@@ -1,0 +1,1062 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>memtomem</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="/style.css?v=59" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" />
+</head>
+<body>
+  <header>
+    <h1>memtomem</h1>
+    <div class="header-info-bar">
+      <span class="header-sys-info" id="header-sys-info"></span>
+      <span class="header-sep" id="header-sep" hidden></span>
+      <span class="stat-pill" id="stat-chunks">— chunks</span>
+      <span class="stat-pill" id="stat-sources">— sources</span>
+    </div>
+    <div class="header-actions">
+      <button id="settings-btn" class="btn-ghost btn-icon" title="Settings">⚙️</button>
+      <button id="theme-toggle" class="btn-ghost btn-icon" title="Toggle theme">🌙</button>
+      <button id="help-toggle" title="Toggle help hints (h)" aria-pressed="true">?</button>
+    </div>
+  </header>
+
+  <div id="embedding-mismatch-banner" class="embedding-mismatch-banner" hidden>
+    <span class="emb-banner-icon">⚠️</span>
+    <span id="emb-banner-msg" class="emb-banner-msg"></span>
+    <div class="emb-banner-actions">
+      <button id="emb-reset-btn" class="btn-sm btn-warning">현재 설정으로 초기화 (벡터 삭제)</button>
+      <button class="emb-banner-dismiss btn-ghost btn-icon" title="Dismiss for this session" aria-label="Dismiss">&times;</button>
+    </div>
+  </div>
+
+  <nav class="tab-nav" role="tablist" aria-label="Navigation">
+    <button class="tab-btn" data-tab="home">Home</button>
+    <button class="tab-btn active" data-tab="search">Search</button>
+    <button class="tab-btn" data-tab="sources">Sources</button>
+    <button class="tab-btn" data-tab="index">Index</button>
+    <button class="tab-btn" data-tab="tags">Tags</button>
+    <button class="tab-btn" data-tab="timeline">Timeline</button>
+    <button class="tab-btn" data-tab="stm" id="stm-tab-btn" hidden>STM</button>
+    <button class="tab-btn" data-tab="settings">More</button>
+  </nav>
+
+  <!-- ===== HOME TAB ===== -->
+  <div id="tab-home" class="tab-panel" hidden>
+    <div class="home-layout">
+      <div id="home-config-info" class="config-hint" hidden></div>
+
+      <!-- C. Quick Search -->
+      <div class="home-search-row">
+        <div class="home-search-wrap">
+          <input id="home-search-input" type="text" placeholder="Quick search memories..." autocomplete="off" spellcheck="false" />
+          <button id="home-search-go" class="btn-primary">Search</button>
+        </div>
+      </div>
+
+      <!-- A. Stats Cards (expanded) -->
+      <div class="home-stats-row">
+        <div class="stat-card card">
+          <div class="stat-value" id="home-chunks">—</div>
+          <div class="stat-label">Total Chunks</div>
+        </div>
+        <div class="stat-card card">
+          <div class="stat-value" id="home-sources">—</div>
+          <div class="stat-label">Source Files</div>
+        </div>
+        <div class="stat-card card">
+          <div class="stat-value" id="home-namespaces">—</div>
+          <div class="stat-label">Namespaces</div>
+        </div>
+        <div class="stat-card card">
+          <div class="stat-value" id="home-total-size">—</div>
+          <div class="stat-label">Total Size</div>
+        </div>
+        <div class="stat-card card">
+          <div class="stat-value" id="home-sessions">—</div>
+          <div class="stat-label">Sessions</div>
+        </div>
+        <div class="stat-card card">
+          <div class="stat-value" id="home-scratch">—</div>
+          <div class="stat-label">Working Memory</div>
+        </div>
+      </div>
+
+      <!-- G+D+B. Namespaces + File Types + Chunk Sizes + Activity -->
+      <div class="home-activity-row">
+        <div class="card home-chart-card">
+          <div class="home-section-title">Namespaces</div>
+          <div id="home-ns-chart" class="home-bar-chart"></div>
+        </div>
+        <div class="card home-chart-card">
+          <div class="home-section-title">File Types</div>
+          <div id="home-type-chart" class="home-bar-chart"></div>
+        </div>
+        <div class="home-activity card">
+          <div class="home-section-title">Activity (1 year)</div>
+          <div id="home-activity-map" class="home-activity-map"></div>
+        </div>
+        <div class="card home-chart-card">
+          <div class="home-section-title">Chunk Sizes <span class="muted-sm">(tokens)</span></div>
+          <div id="home-chunk-dist" class="home-bar-chart"></div>
+        </div>
+      </div>
+
+      <!-- E. Recent Sources -->
+      <div class="home-recent card">
+        <div class="home-section-title">Recent Sources</div>
+        <div id="home-recent-list" class="home-recent-list">
+          <div class="loading-panel"><div class="spinner-panel"></div></div>
+        </div>
+      </div>
+
+      <!-- F. Quick Actions + Pinned Chunks -->
+      <div class="home-bottom-row">
+        <div class="home-quick card">
+          <div class="home-section-title">Quick Actions</div>
+          <div class="home-quick-actions">
+            <button id="home-search-btn" class="btn-ghost">🔍 Search</button>
+            <button id="home-index-btn" class="btn-ghost">📥 Index</button>
+            <button id="home-reindex-btn" class="btn-ghost">🔄 Re-index All</button>
+            <button id="home-export-btn" class="btn-ghost">📦 Export</button>
+            <button id="home-dedup-btn" class="btn-ghost">🧹 Dedup Scan</button>
+            <button id="home-tags-btn" class="btn-ghost">🏷 Tags</button>
+          </div>
+        </div>
+        <div class="home-pinned card">
+          <div class="home-section-title">Pinned Chunks</div>
+          <div id="home-pinned-list" class="home-pinned-list"></div>
+        </div>
+      </div>
+
+      <!-- H. Storage Health -->
+      <div class="home-health card">
+        <div class="home-section-title">Storage Health</div>
+        <div id="home-health-info" class="home-health-info"></div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ===== SEARCH TAB ===== -->
+  <div id="tab-search" class="tab-panel active">
+    <div class="tab-help-bar" id="help-search" role="status" hidden>
+      <span class="tab-help-bar-text">Semantic search across indexed memories. Filters: tag, namespace, type, score. Pipeline: BM25 (keyword) + Dense (semantic) → RRF fusion.</span>
+      <button class="tab-help-bar-dismiss" data-help-tab="search">✕</button>
+    </div>
+    <div class="search-bar">
+      <button id="filter-toggle" class="btn-ghost btn-icon has-tip" title="Show/hide tag, type, sort and other filters">▾ Filters</button>
+      <div class="search-input-wrap">
+        <input
+          id="search-input"
+          type="text"
+          placeholder="Search memories…"
+          autocomplete="off"
+          spellcheck="false"
+          aria-label="Search memories"
+        />
+        <div id="search-history-dropdown" class="search-history-dropdown" hidden></div>
+      </div>
+      <button id="search-btn" class="btn-primary has-tip" title="Run semantic search (Enter)">Search</button>
+      <button id="save-star-btn" class="btn-ghost btn-icon has-tip" title="Save current search">☆</button>
+      <button id="group-toggle" class="btn-ghost btn-icon has-tip" title="Group results by source file">⊟</button>
+      <button id="view-toggle" class="btn-ghost btn-icon has-tip" title="Switch between card and compact list view">☰</button>
+    </div>
+    <div class="search-filters" hidden>
+      <input id="tag-filter" type="text" placeholder="Filter by tag…" title="Comma-separated tags to include in results" />
+      <select id="ns-filter" title="Limit search to a specific namespace">
+        <option value="">All Namespaces</option>
+      </select>
+      <select id="chunk-type-filter" title="Filter by chunk type (markdown, code, etc.)">
+        <option value="">All Types</option>
+        <option value="markdown_section">Markdown</option>
+        <option value="python_function">Py Function</option>
+        <option value="python_class">Py Class</option>
+        <option value="javascript_function">JS Function</option>
+        <option value="code_block">Code</option>
+        <option value="paragraph">Paragraph</option>
+      </select>
+      <select id="sort-select" title="Sort order for search results">
+        <option value="score">↓ Score</option>
+        <option value="date-desc">↓ Newest</option>
+        <option value="date-asc">↑ Oldest</option>
+        <option value="source">A→Z Source</option>
+      </select>
+      <span class="help-tip" data-help="Maximum results returned. Increase for broader coverage." tabindex="0" role="img" aria-label="Maximum results returned. Increase for broader coverage.">i</span>
+      <select id="top-k" title="Maximum number of results to return">
+        <option value="5">Top 5</option>
+        <option value="10" selected>Top 10</option>
+        <option value="20">Top 20</option>
+        <option value="50">Top 50</option>
+      </select>
+      <div class="context-window-row">
+        <label for="context-window">Context</label>
+        <select id="context-window" title="Include N neighboring chunks around each result for more context">
+          <option value="0">Off</option>
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="5">5</option>
+          <option value="10">10</option>
+        </select>
+      </div>
+      <div class="date-range-picker">
+        <select id="date-range-preset" title="Filter results by date range">
+          <option value="">All Time</option>
+          <option value="today">Today</option>
+          <option value="7d">Last 7 days</option>
+          <option value="30d">Last 30 days</option>
+          <option value="90d">Last 90 days</option>
+          <option value="custom">Custom…</option>
+        </select>
+        <div id="date-range-custom" class="date-range-custom" hidden>
+          <input id="date-from" type="date" title="From date" />
+          <span class="date-range-sep">→</span>
+          <input id="date-to" type="date" title="To date" />
+        </div>
+      </div>
+      <button id="adv-toggle" class="btn-ghost btn-icon has-tip" title="Source multi-select, score threshold, saved searches, export">⚙ Advanced</button>
+    </div>
+    <div id="search-advanced" class="search-advanced" hidden>
+      <div class="adv-row">
+        <label class="adv-label">Sources</label>
+        <select id="source-filter" multiple size="4" title="Ctrl/Cmd+click for multi-select">
+          <option value="" disabled>Loading…</option>
+        </select>
+      </div>
+      <div class="adv-row">
+        <label class="adv-label">Min Score: <span id="score-val">0.0</span> <span class="help-tip" data-help="Minimum similarity score (0–1). Higher = more relevant but fewer results." tabindex="0" role="img" aria-label="Minimum similarity score (0–1). Higher = more relevant but fewer results.">i</span></label>
+        <input id="score-threshold" type="range" min="0" max="1" step="0.05" value="0" />
+      </div>
+      <div class="adv-row" style="display:none">
+        <label class="adv-label">Saved Searches</label>
+        <div class="saved-wrap">
+          <select id="saved-queries-select"><option value="">— Load saved —</option></select>
+          <button id="save-query-btn" class="btn-ghost btn-xs" title="Save current search">Save</button>
+          <button id="delete-query-btn" class="btn-ghost btn-xs" title="Delete selected">✕</button>
+        </div>
+      </div>
+      <div class="adv-row">
+        <label class="adv-label">Export Results</label>
+        <div class="saved-wrap">
+          <select id="export-format">
+            <option value="json">JSON</option>
+            <option value="csv">CSV</option>
+            <option value="markdown">Markdown</option>
+          </select>
+          <button id="export-all-btn" class="btn-ghost btn-xs">All Results</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="search-config-info" class="config-hint" hidden></div>
+    <div id="saved-searches-bar" class="saved-searches-bar" hidden></div>
+    <div id="active-filters" class="active-filters-row" hidden></div>
+
+    <div class="results-layout">
+      <div id="results-panel">
+        <div id="bulk-toolbar" class="bulk-toolbar" hidden>
+          <label class="bulk-select-all-wrap">
+            <input type="checkbox" id="bulk-select-all" />
+            <span id="bulk-count">0 selected</span>
+          </label>
+          <button id="bulk-delete-btn" class="btn-danger btn-xs" disabled>Delete Selected</button>
+          <span class="flex-1"></span>
+          <select id="bulk-export-fmt" class="bulk-export-fmt-select">
+            <option value="json">JSON</option>
+            <option value="csv">CSV</option>
+            <option value="markdown">MD</option>
+          </select>
+          <button id="bulk-export-btn" class="btn-ghost btn-xs" disabled>Export</button>
+        </div>
+        <div id="results-empty" class="empty-state">
+          <span class="empty-state-icon">🔍</span>
+          <span>Enter a query to search</span>
+          <span class="empty-state-hint"><kbd>/</kbd> focus · <kbd>j</kbd>/<kbd>k</kbd> navigate · <kbd>p</kbd> pin · <kbd>c</kbd> copy</span>
+          <div id="recent-chips" class="recent-chips" hidden></div>
+        </div>
+        <div id="results-list" hidden></div>
+        <div id="load-more-row" class="load-more-row" hidden>
+          <button id="load-more-btn" class="btn-ghost">Load More</button>
+        </div>
+      </div>
+
+      <div id="results-divider" class="results-divider"></div>
+
+      <div id="detail-panel">
+        <button id="mobile-back-btn" class="btn-ghost mobile-back-btn">← Back</button>
+        <div id="detail-empty" class="empty-state">
+          <p>Select a result to view details</p>
+        </div>
+        <div id="detail-view" hidden>
+          <div class="detail-header">
+            <div class="detail-meta-row">
+              <span id="d-score" class="badge badge-blue"></span>
+              <span id="d-type" class="badge badge-gray"></span>
+              <span id="d-namespace" class="badge badge-ns"></span>
+              <span id="d-source" class="badge badge-source badge-retrieval"></span>
+              <span id="d-created" class="badge badge-gray"></span>
+            </div>
+            <div id="d-score-detail" class="score-detail-row" hidden>
+              <span id="d-rank-label" class="score-detail-rank"></span>
+              <div class="score-bar-wrap" title="">
+                <div id="d-score-bar" class="score-bar-fill"></div>
+              </div>
+              <span id="d-score-pct" class="score-detail-pct"></span>
+            </div>
+            <div class="detail-location">
+              <span id="d-file" class="file-path"></span>
+              <span id="d-lines" class="lines-info"></span>
+            </div>
+            <div class="source-nav">
+              <button id="d-prev-btn" class="btn-ghost btn-xs" title="Previous chunk in source" disabled>◀</button>
+              <span id="d-source-pos" class="source-pos"></span>
+              <button id="d-next-btn" class="btn-ghost btn-xs" title="Next chunk in source" disabled>▶</button>
+            </div>
+          </div>
+
+          <div class="editor-section">
+            <div id="d-hierarchy" class="hierarchy-title"></div>
+            <div class="editor-label-row">
+              <div class="editor-label">Content</div>
+              <div class="editor-section-actions">
+                <button id="d-copy-btn" class="btn-ghost btn-xs" title="Copy content">Copy</button>
+                <button id="d-expand-btn" class="btn-ghost btn-xs" title="Expand to full screen">Expand</button>
+                <button id="d-view-btn" class="btn-ghost btn-xs" title="Toggle highlighted view">View</button>
+                <button id="d-preview-btn" class="btn-ghost btn-xs" hidden>Preview</button>
+                <button id="d-diff-btn" class="btn-ghost btn-xs" hidden>Diff</button>
+                <button id="d-history-btn" class="btn-ghost btn-xs" hidden>History</button>
+              </div>
+            </div>
+            <div id="d-code-view" class="detail-code-view" hidden></div>
+            <textarea id="d-editor" spellcheck="false"></textarea>
+            <div id="d-word-count" class="word-count-bar"></div>
+            <div id="d-preview" class="md-preview" hidden></div>
+            <div id="d-diff" class="diff-view" hidden></div>
+          </div>
+
+          <div class="tag-editor-section">
+            <div class="editor-label">Tags</div>
+            <div id="d-tag-chips" class="tag-chips"></div>
+            <div class="tag-input-row">
+              <input id="d-tag-input" type="text" placeholder="Add tag…" autocomplete="off" />
+              <button id="d-tag-add-btn" class="btn-ghost">Add</button>
+              <button id="d-tag-save-btn" class="btn-primary">Save Tags</button>
+            </div>
+          </div>
+
+          <div class="detail-actions">
+            <button id="d-save-btn" class="btn-primary" title="Save content and tag changes to this chunk">Save Edit</button>
+            <button id="d-delete-btn" class="btn-danger" title="Permanently delete this chunk">Delete</button>
+            <button id="d-reset-btn" class="btn-ghost" title="Discard unsaved edits and restore original" hidden>Reset</button>
+            <button id="d-similar-btn" class="btn-ghost" title="Find semantically similar chunks" hidden>Find Similar</button>
+            <button id="d-source-btn" class="btn-ghost" title="Show all chunks from the same source file" hidden>⊞ Source</button>
+            <button id="d-pin-btn" class="btn-ghost" title="Pin this chunk to prevent decay removal">☆ Pin</button>
+          </div>
+          <div id="detail-msg" class="status-msg" hidden></div>
+          <div id="similar-panel" hidden>
+            <div class="similar-header">
+              <span class="editor-label">Similar Chunks</span>
+              <button id="similar-close-btn" class="btn-ghost btn-xs">✕</button>
+            </div>
+            <div id="similar-list"></div>
+          </div>
+          <div id="source-chunks-panel" hidden>
+            <div class="similar-header">
+              <span class="editor-label">Chunks in Same Source</span>
+              <button id="source-chunks-close-btn" class="btn-ghost btn-xs">✕</button>
+            </div>
+            <div id="source-chunks-list"></div>
+          </div>
+          <div id="history-panel" hidden>
+            <div class="similar-header">
+              <span class="editor-label">Edit History</span>
+              <button id="history-close-btn" class="btn-ghost btn-xs">✕</button>
+            </div>
+            <div id="history-list"></div>
+          </div>
+          <div id="related-panel" hidden>
+            <div class="related-toggle" id="related-toggle">
+              <span class="editor-label">Related Chunks</span>
+              <span id="related-count" class="badge badge-gray"></span>
+              <span class="related-chevron" id="related-chevron">▸</span>
+            </div>
+            <div id="related-list" hidden></div>
+            <div id="related-preview" class="related-preview" hidden></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="search-drop-overlay" class="search-drop-overlay" hidden>
+      <div class="search-drop-msg">📥 Drop files to index</div>
+    </div>
+  </div>
+
+  <!-- ===== SOURCES TAB ===== -->
+  <div id="tab-sources" class="tab-panel" hidden>
+    <div class="tab-help-bar" id="help-sources" role="status" hidden>
+      <span class="tab-help-bar-text">Indexed source files. Click a file to browse chunks. Drag the divider to resize. Sort by name, chunks, size, or recency.</span>
+      <button class="tab-help-bar-dismiss" data-help-tab="sources">✕</button>
+    </div>
+    <div class="sources-layout">
+      <div class="sources-sidebar">
+        <div class="sources-header">
+          <h2>Sources</h2>
+          <button id="refresh-sources-btn" class="btn-ghost">Refresh</button>
+        </div>
+        <div class="sources-filter-row">
+          <input id="sources-filter" type="text" placeholder="Type to filter by path… e.g. .md, src/, utils" autocomplete="off" title="Filters source list by partial path match" />
+          <span id="sources-ns-chip" hidden></span>
+        </div>
+        <div class="sources-sort-row">
+          <button class="sources-sort-btn active" data-sort="name">Name</button>
+          <button class="sources-sort-btn" data-sort="chunks">Chunks</button>
+          <button class="sources-sort-btn" data-sort="size">Size</button>
+          <button class="sources-sort-btn" data-sort="recent">Recent</button>
+        </div>
+        <div id="sources-stats" class="sources-stats" hidden></div>
+        <div id="sources-list">
+          <div class="loading-panel"><div class="spinner-panel"></div></div>
+        </div>
+      </div>
+      <div id="sources-divider" class="sources-divider"></div>
+      <div class="chunks-browser" id="chunks-browser">
+        <div class="empty-state">
+          <span class="empty-state-icon">📄</span>
+          <span>Select a source to browse its chunks</span>
+        </div>
+        <div id="chunks-browser-content" hidden>
+          <div class="chunks-browser-header">
+            <span id="chunks-browser-title" class="file-path"></span>
+            <span id="chunks-browser-count" class="badge badge-blue"></span>
+          </div>
+          <div id="chunks-browser-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== INDEX TAB ===== -->
+  <div id="tab-index" class="tab-panel" hidden>
+    <div class="index-layout">
+      <div class="index-form card index-primary">
+        <h2>Index Files</h2>
+        <div class="index-form-row">
+          <div class="index-form-main">
+            <label class="field-label" for="index-path">Path</label>
+            <input id="index-path" type="text" placeholder="e.g. ~/memories or /path/to/notes" />
+            <label class="field-label" for="index-namespace">Namespace</label>
+            <input id="index-namespace" type="text" placeholder="default (from config)" />
+            <div class="checkbox-row">
+              <label><input type="checkbox" id="index-recursive" checked /> Recursive</label>
+              <label><input type="checkbox" id="index-force" /> Force re-index</label>
+            </div>
+            <div class="index-btn-row">
+              <button id="index-btn" class="btn-primary">Index</button>
+              <button id="index-stream-btn" class="btn-ghost">Index with Progress</button>
+            </div>
+            <div id="index-msg" class="status-msg" hidden></div>
+          </div>
+          <div class="index-form-stats">
+            <div class="stat-card-mini">
+              <div class="stat-value" id="card-chunks">—</div>
+              <div class="stat-label">Chunks</div>
+            </div>
+            <div class="stat-card-mini">
+              <div class="stat-value" id="card-sources">—</div>
+              <div class="stat-label">Sources</div>
+            </div>
+          </div>
+        </div>
+        <div id="index-progress" class="index-progress" hidden>
+          <div class="progress-bar-wrap">
+            <div id="index-progress-bar" class="progress-bar" style="width:0%"></div>
+          </div>
+          <div id="index-progress-label" class="progress-label">0 / 0 files</div>
+          <div id="index-progress-file" class="progress-file"></div>
+        </div>
+        <div id="index-result" class="index-result" hidden>
+          <table>
+            <tr><td>Files scanned</td><td id="r-files"></td></tr>
+            <tr><td>Total chunks</td><td id="r-chunks"></td></tr>
+            <tr><td>Indexed</td><td id="r-indexed"></td></tr>
+            <tr><td>Skipped</td><td id="r-skipped"></td></tr>
+            <tr><td>Deleted</td><td id="r-deleted"></td></tr>
+            <tr><td>Duration</td><td id="r-duration"></td></tr>
+          </table>
+        </div>
+        <div id="index-config-hint" class="config-hint" hidden></div>
+      </div>
+
+      <div class="index-secondary">
+        <div class="upload-form card">
+          <h2>Upload Files</h2>
+          <div id="upload-drop" class="upload-drop">
+            <div class="upload-drop-icon">📂</div>
+            <p class="upload-drop-hint">Drop files here or <label for="upload-input" class="upload-browse-link">browse</label></p>
+            <p class="upload-drop-ext">.md .txt .py .js .ts .json .yaml</p>
+            <input id="upload-input" type="file" multiple accept=".md,.txt,.py,.js,.ts,.tsx,.json,.yaml,.yml" hidden />
+          </div>
+          <div id="upload-file-list" class="upload-file-list" hidden></div>
+          <button id="upload-btn" class="btn-primary mt-10" disabled>Upload &amp; Index</button>
+          <div id="upload-msg" class="status-msg" hidden></div>
+          <div id="upload-result" class="upload-result" hidden></div>
+        </div>
+
+        <div class="add-form card">
+          <h2>Add Memory</h2>
+          <label class="field-label" for="add-title">Title</label>
+          <input id="add-title" type="text" placeholder="Optional heading" style="width:100%" />
+          <label class="field-label" for="add-tags">Tags</label>
+          <input id="add-tags" type="text" placeholder="tag1, tag2, …" style="width:100%" />
+          <label class="field-label" for="add-file">Target File</label>
+          <input id="add-file" type="text" placeholder="path/to/memories.md" style="width:100%" />
+          <label class="field-label" for="add-namespace">Namespace</label>
+          <input id="add-namespace" type="text" placeholder="default (from config)" style="width:100%" />
+          <label class="field-label" for="add-content">Content</label>
+          <textarea id="add-content" spellcheck="false" placeholder="Write your memory here…"></textarea>
+          <button id="add-btn" class="btn-primary mt-10">Add</button>
+          <div id="add-msg" class="status-msg" hidden></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== STM PROXY TAB ===== -->
+  <div id="tab-stm" class="tab-panel" hidden>
+  <div class="stm-scroll-container">
+    <!-- Status bar -->
+    <div id="stm-status-bar" class="stm-status-bar"></div>
+
+    <!-- Server cards -->
+    <div class="stm-section">
+      <h2>Upstream Servers</h2>
+      <div id="stm-servers" class="stm-servers-grid"></div>
+    </div>
+
+    <!-- Metrics summary -->
+    <div class="stm-section">
+      <div class="stm-section-header">
+        <h2>Compression Metrics</h2>
+        <div class="stm-period-filter">
+          <button class="stm-period-btn active" data-period="">All</button>
+          <button class="stm-period-btn" data-period="3600">1h</button>
+          <button class="stm-period-btn" data-period="86400">24h</button>
+          <button class="stm-period-btn" data-period="604800">7d</button>
+          <button class="stm-period-btn" data-period="2592000">30d</button>
+          <button id="stm-refresh-btn" class="btn-outline btn-sm">Refresh</button>
+        </div>
+      </div>
+      <div id="stm-metrics-summary" class="stm-metric-cards"></div>
+
+      <div class="stm-breakdown-grid">
+        <div>
+          <h3>By Server</h3>
+          <table id="stm-by-server" class="stm-table"><thead><tr><th>Server</th><th>Calls</th><th>Original</th><th>Compressed</th><th>Savings</th></tr></thead><tbody></tbody></table>
+        </div>
+        <div>
+          <h3>By Tool</h3>
+          <table id="stm-by-tool" class="stm-table"><thead><tr><th>Tool</th><th>Calls</th><th>Original</th><th>Compressed</th><th>Savings</th></tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Cache -->
+    <div class="stm-section stm-row">
+      <div class="stm-subsection">
+        <h3>Cache</h3>
+        <div id="stm-cache-info"></div>
+        <button id="stm-cache-clear-btn" class="btn-outline btn-sm">Clear Cache</button>
+      </div>
+
+      <!-- Surfacing -->
+      <div class="stm-subsection">
+        <h3>Surfacing</h3>
+        <div id="stm-surfacing-info"></div>
+      </div>
+    </div>
+
+    <!-- Call history -->
+    <div class="stm-section">
+      <div class="stm-section-header">
+        <h2>Call History</h2>
+        <div class="stm-history-filters">
+          <input id="stm-hist-server" placeholder="Server filter" class="input-sm">
+          <input id="stm-hist-tool" placeholder="Tool filter" class="input-sm">
+          <button id="stm-hist-filter-btn" class="btn-outline btn-sm">Filter</button>
+          <button id="stm-hist-clear-btn" class="btn-outline btn-sm" hidden>Clear</button>
+        </div>
+      </div>
+      <table id="stm-history" class="stm-table"><thead><tr><th>Time</th><th>Server</th><th>Tool</th><th>Original</th><th>Cleaned</th><th>Compressed</th><th>Savings</th></tr></thead><tbody></tbody></table>
+      <div id="stm-hist-pagination" class="stm-pagination"></div>
+    </div>
+  </div><!-- stm-scroll-container -->
+  </div>
+
+  <!-- ===== SETTINGS HUB ===== -->
+  <div id="tab-settings" class="tab-panel" hidden>
+    <div class="settings-layout">
+      <div class="settings-nav">
+        <div class="settings-nav-group">System</div>
+        <button class="settings-nav-btn active" data-section="config">Config</button>
+        <button class="settings-nav-btn" data-section="namespaces">Namespaces</button>
+        <div class="settings-nav-group">Maintenance</div>
+        <button class="settings-nav-btn" data-section="dedup">Dedup</button>
+        <button class="settings-nav-btn" data-section="decay">Decay</button>
+        <div class="settings-nav-group">Data Transfer</div>
+        <button class="settings-nav-btn" data-section="export">Export / Import</button>
+        <div class="settings-nav-group">Harness</div>
+        <button class="settings-nav-btn" data-section="harness-sessions">Sessions</button>
+        <button class="settings-nav-btn" data-section="harness-scratch">Working Memory</button>
+        <button class="settings-nav-btn" data-section="harness-procedures">Procedures</button>
+        <button class="settings-nav-btn" data-section="harness-health">Health</button>
+      </div>
+      <div class="settings-content">
+
+        <!-- Config section -->
+        <div class="settings-section active" id="settings-config">
+          <div class="config-layout">
+            <div class="config-main">
+              <div id="config-loading" class="empty-state"><div class="spinner-panel"></div></div>
+              <div id="config-content" hidden></div>
+            </div>
+            <div id="config-guide" class="config-guide">
+              <div class="config-guide-inner">
+                <h4 class="config-guide-title">Configuration Guide</h4>
+                <p class="config-guide-text">Select a config section to see its documentation.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Namespaces section -->
+        <div class="settings-section" id="settings-namespaces">
+          <div class="ns-layout">
+            <div id="ns-config-info" class="config-hint" hidden></div>
+            <div class="ns-header">
+              <h2>Namespaces</h2>
+              <button id="ns-refresh-btn" class="btn-ghost">Refresh</button>
+            </div>
+            <div id="ns-list" class="ns-list">
+              <div class="loading-panel"><div class="spinner-panel"></div></div>
+            </div>
+          </div>
+        </div>
+
+
+        <!-- Dedup section -->
+        <div class="settings-section" id="settings-dedup">
+          <div class="dedup-controls">
+            <div class="dedup-params">
+              <label>
+                Threshold <span class="help-tip" data-help="Similarity above which chunks are considered duplicates. Default 0.92 catches near-identical content." tabindex="0" role="img" aria-label="Similarity above which chunks are considered duplicates. Default 0.92 catches near-identical content.">i</span>
+                <input id="dedup-threshold" type="number" value="0.92" min="0.5" max="1" step="0.01" />
+              </label>
+              <label>
+                Limit
+                <input id="dedup-limit" type="number" value="100" min="1" max="1000" class="w-60" />
+              </label>
+              <label>
+                Max Scan
+                <input id="dedup-max-scan" type="number" value="500" min="10" max="5000" class="w-70" />
+              </label>
+            </div>
+            <button id="dedup-scan-btn" class="btn-primary">Scan</button>
+          </div>
+          <div id="dedup-panel" class="dedup-panel">
+            <div id="dedup-empty" class="empty-state">
+              <span class="empty-state-icon">📋</span>
+              <span>Run Scan to see duplicate candidates</span>
+            </div>
+            <div id="dedup-list" hidden></div>
+          </div>
+          <div id="dedup-msg" class="status-msg" hidden></div>
+        </div>
+
+        <!-- Decay section -->
+        <div class="settings-section" id="settings-decay">
+          <div id="decay-config-status" class="config-status" hidden></div>
+          <div class="decay-controls">
+            <div class="decay-params">
+              <label>
+                Max Age (days)
+                <input id="decay-max-age" type="number" value="90" min="1" step="1" class="w-70" />
+              </label>
+              <label>
+                Source Filter
+                <input id="decay-source-filter" type="text" placeholder="optional substring…" />
+              </label>
+            </div>
+            <div class="decay-actions">
+              <button id="decay-scan-btn" class="btn-primary">Scan</button>
+              <button id="decay-expire-btn" class="btn-danger" disabled>Expire</button>
+            </div>
+          </div>
+          <div id="decay-result" class="decay-result" hidden>
+            <table>
+              <tr><td>Total chunks</td><td id="decay-r-total"></td></tr>
+              <tr><td>Expired candidates</td><td id="decay-r-expired"></td></tr>
+              <tr><td>Deleted chunks</td><td id="decay-r-deleted"></td></tr>
+            </table>
+          </div>
+          <div id="decay-msg" class="status-msg" hidden></div>
+        </div>
+
+        <!-- Harness: Sessions -->
+        <div class="settings-section" id="settings-harness-sessions">
+          <div class="harness-header">
+            <h2>Episodic Sessions</h2>
+            <button id="sessions-refresh-btn" class="btn-ghost">Refresh</button>
+          </div>
+          <div id="sessions-list" class="harness-list">
+            <div class="empty-state">Loading...</div>
+          </div>
+          <div id="session-events-panel" class="harness-detail" hidden>
+            <div class="harness-detail-header">
+              <h3 id="session-events-title">Session Events</h3>
+              <button id="session-events-close" class="btn-ghost btn-xs">Close</button>
+            </div>
+            <div id="session-events-list" class="harness-events"></div>
+          </div>
+        </div>
+
+        <!-- Harness: Working Memory -->
+        <div class="settings-section" id="settings-harness-scratch">
+          <div class="harness-header">
+            <h2>Working Memory</h2>
+            <button id="scratch-refresh-btn" class="btn-ghost">Refresh</button>
+          </div>
+          <div class="scratch-add-row">
+            <input id="scratch-key" type="text" placeholder="Key" class="w-120" />
+            <input id="scratch-value" type="text" placeholder="Value" />
+            <input id="scratch-ttl" type="number" placeholder="TTL (min)" class="w-70" min="1" />
+            <button id="scratch-add-btn" class="btn-primary btn-xs">Add</button>
+          </div>
+          <div id="scratch-list" class="harness-list">
+            <div class="empty-state">Loading...</div>
+          </div>
+        </div>
+
+        <!-- Harness: Procedures -->
+        <div class="settings-section" id="settings-harness-procedures">
+          <div class="harness-header">
+            <h2>Procedures</h2>
+            <button id="procedures-refresh-btn" class="btn-ghost">Refresh</button>
+          </div>
+          <div id="procedures-list" class="harness-list">
+            <div class="empty-state">Loading...</div>
+          </div>
+        </div>
+
+        <!-- Harness: Health -->
+        <div class="settings-section" id="settings-harness-health">
+          <div class="harness-header">
+            <h2>Memory Health</h2>
+            <button id="health-refresh-btn" class="btn-ghost">Refresh</button>
+          </div>
+          <div id="health-report" class="harness-health">
+            <div class="empty-state">Loading...</div>
+          </div>
+        </div>
+
+        <!-- Export/Import section -->
+        <div class="settings-section" id="settings-export">
+          <div class="export-layout">
+            <div class="export-card card">
+              <h2>Export</h2>
+              <div class="export-filters">
+                <label class="field-label" for="exp-source">Source Filter</label>
+                <input id="exp-source" type="text" placeholder="optional path substring…" />
+                <label class="field-label" for="exp-tag">Tag Filter</label>
+                <input id="exp-tag" type="text" placeholder="exact tag…" />
+                <label class="field-label" for="exp-since">Since (ISO date)</label>
+                <input id="exp-since" type="text" placeholder="e.g. 2025-01-01" />
+                <label class="field-label" for="exp-namespace">Namespace</label>
+                <select id="exp-namespace">
+                  <option value="">All Namespaces</option>
+                </select>
+              </div>
+              <div class="export-btn-row">
+                <button id="exp-preview-btn" class="btn-ghost">Preview</button>
+                <button id="exp-download-btn" class="btn-primary">Download JSON</button>
+              </div>
+              <div id="exp-preview" class="export-preview" hidden>
+                <span id="exp-count"></span> chunks will be exported
+              </div>
+              <div id="exp-msg" class="status-msg" hidden></div>
+            </div>
+            <div class="export-card card">
+              <h2>Import</h2>
+              <p class="export-hint">Upload a <code>memtomem_export.json</code> bundle to re-index its chunks.</p>
+              <label class="field-label">Bundle File (.json)</label>
+              <div class="custom-file-input">
+                <input id="imp-file" type="file" accept=".json" hidden />
+                <button type="button" class="btn-ghost btn-xs" onclick="document.getElementById('imp-file').click()">Choose File</button>
+                <span id="imp-file-name" class="custom-file-name">No file chosen</span>
+              </div>
+              <button id="imp-btn" class="btn-primary mt-12" disabled>Import</button>
+              <div id="imp-msg" class="status-msg" hidden></div>
+              <div id="imp-result" class="import-result" hidden>
+                <table>
+                  <tr><td>Total chunks</td><td id="imp-total"></td></tr>
+                  <tr><td>Imported</td><td id="imp-imported"></td></tr>
+                  <tr><td>Skipped</td><td id="imp-skipped"></td></tr>
+                  <tr><td>Failed</td><td id="imp-failed"></td></tr>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+
+
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== TAGS TAB ===== -->
+  <div id="tab-tags" class="tab-panel" hidden>
+    <div class="tab-help-bar" id="help-tags" role="status" hidden>
+      <span class="tab-help-bar-text">Tag cloud sized by frequency. Click a tag to filter search. Auto-Tag analyzes content to suggest tags for untagged chunks.</span>
+      <button class="tab-help-bar-dismiss" data-help-tab="tags">✕</button>
+    </div>
+    <div class="tags-layout">
+      <div class="tags-left card">
+        <div class="tags-header-row">
+          <h2>Tags</h2>
+          <div class="tags-view-toggle">
+            <button id="tags-cloud-btn" class="btn-ghost btn-xs btn-active" title="Cloud view">Cloud</button>
+            <button id="tags-list-btn" class="btn-ghost btn-xs" title="List view">List</button>
+          </div>
+          <button id="refresh-tags-btn" class="btn-ghost">Refresh</button>
+        </div>
+        <input id="tags-search" type="text" placeholder="Filter tags..." autocomplete="off" />
+        <div class="tags-sort-row">
+          <button class="tags-sort-btn btn-ghost btn-xs btn-active" data-sort="count-desc" title="Sort by count descending">Count&#8595;</button>
+          <button class="tags-sort-btn btn-ghost btn-xs" data-sort="count-asc" title="Sort by count ascending">Count&#8593;</button>
+          <button class="tags-sort-btn btn-ghost btn-xs" data-sort="az" title="Sort alphabetically A-Z">A-Z</button>
+          <button class="tags-sort-btn btn-ghost btn-xs" data-sort="za" title="Sort alphabetically Z-A">Z-A</button>
+        </div>
+        <div id="tags-stats" class="tags-stats" hidden></div>
+        <div id="tags-empty" class="empty-state"><div class="spinner-panel"></div></div>
+        <div id="tags-cloud" class="tags-cloud" hidden></div>
+        <div id="tags-list" hidden></div>
+      </div>
+
+      <div class="tags-right card">
+        <h2>Auto-Tag</h2>
+        <p class="tags-form-desc">Analyze chunk content and extract keyword-based tags automatically.</p>
+        <div class="tags-form">
+          <label class="field-label" for="autotag-source">Source Filter</label>
+          <input id="autotag-source" type="text" placeholder="optional path substring…" />
+
+          <label class="field-label" for="autotag-max">Max Tags per Chunk</label>
+          <input id="autotag-max" type="number" value="5" min="1" max="20" />
+
+          <div class="checkbox-row">
+            <label>
+              <input type="checkbox" id="autotag-overwrite" />
+              Overwrite existing
+            </label>
+            <label>
+              <input type="checkbox" id="autotag-dry-run" checked />
+              Dry run <span class="help-tip" data-help="Preview suggested tags without applying. Uncheck to apply immediately." tabindex="0" role="img" aria-label="Preview suggested tags without applying. Uncheck to apply immediately.">i</span>
+            </label>
+          </div>
+
+          <button id="autotag-btn" class="btn-primary">Run Auto-Tag</button>
+          <div id="autotag-msg" class="status-msg" hidden></div>
+
+          <div id="autotag-result" class="autotag-result" hidden>
+            <table>
+              <tr><td>Total chunks</td><td id="at-total"></td></tr>
+              <tr><td>Tagged</td><td id="at-tagged"></td></tr>
+              <tr><td>Skipped</td><td id="at-skipped"></td></tr>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ===== TIMELINE TAB ===== -->
+  <div id="tab-timeline" class="tab-panel" hidden>
+    <div class="tab-help-bar" id="help-timeline" role="status" hidden>
+      <span class="tab-help-bar-text">Activity timeline of indexed chunks. Heatmap shows daily activity. Toggle Chunks/Files view.</span>
+      <button class="tab-help-bar-dismiss" data-help-tab="timeline">✕</button>
+    </div>
+    <div class="timeline-controls">
+      <div class="date-range-picker">
+        <select id="tl-days" title="Time range for timeline">
+          <option value="1">Today</option>
+          <option value="7">Last 7 days</option>
+          <option value="30" selected>Last 30 days</option>
+          <option value="90">Last 90 days</option>
+          <option value="180">Last 180 days</option>
+          <option value="365">Last 365 days</option>
+          <option value="custom">Custom…</option>
+        </select>
+        <div id="tl-date-custom" class="date-range-custom" hidden>
+          <input id="tl-date-from" type="date" title="From date" />
+          <span class="date-range-sep">→</span>
+          <input id="tl-date-to" type="date" title="To date" />
+        </div>
+      </div>
+      <label>
+        Source filter
+        <input id="tl-source" type="text" placeholder="optional substring…" />
+      </label>
+      <label>
+        Namespace
+        <select id="tl-namespace">
+          <option value="">All</option>
+        </select>
+      </label>
+      <label>
+        Limit
+        <input id="tl-limit" type="number" value="200" min="1" max="1000" class="w-70" />
+      </label>
+      <button id="tl-load-btn" class="btn-primary">Load</button>
+      <div class="tl-view-toggle">
+        <button id="tl-view-chunks" class="tl-view-btn tl-view-active">Chunks</button>
+        <button id="tl-view-files" class="tl-view-btn">Files</button>
+      </div>
+    </div>
+    <div id="tl-heatmap" class="tl-heatmap" hidden></div>
+    <div id="tl-stats" class="tl-stats" hidden></div>
+    <div id="tl-empty" class="empty-state">
+      <span class="empty-state-icon">🕐</span>
+      <span>Click Load to view the timeline</span>
+    </div>
+    <div id="tl-list" class="timeline-list" hidden></div>
+    <div id="tl-msg" class="status-msg" hidden></div>
+  </div>
+
+
+  <!-- Expand Modal (I2) -->
+  <div id="expand-modal" class="modal-overlay" hidden>
+    <div class="modal-inner expand-modal-inner">
+      <div class="modal-header">
+        <span id="expand-modal-title" class="modal-title"></span>
+        <button id="expand-close-btn" class="btn-ghost">✕</button>
+      </div>
+      <pre id="expand-content" class="expand-content"></pre>
+    </div>
+  </div>
+
+  <!-- Source Preview Modal -->
+  <div id="source-preview-modal" class="modal-overlay" hidden>
+    <div class="modal-inner source-preview-inner">
+      <div class="modal-header">
+        <span id="source-preview-title" class="modal-title"></span>
+        <div class="source-preview-actions">
+          <span id="source-preview-info" class="source-preview-info"></span>
+          <button id="source-preview-close" class="btn-ghost">✕</button>
+        </div>
+      </div>
+      <div id="source-preview-body" class="source-preview-body"></div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settings-modal" class="modal-overlay" hidden>
+    <div class="modal-inner">
+      <div class="modal-header">
+        <span class="modal-title">Settings</span>
+        <button id="settings-close-btn" class="btn-ghost">✕</button>
+      </div>
+      <div class="settings-form">
+        <label class="settings-label">Default Tab</label>
+        <select id="settings-default-tab">
+          <optgroup label="Main">
+            <option value="home">Home</option>
+            <option value="search">Search</option>
+            <option value="sources">Sources</option>
+            <option value="index">Index</option>
+            <option value="tags">Tags</option>
+            <option value="timeline">Timeline</option>
+          </optgroup>
+          <optgroup label="Settings">
+            <option value="settings">⚙ Settings Hub</option>
+          </optgroup>
+        </select>
+        <label class="settings-label">Default Top-K</label>
+        <select id="settings-default-topk">
+          <option value="5">Top 5</option>
+          <option value="10">Top 10</option>
+          <option value="20">Top 20</option>
+          <option value="50">Top 50</option>
+        </select>
+        <div class="settings-actions">
+          <button id="settings-reset-btn" class="btn-ghost">Reset Defaults</button>
+          <button id="settings-save-btn" class="btn-primary">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Keyboard Shortcuts Modal -->
+  <div id="shortcuts-modal" class="modal-overlay" hidden>
+    <div class="modal-inner">
+      <div class="modal-header">
+        <span class="modal-title">Keyboard Shortcuts</span>
+        <button id="shortcuts-close-btn" class="btn-ghost">✕</button>
+      </div>
+      <table class="shortcuts-table">
+        <tbody>
+          <tr><td><kbd>/</kbd></td><td>Focus search input</td></tr>
+          <tr><td><kbd>j</kbd> / <kbd>k</kbd></td><td>Navigate results (next / prev)</td></tr>
+          <tr><td><kbd>p</kbd></td><td>Pin / unpin selected chunk</td></tr>
+          <tr><td><kbd>c</kbd></td><td>Copy selected chunk content</td></tr>
+          <tr><td><kbd>Enter</kbd></td><td>Open selected result detail</td></tr>
+          <tr><td><kbd>Backspace</kbd></td><td>Back to results list from detail</td></tr>
+          <tr><td><kbd>1</kbd>–<kbd>7</kbd></td><td>Switch tabs (Home=1 … More=7)</td></tr>
+          <tr><td><kbd>⌘K</kbd></td><td>Command palette</td></tr>
+          <tr><td><kbd>g</kbd> <kbd>s</kbd></td><td>Go to Sources</td></tr>
+          <tr><td><kbd>Esc</kbd></td><td>Close panel, dropdown, or modal</td></tr>
+          <tr><td><kbd>h</kbd></td><td>Toggle help hints</td></tr>
+          <tr><td><kbd>?</kbd></td><td>Toggle this help</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Command Palette (Cmd+K) -->
+  <div id="cmd-palette" class="modal-overlay" hidden>
+    <div class="cmd-palette-inner">
+      <input id="cmd-input" type="text" class="cmd-input" placeholder="Type a command…" autocomplete="off" spellcheck="false" />
+      <div id="cmd-list" class="cmd-list"></div>
+    </div>
+  </div>
+
+  <!-- Toast container (A1) -->
+  <div id="toast-container" class="toast-container" aria-live="polite" aria-atomic="false"></div>
+
+  <!-- Confirm Dialog (A3) -->
+  <div id="confirm-modal" class="modal-overlay" hidden>
+    <div class="modal-inner confirm-dialog">
+      <div class="modal-header">
+        <span id="confirm-title" class="modal-title"></span>
+      </div>
+      <p id="confirm-message" class="confirm-message"></p>
+      <div class="confirm-actions">
+        <button id="confirm-cancel-btn" class="btn-ghost">Cancel</button>
+        <button id="confirm-ok-btn" class="btn-danger">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-typescript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js"></script>
+  <script src="/app.js?v=59"></script>
+</body>
+</html>

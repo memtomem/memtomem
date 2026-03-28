@@ -1,0 +1,29 @@
+{
+  "name": "memtomem",
+  "owner": {
+    "name": "memtomem",
+    "url": "https://github.com/memtomem"
+  },
+  "metadata": {
+    "description": "Markdown-first semantic memory plugins for AI agents",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "memtomem",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/memtomem/memtomem.git",
+        "path": "packages/memtomem-claude-plugin"
+      },
+      "description": "Semantic memory with hybrid BM25 + dense search",
+      "version": "0.1.0",
+      "author": { "name": "memtomem" },
+      "repository": "https://github.com/memtomem/memtomem",
+      "license": "Apache-2.0",
+      "keywords": ["memory", "semantic-search", "rag", "mcp"],
+      "category": "productivity",
+      "tags": ["memory", "search", "knowledge-base"]
+    }
+  ]
+}

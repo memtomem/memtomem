@@ -1,0 +1,12 @@
+{
+  "name": "memtomem",
+  "version": "0.1.0",
+  "description": "Markdown-first semantic memory for AI agents — hybrid BM25 + dense search across your markdown files",
+  "author": {
+    "name": "memtomem",
+    "url": "https://github.com/memtomem/memtomem"
+  },
+  "repository": "https://github.com/memtomem/memtomem",
+  "license": "Apache-2.0",
+  "keywords": ["memory", "semantic-search", "rag", "knowledge-base", "mcp"]
+}

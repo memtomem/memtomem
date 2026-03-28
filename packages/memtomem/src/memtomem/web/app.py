@@ -1,0 +1,171 @@
+"""FastAPI web application for memtomem Web UI."""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
+
+from memtomem.web.routes import (
+    chunks,
+    decay,
+    dedup,
+    evaluation,
+    export,
+    namespaces,
+    procedures,
+    scratch,
+    search,
+    sessions,
+    sources,
+    system,
+    tags,
+    proxy,
+    timeline,
+)
+
+logger = logging.getLogger(__name__)
+
+_STATIC_DIR = Path(__file__).parent / "static"
+
+
+def create_app(lifespan=None) -> FastAPI:
+    """Factory for creating the FastAPI app (testable without lifespan)."""
+    app = FastAPI(
+        title="memtomem Web UI",
+        description="Web UI for memtomem memory infrastructure",
+        version="0.1.0",
+        lifespan=lifespan,
+        docs_url="/api/docs",
+        redoc_url="/api/redoc",
+    )
+
+    app.include_router(search.router, prefix="/api")
+    app.include_router(chunks.router, prefix="/api")
+    app.include_router(sources.router, prefix="/api")
+    app.include_router(system.router, prefix="/api")
+    app.include_router(tags.router, prefix="/api")
+    app.include_router(dedup.router, prefix="/api")
+    app.include_router(decay.router, prefix="/api")
+    app.include_router(export.router, prefix="/api")
+    app.include_router(namespaces.router, prefix="/api")
+    app.include_router(timeline.router, prefix="/api")
+    app.include_router(sessions.router, prefix="/api")
+    app.include_router(scratch.router, prefix="/api")
+    app.include_router(procedures.router, prefix="/api")
+    app.include_router(evaluation.router, prefix="/api")
+    app.include_router(proxy.router, prefix="/api")
+
+    @app.exception_handler(ValueError)
+    async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
+        import re
+
+        msg = re.sub(r"(?:[A-Za-z]:)?(?:[/\\][\w.\-]+){2,}", "<path>", str(exc))
+        return JSONResponse(status_code=400, content={"detail": msg})
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "Accept"],
+    )
+
+    class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next) -> Response:
+            response = await call_next(request)
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            response.headers["X-Frame-Options"] = "DENY"
+            response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; "
+                "script-src 'self' https://cdnjs.cloudflare.com; "
+                "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; "
+                "img-src 'self' data:; "
+                "connect-src 'self'; "
+                "frame-ancestors 'none'"
+            )
+            return response
+
+    app.add_middleware(SecurityHeadersMiddleware)
+
+    if _STATIC_DIR.exists():
+        app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="static")
+
+    return app
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    from memtomem.server.component_factory import close_components, create_components
+
+    comp = await create_components()
+
+    from memtomem.search.dedup import DedupScanner
+
+    app.state.config = comp.config
+    app.state.storage = comp.storage
+    app.state.embedder = comp.embedder
+    app.state.search_pipeline = comp.search_pipeline
+    app.state.index_engine = comp.index_engine
+    app.state.dedup_scanner = DedupScanner(comp.storage, comp.embedder)
+
+    # Sync config to match DB-stored embedding info (prevents mismatch banner)
+    stored_info = getattr(comp.storage, "stored_embedding_info", None)
+    if stored_info:
+        cfg = comp.config.embedding
+        if cfg.model != stored_info["model"] or cfg.dimension != stored_info["dimension"]:
+            logger.info(
+                "Syncing config to DB embedding: %s/%s (%dd)",
+                stored_info["provider"],
+                stored_info["model"],
+                stored_info["dimension"],
+            )
+            cfg.model = stored_info["model"]
+            cfg.dimension = stored_info["dimension"]
+            if stored_info.get("provider"):
+                cfg.provider = stored_info["provider"]
+            # Clear mismatch flags since config now matches DB
+            if hasattr(comp.storage, "_dim_mismatch"):
+                comp.storage._dim_mismatch = None
+            if hasattr(comp.storage, "_model_mismatch"):
+                comp.storage._model_mismatch = None
+
+    # Ensure memory_dirs exist
+    for d in comp.config.indexing.memory_dirs:
+        Path(d).expanduser().resolve().mkdir(parents=True, exist_ok=True)
+
+    try:
+        yield
+    finally:
+        await close_components(comp)
+
+
+app = create_app(lifespan=_lifespan)
+
+
+def main() -> None:
+    """Run the web UI server."""
+    import argparse
+    import os
+
+    import uvicorn
+
+    parser = argparse.ArgumentParser(description="memtomem Web UI")
+    parser.add_argument("--host", default=None, help="Bind host (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=None, help="Bind port (default: 8080)")
+    args = parser.parse_args()
+
+    host = args.host or os.environ.get("MEMTOMEM_WEB__HOST", "127.0.0.1")
+    port = args.port or int(os.environ.get("MEMTOMEM_WEB__PORT", "8080"))
+    uvicorn.run("memtomem.web.app:app", host=host, port=port, reload=False)
+
+
+if __name__ == "__main__":
+    main()

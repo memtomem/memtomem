@@ -1,0 +1,646 @@
+"""Stats, indexing, and memory-add endpoints."""
+
+from __future__ import annotations
+
+import asyncio as _asyncio
+import json
+import logging
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse, StreamingResponse
+
+from memtomem.tools.memory_writer import append_entry
+from memtomem.web.deps import (
+    get_config,
+    get_embedder,
+    get_index_engine,
+    get_search_pipeline,
+    get_storage,
+)
+from memtomem.web.schemas.config import (
+    ConfigDecayOut,
+    ConfigEmbeddingOut,
+    ConfigIndexingOut,
+    ConfigMMROut,
+    ConfigNamespaceOut,
+    ConfigPatchChange,
+    ConfigPatchRequest,
+    ConfigPatchResponse,
+    ConfigResponse,
+    ConfigSearchOut,
+    ConfigStorageOut,
+    EmbeddingConfigInfo,
+    EmbeddingResetResponse,
+    EmbeddingStatusResponse,
+)
+from memtomem.web.schemas.memory import (
+    AddMemoryRequest,
+    AddMemoryResponse,
+    IndexRequest,
+    IndexResponse,
+    UploadFileResult,
+    UploadResponse,
+)
+from memtomem.web.schemas.sources import StatsResponse
+
+logger = logging.getLogger(__name__)
+
+_LOCALHOST_ADDRS = {"127.0.0.1", "::1", "localhost", "0.0.0.0"}
+_config_patch_lock = _asyncio.Lock()
+
+
+def _require_localhost(request: Request) -> None:
+    """Block non-localhost access to sensitive endpoints."""
+    client = request.client
+    if client and client.host not in _LOCALHOST_ADDRS:
+        raise HTTPException(status_code=403, detail="This endpoint is restricted to localhost")
+
+
+router = APIRouter(tags=["system"])
+
+
+@router.get("/health")
+async def health(storage=Depends(get_storage), embedder=Depends(get_embedder)):
+    checks: dict[str, str] = {}
+    try:
+        await storage.get_stats()
+        checks["storage"] = "ok"
+    except Exception as exc:
+        checks["storage"] = type(exc).__name__
+
+    try:
+        await embedder.embed_texts(["health check"])
+        checks["embedding"] = "ok"
+    except Exception as exc:
+        checks["embedding"] = type(exc).__name__
+
+    all_ok = all(v == "ok" for v in checks.values())
+    if all_ok:
+        return {"status": "ok", "checks": checks}
+    return JSONResponse(
+        status_code=503,
+        content={"status": "degraded", "checks": checks},
+    )
+
+
+@router.post("/embed", dependencies=[Depends(_require_localhost)])
+async def embed_text(request: Request, embedder=Depends(get_embedder)):
+    """Return embedding vector for a given text."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    text = body.get("text", "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+    if len(text) > 5000:
+        raise HTTPException(status_code=400, detail="text too long (max 5000 chars)")
+
+    try:
+        vectors = await embedder.embed_texts([text])
+        return {"embedding": vectors[0]}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Embedding failed: {type(exc).__name__}")
+
+
+def _build_config_response(cfg) -> ConfigResponse:
+    """Build ConfigResponse from a Mem2MemConfig instance."""
+    return ConfigResponse(
+        embedding=ConfigEmbeddingOut(
+            provider=cfg.embedding.provider,
+            model=cfg.embedding.model,
+            dimension=cfg.embedding.dimension,
+            base_url=cfg.embedding.base_url,
+            batch_size=cfg.embedding.batch_size,
+            api_key="***" if cfg.embedding.api_key else "",
+        ),
+        storage=ConfigStorageOut(
+            backend=cfg.storage.backend,
+            sqlite_path=str(Path(cfg.storage.sqlite_path).expanduser().resolve()),
+            collection_name=cfg.storage.collection_name,
+        ),
+        search=ConfigSearchOut(
+            default_top_k=cfg.search.default_top_k,
+            bm25_candidates=cfg.search.bm25_candidates,
+            dense_candidates=cfg.search.dense_candidates,
+            rrf_k=cfg.search.rrf_k,
+            enable_bm25=cfg.search.enable_bm25,
+            enable_dense=cfg.search.enable_dense,
+            tokenizer=cfg.search.tokenizer,
+            rrf_weights=cfg.search.rrf_weights,
+        ),
+        indexing=ConfigIndexingOut(
+            memory_dirs=[str(Path(p).expanduser().resolve()) for p in cfg.indexing.memory_dirs],
+            supported_extensions=sorted(cfg.indexing.supported_extensions),
+            max_chunk_tokens=cfg.indexing.max_chunk_tokens,
+            min_chunk_tokens=cfg.indexing.min_chunk_tokens,
+            chunk_overlap_tokens=cfg.indexing.chunk_overlap_tokens,
+            structured_chunk_mode=cfg.indexing.structured_chunk_mode,
+        ),
+        decay=ConfigDecayOut(
+            enabled=cfg.decay.enabled,
+            half_life_days=cfg.decay.half_life_days,
+        ),
+        mmr=ConfigMMROut(
+            enabled=cfg.mmr.enabled,
+            lambda_param=cfg.mmr.lambda_param,
+        ),
+        namespace=ConfigNamespaceOut(
+            default_namespace=cfg.namespace.default_namespace,
+            enable_auto_ns=cfg.namespace.enable_auto_ns,
+        ),
+    )
+
+
+@router.get("/config", response_model=ConfigResponse)
+async def get_config_endpoint(config=Depends(get_config)) -> ConfigResponse:
+    return _build_config_response(config)
+
+
+# ---------------------------------------------------------------------------
+# PATCH /api/config — runtime configuration update
+# ---------------------------------------------------------------------------
+
+_MUTABLE_FIELDS: dict[str, set[str]] = {
+    "search": {
+        "default_top_k",
+        "bm25_candidates",
+        "dense_candidates",
+        "rrf_k",
+        "enable_bm25",
+        "enable_dense",
+        "tokenizer",
+        "rrf_weights",
+    },
+    "indexing": {
+        "max_chunk_tokens",
+        "min_chunk_tokens",
+        "chunk_overlap_tokens",
+        "structured_chunk_mode",
+    },
+    "embedding": {"batch_size"},
+    "decay": {"enabled", "half_life_days"},
+    "mmr": {"enabled", "lambda_param"},
+    "namespace": {"default_namespace", "enable_auto_ns"},
+}
+
+_FIELD_CONSTRAINTS: dict[str, dict] = {
+    "search.default_top_k": {"type": int, "min": 1, "max": 500},
+    "search.bm25_candidates": {"type": int, "min": 1, "max": 1000},
+    "search.dense_candidates": {"type": int, "min": 1, "max": 1000},
+    "search.rrf_k": {"type": int, "min": 1, "max": 1000},
+    "search.enable_bm25": {"type": bool},
+    "search.enable_dense": {"type": bool},
+    "search.tokenizer": {"type": str, "allowed": {"unicode61", "kiwipiepy"}},
+    "indexing.max_chunk_tokens": {"type": int, "min": 64, "max": 8192},
+    "indexing.min_chunk_tokens": {"type": int, "min": 0, "max": 256},
+    "indexing.chunk_overlap_tokens": {"type": int, "min": 0, "max": 512},
+    "indexing.structured_chunk_mode": {"type": str, "allowed": {"original", "recursive"}},
+    "embedding.batch_size": {"type": int, "min": 1, "max": 1024},
+    "decay.enabled": {"type": bool},
+    "decay.half_life_days": {"type": float, "min": 0.1},
+    "mmr.enabled": {"type": bool},
+    "mmr.lambda_param": {"type": float, "min": 0.0, "max": 1.0},
+    "namespace.default_namespace": {"type": str},
+    "namespace.enable_auto_ns": {"type": bool},
+}
+
+
+def _coerce_and_validate(value, constraint: dict | None):
+    """Coerce value to expected type and validate constraints."""
+    if constraint is None:
+        return value
+
+    expected_type = constraint["type"]
+
+    if expected_type is bool:
+        if isinstance(value, bool):
+            coerced = value
+        elif isinstance(value, str):
+            low = value.lower()
+            if low in ("true", "1", "yes"):
+                coerced = True
+            elif low in ("false", "0", "no"):
+                coerced = False
+            else:
+                raise ValueError(f"cannot convert '{value}' to bool")
+        elif isinstance(value, (int, float)):
+            coerced = bool(value)
+        else:
+            raise ValueError(f"cannot convert to bool: {value}")
+    elif expected_type is int:
+        try:
+            coerced = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"cannot convert '{value}' to int")
+    elif expected_type is float:
+        try:
+            coerced = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"cannot convert '{value}' to float")
+    elif expected_type is str:
+        coerced = str(value)
+    else:
+        coerced = value
+
+    if "min" in constraint and coerced < constraint["min"]:
+        raise ValueError(f"must be >= {constraint['min']}")
+    if "max" in constraint and coerced > constraint["max"]:
+        raise ValueError(f"must be <= {constraint['max']}")
+    if "allowed" in constraint and coerced not in constraint["allowed"]:
+        raise ValueError(f"must be one of {constraint['allowed']}")
+
+    return coerced
+
+
+@router.patch("/config", response_model=ConfigPatchResponse)
+async def patch_config(
+    req: ConfigPatchRequest,
+    persist: bool = False,
+    config=Depends(get_config),
+    storage=Depends(get_storage),
+    search_pipeline=Depends(get_search_pipeline),
+):
+    """Update mutable runtime configuration fields."""
+    applied: list[ConfigPatchChange] = []
+    rejected: list[str] = []
+
+    async with _config_patch_lock:
+        for section_name, updates in req.model_dump(exclude_none=True).items():
+            allowed = _MUTABLE_FIELDS.get(section_name, set())
+            section_obj = getattr(config, section_name, None)
+            if section_obj is None:
+                rejected.append(f"{section_name}: unknown section")
+                continue
+
+            for key, value in updates.items():
+                full_key = f"{section_name}.{key}"
+                if key not in allowed:
+                    rejected.append(f"{full_key}: read-only field")
+                    continue
+
+                constraint = _FIELD_CONSTRAINTS.get(full_key)
+                try:
+                    coerced = _coerce_and_validate(value, constraint)
+                except ValueError as e:
+                    rejected.append(f"{full_key}: {e}")
+                    continue
+
+                old_val = getattr(section_obj, key)
+                setattr(section_obj, key, coerced)
+                applied.append(
+                    ConfigPatchChange(
+                        field=full_key,
+                        old_value=str(old_val),
+                        new_value=str(coerced),
+                    )
+                )
+
+        # Re-initialize tokenizer if changed — auto-rebuild FTS index
+        if any(c.field == "search.tokenizer" for c in applied):
+            from memtomem.storage.fts_tokenizer import set_tokenizer
+
+            set_tokenizer(config.search.tokenizer)
+            count = await storage.rebuild_fts()
+            logger.info(
+                "FTS index rebuilt with tokenizer=%s (%d chunks)", config.search.tokenizer, count
+            )
+
+        # Invalidate search cache so config changes take effect immediately
+        if applied:
+            search_pipeline.invalidate_cache()
+
+        if persist:
+            from memtomem.config import save_config_overrides
+
+            save_config_overrides(config, _MUTABLE_FIELDS)
+
+    return ConfigPatchResponse(applied=applied, rejected=rejected)
+
+
+@router.post("/config/save")
+async def save_config(config=Depends(get_config)):
+    """Persist current mutable config to ~/.memtomem/config.json."""
+    from memtomem.config import save_config_overrides
+
+    save_config_overrides(config, _MUTABLE_FIELDS)
+    return {"ok": True, "message": "Config saved to ~/.memtomem/config.json"}
+
+
+@router.post("/memory-dirs/add")
+async def add_memory_dir(request: Request, config=Depends(get_config)):
+    """Add a directory to memory_dirs watch list."""
+    body = await request.json()
+    dir_path = body.get("path", "").strip()
+    if not dir_path:
+        raise HTTPException(status_code=400, detail="path is required")
+
+    resolved = Path(dir_path).expanduser().resolve()
+    if not resolved.is_dir():
+        resolved.mkdir(parents=True, exist_ok=True)
+
+    current = [Path(p).expanduser().resolve() for p in config.indexing.memory_dirs]
+    if resolved in current:
+        return {
+            "ok": True,
+            "message": "Already in memory_dirs",
+            "memory_dirs": [str(p) for p in current],
+        }
+
+    config.indexing.memory_dirs.append(resolved)
+    from memtomem.config import save_config_overrides
+
+    save_config_overrides(config, _MUTABLE_FIELDS)
+    return {
+        "ok": True,
+        "message": f"Added {resolved}",
+        "memory_dirs": [str(Path(p).expanduser().resolve()) for p in config.indexing.memory_dirs],
+    }
+
+
+@router.post("/memory-dirs/remove")
+async def remove_memory_dir(request: Request, config=Depends(get_config)):
+    """Remove a directory from memory_dirs watch list."""
+    body = await request.json()
+    dir_path = body.get("path", "").strip()
+    if not dir_path:
+        raise HTTPException(status_code=400, detail="path is required")
+
+    resolved = Path(dir_path).expanduser().resolve()
+    new_dirs = [p for p in config.indexing.memory_dirs if Path(p).expanduser().resolve() != resolved]
+    if len(new_dirs) == len(config.indexing.memory_dirs):
+        raise HTTPException(status_code=404, detail="Directory not in memory_dirs")
+    if len(new_dirs) == 0:
+        raise HTTPException(status_code=400, detail="Cannot remove last memory_dir")
+
+    config.indexing.memory_dirs = new_dirs
+    from memtomem.config import save_config_overrides
+
+    save_config_overrides(config, _MUTABLE_FIELDS)
+    return {
+        "ok": True,
+        "message": f"Removed {resolved}",
+        "memory_dirs": [str(Path(p).expanduser().resolve()) for p in config.indexing.memory_dirs],
+    }
+
+
+@router.post("/reindex")
+async def reindex_all(
+    force: bool = False,
+    config=Depends(get_config),
+    index_engine=Depends(get_index_engine),
+):
+    """Re-index all memory_dirs."""
+    results = []
+    for d in config.indexing.memory_dirs:
+        resolved = d.expanduser().resolve()
+        if not resolved.is_dir():
+            results.append({"path": str(resolved), "error": "not a directory"})
+            continue
+        stats = await index_engine.index_path(resolved, recursive=True, force=force)
+        entry: dict = {
+            "path": str(resolved),
+            "total_files": stats.total_files,
+            "indexed_chunks": stats.indexed_chunks,
+            "skipped_chunks": stats.skipped_chunks,
+            "deleted_chunks": stats.deleted_chunks,
+            "duration_ms": stats.duration_ms,
+        }
+        if stats.errors:
+            entry["errors"] = list(stats.errors)
+        results.append(entry)
+    all_errors = [e for r in results for e in r.get("errors", [])]
+    return {"ok": len(all_errors) == 0, "results": results, "errors": all_errors}
+
+
+@router.get("/embedding-status", response_model=EmbeddingStatusResponse)
+async def get_embedding_status(storage=Depends(get_storage)) -> EmbeddingStatusResponse:
+    stored_info = getattr(storage, "stored_embedding_info", None)
+    stored_out = (
+        EmbeddingConfigInfo(
+            dimension=stored_info["dimension"],
+            provider=stored_info["provider"],
+            model=stored_info["model"],
+        )
+        if stored_info
+        else None
+    )
+
+    mismatch = getattr(storage, "embedding_mismatch", None)
+    if mismatch is None:
+        return EmbeddingStatusResponse(has_mismatch=False, stored=stored_out)
+    return EmbeddingStatusResponse(
+        has_mismatch=True,
+        dimension_mismatch=mismatch["dimension_mismatch"],
+        model_mismatch=mismatch["model_mismatch"],
+        stored=EmbeddingConfigInfo(**mismatch["stored"]),
+        configured=EmbeddingConfigInfo(**mismatch["configured"]),
+    )
+
+
+@router.post(
+    "/embedding-reset",
+    response_model=EmbeddingResetResponse,
+    dependencies=[Depends(_require_localhost)],
+)
+async def reset_embedding(
+    storage=Depends(get_storage),
+    config=Depends(get_config),
+) -> EmbeddingResetResponse:
+    """Reset embedding metadata to current config. Drops all vectors."""
+    await storage.reset_embedding_meta(
+        dimension=config.embedding.dimension,
+        provider=config.embedding.provider,
+        model=config.embedding.model,
+    )
+    storage._dim_mismatch = None
+    storage._model_mismatch = None
+    return EmbeddingResetResponse(
+        ok=True,
+        message="Embedding metadata reset. All indexed vectors deleted — please re-index.",
+    )
+
+
+@router.post("/fts-rebuild", dependencies=[Depends(_require_localhost)])
+async def rebuild_fts(storage=Depends(get_storage)):
+    """Rebuild the FTS5 full-text index using the current tokenizer."""
+    count = await storage.rebuild_fts()
+    return {"ok": True, "rebuilt_rows": count, "message": f"FTS index rebuilt for {count} chunks."}
+
+
+@router.get("/stats", response_model=StatsResponse)
+async def get_stats(storage=Depends(get_storage)) -> StatsResponse:
+    data = await storage.get_stats()
+    distribution = await storage.get_chunk_size_distribution()
+    return StatsResponse(
+        total_chunks=data.get("total_chunks", 0),
+        total_sources=data.get("total_sources", 0),
+        chunk_size_distribution=distribution,
+    )
+
+
+@router.get("/index/stream")
+async def index_stream(
+    path: str = ".",
+    recursive: bool = True,
+    force: bool = False,
+    index_engine=Depends(get_index_engine),
+    config=Depends(get_config),
+) -> StreamingResponse:
+    """Stream indexing progress as Server-Sent Events."""
+    resolved = Path(path).resolve()
+    memory_dirs = [Path(d).expanduser().resolve() for d in config.indexing.memory_dirs]
+    if not any(str(resolved).startswith(str(d)) for d in memory_dirs):
+        raise HTTPException(
+            status_code=403,
+            detail="Path is outside configured memory_dirs",
+        )
+
+    async def _generate():
+        try:
+            async for event in index_engine.index_path_stream(
+                resolved, recursive=recursive, force=force
+            ):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as exc:
+            error_event = {"type": "error", "message": str(exc)}
+            yield f"data: {json.dumps(error_event)}\n\n"
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@router.post("/index", response_model=IndexResponse)
+async def trigger_index(
+    req: IndexRequest = IndexRequest(),
+    index_engine=Depends(get_index_engine),
+) -> IndexResponse:
+    stats = await index_engine.index_path(
+        Path(req.path).resolve(),
+        recursive=req.recursive,
+        force=req.force,
+        namespace=req.namespace,
+    )
+    return IndexResponse(
+        total_files=stats.total_files,
+        total_chunks=stats.total_chunks,
+        indexed_chunks=stats.indexed_chunks,
+        skipped_chunks=stats.skipped_chunks,
+        deleted_chunks=stats.deleted_chunks,
+        duration_ms=stats.duration_ms,
+        errors=list(stats.errors) if stats.errors else [],
+    )
+
+
+_ALLOWED_UPLOAD_EXTS = {".md", ".txt", ".json", ".yaml", ".yml", ".toml"}
+
+
+@router.post("/upload", response_model=UploadResponse)
+async def upload_files(
+    files: list[UploadFile] = File(...),
+    index_engine=Depends(get_index_engine),
+) -> UploadResponse:
+    """Upload one or more files, save to ~/.memtomem/uploads/, and index them."""
+    _MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+
+    upload_dir = Path("~/.memtomem/uploads").expanduser()
+    upload_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    results: list[UploadFileResult] = []
+    for file in files:
+        fname = Path(file.filename or "upload").name
+        if Path(fname).suffix.lower() not in _ALLOWED_UPLOAD_EXTS:
+            results.append(
+                UploadFileResult(
+                    filename=fname,
+                    indexed_chunks=0,
+                    error=f"Unsupported type: {Path(fname).suffix}",
+                )
+            )
+            continue
+        dest = upload_dir / fname
+        if dest.exists():
+            stem, suffix = dest.stem, dest.suffix
+            dest = upload_dir / f"{stem}_{dest.stat().st_mtime_ns}{suffix}"
+        try:
+            content = await file.read()
+            if len(content) > _MAX_UPLOAD_BYTES:
+                results.append(
+                    UploadFileResult(
+                        filename=fname,
+                        indexed_chunks=0,
+                        error=f"File too large ({len(content)} bytes, max {_MAX_UPLOAD_BYTES})",
+                    )
+                )
+                continue
+            dest.write_bytes(content)
+            stats = await index_engine.index_file(dest)
+            results.append(UploadFileResult(filename=fname, indexed_chunks=stats.indexed_chunks))
+        except Exception as exc:
+            results.append(UploadFileResult(filename=fname, indexed_chunks=0, error=str(exc)))
+
+    return UploadResponse(
+        files=results,
+        total_indexed=sum(r.indexed_chunks for r in results),
+    )
+
+
+@router.post("/add", response_model=AddMemoryResponse)
+async def add_memory(
+    req: AddMemoryRequest,
+    index_engine=Depends(get_index_engine),
+    storage=Depends(get_storage),
+) -> AddMemoryResponse:
+    from datetime import datetime, timezone
+
+    if req.file:
+        raw = req.file
+        if raw.startswith("/") or raw.startswith("\\") or ".." in raw:
+            raise HTTPException(
+                status_code=422,
+                detail="File path must be relative and must not contain '..'",
+            )
+        base = Path("~/.memtomem/memories").expanduser().resolve()
+        target = (base / raw).resolve()
+        if not str(target).startswith(str(base)):
+            raise HTTPException(
+                status_code=422,
+                detail="File path must be relative and must not contain '..'",
+            )
+    else:
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        base = Path("~/.memtomem/memories").expanduser().resolve()
+        target = (base / f"{date_str}.md").resolve()
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tags = req.tags or []
+    append_entry(target, req.content, title=req.title, tags=tags)
+    stats = await index_engine.index_file(target, namespace=req.namespace)
+
+    # Apply tags to indexed chunks (the chunker doesn't parse tag text from content)
+    if tags and stats.indexed_chunks > 0:
+        chunks = await storage.list_chunks_by_source(target)
+        updated = []
+        for c in chunks:
+            merged = set(c.metadata.tags) | set(tags)
+            if merged != set(c.metadata.tags):
+                c.metadata = c.metadata.__class__(
+                    **{
+                        **{f: getattr(c.metadata, f) for f in c.metadata.__dataclass_fields__},
+                        "tags": tuple(sorted(merged)),
+                    }
+                )
+                updated.append(c)
+        if updated:
+            await storage.upsert_chunks(updated)
+
+    return AddMemoryResponse(file=str(target), indexed_chunks=stats.indexed_chunks)

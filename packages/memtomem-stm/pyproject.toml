@@ -1,0 +1,25 @@
+[project]
+name = "memtomem-stm"
+version = "0.1.0"
+description = "Short-term memory proxy gateway with proactive memory surfacing for AI agents"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = [
+    "mcp[cli]>=1.26.0",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.7",
+    "httpx>=0.28",
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+ltm = ["memtomem>=0.1.0"]
+langfuse = ["langfuse>=4.0"]
+
+[project.scripts]
+memtomem-stm = "memtomem_stm.server:main"
+memtomem-stm-proxy = "memtomem_stm.cli.proxy:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

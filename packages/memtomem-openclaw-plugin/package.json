@@ -1,0 +1,25 @@
+{
+  "name": "@memtomem/openclaw-plugin",
+  "version": "0.1.0",
+  "description": "Markdown-first semantic memory for AI agents — OpenClaw plugin wrapping memtomem MCP server",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/memtomem/memtomem.git",
+    "directory": "packages/memtomem-openclaw-plugin"
+  },
+  "keywords": ["openclaw", "memtomem", "memory", "semantic-search", "mcp"],
+  "openclaw": {
+    "extensions": ["./src/index.ts"]
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0"
+  },
+  "peerDependencies": {
+    "@sinclair/typebox": ">=0.34.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
