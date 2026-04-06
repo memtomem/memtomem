@@ -231,8 +231,9 @@ Claude Code에서 자연어로 요청하면 에이전트가 MCP 도구를 호출
 
 ### 4.7 멀티 에이전트 시나리오 (Claude Code에서)
 
-하나의 Claude Code 세션에서 `agent_id`를 바꿔가며 여러 에이전트 역할을 시뮬레이션한다.
-각 에이전트는 `agent/{id}` 네임스페이스에 개인 메모리를 갖고, `shared` 네임스페이스를 통해 지식을 공유한다.
+여러 에이전트가 각자의 메모리를 갖고, 필요 시 공유하는 시나리오.
+실제 환경에서는 CLAUDE.md에 에이전트 역할을 설정하면 에이전트가 스스로 등록/관리한다.
+여기서는 테스트를 위해 수동으로 시뮬레이션한다.
 
 **구조:**
 ```
@@ -241,62 +242,65 @@ agent/frontend   ← 프론트엔드 에이전트 전용 메모리
 shared           ← 모든 에이전트가 접근 가능한 공유 메모리
 ```
 
-**테스트 흐름:**
+**실제 운영 시**: CLAUDE.md에 다음과 같이 설정하면 에이전트가 자동 등록한다.
+```markdown
+## Agent Identity
+이 프로젝트에서 당신은 backend 에이전트입니다.
+세션 시작 시 mem_agent_register(agent_id="backend")를 호출하세요.
+메모리는 agent/backend 네임스페이스에 저장하세요.
+```
+
+**테스트 흐름 (수동 시뮬레이션):**
 
 ```
-# ── 1단계: 에이전트 등록 ──
+# ── 준비: 에이전트 등록 ──
+# 실제 운영 시에는 에이전트가 세션 시작 시 자동으로 수행
 
-사용자: "백엔드 에이전트 등록해줘. agent_id는 backend, 설명은 'API 서버 담당'"
-→ mem_agent_register(agent_id="backend", description="API 서버 담당")
-→ agent/backend 네임스페이스 생성, shared 네임스페이스 자동 생성
-
-사용자: "프론트엔드 에이전트도 등록. agent_id는 frontend, 설명은 'React UI 담당'"
-→ mem_agent_register(agent_id="frontend", description="React UI 담당")
-
-사용자: "네임스페이스 목록 보여줘"
+사용자: "memtomem 멀티 에이전트 테스트할거야.
+  backend(API 서버 담당)와 frontend(React UI 담당) 두 에이전트를 등록하고
+  네임스페이스 목록 확인해줘"
+→ mem_agent_register × 2 호출
 → mem_do(action="ns_list")
 → agent/backend, agent/frontend, shared 3개 확인
 
-# ── 2단계: 각 에이전트의 개인 메모리 추가 ──
+# ── 각 에이전트의 개인 메모리 추가 ──
 
-사용자: "backend 에이전트 네임스페이스에 메모 추가:
-  'API rate limiting은 Redis sliding window 방식으로 구현. 분당 100 요청 제한.'"
+사용자: "backend 네임스페이스에 저장:
+  'API rate limiting은 Redis sliding window 방식. 분당 100 요청 제한.'"
 → mem_add(content="...", namespace="agent/backend", tags=["api", "rate-limit"])
 
-사용자: "frontend 에이전트 네임스페이스에 메모 추가:
-  'React Query로 서버 상태 관리. staleTime 5분, retry 3회 설정.'"
+사용자: "frontend 네임스페이스에 저장:
+  'React Query로 서버 상태 관리. staleTime 5분, retry 3회.'"
 → mem_add(content="...", namespace="agent/frontend", tags=["react", "state"])
 
-# ── 3단계: 에이전트 범위 검색 ──
+# ── 에이전트 범위 검색 ──
 
-사용자: "backend 에이전트 관점에서 'rate limit' 검색해줘"
+사용자: "backend 관점에서 'rate limit' 검색"
 → mem_agent_search(query="rate limit", agent_id="backend")
-→ agent/backend + shared 범위에서 검색, backend 메모 출현
+→ agent/backend + shared 범위 검색 → rate limit 메모 출현
 
-사용자: "frontend 에이전트 관점에서 'rate limit' 검색해줘"
+사용자: "frontend 관점에서 'rate limit' 검색"
 → mem_agent_search(query="rate limit", agent_id="frontend")
-→ agent/frontend + shared 범위에서 검색, 결과 없음 (backend 전용이므로)
+→ agent/frontend + shared 범위 검색 → 결과 없음 (backend 전용)
 
-# ── 4단계: 메모리 공유 ──
+# ── 메모리 공유 ──
 
 사용자: "backend의 rate limit 메모를 shared로 공유해줘"
 → mem_agent_share(chunk_id="...", target="shared")
-→ shared 네임스페이스에 복사됨
 
 사용자: "이제 frontend 관점에서 다시 'rate limit' 검색"
-→ mem_agent_search(query="rate limit", agent_id="frontend")
-→ shared 네임스페이스의 공유 메모 출현!
+→ shared에 복사된 메모 출현!
 
-# ── 5단계: 공유 메모리 직접 추가 ──
+# ── 공유 메모리 직접 추가 ──
 
-사용자: "shared 네임스페이스에 팀 전체 결정사항 추가:
-  'API 버전닝은 URL path 방식 (v1/v2). Header 방식은 사용하지 않기로 결정.'"
+사용자: "shared에 팀 결정사항 추가:
+  'API 버전닝은 URL path 방식 (v1/v2). Header 방식은 사용 안 함.'"
 → mem_add(content="...", namespace="shared", tags=["api", "decision"])
 
 사용자: "backend 관점에서 'API 버전' 검색"
 → 공유 결정사항 출현
 
-사용자: "frontend 관점에서 'API 버전' 검색"
+사용자: "frontend 관점에서도 'API 버전' 검색"
 → 동일한 공유 결정사항 출현
 ```
 
