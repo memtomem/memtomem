@@ -29,6 +29,7 @@ cd memtomem
 # 가상환경 + 의존성 설치
 uv venv --python 3.12 && source .venv/bin/activate
 uv pip install -e "packages/memtomem[dev]"
+uv pip install -e "packages/memtomem-stm[ltm]"
 ```
 
 ---
