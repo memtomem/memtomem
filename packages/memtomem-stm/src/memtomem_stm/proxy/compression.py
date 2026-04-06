@@ -85,72 +85,115 @@ class TruncateCompressor:
     def _section_aware_truncate(
         self, text: str, max_chars: int, headings: list[re.Match]
     ) -> str:
-        """Cut at the last complete heading section that fits within budget.
+        """Preserve information from ALL sections, not just the first ones.
 
-        If the last section is a summary/conclusion, it is appended to the
-        kept portion (budget permitting) so critical wrap-up info is preserved.
-        Remaining section titles are listed in the footer.
+        Strategy:
+        1. Keep full text of sections that fit within 60% of budget
+        2. For remaining sections, preserve heading + first line (key facts)
+        3. Detect and preserve summary/conclusion sections
+
+        This prevents total information loss from sections beyond the cutoff.
         """
-        # Reserve space for the footer (section list + truncation notice)
-        footer_budget = min(500, max_chars // 4)
-        content_budget = max_chars - footer_budget
-
-        # Check if the last section is a summary/conclusion
-        summary_text = ""
-        last_title = headings[-1].group(1).strip() if headings else ""
-        if self._SUMMARY_RE.search(last_title):
-            summary_start = headings[-1].start()
-            summary_text = text[summary_start:].rstrip()
-            # Reserve budget for the summary section
-            summary_budget = min(len(summary_text), content_budget // 3)
-            content_budget -= summary_budget
-
-        # Find the last heading whose START fits within content_budget
-        last_fit_idx = 0
+        # Parse sections: (title, body_text) pairs
+        sections: list[tuple[str, str]] = []
         for i, m in enumerate(headings):
-            if m.start() <= content_budget:
-                last_fit_idx = i
+            start = m.start()
+            end = headings[i + 1].start() if i + 1 < len(headings) else len(text)
+            title = m.group(1).strip()
+            body = text[start:end].rstrip()
+            sections.append((title, body))
+
+        # Text before the first heading (preamble)
+        preamble = text[: headings[0].start()].rstrip() if headings[0].start() > 0 else ""
+
+        # Detect summary/conclusion as last section
+        summary_idx = -1
+        if sections:
+            last_title = sections[-1][0]
+            if self._SUMMARY_RE.search(last_title):
+                summary_idx = len(sections) - 1
+
+        # Phase 1: Keep full sections from the top
+        # Scale full_budget with document compression ratio
+        ratio = max_chars / len(text) if text else 1.0
+        full_pct = min(0.85, 0.5 + ratio * 0.4)  # 50-85% based on budget ratio
+        full_budget = int(max_chars * full_pct)
+        full_parts: list[str] = []
+        used = 0
+        full_count = 0
+
+        if preamble:
+            full_parts.append(preamble)
+            used += len(preamble) + 1
+
+        for i, (title, body) in enumerate(sections):
+            if i == summary_idx:
+                continue  # Handle summary separately
+            if used + len(body) + 2 <= full_budget:
+                full_parts.append(body)
+                used += len(body) + 2
+                full_count = i + 1
             else:
                 break
 
-        # Include at least the first heading's content
-        if last_fit_idx + 1 < len(headings):
-            cut_at = headings[last_fit_idx + 1].start()
-        else:
-            cut_at = self._find_break(text, content_budget)
+        # Phase 2: For remaining sections, keep heading + first meaningful line
+        snippet_parts: list[str] = []
+        snippet_budget = max_chars - used - 100  # Reserve 100 for footer
+        snippet_used = 0
 
-        kept = text[:cut_at].rstrip()
+        remaining_sections = [
+            (i, t, b) for i, (t, b) in enumerate(sections)
+            if i >= full_count and i != summary_idx
+        ]
 
-        # Build footer with remaining section titles
-        remaining_titles = []
-        for m in headings[last_fit_idx + 1 :]:
-            title = m.group(1).strip()
-            # Don't list the summary section — it's appended below
-            if summary_text and m.start() == headings[-1].start():
-                continue
-            remaining_titles.append(title)
-
-        if remaining_titles:
-            titles_str = ", ".join(
-                t.lstrip("#").strip() for t in remaining_titles
-            )
-            footer = (
-                f"\n\n... ({len(remaining_titles)} more sections: {titles_str})"
-                f"\n(truncated, original: {len(text)} chars)"
-            )
-        else:
-            footer = f"\n... (truncated, original: {len(text)} chars)"
-
-        result = kept + footer
-
-        # Append summary section if detected and budget allows
-        if summary_text and headings[-1].start() > cut_at:
-            budget_left = max_chars - len(result)
-            if budget_left >= 100:
-                if len(summary_text) <= budget_left:
-                    result += "\n\n" + summary_text
+        if remaining_sections:
+            # Budget per remaining section (distribute evenly)
+            per_section = max(60, snippet_budget // max(1, len(remaining_sections)))
+            for idx, title, body in remaining_sections:
+                # Extract heading + first few meaningful content lines
+                lines = body.split("\n")
+                snippet_lines = [lines[0]]  # heading line
+                content_chars = 0
+                for line in lines[1:]:
+                    line_stripped = line.strip()
+                    if not line_stripped or line_stripped.startswith("#"):
+                        continue
+                    snippet_lines.append(line)
+                    content_chars += len(line)
+                    if content_chars >= per_section - len(lines[0]):
+                        break
+                snippet = "\n".join(snippet_lines)
+                if snippet_used + len(snippet) + 2 > snippet_budget:
+                    # Just add the title
+                    title_only = title.lstrip("#").strip()
+                    if snippet_used + len(title_only) + 4 <= snippet_budget:
+                        snippet_parts.append(f"- {title_only}")
+                        snippet_used += len(title_only) + 4
                 else:
-                    result += "\n\n" + summary_text[: budget_left - 20] + "\n... (summary truncated)"
+                    snippet_parts.append(snippet)
+                    snippet_used += len(snippet) + 2
+
+        # Phase 3: Summary section
+        summary_part = ""
+        if summary_idx >= 0:
+            _, summary_body = sections[summary_idx]
+            budget_left = max_chars - used - snippet_used - 80
+            if budget_left >= 100:
+                if len(summary_body) <= budget_left:
+                    summary_part = summary_body
+                else:
+                    summary_part = summary_body[:budget_left - 20] + "\n... (summary truncated)"
+
+        # Assemble
+        result = "\n\n".join(full_parts)
+        if snippet_parts:
+            divider = f"\n\n... ({len(remaining_sections)} sections condensed)\n\n"
+            result += divider + "\n\n".join(snippet_parts)
+        if summary_part:
+            result += "\n\n" + summary_part
+
+        footer = f"\n(original: {len(text)} chars)"
+        result += footer
 
         if len(result) > max_chars:
             result = result[:max_chars]
@@ -403,62 +446,105 @@ class FieldExtractCompressor:
 
     def _compress_json(self, data: object, max_chars: int) -> str:
         if isinstance(data, dict):
-            summary = {}
-            for key, value in data.items():
-                if isinstance(value, str) and len(value) > 80:
-                    if "```" in value:
-                        limit = min(len(value), 500)
-                        fence_end = value.rfind("```", 0, limit)
-                        summary[key] = (
-                            value[: fence_end + 3] if fence_end > 80 else value[:limit] + "..."
-                        )
-                    else:
-                        summary[key] = value[:80] + "..."
-                elif isinstance(value, list):
-                    preview_n = min(3, len(value))
-                    preview: list[object] = []
-                    for item in value[:preview_n]:
-                        if isinstance(item, str) and len(item) > 60:
-                            preview.append(item[:60] + "...")
-                        elif isinstance(item, dict):
-                            preview.append(self._preview_dict(item))
-                        elif isinstance(item, list):
-                            preview.append(f"[{len(item)} items]")
-                        else:
-                            preview.append(item)
-                    remaining = len(value) - preview_n
-                    if remaining > 0:
-                        preview.append(f"... ({remaining} more)")
-                    summary[key] = preview
-                elif isinstance(value, dict):
-                    summary[key] = self._preview_dict(value)
-                else:
-                    summary[key] = value
+            summary = self._extract_dict(data, max_chars)
             result = json.dumps(summary, ensure_ascii=False, indent=2)
         elif isinstance(data, list):
-            preview = data[:3]
+            preview_n = min(5, len(data))
+            preview: list[object] = []
+            for item in data[:preview_n]:
+                if isinstance(item, dict):
+                    preview.append(self._preview_dict(item))
+                else:
+                    preview.append(item)
             result = json.dumps(preview, ensure_ascii=False, indent=2)
-            if len(data) > 3:
-                result += f"\n... ({len(data)} items total, showing first 3)"
+            if len(data) > preview_n:
+                result += f"\n... ({len(data)} items total, showing first {preview_n})"
         else:
             result = json.dumps(data, ensure_ascii=False)
         if len(result) > max_chars:
             result = result[:max_chars] + "\n... (truncated)"
         return result
 
+    def _extract_dict(self, data: dict, budget: int) -> dict:
+        """Budget-aware recursive dict extraction — preserves all keys with depth.
+
+        Scalar/small values are placed first so they survive truncation.
+        Large arrays/dicts are placed after, allowing them to be cut if needed.
+        """
+        # Separate scalar (small) values from large collections
+        scalar_keys: list[str] = []
+        collection_keys: list[str] = []
+        for key, value in data.items():
+            if isinstance(value, (list, dict)):
+                collection_keys.append(key)
+            else:
+                scalar_keys.append(key)
+
+        # Process scalars first (survive truncation), then collections
+        summary: dict = {}
+        for key in scalar_keys + collection_keys:
+            value = data[key]
+            if isinstance(value, str) and len(value) > 80:
+                if "```" in value:
+                    limit = min(len(value), 500)
+                    fence_end = value.rfind("```", 0, limit)
+                    summary[key] = (
+                        value[: fence_end + 3] if fence_end > 80 else value[:limit] + "..."
+                    )
+                else:
+                    summary[key] = value[:80] + "..."
+            elif isinstance(value, list):
+                preview_n = min(5, len(value))
+                items: list[object] = []
+                for item in value[:preview_n]:
+                    if isinstance(item, str) and len(item) > 80:
+                        items.append(item[:80] + "...")
+                    elif isinstance(item, dict):
+                        items.append(self._preview_dict(item))
+                    elif isinstance(item, list):
+                        items.append(f"[{len(item)} items]")
+                    else:
+                        items.append(item)
+                remaining = len(value) - preview_n
+                if remaining > 0:
+                    items.append(f"... ({remaining} more)")
+                summary[key] = items
+            elif isinstance(value, dict):
+                # Recurse one level — preserve all keys of nested dicts
+                summary[key] = self._preview_dict(value)
+            else:
+                summary[key] = value
+        return summary
+
     @staticmethod
-    def _preview_dict(d: dict, max_keys: int = 2, max_value_len: int = 40) -> dict:
+    def _preview_dict(d: dict, max_keys: int = 6, max_value_len: int = 80) -> dict:
         """Show first N key-value pairs with truncated values, hint at rest."""
-        preview = {}
+        preview: dict = {}
         keys = list(d.keys())
         for k in keys[:max_keys]:
             v = d[k]
             if isinstance(v, str) and len(v) > max_value_len:
                 preview[k] = v[:max_value_len] + "..."
             elif isinstance(v, dict):
-                preview[k] = f"{{{len(v)} keys}}"
+                # One more level of preview for nested dicts
+                inner: dict = {}
+                inner_keys = list(v.keys())
+                for ik in inner_keys[:4]:
+                    iv = v[ik]
+                    if isinstance(iv, str) and len(iv) > 40:
+                        inner[ik] = iv[:40] + "..."
+                    elif isinstance(iv, (dict, list)):
+                        inner[ik] = f"({type(iv).__name__}, {len(iv)})"
+                    else:
+                        inner[ik] = iv
+                if len(inner_keys) > 4:
+                    inner[f"...{len(inner_keys) - 4} more"] = "..."
+                preview[k] = inner
             elif isinstance(v, list):
-                preview[k] = f"[{len(v)} items]"
+                if len(v) <= 3:
+                    preview[k] = v
+                else:
+                    preview[k] = v[:3] + [f"... ({len(v) - 3} more)"]
             else:
                 preview[k] = v
         remaining = len(keys) - max_keys
@@ -703,8 +789,11 @@ def get_compressor(strategy: CompressionStrategy) -> Compressor:
 def auto_select_strategy(text: str) -> CompressionStrategy:
     """Detect content type and return the best compression strategy.
 
+    Selection priority: information preservation > compression ratio.
+
     - JSON → EXTRACT_FIELDS (preserves key structure)
-    - Markdown with headings → HYBRID (head preserve + tail TOC)
+    - Large markdown (5K+) with many headings → HYBRID (head + TOC)
+    - Shorter markdown → TRUNCATE (section-aware, preserves info from all sections)
     - Plain text → TRUNCATE (sentence-aware)
     """
     stripped = text.strip()
@@ -719,14 +808,15 @@ def auto_select_strategy(text: str) -> CompressionStrategy:
         except (json.JSONDecodeError, ValueError):
             pass
 
-    # Markdown detection (multiple headings → hybrid benefits from TOC)
+    # Markdown detection — HYBRID only benefits large documents where TOC helps
+    # For shorter docs, TRUNCATE's section-aware mode preserves more info
     heading_count = len(re.findall(r"(?:^|\n)#{1,6}\s", stripped))
-    if heading_count >= 3:
+    if heading_count >= 5 and len(stripped) >= 5000:
         return CompressionStrategy.HYBRID
 
-    # Code-heavy content (multiple code fences → preserve head)
+    # Code-heavy content — HYBRID only for large code files
     fence_count = stripped.count("```")
-    if fence_count >= 4:  # 2+ code blocks
+    if fence_count >= 6 and len(stripped) >= 5000:  # 3+ code blocks, large file
         return CompressionStrategy.HYBRID
 
     return CompressionStrategy.TRUNCATE
