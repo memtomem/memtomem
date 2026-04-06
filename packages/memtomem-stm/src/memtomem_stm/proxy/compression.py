@@ -80,17 +80,30 @@ class TruncateCompressor:
         summary = _content_summary(text)
         return text[:break_at] + f"\n... (truncated, original: {len(text)} chars){summary}"
 
+    _SUMMARY_RE = re.compile(r"summary|conclusion|결론|요약", re.IGNORECASE)
+
     def _section_aware_truncate(
         self, text: str, max_chars: int, headings: list[re.Match]
     ) -> str:
         """Cut at the last complete heading section that fits within budget.
 
-        Appends a list of remaining section titles so the agent knows
-        what was cut.
+        If the last section is a summary/conclusion, it is appended to the
+        kept portion (budget permitting) so critical wrap-up info is preserved.
+        Remaining section titles are listed in the footer.
         """
         # Reserve space for the footer (section list + truncation notice)
         footer_budget = min(500, max_chars // 4)
         content_budget = max_chars - footer_budget
+
+        # Check if the last section is a summary/conclusion
+        summary_text = ""
+        last_title = headings[-1].group(1).strip() if headings else ""
+        if self._SUMMARY_RE.search(last_title):
+            summary_start = headings[-1].start()
+            summary_text = text[summary_start:].rstrip()
+            # Reserve budget for the summary section
+            summary_budget = min(len(summary_text), content_budget // 3)
+            content_budget -= summary_budget
 
         # Find the last heading whose START fits within content_budget
         last_fit_idx = 0
@@ -112,6 +125,9 @@ class TruncateCompressor:
         remaining_titles = []
         for m in headings[last_fit_idx + 1 :]:
             title = m.group(1).strip()
+            # Don't list the summary section — it's appended below
+            if summary_text and m.start() == headings[-1].start():
+                continue
             remaining_titles.append(title)
 
         if remaining_titles:
@@ -126,6 +142,16 @@ class TruncateCompressor:
             footer = f"\n... (truncated, original: {len(text)} chars)"
 
         result = kept + footer
+
+        # Append summary section if detected and budget allows
+        if summary_text and headings[-1].start() > cut_at:
+            budget_left = max_chars - len(result)
+            if budget_left >= 100:
+                if len(summary_text) <= budget_left:
+                    result += "\n\n" + summary_text
+                else:
+                    result += "\n\n" + summary_text[: budget_left - 20] + "\n... (summary truncated)"
+
         if len(result) > max_chars:
             result = result[:max_chars]
         return result

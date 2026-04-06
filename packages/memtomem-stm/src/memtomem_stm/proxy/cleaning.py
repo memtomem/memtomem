@@ -10,7 +10,7 @@ _SCRIPT_STYLE_RE = re.compile(r"<(script|style)\b[^>]*>[\s\S]*?</\1>", re.I)
 _HTML_TAG_RE = re.compile(r"<[a-zA-Z][\w.-]*(?:\s[^>]*)?\s*/?>")
 _CLOSE_TAG_RE = re.compile(r"</[a-zA-Z][\w.-]*\s*>")
 _MULTI_NEWLINE_RE = re.compile(r"\n{3,}")
-_LINK_LINE_RE = re.compile(r"^\s*[-*]\s*\[.*?\]\(https?://.*?\)\s*$")
+_LINK_LINE_RE = re.compile(r"^\s*[-*]\s*\[.*?\]\(https?://\S+\)")
 _BARE_URL_LINE_RE = re.compile(r"^\s*[-*]?\s*https?://\S+\s*$")
 _GENERIC_RE = re.compile(r"[A-Z]\w*<[^>]+>")
 
