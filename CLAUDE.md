@@ -13,7 +13,7 @@ Markdown-first, long-term memory infrastructure for AI agents. Provides hybrid B
 uv pip install -e "packages/memtomem[dev]"
 
 # Run all tests (pytest + pytest-asyncio, async tests auto-detected)
-uv run pytest                      # 941 tests (core 695 + STM 246)
+uv run pytest                      # 1101 tests (core 819 + STM 282)
 
 # Run core tests only
 uv run pytest packages/memtomem/tests/ -v
@@ -115,8 +115,8 @@ Key patterns:
 ## Testing
 
 - Framework: pytest + pytest-asyncio (asyncio_mode = "auto")
-- Core test root: `packages/memtomem/tests/` (695 tests)
-- STM test root: `packages/memtomem-stm/tests/` (246 tests)
+- Core test root: `packages/memtomem/tests/` (819 tests)
+- STM test root: `packages/memtomem-stm/tests/` (282 tests)
 - Both paths configured in `pyproject.toml` `testpaths`
 - Core fixtures in `conftest.py` create isolated SQLite DB per test
 - STM fixtures in `conftest.py` provide `surfacing_config`, `feedback_store`, `proxy_cache`, `token_tracker`
