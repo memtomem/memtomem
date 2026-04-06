@@ -11,6 +11,7 @@ from memtomem_stm.proxy.compression import (
     FieldExtractCompressor,
     HybridCompressor,
     NoopCompressor,
+    SelectiveCompressor,
     TruncateCompressor,
     auto_select_strategy,
 )
@@ -125,6 +126,20 @@ class ComparisonReport:
     def surfacing_overhead(self) -> float:
         m = self.stm.stage_metrics
         return m.surfacing_overhead if m else 0.0
+
+
+@dataclass
+class SelectiveResult:
+    """Result of a 2-phase selective compression benchmark."""
+
+    task_id: str
+    toc_chars: int  # Phase 1: TOC size
+    toc_entry_count: int  # Number of selectable sections
+    selected_chars: int  # Phase 2: selected content size
+    selected_sections: list[str]  # Which sections were selected
+    quality_score: float  # Quality of selected content
+    total_chars: int  # Original content size
+    recovery_ratio: float  # selected_chars / total_chars
 
 
 @dataclass
@@ -387,3 +402,59 @@ class BenchHarness:
             )
 
         return points
+
+    # ── Selective 2-phase ────────────────────────────────────────────
+
+    def run_selective_2phase(
+        self,
+        task: BenchTask,
+        select_top_n: int | None = None,
+    ) -> SelectiveResult:
+        """Run 2-phase selective compression: TOC → select top sections.
+
+        Phase 1: compress() returns JSON TOC with section catalog
+        Phase 2: select() retrieves full content of chosen sections
+        """
+        import json as _json
+
+        comp = SelectiveCompressor(min_section_chars=10)
+        cleaned = self._cleaner.clean(task.content)
+
+        # Phase 1: get TOC
+        toc_str = comp.compress(cleaned, max_chars=200)
+        try:
+            toc = _json.loads(toc_str)
+        except _json.JSONDecodeError:
+            # Content was short enough to return as-is
+            score = self._judge.score(task, toc_str)
+            return SelectiveResult(
+                task_id=task.task_id,
+                toc_chars=len(toc_str),
+                toc_entry_count=0,
+                selected_chars=len(toc_str),
+                selected_sections=[],
+                quality_score=score,
+                total_chars=len(cleaned),
+                recovery_ratio=1.0,
+            )
+
+        key = toc.get("selection_key", "")
+        entries = toc.get("entries", [])
+
+        # Phase 2: select top N sections by size (largest first)
+        n = select_top_n or min(3, len(entries))
+        sorted_entries = sorted(entries, key=lambda e: e.get("size", 0), reverse=True)
+        section_keys = [e["key"] for e in sorted_entries[:n]]
+        selected = comp.select(key, section_keys)
+
+        score = self._judge.score(task, selected)
+        return SelectiveResult(
+            task_id=task.task_id,
+            toc_chars=len(toc_str),
+            toc_entry_count=len(entries),
+            selected_chars=len(selected),
+            selected_sections=section_keys,
+            quality_score=score,
+            total_chars=len(cleaned),
+            recovery_ratio=len(selected) / len(cleaned) if cleaned else 0.0,
+        )

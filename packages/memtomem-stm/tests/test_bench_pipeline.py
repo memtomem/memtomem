@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -21,7 +22,7 @@ from memtomem_stm.proxy.compression import (
     TruncateCompressor,
     auto_select_strategy,
 )
-from memtomem_stm.proxy.config import CleaningConfig
+from memtomem_stm.proxy.config import CleaningConfig, CompressionStrategy
 from memtomem_stm.proxy.metrics import CallMetrics, TokenTracker
 from memtomem_stm.surfacing.config import SurfacingConfig
 from memtomem_stm.surfacing.engine import SurfacingEngine
@@ -32,6 +33,7 @@ from bench.harness import (
     BenchTask,
     ComparisonReport,
     CurvePoint,
+    SelectiveResult,
     StageMetrics,
     StrategyResult,
     resolve_auto_strategy,
@@ -912,3 +914,221 @@ class TestCallMetrics:
         assert summary["total_calls"] == 1
         assert summary["avg_clean_ms"] == 0.0
         assert summary["total_surfaced_chars"] == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TestSelective2Phase — TOC → select workflow
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestSelective2Phase:
+    """Benchmark the 2-phase selective compression flow (TOC → select)."""
+
+    def test_markdown_produces_toc(self, harness):
+        task = [t for t in get_all_tasks() if t.task_id == "code_file_large"][0]
+        result = harness.run_selective_2phase(task)
+        assert isinstance(result, SelectiveResult)
+        assert result.toc_entry_count > 0
+        assert result.selected_chars > 0
+
+    def test_json_produces_toc(self, harness):
+        task = [t for t in get_all_tasks() if t.task_id == "api_response_json"][0]
+        result = harness.run_selective_2phase(task)
+        assert result.toc_entry_count > 0
+
+    def test_selected_content_has_quality(self, harness):
+        """Selected sections should contain at least some keywords."""
+        task = [t for t in get_all_tasks() if t.task_id == "code_file_large"][0]
+        result = harness.run_selective_2phase(task, select_top_n=3)
+        assert result.quality_score > 0
+
+    def test_full_select_recovers_content(self, harness):
+        """Selecting all sections should recover most of the original."""
+        task = [t for t in get_all_tasks() if t.task_id == "meeting_notes"][0]
+        result = harness.run_selective_2phase(task, select_top_n=100)
+        # Recovery should be high when selecting all sections
+        assert result.recovery_ratio >= 0.8
+
+    def test_short_text_passthrough(self, harness):
+        """Short text should not produce TOC — passthrough."""
+        task = [t for t in get_all_tasks() if t.task_id == "short_response"][0]
+        result = harness.run_selective_2phase(task)
+        assert result.toc_entry_count == 0
+        assert result.recovery_ratio == 1.0
+
+    def test_selective_all_tasks(self, harness):
+        """2-phase runs on all tasks without errors."""
+        for task in get_all_tasks():
+            result = harness.run_selective_2phase(task)
+            assert result.total_chars > 0
+
+    def test_top1_vs_top3_quality(self, harness):
+        """Selecting 3 sections should give better quality than 1."""
+        task = [t for t in get_all_tasks() if t.task_id == "code_file_large"][0]
+        r1 = harness.run_selective_2phase(task, select_top_n=1)
+        r3 = harness.run_selective_2phase(task, select_top_n=3)
+        assert r3.quality_score >= r1.quality_score
+        assert r3.selected_chars >= r1.selected_chars
+
+    def test_multilingual_toc(self, harness):
+        """Korean-English content should produce valid TOC."""
+        task = [t for t in get_all_tasks() if t.task_id == "multilingual_kr_en"][0]
+        result = harness.run_selective_2phase(task)
+        assert result.toc_entry_count >= 2
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TestProxyManagerIntegration — full pipeline with mock upstream
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestProxyManagerIntegration:
+    """Exercise the real ProxyManager pipeline with mock upstream MCP server."""
+
+    def _make_manager(self, tracker, compression=None, max_chars=2000):
+        from memtomem_stm.proxy.config import ProxyConfig, UpstreamServerConfig
+        from memtomem_stm.proxy.manager import ProxyManager
+
+        comp = compression or CompressionStrategy.TRUNCATE
+        config = ProxyConfig(
+            enabled=True,
+            config_path=Path("/tmp/nonexistent-bench-config.json"),
+            upstream_servers={
+                "bench": UpstreamServerConfig(
+                    prefix="b",
+                    compression=comp,
+                    max_result_chars=max_chars,
+                )
+            },
+        )
+        return ProxyManager(config=config, tracker=tracker)
+
+    def _inject_mock_upstream(self, manager, server_name, response_text):
+        from dataclasses import dataclass as _dc
+        from unittest.mock import AsyncMock, MagicMock
+
+        from memtomem_stm.proxy.manager import UpstreamConnection
+
+        mock_content = MagicMock()
+        mock_content.type = "text"
+        mock_content.text = response_text
+
+        mock_result = MagicMock()
+        mock_result.content = [mock_content]
+        mock_result.isError = False
+
+        mock_session = AsyncMock()
+        mock_session.call_tool = AsyncMock(return_value=mock_result)
+
+        conn = UpstreamConnection(
+            name=server_name,
+            config=manager._config.upstream_servers[server_name],
+            session=mock_session,
+            tools=[],
+        )
+        manager._connections[server_name] = conn
+        return mock_session
+
+    async def test_truncate_pipeline(self):
+        """Full pipeline: upstream → clean → truncate → metrics."""
+        tracker = TokenTracker(metrics_store=None)
+        mgr = self._make_manager(tracker, CompressionStrategy.TRUNCATE, max_chars=500)
+        self._inject_mock_upstream(mgr, "bench", CODE_FILE)
+
+        result = await mgr._call_tool_inner("bench", "read_file", {})
+        assert isinstance(result, str)
+        assert len(result) <= 700  # max_chars + metadata overhead
+
+        summary = tracker.get_summary()
+        assert summary["total_calls"] == 1
+        assert summary["avg_clean_ms"] > 0 or summary["avg_compress_ms"] >= 0
+
+    async def test_hybrid_pipeline(self):
+        """Full pipeline with hybrid compression."""
+        tracker = TokenTracker(metrics_store=None)
+        mgr = self._make_manager(tracker, CompressionStrategy.HYBRID, max_chars=800)
+        self._inject_mock_upstream(mgr, "bench", CODE_FILE)
+
+        result = await mgr._call_tool_inner("bench", "read_file", {})
+        assert isinstance(result, str)
+        assert "Authentication Module" in result  # head preserved
+
+    async def test_extract_fields_pipeline(self):
+        """Full pipeline with extract_fields on JSON."""
+        tracker = TokenTracker(metrics_store=None)
+        mgr = self._make_manager(tracker, CompressionStrategy.EXTRACT_FIELDS, max_chars=500)
+        self._inject_mock_upstream(mgr, "bench", API_RESPONSE_JSON)
+
+        result = await mgr._call_tool_inner("bench", "get_users", {})
+        assert isinstance(result, str)
+        # Top-level keys should be visible
+        assert "users" in result.lower() or "total" in result.lower()
+
+    async def test_selective_pipeline_returns_toc(self):
+        """Full pipeline with selective returns TOC JSON."""
+        import json
+
+        tracker = TokenTracker(metrics_store=None)
+        mgr = self._make_manager(tracker, CompressionStrategy.SELECTIVE, max_chars=200)
+        self._inject_mock_upstream(mgr, "bench", CODE_FILE)
+
+        result = await mgr._call_tool_inner("bench", "read_file", {})
+        assert isinstance(result, str)
+        toc = json.loads(result)
+        assert toc["type"] == "toc"
+        assert "selection_key" in toc
+
+        # Phase 2: select sections
+        key = toc["selection_key"]
+        entries = toc["entries"]
+        section_keys = [e["key"] for e in entries[:2]]
+        selected = mgr.select_chunks(key, section_keys)
+        assert len(selected) > 0
+        assert "Selection key" not in selected  # not an error
+
+    async def test_short_response_passthrough(self):
+        """Short responses should not be compressed."""
+        tracker = TokenTracker(metrics_store=None)
+        mgr = self._make_manager(tracker, CompressionStrategy.TRUNCATE, max_chars=2000)
+        self._inject_mock_upstream(mgr, "bench", SHORT_RESPONSE)
+
+        result = await mgr._call_tool_inner("bench", "save_file", {})
+        assert result == SHORT_RESPONSE
+
+    async def test_metrics_recorded(self):
+        """Verify per-stage timing is recorded in metrics."""
+        tracker = TokenTracker(metrics_store=None)
+        mgr = self._make_manager(tracker, CompressionStrategy.TRUNCATE, max_chars=500)
+        self._inject_mock_upstream(mgr, "bench", MEETING_NOTES)
+
+        await mgr._call_tool_inner("bench", "read_doc", {})
+
+        summary = tracker.get_summary()
+        assert summary["total_calls"] == 1
+        assert summary["total_original_chars"] > 0
+        assert summary["total_compressed_chars"] > 0
+        assert summary["total_surfaced_chars"] > 0
+
+    async def test_html_cleaning_in_pipeline(self):
+        """HTML content should be cleaned before compression."""
+        tracker = TokenTracker(metrics_store=None)
+        mgr = self._make_manager(tracker, CompressionStrategy.TRUNCATE, max_chars=2000)
+        self._inject_mock_upstream(mgr, "bench", HTML_MIXED)
+
+        result = await mgr._call_tool_inner("bench", "read_docs", {})
+        assert "<script>" not in result
+        assert "<style>" not in result
+
+    async def test_context_query_removed(self):
+        """_context_query should be stripped from upstream arguments."""
+        tracker = TokenTracker(metrics_store=None)
+        mgr = self._make_manager(tracker, CompressionStrategy.TRUNCATE, max_chars=2000)
+        mock_session = self._inject_mock_upstream(mgr, "bench", SHORT_RESPONSE)
+
+        await mgr._call_tool_inner(
+            "bench", "read_file", {"path": "/test", "_context_query": "auth tokens"}
+        )
+        # _context_query should NOT be forwarded to upstream
+        call_args = mock_session.call_tool.call_args
+        forwarded_args = call_args[0][1] if len(call_args[0]) > 1 else call_args[1].get("arguments", {})
+        assert "_context_query" not in forwarded_args
