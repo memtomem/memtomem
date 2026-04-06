@@ -8,6 +8,7 @@ from pathlib import Path
 # Ensure tests/ directory is importable for helpers.py
 sys.path.insert(0, str(Path(__file__).parent))
 
+import httpx
 import pytest
 from uuid import uuid4
 
@@ -17,6 +18,28 @@ from memtomem.server.component_factory import Components, create_components, clo
 
 
 from helpers import make_chunk  # noqa: E402 — re-export for fixture below
+
+
+def _ollama_available() -> bool:
+    """Check if Ollama is reachable at localhost:11434."""
+    try:
+        r = httpx.get("http://localhost:11434/api/tags", timeout=2)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+_OLLAMA_UP = _ollama_available()
+
+
+def pytest_collection_modifyitems(config, items):
+    """Auto-skip tests marked with @pytest.mark.ollama when Ollama is down."""
+    if _OLLAMA_UP:
+        return
+    skip = pytest.mark.skip(reason="Ollama not running")
+    for item in items:
+        if "ollama" in item.keywords:
+            item.add_marker(skip)
 
 
 @pytest.fixture

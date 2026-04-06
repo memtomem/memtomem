@@ -23,6 +23,7 @@ class TestMemtomemStoreInit:
         assert store._current_session_id is None
 
 
+@pytest.mark.ollama
 class TestMemtomemStoreIntegration:
     @pytest.mark.asyncio
     async def test_lifecycle(self, tmp_path):

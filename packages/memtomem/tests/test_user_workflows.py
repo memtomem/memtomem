@@ -3,6 +3,8 @@
 Each test class represents a user persona from the usability test plan.
 Tests use the full component stack (storage, indexer, search pipeline)
 with a temporary DB — no mocks.
+
+All tests require a running Ollama instance for embedding.
 """
 
 from __future__ import annotations
@@ -12,6 +14,8 @@ from pathlib import Path
 import pytest
 
 from memtomem.tools.memory_writer import append_entry
+
+pytestmark = pytest.mark.ollama
 
 
 # ── Scenario 1: Developer — Basic CRUD ───────────────────────────────────

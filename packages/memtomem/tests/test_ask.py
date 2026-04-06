@@ -71,6 +71,7 @@ class TestMemAskFormatting:
         assert "broader keywords" in output
 
 
+@pytest.mark.ollama
 class TestMemAskIntegration:
     """Integration tests using real components."""
 
