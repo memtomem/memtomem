@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time as _time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -536,9 +537,12 @@ class ProxyManager:
         tc = self._resolve_tool_config(server, tool)
 
         # ── Stage 1: CLEAN ──
+        _t0 = _time.monotonic()
         cleaned = self._clean_content(original_text, tc.cleaning)
+        _clean_ms = (_time.monotonic() - _t0) * 1000
 
         # ── Stage 2: COMPRESS ──
+        _t0 = _time.monotonic()
         compressed = await self._apply_compression(
             cleaned,
             tc.compression,
@@ -549,12 +553,15 @@ class ProxyManager:
             server,
             tool,
         )
+        _compress_ms = (_time.monotonic() - _t0) * 1000
 
         # Record metrics BEFORE surfacing (surfacing adds content, not compresses)
         compressed_chars_for_metrics = len(compressed)
 
         # ── Stage 3: SURFACE (proactive memory injection) ──
+        _t0 = _time.monotonic()
         surfaced = await self._apply_surfacing(server, tool, upstream_args, compressed)
+        _surface_ms = (_time.monotonic() - _t0) * 1000
 
         # ── Stage 4: INDEX (optional) ──
         ai_cfg = self._config.auto_index
@@ -585,6 +592,10 @@ class ProxyManager:
                 original_chars=len(original_text),
                 compressed_chars=compressed_chars_for_metrics,
                 cleaned_chars=len(cleaned),
+                clean_ms=_clean_ms,
+                compress_ms=_compress_ms,
+                surface_ms=_surface_ms,
+                surfaced_chars=len(surfaced),
             )
         )
 

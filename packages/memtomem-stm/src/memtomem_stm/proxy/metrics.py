@@ -23,6 +23,11 @@ class CallMetrics:
     original_tokens: int = 0
     compressed_tokens: int = 0
     trace_id: str | None = None
+    # Per-stage timing (ms) and surfacing size
+    clean_ms: float = 0.0
+    compress_ms: float = 0.0
+    surface_ms: float = 0.0
+    surfaced_chars: int = 0
 
 
 class TokenTracker:
@@ -32,6 +37,10 @@ class TokenTracker:
         self._total_calls = 0
         self._total_original = 0
         self._total_compressed = 0
+        self._total_surfaced = 0
+        self._total_clean_ms = 0.0
+        self._total_compress_ms = 0.0
+        self._total_surface_ms = 0.0
         self._cache_hits = 0
         self._cache_misses = 0
         self._reconnects = 0
@@ -47,6 +56,10 @@ class TokenTracker:
         self._total_calls += 1
         self._total_original += metrics.original_chars
         self._total_compressed += metrics.compressed_chars
+        self._total_surfaced += metrics.surfaced_chars
+        self._total_clean_ms += metrics.clean_ms
+        self._total_compress_ms += metrics.compress_ms
+        self._total_surface_ms += metrics.surface_ms
 
         s = self._by_server[metrics.server]
         s["calls"] += 1
@@ -90,11 +103,16 @@ class TokenTracker:
             )
             by_server[name] = {**s, "savings_pct": pct}
 
+        n = self._total_calls or 1
         return {
             "total_calls": self._total_calls,
             "total_original_chars": self._total_original,
             "total_compressed_chars": self._total_compressed,
+            "total_surfaced_chars": self._total_surfaced,
             "total_savings_pct": savings,
+            "avg_clean_ms": round(self._total_clean_ms / n, 2),
+            "avg_compress_ms": round(self._total_compress_ms / n, 2),
+            "avg_surface_ms": round(self._total_surface_ms / n, 2),
             "cache_hits": self._cache_hits,
             "cache_misses": self._cache_misses,
             "reconnects": self._reconnects,
