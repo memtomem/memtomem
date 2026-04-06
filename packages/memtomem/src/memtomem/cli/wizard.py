@@ -20,7 +20,10 @@ class _NavType(click.ParamType):
 
     name = "input"
 
-    def __init__(self, inner: click.ParamType | None = None):
+    def __init__(self, inner: click.ParamType | type | None = None):
+        # Accept Python types (int, float, str) and convert to Click types
+        if inner is not None and not isinstance(inner, click.ParamType):
+            inner = click.types.convert_type(inner)
         self.inner = inner
 
     def convert(self, value: Any, param: Any, ctx: Any) -> Any:
