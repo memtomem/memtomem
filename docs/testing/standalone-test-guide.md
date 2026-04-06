@@ -190,34 +190,44 @@ Claude Code에서 대화형 테스트:
 
 ### 4.6 고급 LTM 기능 (Claude Code에서)
 
+Claude Code에서 자연어로 요청하면 에이전트가 MCP 도구를 호출한다.
+
 ```
-# 세션 시작
-mem_session_start(agent_id="tester", title="인프라 검토")
+사용자: "세션 시작해줘. 에이전트 ID는 tester, 제목은 인프라 검토"
+→ 에이전트가 mem_session_start 호출
 
-# 워킹 메모리
-mem_scratch_set(key="focus", value="Redis 마이그레이션 계획")
-mem_scratch_get(key="focus")
+사용자: "워킹 메모리에 현재 작업 저장해줘: focus = Redis 마이그레이션 계획"
+→ mem_scratch_set 호출
 
-# 네임스페이스
-mem_do(action="ns_list")
+사용자: "워킹 메모리에서 focus 값 확인"
+→ mem_scratch_get 호출
 
-# 태그 관리
-mem_do(action="tag_list")
-mem_do(action="auto_tag", params={"dry_run": true})
+사용자: "네임스페이스 목록 보여줘"
+→ mem_do(action="ns_list") 호출
 
-# 엔티티 추출
-mem_do(action="entity_scan", params={"dry_run": true})
+사용자: "태그 목록 보여줘"
+→ mem_do(action="tag_list") 호출
 
-# 건강 보고서
-mem_do(action="eval")
+사용자: "자동 태깅 미리보기 해줘 (적용하지 말고)"
+→ mem_do(action="auto_tag", params={"dry_run": true}) 호출
 
-# 중복 스캔
-mem_do(action="dedup_scan")
+사용자: "엔티티 추출 미리보기"
+→ mem_do(action="entity_scan", params={"dry_run": true}) 호출
 
-# 세션 종료
-mem_session_end(summary="Redis 마이그레이션 계획 수립, Kong 게이트웨이 선정")
-mem_session_list()
+사용자: "메모리 시스템 건강 보고서 보여줘"
+→ mem_do(action="eval") 호출
+
+사용자: "중복 메모리 있는지 스캔해줘"
+→ mem_do(action="dedup_scan") 호출
+
+사용자: "세션 종료. 요약: Redis 마이그레이션 계획 수립, Kong 게이트웨이 선정"
+→ mem_session_end 호출
+
+사용자: "세션 기록 보여줘"
+→ mem_session_list 호출
 ```
+
+> **팁**: `mem_do(action="help")` 호출을 요청하면 사용 가능한 61개 액션 전체 목록을 볼 수 있다.
 
 ---
 
