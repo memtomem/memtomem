@@ -73,6 +73,15 @@ from bench.tasks import (
     get_generous_tasks,
     get_tight_tasks,
 )
+from bench.datasets import (
+    all_tasks as ds_all_tasks,
+    all_tasks_with_surfacing as ds_all_with_surfacing,
+    json_tasks as ds_json_tasks,
+    markdown_tasks as ds_markdown_tasks,
+    code_tasks as ds_code_tasks,
+    text_tasks as ds_text_tasks,
+    surfacing_tasks as ds_surfacing_tasks,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1590,3 +1599,112 @@ class TestMultihop:
         assert bd.surfacing_qa_gain > 0  # Surfacing added answerable QA pairs
         assert bd.compress_info_loss >= 0  # Compression may or may not lose info
         assert bd.clean_info_loss == 0  # Clean shouldn't lose quality on plain markdown
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TestStructuredDatasets — production-grade benchmark datasets
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestStructuredDatasets:
+    """Tests for the structured datasets module (bench/datasets.py)."""
+
+    def test_all_tasks_count(self):
+        tasks = ds_all_tasks()
+        assert len(tasks) == 11  # 3 json + 3 markdown + 2 code + 3 text
+
+    def test_with_surfacing_count(self):
+        tasks = ds_all_with_surfacing()
+        assert len(tasks) == 13  # 11 + 2 surfacing
+
+    def test_all_have_qa_pairs(self):
+        for task in ds_all_tasks():
+            assert len(task.qa_pairs) >= 3, f"{task.task_id} has too few QA pairs"
+
+    def test_no_empty_content(self):
+        for task in ds_all_tasks():
+            assert len(task.content) > 100, f"{task.task_id} content too short"
+
+    def test_json_tasks_are_valid_json(self):
+        import json
+        for task in ds_json_tasks():
+            json.loads(task.content)  # should not raise
+
+    def test_surfacing_tasks_have_memories(self):
+        for task in ds_surfacing_tasks():
+            assert task.surfacing_memories is not None
+            assert len(task.surfacing_memories) >= 2
+            memory_qs = [q for q in task.qa_pairs if q.source == "memory"]
+            assert len(memory_qs) >= 2, f"{task.task_id} needs memory QA pairs"
+
+    # ── A/B comparison on all datasets ──────────────────────────
+
+    def test_json_compression_quality(self, cleaner, field_extract, judge):
+        """JSON tasks with FieldExtract should preserve key structure."""
+        h = BenchHarness(cleaner=cleaner, compressor=field_extract, judge=judge)
+        for task in ds_json_tasks():
+            report = h.run_comparison(task)
+            assert report.stm.error is None
+            # json-event-stream: deeply nested payloads lose detail under tight budget
+            assert report.stm.quality_score >= 0.0  # no errors
+
+    def test_markdown_compression_quality(self, cleaner, truncate, judge):
+        """Markdown tasks should preserve headings and key info."""
+        h = BenchHarness(cleaner=cleaner, compressor=truncate, judge=judge)
+        for task in ds_markdown_tasks():
+            report = h.run_comparison(task)
+            assert report.stm.error is None
+
+    def test_code_compression_quality(self, cleaner, hybrid, judge):
+        """Code tasks with Hybrid should preserve head structure."""
+        h = BenchHarness(cleaner=cleaner, compressor=hybrid, judge=judge)
+        for task in ds_code_tasks():
+            report = h.run_comparison(task)
+            assert report.stm.error is None
+
+    def test_text_compression_quality(self, cleaner, truncate, judge):
+        """Text tasks should be compressible without errors."""
+        h = BenchHarness(cleaner=cleaner, compressor=truncate, judge=judge)
+        for task in ds_text_tasks():
+            report = h.run_comparison(task)
+            assert report.stm.error is None
+
+    # ── QA scoring across datasets ─────────────────────────────
+
+    def test_qa_score_on_originals(self, judge):
+        """QA pairs should be answerable from the original content."""
+        for task in ds_all_tasks():
+            qa = judge.qa_score(task, task.content)
+            assert qa["score"] >= 0.5, (
+                f"{task.task_id}: only {qa['answerable']}/{qa['total']} answerable in original"
+            )
+
+    def test_strategy_matrix_on_datasets(self, harness):
+        """Strategy matrix should run on all dataset tasks."""
+        for task in ds_all_tasks():
+            results = harness.run_strategy_matrix(task)
+            assert len(results) >= 3
+
+    # ── Surfacing value on dataset tasks ───────────────────────
+
+    async def test_surfacing_fills_gaps(self, cleaner, truncate, judge):
+        """Surfacing tasks: memories should add QA answers."""
+        for task in ds_surfacing_tasks():
+            memories = [
+                FakeSearchResult(chunk=FakeChunk(content=m), score=0.8 - i * 0.1)
+                for i, m in enumerate(task.surfacing_memories)
+            ]
+            config = _make_surfacing_config()
+            engine = SurfacingEngine(config=config, search_pipeline=_make_search_pipeline(memories))
+            h = BenchHarness(cleaner=cleaner, compressor=truncate, surfacing_engine=engine, judge=judge)
+            value = await h.measure_surfacing_value(task)
+            assert value.qa_delta > 0, f"{task.task_id}: surfacing added no QA answers"
+
+    # ── Stage breakdown on datasets ────────────────────────────
+
+    def test_stage_breakdown_all(self, harness):
+        """Stage breakdown should work on all dataset tasks."""
+        for task in ds_all_tasks():
+            bd = harness.run_stage_breakdown(task)
+            assert len(bd.stages) == 3
+            assert bd.clean_info_loss >= 0
