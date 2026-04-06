@@ -11,26 +11,27 @@ if TYPE_CHECKING:
 
 
 class RuleBasedJudge:
-    """Deterministic quality scoring based on keyword/structure preservation."""
+    """Deterministic quality scoring based on keyword/structure preservation.
+
+    Scoring:
+    - Start at 10.0
+    - -2.0 per missing expected keyword (weighted if keyword_weights provided)
+    - -1.0 if heading count below expected
+    - -1.0 if code block count below expected
+    - +0.5 if JSON is valid when content_type is "json"
+    - Clamped to [0.0, 10.0]
+    """
 
     def score(self, task: BenchTask, response: str) -> float:
-        """Score response quality on a 0-10 scale.
-
-        Deductions:
-        - -2.0 per missing expected keyword
-        - -1.0 if heading count below expected
-        - -1.0 if code block count below expected
-
-        Bonuses:
-        - +0.5 if JSON is valid when content_type is "json"
-        """
         s = 10.0
         lower = response.lower()
 
-        # Keyword preservation
-        for kw in task.expected_keywords:
+        # Keyword preservation (with optional weights)
+        weights = task.keyword_weights
+        for i, kw in enumerate(task.expected_keywords):
             if kw.lower() not in lower:
-                s -= 2.0
+                w = weights[i] if weights and i < len(weights) else 1.0
+                s -= 2.0 * w
 
         # Heading preservation
         if task.expect_headings > 0:
@@ -41,7 +42,6 @@ class RuleBasedJudge:
         # Code block preservation
         if task.expect_code_blocks > 0:
             code_count = response.count("```")
-            # Each block has open + close = 2 markers
             block_count = code_count // 2
             if block_count < task.expect_code_blocks:
                 s -= 1.0
@@ -55,3 +55,8 @@ class RuleBasedJudge:
                 pass
 
         return max(0.0, min(10.0, s))
+
+    def keyword_report(self, task: BenchTask, response: str) -> dict[str, bool]:
+        """Return per-keyword presence report."""
+        lower = response.lower()
+        return {kw: kw.lower() in lower for kw in task.expected_keywords}

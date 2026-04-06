@@ -1,4 +1,11 @@
-"""Benchmark task definitions — realistic MCP tool responses."""
+"""Benchmark task definitions — realistic MCP tool responses.
+
+Dataset structure:
+- Each task has a category (content_type) for grouped analysis
+- expected_keywords are the "ground truth" — critical info that must survive
+- keyword_weights allow prioritizing critical vs nice-to-have keywords
+- Multiple budget levels available via get_all_tasks(budget_mode=...)
+"""
 
 from __future__ import annotations
 
@@ -170,7 +177,7 @@ HTML_MIXED = """<div class="api-docs">
 
 <p>For more details, see the full documentation:</p>
 """ + "\n".join(
-    f'- [Endpoint {i}](https://docs.example.com/api/endpoint/{i})'
+    f"- [Endpoint {i}](https://docs.example.com/api/endpoint/{i})"
     for i in range(30)
 ) + """
 
@@ -199,10 +206,7 @@ The API gateway handles routing and rate limiting.
 
 ## Important Links
 
-""" + "\n".join(
-    f"- https://example.com/link/{i}"
-    for i in range(20)
-)
+""" + "\n".join(f"- https://example.com/link/{i}" for i in range(20))
 
 
 MULTILINGUAL_KR_EN = """# 프로젝트 아키텍처 결정 (Architecture Decisions)
@@ -238,82 +242,196 @@ Kubernetes 기반 배포:
 """
 
 
+# Large structured response (GitHub-style diff output)
+LARGE_DIFF_OUTPUT = """## Files Changed
+
+### src/auth/jwt_handler.py (+45, -12)
+
+```python
+# Before
+def verify_token(token: str) -> bool:
+    return jwt.decode(token, SECRET)
+
+# After
+def verify_token(token: str, audience: str = "api") -> TokenPayload:
+    payload = jwt.decode(token, SECRET, audience=audience)
+    return TokenPayload(
+        user_id=payload["sub"],
+        roles=payload.get("roles", []),
+        expires_at=payload["exp"],
+    )
+```
+
+### src/auth/middleware.py (+20, -5)
+
+```python
+# Added role-based access control
+@require_role("admin")
+async def admin_endpoint(request):
+    return {"users": await get_all_users()}
+```
+
+### src/models/user.py (+8, -2)
+
+Added `last_login` timestamp field and `is_active` boolean.
+
+### tests/test_auth.py (+60, -0)
+
+New test cases for:
+- Token expiration handling
+- Role-based access control
+- Invalid audience rejection
+- Refresh token rotation
+
+### Summary
+
+- 4 files changed
+- 133 insertions, 19 deletions
+- Breaking change: `verify_token` now returns `TokenPayload` instead of `bool`
+- Migration required: run `alembic upgrade head` for `last_login` column
+"""
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Task definitions
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def get_all_tasks() -> list[BenchTask]:
-    """Return all benchmark tasks."""
+def _make_tasks(budget_scale: float = 1.0) -> list[BenchTask]:
+    """Create tasks with adjustable budget scale (1.0 = default, 0.5 = tight, 2.0 = generous)."""
+
+    def b(base: int) -> int:
+        return max(50, int(base * budget_scale))
+
     return [
+        # ── JSON ──
         BenchTask(
             task_id="api_response_json",
             description="JSON API response with 50 user records",
             content=API_RESPONSE_JSON,
             content_type="json",
-            max_chars=1000,
+            max_chars=b(1000),
             expected_keywords=["Alice", "admin", "total", "has_more"],
-            expect_headings=0,
-            expect_code_blocks=0,
+            keyword_weights=[1.0, 0.8, 1.0, 0.5],  # Alice & total are critical
         ),
+        # ── Code ──
         BenchTask(
             task_id="code_file_large",
             description="Python authentication module with code blocks",
             content=CODE_FILE,
             content_type="code",
-            max_chars=1500,
+            max_chars=b(1500),
             expected_keywords=["JWT", "access_token", "validate_token", "middleware"],
+            keyword_weights=[1.0, 1.0, 0.8, 0.6],
             expect_headings=3,
             expect_code_blocks=2,
         ),
+        # ── Markdown (meeting) ──
         BenchTask(
             task_id="meeting_notes",
             description="Sprint planning meeting notes with decisions",
             content=MEETING_NOTES,
             content_type="markdown",
-            max_chars=800,
+            max_chars=b(800),
             expected_keywords=["PostgreSQL", "Kim Cheolsu", "April 15", "Grafana"],
+            keyword_weights=[1.0, 0.8, 1.0, 0.7],
             expect_headings=2,
-            expect_code_blocks=0,
         ),
+        # ── HTML mixed ──
         BenchTask(
             task_id="html_mixed",
             description="HTML API docs with script/style tags and link floods",
             content=HTML_MIXED,
             content_type="text",
-            max_chars=800,
+            max_chars=b(800),
             expected_keywords=["API Reference", "Endpoints", "authentication", "admin"],
-            expect_headings=0,  # Headings are in HTML, may be stripped
-            expect_code_blocks=0,
+            keyword_weights=[1.0, 1.0, 0.8, 0.6],
         ),
+        # ── Short ──
         BenchTask(
             task_id="short_response",
             description="Short response that needs no compression",
             content=SHORT_RESPONSE,
             content_type="text",
-            max_chars=1000,
+            max_chars=b(1000),
             expected_keywords=["OK", "saved"],
-            expect_headings=0,
-            expect_code_blocks=0,
         ),
+        # ── Link floods ──
         BenchTask(
             task_id="markdown_with_links",
             description="Markdown with link floods in resource collection",
             content=MARKDOWN_WITH_LINKS,
             content_type="markdown",
-            max_chars=600,
+            max_chars=b(600),
             expected_keywords=["microservices", "gRPC", "API gateway"],
+            keyword_weights=[1.0, 1.0, 1.0],
             expect_headings=1,
-            expect_code_blocks=0,
         ),
+        # ── Multilingual ──
         BenchTask(
             task_id="multilingual_kr_en",
             description="Korean-English architecture decision document",
             content=MULTILINGUAL_KR_EN,
             content_type="markdown",
-            max_chars=1000,
+            max_chars=b(1000),
             expected_keywords=["FastAPI", "PostgreSQL", "Redis", "Kubernetes"],
+            keyword_weights=[1.0, 1.0, 0.8, 0.7],
             expect_headings=2,
-            expect_code_blocks=0,
+        ),
+        # ── Large structured diff ──
+        BenchTask(
+            task_id="large_diff_output",
+            description="GitHub-style diff output with code changes and summary",
+            content=LARGE_DIFF_OUTPUT,
+            content_type="code",
+            max_chars=b(800),
+            expected_keywords=[
+                "verify_token",
+                "TokenPayload",
+                "Breaking change",
+                "alembic",
+            ],
+            keyword_weights=[1.0, 1.0, 1.0, 0.8],
+            expect_headings=2,
+            expect_code_blocks=1,
         ),
     ]
+
+
+def get_all_tasks() -> list[BenchTask]:
+    """Return all benchmark tasks with default budgets."""
+    return _make_tasks(budget_scale=1.0)
+
+
+def get_tight_tasks() -> list[BenchTask]:
+    """Return tasks with tight (50%) budget — stress test."""
+    return _make_tasks(budget_scale=0.5)
+
+
+def get_generous_tasks() -> list[BenchTask]:
+    """Return tasks with generous (2x) budget."""
+    return _make_tasks(budget_scale=2.0)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Dataset metadata — for objective evaluation
+# ═══════════════════════════════════════════════════════════════════════════
+
+TASK_CATEGORIES = {
+    "json": ["api_response_json"],
+    "code": ["code_file_large", "large_diff_output"],
+    "markdown": ["meeting_notes", "markdown_with_links", "multilingual_kr_en"],
+    "text": ["html_mixed", "short_response"],
+}
+
+# Recommended strategy per content type (ground truth for auto_select validation)
+OPTIMAL_STRATEGIES = {
+    "api_response_json": "extract_fields",
+    "code_file_large": "hybrid",
+    "meeting_notes": "truncate",
+    "html_mixed": "truncate",
+    "short_response": "none",
+    "markdown_with_links": "hybrid",
+    "multilingual_kr_en": "truncate",
+    "large_diff_output": "hybrid",
+}

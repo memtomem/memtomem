@@ -1,11 +1,11 @@
-"""Benchmark report formatter."""
+"""Benchmark report formatter — comparison, matrix, and curve reports."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .harness import ComparisonReport
+    from .harness import ComparisonReport, CurvePoint, StrategyResult
 
 
 def format_report(comparisons: list[ComparisonReport]) -> str:
@@ -45,6 +45,8 @@ def format_report(comparisons: list[ComparisonReport]) -> str:
                 f"compress {m.compress_ms:.1f}ms, "
                 f"surface {m.surface_ms:.1f}ms"
             )
+            if m.strategy != "unknown":
+                lines.append(f"  Strategy: {m.strategy}")
         else:
             lines.append(f"  STM-proxied: quality: {s.quality_score:.1f}/10")
 
@@ -76,3 +78,82 @@ def format_report(comparisons: list[ComparisonReport]) -> str:
         lines.append("  No tasks run.")
 
     return "\n".join(lines)
+
+
+def format_matrix(
+    task_id: str,
+    results: dict[str, StrategyResult],
+    optimal: str | None = None,
+) -> str:
+    """Format strategy matrix for a single task."""
+    lines = [f"Strategy matrix: {task_id}"]
+    lines.append(f"  {'Strategy':<25} {'Quality':>8} {'Ratio':>8} {'Chars':>8}")
+    lines.append(f"  {'-' * 25} {'-' * 8} {'-' * 8} {'-' * 8}")
+
+    best_strategy = ""
+    best_score = -1.0
+    for name, r in sorted(results.items(), key=lambda x: -x[1].quality_score):
+        marker = ""
+        if r.quality_score > best_score:
+            best_score = r.quality_score
+            best_strategy = name
+        lines.append(
+            f"  {name:<25} {r.quality_score:>7.1f} {r.compression_ratio:>7.1%} {r.compressed_chars:>8}"
+        )
+
+    if optimal:
+        # Check if auto matches optimal
+        auto_key = [k for k in results if k.startswith("auto(")]
+        auto_matches = any(optimal in k for k in auto_key) if auto_key else False
+        lines.append(f"  Optimal: {optimal} | Best: {best_strategy} | Auto correct: {auto_matches}")
+
+    return "\n".join(lines)
+
+
+def format_curve(task_id: str, points: list[CurvePoint]) -> str:
+    """Format compression curve for a single task."""
+    lines = [f"Compression curve: {task_id} ({points[0].strategy if points else '?'})"]
+    lines.append(f"  {'Budget':>8} {'MaxChars':>10} {'Actual':>8} {'Quality':>8}")
+    lines.append(f"  {'-' * 8} {'-' * 10} {'-' * 8} {'-' * 8}")
+
+    for p in points:
+        lines.append(
+            f"  {p.budget_ratio:>7.0%} {p.max_chars:>10} {p.compressed_chars:>8} {p.quality_score:>7.1f}"
+        )
+
+    # Monotonicity check
+    scores = [p.quality_score for p in points]
+    is_monotone = all(s1 <= s2 for s1, s2 in zip(scores, scores[1:]))
+    if not is_monotone:
+        lines.append("  ⚠️  Non-monotonic: more budget doesn't always mean more quality")
+
+    return "\n".join(lines)
+
+
+def format_full_report(
+    comparisons: list[ComparisonReport],
+    matrices: dict[str, dict[str, StrategyResult]] | None = None,
+    curves: dict[str, list[CurvePoint]] | None = None,
+    optimal_strategies: dict[str, str] | None = None,
+) -> str:
+    """Format complete benchmark report with comparisons, matrices, and curves."""
+    parts = [format_report(comparisons)]
+
+    if matrices:
+        parts.append("")
+        parts.append("=== Strategy Matrix ===")
+        parts.append("")
+        for task_id, results in matrices.items():
+            opt = optimal_strategies.get(task_id) if optimal_strategies else None
+            parts.append(format_matrix(task_id, results, optimal=opt))
+            parts.append("")
+
+    if curves:
+        parts.append("")
+        parts.append("=== Compression Curves ===")
+        parts.append("")
+        for task_id, points in curves.items():
+            parts.append(format_curve(task_id, points))
+            parts.append("")
+
+    return "\n".join(parts)
