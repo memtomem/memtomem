@@ -22,8 +22,8 @@
 # 작업 디렉토리 생성
 mkdir -p /tmp/memtomem-test && cd /tmp/memtomem-test
 
-# 소스 클론
-git clone https://github.com/memtomem/memtomem.git
+# 소스 클론 (SSH)
+git clone git@github.com:memtomem/memtomem.git
 cd memtomem
 
 # 가상환경 + 의존성 설치
