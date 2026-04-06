@@ -7,7 +7,7 @@ import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .harness import BenchTask
+    from .harness import BenchTask, QAPair
 
 
 class RuleBasedJudge:
@@ -60,3 +60,57 @@ class RuleBasedJudge:
         """Return per-keyword presence report."""
         lower = response.lower()
         return {kw: kw.lower() in lower for kw in task.expected_keywords}
+
+    def qa_score(self, task: BenchTask, response: str) -> dict:
+        """Score response based on QA pairs — can specific questions be answered?
+
+        Returns:
+            {
+                "answerable": int,      # QA pairs whose answer is in the response
+                "total": int,
+                "score": float,         # answerable / total (0-1)
+                "details": [{"question": str, "answerable": bool, "source": str}]
+            }
+        """
+        lower = response.lower()
+        details = []
+        answerable = 0
+        for qa in task.qa_pairs:
+            found = qa.answer.lower() in lower
+            if found:
+                answerable += 1
+            details.append({
+                "question": qa.question,
+                "answerable": found,
+                "source": qa.source,
+            })
+        total = len(task.qa_pairs)
+        return {
+            "answerable": answerable,
+            "total": total,
+            "score": answerable / total if total else 1.0,
+            "details": details,
+        }
+
+    def qa_by_source(self, task: BenchTask, response: str) -> dict:
+        """Score QA pairs grouped by source (content vs memory).
+
+        Useful for measuring: did surfacing add answerable questions?
+        """
+        lower = response.lower()
+        content_total = content_found = 0
+        memory_total = memory_found = 0
+        for qa in task.qa_pairs:
+            found = qa.answer.lower() in lower
+            if qa.source == "memory":
+                memory_total += 1
+                if found:
+                    memory_found += 1
+            else:
+                content_total += 1
+                if found:
+                    content_found += 1
+        return {
+            "content": {"answerable": content_found, "total": content_total},
+            "memory": {"answerable": memory_found, "total": memory_total},
+        }

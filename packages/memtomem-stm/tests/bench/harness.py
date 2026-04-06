@@ -33,6 +33,15 @@ STRATEGY_COMPRESSORS: dict[str, Compressor] = {
 
 
 @dataclass
+class QAPair:
+    """A question-answer pair for answer-based quality scoring."""
+
+    question: str
+    answer: str  # Ground truth — must be findable in the output
+    source: str = "content"  # "content" = from original, "memory" = from surfaced memory
+
+
+@dataclass
 class BenchTask:
     """A single benchmark task definition."""
 
@@ -47,6 +56,8 @@ class BenchTask:
     surfacing_memories: list[str] | None = None
     # Weight for keywords in scoring (0-1, default equal)
     keyword_weights: list[float] | None = None
+    # QA pairs for answer-based scoring
+    qa_pairs: list[QAPair] = field(default_factory=list)
 
 
 @dataclass
@@ -140,6 +151,84 @@ class SelectiveResult:
     quality_score: float  # Quality of selected content
     total_chars: int  # Original content size
     recovery_ratio: float  # selected_chars / total_chars
+
+
+@dataclass
+class StageScore:
+    """Quality score at a single pipeline stage."""
+
+    stage: str  # "original" | "cleaned" | "compressed" | "surfaced"
+    text: str
+    chars: int
+    quality_score: float
+    qa_score: float  # QA-based score (0-1)
+    qa_answerable: int  # number of answerable QA pairs
+    qa_total: int  # total QA pairs
+
+
+@dataclass
+class StageBreakdown:
+    """Per-stage quality breakdown showing where info is lost or gained."""
+
+    task_id: str
+    stages: list[StageScore]
+
+    @property
+    def clean_info_loss(self) -> float:
+        """Quality drop from cleaning (should be ~0 for good cleaning)."""
+        orig = self._get("original")
+        cleaned = self._get("cleaned")
+        if not orig or not cleaned or orig.quality_score == 0:
+            return 0.0
+        return orig.quality_score - cleaned.quality_score
+
+    @property
+    def compress_info_loss(self) -> float:
+        """Quality drop from compression."""
+        cleaned = self._get("cleaned")
+        compressed = self._get("compressed")
+        if not cleaned or not compressed or cleaned.quality_score == 0:
+            return 0.0
+        return cleaned.quality_score - compressed.quality_score
+
+    @property
+    def surfacing_value(self) -> float:
+        """Quality gain from surfacing (positive = memories helped)."""
+        compressed = self._get("compressed")
+        surfaced = self._get("surfaced")
+        if not compressed or not surfaced:
+            return 0.0
+        return surfaced.quality_score - compressed.quality_score
+
+    @property
+    def surfacing_qa_gain(self) -> int:
+        """Number of QA pairs answerable ONLY because of surfacing."""
+        compressed = self._get("compressed")
+        surfaced = self._get("surfaced")
+        if not compressed or not surfaced:
+            return 0
+        return surfaced.qa_answerable - compressed.qa_answerable
+
+    def _get(self, stage: str) -> StageScore | None:
+        for s in self.stages:
+            if s.stage == stage:
+                return s
+        return None
+
+
+@dataclass
+class SurfacingValue:
+    """Measures whether surfaced memories actually help answer questions."""
+
+    task_id: str
+    without_surfacing: float  # quality score (compress only)
+    with_surfacing: float  # quality score (compress + surface)
+    qa_without: int  # answerable QA pairs without surfacing
+    qa_with: int  # answerable QA pairs with surfacing
+    qa_total: int
+    memories_injected: int
+    quality_delta: float  # with - without (positive = surfacing helped)
+    qa_delta: int  # qa_with - qa_without
 
 
 @dataclass
@@ -457,4 +546,119 @@ class BenchHarness:
             quality_score=score,
             total_chars=len(cleaned),
             recovery_ratio=len(selected) / len(cleaned) if cleaned else 0.0,
+        )
+
+    # ── Per-stage breakdown ──────────────────────────────────────────
+
+    def _score_stage(self, task: BenchTask, stage: str, text: str) -> StageScore:
+        """Score text at a given pipeline stage."""
+        quality = self._judge.score(task, text)
+        qa_answerable = 0
+        qa_total = len(task.qa_pairs)
+        for qa in task.qa_pairs:
+            if qa.answer.lower() in text.lower():
+                qa_answerable += 1
+        qa_score = qa_answerable / qa_total if qa_total else 1.0
+        return StageScore(
+            stage=stage,
+            text=text,
+            chars=len(text),
+            quality_score=quality,
+            qa_score=qa_score,
+            qa_answerable=qa_answerable,
+            qa_total=qa_total,
+        )
+
+    def run_stage_breakdown(self, task: BenchTask) -> StageBreakdown:
+        """Run pipeline and measure quality at EACH stage individually.
+
+        Returns scores for: original → cleaned → compressed → surfaced
+        This shows exactly where information is lost (or gained).
+        """
+        stages: list[StageScore] = []
+
+        # Stage 0: Original
+        stages.append(self._score_stage(task, "original", task.content))
+
+        # Stage 1: Cleaned
+        cleaned = self._cleaner.clean(task.content)
+        stages.append(self._score_stage(task, "cleaned", cleaned))
+
+        # Stage 2: Compressed
+        compressed = self._compressor.compress(cleaned, max_chars=task.max_chars)
+        stages.append(self._score_stage(task, "compressed", compressed))
+
+        return StageBreakdown(task_id=task.task_id, stages=stages)
+
+    async def run_stage_breakdown_with_surfacing(
+        self, task: BenchTask
+    ) -> StageBreakdown:
+        """Run full pipeline including surfacing, measure quality at each stage."""
+        stages: list[StageScore] = []
+
+        stages.append(self._score_stage(task, "original", task.content))
+
+        cleaned = self._cleaner.clean(task.content)
+        stages.append(self._score_stage(task, "cleaned", cleaned))
+
+        compressed = self._compressor.compress(cleaned, max_chars=task.max_chars)
+        stages.append(self._score_stage(task, "compressed", compressed))
+
+        if self._surfacing is not None:
+            surfaced = await self._surfacing.surface(
+                server="bench",
+                tool="bench_task",
+                arguments={"_context_query": task.description},
+                response_text=compressed,
+            )
+            stages.append(self._score_stage(task, "surfaced", surfaced))
+
+        return StageBreakdown(task_id=task.task_id, stages=stages)
+
+    # ── Surfacing value measurement ──────────────────────────────────
+
+    async def measure_surfacing_value(self, task: BenchTask) -> SurfacingValue:
+        """Compare quality with vs without surfacing to measure memory value.
+
+        Requires surfacing_engine to be set. Uses QA pairs to detect
+        whether memories fill knowledge gaps.
+        """
+        cleaned = self._cleaner.clean(task.content)
+        compressed = self._compressor.compress(cleaned, max_chars=task.max_chars)
+
+        # Without surfacing
+        score_without = self._judge.score(task, compressed)
+        qa_without = sum(
+            1 for qa in task.qa_pairs if qa.answer.lower() in compressed.lower()
+        )
+
+        # With surfacing
+        if self._surfacing is not None:
+            surfaced = await self._surfacing.surface(
+                server="bench",
+                tool="bench_task",
+                arguments={"_context_query": task.description},
+                response_text=compressed,
+            )
+        else:
+            surfaced = compressed
+
+        score_with = self._judge.score(task, surfaced)
+        qa_with = sum(
+            1 for qa in task.qa_pairs if qa.answer.lower() in surfaced.lower()
+        )
+
+        # Count injected memories (check for surfacing marker)
+        memories_injected = surfaced.count("score=0.") if surfaced != compressed else 0
+
+        return SurfacingValue(
+            task_id=task.task_id,
+            without_surfacing=score_without,
+            with_surfacing=score_with,
+            qa_without=qa_without,
+            qa_with=qa_with,
+            qa_total=len(task.qa_pairs),
+            memories_injected=memories_injected,
+            quality_delta=score_with - score_without,
+            qa_delta=qa_with - qa_without,
         )

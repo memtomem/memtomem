@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from dataclasses import field as dc_field
 from pathlib import Path
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -33,16 +34,29 @@ from bench.harness import (
     BenchTask,
     ComparisonReport,
     CurvePoint,
+    QAPair,
     SelectiveResult,
+    StageBreakdown,
     StageMetrics,
+    StageScore,
     StrategyResult,
+    SurfacingValue,
     resolve_auto_strategy,
 )
 from bench.judge import RuleBasedJudge
-from bench.report import format_curve, format_full_report, format_matrix, format_report
+from bench.report import (
+    format_curve,
+    format_full_report,
+    format_matrix,
+    format_report,
+    format_stage_breakdown,
+    format_surfacing_value,
+)
 from bench.tasks import (
     API_RESPONSE_JSON,
+    AUTH_MEMORIES,
     CODE_FILE,
+    DEPLOY_MEMORIES,
     HTML_MIXED,
     LARGE_DIFF_OUTPUT,
     MARKDOWN_WITH_LINKS,
@@ -52,6 +66,7 @@ from bench.tasks import (
     SHORT_RESPONSE,
     TASK_CATEGORIES,
     get_all_tasks,
+    get_surfacing_tasks,
     get_generous_tasks,
     get_tight_tasks,
 )
@@ -101,7 +116,7 @@ def harness(cleaner, truncate, judge):
 
 @dataclass
 class FakeChunkMeta:
-    source_file: str = "/notes/test.md"
+    source_file: Path = dc_field(default_factory=lambda: Path("/notes/test.md"))
     namespace: str = "default"
 
 
@@ -1132,3 +1147,232 @@ class TestProxyManagerIntegration:
         call_args = mock_session.call_tool.call_args
         forwarded_args = call_args[0][1] if len(call_args[0]) > 1 else call_args[1].get("arguments", {})
         assert "_context_query" not in forwarded_args
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TestStageBreakdown — per-stage quality measurement
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestStageBreakdown:
+    """Measure quality at each pipeline stage to identify where info is lost."""
+
+    def test_breakdown_has_all_stages(self, harness):
+        task = [t for t in get_all_tasks() if t.task_id == "meeting_notes"][0]
+        bd = harness.run_stage_breakdown(task)
+        stage_names = [s.stage for s in bd.stages]
+        assert "original" in stage_names
+        assert "cleaned" in stage_names
+        assert "compressed" in stage_names
+
+    def test_cleaning_preserves_quality(self, harness):
+        """Clean stage should not lose quality (removes noise, not content)."""
+        for task in get_all_tasks():
+            bd = harness.run_stage_breakdown(task)
+            assert bd.clean_info_loss <= 1.0, (
+                f"{task.task_id}: clean lost {bd.clean_info_loss:.1f} quality"
+            )
+
+    def test_compression_is_main_loss(self, harness):
+        """Compression should be the primary source of quality loss."""
+        task = [t for t in get_all_tasks() if t.task_id == "code_file_large"][0]
+        bd = harness.run_stage_breakdown(task)
+        # Compress may lose some info, clean shouldn't
+        assert bd.clean_info_loss <= bd.compress_info_loss or bd.compress_info_loss == 0
+
+    def test_qa_scoring_works(self, harness):
+        """Tasks with QA pairs should have them scored at each stage."""
+        task = [t for t in get_all_tasks() if t.task_id == "meeting_notes"][0]
+        bd = harness.run_stage_breakdown(task)
+        orig = bd._get("original")
+        assert orig is not None
+        assert orig.qa_total > 0
+        assert orig.qa_answerable > 0  # Original should answer content questions
+
+    def test_qa_degrades_with_compression(self, harness):
+        """Tight compression may reduce answerable QA pairs."""
+        from bench.tasks import get_tight_tasks
+        tasks = get_tight_tasks()
+        task = [t for t in tasks if t.task_id == "code_file_large"][0]
+        bd = harness.run_stage_breakdown(task)
+        orig = bd._get("original")
+        comp = bd._get("compressed")
+        assert orig is not None and comp is not None
+        # Tight budget may lose some answers
+        assert comp.qa_answerable <= orig.qa_answerable
+
+    def test_breakdown_all_tasks(self, harness):
+        """All tasks produce valid breakdowns."""
+        for task in get_all_tasks():
+            bd = harness.run_stage_breakdown(task)
+            assert len(bd.stages) >= 3
+
+    def test_format_stage_breakdown(self, harness):
+        task = [t for t in get_all_tasks() if t.task_id == "meeting_notes"][0]
+        bd = harness.run_stage_breakdown(task)
+        text = format_stage_breakdown(bd)
+        assert "meeting_notes" in text
+        assert "original" in text
+        assert "cleaned" in text
+        assert "compressed" in text
+
+    async def test_breakdown_with_surfacing(self, cleaner, truncate, judge):
+        """Surfacing stage should appear when engine is provided."""
+        memories = [
+            FakeSearchResult(
+                chunk=FakeChunk(content="JWT tokens use HS256 with 1-hour TTL"),
+                score=0.8,
+            ),
+        ]
+        config = _make_surfacing_config()
+        pipeline = _make_search_pipeline(memories)
+        engine = SurfacingEngine(config=config, search_pipeline=pipeline)
+        h = BenchHarness(cleaner=cleaner, compressor=truncate, surfacing_engine=engine, judge=judge)
+
+        task = [t for t in get_all_tasks() if t.task_id == "code_file_large"][0]
+        bd = await h.run_stage_breakdown_with_surfacing(task)
+        stage_names = [s.stage for s in bd.stages]
+        assert "surfaced" in stage_names
+        assert bd.surfacing_value >= 0  # Surfacing shouldn't hurt quality
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TestQAScoring — question-answer based quality measurement
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestQAScoring:
+    """Test QA-based quality scoring."""
+
+    def test_qa_score_all_answerable(self, judge):
+        task = BenchTask(
+            task_id="qa", description="qa", content="The sky is blue and water is wet.",
+            content_type="text", max_chars=100,
+            qa_pairs=[
+                QAPair("What color is the sky?", "blue", "content"),
+                QAPair("Is water wet?", "wet", "content"),
+            ],
+        )
+        result = judge.qa_score(task, "The sky is blue and water is wet.")
+        assert result["answerable"] == 2
+        assert result["score"] == 1.0
+
+    def test_qa_score_partial(self, judge):
+        task = BenchTask(
+            task_id="qa", description="qa", content="x", content_type="text", max_chars=100,
+            qa_pairs=[
+                QAPair("Q1?", "alpha", "content"),
+                QAPair("Q2?", "beta", "content"),
+            ],
+        )
+        result = judge.qa_score(task, "alpha is here but not the other")
+        assert result["answerable"] == 1
+        assert result["score"] == 0.5
+
+    def test_qa_by_source(self, judge):
+        task = BenchTask(
+            task_id="qa", description="qa", content="x", content_type="text", max_chars=100,
+            qa_pairs=[
+                QAPair("From content?", "original_fact", "content"),
+                QAPair("From memory?", "remembered_fact", "memory"),
+            ],
+        )
+        # Only content answer present, not memory answer
+        result = judge.qa_by_source(task, "This has original_fact but nothing from memories")
+        assert result["content"]["answerable"] == 1
+        assert result["memory"]["answerable"] == 0
+
+    def test_qa_no_pairs(self, judge):
+        task = BenchTask(
+            task_id="qa", description="qa", content="x", content_type="text", max_chars=100,
+        )
+        result = judge.qa_score(task, "anything")
+        assert result["total"] == 0
+        assert result["score"] == 1.0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TestSurfacingValue — does surfacing actually help?
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestSurfacingValue:
+    """Measure whether surfaced memories improve answer quality."""
+
+    async def test_surfacing_fills_knowledge_gaps(self, cleaner, truncate, judge):
+        """Memories should make previously unanswerable QA pairs answerable."""
+        tasks = get_surfacing_tasks()
+        task = [t for t in tasks if t.task_id == "auth_incomplete"][0]
+
+        # Build surfacing engine with task-specific memories
+        memories = [
+            FakeSearchResult(chunk=FakeChunk(content=m), score=0.8 - i * 0.1)
+            for i, m in enumerate(AUTH_MEMORIES)
+        ]
+        config = _make_surfacing_config()
+        pipeline = _make_search_pipeline(memories)
+        engine = SurfacingEngine(config=config, search_pipeline=pipeline)
+
+        h = BenchHarness(cleaner=cleaner, compressor=truncate, surfacing_engine=engine, judge=judge)
+        value = await h.measure_surfacing_value(task)
+
+        # Without surfacing: only "content" QA pairs answerable
+        assert value.qa_without >= 1  # at least content answers
+        # With surfacing: "memory" QA pairs also answerable
+        assert value.qa_with > value.qa_without
+        assert value.qa_delta > 0
+
+    async def test_surfacing_value_deploy_task(self, cleaner, truncate, judge):
+        """Deploy failure + Redis migration memory should help diagnosis."""
+        tasks = get_surfacing_tasks()
+        task = [t for t in tasks if t.task_id == "deploy_failure"][0]
+
+        memories = [
+            FakeSearchResult(chunk=FakeChunk(content=m), score=0.8 - i * 0.1)
+            for i, m in enumerate(DEPLOY_MEMORIES)
+        ]
+        config = _make_surfacing_config()
+        pipeline = _make_search_pipeline(memories)
+        engine = SurfacingEngine(config=config, search_pipeline=pipeline)
+
+        h = BenchHarness(cleaner=cleaner, compressor=truncate, surfacing_engine=engine, judge=judge)
+        value = await h.measure_surfacing_value(task)
+        assert value.qa_delta > 0  # Memories should add answerable questions
+
+    async def test_no_surfacing_no_delta(self, cleaner, truncate, judge):
+        """Without surfacing engine, quality delta should be 0."""
+        tasks = get_surfacing_tasks()
+        task = tasks[0]
+        h = BenchHarness(cleaner=cleaner, compressor=truncate, judge=judge)
+        value = await h.measure_surfacing_value(task)
+        assert value.quality_delta == 0.0
+        assert value.qa_delta == 0
+
+    async def test_surfacing_doesnt_hurt(self, cleaner, truncate, judge):
+        """Surfacing should not reduce quality of existing content."""
+        tasks = get_surfacing_tasks()
+        for task in tasks:
+            memories = [
+                FakeSearchResult(chunk=FakeChunk(content=m), score=0.5)
+                for m in (task.surfacing_memories or [])
+            ]
+            config = _make_surfacing_config()
+            pipeline = _make_search_pipeline(memories)
+            engine = SurfacingEngine(config=config, search_pipeline=pipeline)
+            h = BenchHarness(cleaner=cleaner, compressor=truncate, surfacing_engine=engine, judge=judge)
+            value = await h.measure_surfacing_value(task)
+            # Surfacing should never reduce quality (it only adds content)
+            assert value.quality_delta >= 0, f"{task.task_id}: delta={value.quality_delta}"
+
+    def test_format_surfacing_value(self):
+        values = [
+            SurfacingValue(
+                task_id="test", without_surfacing=6.0, with_surfacing=8.0,
+                qa_without=2, qa_with=5, qa_total=6, memories_injected=3,
+                quality_delta=2.0, qa_delta=3,
+            ),
+        ]
+        text = format_surfacing_value(values)
+        assert "Surfacing Value" in text
+        assert "+2.0" in text
+        assert "+3" in text

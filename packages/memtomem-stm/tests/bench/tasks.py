@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 
-from .harness import BenchTask
+from .harness import BenchTask, QAPair
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Content fixtures — realistic MCP tool response data
@@ -312,7 +312,12 @@ def _make_tasks(budget_scale: float = 1.0) -> list[BenchTask]:
             content_type="json",
             max_chars=b(1000),
             expected_keywords=["Alice", "admin", "total", "has_more"],
-            keyword_weights=[1.0, 0.8, 1.0, 0.5],  # Alice & total are critical
+            keyword_weights=[1.0, 0.8, 1.0, 0.5],
+            qa_pairs=[
+                QAPair("What role does Alice have?", "admin", "content"),
+                QAPair("How many total users?", "50", "content"),
+                QAPair("Is there more data?", "false", "content"),
+            ],
         ),
         # ── Code ──
         BenchTask(
@@ -325,6 +330,11 @@ def _make_tasks(budget_scale: float = 1.0) -> list[BenchTask]:
             keyword_weights=[1.0, 1.0, 0.8, 0.6],
             expect_headings=3,
             expect_code_blocks=2,
+            qa_pairs=[
+                QAPair("What algorithm is used for JWT?", "HS256", "content"),
+                QAPair("What is the access token TTL?", "3600", "content"),
+                QAPair("What happens on expired token?", "Token expired", "content"),
+            ],
         ),
         # ── Markdown (meeting) ──
         BenchTask(
@@ -336,6 +346,12 @@ def _make_tasks(budget_scale: float = 1.0) -> list[BenchTask]:
             expected_keywords=["PostgreSQL", "Kim Cheolsu", "April 15", "Grafana"],
             keyword_weights=[1.0, 0.8, 1.0, 0.7],
             expect_headings=2,
+            qa_pairs=[
+                QAPair("Who leads the DB migration?", "Kim Cheolsu", "content"),
+                QAPair("When is the migration deadline?", "April 15", "content"),
+                QAPair("What is the downtime window?", "2am-4am", "content"),
+                QAPair("What is sprint velocity?", "42", "content"),
+            ],
         ),
         # ── HTML mixed ──
         BenchTask(
@@ -394,6 +410,11 @@ def _make_tasks(budget_scale: float = 1.0) -> list[BenchTask]:
             keyword_weights=[1.0, 1.0, 1.0, 0.8],
             expect_headings=2,
             expect_code_blocks=1,
+            qa_pairs=[
+                QAPair("What is the breaking change?", "TokenPayload", "content"),
+                QAPair("How many files changed?", "4 files", "content"),
+                QAPair("What migration command?", "alembic upgrade head", "content"),
+            ],
         ),
     ]
 
@@ -435,3 +456,94 @@ OPTIMAL_STRATEGIES = {
     "multilingual_kr_en": "truncate",
     "large_diff_output": "hybrid",
 }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Surfacing-specific tasks — response is incomplete, memories fill the gap
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Tool response that's missing context (memories should fill the gap)
+AUTH_CODE_INCOMPLETE = """## src/auth/handler.py
+
+```python
+def login(username: str, password: str) -> dict:
+    user = db.find_user(username)
+    if not user or not verify_password(password, user.hashed_password):
+        raise AuthError("Invalid credentials")
+    token = create_token(user.id, user.roles)
+    return {"access_token": token, "token_type": "bearer"}
+```
+
+This handles the login endpoint. See auth configuration for token TTL settings.
+"""
+
+# Memories that provide the missing context
+AUTH_MEMORIES = [
+    "Auth tokens use HS256 algorithm with 1-hour TTL for access tokens and 7-day TTL for refresh tokens.",
+    "Rate limiting: 100 requests/min for regular users, 500 for admins. Uses Redis sliding window.",
+    "Known issue: token rotation is not yet implemented. Refresh tokens are single-use but not revoked on reissue.",
+]
+
+DEPLOY_LOG_INCOMPLETE = """## Deployment Log — 2026-04-06 14:30 UTC
+
+Status: FAILED
+Service: api-gateway
+Cluster: prod-east-1
+
+Error: CrashLoopBackOff — container restarted 5 times
+Last log: "connection refused: redis:6379"
+"""
+
+DEPLOY_MEMORIES = [
+    "Redis prod-east-1 was migrated to a new cluster on 2026-04-05. New endpoint: redis-v2.internal:6380.",
+    "api-gateway config reads REDIS_URL from ConfigMap 'gateway-config' in namespace 'production'.",
+    "Previous Redis migration (2026-01-15) also caused CrashLoopBackOff. Fix was updating ConfigMap and restarting pods.",
+]
+
+
+def get_surfacing_tasks() -> list[BenchTask]:
+    """Tasks where tool response is incomplete — memories should fill gaps.
+
+    QA pairs include both 'content' (answerable from response alone)
+    and 'memory' (answerable only if surfacing provides the memory).
+    """
+    return [
+        BenchTask(
+            task_id="auth_incomplete",
+            description="Auth handler code missing config details",
+            content=AUTH_CODE_INCOMPLETE,
+            content_type="code",
+            max_chars=2000,
+            expected_keywords=["login", "create_token", "bearer"],
+            surfacing_memories=AUTH_MEMORIES,
+            qa_pairs=[
+                # Answerable from content
+                QAPair("What does the login function return?", "access_token", "content"),
+                QAPair("What error is raised for bad credentials?", "Invalid credentials", "content"),
+                # Answerable ONLY from memories
+                QAPair("What algorithm do auth tokens use?", "HS256", "memory"),
+                QAPair("What is the access token TTL?", "1-hour", "memory"),
+                QAPair("What is the rate limit for regular users?", "100 requests", "memory"),
+                QAPair("Is token rotation implemented?", "not yet implemented", "memory"),
+            ],
+        ),
+        BenchTask(
+            task_id="deploy_failure",
+            description="Deployment failure log missing root cause context",
+            content=DEPLOY_LOG_INCOMPLETE,
+            content_type="text",
+            max_chars=2000,
+            expected_keywords=["FAILED", "CrashLoopBackOff", "redis"],
+            surfacing_memories=DEPLOY_MEMORIES,
+            qa_pairs=[
+                # Answerable from content
+                QAPair("What is the deployment status?", "FAILED", "content"),
+                QAPair("What error occurred?", "CrashLoopBackOff", "content"),
+                QAPair("What service failed?", "api-gateway", "content"),
+                # Answerable ONLY from memories
+                QAPair("What is the new Redis endpoint?", "redis-v2.internal:6380", "memory"),
+                QAPair("Where is REDIS_URL configured?", "ConfigMap", "memory"),
+                QAPair("How was the previous Redis issue fixed?", "updating ConfigMap", "memory"),
+            ],
+        ),
+    ]

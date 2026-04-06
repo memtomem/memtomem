@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .harness import ComparisonReport, CurvePoint, StrategyResult
+    from .harness import ComparisonReport, CurvePoint, StageBreakdown, StrategyResult, SurfacingValue
 
 
 def format_report(comparisons: list[ComparisonReport]) -> str:
@@ -157,3 +157,49 @@ def format_full_report(
             parts.append("")
 
     return "\n".join(parts)
+
+
+def format_stage_breakdown(breakdown: StageBreakdown) -> str:
+    """Format per-stage quality breakdown."""
+    lines = [f"Stage breakdown: {breakdown.task_id}"]
+    lines.append(f"  {'Stage':<12} {'Chars':>8} {'Quality':>8} {'QA':>10}")
+    lines.append(f"  {'-' * 12} {'-' * 8} {'-' * 8} {'-' * 10}")
+
+    for s in breakdown.stages:
+        qa_str = f"{s.qa_answerable}/{s.qa_total}" if s.qa_total else "n/a"
+        lines.append(f"  {s.stage:<12} {s.chars:>8} {s.quality_score:>7.1f} {qa_str:>10}")
+
+    # Deltas
+    lines.append(f"  ---")
+    lines.append(f"  Clean info loss:    {breakdown.clean_info_loss:+.1f}")
+    lines.append(f"  Compress info loss: {breakdown.compress_info_loss:+.1f}")
+    lines.append(f"  Surfacing value:    {breakdown.surfacing_value:+.1f}")
+    if breakdown.surfacing_qa_gain:
+        lines.append(f"  Surfacing QA gain:  +{breakdown.surfacing_qa_gain} answers")
+
+    return "\n".join(lines)
+
+
+def format_surfacing_value(values: list[SurfacingValue]) -> str:
+    """Format surfacing value comparison."""
+    lines = ["=== Surfacing Value ===", ""]
+    lines.append(f"  {'Task':<20} {'Without':>8} {'With':>8} {'Delta':>8} {'QA +':>6}")
+    lines.append(f"  {'-' * 20} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 6}")
+
+    total_delta = 0.0
+    total_qa_delta = 0
+    for v in values:
+        total_delta += v.quality_delta
+        total_qa_delta += v.qa_delta
+        lines.append(
+            f"  {v.task_id:<20} {v.without_surfacing:>7.1f} {v.with_surfacing:>7.1f} "
+            f"{v.quality_delta:>+7.1f} {v.qa_delta:>+5}"
+        )
+
+    if values:
+        n = len(values)
+        lines.append(f"  ---")
+        lines.append(f"  Avg quality delta: {total_delta / n:+.1f}")
+        lines.append(f"  Total QA gain:     +{total_qa_delta} answers")
+
+    return "\n".join(lines)
