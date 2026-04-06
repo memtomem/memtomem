@@ -574,284 +574,155 @@ Tier 3은 **플랫폼화** 시점.
 ---
 ---
 
-# mcp-bench 기반 STM 파이프라인 품질 평가 계획
+# STM 파이프라인 품질 평가 — 벤치마크 프레임워크
 
-## Context
+## 구현 상태: 완료 (2026-04-06)
 
-mcp-bench를 활용해 memtomem MCP 도구 호출 호환성을 검증하고, **STM 파이프라인(clean → compress → surface) 전후의 작업 결과 품질이 유지되는지** + **각 단계별 압축률**을 측정한다.
-
-### 핵심 측정 목표
-
-```
-                 직접 호출 (baseline)      STM 경유
-                ┌──────────────┐     ┌────────────────────────┐
-upstream MCP ──→│ 원본 응답     │     │ clean → compress → surface │
-                │ (100%)       │     │ (압축률? 품질 보존?)        │
-                └──────┬───────┘     └──────────┬─────────────┘
-                       ↓                        ↓
-                 LLM-as-judge             LLM-as-judge
-                 (작업 완료도 채점)          (작업 완료도 채점)
-                       ↓                        ↓
-                  Score A                   Score B
-                       ↓
-              품질 보존율 = Score B / Score A × 100%
-```
-
-**측정 항목:**
-
-| 항목 | 설명 | 기존 인프라 |
-|------|------|-----------|
-| 도구 호환성 | 65개 MCP 도구가 STM 경유 시에도 정상 작동하는지 | 없음 — 신규 |
-| 단계별 압축률 | clean/compress/surface 각 단계의 크기 변화 | TokenTracker에 partial (clean/compress만) |
-| 작업 품질 보존 | 직접 호출 vs STM 경유 시 LLM 작업 완료도 차이 | 없음 — 신규 |
-| 서피싱 유용성 | 주입된 메모리가 작업 완료에 기여했는지 | FeedbackTracker (수동 피드백만) |
+브랜치: `feat/mcp-bench-quality-eval` | 74 tests | STM 총 356 tests
 
 ---
 
-## 구현 계획
-
-### Phase 1: 벤치마크 하네스 (`packages/memtomem-stm/tests/bench/`)
-
-**파일: `bench/harness.py`**
-
-```python
-@dataclass
-class BenchResult:
-    """단일 태스크 실행 결과."""
-    task_id: str
-    mode: str                    # "direct" | "stm_proxied"
-    
-    # 크기 메트릭 (각 단계별)
-    original_chars: int
-    cleaned_chars: int
-    compressed_chars: int
-    surfaced_chars: int          # 서피싱 후 최종 크기 (compressed보다 클 수 있음)
-    
-    # 비율
-    cleaning_ratio: float        # cleaned / original
-    compression_ratio: float     # compressed / cleaned
-    total_reduction: float       # compressed / original
-    surfacing_overhead: float    # (surfaced - compressed) / compressed
-    
-    # 시간
-    latency_ms: float
-    clean_ms: float
-    compress_ms: float
-    surface_ms: float
-    
-    # 품질 (LLM judge 또는 규칙 기반)
-    quality_score: float | None  # 0-10 scale
-    tool_calls_correct: bool
-    error: str | None
-
-
-class BenchHarness:
-    """A/B 비교 벤치마크 — 동일 태스크를 direct와 STM 경유로 실행."""
-    
-    async def run_task(self, task: BenchTask, mode: str) -> BenchResult:
-        """태스크 실행. mode="direct"이면 원본, "stm_proxied"이면 STM 경유."""
-    
-    async def run_comparison(self, task: BenchTask) -> tuple[BenchResult, BenchResult]:
-        """동일 태스크를 direct + stm 모두 실행, 결과 쌍 반환."""
-    
-    def compare(self, direct: BenchResult, stm: BenchResult) -> ComparisonReport:
-        """두 결과 비교 → 품질 보존율, 압축 효율 등."""
-```
-
-### Phase 2: 태스크 정의 (`bench/tasks.json`)
-
-mcp-bench 형식을 참고하되, memtomem 전용으로 작성:
-
-```json
-[
-  {
-    "task_id": "search_simple",
-    "description": "Search for architecture decisions about database choice",
-    "tools": ["mem_search"],
-    "params": {"query": "database architecture decision", "top_k": 5},
-    "quality_criteria": "Returns results mentioning database/PostgreSQL/Redis from architecture.md"
-  },
-  {
-    "task_id": "multi_tool_workflow",
-    "description": "Index files, search, then recall by date",
-    "steps": [
-      {"tool": "mem_index", "params": {"path": "$TEST_DIR/memories"}},
-      {"tool": "mem_search", "params": {"query": "kubernetes monitoring"}},
-      {"tool": "mem_recall", "params": {"since": "2026-04"}}
-    ],
-    "quality_criteria": "All 3 steps succeed, search returns kubernetes.md, recall returns recent entries"
-  },
-  {
-    "task_id": "cross_language",
-    "description": "Search Korean content with English query",
-    "tools": ["mem_search"],
-    "params": {"query": "web framework choice reason"},
-    "quality_criteria": "Returns architecture.md with Flask/FastAPI Korean content in top 3"
-  },
-  {
-    "task_id": "session_workflow",
-    "description": "Start session, add scratch, search, end session",
-    "steps": [
-      {"tool": "mem_session_start", "params": {"title": "test session"}},
-      {"tool": "mem_scratch_set", "params": {"key": "focus", "value": "auth review"}},
-      {"tool": "mem_search", "params": {"query": "authentication"}},
-      {"tool": "mem_session_end", "params": {"summary": "reviewed auth"}}
-    ],
-    "quality_criteria": "Session created and ended, scratch value persisted during session"
-  },
-  {
-    "task_id": "large_response_compression",
-    "description": "Read a large file and verify content preservation after compression",
-    "tools": ["fs__read_file"],
-    "params": {"path": "$TEST_DIR/large_doc.md"},
-    "quality_criteria": "Key sections (headings, code blocks, decisions) preserved after compression"
-  }
-]
-```
-
-### Phase 3: 단계별 메트릭 수집 (`proxy/manager.py` 수정)
-
-현재 `_call_tool_inner`에서 clean/compress/surface 각 단계의 시간과 크기를 개별 추적하도록 확장:
-
-```python
-# 현재: compressed_chars_for_metrics = len(compressed) 만 추적
-# 확장: 각 단계별 시간 + 크기
-
-import time as _time
-
-# Stage 1: CLEAN
-t_clean = _time.monotonic()
-cleaned = self._clean_content(original_text, tc.cleaning)
-clean_ms = (_time.monotonic() - t_clean) * 1000
-
-# Stage 2: COMPRESS
-t_compress = _time.monotonic()
-compressed = await self._apply_compression(...)
-compress_ms = (_time.monotonic() - t_compress) * 1000
-
-# Stage 3: SURFACE
-t_surface = _time.monotonic()
-surfaced = await self._apply_surfacing(...)
-surface_ms = (_time.monotonic() - t_surface) * 1000
-
-# 확장된 메트릭
-self.tracker.record(CallMetrics(
-    ...,
-    clean_ms=clean_ms,
-    compress_ms=compress_ms,
-    surface_ms=surface_ms,
-    surfaced_chars=len(surfaced),  # 서피싱 후 크기 (compressed보다 클 수 있음)
-))
-```
-
-### Phase 4: 품질 판정 (`bench/judge.py`)
-
-**방법 1: 규칙 기반 (빠르고 결정적)**
-
-```python
-class RuleBasedJudge:
-    def score(self, task: BenchTask, response: str) -> float:
-        """규칙 기반 품질 채점 (0-10)."""
-        criteria = task.quality_criteria
-        score = 10.0
-        
-        # 키워드 존재 확인
-        for keyword in criteria.expected_keywords:
-            if keyword.lower() not in response.lower():
-                score -= 2.0
-        
-        # 구조 보존 확인 (헤딩, 코드 블록)
-        if criteria.expect_headings:
-            heading_count = response.count("## ")
-            if heading_count < criteria.min_headings:
-                score -= 1.0
-        
-        return max(0, score)
-```
-
-**방법 2: LLM-as-judge (mcp-bench 방식, 정밀하지만 비용)**
-
-```python
-class LLMJudge:
-    async def score(self, task: BenchTask, direct_response: str, stm_response: str) -> dict:
-        """LLM이 두 응답을 비교 채점."""
-        prompt = f"""
-        Task: {task.description}
-        Quality criteria: {task.quality_criteria}
-        
-        Response A (direct): {direct_response[:2000]}
-        Response B (STM-proxied): {stm_response[:2000]}
-        
-        Score each response 1-10 on:
-        1. Task completion (did it answer the question?)
-        2. Information completeness (key facts preserved?)
-        3. Usability (is the response useful for the agent?)
-        
-        Return JSON: {{"a_score": N, "b_score": N, "reasoning": "..."}}
-        """
-```
-
-**권장: Phase 1에서 규칙 기반으로 시작, 필요 시 LLM 판정 추가.**
-
-### Phase 5: 리포트 생성 (`bench/report.py`)
+## 아키텍처
 
 ```
-=== memtomem STM Pipeline Benchmark ===
-
-Task: search_simple
-  Direct:      5000 chars, 0 ms clean, 0 ms compress   → quality: 9.0/10
-  STM-proxied: 5000 → 4200 → 2100 (+300 surfacing)     → quality: 8.5/10
-  Compression: clean -16%, compress -50%, surface +14%
-  Quality preservation: 94.4%
-
-Task: large_response_compression
-  Direct:      50000 chars                               → quality: 10/10
-  STM-proxied: 50000 → 42000 → 8000 (+500 surfacing)   → quality: 7.0/10
-  Compression: clean -16%, compress -81%, surface +6%
-  Quality preservation: 70.0%
-  ⚠️ Quality drop: meeting decisions lost in compression
-
-Summary:
-  Avg compression: 62%
-  Avg quality preservation: 88%
-  Tool compatibility: 5/5 tasks passed
-  Surfacing overhead: avg +8%
-  Pipeline latency: avg 15ms
+Direct (baseline)              STM Pipeline
+┌────────────┐     ┌──────────────────────────────────┐
+│ 원본 텍스트  │     │ Clean → Compress → Surface       │
+│ quality=10  │     │ (전략 자동 선택, 단계별 측정)       │
+└──────┬──────┘     └───────────────┬──────────────────┘
+       ↓                            ↓
+  RuleBasedJudge              RuleBasedJudge
+  (keyword/structure)         (keyword/structure)
+       ↓                            ↓
+    Score A                      Score B
+              품질 보존율 = B / A × 100%
 ```
 
 ---
 
-## 수정 대상 파일
+## 구현된 기능
 
-| 파일 | 작업 |
+### 1. 파이프라인 계측 (proxy/metrics.py, proxy/manager.py)
+
+`CallMetrics` 확장: `clean_ms`, `compress_ms`, `surface_ms`, `surfaced_chars`
+`ProxyManager._call_tool_inner`: `_time.monotonic()` 기반 단계별 타이밍
+
+### 2. 벤치마크 프레임워크 (tests/bench/)
+
+| 파일 | 역할 |
 |------|------|
-| `packages/memtomem-stm/tests/bench/harness.py` | 신규 — A/B 비교 하네스 |
-| `packages/memtomem-stm/tests/bench/tasks.json` | 신규 — 태스크 정의 |
-| `packages/memtomem-stm/tests/bench/judge.py` | 신규 — 규칙 기반 품질 판정 |
-| `packages/memtomem-stm/tests/bench/report.py` | 신규 — 리포트 생성 |
-| `packages/memtomem-stm/tests/test_bench_pipeline.py` | 신규 — pytest 통합 |
-| `packages/memtomem-stm/src/.../proxy/metrics.py` | 수정 — 단계별 시간 추가 |
-| `packages/memtomem-stm/src/.../proxy/manager.py` | 수정 — 단계별 프로파일링 |
+| `harness.py` | BenchTask, StageMetrics, BenchResult, ComparisonReport, BenchHarness |
+| `tasks.py` | 8개 태스크 + 3가지 예산 (tight/default/generous) + 메타데이터 |
+| `judge.py` | RuleBasedJudge (weighted keyword + heading + code block + JSON) |
+| `report.py` | format_report, format_matrix, format_curve, format_full_report |
+
+### 3. 데이터셋 (8 tasks)
+
+| Task | Type | Budget | Keywords | Ground Truth Strategy |
+|------|------|--------|----------|----------------------|
+| api_response_json | json | 1000 | Alice, admin, total, has_more | extract_fields |
+| code_file_large | code | 1500 | JWT, access_token, validate_token, middleware | hybrid |
+| meeting_notes | markdown | 800 | PostgreSQL, Kim Cheolsu, April 15, Grafana | truncate |
+| html_mixed | text | 800 | API Reference, Endpoints, authentication, admin | truncate |
+| short_response | text | 1000 | OK, saved | none |
+| markdown_with_links | markdown | 600 | microservices, gRPC, API gateway | hybrid |
+| multilingual_kr_en | markdown | 1000 | FastAPI, PostgreSQL, Redis, Kubernetes | truncate |
+| large_diff_output | code | 800 | verify_token, TokenPayload, Breaking change, alembic | hybrid |
+
+### 4. 분석 도구
+
+- **Auto-strategy**: `auto_select_strategy()` 기반 자동 전략 선택
+- **Strategy matrix**: 8 tasks × 4 strategies (truncate/hybrid/extract_fields/auto) 비교
+- **Compression curve**: 30%/50%/70%/90% 예산별 quality-ratio 곡선
+- **Budget levels**: tight (0.5x), default (1.0x), generous (2.0x)
+- **Surfacing integration**: mock SurfacingEngine + FakeChunk 기반 메모리 주입 테스트
+
+### 5. 회귀 게이트 (CI)
+
+| Gate | Threshold | 용도 |
+|------|-----------|------|
+| auto strategy | ≥40% quality | 자동 전략 선택 최소 품질 보장 |
+| optimal strategy | ≥60% quality | 최적 전략 사용 시 품질 보장 |
+| generous budget | ≥80% quality | 충분한 예산 시 품질 보장 |
+
+---
+
+## 벤치마크 결과
+
+### Auto-strategy 비교 (default budget)
+
+| Task | Strategy | Quality | Compression | Preservation |
+|------|----------|---------|-------------|-------------|
+| api_response_json | FieldExtract | 8.9/10 | 94% | **89%** |
+| code_file_large | Hybrid | 10.0/10 | 31% | **100%** |
+| meeting_notes | Hybrid | 10.0/10 | 14% | **100%** |
+| html_mixed | Truncate | 10.0/10 | 81%* | **100%** |
+| short_response | Truncate | 10.0/10 | 0% | **100%** |
+| markdown_with_links | Hybrid | 4.0/10 | 86% | ⚠️ 40% |
+| multilingual_kr_en | Hybrid | 10.0/10 | 0% | **100%** |
+| large_diff_output | Hybrid | 6.4/10 | 27% | ⚠️ 64% |
+
+*html_mixed: 81% = clean 단계에서 HTML/script/style 제거, 압축 불필요
+
+**평균: 86.6% quality preservation, 42% compression**
+
+### 핵심 인사이트
+
+1. **auto_select가 JSON에 extract_fields 선택 → quality 70% → 89% (27% 향상)**
+2. **Code 파일은 70% budget에서 100% quality 달성** (compression curve)
+3. **HTML 콘텐츠는 clean 단계에서 81% 크기 감소** → 압축 단계 불필요
+4. **markdown_with_links는 구조적 한계** — 링크 50개가 본문 앞에 위치
+5. **large_diff_output**: Summary 섹션이 문서 끝에 위치 → hybrid head에 포함 안 됨
+
+### Strategy Matrix (api_response_json)
+
+| Strategy | Quality | Ratio | Chars |
+|----------|---------|-------|-------|
+| extract_fields | 8.9 | 5.9% | 335 |
+| auto(extract_fields) | 8.9 | 5.9% | 335 |
+| truncate | 7.0 | 18.1% | 1035 |
+| hybrid | 7.0 | 17.5% | 1000 |
+
+→ **extract_fields가 JSON에 최적: 94% 압축 + 89% quality**
+
+### Compression Curve (code_file_large, Truncate)
+
+| Budget | Quality |
+|--------|---------|
+| 30% | 6.2/10 |
+| 50% | 8.4/10 |
+| **70%** | **10.0/10** |
+| 90% | 10.0/10 |
+
+→ **70% budget가 최적 지점 (비용 대비 quality 최대)**
+
+---
 
 ## 검증
 
 ```bash
-# 벤치마크 실행 (Ollama 필요)
+# 벤치마크 테스트 (74 tests)
 uv run pytest packages/memtomem-stm/tests/test_bench_pipeline.py -v
 
-# 또는 직접 실행
-uv run python -m memtomem_stm.tests.bench.harness --tasks bench/tasks.json --report
+# 전체 STM 테스트 (356 tests)
+uv run pytest packages/memtomem-stm/tests/ -v
+
+# 리포트 생성 (Ollama 불필요)
+PYTHONPATH=packages/memtomem-stm/tests uv run python -c "
+from bench.tasks import get_all_tasks, OPTIMAL_STRATEGIES
+from bench.harness import BenchHarness
+from bench.judge import RuleBasedJudge
+from bench.report import format_full_report
+from memtomem_stm.proxy.cleaning import DefaultContentCleaner
+from memtomem_stm.proxy.config import CleaningConfig
+from memtomem_stm.proxy.compression import TruncateCompressor
+
+cleaner = DefaultContentCleaner(CleaningConfig(strip_html=True, collapse_links=True, deduplicate=True))
+h = BenchHarness(cleaner=cleaner, compressor=TruncateCompressor(), judge=RuleBasedJudge())
+tasks = get_all_tasks()
+comparisons = [h.run_auto_strategy(t) for t in tasks]
+matrices = {t.task_id: h.run_strategy_matrix(t) for t in tasks}
+curves = {t.task_id: h.run_compression_curve(t) for t in tasks}
+print(format_full_report(comparisons, matrices=matrices, curves=curves, optimal_strategies=OPTIMAL_STRATEGIES))
+"
 ```
-
-## 기존 인프라 재사용
-
-| 기존 코드 | 재사용 |
-|-----------|--------|
-| `test_effectiveness.py` (39 tests) | 압축/서피싱 효용성 패턴 |
-| `test_information_loss.py` (27 tests) | 정보 보존 측정 패턴 |
-| `TokenTracker` / `MetricsStore` | 메트릭 수집/저장 |
-| `ProxyManager._call_tool_inner` | 파이프라인 단계별 측정 지점 |
-| `FeedbackTracker` | 서피싱 피드백 기록 |
-| `DefaultContentCleaner` | clean 단계 |
-| 6 compression strategies | compress 단계 |
-| `SurfacingEngine` | surface 단계 |
