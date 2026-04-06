@@ -244,7 +244,7 @@ git clone https://github.com/memtomem/memtomem.git
 cd memtomem
 uv venv --python 3.12 && source .venv/bin/activate
 uv pip install -e "packages/memtomem[dev]"
-uv run pytest                    # 551 tests (core 305 + STM 246)
+uv run pytest                    # 858 tests (core 612 + STM 246)
 uv run ruff check packages/      # lint
 ```
 

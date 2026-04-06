@@ -73,7 +73,7 @@ Verify it works:
 ```bash
 uv run mm -h               # CLI help
 uv run memtomem-server     # MCP server starts (Ctrl+C to stop)
-uv run pytest              # 551 tests pass
+uv run pytest              # 858 tests pass
 ```
 
 ---

@@ -79,6 +79,7 @@ Initial release.
 - SQL injection: all queries parameterized
 
 ### Testing
-- 551 automated tests (pytest + pytest-asyncio)
-- Core: 305 tests — storage, search, chunking, sessions, scratch, entities, policies, analytics, meta-tool, SSRF, webhooks, config, usability fixes, user workflows
+- 858 automated tests (pytest + pytest-asyncio)
+- Core: 612 tests — storage, search, chunking, sessions, scratch, entities, policies, analytics, meta-tool, SSRF, webhooks, config, usability fixes, user workflows, server tools (core/org/advanced), search stages (RRF/MMR), chunkers (Python/JS/structured), web routes, server helpers
+
 - STM: 246 tests — circuit breaker, compression (6 strategies), relevance gate, context extractor, feedback/auto-tuner, proxy cache, cleaning, surfacing cache, surfacing engine, formatter, proxy manager, config persistence, integration, effectiveness, information loss
