@@ -98,8 +98,8 @@ All config via `MEMTOMEM_` prefixed env vars with `__` nesting (e.g., `MEMTOMEM_
 
 `packages/memtomem-stm/` is a separate uv workspace package that proxies upstream MCP servers with a 4-stage pipeline:
 
-1. **CLEAN** — `proxy/cleaning.py`: HTML/script/style stripping, paragraph dedup, link flood collapse. `DefaultContentCleaner` accepts `CleaningConfig` in constructor.
-2. **COMPRESS** — `proxy/compression.py`: 6 strategies (none/truncate/selective/hybrid/extract_fields/LLM) + `auto_select_strategy()` for content-type detection. `TruncateCompressor` is section-aware for markdown (cuts at heading boundaries). `FieldExtractCompressor` shows first key-value pairs of nested dicts. `SelectiveCompressor` stores pending sections in deque-backed storage.
+1. **CLEAN** — `proxy/cleaning.py`: HTML/script/style stripping, paragraph dedup, link flood collapse (supports links with trailing descriptions). `DefaultContentCleaner` accepts `CleaningConfig` in constructor.
+2. **COMPRESS** — `proxy/compression.py`: 6 strategies (none/truncate/selective/hybrid/extract_fields/LLM) + `auto_select_strategy()` for content-type detection. `TruncateCompressor` is section-aware for markdown (cuts at heading boundaries, preserves Summary/Conclusion sections at document end). `FieldExtractCompressor` shows first key-value pairs of nested dicts. `SelectiveCompressor` stores pending sections in deque-backed storage.
 3. **SURFACE** — `surfacing/engine.py`: proactive memory injection from LTM. Gated by `RelevanceGate` (rate limit, cooldown, write-tool heuristic), protected by `CircuitBreaker`, session dedup (same memory not shown twice), and `max_injection_chars` size cap. File paths are tokenized for query extraction.
 4. **INDEX** — optional auto-indexing of large responses to LTM.
 

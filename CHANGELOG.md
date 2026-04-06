@@ -86,3 +86,5 @@ Initial release.
 ### Bug Fixes
 - `mm stm init` wizard crash on cache TTL input (`type=int` not converted to Click type)
 - Ollama-dependent tests now auto-skipped via `@pytest.mark.ollama` + `pytest_collection_modifyitems` hook
+- Link flood detection regex missed markdown links with trailing descriptions (`- [text](url) — desc`)
+- `TruncateCompressor` now preserves Summary/Conclusion sections at document end

@@ -127,7 +127,7 @@ Removes noise from the upstream response before compression:
 - **`<script>`/`<style>` removal** — content and tags fully stripped before other processing
 - **HTML stripping** — removes tags (preserves code fences and generic types like `List<String>`)
 - **Paragraph deduplication** — removes identical paragraphs
-- **Link flood collapse** — replaces paragraphs where 80%+ lines are links (10+ lines) with `[N links omitted]`
+- **Link flood collapse** — replaces paragraphs where 80%+ lines are links (10+ lines) with `[N links omitted]` (supports links with trailing descriptions)
 - **Whitespace normalization** — collapses triple+ newlines to double
 
 Each cleaning step can be individually toggled per server:
@@ -177,7 +177,7 @@ Indexed files are written as markdown with frontmatter (source, timestamp, compr
 |----------|----------|-------------|
 | **hybrid** (default) | General use | Preserves first ~5K chars + TOC for remainder |
 | **selective** | Large structured data | 2-phase: returns TOC only, then retrieve selected sections on demand |
-| **truncate** | Simple limiting | Section-aware for markdown (cuts at heading boundaries, lists remaining sections); sentence-boundary for plain text |
+| **truncate** | Simple limiting | Section-aware for markdown (cuts at heading boundaries, preserves Summary/Conclusion sections, lists remaining); sentence-boundary for plain text |
 | **extract_fields** | JSON responses | Preserves key structure, shows first key-value pairs of nested dicts, truncates long values |
 | **llm_summary** | High-value content | Calls external LLM (OpenAI/Anthropic/Ollama) to summarize |
 | **none** | Passthrough | No compression (cache only) |
