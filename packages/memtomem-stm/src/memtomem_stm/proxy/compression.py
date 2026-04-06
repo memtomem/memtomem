@@ -66,6 +66,18 @@ class TruncateCompressor:
 
     _HEADING_RE = re.compile(r"(?:^|\n)(#{1,6}\s+.+)")
 
+    # Patterns for code structure boundaries (function/class/method definitions)
+    _CODE_BOUNDARY_RE = re.compile(
+        r"(?:^|\n)"
+        r"(\s*(?:def |class |async def |function |func |export |pub fn )\S.*)",
+    )
+    # SQL top-level statement boundaries (non-indented only)
+    _SQL_BOUNDARY_RE = re.compile(
+        r"(?:^|\n)((?:SELECT|WITH|CREATE|INSERT|UPDATE|DELETE)\s)", re.IGNORECASE
+    )
+    # Comment-section boundaries (-- Section Header)
+    _COMMENT_SECTION_RE = re.compile(r"(?:^|\n)(--\s+\S.+)")
+
     def compress(self, text: str, *, max_chars: int) -> str:
         if not text or len(text) <= max_chars:
             return text
@@ -74,6 +86,18 @@ class TruncateCompressor:
         headings = list(self._HEADING_RE.finditer(text))
         if len(headings) >= 2:
             return self._section_aware_truncate(text, max_chars, headings)
+
+        # Try code-structure-aware truncation (function/class/SQL boundaries)
+        code_boundaries = list(self._CODE_BOUNDARY_RE.finditer(text))
+        if len(code_boundaries) >= 2:
+            return self._code_aware_truncate(text, max_chars, code_boundaries)
+
+        # Try SQL/comment-section boundaries
+        sql_boundaries = list(self._COMMENT_SECTION_RE.finditer(text))
+        if len(sql_boundaries) < 2:
+            sql_boundaries = list(self._SQL_BOUNDARY_RE.finditer(text))
+        if len(sql_boundaries) >= 2:
+            return self._code_aware_truncate(text, max_chars, sql_boundaries)
 
         # Fallback: position-based truncation
         break_at = self._find_break(text, max_chars)
@@ -195,6 +219,84 @@ class TruncateCompressor:
         footer = f"\n(original: {len(text)} chars)"
         result += footer
 
+        if len(result) > max_chars:
+            result = result[:max_chars]
+        return result
+
+    def _code_aware_truncate(
+        self, text: str, max_chars: int, boundaries: list[re.Match]
+    ) -> str:
+        """Preserve signatures/names from ALL code blocks, not just the first ones.
+
+        For code files: keeps full body of top functions + signature lines of rest.
+        For SQL: keeps first query full + signature of remaining queries.
+        """
+        # Parse blocks: each boundary starts a logical block
+        blocks: list[tuple[str, str]] = []  # (signature_line, full_body)
+        for i, m in enumerate(boundaries):
+            start = m.start()
+            end = boundaries[i + 1].start() if i + 1 < len(boundaries) else len(text)
+            sig = m.group(1).strip()
+            body = text[start:end].rstrip()
+            blocks.append((sig, body))
+
+        # Preamble (imports, docstrings before first boundary)
+        preamble = text[: boundaries[0].start()].rstrip() if boundaries[0].start() > 0 else ""
+
+        # Phase 1: full blocks from top
+        ratio = max_chars / len(text) if text else 1.0
+        full_pct = min(0.80, 0.45 + ratio * 0.4)
+        full_budget = int(max_chars * full_pct)
+
+        parts: list[str] = []
+        used = 0
+        full_count = 0
+
+        if preamble:
+            # Keep preamble but cap it
+            preamble_budget = min(len(preamble), full_budget // 3)
+            if len(preamble) > preamble_budget:
+                preamble = preamble[:preamble_budget] + "\n..."
+            parts.append(preamble)
+            used += len(preamble) + 1
+
+        for i, (sig, body) in enumerate(blocks):
+            if used + len(body) + 2 <= full_budget:
+                parts.append(body)
+                used += len(body) + 2
+                full_count = i + 1
+            else:
+                break
+
+        # Phase 2: signatures of remaining blocks
+        remaining = [(sig, body) for i, (sig, body) in enumerate(blocks) if i >= full_count]
+        if remaining:
+            sig_budget = max_chars - used - 60
+            sig_parts: list[str] = []
+            sig_used = 0
+            for sig, body in remaining:
+                # Show signature + first non-empty body line
+                body_lines = body.split("\n")
+                sig_lines = [body_lines[0]]
+                for line in body_lines[1:4]:  # up to 3 more lines
+                    stripped = line.strip()
+                    if stripped:
+                        sig_lines.append(line)
+                snippet = "\n".join(sig_lines)
+                if sig_used + len(snippet) + 2 > sig_budget:
+                    if sig_used + len(sig) + 4 <= sig_budget:
+                        sig_parts.append(f"# {sig}")
+                        sig_used += len(sig) + 4
+                else:
+                    sig_parts.append(snippet)
+                    sig_used += len(snippet) + 2
+
+            if sig_parts:
+                parts.append(f"\n... ({len(remaining)} more blocks)\n")
+                parts.extend(sig_parts)
+
+        result = "\n\n".join(parts)
+        result += f"\n(original: {len(text)} chars)"
         if len(result) > max_chars:
             result = result[:max_chars]
         return result
