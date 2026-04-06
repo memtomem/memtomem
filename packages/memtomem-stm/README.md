@@ -743,7 +743,7 @@ uv run pytest packages/memtomem-stm/tests/ -v
 uv run pytest packages/memtomem-stm/tests/test_compression.py -v
 ```
 
-246 tests covering:
+282 tests covering:
 
 | Test file | Coverage |
 |-----------|----------|

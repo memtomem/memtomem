@@ -79,7 +79,10 @@ Initial release.
 - SQL injection: all queries parameterized
 
 ### Testing
-- 858 automated tests (pytest + pytest-asyncio)
-- Core: 612 tests — storage, search, chunking, sessions, scratch, entities, policies, analytics, meta-tool, SSRF, webhooks, config, usability fixes, user workflows, server tools (core/org/advanced), search stages (RRF/MMR), chunkers (Python/JS/structured), web routes, server helpers
+- 1101 automated tests (pytest + pytest-asyncio), Ollama-dependent tests auto-skipped
+- Core: 819 tests — storage, search, chunking, sessions, scratch, entities, policies, analytics, meta-tool, SSRF, webhooks, config, usability fixes, user workflows, server tools (core/org/advanced), search stages (RRF/MMR), chunkers (Python/JS/structured), web routes, server helpers, tools logic (entity extraction/policy engine/temporal), storage extended, CLI, indexing engine, embedding providers
+- STM: 282 tests — circuit breaker, compression (6 strategies), relevance gate, context extractor, feedback/auto-tuner, proxy cache, cleaning, surfacing cache, surfacing engine, formatter, proxy manager, config persistence, integration, effectiveness, information loss, STM remaining (fastmcp compat/tracing/metrics/mcp client)
 
-- STM: 246 tests — circuit breaker, compression (6 strategies), relevance gate, context extractor, feedback/auto-tuner, proxy cache, cleaning, surfacing cache, surfacing engine, formatter, proxy manager, config persistence, integration, effectiveness, information loss
+### Bug Fixes
+- `mm stm init` wizard crash on cache TTL input (`type=int` not converted to Click type)
+- Ollama-dependent tests now auto-skipped via `@pytest.mark.ollama` + `pytest_collection_modifyitems` hook
