@@ -124,6 +124,7 @@ Every proxied tool call goes through 4 stages:
 
 Removes noise from the upstream response before compression:
 
+- **`<script>`/`<style>` removal** — content and tags fully stripped before other processing
 - **HTML stripping** — removes tags (preserves code fences and generic types like `List<String>`)
 - **Paragraph deduplication** — removes identical paragraphs
 - **Link flood collapse** — replaces paragraphs where 80%+ lines are links (10+ lines) with `[N links omitted]`
@@ -176,8 +177,8 @@ Indexed files are written as markdown with frontmatter (source, timestamp, compr
 |----------|----------|-------------|
 | **hybrid** (default) | General use | Preserves first ~5K chars + TOC for remainder |
 | **selective** | Large structured data | 2-phase: returns TOC only, then retrieve selected sections on demand |
-| **truncate** | Simple limiting | Sentence-boundary-aware character limit with structural metadata |
-| **extract_fields** | JSON responses | Preserves key structure, truncates long values, shows array previews |
+| **truncate** | Simple limiting | Section-aware for markdown (cuts at heading boundaries, lists remaining sections); sentence-boundary for plain text |
+| **extract_fields** | JSON responses | Preserves key structure, shows first key-value pairs of nested dicts, truncates long values |
 | **llm_summary** | High-value content | Calls external LLM (OpenAI/Anthropic/Ollama) to summarize |
 | **none** | Passthrough | No compression (cache only) |
 
@@ -294,8 +295,9 @@ STM extracts a search query in priority order:
 
 1. **Per-tool template** — `"query_template": "file {arg.path}"` → `"file /src/main.py"`
 2. **Agent-provided** — `_context_query` argument if present
-3. **Heuristic** — extracts string values from semantic keys (`query`, `path`, `file`, `url`, `topic`, `name`, `title`, `description`). Skips UUIDs, hex strings, booleans.
-4. **Fallback** — tool name with underscores replaced (`search_repositories` → `"search repositories"`)
+3. **Path tokenization** — file paths like `/src/auth/jwt_handler.py` are auto-split on `/._-` separators → `"src auth jwt handler py"`
+4. **Heuristic** — extracts string values from semantic keys (`query`, `path`, `file`, `url`, `topic`, `name`, `title`, `description`). Skips UUIDs, hex strings, booleans.
+5. **Fallback** — tool name with underscores replaced (`search_repositories` → `"search repositories"`)
 
 Queries shorter than `min_query_tokens` (default 3) are skipped.
 
@@ -325,6 +327,7 @@ The injection mode is configurable: `prepend` (default), `append`, or `section`.
 | `enabled` | `true` | Global on/off switch |
 | `min_score` | `0.02` | Minimum search score to include a result |
 | `max_results` | `3` | Maximum memories surfaced per tool call |
+| `max_injection_chars` | `2000` | Maximum total chars injected (truncated if exceeded) |
 | `min_response_chars` | `5000` | Skip surfacing for small responses |
 | `min_query_tokens` | `3` | Skip if extracted query has fewer tokens |
 | `timeout_seconds` | `3.0` | Surfacing timeout (falls back to original response) |
@@ -336,6 +339,7 @@ The injection mode is configurable: `prepend` (default), `append`, or `section`.
 | `exclude_tools` | `[]` | fnmatch patterns to never surface (e.g. `["*debug*"]`) |
 | `write_tool_patterns` | `*write*`, `*create*`, etc. | Auto-skip write/mutation operations |
 | `include_session_context` | `true` | Include working memory (scratch) items |
+| `session_dedup` | `true` | Same memory ID not shown twice in one session |
 
 ### Per-tool Templates
 
@@ -399,7 +403,9 @@ When auto-tuning is enabled (default), STM adjusts `min_score` per tool based on
 | > 60% `not_relevant` | Raise `min_score` by +0.002 (surface fewer, more relevant) |
 | < 20% `not_relevant` | Lower `min_score` by -0.002 (surface more) |
 
-Requires `auto_tune_min_samples` (default 20) feedback entries before adjusting. Score is capped between 0.005 and 0.05.
+Requires `auto_tune_min_samples` (default 20) feedback entries before adjusting. Score is capped between 0.005 and 0.05. **Cold-start fallback**: new tools with insufficient samples use the global ratio across all tools instead of waiting for 20 per-tool samples.
+
+**Search boost from feedback**: when you rate memories as "helpful", their `access_count` is incremented in the core search index (once per surfacing event, capped at `max_boost=1.5`). This creates a positive feedback loop where useful memories rank higher in future searches.
 
 Check effectiveness with `stm_surfacing_stats`:
 
@@ -655,6 +661,9 @@ Applied to both surfacing (LTM search) and LLM compression (external API calls).
 - **Write-tool skip**: Never surfaces for `*write*`, `*create*`, `*delete*`, `*push*`, `*send*`, `*remove*` tools
 - **Query cooldown**: Deduplicates similar queries (Jaccard similarity > 0.95) within 5s window
 - **Response size gate**: Skips surfacing for responses under `min_response_chars` (default 5000)
+- **Session dedup**: Same memory ID not shown twice in one session
+- **Injection size cap**: Memory block truncated if total exceeds `max_injection_chars` (default 2000)
+- **Boost guard**: Each surfacing event can only boost `access_count` once (duplicate feedback ignored)
 - **Fresh cache**: Proxy cache stores pre-surfacing content; surfacing is re-applied on cache hit so memories stay current
 
 ---
@@ -734,18 +743,25 @@ uv run pytest packages/memtomem-stm/tests/ -v
 uv run pytest packages/memtomem-stm/tests/test_compression.py -v
 ```
 
-122 unit tests covering:
+246 tests covering:
 
 | Test file | Coverage |
 |-----------|----------|
 | `test_circuit_breaker.py` | State machine transitions (closed/open/half-open) |
-| `test_compression.py` | All 5 compression strategies (noop/truncate/selective/hybrid/field-extract) |
+| `test_compression.py` | All 6 compression strategies + auto_select_strategy |
 | `test_relevance_gate.py` | Exclusions, write-tool heuristic, rate limit, cooldown, Jaccard similarity |
-| `test_context_extractor.py` | Query templates, heuristic extraction, identifier detection |
-| `test_feedback.py` | FeedbackStore, FeedbackTracker, AutoTuner feedback loop |
+| `test_context_extractor.py` | Query templates, heuristic extraction, path tokenization, identifier detection |
+| `test_feedback.py` | FeedbackStore, FeedbackTracker, AutoTuner feedback loop, cold-start fallback |
 | `test_proxy_cache.py` | TTL expiration, eviction, clear, key generation |
-| `test_cleaning.py` | HTML stripping, deduplication, link flood collapse |
+| `test_cleaning.py` | HTML stripping, script/style removal, deduplication, link flood collapse |
 | `test_surfacing_cache.py` | In-memory TTL cache, eviction, empty list caching |
+| `test_surfacing_engine.py` | Surfacing pipeline, session dedup, circuit breaker, cooldown, rate limit, feedback boost |
+| `test_formatter.py` | Injection modes (prepend/append/section), size cap, source badges |
+| `test_proxy_manager.py` | ToolConfig resolution, error handling, cleaning+compression pipeline |
+| `test_config_persistence.py` | Hot reload, MetricsStore, FeedbackStore persistence, TokenTracker, privacy patterns |
+| `test_stm_integration.py` | End-to-end pipeline (clean→compress→surface), selective 2-phase, auto-tuner loop |
+| `test_effectiveness.py` | Decision quality, context extraction accuracy, compression ratio, feedback loop |
+| `test_information_loss.py` | Content preservation across compression strategies, structural integrity |
 
 ## License
 

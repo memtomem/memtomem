@@ -8,7 +8,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Initial release.
 
 ### Core
-- MCP server (`memtomem-server`) with 63 tools + `mem_do` meta-tool
+- MCP server (`memtomem-server`) with 65 tools + `mem_do` meta-tool
 - CLI (`memtomem` / `mm`) with subcommands: `init`, `search`, `add`, `recall`, `index`, `config`, `context`, `embedding-reset`, `stm`, `shell`, `web`
 - Interactive setup wizard (`mm init`) — 7-step with back/cancel navigation (b/q)
 - STM proxy setup wizard (`mm stm init`) — auto-detects MCP clients and configures upstream servers
@@ -25,16 +25,18 @@ Initial release.
 - 13 tables: chunks, chunks_fts, chunks_vec, sessions, session_events, working_memory, chunk_relations, chunk_entities, memory_policies, access_log, query_history, namespace_metadata, _memtomem_meta
 
 ### Indexing
-- Semantic chunking: Markdown (heading-based), Python (AST), JS/TS (tree-sitter), JSON/YAML/TOML
+- Semantic chunking: Markdown (heading-aware with frontmatter tag extraction, wikilink resolution, heading-boundary merge prevention), Python (AST), JS/TS (tree-sitter), JSON/YAML/TOML
 - Incremental indexing with SHA-256 content hashing (only changed chunks re-embedded)
+- Auto-tag option on indexing (`auto_tag` parameter)
 - File watcher with debounced batch reindexing (concurrent via asyncio.gather)
 - Embedding providers: Ollama (local) and OpenAI (cloud) with concurrent batching
+- `bge-m3` recommended for multilingual use (KR/EN/JP/CN cross-language search)
 
 ### Tool System
-- `mem_do` meta-tool routes to 55 actions across 14 categories
-- Tool modes: `core` (9 tools, default), `standard` (~30), `full` (63)
+- `mem_do` meta-tool routes to 61 actions across 14 categories (with aliases for discoverability)
+- Tool modes: `core` (9 tools, default), `standard` (~30), `full` (65)
 - `@register` decorator in `server/tool_registry.py` for action registration
-- `mem_do(action="help")` returns full action catalog
+- `mem_do(action="help")` returns full action catalog with parameter docs
 
 ### Agent Memory Features
 - Episodic memory: sessions with event tracking
@@ -55,13 +57,17 @@ Initial release.
 
 ### STM Proxy (memtomem-stm)
 - 4-stage pipeline: CLEAN → COMPRESS → SURFACE → INDEX
-- 6 compression strategies: none, truncate, selective (2-phase TOC), hybrid, extract_fields, llm_summary
-- Proactive memory surfacing with context extraction, relevance gating, auto-tuning
+- 6 compression strategies + `auto_select_strategy()` content-type detection
+- Section-aware truncation for markdown (cuts at heading boundaries, lists remaining sections)
+- `FieldExtractCompressor` shows first key-value pairs of nested dicts
+- Proactive memory surfacing with context extraction, path tokenization, relevance gating
+- Session dedup (same memory not shown twice), injection size cap (`max_injection_chars`)
+- Feedback-driven search boost: "helpful" ratings increment `access_count` (once per surfacing event)
+- AutoTuner with cold-start global fallback for tools with insufficient feedback samples
 - Response caching (pre-surfacing content cached, surfacing re-applied on hit)
 - Unified CircuitBreaker (closed/open/half-open) for surfacing and LLM compression
 - Retry with exponential backoff, error type filtering (transport errors only)
-- Privacy-aware content scanning (API keys, passwords, PII never sent to LLM)
-- Feedback & auto-tuning: per-tool min_score adjusted by not_relevant ratio
+- Privacy-aware content scanning; `<script>`/`<style>` blocks fully stripped
 - 5 MCP tools: stats, select_chunks, cache_clear, surfacing_feedback, surfacing_stats
 - CLI: `memtomem-stm-proxy` (status/list/add/remove)
 - Optional Langfuse tracing
@@ -73,6 +79,6 @@ Initial release.
 - SQL injection: all queries parameterized
 
 ### Testing
-- 379 automated tests (pytest + pytest-asyncio)
-- Core: 257 tests — storage, search, chunking, sessions, scratch, entities, policies, analytics, meta-tool, SSRF, webhooks, config
-- STM: 122 tests — circuit breaker, compression (5 strategies), relevance gate, context extractor, feedback/auto-tuner, proxy cache, cleaning, surfacing cache
+- 551 automated tests (pytest + pytest-asyncio)
+- Core: 305 tests — storage, search, chunking, sessions, scratch, entities, policies, analytics, meta-tool, SSRF, webhooks, config, usability fixes, user workflows
+- STM: 246 tests — circuit breaker, compression (6 strategies), relevance gate, context extractor, feedback/auto-tuner, proxy cache, cleaning, surfacing cache, surfacing engine, formatter, proxy manager, config persistence, integration, effectiveness, information loss

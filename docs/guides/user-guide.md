@@ -19,7 +19,7 @@
 | **RRF** | Reciprocal Rank Fusion — the algorithm that merges keyword and meaning results |
 | **Chunk** | A section of a file (one heading, one function, one key) — the unit of indexing |
 | **Namespace** | A label to organize memories (e.g., "work", "personal", "project-x") |
-| **`mem_do`** | Meta-tool that routes to 55 advanced actions. Use `mem_do(action="help")` to list all |
+| **`mem_do`** | Meta-tool that routes to 61 advanced actions (with aliases). Use `mem_do(action="help")` to list all |
 
 ---
 
