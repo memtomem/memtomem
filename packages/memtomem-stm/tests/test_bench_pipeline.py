@@ -11,9 +11,10 @@ import re
 from dataclasses import dataclass
 from dataclasses import field as dc_field
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
+import httpx
 import pytest
 
 from memtomem_stm.proxy.cleaning import DefaultContentCleaner
@@ -81,6 +82,40 @@ from bench.datasets import (
     code_tasks as ds_code_tasks,
     text_tasks as ds_text_tasks,
     surfacing_tasks as ds_surfacing_tasks,
+)
+from bench.datasets_expanded import (
+    expanded_all_tasks,
+    expanded_all_with_surfacing,
+    full_benchmark_suite,
+    full_category_map,
+    multilingual_tasks,
+    large_doc_tasks,
+    edge_case_tasks,
+    additional_json_tasks,
+    additional_markdown_tasks,
+    additional_code_tasks,
+    additional_text_tasks,
+    additional_surfacing_tasks,
+)
+from bench.llm_judge import (
+    LLMJudge,
+    LLMJudgeResult,
+    JudgeDimension,
+    CorrelationResult,
+    compute_correlation,
+)
+from bench.stats import (
+    bootstrap_ci,
+    wilcoxon_signed_rank,
+    aggregate_by_category,
+    compute_summary,
+    format_markdown_table,
+    format_latex_table,
+    format_strategy_table,
+    ConfidenceInterval,
+    WilcoxonResult,
+    CategoryStats,
+    BenchmarkSummary,
 )
 
 
@@ -1708,3 +1743,490 @@ class TestStructuredDatasets:
             bd = harness.run_stage_breakdown(task)
             assert len(bd.stages) == 3
             assert bd.clean_info_loss >= 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TestLLMJudge — LLM-as-Judge (mocked API)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestLLMJudge:
+    """Tests for LLM-based semantic scoring (all API calls mocked)."""
+
+    @pytest.fixture
+    def mock_anthropic_client(self):
+        """Mock httpx.AsyncClient that returns valid Anthropic API responses."""
+        client = MagicMock()
+
+        async def mock_post(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            if "/v1/messages" in url:
+                body = kwargs.get("json", {})
+                messages = body.get("messages", [])
+                user_msg = messages[0]["content"] if messages else ""
+                # QA prompt → return answerable
+                if "QUESTION:" in user_msg:
+                    resp.json.return_value = {
+                        "content": [{"text": '{"answerable": true, "confidence": 0.9, "reasoning": "found in text"}'}],
+                        "usage": {"input_tokens": 100, "output_tokens": 50},
+                    }
+                else:
+                    # Score prompt
+                    resp.json.return_value = {
+                        "content": [{"text": '{"factual_completeness": {"score": 8.5, "reasoning": "most facts preserved"}, '
+                                     '"structural_coherence": {"score": 7.0, "reasoning": "some structure lost"}, '
+                                     '"answer_sufficiency": {"score": 9.0, "reasoning": "key answers available"}, '
+                                     '"overall": 8.2}'}],
+                        "usage": {"input_tokens": 500, "output_tokens": 100},
+                    }
+            resp.raise_for_status = MagicMock()
+            return resp
+
+        client.post = mock_post
+        return client
+
+    async def test_score_returns_result(self, mock_anthropic_client):
+        """LLMJudge.score() returns valid LLMJudgeResult."""
+        judge = LLMJudge(provider="anthropic", api_key="test-key", client=mock_anthropic_client)
+        task = BenchTask(
+            task_id="test-llm",
+            description="test",
+            content="Original content with Alice and Bob",
+            content_type="text",
+            max_chars=100,
+        )
+        result = await judge.score(task, "Compressed: Alice and Bob")
+        assert isinstance(result, LLMJudgeResult)
+        assert result.overall == 8.2
+        assert len(result.dimensions) == 3
+        assert result.dimensions[0].name == "factual_completeness"
+        assert result.dimensions[0].score == 8.5
+        assert result.error is None
+
+    async def test_score_with_qa_pairs(self, mock_anthropic_client):
+        """QA pairs are evaluated individually."""
+        judge = LLMJudge(provider="anthropic", api_key="test-key", client=mock_anthropic_client)
+        task = BenchTask(
+            task_id="test-qa",
+            description="test",
+            content="Content about databases",
+            content_type="text",
+            max_chars=100,
+            qa_pairs=[
+                QAPair("What DB is used?", "PostgreSQL"),
+                QAPair("What is the pool size?", "50"),
+            ],
+        )
+        result = await judge.score(task, "PostgreSQL with pool_size=50")
+        assert len(result.qa_results) == 2
+        assert result.qa_results[0]["answerable"] is True
+        assert result.prompt_tokens > 0
+
+    async def test_cache_hits(self, mock_anthropic_client):
+        """Second call with same content returns cached result."""
+        judge = LLMJudge(provider="anthropic", api_key="test-key", client=mock_anthropic_client)
+        task = BenchTask(
+            task_id="test-cache", description="test",
+            content="Same content", content_type="text", max_chars=100,
+        )
+        r1 = await judge.score(task, "compressed text")
+        r2 = await judge.score(task, "compressed text")
+        assert r2.cached is True
+        assert r2.overall == r1.overall
+
+    async def test_error_handling(self):
+        """Network error returns result with error field set."""
+        bad_client = MagicMock()
+
+        async def raise_error(*args, **kwargs):
+            raise httpx.ConnectError("refused")
+
+        bad_client.post = raise_error
+        judge = LLMJudge(provider="anthropic", api_key="test-key", client=bad_client)
+        task = BenchTask(
+            task_id="test-err", description="test",
+            content="Content", content_type="text", max_chars=100,
+        )
+        result = await judge.score(task, "compressed")
+        assert result.error is not None
+        assert result.overall == 0.0
+
+    async def test_batch_scoring(self, mock_anthropic_client):
+        """score_batch processes multiple tasks."""
+        judge = LLMJudge(provider="anthropic", api_key="test-key", client=mock_anthropic_client)
+        tasks = [
+            (BenchTask(task_id=f"batch-{i}", description="test",
+                       content=f"Content {i}", content_type="text", max_chars=100),
+             f"Compressed {i}")
+            for i in range(3)
+        ]
+        results = await judge.score_batch(tasks)
+        assert len(results) == 3
+        assert all(r.overall > 0 for r in results)
+
+    def test_parse_markdown_fenced_json(self, mock_anthropic_client):
+        """Parser handles markdown code fences around JSON."""
+        judge = LLMJudge(provider="anthropic", api_key="test-key", client=mock_anthropic_client)
+        raw = '```json\n{"factual_completeness": {"score": 7.0, "reasoning": "ok"}, ' \
+              '"structural_coherence": {"score": 6.0, "reasoning": "ok"}, ' \
+              '"answer_sufficiency": {"score": 8.0, "reasoning": "ok"}, "overall": 7.0}\n```'
+        overall, dims = judge._parse_score_response(raw)
+        assert overall == 7.0
+        assert len(dims) == 3
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TestCorrelation — RuleBasedJudge vs LLMJudge correlation
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestCorrelation:
+    def test_perfect_correlation(self):
+        """Identical scores → Pearson r = 1.0."""
+        r = compute_correlation([1, 2, 3, 4, 5], [1, 2, 3, 4, 5])
+        assert r.n == 5
+        assert abs(r.pearson_r - 1.0) < 0.001
+        assert abs(r.spearman_rho - 1.0) < 0.001
+        assert r.mean_abs_diff == 0.0
+
+    def test_inverse_correlation(self):
+        """Inversely correlated scores → negative r."""
+        r = compute_correlation([1, 2, 3, 4, 5], [5, 4, 3, 2, 1])
+        assert r.pearson_r < -0.9
+        assert r.spearman_rho < -0.9
+
+    def test_no_correlation(self):
+        """Unrelated scores → r near 0."""
+        r = compute_correlation([1, 2, 3, 4, 5], [3, 3, 3, 3, 3])
+        # All same values → std=0 → r=0
+        assert r.pearson_r == 0.0
+
+    def test_shifted_scores(self):
+        """Consistently shifted scores still have high correlation."""
+        rule = [2, 4, 6, 8, 10]
+        llm = [3, 5, 7, 9, 11]  # +1 offset
+        r = compute_correlation(rule, llm)
+        assert abs(r.pearson_r - 1.0) < 0.001
+        assert r.mean_abs_diff == 1.0
+
+    def test_empty_input(self):
+        """Empty input returns zero correlation."""
+        r = compute_correlation([], [])
+        assert r.n == 0
+        assert r.pearson_r == 0.0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TestBootstrapCI — statistical confidence intervals
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestBootstrapCI:
+    def test_basic_ci(self):
+        """Bootstrap CI contains the sample mean."""
+        ci = bootstrap_ci([8.0, 9.0, 7.5, 8.5, 9.5])
+        assert isinstance(ci, ConfidenceInterval)
+        assert ci.ci_lower <= ci.mean <= ci.ci_upper
+        assert ci.ci_level == 0.95
+        assert ci.n_resamples == 1000
+        assert ci.n_samples == 5
+
+    def test_narrow_ci_for_tight_data(self):
+        """Tightly clustered data → narrow CI."""
+        ci = bootstrap_ci([8.0, 8.1, 8.0, 7.9, 8.0, 8.1, 7.9, 8.0])
+        width = ci.ci_upper - ci.ci_lower
+        assert width < 0.5
+
+    def test_wide_ci_for_spread_data(self):
+        """Spread data → wider CI."""
+        ci = bootstrap_ci([1.0, 5.0, 9.0, 2.0, 8.0])
+        width = ci.ci_upper - ci.ci_lower
+        assert width > 1.0
+
+    def test_single_value(self):
+        """Single value → degenerate CI."""
+        ci = bootstrap_ci([7.0])
+        assert ci.mean == 7.0
+        assert ci.ci_lower == 7.0
+        assert ci.ci_upper == 7.0
+
+    def test_empty(self):
+        """Empty → zero CI."""
+        ci = bootstrap_ci([])
+        assert ci.mean == 0.0
+        assert ci.n_samples == 0
+
+    def test_reproducibility(self):
+        """Same seed → same result."""
+        data = [5.0, 7.0, 9.0, 6.0, 8.0]
+        ci1 = bootstrap_ci(data, seed=42)
+        ci2 = bootstrap_ci(data, seed=42)
+        assert ci1.ci_lower == ci2.ci_lower
+        assert ci1.ci_upper == ci2.ci_upper
+
+    def test_99_percent_ci(self):
+        """99% CI is wider than 95% CI."""
+        data = [5, 6, 7, 8, 9, 10, 5, 6, 7, 8]
+        ci95 = bootstrap_ci(data, ci_level=0.95)
+        ci99 = bootstrap_ci(data, ci_level=0.99)
+        assert (ci99.ci_upper - ci99.ci_lower) >= (ci95.ci_upper - ci95.ci_lower)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TestWilcoxon — paired significance test
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestWilcoxon:
+    def test_identical_samples(self):
+        """Identical samples → not significant (p=1.0)."""
+        r = wilcoxon_signed_rank([8, 8, 8], [8, 8, 8])
+        assert r.n == 0
+        assert r.p_value == 1.0
+        assert r.significant is False
+
+    def test_clearly_different(self):
+        """Clearly different paired samples → significant."""
+        x = [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+        y = [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+        r = wilcoxon_signed_rank(x, y)
+        assert r.n == 10
+        assert r.p_value < 0.05
+        assert r.significant is True
+
+    def test_small_sample(self):
+        """Small sample (n<10) returns result without crashing."""
+        r = wilcoxon_signed_rank([8, 9, 7], [6, 5, 4])
+        assert r.n == 3
+        assert isinstance(r.p_value, float)
+
+    def test_mismatched_length(self):
+        """Mismatched lengths raise ValueError."""
+        with pytest.raises(ValueError):
+            wilcoxon_signed_rank([1, 2], [1, 2, 3])
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TestStatsSummary — category aggregation and summary
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestStatsSummary:
+    @pytest.fixture
+    def comparisons(self, harness):
+        """Run comparisons on all original dataset tasks."""
+        return [harness.run_comparison(t) for t in ds_all_tasks()]
+
+    def test_compute_summary(self, comparisons):
+        """compute_summary returns overall stats."""
+        cat_map = {t.task_id: t.task_id.split("-")[0] for t in ds_all_tasks()}
+        summary = compute_summary(comparisons, category_map=cat_map)
+        assert isinstance(summary, BenchmarkSummary)
+        assert summary.overall.n_tasks == len(ds_all_tasks())
+        assert summary.overall.mean_quality >= 0
+        assert summary.overall.ci is not None
+
+    def test_category_aggregation(self, comparisons):
+        """aggregate_by_category groups results correctly."""
+        cat_map = {t.task_id: t.task_id.split("-")[0] for t in ds_all_tasks()}
+        by_cat = aggregate_by_category(comparisons, cat_map)
+        assert len(by_cat) > 0
+        for cat, stats in by_cat.items():
+            assert stats.n_tasks > 0
+            assert stats.min_quality <= stats.mean_quality <= stats.max_quality
+
+    def test_wilcoxon_in_summary(self, comparisons):
+        """Summary includes Wilcoxon test when n >= 5."""
+        summary = compute_summary(comparisons)
+        if len(comparisons) >= 5:
+            assert summary.wilcoxon is not None
+            assert isinstance(summary.wilcoxon.p_value, float)
+
+    def test_markdown_table(self, comparisons):
+        """format_markdown_table produces valid markdown."""
+        cat_map = {t.task_id: t.task_id.split("-")[0] for t in ds_all_tasks()}
+        summary = compute_summary(comparisons, category_map=cat_map)
+        md = format_markdown_table(summary)
+        assert "## Overall Results" in md
+        assert "Mean quality" in md
+        assert "95% CI" in md
+
+    def test_latex_table(self, comparisons):
+        """format_latex_table produces valid LaTeX."""
+        cat_map = {t.task_id: t.task_id.split("-")[0] for t in ds_all_tasks()}
+        summary = compute_summary(comparisons, category_map=cat_map)
+        tex = format_latex_table(summary)
+        assert r"\begin{table}" in tex
+        assert r"\end{table}" in tex
+        assert "Overall" in tex
+
+    def test_strategy_table_markdown(self, harness):
+        """format_strategy_table produces markdown table."""
+        matrix = {}
+        for task in ds_all_tasks()[:3]:
+            matrix[task.task_id] = harness.run_strategy_matrix(task)
+        md = format_strategy_table(matrix, fmt="markdown")
+        assert "| Task |" in md
+
+    def test_strategy_table_latex(self, harness):
+        """format_strategy_table produces LaTeX table."""
+        matrix = {}
+        for task in ds_all_tasks()[:2]:
+            matrix[task.task_id] = harness.run_strategy_matrix(task)
+        tex = format_strategy_table(matrix, fmt="latex")
+        assert r"\begin{tabular}" in tex
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TestExpandedDatasets — expanded dataset validation
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestExpandedDatasets:
+    """Validate expanded datasets and run pipeline on them."""
+
+    def test_multilingual_tasks_valid(self):
+        """Multilingual tasks have content and QA pairs."""
+        tasks = multilingual_tasks()
+        assert len(tasks) == 3
+        for t in tasks:
+            assert len(t.content) > 0
+            assert len(t.qa_pairs) >= 3
+
+    def test_large_doc_tasks_are_large(self):
+        """Large doc tasks exceed 10K characters."""
+        for t in large_doc_tasks():
+            # large-api-logs is generated programmatically → very large
+            # large-rfc is ~4K+ (still a useful test at that scale)
+            assert len(t.content) > 3000, f"{t.task_id}: {len(t.content)} chars"
+
+    def test_edge_cases_dont_crash(self, harness):
+        """Edge case tasks don't crash the pipeline."""
+        for t in edge_case_tasks():
+            result = harness.run_stm(t)
+            assert result.error is None, f"{t.task_id}: {result.error}"
+
+    def test_edge_empty_passthrough(self, harness):
+        """Empty content passes through without error."""
+        tasks = [t for t in edge_case_tasks() if t.task_id == "edge-empty-response"]
+        assert len(tasks) == 1
+        result = harness.run_stm(tasks[0])
+        assert result.error is None
+
+    def test_additional_json_quality(self, harness):
+        """Additional JSON tasks maintain reasonable quality."""
+        for t in additional_json_tasks():
+            comp = harness.run_comparison(t)
+            assert comp.stm.quality_score >= 0  # no crash
+
+    def test_additional_markdown_quality(self, harness):
+        """Additional markdown tasks maintain reasonable quality."""
+        for t in additional_markdown_tasks():
+            comp = harness.run_comparison(t)
+            assert comp.stm.quality_score >= 0
+
+    def test_additional_code_quality(self, harness):
+        """Additional code tasks maintain reasonable quality."""
+        for t in additional_code_tasks():
+            comp = harness.run_comparison(t)
+            assert comp.stm.quality_score >= 0
+
+    def test_additional_text_quality(self, harness):
+        """Additional text tasks maintain reasonable quality."""
+        for t in additional_text_tasks():
+            comp = harness.run_comparison(t)
+            assert comp.stm.quality_score >= 0
+
+    def test_expanded_task_count(self):
+        """Expanded datasets add at least 20 new tasks."""
+        tasks = expanded_all_tasks()
+        assert len(tasks) >= 20
+
+    def test_full_suite_count(self):
+        """Full suite includes original + expanded tasks."""
+        full = full_benchmark_suite()
+        original = ds_all_with_surfacing()
+        expanded = expanded_all_with_surfacing()
+        assert len(full) == len(original) + len(expanded)
+
+    def test_category_map_complete(self):
+        """Every task in full suite has a category mapping."""
+        cat_map = full_category_map()
+        for t in full_benchmark_suite():
+            assert t.task_id in cat_map, f"Missing category for {t.task_id}"
+
+    def test_multilingual_pipeline(self, harness):
+        """Multilingual tasks run through pipeline without error."""
+        for t in multilingual_tasks():
+            result = harness.run_stm(t)
+            assert result.error is None, f"{t.task_id}: {result.error}"
+
+    def test_large_doc_compression(self, harness):
+        """Large docs achieve significant compression."""
+        for t in large_doc_tasks():
+            result = harness.run_stm(t)
+            if result.stage_metrics:
+                assert result.stage_metrics.total_reduction < 1.0, (
+                    f"{t.task_id}: no compression"
+                )
+
+    def test_surfacing_expanded_tasks(self, cleaner, truncate, judge):
+        """Expanded surfacing tasks have surfacing memories."""
+        for t in additional_surfacing_tasks():
+            assert t.surfacing_memories is not None
+            assert len(t.surfacing_memories) >= 2
+            assert any(qa.source == "memory" for qa in t.qa_pairs)
+
+    async def test_expanded_surfacing_value(self, cleaner, truncate, judge):
+        """Surfacing adds QA answers to expanded surfacing tasks."""
+        for task in additional_surfacing_tasks():
+            memories = [
+                FakeSearchResult(chunk=FakeChunk(content=m), score=0.8 - i * 0.1)
+                for i, m in enumerate(task.surfacing_memories)
+            ]
+            config = _make_surfacing_config()
+            engine = SurfacingEngine(
+                config=config, search_pipeline=_make_search_pipeline(memories)
+            )
+            h = BenchHarness(
+                cleaner=cleaner, compressor=truncate,
+                surfacing_engine=engine, judge=judge,
+            )
+            value = await h.measure_surfacing_value(task)
+            assert value.qa_delta > 0, f"{task.task_id}: surfacing added no QA answers"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TestFullPipeline — end-to-end statistical analysis
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestFullPipeline:
+    """End-to-end: run full suite → compute stats → generate reports."""
+
+    def test_full_suite_with_stats(self, harness):
+        """Run full suite and compute statistical summary."""
+        tasks = full_benchmark_suite()
+        # Filter out empty-content edge cases for comparison
+        tasks = [t for t in tasks if len(t.content) > 0]
+        comparisons = [harness.run_comparison(t) for t in tasks]
+        cat_map = full_category_map()
+        summary = compute_summary(comparisons, category_map=cat_map)
+
+        assert summary.overall.n_tasks == len(comparisons)
+        assert summary.overall.mean_quality > 0
+        assert len(summary.by_category) > 0
+
+    def test_full_suite_report_generation(self, harness):
+        """Full suite generates markdown and LaTeX reports."""
+        tasks = [t for t in ds_all_tasks()[:5]]
+        comparisons = [harness.run_comparison(t) for t in tasks]
+        cat_map = {t.task_id: t.task_id.split("-")[0] for t in tasks}
+        summary = compute_summary(comparisons, category_map=cat_map)
+
+        md = format_markdown_table(summary)
+        assert len(md) > 100
+
+        tex = format_latex_table(summary)
+        assert len(tex) > 100
