@@ -229,6 +229,84 @@ Claude Code에서 자연어로 요청하면 에이전트가 MCP 도구를 호출
 
 > **팁**: `mem_do(action="help")` 호출을 요청하면 사용 가능한 61개 액션 전체 목록을 볼 수 있다.
 
+### 4.7 멀티 에이전트 시나리오 (Claude Code에서)
+
+하나의 Claude Code 세션에서 `agent_id`를 바꿔가며 여러 에이전트 역할을 시뮬레이션한다.
+각 에이전트는 `agent/{id}` 네임스페이스에 개인 메모리를 갖고, `shared` 네임스페이스를 통해 지식을 공유한다.
+
+**구조:**
+```
+agent/backend    ← 백엔드 에이전트 전용 메모리
+agent/frontend   ← 프론트엔드 에이전트 전용 메모리
+shared           ← 모든 에이전트가 접근 가능한 공유 메모리
+```
+
+**테스트 흐름:**
+
+```
+# ── 1단계: 에이전트 등록 ──
+
+사용자: "백엔드 에이전트 등록해줘. agent_id는 backend, 설명은 'API 서버 담당'"
+→ mem_agent_register(agent_id="backend", description="API 서버 담당")
+→ agent/backend 네임스페이스 생성, shared 네임스페이스 자동 생성
+
+사용자: "프론트엔드 에이전트도 등록. agent_id는 frontend, 설명은 'React UI 담당'"
+→ mem_agent_register(agent_id="frontend", description="React UI 담당")
+
+사용자: "네임스페이스 목록 보여줘"
+→ mem_do(action="ns_list")
+→ agent/backend, agent/frontend, shared 3개 확인
+
+# ── 2단계: 각 에이전트의 개인 메모리 추가 ──
+
+사용자: "backend 에이전트 네임스페이스에 메모 추가:
+  'API rate limiting은 Redis sliding window 방식으로 구현. 분당 100 요청 제한.'"
+→ mem_add(content="...", namespace="agent/backend", tags=["api", "rate-limit"])
+
+사용자: "frontend 에이전트 네임스페이스에 메모 추가:
+  'React Query로 서버 상태 관리. staleTime 5분, retry 3회 설정.'"
+→ mem_add(content="...", namespace="agent/frontend", tags=["react", "state"])
+
+# ── 3단계: 에이전트 범위 검색 ──
+
+사용자: "backend 에이전트 관점에서 'rate limit' 검색해줘"
+→ mem_agent_search(query="rate limit", agent_id="backend")
+→ agent/backend + shared 범위에서 검색, backend 메모 출현
+
+사용자: "frontend 에이전트 관점에서 'rate limit' 검색해줘"
+→ mem_agent_search(query="rate limit", agent_id="frontend")
+→ agent/frontend + shared 범위에서 검색, 결과 없음 (backend 전용이므로)
+
+# ── 4단계: 메모리 공유 ──
+
+사용자: "backend의 rate limit 메모를 shared로 공유해줘"
+→ mem_agent_share(chunk_id="...", target="shared")
+→ shared 네임스페이스에 복사됨
+
+사용자: "이제 frontend 관점에서 다시 'rate limit' 검색"
+→ mem_agent_search(query="rate limit", agent_id="frontend")
+→ shared 네임스페이스의 공유 메모 출현!
+
+# ── 5단계: 공유 메모리 직접 추가 ──
+
+사용자: "shared 네임스페이스에 팀 전체 결정사항 추가:
+  'API 버전닝은 URL path 방식 (v1/v2). Header 방식은 사용하지 않기로 결정.'"
+→ mem_add(content="...", namespace="shared", tags=["api", "decision"])
+
+사용자: "backend 관점에서 'API 버전' 검색"
+→ 공유 결정사항 출현
+
+사용자: "frontend 관점에서 'API 버전' 검색"
+→ 동일한 공유 결정사항 출현
+```
+
+**확인 포인트:**
+- [ ] 에이전트 등록 시 네임스페이스 자동 생성
+- [ ] 개인 메모리는 해당 에이전트 검색에서만 출현
+- [ ] `mem_agent_share` 후 다른 에이전트에서도 검색 가능
+- [ ] `shared` 네임스페이스는 모든 에이전트 검색에 포함
+- [ ] `include_shared=false`로 검색하면 공유 메모리 제외
+
 ---
 
 ## 5. STM 테스트 — 프록시 기반 자동 메모리 서피싱
