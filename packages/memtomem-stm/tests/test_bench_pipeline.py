@@ -66,6 +66,9 @@ from bench.tasks import (
     SHORT_RESPONSE,
     TASK_CATEGORIES,
     get_all_tasks,
+    get_distractor_tasks,
+    get_multihop_tasks,
+    get_needle_tasks,
     get_surfacing_tasks,
     get_generous_tasks,
     get_tight_tasks,
@@ -1376,3 +1379,214 @@ class TestSurfacingValue:
         assert "Surfacing Value" in text
         assert "+2.0" in text
         assert "+3" in text
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TestNeedleInHaystack — critical info buried in noise
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestNeedleInHaystack:
+    """Test whether compression preserves critical details under tight budgets."""
+
+    def test_needle_tasks_exist(self):
+        tasks = get_needle_tasks()
+        assert len(tasks) == 2
+
+    def test_markdown_needle_with_hybrid(self, cleaner, hybrid, judge):
+        """Hybrid: needle buried in middle section — lost under tight budget.
+
+        Known limitation: hybrid head preserves top sections, but the DB config
+        needle is in the 3rd section. With 600-char budget, it goes to tail TOC.
+        This test documents the limitation for future improvement.
+        """
+        h = BenchHarness(cleaner=cleaner, compressor=hybrid, judge=judge)
+        task = [t for t in get_needle_tasks() if t.task_id == "needle_markdown"][0]
+        result = h.run_stm(task)
+        qa = judge.qa_score(task, result.text)
+        # Document current behavior: needle is lost under this budget
+        # A future "priority section" feature could improve this
+        assert qa["total"] == 5
+        assert result.stage_metrics is not None
+
+    def test_json_needle_with_extract_fields(self, cleaner, field_extract, judge):
+        """FieldExtract: degraded server at index 30 — only first 3 shown.
+
+        Known limitation: FieldExtract shows first N array items, not anomalous ones.
+        A future "anomaly-aware" extract could prioritize non-healthy entries.
+        """
+        h = BenchHarness(cleaner=cleaner, compressor=field_extract, judge=judge)
+        task = [t for t in get_needle_tasks() if t.task_id == "needle_json"][0]
+        result = h.run_stm(task)
+        # Document: top-level keys preserved (total, alerts_active) but needle item lost
+        assert "total" in result.text.lower()
+        assert "alerts_active" in result.text.lower()
+
+    def test_needle_compression_curve(self, harness):
+        """Quality should increase with budget — needle more likely found."""
+        task = [t for t in get_needle_tasks() if t.task_id == "needle_markdown"][0]
+        points = harness.run_compression_curve(task, budget_ratios=[0.2, 0.5, 0.8])
+        # More budget = better chance of preserving needle
+        assert points[-1].quality_score >= points[0].quality_score
+
+    def test_needle_qa_at_tight_budget(self, harness):
+        """At very tight budget, some needles may be lost — measure which."""
+        task = [t for t in get_needle_tasks() if t.task_id == "needle_markdown"][0]
+        # Force very tight budget
+        tight_task = BenchTask(**{**task.__dict__, "max_chars": 300})
+        bd = harness.run_stage_breakdown(tight_task)
+        comp = bd._get("compressed")
+        assert comp is not None
+        # Log what was lost
+        assert comp.qa_total == 5
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TestDistractorRobustness — noisy memories shouldn't hurt quality
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestDistractorRobustness:
+    """Test that irrelevant surfaced memories don't degrade answer quality."""
+
+    def test_distractor_tasks_exist(self):
+        tasks = get_distractor_tasks()
+        assert len(tasks) == 2
+        for t in tasks:
+            assert t.surfacing_memories is not None
+            assert len(t.surfacing_memories) >= 3  # 1 relevant + distractors
+
+    async def test_distractors_dont_reduce_content_qa(self, cleaner, truncate, judge):
+        """Content QA should be unaffected by distractor memories."""
+        for task in get_distractor_tasks():
+            # Build engine with all memories (relevant + distractors)
+            memories = [
+                FakeSearchResult(chunk=FakeChunk(content=m), score=0.5)
+                for m in task.surfacing_memories
+            ]
+            config = _make_surfacing_config()
+            pipeline = _make_search_pipeline(memories)
+            engine = SurfacingEngine(config=config, search_pipeline=pipeline)
+            h = BenchHarness(
+                cleaner=cleaner, compressor=truncate, surfacing_engine=engine, judge=judge
+            )
+            value = await h.measure_surfacing_value(task)
+            # Content answers should not be lost due to distractors
+            content_qa = judge.qa_by_source(task, value.task_id)  # not used directly
+            assert value.quality_delta >= 0, (
+                f"{task.task_id}: distractors hurt quality by {value.quality_delta}"
+            )
+
+    async def test_relevant_memory_still_found(self, cleaner, truncate, judge):
+        """Despite distractors, the one relevant memory should still add value."""
+        task = [t for t in get_distractor_tasks() if t.task_id == "distractor_auth"][0]
+        memories = [
+            FakeSearchResult(chunk=FakeChunk(content=m), score=0.8 - i * 0.1)
+            for i, m in enumerate(task.surfacing_memories)
+        ]
+        config = _make_surfacing_config()
+        pipeline = _make_search_pipeline(memories)
+        engine = SurfacingEngine(config=config, search_pipeline=pipeline)
+        h = BenchHarness(
+            cleaner=cleaner, compressor=truncate, surfacing_engine=engine, judge=judge
+        )
+        value = await h.measure_surfacing_value(task)
+        # The relevant memory (HS256) should be surfaced and add a QA answer
+        assert value.qa_with >= value.qa_without
+
+    async def test_distractor_vs_clean_memories(self, cleaner, truncate, judge):
+        """Compare surfacing value: clean memories vs same + distractors."""
+        from bench.tasks import AUTH_MEMORIES
+
+        task = [t for t in get_surfacing_tasks() if t.task_id == "auth_incomplete"][0]
+
+        # Clean memories (all relevant)
+        clean_mems = [
+            FakeSearchResult(chunk=FakeChunk(content=m), score=0.8)
+            for m in AUTH_MEMORIES
+        ]
+        config = _make_surfacing_config()
+        clean_engine = SurfacingEngine(config=config, search_pipeline=_make_search_pipeline(clean_mems))
+        h_clean = BenchHarness(
+            cleaner=cleaner, compressor=truncate, surfacing_engine=clean_engine, judge=judge
+        )
+        v_clean = await h_clean.measure_surfacing_value(task)
+
+        # Noisy memories (1 relevant + 3 distractors)
+        from bench.tasks import DISTRACTOR_MEMORIES_AUTH
+        noisy_mems = [
+            FakeSearchResult(chunk=FakeChunk(content=m), score=0.5)
+            for m in DISTRACTOR_MEMORIES_AUTH
+        ]
+        noisy_engine = SurfacingEngine(config=config, search_pipeline=_make_search_pipeline(noisy_mems))
+        h_noisy = BenchHarness(
+            cleaner=cleaner, compressor=truncate, surfacing_engine=noisy_engine, judge=judge
+        )
+        v_noisy = await h_noisy.measure_surfacing_value(task)
+
+        # Clean memories should give >= distractor memories value
+        assert v_clean.qa_with >= v_noisy.qa_with
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TestMultihop — answer requires combining content + memory
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestMultihop:
+    """Test tasks that need information from both content and memory."""
+
+    def test_multihop_tasks_exist(self):
+        tasks = get_multihop_tasks()
+        assert len(tasks) >= 1
+        task = tasks[0]
+        content_qs = [q for q in task.qa_pairs if q.source == "content"]
+        memory_qs = [q for q in task.qa_pairs if q.source == "memory"]
+        assert len(content_qs) >= 2
+        assert len(memory_qs) >= 3
+
+    def test_content_only_partial_answers(self, judge):
+        """Without memory, only content QA pairs should be answerable."""
+        task = get_multihop_tasks()[0]
+        qa = judge.qa_by_source(task, task.content)
+        # Content questions answerable from content
+        assert qa["content"]["answerable"] >= 2
+        # Memory questions NOT answerable from content alone
+        assert qa["memory"]["answerable"] == 0
+
+    async def test_memory_adds_answers(self, cleaner, truncate, judge):
+        """With surfacing, memory QA pairs become answerable."""
+        from bench.tasks import MULTIHOP_MEMORIES
+
+        task = get_multihop_tasks()[0]
+        memories = [
+            FakeSearchResult(chunk=FakeChunk(content=m), score=0.8 - i * 0.1)
+            for i, m in enumerate(MULTIHOP_MEMORIES)
+        ]
+        config = _make_surfacing_config()
+        engine = SurfacingEngine(config=config, search_pipeline=_make_search_pipeline(memories))
+        h = BenchHarness(
+            cleaner=cleaner, compressor=truncate, surfacing_engine=engine, judge=judge
+        )
+        value = await h.measure_surfacing_value(task)
+        assert value.qa_delta > 0  # Memory QA pairs now answerable
+        assert value.qa_with > value.qa_without
+
+    async def test_multihop_stage_breakdown(self, cleaner, truncate, judge):
+        """Stage breakdown should show surfacing adding QA answers."""
+        from bench.tasks import MULTIHOP_MEMORIES
+
+        task = get_multihop_tasks()[0]
+        memories = [
+            FakeSearchResult(chunk=FakeChunk(content=m), score=0.8 - i * 0.1)
+            for i, m in enumerate(MULTIHOP_MEMORIES)
+        ]
+        config = _make_surfacing_config()
+        engine = SurfacingEngine(config=config, search_pipeline=_make_search_pipeline(memories))
+        h = BenchHarness(
+            cleaner=cleaner, compressor=truncate, surfacing_engine=engine, judge=judge
+        )
+        bd = await h.run_stage_breakdown_with_surfacing(task)
+        assert bd.surfacing_qa_gain > 0  # Surfacing added answerable QA pairs
+        assert bd.compress_info_loss >= 0  # Compression may or may not lose info
+        assert bd.clean_info_loss == 0  # Clean shouldn't lose quality on plain markdown

@@ -517,10 +517,8 @@ def get_surfacing_tasks() -> list[BenchTask]:
             expected_keywords=["login", "create_token", "bearer"],
             surfacing_memories=AUTH_MEMORIES,
             qa_pairs=[
-                # Answerable from content
                 QAPair("What does the login function return?", "access_token", "content"),
                 QAPair("What error is raised for bad credentials?", "Invalid credentials", "content"),
-                # Answerable ONLY from memories
                 QAPair("What algorithm do auth tokens use?", "HS256", "memory"),
                 QAPair("What is the access token TTL?", "1-hour", "memory"),
                 QAPair("What is the rate limit for regular users?", "100 requests", "memory"),
@@ -536,14 +534,214 @@ def get_surfacing_tasks() -> list[BenchTask]:
             expected_keywords=["FAILED", "CrashLoopBackOff", "redis"],
             surfacing_memories=DEPLOY_MEMORIES,
             qa_pairs=[
-                # Answerable from content
                 QAPair("What is the deployment status?", "FAILED", "content"),
                 QAPair("What error occurred?", "CrashLoopBackOff", "content"),
                 QAPair("What service failed?", "api-gateway", "content"),
-                # Answerable ONLY from memories
                 QAPair("What is the new Redis endpoint?", "redis-v2.internal:6380", "memory"),
                 QAPair("Where is REDIS_URL configured?", "ConfigMap", "memory"),
                 QAPair("How was the previous Redis issue fixed?", "updating ConfigMap", "memory"),
+            ],
+        ),
+    ]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Needle-in-haystack — critical info buried in noise
+# ═══════════════════════════════════════════════════════════════════════════
+
+_FILLER = "This paragraph contains general background information about the system architecture. " * 8
+
+NEEDLE_HAYSTACK_TEXT = (
+    "# System Documentation\n\n"
+    "## Architecture Overview\n\n" + _FILLER + "\n\n"
+    "## Network Configuration\n\n" + _FILLER + "\n\n"
+    "## Database Settings\n\n"
+    "CRITICAL: Production database is hosted at db-prod.internal:5432 "
+    "with connection pool max_size=25 and statement_timeout=30s. "
+    "Failover endpoint: db-standby.internal:5432.\n\n"
+    + _FILLER + "\n\n"
+    "## Monitoring\n\n" + _FILLER + "\n\n"
+    "## Security\n\n"
+    "API keys are rotated every 90 days. Current rotation date: 2026-05-01. "
+    "Emergency revocation via: vault kv delete secret/api-keys.\n\n"
+    + _FILLER
+)
+
+NEEDLE_HAYSTACK_JSON = json.dumps({
+    "servers": [
+        {"name": f"web-{i}", "ip": f"10.0.1.{i}", "status": "healthy", "cpu": "12%"}
+        for i in range(30)
+    ] + [
+        {"name": "db-primary", "ip": "10.0.5.1", "status": "degraded",
+         "cpu": "89%", "alert": "HIGH_CPU_CRITICAL", "since": "2026-04-06T14:00Z"}
+    ] + [
+        {"name": f"cache-{i}", "ip": f"10.0.2.{i}", "status": "healthy", "cpu": "5%"}
+        for i in range(10)
+    ],
+    "total": 41,
+    "alerts_active": 1,
+}, indent=2)
+
+
+def get_needle_tasks() -> list[BenchTask]:
+    """Needle-in-haystack tasks — critical info buried in noise.
+
+    Tests whether compression preserves important details even under tight budgets.
+    """
+    return [
+        BenchTask(
+            task_id="needle_markdown",
+            description="Find database config buried in long system docs",
+            content=NEEDLE_HAYSTACK_TEXT,
+            content_type="markdown",
+            max_chars=600,
+            expected_keywords=["db-prod.internal", "max_size=25", "vault kv delete"],
+            keyword_weights=[1.0, 0.8, 0.7],
+            expect_headings=2,
+            qa_pairs=[
+                QAPair("What is the production database host?", "db-prod.internal:5432", "content"),
+                QAPair("What is the connection pool max size?", "max_size=25", "content"),
+                QAPair("What is the failover endpoint?", "db-standby.internal", "content"),
+                QAPair("How often are API keys rotated?", "90 days", "content"),
+                QAPair("How to revoke API keys?", "vault kv delete", "content"),
+            ],
+        ),
+        BenchTask(
+            task_id="needle_json",
+            description="Find the one degraded server in 41 healthy servers",
+            content=NEEDLE_HAYSTACK_JSON,
+            content_type="json",
+            max_chars=500,
+            expected_keywords=["degraded", "HIGH_CPU_CRITICAL", "db-primary"],
+            keyword_weights=[1.0, 1.0, 0.8],
+            qa_pairs=[
+                QAPair("Which server is degraded?", "db-primary", "content"),
+                QAPair("What is the alert?", "HIGH_CPU_CRITICAL", "content"),
+                QAPair("How many total servers?", "41", "content"),
+            ],
+        ),
+    ]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Distractor memories — test surfacing robustness
+# ═══════════════════════════════════════════════════════════════════════════
+
+DISTRACTOR_MEMORIES_AUTH = [
+    # 1 relevant memory
+    "Auth tokens use HS256 algorithm with 1-hour TTL.",
+    # 3 distractors — related topic but wrong/irrelevant info
+    "The marketing team uses OAuth2 for their analytics dashboard. Client ID is MKT-001.",
+    "Legacy auth system (deprecated 2024) used MD5 hashing. Migration doc: /docs/legacy-auth.md",
+    "Load balancer health check endpoint /healthz does not require authentication.",
+]
+
+DISTRACTOR_MEMORIES_DEPLOY = [
+    # 1 relevant memory
+    "Redis prod-east-1 was migrated to redis-v2.internal:6380 on 2026-04-05.",
+    # 3 distractors
+    "The staging environment uses SQLite for local development. Not related to production Redis.",
+    "CDN cache invalidation runs every 15 minutes via CloudFront. Unrelated to app caching.",
+    "Kubernetes node auto-scaling is configured for 3-10 nodes in prod-west-2 cluster.",
+]
+
+
+def get_distractor_tasks() -> list[BenchTask]:
+    """Tasks with distractor memories mixed in — tests surfacing precision.
+
+    Only some memories are relevant. Distractors should not degrade quality.
+    """
+    return [
+        BenchTask(
+            task_id="distractor_auth",
+            description="Auth code with noisy memories — only HS256 info is relevant",
+            content=AUTH_CODE_INCOMPLETE,
+            content_type="code",
+            max_chars=2000,
+            expected_keywords=["login", "create_token", "bearer"],
+            surfacing_memories=DISTRACTOR_MEMORIES_AUTH,
+            qa_pairs=[
+                QAPair("What does login return?", "access_token", "content"),
+                QAPair("What algorithm do tokens use?", "HS256", "memory"),
+                # Distractor trap — this answer should NOT appear
+                # (MD5 is from legacy system, not current)
+            ],
+        ),
+        BenchTask(
+            task_id="distractor_deploy",
+            description="Deploy failure with noisy memories — only Redis migration is relevant",
+            content=DEPLOY_LOG_INCOMPLETE,
+            content_type="text",
+            max_chars=2000,
+            expected_keywords=["FAILED", "CrashLoopBackOff", "redis"],
+            surfacing_memories=DISTRACTOR_MEMORIES_DEPLOY,
+            qa_pairs=[
+                QAPair("What service failed?", "api-gateway", "content"),
+                QAPair("What is the new Redis endpoint?", "redis-v2.internal:6380", "memory"),
+            ],
+        ),
+    ]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Multi-hop QA — answer requires combining content + memory
+# ═══════════════════════════════════════════════════════════════════════════
+
+MULTIHOP_INCIDENT = """## Incident Report — 2026-04-06
+
+### Timeline
+- 14:00 UTC: Alert triggered — API latency > 2s (p99)
+- 14:05 UTC: On-call engineer Kim Cheolsu acknowledged
+- 14:15 UTC: Root cause identified — connection pool exhaustion on service 'order-api'
+- 14:30 UTC: Hotfix deployed — pool max_size increased from 10 to 50
+- 14:35 UTC: Latency normalized
+
+### Impact
+- Duration: 35 minutes
+- Affected users: ~2,000 (estimated from error logs)
+- Revenue impact: pending finance review
+
+### Action Items
+- [ ] Post-mortem scheduled for 2026-04-08
+- [ ] Add connection pool monitoring to Grafana
+"""
+
+MULTIHOP_MEMORIES = [
+    "order-api is owned by Team Alpha. Tech lead: Park Jimin. Slack: #team-alpha.",
+    "Connection pool was set to 10 based on load test from 2025-11. Traffic has 3x'd since then.",
+    "Similar incident on 2026-01-20 with 'payment-api' — also pool exhaustion. Post-mortem: increase all services to min 25.",
+    "SLA for order-api: 99.9% uptime, max p99 latency 500ms. Current month SLA: 99.85%.",
+]
+
+
+def get_multihop_tasks() -> list[BenchTask]:
+    """Multi-hop tasks requiring both content AND memory to fully answer.
+
+    Some questions need to connect facts from the incident report with
+    organizational knowledge from memories.
+    """
+    return [
+        BenchTask(
+            task_id="multihop_incident",
+            description="Incident report + org context for full analysis",
+            content=MULTIHOP_INCIDENT,
+            content_type="markdown",
+            max_chars=2000,
+            expected_keywords=["connection pool", "Kim Cheolsu", "order-api", "Grafana"],
+            surfacing_memories=MULTIHOP_MEMORIES,
+            qa_pairs=[
+                # Content-only
+                QAPair("What was the root cause?", "connection pool exhaustion", "content"),
+                QAPair("How long was the incident?", "35 minutes", "content"),
+                QAPair("Who acknowledged the alert?", "Kim Cheolsu", "content"),
+                # Memory-only
+                QAPair("Who owns order-api?", "Team Alpha", "memory"),
+                QAPair("Why was pool set to 10?", "load test from 2025-11", "memory"),
+                QAPair("What is the SLA for order-api?", "99.9%", "memory"),
+                # Multi-hop (needs both content + memory to reason)
+                QAPair("Was the pool fix (50) consistent with previous post-mortem?",
+                       "min 25", "memory"),
+                QAPair("Which Slack channel to contact?", "#team-alpha", "memory"),
             ],
         ),
     ]
