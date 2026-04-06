@@ -82,19 +82,29 @@ uv run pytest packages/memtomem/tests/test_embedding_providers.py -v # 임베딩
 
 ### 3.1 격리 설정
 
-기존 `~/.memtomem/` 설정과 충돌하지 않도록 환경변수로 격리한다.
+기존 `~/.memtomem/` 설정과 충돌하지 않도록 `.env` 파일로 격리한다.
+환경변수는 현재 터미널 세션 전체에 적용되므로, `.env` 파일을 만들어 필요할 때만 로드하는 방식이 안전하다.
 
 ```bash
 # 테스트 전용 디렉토리 준비
-export TEST_DIR=/tmp/memtomem-test/sandbox
+TEST_DIR=/tmp/memtomem-test/sandbox
 mkdir -p $TEST_DIR/memories $TEST_DIR/db
 
-# 환경변수로 경로 격리
-export MEMTOMEM_STORAGE__SQLITE_PATH=$TEST_DIR/db/test.db
-export MEMTOMEM_INDEXING__MEMORY_DIRS="[\"$TEST_DIR/memories\"]"
+# .env 파일 생성
+cat > $TEST_DIR/.env << 'ENVEOF'
+export TEST_DIR=/tmp/memtomem-test/sandbox
+export MEMTOMEM_STORAGE__SQLITE_PATH=/tmp/memtomem-test/sandbox/db/test.db
+export MEMTOMEM_INDEXING__MEMORY_DIRS='["/tmp/memtomem-test/sandbox/memories"]'
 export MEMTOMEM_EMBEDDING__MODEL=bge-m3
 export MEMTOMEM_EMBEDDING__DIMENSION=1024
+ENVEOF
+
+# 테스트 환경 활성화 (현재 터미널에만 적용, 닫으면 사라짐)
+source $TEST_DIR/.env
 ```
+
+> **참고**: `source .env`는 현재 터미널 세션에만 적용된다. 새 터미널을 열면 다시 `source`해야 한다.
+> 테스트가 끝나면 터미널을 닫거나 `unset` 명령으로 정리한다 ([7. 정리](#7-정리) 참조).
 
 ### 3.2 샘플 데이터 생성
 
