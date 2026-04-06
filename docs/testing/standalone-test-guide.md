@@ -193,8 +193,8 @@ Claude Code에서 대화형 테스트:
 Claude Code에서 자연어로 요청하면 에이전트가 MCP 도구를 호출한다.
 
 ```
-사용자: "세션 시작해줘. 에이전트 ID는 tester, 제목은 인프라 검토"
-→ 에이전트가 mem_session_start 호출
+사용자: "세션 시작해줘. 제목은 인프라 검토"
+→ 에이전트가 mem_session_start(title="인프라 검토") 호출 (agent_id는 기본값 "default")
 
 사용자: "워킹 메모리에 현재 작업 저장해줘: focus = Redis 마이그레이션 계획"
 → mem_scratch_set 호출
