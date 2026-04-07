@@ -62,9 +62,18 @@ class TruncateCompressor:
     For text with markdown headings, prefers to cut at heading boundaries
     and appends a list of remaining section titles. For plain text, cuts
     at the nearest sentence or word boundary.
+
+    Args:
+        min_retention: Minimum fraction of original content to preserve (0-1).
+            If the budget (max_chars) would retain less than this fraction,
+            the effective budget is raised to ``len(text) * min_retention``.
+            Default 0.5 ensures at least 50% of content survives compression.
     """
 
     _HEADING_RE = re.compile(r"(?:^|\n)(#{1,6}\s+.+)")
+
+    def __init__(self, min_retention: float = 0.5) -> None:
+        self._min_retention = min_retention
 
     # Patterns for code structure boundaries (function/class/method definitions)
     _CODE_BOUNDARY_RE = re.compile(
@@ -81,6 +90,11 @@ class TruncateCompressor:
     def compress(self, text: str, *, max_chars: int) -> str:
         if not text or len(text) <= max_chars:
             return text
+
+        # Enforce minimum retention: keep at least N% of original content
+        min_budget = int(len(text) * self._min_retention)
+        if max_chars < min_budget:
+            max_chars = min_budget
 
         # Try JSON key-aware truncation — only for config-like dicts (all values are dicts)
         stripped = text.strip()
@@ -823,17 +837,22 @@ class SchemaPruningCompressor:
     data relationship is represented in the output.
     """
 
-    def __init__(self, max_string: int = 80, max_array_items: int = 3) -> None:
+    def __init__(self, max_string: int = 80, max_array_items: int = 3, min_retention: float = 0.5) -> None:
         self._max_string = max_string
         self._max_array = max_array_items
+        self._min_retention = min_retention
 
     def compress(self, text: str, *, max_chars: int) -> str:
         if not text or len(text) <= max_chars:
             return text
+        # Enforce min retention
+        min_budget = int(len(text) * self._min_retention)
+        if max_chars < min_budget:
+            max_chars = min_budget
         try:
             data = json.loads(text)
         except (json.JSONDecodeError, ValueError):
-            return TruncateCompressor().compress(text, max_chars=max_chars)
+            return TruncateCompressor(min_retention=self._min_retention).compress(text, max_chars=max_chars)
 
         # Iteratively reduce detail until output fits budget
         for max_str in (self._max_string, 40, 20):
