@@ -82,6 +82,17 @@ class TruncateCompressor:
         if not text or len(text) <= max_chars:
             return text
 
+        # Try JSON key-aware truncation — only for config-like dicts (all values are dicts)
+        stripped = text.strip()
+        if stripped and stripped[0] == "{":
+            try:
+                data = json.loads(stripped)
+                if (isinstance(data, dict) and len(data) >= 2
+                        and all(isinstance(v, dict) for v in data.values())):
+                    return self._json_key_truncate(data, max_chars)
+            except (json.JSONDecodeError, ValueError):
+                pass
+
         # Try section-aware truncation for markdown with headings
         headings = list(self._HEADING_RE.finditer(text))
         if len(headings) >= 2:
@@ -99,12 +110,145 @@ class TruncateCompressor:
         if len(sql_boundaries) >= 2:
             return self._code_aware_truncate(text, max_chars, sql_boundaries)
 
+        # Repetitive content: preserve tail anomaly
+        result = self._tail_anomaly_truncate(text, max_chars)
+        if result:
+            return result
+
         # Fallback: position-based truncation
         break_at = self._find_break(text, max_chars)
         summary = _content_summary(text)
         return text[:break_at] + f"\n... (truncated, original: {len(text)} chars){summary}"
 
-    _SUMMARY_RE = re.compile(r"summary|conclusion|결론|요약", re.IGNORECASE)
+    _SUMMARY_RE = re.compile(
+        r"summary|conclusion|결론|요약|security|root\s*cause|remediation"
+        r"|troubleshoot|보안|원인|조치",
+        re.IGNORECASE,
+    )
+
+    def _json_key_truncate(self, data: dict, max_chars: int) -> str:
+        """Distribute budget across all top-level JSON keys.
+
+        Each key gets a proportional share of the budget based on its
+        serialized size. This ensures no top-level section is completely lost.
+        """
+        # Serialize each top-level key separately to measure sizes
+        key_sizes: list[tuple[str, str, int]] = []
+        for k, v in data.items():
+            serialized = json.dumps({k: v}, ensure_ascii=False, indent=2)
+            key_sizes.append((k, serialized, len(serialized)))
+
+        total_size = sum(s for _, _, s in key_sizes)
+        overhead = 10  # {}, commas, newlines
+        available = max_chars - overhead
+
+        # Build output: each key gets proportional budget
+        parts: list[str] = []
+        for k, serialized, size in key_sizes:
+            key_budget = max(40, int(available * size / total_size))
+            if size <= key_budget:
+                # Fits entirely — use as-is (strip outer braces)
+                inner = serialized.strip()[1:-1].strip()  # remove { }
+                parts.append(inner)
+            else:
+                # Truncate the value
+                v = data[k]
+                truncated = self._truncate_json_value(v, key_budget - len(k) - 6)
+                part = json.dumps({k: truncated}, ensure_ascii=False, indent=2)
+                inner = part.strip()[1:-1].strip()
+                parts.append(inner)
+
+        result = "{\n" + ",\n".join(parts) + "\n}"
+        if len(result) > max_chars:
+            result = result[:max_chars] + "\n... (truncated)"
+        return result
+
+    def _truncate_json_value(self, value: object, budget: int) -> object:
+        """Truncate a JSON value to fit within character budget."""
+        if isinstance(value, str):
+            if len(value) > budget:
+                return value[:budget] + "..."
+            return value
+        if isinstance(value, dict):
+            preview: dict = {}
+            per_key = max(20, budget // max(1, len(value)))
+            for k, v in value.items():
+                preview[k] = self._truncate_json_value(v, per_key)
+            return preview
+        if isinstance(value, list):
+            if not value:
+                return value
+            n = min(3, len(value))
+            items = [self._truncate_json_value(item, budget // max(1, n)) for item in value[:n]]
+            if len(value) > n:
+                items.append(f"... ({len(value) - n} more)")
+            return items
+        return value
+
+    # Pattern to strip timestamps/IDs for repetitive content detection
+    _TIMESTAMP_RE = re.compile(
+        r"\d{4}[-/]\d{2}[-/]\d{2}[T ]\d{2}:\d{2}[:\d.]*\S*"
+        r"|\b\d{10,13}\b"  # unix timestamps
+    )
+
+    @classmethod
+    def _tail_anomaly_truncate(cls, text: str, max_chars: int) -> str | None:
+        """Detect highly repetitive content and preserve tail anomaly.
+
+        If >50% of lines match a repeated pattern (after stripping timestamps)
+        and the tail differs, keep a sample + full tail anomaly.
+        Returns None if content is not repetitive.
+        """
+        lines = text.split("\n")
+        if len(lines) < 10:
+            return None
+
+        # Fingerprint: strip timestamps/numbers, keep structure
+        def _fp(line: str) -> str:
+            stripped = cls._TIMESTAMP_RE.sub("", line.strip())
+            # Also normalize varying numbers (latency, counts)
+            stripped = re.sub(r"\d+", "#", stripped)
+            return stripped[:40]
+
+        fingerprints: dict[str, int] = {}
+        for line in lines:
+            fp = _fp(line)
+            if fp:
+                fingerprints[fp] = fingerprints.get(fp, 0) + 1
+
+        if not fingerprints:
+            return None
+
+        top_fp, top_count = max(fingerprints.items(), key=lambda x: x[1])
+        if top_count < len(lines) * 0.5:
+            return None  # Not repetitive enough
+
+        # Find non-matching tail lines (anomalies)
+        tail_lines: list[str] = []
+        for line in reversed(lines):
+            if _fp(line) != top_fp:
+                tail_lines.insert(0, line)
+            else:
+                break
+
+        if not tail_lines:
+            return None
+
+        # Build: first few lines + count + tail anomaly
+        tail_text = "\n".join(tail_lines)
+        sample_count = 3
+        head_lines = lines[:sample_count]
+        head_text = "\n".join(head_lines)
+        omitted = len(lines) - sample_count - len(tail_lines)
+
+        result = (
+            f"{head_text}\n"
+            f"... ({omitted} similar lines omitted)\n"
+            f"{tail_text}"
+        )
+        if len(result) > max_chars:
+            result = result[:max_chars]
+        return result
 
     def _section_aware_truncate(
         self, text: str, max_chars: int, headings: list[re.Match]
