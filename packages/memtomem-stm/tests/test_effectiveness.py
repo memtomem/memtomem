@@ -388,18 +388,41 @@ class TestAutoTunerConvergence:
 class TestAutoStrategySelection:
     """Verify content-type-based compression strategy auto-detection."""
 
-    def test_json_selects_field_extract(self):
+    def test_json_small_selects_truncate(self):
         from memtomem_stm.proxy.compression import auto_select_strategy
         from memtomem_stm.proxy.config import CompressionStrategy
 
+        # Small JSON without large arrays → truncate (better value preservation)
         text = '{"users": [1, 2, 3], "total": 3}'
-        assert auto_select_strategy(text) == CompressionStrategy.EXTRACT_FIELDS
+        assert auto_select_strategy(text) == CompressionStrategy.TRUNCATE
 
-    def test_markdown_with_headings_selects_hybrid(self):
+    def test_json_large_array_selects_schema_pruning(self):
         from memtomem_stm.proxy.compression import auto_select_strategy
         from memtomem_stm.proxy.config import CompressionStrategy
 
+        # JSON with 20+ item array → schema_pruning (first+last sampling)
+        items = ", ".join(f'{{"id": {i}}}' for i in range(25))
+        text = f'{{"items": [{items}]}}'
+        assert auto_select_strategy(text) == CompressionStrategy.SCHEMA_PRUNING
+
+    def test_short_markdown_selects_truncate(self):
+        from memtomem_stm.proxy.compression import auto_select_strategy
+        from memtomem_stm.proxy.config import CompressionStrategy
+
+        # Short markdown (<5000 chars) → TRUNCATE preserves more info
         text = "# A\n\ntext\n\n## B\n\ntext\n\n### C\n\ntext"
+        assert auto_select_strategy(text) == CompressionStrategy.TRUNCATE
+
+    def test_large_markdown_selects_hybrid(self):
+        from memtomem_stm.proxy.compression import auto_select_strategy
+        from memtomem_stm.proxy.config import CompressionStrategy
+
+        # Large markdown (5000+ chars, 5+ headings) → HYBRID
+        sections = "\n\n".join(
+            f"## Section {i}\n\n" + f"Content for section {i}. " * 50
+            for i in range(6)
+        )
+        text = f"# Title\n\n{sections}"
         assert auto_select_strategy(text) == CompressionStrategy.HYBRID
 
     def test_plain_text_selects_truncate(self):
@@ -409,12 +432,13 @@ class TestAutoStrategySelection:
         text = "Just a plain paragraph of text without any special formatting."
         assert auto_select_strategy(text) == CompressionStrategy.TRUNCATE
 
-    def test_code_heavy_selects_hybrid(self):
+    def test_short_code_selects_truncate(self):
         from memtomem_stm.proxy.compression import auto_select_strategy
         from memtomem_stm.proxy.config import CompressionStrategy
 
+        # Short code content → TRUNCATE (HYBRID only for large code files)
         text = "Intro.\n\n```python\ncode1\n```\n\nMiddle.\n\n```js\ncode2\n```\n\nEnd."
-        assert auto_select_strategy(text) == CompressionStrategy.HYBRID
+        assert auto_select_strategy(text) == CompressionStrategy.TRUNCATE
 
     def test_empty_selects_none(self):
         from memtomem_stm.proxy.compression import auto_select_strategy

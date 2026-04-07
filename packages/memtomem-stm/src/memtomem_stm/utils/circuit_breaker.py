@@ -38,6 +38,26 @@ class CircuitBreaker:
             return False  # allow one probe
         return self._state == "open"
 
+    @property
+    def state(self) -> str:
+        """Current state: 'closed', 'open', or 'half-open'."""
+        # Trigger half-open transition if timeout elapsed
+        if self._state == "open" and time.monotonic() - self._opened_at >= self._reset_timeout:
+            self._state = "half-open"
+        return self._state
+
+    @property
+    def failure_count(self) -> int:
+        return self._failures
+
+    @property
+    def time_until_reset(self) -> float | None:
+        """Seconds until open breaker transitions to half-open. None if not open."""
+        if self._state != "open":
+            return None
+        remaining = self._reset_timeout - (time.monotonic() - self._opened_at)
+        return max(0.0, remaining)
+
     def record_success(self) -> None:
         self._failures = 0
         self._state = "closed"

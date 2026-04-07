@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time as _time
+import uuid
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,6 +27,7 @@ from memtomem_stm.proxy.compression import (
     LLMCompressor,
     SelectiveCompressor,
     TruncateCompressor,
+    auto_select_strategy,
     get_compressor,
 )
 from memtomem_stm.proxy.config import (
@@ -38,7 +41,7 @@ from memtomem_stm.proxy.config import (
     TransportType,
     UpstreamServerConfig,
 )
-from memtomem_stm.proxy.metrics import CallMetrics, TokenTracker
+from memtomem_stm.proxy.metrics import CallMetrics, ErrorCategory, TokenTracker
 
 # JSON-RPC error codes that indicate bad input, not connection problems.
 # Retrying these wastes time and can damage the connection.
@@ -195,15 +198,75 @@ class ProxyManager:
     def _config(self) -> ProxyConfig:
         return self._config_loader.get()
 
+    @staticmethod
+    def _truncate_description(desc: str, max_chars: int) -> str:
+        """Truncate description at sentence boundary within budget."""
+        if not desc or len(desc) <= max_chars:
+            return desc
+        # Try to cut at last sentence boundary
+        truncated = desc[:max_chars]
+        for sep in (". ", ".\n", "! ", "? "):
+            idx = truncated.rfind(sep)
+            if idx > max_chars // 3:  # don't cut too early
+                return truncated[: idx + 1].rstrip()
+        # Fall back to word boundary
+        idx = truncated.rfind(" ")
+        if idx > max_chars // 3:
+            return truncated[:idx] + "..."
+        return truncated + "..."
+
+    @staticmethod
+    def _distill_schema(schema: dict, strip_descriptions: bool) -> dict:
+        """Remove description/examples from schema properties to save tokens."""
+        if not strip_descriptions or not isinstance(schema, dict):
+            return schema
+        result = {}
+        for k, v in schema.items():
+            if k in ("description", "examples"):
+                continue
+            if isinstance(v, dict):
+                result[k] = ProxyManager._distill_schema(v, strip_descriptions)
+            elif isinstance(v, list):
+                result[k] = [
+                    ProxyManager._distill_schema(item, True) if isinstance(item, dict) else item
+                    for item in v
+                ]
+            else:
+                result[k] = v
+        return result
+
     def get_proxy_tools(self) -> list[ProxyToolInfo]:
         result: list[ProxyToolInfo] = []
+        global_max_desc = self._config.max_description_chars
+        global_strip = self._config.strip_schema_descriptions
+
         for conn in self._connections.values():
+            cfg = conn.config
+            max_desc = cfg.max_description_chars
+            strip = cfg.strip_schema_descriptions or global_strip
+
             for t in conn.tools:
+                # Check per-tool hidden override
+                override = cfg.tool_overrides.get(t.name)
+                if override is not None and override.hidden:
+                    continue
+
+                # Resolve description
+                desc = t.description or ""
+                if override is not None and override.description_override is not None:
+                    desc = override.description_override
+                desc = self._truncate_description(desc, min(max_desc, global_max_desc))
+
+                # Resolve schema
+                schema = t.inputSchema or {"type": "object"}
+                if strip:
+                    schema = self._distill_schema(schema, True)
+
                 result.append(
                     ProxyToolInfo(
-                        prefixed_name=f"{conn.config.prefix}__{t.name}",
-                        description=t.description or "",
-                        input_schema=t.inputSchema or {"type": "object"},
+                        prefixed_name=f"{cfg.prefix}__{t.name}",
+                        description=desc,
+                        input_schema=schema,
                         server=conn.name,
                         original_name=t.name,
                         annotations=getattr(t, "annotations", None),
@@ -216,7 +279,12 @@ class ProxyManager:
         cfg = conn.config
 
         compression = cfg.compression
-        max_chars = cfg.max_result_chars
+        # Use model-aware budget if server uses default max_result_chars
+        _default_server_max = UpstreamServerConfig.model_fields["max_result_chars"].default
+        if cfg.max_result_chars == _default_server_max:
+            max_chars = self._config.effective_max_result_chars()
+        else:
+            max_chars = cfg.max_result_chars
         llm_cfg = cfg.llm
         sel_cfg = cfg.selective
         hybrid_cfg = cfg.hybrid
@@ -269,6 +337,15 @@ class ProxyManager:
         server: str,
         tool: str,
     ) -> str:
+        if compression == CompressionStrategy.AUTO:
+            resolved = auto_select_strategy(text, max_chars=max_chars)
+            logger.debug("auto_select_strategy → %s for %s/%s", resolved.value, server, tool)
+            if resolved == CompressionStrategy.NONE:
+                return text
+            return await self._apply_compression(
+                text, resolved, max_chars, sel_cfg, llm_cfg, hybrid_cfg, server, tool
+            )
+
         if compression == CompressionStrategy.HYBRID:
             return await self._apply_hybrid(text, max_chars, hybrid_cfg, sel_cfg)
 
@@ -428,6 +505,16 @@ class ProxyManager:
             return "Selective compression not active — no pending TOC selections."
         return self._selective_compressor.select(key, sections)
 
+    def get_upstream_health(self) -> dict[str, dict]:
+        """Return per-server health: connection status, tool count."""
+        health: dict[str, dict] = {}
+        for name, conn in self._connections.items():
+            health[name] = {
+                "connected": conn.session is not None,
+                "tools": len(conn.tools),
+            }
+        return health
+
     async def call_tool(self, server: str, tool: str, arguments: dict[str, Any]) -> str | list:
         """Forward a tool call to upstream, compress, surface, and return."""
         if server not in self._connections:
@@ -440,6 +527,9 @@ class ProxyManager:
         tool: str,
         arguments: dict[str, Any],
     ) -> str | list:
+        trace_id = uuid.uuid4().hex[:16]
+        logger.debug("trace_id=%s server=%s tool=%s", trace_id, server, tool)
+
         # Extract _context_query before forwarding
         context_query = arguments.get("_context_query") if arguments else None
         upstream_args = (
@@ -473,6 +563,11 @@ class ProxyManager:
                     not isinstance(exc, (OSError, ConnectionError, asyncio.TimeoutError, EOFError))
                     and err_code is None
                 ):
+                    self.tracker.record_error(CallMetrics(
+                        server=server, tool=tool, original_chars=0, compressed_chars=0,
+                        is_error=True, error_category=ErrorCategory.PROGRAMMING,
+                        trace_id=trace_id,
+                    ))
                     raise
 
                 # Protocol errors (bad params, unknown method) — don't retry,
@@ -481,6 +576,11 @@ class ProxyManager:
                     logger.debug(
                         "Protocol error %s for %s/%s, skipping retry", err_code, server, tool
                     )
+                    self.tracker.record_error(CallMetrics(
+                        server=server, tool=tool, original_chars=0, compressed_chars=0,
+                        is_error=True, error_category=ErrorCategory.PROTOCOL,
+                        error_code=err_code, trace_id=trace_id,
+                    ))
                     try:
                         await self._reconnect_server(server)
                     except Exception:
@@ -488,6 +588,15 @@ class ProxyManager:
                     raise
 
                 if attempt >= cfg.max_retries:
+                    cat = (
+                        ErrorCategory.TIMEOUT
+                        if isinstance(exc, asyncio.TimeoutError)
+                        else ErrorCategory.TRANSPORT
+                    )
+                    self.tracker.record_error(CallMetrics(
+                        server=server, tool=tool, original_chars=0, compressed_chars=0,
+                        is_error=True, error_category=cat, trace_id=trace_id,
+                    ))
                     # Reconnect before raising so the NEXT call starts fresh
                     try:
                         await self._reconnect_server(server)
@@ -530,31 +639,63 @@ class ProxyManager:
         original_text = "\n".join(text_parts)
 
         if result.isError:
+            self.tracker.record_error(CallMetrics(
+                server=server, tool=tool,
+                original_chars=len(original_text), compressed_chars=len(original_text),
+                is_error=True, error_category=ErrorCategory.UPSTREAM_ERROR,
+                trace_id=trace_id,
+            ))
             return original_text
 
         # Resolve effective settings
         tc = self._resolve_tool_config(server, tool)
 
         # ── Stage 1: CLEAN ──
+        _t0 = _time.monotonic()
         cleaned = self._clean_content(original_text, tc.cleaning)
+        _clean_ms = (_time.monotonic() - _t0) * 1000
 
         # ── Stage 2: COMPRESS ──
+        # Enforce minimum retention: budget must preserve at least N% of cleaned content.
+        # Dynamic scaling: shorter content → higher retention (less to gain from cutting).
+        # This is the SINGLE place where retention is enforced — compressors trust max_chars.
+        effective_max_chars = tc.max_chars
+        min_retention = getattr(self._config, "min_result_retention", 0.65)
+        if min_retention > 0:
+            n = len(cleaned)
+            # Scale: short content (< 1KB) gets ~90% retention, large (10KB+) gets base retention
+            if n < 1000:
+                dynamic = max(min_retention, 0.9)
+            elif n < 3000:
+                dynamic = max(min_retention, 0.75)
+            elif n < 10000:
+                dynamic = max(min_retention, 0.65)
+            else:
+                dynamic = min_retention  # use config value for very large content
+            min_budget = int(n * dynamic)
+            if effective_max_chars < min_budget:
+                effective_max_chars = min_budget
+
+        _t0 = _time.monotonic()
         compressed = await self._apply_compression(
             cleaned,
             tc.compression,
-            tc.max_chars,
+            effective_max_chars,
             tc.selective,
             tc.llm,
             tc.hybrid,
             server,
             tool,
         )
+        _compress_ms = (_time.monotonic() - _t0) * 1000
 
         # Record metrics BEFORE surfacing (surfacing adds content, not compresses)
         compressed_chars_for_metrics = len(compressed)
 
         # ── Stage 3: SURFACE (proactive memory injection) ──
+        _t0 = _time.monotonic()
         surfaced = await self._apply_surfacing(server, tool, upstream_args, compressed)
+        _surface_ms = (_time.monotonic() - _t0) * 1000
 
         # ── Stage 4: INDEX (optional) ──
         ai_cfg = self._config.auto_index
@@ -578,6 +719,11 @@ class ProxyManager:
             final_result = surfaced
 
         # Record metrics (using pre-surfacing compressed size)
+        # Approximate token counts: chars / 3.5 (average for mixed en/code/json).
+        # Not exact but sufficient for budget tracking and cost estimation.
+        _orig_tokens = max(1, int(len(original_text) / 3.5))
+        _comp_tokens = max(1, int(compressed_chars_for_metrics / 3.5))
+
         self.tracker.record(
             CallMetrics(
                 server=server,
@@ -585,6 +731,13 @@ class ProxyManager:
                 original_chars=len(original_text),
                 compressed_chars=compressed_chars_for_metrics,
                 cleaned_chars=len(cleaned),
+                original_tokens=_orig_tokens,
+                compressed_tokens=_comp_tokens,
+                trace_id=trace_id,
+                clean_ms=_clean_ms,
+                compress_ms=_compress_ms,
+                surface_ms=_surface_ms,
+                surfaced_chars=len(surfaced),
             )
         )
 

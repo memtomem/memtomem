@@ -30,8 +30,16 @@ CREATE TABLE IF NOT EXISTS surfacing_feedback (
     created_at      REAL    NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS seen_memories (
+    memory_id       TEXT    PRIMARY KEY,
+    first_seen_at   REAL    NOT NULL,
+    last_seen_at    REAL    NOT NULL,
+    seen_count      INTEGER NOT NULL DEFAULT 1
+);
+
 CREATE INDEX IF NOT EXISTS idx_feedback_surfacing ON surfacing_feedback(surfacing_id);
 CREATE INDEX IF NOT EXISTS idx_events_tool ON surfacing_events(tool);
+CREATE INDEX IF NOT EXISTS idx_seen_last ON seen_memories(last_seen_at);
 """
 
 
@@ -148,6 +156,47 @@ class FeedbackStore:
             "total_feedback": total_feedback,
             "by_rating": by_rating,
         }
+
+    # ── Cross-session dedup ────────────────────────────────────────────
+
+    def mark_surfaced(self, memory_ids: list[str]) -> None:
+        """Record memory IDs as surfaced for cross-session dedup."""
+        if self._db is None or not memory_ids:
+            return
+        now = time.time()
+        with self._lock:
+            for mid in memory_ids:
+                self._db.execute(
+                    "INSERT INTO seen_memories (memory_id, first_seen_at, last_seen_at, seen_count) "
+                    "VALUES (?, ?, ?, 1) "
+                    "ON CONFLICT(memory_id) DO UPDATE SET "
+                    "last_seen_at = excluded.last_seen_at, "
+                    "seen_count = seen_count + 1",
+                    (mid, now, now),
+                )
+            self._db.commit()
+
+    def get_seen_ids(self, ttl_seconds: float) -> set[str]:
+        """Return memory IDs surfaced within the TTL window."""
+        if self._db is None:
+            return set()
+        cutoff = time.time() - ttl_seconds
+        rows = self._db.execute(
+            "SELECT memory_id FROM seen_memories WHERE last_seen_at >= ?", (cutoff,)
+        ).fetchall()
+        return {r[0] for r in rows}
+
+    def cleanup_expired(self, ttl_seconds: float) -> int:
+        """Delete seen_memories entries older than TTL. Returns count deleted."""
+        if self._db is None:
+            return 0
+        cutoff = time.time() - ttl_seconds
+        with self._lock:
+            cursor = self._db.execute(
+                "DELETE FROM seen_memories WHERE last_seen_at < ?", (cutoff,)
+            )
+            self._db.commit()
+            return cursor.rowcount
 
     def get_tool_not_relevant_ratio(
         self, tool: str | None, min_samples: int = 20

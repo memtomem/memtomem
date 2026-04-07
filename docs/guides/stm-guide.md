@@ -182,25 +182,33 @@ Each upstream server can use a different compression strategy:
 
 | Strategy | Best for | How it works |
 |----------|----------|-------------|
-| **hybrid** (default) | Most responses | Preserves first 5K chars + TOC for remainder |
+| **auto** (default) | All responses | Content-aware: detects type and picks the best strategy per response |
+| **hybrid** | Large structured docs | Preserves first 5K chars + TOC for remainder |
 | **selective** | Dense/large | 2-phase: returns TOC first, agent picks sections |
-| **truncate** | Simple text | Section-aware for markdown (lists remaining headings), sentence-boundary for plain text |
-| **extract_fields** | JSON APIs | Preserves key structure, shows first key-value pairs of nested dicts |
+| **truncate** | Simple text | Section-aware for markdown, sentence-boundary for plain text |
+| **extract_fields** | JSON configs | Preserves all top-level keys with nested structure preview |
+| **schema_pruning** | Large JSON arrays | Samples first+last items, prunes repeated structure |
+| **skeleton** | API docs | All headings + first content line per section |
 | **llm_summary** | Dense content | LLM summarization (requires API key) |
 | **none** | Short responses | Pass-through, cache only |
 
-### Auto-strategy selection
+### AUTO strategy (default)
 
-When you're unsure which strategy to use, STM can auto-detect the best one based on content type:
+When compression is set to `auto` (the default), STM analyzes each response and picks the best strategy:
 
-| Content type | Auto-selected strategy |
-|-------------|----------------------|
-| JSON (`{...}` or `[...]`) | `extract_fields` |
-| Markdown (3+ headings) | `hybrid` |
-| Code-heavy (2+ code blocks) | `hybrid` |
-| Plain text | `truncate` |
+| Content type | Strategy selected |
+|-------------|------------------|
+| Content fits within budget | `none` (passthrough) |
+| JSON array with 20+ items | `schema_pruning` |
+| JSON dict with 3+ nested keys (config-like) | `extract_fields` |
+| Markdown API docs (HTTP method endpoints) | `skeleton` |
+| Large markdown (5+ headings, 5KB+) | `hybrid` |
+| Large code (6+ code fences, 5KB+) | `hybrid` |
+| Everything else | `truncate` |
 
-The `auto_select_strategy()` function is available for programmatic use. To use it, omit the `compression` field in server config and let the proxy choose per-response.
+This eliminates the need to manually configure strategies per server. AUTO preserves information structure: JSON configs keep all top-level keys, changelogs keep all section headings.
+
+To force a specific strategy, set `"compression": "truncate"` (or any strategy) in server config.
 
 ### Selective compression (2-phase)
 
@@ -220,9 +228,50 @@ Phase 1: STM parses the response into sections and returns a compact TOC:
 
 Phase 2: Agent calls `stm_proxy_select_chunks` to get only the sections it needs.
 
+### Budget & Retention Tuning
+
+STM preserves a minimum percentage of every response (dynamic retention):
+
+| Response size | Default retention | Meaning |
+|--------------|------------------|---------|
+| < 1 KB | 90% | Short responses barely compressed |
+| 1–3 KB | 75% | Light compression |
+| 3–10 KB | 65% | Moderate compression |
+| 10 KB+ | 50% | Heavier compression, structure preserved |
+
+**To adjust**, set `min_result_retention` in `~/.memtomem/stm_proxy.json`:
+
+```json
+{
+  "min_result_retention": 0.65,
+  "default_max_result_chars": 16000
+}
+```
+
+Setting `min_result_retention` to `0` disables dynamic retention and uses fixed budgets only.
+
+### Context-Window-Aware Budget
+
+If your agent uses a model with a small context window, STM can automatically scale budgets:
+
+```json
+{
+  "consumer_model": "gpt-4",
+  "context_budget_ratio": 0.05
+}
+```
+
+| Model | Context | Budget (at 5% ratio) |
+|-------|---------|---------------------|
+| claude-sonnet-4 | 200K | 16,000 (capped at default) |
+| gpt-4o | 128K | 16,000 (capped) |
+| gpt-4 | 8K | 1,433 chars |
+
+Leave `consumer_model` empty (default) to use fixed budgets. The budget is always capped at `default_max_result_chars`.
+
 ### Per-tool overrides
 
-Override compression for specific tools in `~/.memtomem/stm_proxy.json`:
+Override compression, budget, or visibility for specific tools:
 
 ```json
 {
@@ -231,22 +280,30 @@ Override compression for specific tools in `~/.memtomem/stm_proxy.json`:
       "prefix": "fs",
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"],
-      "compression": "selective",
-      "max_result_chars": 2000,
+      "compression": "auto",
+      "max_result_chars": 8000,
       "tool_overrides": {
         "read_file": {
           "compression": "hybrid",
-          "max_result_chars": 5000
+          "max_result_chars": 16000
         },
         "list_directory": {
           "compression": "truncate",
           "max_result_chars": 1000
+        },
+        "internal_debug": {
+          "hidden": true
+        },
+        "search": {
+          "description_override": "Search files by name"
         }
       }
     }
   }
 }
 ```
+
+Per-tool options: `compression`, `max_result_chars`, `hidden` (exclude from tool list), `description_override` (replace upstream description).
 
 ---
 
@@ -272,6 +329,7 @@ STM applies multiple safeguards to prevent surfacing from becoming intrusive:
 | **Cooldown** | 5s | Suppresses near-identical queries (Jaccard > 0.95) |
 | **Min response size** | 5000 chars | Short responses don't trigger surfacing |
 | **Session dedup** | On | Same memory ID not shown twice in one session |
+| **Cross-session dedup** | 7 days | Recently surfaced memories suppressed across sessions |
 | **Injection size cap** | 2000 chars | Memory block truncated if too large |
 | **Circuit breaker** | 3 failures / 60s reset | Stops surfacing if LTM search keeps failing |
 | **Timeout** | 3s | Falls back to original response if search is slow |

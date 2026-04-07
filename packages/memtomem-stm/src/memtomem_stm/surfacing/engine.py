@@ -57,8 +57,20 @@ class SurfacingEngine:
             max_failures=config.circuit_max_failures,
             reset_timeout=config.circuit_reset_seconds,
         )
-        # Track memory IDs surfaced in this session to avoid repetition
+        # Track memory IDs surfaced — seeded from persistent store for cross-session dedup
         self._surfaced_ids: set[str] = set()
+        if feedback_tracker is not None and config.dedup_ttl_seconds > 0:
+            try:
+                self._surfaced_ids = feedback_tracker.store.get_seen_ids(
+                    config.dedup_ttl_seconds
+                )
+                if self._surfaced_ids:
+                    logger.debug(
+                        "Loaded %d seen memory IDs for cross-session dedup",
+                        len(self._surfaced_ids),
+                    )
+            except Exception:
+                logger.debug("Failed to load cross-session seen IDs", exc_info=True)
         # Track surfacing IDs already boosted to prevent double-counting
         self._boosted_surfacings: set[str] = set()
 
@@ -261,9 +273,15 @@ class SurfacingEngine:
             except Exception:
                 logger.debug("Failed to record surfacing event", exc_info=True)
 
-        # Record surfaced IDs to suppress repeats within this session
-        for r in relevant:
-            self._surfaced_ids.add(str(r.chunk.id))
+        # Record surfaced IDs to suppress repeats (in-memory + persistent)
+        new_ids = [str(r.chunk.id) for r in relevant]
+        for mid in new_ids:
+            self._surfaced_ids.add(mid)
+        if self._feedback_tracker is not None:
+            try:
+                self._feedback_tracker.store.mark_surfaced(new_ids)
+            except Exception:
+                logger.debug("Failed to persist seen memory IDs", exc_info=True)
 
         # Inject memories into response
         result = self._formatter.inject(

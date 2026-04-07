@@ -15,8 +15,11 @@ logger = logging.getLogger(__name__)
 
 class CompressionStrategy(StrEnum):
     NONE = "none"
+    AUTO = "auto"
     TRUNCATE = "truncate"
     EXTRACT_FIELDS = "extract_fields"
+    SCHEMA_PRUNING = "schema_pruning"
+    SKELETON = "skeleton"
     LLM_SUMMARY = "llm_summary"
     SELECTIVE = "selective"
     HYBRID = "hybrid"
@@ -88,6 +91,8 @@ class ToolOverrideConfig(BaseModel):
     hybrid: HybridConfig | None = None
     cleaning: CleaningConfig | None = None
     auto_index: bool | None = None
+    hidden: bool = False
+    description_override: str | None = None
 
 
 class UpstreamServerConfig(BaseModel):
@@ -98,8 +103,8 @@ class UpstreamServerConfig(BaseModel):
     transport: TransportType = TransportType.STDIO
     url: str = ""
     headers: dict[str, str] | None = None
-    compression: CompressionStrategy = CompressionStrategy.SELECTIVE
-    max_result_chars: int = 2000
+    compression: CompressionStrategy = CompressionStrategy.AUTO
+    max_result_chars: int = 8000
     llm: LLMCompressorConfig | None = None
     selective: SelectiveConfig | None = None
     hybrid: HybridConfig | None = None
@@ -109,6 +114,8 @@ class UpstreamServerConfig(BaseModel):
     max_retries: int = 3
     reconnect_delay_seconds: float = 1.0
     max_reconnect_delay_seconds: float = 30.0
+    max_description_chars: int = 200
+    strip_schema_descriptions: bool = False
 
 
 class CacheConfig(BaseModel):
@@ -124,15 +131,72 @@ class MetricsConfig(BaseModel):
     max_history: int = 10000
 
 
+# Static context window sizes (tokens) for known model families.
+# Used by ProxyConfig.effective_max_result_chars() to scale compression budget.
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "claude-opus-4": 200000,
+    "claude-sonnet-4": 200000,
+    "claude-haiku-4": 200000,
+    "claude-3.5": 200000,
+    "claude-3-opus": 200000,
+    "claude-3-sonnet": 200000,
+    "claude-3-haiku": 200000,
+    "gpt-4o": 128000,
+    "gpt-4o-mini": 128000,
+    "gpt-4-turbo": 128000,
+    "gpt-4.1": 1048576,
+    "gpt-4": 8192,
+    "gpt-3.5": 16385,
+    "o3": 200000,
+    "o4-mini": 200000,
+    "gemini-2": 1048576,
+    "gemini-1.5": 1048576,
+}
+
+
 class ProxyConfig(BaseModel):
     enabled: bool = False
     config_path: Path = Path("~/.memtomem/stm_proxy.json")
     upstream_servers: dict[str, UpstreamServerConfig] = {}
-    default_compression: CompressionStrategy = CompressionStrategy.HYBRID
+    default_compression: CompressionStrategy = CompressionStrategy.AUTO
     default_max_result_chars: int = 16000
+    min_result_retention: float = 0.65
+    """Minimum fraction of response to preserve after compression (0-1).
+
+    If ``default_max_result_chars`` or per-tool ``max_result_chars`` would
+    retain less than this fraction of the cleaned response, the effective
+    budget is raised to ``len(response) * min_result_retention``.
+
+    Default 0.5 ensures at least 50% of every response survives compression.
+    Set to 0 to disable and use fixed budgets only.
+    """
+    max_description_chars: int = 200
+    strip_schema_descriptions: bool = False
+    consumer_model: str = ""
+    context_budget_ratio: float = 0.05
     cache: CacheConfig = Field(default_factory=CacheConfig)
     auto_index: AutoIndexConfig = Field(default_factory=AutoIndexConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
+
+    def effective_max_result_chars(self) -> int:
+        """Compute max_result_chars scaled by consumer model's context window.
+
+        If ``consumer_model`` is set and matches a known model prefix,
+        the budget is ``context_window * context_budget_ratio * 3.5``
+        (tokens → chars), capped at ``default_max_result_chars``.
+        """
+        if not self.consumer_model:
+            return self.default_max_result_chars
+        # Prefix match: "claude-sonnet-4-20250514" matches "claude-sonnet-4"
+        ctx_tokens = None
+        for prefix, tokens in MODEL_CONTEXT_WINDOWS.items():
+            if self.consumer_model.startswith(prefix):
+                ctx_tokens = tokens
+                break
+        if ctx_tokens is None:
+            return self.default_max_result_chars
+        model_budget = int(ctx_tokens * self.context_budget_ratio * 3.5)
+        return min(model_budget, self.default_max_result_chars)
 
     @staticmethod
     def load_from_file(path: Path) -> ProxyConfig:

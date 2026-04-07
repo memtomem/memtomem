@@ -52,3 +52,4 @@ class SurfacingConfig(BaseModel):
     include_session_context: bool = True
     fire_webhook: bool = True
     max_injection_chars: int = 2000
+    dedup_ttl_seconds: float = 604800.0  # 7 days
