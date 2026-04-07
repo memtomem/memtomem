@@ -73,7 +73,7 @@ class TruncateCompressor:
     _HEADING_RE = re.compile(r"(?:^|\n)(#{1,6}\s+.+)")
 
     def __init__(self, min_retention: float | None = None) -> None:
-        self._min_retention = min_retention  # None = dynamic
+        self._min_retention = min_retention  # None = dynamic based on content length
 
     # Patterns for code structure boundaries (function/class/method definitions)
     _CODE_BOUNDARY_RE = re.compile(
