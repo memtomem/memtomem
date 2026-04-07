@@ -3,6 +3,8 @@
 별도 폴더에서 memtomem을 처음부터 구성하고, use case별로 하나씩 따라하며 기능을 검증하는 가이드.
 기존 `~/.memtomem/` 설정에 영향을 주지 않는다.
 
+> **클라이언트별 MCP 설정**: Claude Code, Gemini CLI, Google Antigravity, Cursor 각각의 설정 방법은 [client-setup-guides.md](client-setup-guides.md) 참고.
+
 ---
 
 ## 사전 준비
