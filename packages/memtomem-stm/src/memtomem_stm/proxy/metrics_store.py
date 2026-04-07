@@ -59,6 +59,7 @@ class MetricsStore:
             "is_error": "ALTER TABLE proxy_metrics ADD COLUMN is_error INTEGER NOT NULL DEFAULT 0",
             "error_category": "ALTER TABLE proxy_metrics ADD COLUMN error_category TEXT DEFAULT NULL",
             "error_code": "ALTER TABLE proxy_metrics ADD COLUMN error_code INTEGER DEFAULT NULL",
+            "trace_id": "ALTER TABLE proxy_metrics ADD COLUMN trace_id TEXT DEFAULT NULL",
         }
         for col, ddl in migrations.items():
             if col not in existing:
@@ -78,8 +79,8 @@ class MetricsStore:
             self._db.execute(
                 "INSERT INTO proxy_metrics "
                 "(server, tool, original_chars, compressed_chars, cleaned_chars, "
-                "is_error, error_category, error_code, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "is_error, error_category, error_code, trace_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     metrics.server,
                     metrics.tool,
@@ -89,6 +90,7 @@ class MetricsStore:
                     int(metrics.is_error),
                     metrics.error_category.value if metrics.error_category else None,
                     metrics.error_code,
+                    metrics.trace_id,
                     now,
                 ),
             )

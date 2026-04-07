@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import math
-from collections import defaultdict
+import time as _time
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -63,6 +64,32 @@ class CallMetrics:
     error_code: int | None = None
 
 
+class RPSTracker:
+    """Sliding-window requests-per-second counter."""
+
+    def __init__(self, window_seconds: float = 60.0) -> None:
+        self._window = window_seconds
+        self._timestamps: deque[float] = deque()
+
+    def record(self) -> None:
+        self._timestamps.append(_time.monotonic())
+        self._trim()
+
+    def _trim(self) -> None:
+        cutoff = _time.monotonic() - self._window
+        while self._timestamps and self._timestamps[0] < cutoff:
+            self._timestamps.popleft()
+
+    def rps(self) -> float:
+        self._trim()
+        if not self._timestamps:
+            return 0.0
+        return round(len(self._timestamps) / self._window, 2)
+
+    def reset(self) -> None:
+        self._timestamps.clear()
+
+
 class TokenTracker:
     """Aggregate proxy call metrics (in-memory + optional persistent store)."""
 
@@ -86,6 +113,7 @@ class TokenTracker:
         self._by_tool: dict[str, dict[str, int]] = defaultdict(
             lambda: {"calls": 0, "original_chars": 0, "compressed_chars": 0}
         )
+        self._rps_tracker = RPSTracker()
         # Error tracking
         self._total_errors = 0
         self._errors_by_category: dict[str, int] = defaultdict(int)
@@ -97,6 +125,7 @@ class TokenTracker:
         self._total_latencies: list[float] = []
 
     def record(self, metrics: CallMetrics) -> None:
+        self._rps_tracker.record()
         self._total_calls += 1
         self._total_original += metrics.original_chars
         self._total_compressed += metrics.compressed_chars
@@ -142,6 +171,7 @@ class TokenTracker:
 
     def record_error(self, metrics: CallMetrics) -> None:
         """Record a failed tool call for error tracking."""
+        self._rps_tracker.record()
         self._total_errors += 1
         if metrics.error_category is not None:
             self._errors_by_category[metrics.error_category.value] += 1
@@ -206,6 +236,7 @@ class TokenTracker:
                 "surface_ms": self._percentiles(self._surface_latencies),
                 "total_ms": self._percentiles(self._total_latencies),
             },
+            "current_rps": self._rps_tracker.rps(),
             "total_errors": self._total_errors,
             "errors_by_category": dict(self._errors_by_category),
             "error_rate": (

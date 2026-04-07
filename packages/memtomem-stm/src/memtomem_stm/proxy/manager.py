@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time as _time
+import uuid
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -504,6 +505,16 @@ class ProxyManager:
             return "Selective compression not active — no pending TOC selections."
         return self._selective_compressor.select(key, sections)
 
+    def get_upstream_health(self) -> dict[str, dict]:
+        """Return per-server health: connection status, tool count."""
+        health: dict[str, dict] = {}
+        for name, conn in self._connections.items():
+            health[name] = {
+                "connected": conn.session is not None,
+                "tools": len(conn.tools),
+            }
+        return health
+
     async def call_tool(self, server: str, tool: str, arguments: dict[str, Any]) -> str | list:
         """Forward a tool call to upstream, compress, surface, and return."""
         if server not in self._connections:
@@ -516,6 +527,9 @@ class ProxyManager:
         tool: str,
         arguments: dict[str, Any],
     ) -> str | list:
+        trace_id = uuid.uuid4().hex[:16]
+        logger.debug("trace_id=%s server=%s tool=%s", trace_id, server, tool)
+
         # Extract _context_query before forwarding
         context_query = arguments.get("_context_query") if arguments else None
         upstream_args = (
@@ -552,6 +566,7 @@ class ProxyManager:
                     self.tracker.record_error(CallMetrics(
                         server=server, tool=tool, original_chars=0, compressed_chars=0,
                         is_error=True, error_category=ErrorCategory.PROGRAMMING,
+                        trace_id=trace_id,
                     ))
                     raise
 
@@ -564,7 +579,7 @@ class ProxyManager:
                     self.tracker.record_error(CallMetrics(
                         server=server, tool=tool, original_chars=0, compressed_chars=0,
                         is_error=True, error_category=ErrorCategory.PROTOCOL,
-                        error_code=err_code,
+                        error_code=err_code, trace_id=trace_id,
                     ))
                     try:
                         await self._reconnect_server(server)
@@ -580,7 +595,7 @@ class ProxyManager:
                     )
                     self.tracker.record_error(CallMetrics(
                         server=server, tool=tool, original_chars=0, compressed_chars=0,
-                        is_error=True, error_category=cat,
+                        is_error=True, error_category=cat, trace_id=trace_id,
                     ))
                     # Reconnect before raising so the NEXT call starts fresh
                     try:
@@ -628,6 +643,7 @@ class ProxyManager:
                 server=server, tool=tool,
                 original_chars=len(original_text), compressed_chars=len(original_text),
                 is_error=True, error_category=ErrorCategory.UPSTREAM_ERROR,
+                trace_id=trace_id,
             ))
             return original_text
 
@@ -717,6 +733,7 @@ class ProxyManager:
                 cleaned_chars=len(cleaned),
                 original_tokens=_orig_tokens,
                 compressed_tokens=_comp_tokens,
+                trace_id=trace_id,
                 clean_ms=_clean_ms,
                 compress_ms=_compress_ms,
                 surface_ms=_surface_ms,
