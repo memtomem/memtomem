@@ -221,10 +221,12 @@ class SurfacingEngine:
 
         # Search LTM (in-process or MCP client)
         searcher = self._search_pipeline or self._mcp_adapter
+        ctx_win = self._config.context_window_size or None
         results, _stats = await searcher.search(
             query=query,
             top_k=max_results * 2,
             namespace=namespace,
+            **({"context_window": ctx_win} if ctx_win else {}),
         )
 
         # Filter by score, then exclude already-surfaced memories in this session

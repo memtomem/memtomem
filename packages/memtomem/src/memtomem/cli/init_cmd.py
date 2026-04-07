@@ -196,9 +196,7 @@ def _step_language(state: dict) -> None:
 
             click.secho("  kiwipiepy is installed.", fg="green")
         except ImportError:
-            click.secho(
-                "  kiwipiepy not installed. Run: pip install kiwipiepy", fg="yellow"
-            )
+            click.secho("  kiwipiepy not installed. Run: pip install kiwipiepy", fg="yellow")
     state["tokenizer"] = tokenizer
     click.echo()
 

@@ -47,7 +47,9 @@ async def _run(mode: str) -> None:
     if mode == "status":
         click.echo(click.style("Embedding Status", bold=True))
         if stored:
-            click.echo(f"  DB stored:  {stored['provider']}/{stored['model']} ({stored['dimension']}d)")
+            click.echo(
+                f"  DB stored:  {stored['provider']}/{stored['model']} ({stored['dimension']}d)"
+            )
         click.echo(
             f"  Config:     {cfg.embedding.provider}/{cfg.embedding.model} "
             f"({cfg.embedding.dimension}d)"
@@ -56,8 +58,12 @@ async def _run(mode: str) -> None:
             click.echo(click.style("\nNo mismatch — DB and config are in sync.", fg="green"))
         else:
             click.echo(click.style("\nMismatch detected!", fg="yellow"))
-            click.echo("  mm embedding-reset --mode apply-current    # reset DB (destructive, re-index needed)")
-            click.echo("  mm embedding-reset --mode revert-to-stored # match DB settings (non-destructive)")
+            click.echo(
+                "  mm embedding-reset --mode apply-current    # reset DB (destructive, re-index needed)"
+            )
+            click.echo(
+                "  mm embedding-reset --mode revert-to-stored # match DB settings (non-destructive)"
+            )
         await storage.close()
         return
 

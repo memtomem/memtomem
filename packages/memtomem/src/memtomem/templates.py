@@ -105,7 +105,8 @@ def render_template(name: str, content: str, title: str | None = None) -> str:
 
     # Remove field lines with unfilled placeholders, but keep headings
     result = "\n".join(
-        line for line in result.splitlines()
+        line
+        for line in result.splitlines()
         if "(fill: " not in line or line.lstrip().startswith("#")
     )
 

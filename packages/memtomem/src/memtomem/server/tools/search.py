@@ -1,11 +1,14 @@
-"""Tool: mem_search."""
+"""Tools: mem_search, mem_expand."""
 
 from __future__ import annotations
+
+from uuid import UUID
 
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app
 from memtomem.server.error_handler import tool_handler
-from memtomem.server.formatters import _format_results
+from memtomem.server.formatters import _display_path, _format_results
+from memtomem.server.tool_registry import register
 
 
 @mcp.tool()
@@ -18,6 +21,7 @@ async def mem_search(
     namespace: str | None = None,
     bm25_weight: float | None = None,
     dense_weight: float | None = None,
+    context_window: int = 0,
     ctx: CtxType = None,  # type: ignore[assignment]
 ) -> str:
     """Search across indexed memory files using hybrid BM25 + semantic search.
@@ -30,6 +34,7 @@ async def mem_search(
         namespace: Namespace scope (single value)
         bm25_weight: Override BM25 weight in RRF fusion (default 1.0). Set higher to favor keyword matches.
         dense_weight: Override dense/semantic weight in RRF fusion (default 1.0). Set higher to favor meaning.
+        context_window: Expand each result with ±N adjacent chunks (0=disabled). Use for more context.
     """
     if len(query) > 10_000:
         return "Error: query too long (max 10,000 characters)."
@@ -50,6 +55,7 @@ async def mem_search(
         tag_filter=tag_filter,
         namespace=effective_ns,
         rrf_weights=rrf_weights,
+        context_window=context_window if context_window > 0 else None,
     )
 
     if not results:
@@ -78,3 +84,72 @@ async def mem_search(
         )
 
     return output
+
+
+@mcp.tool()
+@tool_handler
+@register("search")
+async def mem_expand(
+    chunk_id: str,
+    window: int = 2,
+    ctx: CtxType = None,  # type: ignore[assignment]
+) -> str:
+    """Expand a chunk with adjacent context from the same source file.
+
+    Use this after mem_search when you need more surrounding context for
+    a specific result. Returns ±N adjacent chunks ordered by line number.
+
+    Args:
+        chunk_id: The UUID of the chunk to expand (from mem_search results)
+        window: Number of adjacent chunks before and after (default 2, max 10)
+    """
+    window = max(0, min(window, 10))
+    app = _get_app(ctx)
+
+    chunk = await app.storage.get_chunk(UUID(chunk_id))
+    if chunk is None:
+        return f"Chunk {chunk_id} not found."
+
+    source_file = chunk.metadata.source_file
+    all_chunks = await app.storage.list_chunks_by_source(source_file, limit=10000)
+
+    # Find position of this chunk
+    idx_map = {str(c.id): i for i, c in enumerate(all_chunks)}
+    pos = idx_map.get(chunk_id)
+    if pos is None:
+        return f"Chunk {chunk_id} not found in source file listing."
+
+    before = all_chunks[max(0, pos - window) : pos]
+    after = all_chunks[pos + 1 : pos + 1 + window]
+
+    parts = [
+        f"## Expand: chunk {pos + 1}/{len(all_chunks)} in {_display_path(source_file)}",
+        f"Window: ±{window} chunks\n",
+    ]
+
+    if before:
+        parts.append("### Before")
+        for c in before:
+            hierarchy = (
+                " > ".join(c.metadata.heading_hierarchy) if c.metadata.heading_hierarchy else ""
+            )
+            header = f"**[{_display_path(c.metadata.source_file)} L{c.metadata.start_line}-{c.metadata.end_line}]**"
+            if hierarchy:
+                header += f" {hierarchy}"
+            parts.append(f"{header}\n```\n{c.content}\n```")
+
+    parts.append("### Matched")
+    parts.append(f"```\n{chunk.content}\n```")
+
+    if after:
+        parts.append("### After")
+        for c in after:
+            hierarchy = (
+                " > ".join(c.metadata.heading_hierarchy) if c.metadata.heading_hierarchy else ""
+            )
+            header = f"**[{_display_path(c.metadata.source_file)} L{c.metadata.start_line}-{c.metadata.end_line}]**"
+            if hierarchy:
+                header += f" {hierarchy}"
+            parts.append(f"{header}\n```\n{c.content}\n```")
+
+    return "\n\n".join(parts)

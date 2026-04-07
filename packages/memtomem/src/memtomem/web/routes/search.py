@@ -22,6 +22,7 @@ async def search(
     source_filter: str | None = Query(None),
     tag_filter: str | None = Query(None),
     namespace: str | None = Query(None),
+    context_window: int = Query(0, ge=0, le=10, description="Expand ±N adjacent chunks"),
     pipeline=Depends(get_search_pipeline),
 ) -> SearchResponse:
     try:
@@ -31,6 +32,7 @@ async def search(
             source_filter=source_filter,
             tag_filter=tag_filter,
             namespace=namespace,
+            context_window=context_window if context_window > 0 else None,
         )
     except Exception as exc:
         logger.error("Search failed: %s", exc, exc_info=True)

@@ -125,7 +125,7 @@ async def mem_session_list(
             except (json.JSONDecodeError, TypeError):
                 meta = {}
         title = meta.get("title", "")
-        label = f" \"{title}\"" if title else ""
+        label = f' "{title}"' if title else ""
         summary = f" — {s['summary'][:60]}..." if s.get("summary") else ""
         lines.append(
             f"  [{status}] {s['id'][:8]}...{label} ({s['agent_id']}) {s['started_at']}{summary}"

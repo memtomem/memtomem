@@ -219,6 +219,20 @@ class EntityExtractionConfig(BaseSettings):
     min_confidence: float = 0.5
 
 
+class ContextWindowConfig(BaseSettings):
+    """Context window expansion for search results (small-to-big retrieval)."""
+
+    enabled: bool = False
+    window_size: int = 2  # ±N adjacent chunks
+
+    @field_validator("window_size")
+    @classmethod
+    def must_be_in_range(cls, v: int) -> int:
+        if not 0 <= v <= 10:
+            raise ValueError("window_size must be 0-10")
+        return v
+
+
 class StmProxyConfig(BaseSettings):
     """STM proxy gateway integration (requires memtomem-stm package)."""
 
@@ -251,6 +265,7 @@ class Mem2MemConfig(BaseSettings):
     )
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
     entity_extraction: EntityExtractionConfig = Field(default_factory=EntityExtractionConfig)
+    context_window: ContextWindowConfig = Field(default_factory=ContextWindowConfig)
     stm_proxy: StmProxyConfig = Field(default_factory=StmProxyConfig)
 
 

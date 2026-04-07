@@ -38,7 +38,7 @@ mcp = FastMCP("memtomem", lifespan=app_lifespan)
 from memtomem.server.tools.indexing import mem_index  # noqa: E402, F401
 from memtomem.server.tools.memory_crud import mem_add, mem_batch_add, mem_delete, mem_edit  # noqa: E402, F401
 from memtomem.server.tools.recall import mem_recall  # noqa: E402, F401
-from memtomem.server.tools.search import mem_search  # noqa: E402, F401
+from memtomem.server.tools.search import mem_search, mem_expand  # noqa: E402, F401
 from memtomem.server.tools.status_config import (
     mem_config,
     mem_embedding_reset,
@@ -84,7 +84,12 @@ from memtomem.server.tools.policy import (
     mem_policy_delete,
     mem_policy_run,
 )  # noqa: E402, F401
-from memtomem.server.tools.context import mem_context_detect, mem_context_generate, mem_context_diff, mem_context_sync  # noqa: E402, F401
+from memtomem.server.tools.context import (
+    mem_context_detect,
+    mem_context_generate,
+    mem_context_diff,
+    mem_context_sync,
+)  # noqa: E402, F401
 from memtomem.server.tools.meta import mem_do  # noqa: E402, F401
 import memtomem.server.resources  # noqa: E402, F401  — register MCP resources
 

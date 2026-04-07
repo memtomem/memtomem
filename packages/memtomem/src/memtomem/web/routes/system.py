@@ -369,7 +369,9 @@ async def remove_memory_dir(request: Request, config=Depends(get_config)):
         raise HTTPException(status_code=400, detail="path is required")
 
     resolved = Path(dir_path).expanduser().resolve()
-    new_dirs = [p for p in config.indexing.memory_dirs if Path(p).expanduser().resolve() != resolved]
+    new_dirs = [
+        p for p in config.indexing.memory_dirs if Path(p).expanduser().resolve() != resolved
+    ]
     if len(new_dirs) == len(config.indexing.memory_dirs):
         raise HTTPException(status_code=404, detail="Directory not in memory_dirs")
     if len(new_dirs) == 0:

@@ -101,6 +101,7 @@ async def create_components(config: Mem2MemConfig | None = None) -> Components:
         reranker=reranker,
         expansion_config=config.query_expansion,
         importance_config=config.importance,
+        context_window_config=config.context_window,
     )
 
     return Components(

@@ -330,7 +330,7 @@ STM applies multiple safeguards to prevent surfacing from becoming intrusive:
 | **Min response size** | 5000 chars | Short responses don't trigger surfacing |
 | **Session dedup** | On | Same memory ID not shown twice in one session |
 | **Cross-session dedup** | 7 days | Recently surfaced memories suppressed across sessions |
-| **Injection size cap** | 2000 chars | Memory block truncated if too large |
+| **Injection size cap** | 3000 chars | Memory block truncated if too large |
 | **Circuit breaker** | 3 failures / 60s reset | Stops surfacing if LTM search keeps failing |
 | **Timeout** | 3s | Falls back to original response if search is slow |
 
@@ -410,6 +410,71 @@ surface → user rates helpful → access_count++ → higher search ranking → 
 → stm_surfacing_stats()
 → stm_surfacing_stats(tool="read_file")
 ```
+
+---
+
+## Context-Window Search
+
+By default, search returns only the matched chunk (300-500 characters). **Context-window search** expands results with adjacent chunks from the same source file, giving your agent full surrounding context.
+
+### Two ways to expand
+
+**1. Bulk expansion via `mem_search`**
+
+Request context for all results at once:
+
+```
+→ mem_search("authentication flow", context_window=2)
+```
+
+Each result includes ±2 adjacent chunks. The `context_window` parameter (0-10) controls expansion size.
+
+**2. Targeted expansion via `mem_expand`**
+
+Expand a specific result after reviewing search output:
+
+```
+→ mem_search("JWT token handling")          # basic results
+→ mem_do(action="expand", params={          # expand one result
+    "chunk_id": "abc-123-def",
+    "window": 3
+  })
+```
+
+Returns the full content of ±3 adjacent chunks with section headings and line numbers.
+
+### Typical workflow
+
+1. `mem_search("query")` — get basic results
+2. Review results, identify the most relevant one
+3. `mem_expand(chunk_id, window=3)` — get full surrounding context
+4. Or re-search with `mem_search("query", context_window=2)` if all results need context
+
+### Configuration
+
+Enable globally (all searches get context expansion):
+
+```bash
+export MEMTOMEM_CONTEXT_WINDOW__ENABLED=true
+export MEMTOMEM_CONTEXT_WINDOW__WINDOW_SIZE=2
+```
+
+Or use per-call `context_window=N` parameter without global config.
+
+### STM surfacing with context
+
+When memories are surfaced proactively, expand them with adjacent context:
+
+```json
+{
+  "surfacing": {
+    "context_window_size": 2,
+    "max_injection_chars": 3000
+  }
+}
+```
+
+Setting `context_window_size` > 0 passes the window to LTM search, so surfaced memories include neighboring chunks for richer context.
 
 ---
 

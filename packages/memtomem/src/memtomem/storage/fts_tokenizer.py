@@ -119,7 +119,7 @@ def _apply_prefix_wildcard(text: str, *, use_or: bool = False) -> str:
     for word in text.split():
         if _FTS5_SPECIAL_RE.search(word):
             # Quote the word so FTS5 treats it as a literal phrase
-            safe = word.replace('"', '')
+            safe = word.replace('"', "")
             if safe:
                 parts.append(f'"{safe}"')
         else:

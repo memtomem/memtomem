@@ -297,6 +297,15 @@ All variables use the `MEMTOMEM_` prefix, with nested sections separated by `__`
 | `MEMTOMEM_SEARCH__RRF_WEIGHTS` | `[1.0, 1.0]` | RRF weights for [BM25, Dense] — adjust to favor one retriever |
 | `MEMTOMEM_SEARCH__TOKENIZER` | `unicode61` | FTS tokenizer (`unicode61` or `kiwipiepy`) |
 
+### Context Window
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMTOMEM_CONTEXT_WINDOW__ENABLED` | `false` | Enable context expansion for all searches |
+| `MEMTOMEM_CONTEXT_WINDOW__WINDOW_SIZE` | `2` | Number of adjacent chunks (±N) to include |
+
+When enabled, search results include surrounding chunks from the same source file. Also available per-call via `mem_search(context_window=N)` or `mem_do(action="expand", params={"chunk_id": "...", "window": 2})`.
+
 ### Indexing
 
 | Variable | Default | Description |

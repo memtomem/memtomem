@@ -65,8 +65,7 @@ def _read_mcp_servers(path: Path, fmt: str = "standard") -> dict:
                     servers.update(proj_servers)
         # Filter out disabled servers
         servers = {
-            k: v for k, v in servers.items()
-            if not (isinstance(v, dict) and v.get("disabled"))
+            k: v for k, v in servers.items() if not (isinstance(v, dict) and v.get("disabled"))
         }
         return servers
 
@@ -272,9 +271,7 @@ def _step_cache(state: dict) -> None:
     state["cache_enabled"] = enable_cache
 
     if enable_cache:
-        ttl = nav_prompt(
-            "  Cache TTL in seconds (3600 = 1 hour)", type=int, default=3600
-        )
+        ttl = nav_prompt("  Cache TTL in seconds (3600 = 1 hour)", type=int, default=3600)
         state["cache_ttl"] = ttl
     click.echo()
 
