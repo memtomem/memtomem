@@ -72,8 +72,8 @@ class TruncateCompressor:
 
     _HEADING_RE = re.compile(r"(?:^|\n)(#{1,6}\s+.+)")
 
-    def __init__(self, min_retention: float = 0.5) -> None:
-        self._min_retention = min_retention
+    def __init__(self, min_retention: float | None = None) -> None:
+        self._min_retention = min_retention  # None = dynamic
 
     # Patterns for code structure boundaries (function/class/method definitions)
     _CODE_BOUNDARY_RE = re.compile(
@@ -92,7 +92,19 @@ class TruncateCompressor:
             return text
 
         # Enforce minimum retention: keep at least N% of original content
-        min_budget = int(len(text) * self._min_retention)
+        # Dynamic: shorter content → higher retention (less to gain from cutting)
+        retention = self._min_retention
+        if retention is None:
+            n = len(text)
+            if n < 1000:
+                retention = 0.9   # short: keep almost all
+            elif n < 3000:
+                retention = 0.65  # medium: keep majority
+            elif n < 10000:
+                retention = 0.5   # large: keep half
+            else:
+                retention = 0.35  # very large: aggressive OK
+        min_budget = int(len(text) * retention)
         if max_chars < min_budget:
             max_chars = min_budget
 
@@ -837,22 +849,28 @@ class SchemaPruningCompressor:
     data relationship is represented in the output.
     """
 
-    def __init__(self, max_string: int = 80, max_array_items: int = 3, min_retention: float = 0.5) -> None:
+    def __init__(self, max_string: int = 80, max_array_items: int = 3, min_retention: float | None = None) -> None:
         self._max_string = max_string
         self._max_array = max_array_items
-        self._min_retention = min_retention
+        self._min_retention = min_retention  # None = use TruncateCompressor's dynamic
 
     def compress(self, text: str, *, max_chars: int) -> str:
         if not text or len(text) <= max_chars:
             return text
-        # Enforce min retention
-        min_budget = int(len(text) * self._min_retention)
+        # Enforce min retention (delegate to TruncateCompressor's dynamic logic)
+        t = TruncateCompressor(min_retention=self._min_retention)
+        # Use TruncateCompressor just for budget calculation
+        n = len(text)
+        retention = self._min_retention
+        if retention is None:
+            retention = 0.9 if n < 1000 else 0.65 if n < 3000 else 0.5 if n < 10000 else 0.35
+        min_budget = int(n * retention)
         if max_chars < min_budget:
             max_chars = min_budget
         try:
             data = json.loads(text)
         except (json.JSONDecodeError, ValueError):
-            return TruncateCompressor(min_retention=self._min_retention).compress(text, max_chars=max_chars)
+            return t.compress(text, max_chars=max_chars)
 
         # Iteratively reduce detail until output fits budget
         for max_str in (self._max_string, 40, 20):
