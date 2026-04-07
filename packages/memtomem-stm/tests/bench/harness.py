@@ -305,6 +305,22 @@ class BenchHarness:
             quality_score=score,
         )
 
+    @staticmethod
+    def _apply_retention(cleaned_len: int, budget: int) -> int:
+        """Enforce dynamic minimum retention — single source of truth.
+
+        Mirrors ProxyManager logic so bench results match production behavior.
+        """
+        if cleaned_len < 1000:
+            min_r = 0.9
+        elif cleaned_len < 3000:
+            min_r = 0.65
+        elif cleaned_len < 10000:
+            min_r = 0.5
+        else:
+            min_r = 0.35
+        return max(budget, int(cleaned_len * min_r))
+
     def _run_pipeline(
         self, task: BenchTask, compressor: Compressor | None = None, max_chars: int | None = None
     ) -> BenchResult:
@@ -317,6 +333,9 @@ class BenchHarness:
             t0 = _time.monotonic()
             cleaned = self._cleaner.clean(task.content)
             clean_ms = (_time.monotonic() - t0) * 1000
+
+            # Enforce retention at harness level (matches ProxyManager behavior)
+            budget = self._apply_retention(len(cleaned), budget)
 
             t0 = _time.monotonic()
             compressed = comp.compress(cleaned, max_chars=budget)
@@ -367,8 +386,10 @@ class BenchHarness:
             cleaned = self._cleaner.clean(task.content)
             clean_ms = (_time.monotonic() - t0) * 1000
 
+            effective_budget = self._apply_retention(len(cleaned), task.max_chars)
+
             t0 = _time.monotonic()
-            compressed = self._compressor.compress(cleaned, max_chars=task.max_chars)
+            compressed = self._compressor.compress(cleaned, max_chars=effective_budget)
             compress_ms = (_time.monotonic() - t0) * 1000
 
             surfaced = compressed

@@ -542,11 +542,23 @@ class ProxyManager:
         _clean_ms = (_time.monotonic() - _t0) * 1000
 
         # ── Stage 2: COMPRESS ──
-        # Enforce minimum retention: budget must preserve at least N% of cleaned content
+        # Enforce minimum retention: budget must preserve at least N% of cleaned content.
+        # Dynamic scaling: shorter content → higher retention (less to gain from cutting).
+        # This is the SINGLE place where retention is enforced — compressors trust max_chars.
         effective_max_chars = tc.max_chars
         min_retention = getattr(self._config, "min_result_retention", 0.5)
         if min_retention > 0:
-            min_budget = int(len(cleaned) * min_retention)
+            n = len(cleaned)
+            # Scale: short content (< 1KB) gets ~90% retention, large (10KB+) gets base retention
+            if n < 1000:
+                dynamic = max(min_retention, 0.9)
+            elif n < 3000:
+                dynamic = max(min_retention, 0.65)
+            elif n < 10000:
+                dynamic = max(min_retention, 0.5)
+            else:
+                dynamic = min_retention  # use config value for very large content
+            min_budget = int(n * dynamic)
             if effective_max_chars < min_budget:
                 effective_max_chars = min_budget
 
