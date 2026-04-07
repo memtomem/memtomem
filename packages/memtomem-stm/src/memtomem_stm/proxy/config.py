@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 class CompressionStrategy(StrEnum):
     NONE = "none"
+    AUTO = "auto"
     TRUNCATE = "truncate"
     EXTRACT_FIELDS = "extract_fields"
     SCHEMA_PRUNING = "schema_pruning"
@@ -100,7 +101,7 @@ class UpstreamServerConfig(BaseModel):
     transport: TransportType = TransportType.STDIO
     url: str = ""
     headers: dict[str, str] | None = None
-    compression: CompressionStrategy = CompressionStrategy.SELECTIVE
+    compression: CompressionStrategy = CompressionStrategy.AUTO
     max_result_chars: int = 2000
     llm: LLMCompressorConfig | None = None
     selective: SelectiveConfig | None = None
@@ -130,7 +131,7 @@ class ProxyConfig(BaseModel):
     enabled: bool = False
     config_path: Path = Path("~/.memtomem/stm_proxy.json")
     upstream_servers: dict[str, UpstreamServerConfig] = {}
-    default_compression: CompressionStrategy = CompressionStrategy.HYBRID
+    default_compression: CompressionStrategy = CompressionStrategy.AUTO
     default_max_result_chars: int = 16000
     min_result_retention: float = 0.5
     """Minimum fraction of response to preserve after compression (0-1).

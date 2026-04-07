@@ -26,6 +26,7 @@ from memtomem_stm.proxy.compression import (
     LLMCompressor,
     SelectiveCompressor,
     TruncateCompressor,
+    auto_select_strategy,
     get_compressor,
 )
 from memtomem_stm.proxy.config import (
@@ -270,6 +271,15 @@ class ProxyManager:
         server: str,
         tool: str,
     ) -> str:
+        if compression == CompressionStrategy.AUTO:
+            resolved = auto_select_strategy(text, max_chars=max_chars)
+            logger.debug("auto_select_strategy → %s for %s/%s", resolved.value, server, tool)
+            if resolved == CompressionStrategy.NONE:
+                return text
+            return await self._apply_compression(
+                text, resolved, max_chars, sel_cfg, llm_cfg, hybrid_cfg, server, tool
+            )
+
         if compression == CompressionStrategy.HYBRID:
             return await self._apply_hybrid(text, max_chars, hybrid_cfg, sel_cfg)
 
