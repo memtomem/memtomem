@@ -74,6 +74,8 @@ class SelectiveConfig(BaseModel):
     pending_ttl_seconds: float = 300.0
     json_depth: int = 1
     min_section_chars: int = 50
+    pending_store: str = "memory"  # "memory" | "sqlite"
+    pending_store_path: Path = Path("~/.memtomem/pending_selections.db")
 
 
 class AutoIndexConfig(BaseModel):

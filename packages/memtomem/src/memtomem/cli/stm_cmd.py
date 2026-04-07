@@ -24,7 +24,7 @@ def _mcp_config_sources() -> list[tuple[str, Path, str]]:
     sources: list[tuple[str, Path, str]] = [
         ("Claude Code (user)", home / ".claude.json", "claude_json"),
         ("Cursor", home / ".cursor" / "mcp.json", "standard"),
-        ("Gemini CLI", home / ".gemini" / "settings.json", "standard"),
+        ("Gemini CLI / Antigravity", home / ".gemini" / "settings.json", "standard"),
         ("Project (.mcp.json)", Path.cwd() / ".mcp.json", "standard"),
     ]
     if platform.system() == "Darwin":

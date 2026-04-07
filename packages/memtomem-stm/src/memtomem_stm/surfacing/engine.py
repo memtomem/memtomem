@@ -61,9 +61,7 @@ class SurfacingEngine:
         self._surfaced_ids: set[str] = set()
         if feedback_tracker is not None and config.dedup_ttl_seconds > 0:
             try:
-                self._surfaced_ids = feedback_tracker.store.get_seen_ids(
-                    config.dedup_ttl_seconds
-                )
+                self._surfaced_ids = feedback_tracker.store.get_seen_ids(config.dedup_ttl_seconds)
                 if self._surfaced_ids:
                     logger.debug(
                         "Loaded %d seen memory IDs for cross-session dedup",

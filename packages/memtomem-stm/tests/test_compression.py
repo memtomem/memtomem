@@ -140,7 +140,7 @@ class TestSelectiveCompressor:
         for i in range(3):
             data = {f"k{i}": "x" * 200}
             c.compress(json.dumps(data), max_chars=50)
-        assert len(c._pending) <= 2
+        assert len(c._store) <= 2
 
     def test_plain_text_parsed_by_paragraphs(self):
         text = "\n\n".join([f"Paragraph {i} content here." * 10 for i in range(5)])

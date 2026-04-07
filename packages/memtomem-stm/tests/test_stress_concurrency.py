@@ -267,7 +267,7 @@ class TestSelectiveCompressorStress:
             comp.compress(text, max_chars=50)
 
         # Only max_pending entries should remain
-        assert len(comp._pending) <= 5
+        assert len(comp._store) <= 5
 
     def test_large_section_count(self):
         """Compressor handles document with 200+ sections."""

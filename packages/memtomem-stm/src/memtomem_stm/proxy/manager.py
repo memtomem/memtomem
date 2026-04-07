@@ -274,6 +274,26 @@ class ProxyManager:
                 )
         return result
 
+    def _create_selective(self, sel_cfg: SelectiveConfig | None) -> SelectiveCompressor:
+        """Create a SelectiveCompressor with the appropriate PendingStore backend."""
+        kwargs: dict[str, Any] = {}
+        store = None
+        if sel_cfg is not None:
+            kwargs = {
+                "max_pending": sel_cfg.max_pending,
+                "pending_ttl_seconds": sel_cfg.pending_ttl_seconds,
+                "json_depth": sel_cfg.json_depth,
+                "min_section_chars": sel_cfg.min_section_chars,
+            }
+            if sel_cfg.pending_store == "sqlite":
+                from memtomem_stm.proxy.pending_store import SQLitePendingStore
+
+                store = SQLitePendingStore(sel_cfg.pending_store_path.expanduser())
+                store.initialize()
+        if store is not None:
+            kwargs["store"] = store
+        return SelectiveCompressor(**kwargs)
+
     def _resolve_tool_config(self, server: str, tool: str) -> ToolConfig:
         conn = self._connections[server]
         cfg = conn.config
@@ -352,15 +372,7 @@ class ProxyManager:
         if compression == CompressionStrategy.SELECTIVE:
             async with self._selective_lock:
                 if self._selective_compressor is None:
-                    kwargs: dict[str, Any] = {}
-                    if sel_cfg is not None:
-                        kwargs = {
-                            "max_pending": sel_cfg.max_pending,
-                            "pending_ttl_seconds": sel_cfg.pending_ttl_seconds,
-                            "json_depth": sel_cfg.json_depth,
-                            "min_section_chars": sel_cfg.min_section_chars,
-                        }
-                    self._selective_compressor = SelectiveCompressor(**kwargs)
+                    self._selective_compressor = self._create_selective(sel_cfg)
             return self._selective_compressor.compress(text, max_chars=max_chars)
 
         if compression == CompressionStrategy.LLM_SUMMARY:
@@ -411,15 +423,7 @@ class ProxyManager:
         cfg = hybrid_cfg or HybridConfig()
         async with self._selective_lock:
             if self._selective_compressor is None:
-                kw: dict[str, Any] = {}
-                if sel_cfg is not None:
-                    kw = {
-                        "max_pending": sel_cfg.max_pending,
-                        "pending_ttl_seconds": sel_cfg.pending_ttl_seconds,
-                        "json_depth": sel_cfg.json_depth,
-                        "min_section_chars": sel_cfg.min_section_chars,
-                    }
-                self._selective_compressor = SelectiveCompressor(**kw)
+                self._selective_compressor = self._create_selective(sel_cfg)
 
         compressor = HybridCompressor(
             head_chars=cfg.head_chars,
@@ -563,11 +567,17 @@ class ProxyManager:
                     not isinstance(exc, (OSError, ConnectionError, asyncio.TimeoutError, EOFError))
                     and err_code is None
                 ):
-                    self.tracker.record_error(CallMetrics(
-                        server=server, tool=tool, original_chars=0, compressed_chars=0,
-                        is_error=True, error_category=ErrorCategory.PROGRAMMING,
-                        trace_id=trace_id,
-                    ))
+                    self.tracker.record_error(
+                        CallMetrics(
+                            server=server,
+                            tool=tool,
+                            original_chars=0,
+                            compressed_chars=0,
+                            is_error=True,
+                            error_category=ErrorCategory.PROGRAMMING,
+                            trace_id=trace_id,
+                        )
+                    )
                     raise
 
                 # Protocol errors (bad params, unknown method) — don't retry,
@@ -576,11 +586,18 @@ class ProxyManager:
                     logger.debug(
                         "Protocol error %s for %s/%s, skipping retry", err_code, server, tool
                     )
-                    self.tracker.record_error(CallMetrics(
-                        server=server, tool=tool, original_chars=0, compressed_chars=0,
-                        is_error=True, error_category=ErrorCategory.PROTOCOL,
-                        error_code=err_code, trace_id=trace_id,
-                    ))
+                    self.tracker.record_error(
+                        CallMetrics(
+                            server=server,
+                            tool=tool,
+                            original_chars=0,
+                            compressed_chars=0,
+                            is_error=True,
+                            error_category=ErrorCategory.PROTOCOL,
+                            error_code=err_code,
+                            trace_id=trace_id,
+                        )
+                    )
                     try:
                         await self._reconnect_server(server)
                     except Exception:
@@ -593,10 +610,17 @@ class ProxyManager:
                         if isinstance(exc, asyncio.TimeoutError)
                         else ErrorCategory.TRANSPORT
                     )
-                    self.tracker.record_error(CallMetrics(
-                        server=server, tool=tool, original_chars=0, compressed_chars=0,
-                        is_error=True, error_category=cat, trace_id=trace_id,
-                    ))
+                    self.tracker.record_error(
+                        CallMetrics(
+                            server=server,
+                            tool=tool,
+                            original_chars=0,
+                            compressed_chars=0,
+                            is_error=True,
+                            error_category=cat,
+                            trace_id=trace_id,
+                        )
+                    )
                     # Reconnect before raising so the NEXT call starts fresh
                     try:
                         await self._reconnect_server(server)
@@ -639,12 +663,17 @@ class ProxyManager:
         original_text = "\n".join(text_parts)
 
         if result.isError:
-            self.tracker.record_error(CallMetrics(
-                server=server, tool=tool,
-                original_chars=len(original_text), compressed_chars=len(original_text),
-                is_error=True, error_category=ErrorCategory.UPSTREAM_ERROR,
-                trace_id=trace_id,
-            ))
+            self.tracker.record_error(
+                CallMetrics(
+                    server=server,
+                    tool=tool,
+                    original_chars=len(original_text),
+                    compressed_chars=len(original_text),
+                    is_error=True,
+                    error_category=ErrorCategory.UPSTREAM_ERROR,
+                    trace_id=trace_id,
+                )
+            )
             return original_text
 
         # Resolve effective settings

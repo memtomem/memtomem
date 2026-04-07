@@ -7,7 +7,6 @@ import logging
 import re
 import time
 import uuid
-from collections import deque
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -91,8 +90,11 @@ class TruncateCompressor:
         if stripped and stripped[0] == "{":
             try:
                 data = json.loads(stripped)
-                if (isinstance(data, dict) and len(data) >= 2
-                        and all(isinstance(v, dict) for v in data.values())):
+                if (
+                    isinstance(data, dict)
+                    and len(data) >= 2
+                    and all(isinstance(v, dict) for v in data.values())
+                ):
                     return self._json_key_truncate(data, max_chars)
             except (json.JSONDecodeError, ValueError):
                 pass
@@ -245,18 +247,12 @@ class TruncateCompressor:
         head_text = "\n".join(head_lines)
         omitted = len(lines) - sample_count - len(tail_lines)
 
-        result = (
-            f"{head_text}\n"
-            f"... ({omitted} similar lines omitted)\n"
-            f"{tail_text}"
-        )
+        result = f"{head_text}\n... ({omitted} similar lines omitted)\n{tail_text}"
         if len(result) > max_chars:
             result = result[:max_chars]
         return result
 
-    def _section_aware_truncate(
-        self, text: str, max_chars: int, headings: list[re.Match]
-    ) -> str:
+    def _section_aware_truncate(self, text: str, max_chars: int, headings: list[re.Match]) -> str:
         """Preserve information from ALL sections — minimum representation first.
 
         Strategy (eliminates head bias):
@@ -341,7 +337,9 @@ class TruncateCompressor:
                 if extra <= enrich_budget:
                     enriched[summary_idx] = summary_body
                 else:
-                    enriched[summary_idx] = summary_body[: len(minimums[summary_idx]) + enrich_budget]
+                    enriched[summary_idx] = summary_body[
+                        : len(minimums[summary_idx]) + enrich_budget
+                    ]
 
         # ── Assemble ──
         parts: list[str] = []
@@ -358,9 +356,7 @@ class TruncateCompressor:
             result = result[:max_chars]
         return result
 
-    def _code_aware_truncate(
-        self, text: str, max_chars: int, boundaries: list[re.Match]
-    ) -> str:
+    def _code_aware_truncate(self, text: str, max_chars: int, boundaries: list[re.Match]) -> str:
         """Preserve signatures/names from ALL code blocks, not just the first ones.
 
         For code files: keeps full body of top functions + signature lines of rest.
@@ -468,13 +464,18 @@ class SelectiveCompressor:
         pending_ttl_seconds: float = 300.0,
         json_depth: int = 1,
         min_section_chars: int = 50,
+        store: object | None = None,
     ) -> None:
         self._max_pending = max_pending
         self._ttl = pending_ttl_seconds
         self._json_depth = json_depth
         self._min_section_chars = min_section_chars
-        self._pending: dict[str, PendingSelection] = {}
-        self._insertion_order: deque[str] = deque()
+        if store is not None:
+            self._store = store
+        else:
+            from memtomem_stm.proxy.pending_store import InMemoryPendingStore
+
+            self._store = InMemoryPendingStore()
 
     def compress(self, text: str, *, max_chars: int) -> str:
         if not text or len(text) <= max_chars:
@@ -500,13 +501,15 @@ class SelectiveCompressor:
     def _store_and_build_toc(self, text: str, fmt: str, chunks: dict[str, str]) -> str:
         selection_key = uuid.uuid4().hex[:12]
 
-        self._pending[selection_key] = PendingSelection(
-            chunks=chunks,
-            format=fmt,
-            created_at=time.monotonic(),
-            total_chars=len(text),
+        self._store.put(
+            selection_key,
+            PendingSelection(
+                chunks=chunks,
+                format=fmt,
+                created_at=time.monotonic(),
+                total_chars=len(text),
+            ),
         )
-        self._insertion_order.append(selection_key)
         self._evict()
 
         entries = []
@@ -536,13 +539,13 @@ class SelectiveCompressor:
         return json.dumps(toc, ensure_ascii=False)
 
     def select(self, key: str, sections: list[str]) -> str:
-        self._evict_expired()
+        self._store.evict_expired(self._ttl)
 
-        pending = self._pending.get(key)
+        pending = self._store.get(key)
         if pending is None:
             return f"Selection key '{key}' not found or expired."
 
-        pending.created_at = time.monotonic()
+        self._store.touch(key)
 
         selected_parts: list[str] = []
         for section in sections:
@@ -654,18 +657,8 @@ class SelectiveCompressor:
         return "paragraph"
 
     def _evict(self) -> None:
-        self._evict_expired()
-        while len(self._pending) > self._max_pending and self._insertion_order:
-            oldest_key = self._insertion_order.popleft()
-            self._pending.pop(oldest_key, None)
-
-    def _evict_expired(self) -> None:
-        now = time.monotonic()
-        expired = {k for k, v in self._pending.items() if (now - v.created_at) > self._ttl}
-        for k in expired:
-            self._pending.pop(k, None)
-        if expired:
-            self._insertion_order = deque(k for k in self._insertion_order if k not in expired)
+        self._store.evict_expired(self._ttl)
+        self._store.evict_oldest(self._max_pending)
 
 
 class FieldExtractCompressor:
@@ -824,7 +817,7 @@ class SchemaPruningCompressor:
         try:
             data = json.loads(text)
         except (json.JSONDecodeError, ValueError):
-            return t.compress(text, max_chars=max_chars)
+            return TruncateCompressor().compress(text, max_chars=max_chars)
 
         # Iteratively reduce detail until output fits budget
         for max_str in (self._max_string, 40, 20):
@@ -840,9 +833,7 @@ class SchemaPruningCompressor:
             result = result[:max_chars] + "\n... (pruned)"
         return result
 
-    def _prune(
-        self, data: object, max_str: int = 80, max_array: int | None = None
-    ) -> object:
+    def _prune(self, data: object, max_str: int = 80, max_array: int | None = None) -> object:
         ma = max_array if max_array is not None else self._max_array
         if isinstance(data, dict):
             return {k: self._prune(v, max_str, ma) for k, v in data.items()}
