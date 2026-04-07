@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import re
 import time
 import uuid
@@ -22,83 +21,13 @@ from memtomem_stm.proxy.config import (
     LLMProvider,
     TailMode,
 )
+from memtomem_stm.proxy.relevance import BM25Scorer, RelevanceScorer
 from memtomem_stm.utils.circuit_breaker import CircuitBreaker as _CircuitBreaker
 
 logger = logging.getLogger(__name__)
 
-
-# ── Query-Aware Relevance Scoring ─────────────────────────────────────
-
-
-class QueryRelevanceScorer:
-    """BM25-like section relevance scoring with heading weighting.
-
-    Headings are weighted 3× over body text (headings use vocabulary closer
-    to user queries). Case-insensitive with basic suffix stemming.
-    """
-
-    _TOKEN_RE = re.compile(r"[a-zA-Z0-9\uac00-\ud7a3\u3040-\u309f\u30a0-\u30ff\u4e00-\u9fff_]+")
-    _SUFFIX_RE = re.compile(r"(ing|ed|ly|tion|ness|ment|ies|es|s)$")
-    _HEADING_WEIGHT = 3.0
-
-    def __init__(
-        self,
-        query: str,
-        sections: list[tuple[str, str]],
-        *,
-        k1: float = 1.5,
-        b: float = 0.75,
-    ) -> None:
-        self._k1 = k1
-        self._b = b
-        self._query_terms = self._tokenize(query)
-        self._sections = sections
-        # Pre-compute per-section token counts (heading-weighted)
-        self._doc_tfs: list[dict[str, float]] = []
-        self._doc_lens: list[float] = []
-        for title, body in sections:
-            heading_tokens = self._tokenize(title)
-            body_tokens = self._tokenize(body)
-            tf: dict[str, float] = {}
-            for t in heading_tokens:
-                tf[t] = tf.get(t, 0.0) + self._HEADING_WEIGHT
-            for t in body_tokens:
-                tf[t] = tf.get(t, 0.0) + 1.0
-            self._doc_tfs.append(tf)
-            self._doc_lens.append(len(heading_tokens) * self._HEADING_WEIGHT + len(body_tokens))
-        self._avgdl = sum(self._doc_lens) / len(self._doc_lens) if self._doc_lens else 1.0
-        # IDF per query term
-        n = len(sections)
-        self._idfs: dict[str, float] = {}
-        for t in set(self._query_terms):
-            df = sum(1 for tfs in self._doc_tfs if t in tfs)
-            self._idfs[t] = math.log((n - df + 0.5) / (df + 0.5) + 1.0)
-
-    def _tokenize(self, text: str) -> list[str]:
-        tokens = self._TOKEN_RE.findall(text.lower())
-        return [self._stem(t) for t in tokens]
-
-    def _stem(self, token: str) -> str:
-        if len(token) > 4:
-            return self._SUFFIX_RE.sub("", token)
-        return token
-
-    def score(self, section_idx: int) -> float:
-        if not self._query_terms:
-            return 0.0
-        tf_map = self._doc_tfs[section_idx]
-        dl = self._doc_lens[section_idx]
-        total = 0.0
-        for t in self._query_terms:
-            tf = tf_map.get(t, 0.0)
-            idf = self._idfs.get(t, 0.0)
-            num = tf * (self._k1 + 1.0)
-            den = tf + self._k1 * (1.0 - self._b + self._b * dl / self._avgdl)
-            total += idf * num / den if den > 0 else 0.0
-        return total
-
-    def score_all(self) -> list[float]:
-        return [self.score(i) for i in range(len(self._sections))]
+# Backward-compatible alias (tests import QueryRelevanceScorer from here)
+QueryRelevanceScorer = BM25Scorer
 
 
 def _content_summary(text: str) -> str:
@@ -143,6 +72,9 @@ class TruncateCompressor:
     """
 
     _HEADING_RE = re.compile(r"(?:^|\n)(#{1,6}\s+.+)")
+
+    def __init__(self, scorer: RelevanceScorer | None = None) -> None:
+        self._scorer = scorer or BM25Scorer()
 
     # Patterns for code structure boundaries (function/class/method definitions)
     _CODE_BOUNDARY_RE = re.compile(
@@ -230,8 +162,7 @@ class TruncateCompressor:
         relevance_weights: list[float] | None = None
         if context_query and context_query.strip():
             sections = [(k, ser) for k, ser, _ in key_sizes]
-            scorer = QueryRelevanceScorer(context_query, sections)
-            raw = scorer.score_all()
+            raw = self._scorer.score_sections(context_query, sections)
             if any(s > 0 for s in raw):
                 relevance_weights = raw
 
@@ -411,8 +342,7 @@ class TruncateCompressor:
             # Compute per-section relevance scores if query is provided
             scores: list[float] | None = None
             if context_query and context_query.strip():
-                scorer = QueryRelevanceScorer(context_query, sections)
-                raw_scores = scorer.score_all()
+                raw_scores = self._scorer.score_sections(context_query, sections)
                 if any(s > 0 for s in raw_scores):
                     scores = raw_scores
 

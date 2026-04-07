@@ -12,22 +12,22 @@ from unittest.mock import patch
 
 import pytest
 
-from memtomem_stm.proxy.compression import QueryRelevanceScorer, TruncateCompressor
+from memtomem_stm.proxy.compression import TruncateCompressor
+from memtomem_stm.proxy.relevance import BM25Scorer
 
 
-# ── QueryRelevanceScorer ──────────────────────────────────────────────
+# ── BM25Scorer ────────────────────────────────────────────────────────
 
 
-class TestQueryRelevanceScorer:
+class TestBM25Scorer:
     def test_heading_weight(self):
         """Section with query term in heading scores higher than body-only."""
         sections = [
             ("## Redis Caching", "LRU eviction policy applied."),
             ("## Database", "Redis used as secondary cache layer."),
         ]
-        scorer = QueryRelevanceScorer("Redis", sections)
-        scores = scorer.score_all()
-        # "Redis" appears in heading of section 0 → heading weight 3×
+        scorer = BM25Scorer()
+        scores = scorer.score_sections("Redis", sections)
         assert scores[0] > scores[1]
 
     def test_no_match_returns_zeros(self):
@@ -36,8 +36,8 @@ class TestQueryRelevanceScorer:
             ("## Database", "PostgreSQL for ACID transactions."),
             ("## Caching", "LRU eviction policy."),
         ]
-        scorer = QueryRelevanceScorer("kubernetes deployment", sections)
-        scores = scorer.score_all()
+        scorer = BM25Scorer()
+        scores = scorer.score_sections("kubernetes deployment", sections)
         assert all(s == 0.0 for s in scores)
 
     def test_partial_match(self):
@@ -47,8 +47,8 @@ class TestQueryRelevanceScorer:
             ("## Database", "PostgreSQL for storage."),
             ("## API", "RESTful endpoints with FastAPI."),
         ]
-        scorer = QueryRelevanceScorer("OAuth2 authentication", sections)
-        scores = scorer.score_all()
+        scorer = BM25Scorer()
+        scores = scorer.score_sections("OAuth2 authentication", sections)
         assert scores[0] > 0
         assert scores[1] == 0.0
         assert scores[2] == 0.0
@@ -58,15 +58,14 @@ class TestQueryRelevanceScorer:
         sections = [
             ("## Setup", "Install REDIS server on Ubuntu."),
         ]
-        scorer = QueryRelevanceScorer("redis", sections)
-        scores = scorer.score_all()
-        assert scores[0] > 0
+        scorer = BM25Scorer()
+        assert scorer.score_sections("redis", sections)[0] > 0
 
     def test_empty_query_returns_zeros(self):
         """Empty query → all zeros."""
         sections = [("## Title", "Some content.")]
-        scorer = QueryRelevanceScorer("", sections)
-        assert scorer.score_all() == [0.0]
+        scorer = BM25Scorer()
+        assert scorer.score_sections("", sections) == [0.0]
 
     def test_stemming_matches(self):
         """Basic suffix stemming: 'caching' matches 'cache'."""
@@ -74,9 +73,78 @@ class TestQueryRelevanceScorer:
             ("## Cache Layer", "Redis caching strategy."),
             ("## Deployment", "Kubernetes pods."),
         ]
-        scorer = QueryRelevanceScorer("caching", sections)
-        scores = scorer.score_all()
+        scorer = BM25Scorer()
+        scores = scorer.score_sections("caching", sections)
         assert scores[0] > scores[1]
+
+
+# ── RelevanceScorer Protocol & Factory ─────────────────────────────────
+
+
+class TestRelevanceScorerProtocol:
+    def test_create_bm25(self):
+        from memtomem_stm.proxy.relevance import create_scorer
+
+        scorer = create_scorer("bm25")
+        assert isinstance(scorer, BM25Scorer)
+
+    def test_create_embedding(self):
+        from memtomem_stm.proxy.relevance import EmbeddingScorer, create_scorer
+
+        scorer = create_scorer("embedding", provider="ollama", model="test")
+        assert isinstance(scorer, EmbeddingScorer)
+
+    def test_embedding_fallback_to_bm25(self):
+        """EmbeddingScorer falls back to BM25 when embedding API unreachable."""
+        from memtomem_stm.proxy.relevance import EmbeddingScorer
+
+        scorer = EmbeddingScorer(
+            provider="ollama",
+            model="nonexistent",
+            base_url="http://localhost:99999",
+            timeout=0.5,
+        )
+        sections = [
+            ("## Redis", "Cache layer with LRU."),
+            ("## Database", "PostgreSQL storage."),
+        ]
+        # Should not raise — falls back to BM25
+        scores = scorer.score_sections("Redis caching", sections)
+        assert len(scores) == 2
+        # BM25 fallback should score Redis higher
+        assert scores[0] > scores[1]
+
+    def test_custom_scorer_in_truncate(self):
+        """TruncateCompressor accepts a custom scorer."""
+
+        class FixedScorer:
+            def score_sections(self, query, sections):
+                # Always score last section highest
+                return [0.0] * (len(sections) - 1) + [10.0]
+
+        comp = TruncateCompressor(scorer=FixedScorer())
+
+        def _section(heading, line, n=15):
+            return f"## {heading}\n\n" + "\n".join([line] * n)
+
+        doc = "\n\n".join(
+            [
+                _section("First", "Alpha content here."),
+                _section("Second", "Bravo content here."),
+                _section("Third", "Charlie content here."),
+            ]
+        )
+        budget = len(doc) // 3
+        result = comp.compress(doc, max_chars=budget, context_query="anything")
+        # Third section should get more budget than First
+        first_start = result.find("## First")
+        second_start = result.find("## Second")
+        third_start = result.find("## Third")
+        assert third_start > 0
+        first_len = second_start - first_start if second_start > 0 else 0
+        third_len = len(result) - third_start
+        # Custom scorer gave 10.0 to Third, 0.0 to others → Third gets most budget
+        assert third_len >= first_len
 
 
 # ── TruncateCompressor with context_query ─────────────────────────────

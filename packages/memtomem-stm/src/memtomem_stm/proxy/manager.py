@@ -101,6 +101,7 @@ class ProxyManager:
         self._stack: AsyncExitStack | None = None
         self._selective_compressor: SelectiveCompressor | None = None
         self._selective_lock = asyncio.Lock()
+        self._relevance_scorer = self._create_scorer(config)
 
     async def start(self) -> None:
         """Connect to all upstream servers, discover their tools."""
@@ -274,6 +275,20 @@ class ProxyManager:
                 )
         return result
 
+    @staticmethod
+    def _create_scorer(config: ProxyConfig) -> object:
+        """Create a RelevanceScorer from proxy config."""
+        from memtomem_stm.proxy.relevance import create_scorer
+
+        sc = config.relevance_scorer
+        return create_scorer(
+            scorer_type=sc.scorer,
+            provider=sc.embedding_provider,
+            model=sc.embedding_model,
+            base_url=sc.embedding_base_url,
+            timeout=sc.embedding_timeout,
+        )
+
     def _create_selective(self, sel_cfg: SelectiveConfig | None) -> SelectiveCompressor:
         """Create a SelectiveCompressor with the appropriate PendingStore backend."""
         kwargs: dict[str, Any] = {}
@@ -395,10 +410,12 @@ class ProxyManager:
                 server,
                 tool,
             )
-            return TruncateCompressor().compress(text, max_chars=max_chars)
+            return TruncateCompressor(scorer=self._relevance_scorer).compress(
+                text, max_chars=max_chars
+            )
 
         if compression == CompressionStrategy.TRUNCATE:
-            return TruncateCompressor().compress(
+            return TruncateCompressor(scorer=self._relevance_scorer).compress(
                 text, max_chars=max_chars, context_query=context_query
             )
 

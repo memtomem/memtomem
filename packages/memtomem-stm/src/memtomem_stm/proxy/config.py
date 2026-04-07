@@ -156,6 +156,21 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
 }
 
 
+class RelevanceScorerConfig(BaseModel):
+    """Configuration for query-aware relevance scoring."""
+
+    scorer: str = "bm25"
+    """Scorer type: "bm25" (default, zero-latency) or "embedding" (semantic)."""
+    embedding_provider: str = "ollama"
+    """Embedding provider: "ollama" or "openai". Only used when scorer="embedding"."""
+    embedding_model: str = "nomic-embed-text"
+    """Embedding model name. Only used when scorer="embedding"."""
+    embedding_base_url: str = "http://localhost:11434"
+    """Embedding API base URL. Only used when scorer="embedding"."""
+    embedding_timeout: float = 10.0
+    """Embedding API timeout in seconds."""
+
+
 class ProxyConfig(BaseModel):
     enabled: bool = False
     config_path: Path = Path("~/.memtomem/stm_proxy.json")
@@ -163,6 +178,7 @@ class ProxyConfig(BaseModel):
     default_compression: CompressionStrategy = CompressionStrategy.AUTO
     default_max_result_chars: int = 16000
     min_result_retention: float = 0.65
+    relevance_scorer: RelevanceScorerConfig = Field(default_factory=RelevanceScorerConfig)
     """Minimum fraction of response to preserve after compression (0-1).
 
     If ``default_max_result_chars`` or per-tool ``max_result_chars`` would
