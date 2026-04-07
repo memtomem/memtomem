@@ -17,6 +17,8 @@ class CompressionStrategy(StrEnum):
     NONE = "none"
     TRUNCATE = "truncate"
     EXTRACT_FIELDS = "extract_fields"
+    SCHEMA_PRUNING = "schema_pruning"
+    SKELETON = "skeleton"
     LLM_SUMMARY = "llm_summary"
     SELECTIVE = "selective"
     HYBRID = "hybrid"

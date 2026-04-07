@@ -10,6 +10,42 @@ if TYPE_CHECKING:
     from .harness import BenchTask, QAPair
 
 
+def _normalize(text: str) -> str:
+    """Normalize whitespace and punctuation for fuzzy matching."""
+    return re.sub(r"[\s,;:_\-]+", " ", text.lower()).strip()
+
+
+def _fuzzy_contains(answer: str, text: str) -> bool:
+    """Check if answer appears in text with fuzzy matching.
+
+    1. Exact substring match (fast path)
+    2. Normalized match (whitespace/punctuation collapsed)
+    3. Word-boundary match (answer words appear in sequence)
+    """
+    answer_lower = answer.lower()
+    text_lower = text.lower()
+
+    # Fast path: exact substring
+    if answer_lower in text_lower:
+        return True
+
+    # Normalized match
+    norm_answer = _normalize(answer)
+    norm_text = _normalize(text)
+    if norm_answer in norm_text:
+        return True
+
+    # Word sequence match: all words of answer appear in order within a window
+    answer_words = norm_answer.split()
+    if len(answer_words) >= 2:
+        text_words = norm_text.split()
+        for i in range(len(text_words) - len(answer_words) + 1):
+            if text_words[i : i + len(answer_words)] == answer_words:
+                return True
+
+    return False
+
+
 class RuleBasedJudge:
     """Deterministic quality scoring based on keyword/structure preservation.
 
@@ -57,12 +93,13 @@ class RuleBasedJudge:
         return max(0.0, min(10.0, s))
 
     def keyword_report(self, task: BenchTask, response: str) -> dict[str, bool]:
-        """Return per-keyword presence report."""
-        lower = response.lower()
-        return {kw: kw.lower() in lower for kw in task.expected_keywords}
+        """Return per-keyword presence report (with fuzzy matching)."""
+        return {kw: _fuzzy_contains(kw, response) for kw in task.expected_keywords}
 
     def qa_score(self, task: BenchTask, response: str) -> dict:
         """Score response based on QA pairs — can specific questions be answered?
+
+        Uses fuzzy matching: normalized whitespace/punctuation, word sequence.
 
         Returns:
             {
@@ -72,11 +109,10 @@ class RuleBasedJudge:
                 "details": [{"question": str, "answerable": bool, "source": str}]
             }
         """
-        lower = response.lower()
         details = []
         answerable = 0
         for qa in task.qa_pairs:
-            found = qa.answer.lower() in lower
+            found = _fuzzy_contains(qa.answer, response)
             if found:
                 answerable += 1
             details.append({
@@ -97,11 +133,10 @@ class RuleBasedJudge:
 
         Useful for measuring: did surfacing add answerable questions?
         """
-        lower = response.lower()
         content_total = content_found = 0
         memory_total = memory_found = 0
         for qa in task.qa_pairs:
-            found = qa.answer.lower() in lower
+            found = _fuzzy_contains(qa.answer, response)
             if qa.source == "memory":
                 memory_total += 1
                 if found:

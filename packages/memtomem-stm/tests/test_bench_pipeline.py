@@ -465,8 +465,14 @@ class TestQualityJudge:
 
 
 class TestAutoStrategy:
-    def test_json_selects_extract_fields(self):
-        assert resolve_auto_strategy(API_RESPONSE_JSON) == "extract_fields"
+    def test_json_large_array_selects_schema_pruning(self):
+        """JSON with large array (20+ items) → schema_pruning."""
+        assert resolve_auto_strategy(API_RESPONSE_JSON) == "schema_pruning"
+
+    def test_json_small_selects_truncate(self):
+        """JSON without large arrays → truncate (preserves values better)."""
+        small_json = '{"name": "test", "version": "1.0", "config": {"key": "value"}}'
+        assert resolve_auto_strategy(small_json) == "truncate"
 
     def test_markdown_with_headings_selects_hybrid(self, cleaner):
         cleaned = cleaner.clean(MARKDOWN_WITH_LINKS)
@@ -497,9 +503,10 @@ class TestAutoStrategy:
             assert report.stm.error is None
 
     def test_auto_matches_optimal_for_json(self, cleaner):
-        """Verify auto_select picks extract_fields for JSON content."""
+        """JSON with large arrays → schema_pruning; small JSON → truncate."""
         cleaned = cleaner.clean(API_RESPONSE_JSON)
-        assert resolve_auto_strategy(cleaned) == "extract_fields"
+        # API_RESPONSE_JSON has 50-user array → schema_pruning
+        assert resolve_auto_strategy(cleaned) == "schema_pruning"
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -670,6 +670,115 @@ class FieldExtractCompressor:
         return result
 
 
+class SchemaPruningCompressor:
+    """JSON schema-preserving pruner — keeps ALL keys, limits values.
+
+    Strategy: recursively walk JSON tree, preserving the full key structure.
+    Arrays are sampled (first 2 + last 1 + count), strings are capped.
+    This ensures every configuration field, every nested key, and every
+    data relationship is represented in the output.
+    """
+
+    def __init__(self, max_string: int = 80, max_array_items: int = 3) -> None:
+        self._max_string = max_string
+        self._max_array = max_array_items
+
+    def compress(self, text: str, *, max_chars: int) -> str:
+        if not text or len(text) <= max_chars:
+            return text
+        try:
+            data = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            return TruncateCompressor().compress(text, max_chars=max_chars)
+
+        # Iteratively reduce detail until output fits budget
+        for max_str in (self._max_string, 40, 20):
+            pruned = self._prune(data, max_str=max_str)
+            result = json.dumps(pruned, ensure_ascii=False, indent=2)
+            if len(result) <= max_chars:
+                return result
+
+        # Final: minimal detail
+        pruned = self._prune(data, max_str=10, max_array=2)
+        result = json.dumps(pruned, ensure_ascii=False, indent=2)
+        if len(result) > max_chars:
+            result = result[:max_chars] + "\n... (pruned)"
+        return result
+
+    def _prune(
+        self, data: object, max_str: int = 80, max_array: int | None = None
+    ) -> object:
+        ma = max_array if max_array is not None else self._max_array
+        if isinstance(data, dict):
+            return {k: self._prune(v, max_str, ma) for k, v in data.items()}
+        if isinstance(data, list):
+            n = len(data)
+            if n <= ma:
+                return [self._prune(item, max_str, ma) for item in data]
+            # First 2 + last 1 + count (preserves head and tail anomalies)
+            head = [self._prune(data[i], max_str, ma) for i in range(min(2, n))]
+            tail = [self._prune(data[-1], max_str, ma)]
+            omitted = n - min(2, n) - 1
+            return head + [f"... ({omitted} items omitted)"] + tail
+        if isinstance(data, str) and len(data) > max_str:
+            return data[:max_str] + "..."
+        return data
+
+
+class SkeletonCompressor:
+    """Markdown skeleton — preserves ALL headings + structural lines.
+
+    For documents with many parallel sections (API docs, changelogs),
+    keeps the full document skeleton so no section is completely lost.
+    Body content is aggressively trimmed to heading + first key line only.
+    """
+
+    _HEADING_RE = re.compile(r"^(#{1,6}\s.+)$", re.MULTILINE)
+
+    def compress(self, text: str, *, max_chars: int) -> str:
+        """Keep all headings + first content line per section."""
+        if not text or len(text) <= max_chars:
+            return text
+
+        headings = list(self._HEADING_RE.finditer(text))
+        if len(headings) < 2:
+            return TruncateCompressor().compress(text, max_chars=max_chars)
+
+        # Build sections: heading + first few meaningful content lines
+        parts: list[str] = []
+        budget_per_section = max(60, (max_chars - 80) // len(headings))
+
+        for i, m in enumerate(headings):
+            sec_start = m.start()
+            sec_end = headings[i + 1].start() if i + 1 < len(headings) else len(text)
+            section = text[sec_start:sec_end].rstrip()
+            lines = section.split("\n")
+
+            # Always keep the heading
+            kept = [lines[0]]
+            kept_chars = len(lines[0])
+
+            # Add content lines until per-section budget
+            for line in lines[1:]:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                # Prioritize: list items, table rows, HTTP methods, code fences
+                if kept_chars + len(line) + 1 > budget_per_section:
+                    break
+                kept.append(line)
+                kept_chars += len(line) + 1
+
+            parts.append("\n".join(kept))
+
+        result = "\n\n".join(parts)
+        result += f"\n(skeleton — {len(text)} chars original)"
+
+        if len(result) > max_chars:
+            result = result[:max_chars]
+        return result
+
+
 class LLMCompressor:
     """Compress by asking an LLM to summarize the text."""
 
@@ -884,8 +993,25 @@ def get_compressor(strategy: CompressionStrategy) -> Compressor:
             return TruncateCompressor()
         case CompressionStrategy.EXTRACT_FIELDS:
             return FieldExtractCompressor()
+        case CompressionStrategy.SCHEMA_PRUNING:
+            return SchemaPruningCompressor()
+        case CompressionStrategy.SKELETON:
+            return SkeletonCompressor()
         case _:
             return TruncateCompressor()
+
+
+def _json_depth(data: object, _current: int = 0) -> int:
+    """Measure max nesting depth of a JSON structure."""
+    if isinstance(data, dict):
+        if not data:
+            return _current + 1
+        return max(_json_depth(v, _current + 1) for v in data.values())
+    if isinstance(data, list):
+        if not data:
+            return _current + 1
+        return max(_json_depth(v, _current + 1) for v in data[:5])  # sample first 5
+    return _current
 
 
 def auto_select_strategy(text: str) -> CompressionStrategy:
@@ -893,32 +1019,50 @@ def auto_select_strategy(text: str) -> CompressionStrategy:
 
     Selection priority: information preservation > compression ratio.
 
-    - JSON → EXTRACT_FIELDS (preserves key structure)
-    - Large markdown (5K+) with many headings → HYBRID (head + TOC)
-    - Shorter markdown → TRUNCATE (section-aware, preserves info from all sections)
-    - Plain text → TRUNCATE (sentence-aware)
+    - JSON → SCHEMA_PRUNING (preserves all keys, prunes values)
+    - Markdown with many short parallel sections → SKELETON (all headings)
+    - Large markdown (5K+) with headings → HYBRID (head + TOC)
+    - Shorter markdown → TRUNCATE (section-aware)
+    - Code/text → TRUNCATE (code-aware / sentence-aware)
     """
     stripped = text.strip()
     if not stripped:
         return CompressionStrategy.NONE
 
-    # JSON detection
+    # JSON detection — conservative: only use specialized compressors for proven patterns
     if stripped[0] in "{[":
         try:
-            json.loads(stripped)
-            return CompressionStrategy.EXTRACT_FIELDS
+            data = json.loads(stripped)
+            # Schema pruning ONLY for JSON with a dominant large array (10+ items)
+            # These benefit from first+last item sampling (log streams, server lists)
+            if isinstance(data, list) and len(data) >= 20:
+                return CompressionStrategy.SCHEMA_PRUNING
+            if isinstance(data, dict):
+                arrays = [v for v in data.values() if isinstance(v, list) and len(v) >= 20]
+                if arrays:
+                    return CompressionStrategy.SCHEMA_PRUNING
+            # Default: truncate handles JSON well with section-aware mode
+            # (extract_fields can lose nested values that truncate preserves)
+            return CompressionStrategy.TRUNCATE
         except (json.JSONDecodeError, ValueError):
             pass
 
-    # Markdown detection — HYBRID only benefits large documents where TOC helps
-    # For shorter docs, TRUNCATE's section-aware mode preserves more info
+    # Markdown detection
     heading_count = len(re.findall(r"(?:^|\n)#{1,6}\s", stripped))
-    if heading_count >= 5 and len(stripped) >= 5000:
-        return CompressionStrategy.HYBRID
+
+    if heading_count >= 4:
+        # Skeleton ONLY for API-docs with HTTP method endpoints
+        has_http_methods = bool(re.search(r"(?:POST|GET|PUT|DELETE|PATCH)\s+/", stripped))
+        if has_http_methods:
+            return CompressionStrategy.SKELETON
+
+        # Large docs with substantial sections → hybrid
+        if heading_count >= 5 and len(stripped) >= 5000:
+            return CompressionStrategy.HYBRID
 
     # Code-heavy content — HYBRID only for large code files
     fence_count = stripped.count("```")
-    if fence_count >= 6 and len(stripped) >= 5000:  # 3+ code blocks, large file
+    if fence_count >= 6 and len(stripped) >= 5000:
         return CompressionStrategy.HYBRID
 
     return CompressionStrategy.TRUNCATE

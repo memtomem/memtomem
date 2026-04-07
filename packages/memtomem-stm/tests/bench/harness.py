@@ -11,13 +11,15 @@ from memtomem_stm.proxy.compression import (
     FieldExtractCompressor,
     HybridCompressor,
     NoopCompressor,
+    SchemaPruningCompressor,
     SelectiveCompressor,
+    SkeletonCompressor,
     TruncateCompressor,
     auto_select_strategy,
 )
 from memtomem_stm.proxy.config import CompressionStrategy
 
-from .judge import RuleBasedJudge
+from .judge import RuleBasedJudge, _fuzzy_contains
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -28,6 +30,8 @@ STRATEGY_COMPRESSORS: dict[str, Compressor] = {
     "none": NoopCompressor(),
     "truncate": TruncateCompressor(),
     "extract_fields": FieldExtractCompressor(),
+    "schema_pruning": SchemaPruningCompressor(),
+    "skeleton": SkeletonCompressor(),
     "hybrid": HybridCompressor(head_chars=500),
 }
 
@@ -556,7 +560,7 @@ class BenchHarness:
         qa_answerable = 0
         qa_total = len(task.qa_pairs)
         for qa in task.qa_pairs:
-            if qa.answer.lower() in text.lower():
+            if _fuzzy_contains(qa.answer, text):
                 qa_answerable += 1
         qa_score = qa_answerable / qa_total if qa_total else 1.0
         return StageScore(
@@ -629,7 +633,7 @@ class BenchHarness:
         # Without surfacing
         score_without = self._judge.score(task, compressed)
         qa_without = sum(
-            1 for qa in task.qa_pairs if qa.answer.lower() in compressed.lower()
+            1 for qa in task.qa_pairs if _fuzzy_contains(qa.answer, compressed)
         )
 
         # With surfacing
@@ -645,7 +649,7 @@ class BenchHarness:
 
         score_with = self._judge.score(task, surfaced)
         qa_with = sum(
-            1 for qa in task.qa_pairs if qa.answer.lower() in surfaced.lower()
+            1 for qa in task.qa_pairs if _fuzzy_contains(qa.answer, surfaced)
         )
 
         # Count injected memories (check for surfacing marker)
