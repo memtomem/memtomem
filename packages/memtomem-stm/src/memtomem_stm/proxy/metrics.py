@@ -38,6 +38,8 @@ class TokenTracker:
         self._total_original = 0
         self._total_compressed = 0
         self._total_surfaced = 0
+        self._total_original_tokens = 0
+        self._total_compressed_tokens = 0
         self._total_clean_ms = 0.0
         self._total_compress_ms = 0.0
         self._total_surface_ms = 0.0
@@ -57,6 +59,8 @@ class TokenTracker:
         self._total_original += metrics.original_chars
         self._total_compressed += metrics.compressed_chars
         self._total_surfaced += metrics.surfaced_chars
+        self._total_original_tokens += metrics.original_tokens
+        self._total_compressed_tokens += metrics.compressed_tokens
         self._total_clean_ms += metrics.clean_ms
         self._total_compress_ms += metrics.compress_ms
         self._total_surface_ms += metrics.surface_ms
@@ -109,6 +113,13 @@ class TokenTracker:
             "total_original_chars": self._total_original,
             "total_compressed_chars": self._total_compressed,
             "total_surfaced_chars": self._total_surfaced,
+            "total_original_tokens": self._total_original_tokens,
+            "total_compressed_tokens": self._total_compressed_tokens,
+            "total_token_savings_pct": (
+                round((1 - self._total_compressed_tokens / self._total_original_tokens) * 100, 1)
+                if self._total_original_tokens > 0
+                else 0.0
+            ),
             "total_savings_pct": savings,
             "avg_clean_ms": round(self._total_clean_ms / n, 2),
             "avg_compress_ms": round(self._total_compress_ms / n, 2),

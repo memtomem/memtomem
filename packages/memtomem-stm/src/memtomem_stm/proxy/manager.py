@@ -605,6 +605,11 @@ class ProxyManager:
             final_result = surfaced
 
         # Record metrics (using pre-surfacing compressed size)
+        # Approximate token counts: chars / 3.5 (average for mixed en/code/json).
+        # Not exact but sufficient for budget tracking and cost estimation.
+        _orig_tokens = max(1, int(len(original_text) / 3.5))
+        _comp_tokens = max(1, int(compressed_chars_for_metrics / 3.5))
+
         self.tracker.record(
             CallMetrics(
                 server=server,
@@ -612,6 +617,8 @@ class ProxyManager:
                 original_chars=len(original_text),
                 compressed_chars=compressed_chars_for_metrics,
                 cleaned_chars=len(cleaned),
+                original_tokens=_orig_tokens,
+                compressed_tokens=_comp_tokens,
                 clean_ms=_clean_ms,
                 compress_ms=_compress_ms,
                 surface_ms=_surface_ms,
