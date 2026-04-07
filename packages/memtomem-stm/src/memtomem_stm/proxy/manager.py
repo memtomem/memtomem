@@ -542,11 +542,19 @@ class ProxyManager:
         _clean_ms = (_time.monotonic() - _t0) * 1000
 
         # ── Stage 2: COMPRESS ──
+        # Enforce minimum retention: budget must preserve at least N% of cleaned content
+        effective_max_chars = tc.max_chars
+        min_retention = getattr(self._config, "min_result_retention", 0.5)
+        if min_retention > 0:
+            min_budget = int(len(cleaned) * min_retention)
+            if effective_max_chars < min_budget:
+                effective_max_chars = min_budget
+
         _t0 = _time.monotonic()
         compressed = await self._apply_compression(
             cleaned,
             tc.compression,
-            tc.max_chars,
+            effective_max_chars,
             tc.selective,
             tc.llm,
             tc.hybrid,

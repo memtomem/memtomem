@@ -132,6 +132,16 @@ class ProxyConfig(BaseModel):
     upstream_servers: dict[str, UpstreamServerConfig] = {}
     default_compression: CompressionStrategy = CompressionStrategy.HYBRID
     default_max_result_chars: int = 16000
+    min_result_retention: float = 0.5
+    """Minimum fraction of response to preserve after compression (0-1).
+
+    If ``default_max_result_chars`` or per-tool ``max_result_chars`` would
+    retain less than this fraction of the cleaned response, the effective
+    budget is raised to ``len(response) * min_result_retention``.
+
+    Default 0.5 ensures at least 50% of every response survives compression.
+    Set to 0 to disable and use fixed budgets only.
+    """
     cache: CacheConfig = Field(default_factory=CacheConfig)
     auto_index: AutoIndexConfig = Field(default_factory=AutoIndexConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
