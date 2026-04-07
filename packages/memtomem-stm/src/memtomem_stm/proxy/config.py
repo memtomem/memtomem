@@ -91,6 +91,8 @@ class ToolOverrideConfig(BaseModel):
     hybrid: HybridConfig | None = None
     cleaning: CleaningConfig | None = None
     auto_index: bool | None = None
+    hidden: bool = False
+    description_override: str | None = None
 
 
 class UpstreamServerConfig(BaseModel):
@@ -112,6 +114,8 @@ class UpstreamServerConfig(BaseModel):
     max_retries: int = 3
     reconnect_delay_seconds: float = 1.0
     max_reconnect_delay_seconds: float = 30.0
+    max_description_chars: int = 200
+    strip_schema_descriptions: bool = False
 
 
 class CacheConfig(BaseModel):
@@ -143,6 +147,8 @@ class ProxyConfig(BaseModel):
     Default 0.5 ensures at least 50% of every response survives compression.
     Set to 0 to disable and use fixed budgets only.
     """
+    max_description_chars: int = 200
+    strip_schema_descriptions: bool = False
     cache: CacheConfig = Field(default_factory=CacheConfig)
     auto_index: AutoIndexConfig = Field(default_factory=AutoIndexConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)

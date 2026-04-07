@@ -197,15 +197,75 @@ class ProxyManager:
     def _config(self) -> ProxyConfig:
         return self._config_loader.get()
 
+    @staticmethod
+    def _truncate_description(desc: str, max_chars: int) -> str:
+        """Truncate description at sentence boundary within budget."""
+        if not desc or len(desc) <= max_chars:
+            return desc
+        # Try to cut at last sentence boundary
+        truncated = desc[:max_chars]
+        for sep in (". ", ".\n", "! ", "? "):
+            idx = truncated.rfind(sep)
+            if idx > max_chars // 3:  # don't cut too early
+                return truncated[: idx + 1].rstrip()
+        # Fall back to word boundary
+        idx = truncated.rfind(" ")
+        if idx > max_chars // 3:
+            return truncated[:idx] + "..."
+        return truncated + "..."
+
+    @staticmethod
+    def _distill_schema(schema: dict, strip_descriptions: bool) -> dict:
+        """Remove description/examples from schema properties to save tokens."""
+        if not strip_descriptions or not isinstance(schema, dict):
+            return schema
+        result = {}
+        for k, v in schema.items():
+            if k in ("description", "examples"):
+                continue
+            if isinstance(v, dict):
+                result[k] = ProxyManager._distill_schema(v, strip_descriptions)
+            elif isinstance(v, list):
+                result[k] = [
+                    ProxyManager._distill_schema(item, True) if isinstance(item, dict) else item
+                    for item in v
+                ]
+            else:
+                result[k] = v
+        return result
+
     def get_proxy_tools(self) -> list[ProxyToolInfo]:
         result: list[ProxyToolInfo] = []
+        global_max_desc = self._config.max_description_chars
+        global_strip = self._config.strip_schema_descriptions
+
         for conn in self._connections.values():
+            cfg = conn.config
+            max_desc = cfg.max_description_chars
+            strip = cfg.strip_schema_descriptions or global_strip
+
             for t in conn.tools:
+                # Check per-tool hidden override
+                override = cfg.tool_overrides.get(t.name)
+                if override is not None and override.hidden:
+                    continue
+
+                # Resolve description
+                desc = t.description or ""
+                if override is not None and override.description_override is not None:
+                    desc = override.description_override
+                desc = self._truncate_description(desc, min(max_desc, global_max_desc))
+
+                # Resolve schema
+                schema = t.inputSchema or {"type": "object"}
+                if strip:
+                    schema = self._distill_schema(schema, True)
+
                 result.append(
                     ProxyToolInfo(
-                        prefixed_name=f"{conn.config.prefix}__{t.name}",
-                        description=t.description or "",
-                        input_schema=t.inputSchema or {"type": "object"},
+                        prefixed_name=f"{cfg.prefix}__{t.name}",
+                        description=desc,
+                        input_schema=schema,
                         server=conn.name,
                         original_name=t.name,
                         annotations=getattr(t, "annotations", None),
