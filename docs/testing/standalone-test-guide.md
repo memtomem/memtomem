@@ -78,24 +78,118 @@ uv run mm init
 
 ### 위자드 단계별 안내
 
-| 단계 | 설명 | 입문자 권장 |
-|------|------|------------|
-| 1. Embedding provider | Ollama (로컬) / OpenAI (클라우드) | **Ollama** (무료, 로컬) |
-| 2. Embedding model | nomic-embed-text / bge-m3 | **bge-m3** (다국어 우수) |
-| 3. Memory directory | 메모리 저장 디렉토리 | `/tmp/memtomem-test/memories` |
-| 4. Storage | SQLite DB 경로 | 기본값 (`~/.memtomem/memtomem.db`) |
-| 5. Namespace | 폴더명 기반 자동 네임스페이스 | **yes** |
-| 6. Search | 검색 결과 수, time-decay | 기본값 (Enter) |
-| 7. Language | 토크나이저 (Unicode / Korean) | **unicode61** (일반), **kiwipiepy** (한국어 중심) |
-| 8. Editor | Claude Code 자동 설정 | **Claude Code** |
+> 각 단계에서 `b`(뒤로), `q`(종료) 가능. 괄호 안은 기본값.
 
-> 각 단계에서 `b`(뒤로), `q`(종료) 가능.
+**Step 1 — Embedding Provider**
 
-**설정 확인:**
+```
+Choose how to generate embeddings:
+  [1] Ollama (local, free)        ← 입문자 권장
+  [2] OpenAI (cloud, API key 필요)
+Select [1]:
+```
+
+- **Ollama 선택 시** → 모델 선택:
+  - `[1] nomic-embed-text` (768차원, 영어 최적화, 빠름)
+  - `[2] bge-m3` (1024차원, 다국어 우수, 한국어 검색 시 권장)
+- **OpenAI 선택 시** → API 키 입력 + 모델 선택:
+  - `[1] text-embedding-3-small` (1536차원)
+  - `[2] text-embedding-3-large` (3072차원)
+
+> 모델을 나중에 바꾸면 `mm embedding-reset`으로 DB를 리셋해야 한다.
+
+**Step 2 — Memory Directory**
+
+```
+Where are the files you want to index?
+Path [~/memories]: /tmp/memtomem-test/memories
+```
+
+이 디렉토리에 `.md`, `.json`, `.yaml`, `.py`, `.js`, `.ts` 등의 파일을 넣으면 인덱싱된다.
+
+**Step 3 — Storage**
+
+```
+SQLite DB path [~/.memtomem/memtomem.db]:
+```
+
+기본값 그대로 Enter. 모든 메모리, 임베딩, 검색 이력이 이 DB에 저장된다.
+
+**Step 4 — Namespace**
+
+```
+Auto-assign namespace from folder name? [N]:
+Default namespace [default]:
+```
+
+- `Y` 선택 시: `memories/project-a/notes.md` → namespace `project-a`
+- `N` 선택 시 (기본): 모든 메모리가 `default` 네임스페이스에 저장
+
+**Step 5 — Search**
+
+```
+Results per search [10]:
+Enable time-decay? (older memories score lower) [N]:
+```
+
+- `10`이 일반적. 많이 필요하면 `20`까지.
+- time-decay: 최근 메모리를 우선하려면 `Y`. 반감기 기본값은 30일.
+
+**Step 6 — Language / Tokenizer**
+
+```
+Search tokenizer:
+  [1] unicode61 (default, works for all languages)
+  [2] kiwipiepy (optimized for Korean morphological analysis)
+Select [1]:
+```
+
+- `unicode61`: 범용. 한국어도 동작하지만 형태소 분석 없음.
+- `kiwipiepy`: 한국어 문서가 주력이면 선택. `pip install kiwipiepy` 필요.
+
+**Step 7 — Editor Integration**
+
+```
+How do you want to connect memtomem?
+  [1] Claude Code (auto-add MCP server)   ← 권장
+  [2] Generate .mcp.json file
+  [3] Skip
+Select [1]:
+```
+
+- `[1]` 선택 시 `claude mcp add memtomem` 자동 실행.
+- `[2]` 선택 시 현재 디렉토리에 `.mcp.json` 생성.
+
+### 설정 확인
 
 ```bash
 uv run mm config show
 ```
+
+출력 예시:
+```
+[embedding]
+  provider = ollama
+  model = bge-m3
+  dimension = 1024
+  base_url = http://localhost:11434
+[storage]
+  backend = sqlite
+  sqlite_path = ~/.memtomem/memtomem.db
+[search]
+  default_top_k = 10
+  enable_bm25 = True
+  enable_dense = True
+  tokenizer = unicode61
+[indexing]
+  memory_dirs = ['/tmp/memtomem-test/memories']
+  max_chunk_tokens = 512
+[context_window]
+  enabled = False
+  window_size = 2
+```
+
+> `mm config show --format json`으로 JSON 출력도 가능.
 
 ---
 
@@ -316,8 +410,26 @@ Step 2: "첫 번째 결과의 주변 맥락을 보고 싶어. expand 해줘"
 
 ```bash
 export MEMTOMEM_CONTEXT_WINDOW__ENABLED=true
-export MEMTOMEM_CONTEXT_WINDOW__WINDOW_SIZE=2
+export MEMTOMEM_CONTEXT_WINDOW__WINDOW_SIZE=2    # ±2 인접 청크 (범위: 0~10)
 ```
+
+또는 `~/.memtomem/config.json`에:
+
+```json
+{
+  "context_window": {
+    "enabled": true,
+    "window_size": 2
+  }
+}
+```
+
+| 설정 | 기본값 | 설명 |
+|------|--------|------|
+| `enabled` | `false` | 전역 컨텍스트 확장 활성화 |
+| `window_size` | `2` | 앞뒤 포함할 청크 수 (0~10) |
+
+> `enabled=false`여도 `mem_search(context_window=3)` 호출별 오버라이드는 동작한다.
 
 ---
 
@@ -506,20 +618,135 @@ STM은 다른 MCP 서버를 프록싱하면서 관련 메모리를 자동으로 
 uv run mm stm init
 ```
 
-위자드 단계:
-
-| 단계 | 설명 | 선택 |
-|------|------|------|
-| 1. MCP 클라이언트 감지 | Claude Code, Cursor 등 | 자동 감지됨 |
-| 2. 프록시할 서버 선택 | 연결된 MCP 서버 목록 | filesystem 등 선택 |
-| 3. 접두어 설정 | 프록시 도구 이름 접두어 | `fs` (filesystem) |
-| 4. 압축 전략 | auto/none/truncate/hybrid 등 | **auto** (기본, 콘텐츠 기반 자동 선택) |
-| 5. 캐시 | 응답 캐시 활성화 | **yes** |
-| 6. Langfuse | 옵저버빌리티 (선택) | 스킵 가능 |
-| 7. 설정 저장 | `~/.memtomem/stm_proxy.json` | 자동 |
-| 8. STM 활성화 | 에디터 재시작 | 안내에 따라 |
-
 > STM 설정 후 에디터(Claude Code)를 재시작해야 적용된다.
+
+**Step 1 — MCP 클라이언트 감지**
+
+```
+Detected MCP configurations:
+  [1] Claude Code     (5 servers)   ← 가장 서버가 많은 것이 자동 선택
+  [2] Cursor          (2 servers)
+  [3] .mcp.json       (1 server)
+Select source [1]:
+```
+
+자동 감지 대상: Claude Code, Cursor, `.mcp.json`, Claude Desktop, Windsurf.
+
+**Step 2 — 프록시할 서버 선택**
+
+```
+Available servers:
+  [1] filesystem    — npx @modelcontextprotocol/server-filesystem
+  [2] github        — npx @modelcontextprotocol/server-github
+  [3] postgres      — npx @modelcontextprotocol/server-postgres
+Proxy which servers? (comma-separated or "all") [all]:
+```
+
+- `all`: 모든 서버를 프록시 (입문자 권장)
+- `1,2`: 특정 서버만 선택
+
+**Step 3 — 접두어 설정**
+
+```
+filesystem → prefix [fs]:
+github → prefix [gh]:
+```
+
+프록시된 도구 이름: `fs__read_file`, `gh__search_repos` 등.
+
+각 서버 기본값:
+- compression = `selective` (콘텐츠 구조 기반 압축)
+- max_result_chars = `16000` (응답 예산)
+
+**Step 4 — 압축 전략**
+
+```
+How to compress large tool responses:
+  [1] hybrid     — 앞부분 원문 + 뒷부분 TOC (권장)
+  [2] selective  — 전체를 TOC로 변환, 필요 시 원문 요청
+  [3] truncate   — 단순 자르기 (빠름, 정보 손실 가능)
+  [4] none       — 압축 안 함
+Select [1]:
+```
+
+| 전략 | 장점 | 단점 | 적합한 경우 |
+|------|------|------|------------|
+| `auto` | 콘텐츠 유형별 자동 선택 | — | 설정 파일에서 직접 지정 시 |
+| `hybrid` | 핵심 원문 보존 + 구조 요약 | 약간 복잡 | 대부분의 경우 (기본) |
+| `selective` | 전체 구조 파악 가능 | 원문 재요청 필요 | 큰 문서, API 응답 |
+| `truncate` | 빠르고 단순 | 뒷부분 손실 | 로그, 반복 콘텐츠 |
+| `none` | 정보 손실 없음 | 토큰 소비 큼 | 작은 응답 |
+
+> `auto` 전략은 설정 파일에서 `"compression": "auto"`로 지정 가능. 콘텐츠를 분석해서 JSON → `extract_fields`/`schema_pruning`, API 문서 → `skeleton`, 마크다운 → `hybrid/truncate` 등 자동 선택.
+
+**Step 5 — 캐시**
+
+```
+Enable response cache? [Y]:
+Cache TTL in seconds (3600 = 1 hour) [3600]:
+```
+
+- 캐시 DB: `~/.memtomem/proxy_cache.db`
+- 최대 항목 수: 10,000
+- 같은 도구 호출은 TTL 내에 캐시에서 반환
+
+**Step 6 — Langfuse (선택)**
+
+```
+Enable Langfuse tracing? [N]:
+```
+
+- `Y` 선택 시: Langfuse 호스트, Public Key, Secret Key 입력
+- `N` 선택 시: 스킵 (나중에 환경변수로 활성화 가능)
+
+**Step 7 — 설정 저장**
+
+자동으로 `~/.memtomem/stm_proxy.json`에 저장. 생성되는 설정 예시:
+
+```json
+{
+  "upstream_servers": {
+    "filesystem": {
+      "prefix": "fs",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"],
+      "compression": "auto",
+      "max_result_chars": 8000,
+      "max_retries": 3,
+      "reconnect_delay_seconds": 1.0
+    }
+  },
+  "default_compression": "auto",
+  "default_max_result_chars": 16000,
+  "min_result_retention": 0.65,
+  "surfacing": {
+    "enabled": true,
+    "min_score": 0.02,
+    "max_results": 3,
+    "cooldown_seconds": 5.0,
+    "timeout_seconds": 3.0,
+    "injection_mode": "prepend",
+    "max_injection_chars": 3000,
+    "max_surfacings_per_minute": 15,
+    "dedup_ttl_seconds": 604800
+  },
+  "cache": {
+    "enabled": true,
+    "default_ttl_seconds": 3600,
+    "max_entries": 10000
+  }
+}
+```
+
+**Step 8 — STM 활성화**
+
+```
+Enable STM proxy in memtomem config? [Y]:
+Remove proxied servers from Claude Code config? [Y]:
+```
+
+- `Y/Y`: STM이 원본 서버를 대체. 에이전트는 프록시된 도구만 사용.
+- 원본 서버는 STM이 내부적으로 연결.
 
 ### 7-2. 서피싱 동작 확인
 
@@ -569,7 +796,137 @@ Step 4: 서피싱 통계 확인
 
 `context_window_size=2`로 설정하면 서피싱 시 ±2개 인접 청크도 함께 표시된다.
 
-### 7-5. STM 비활성화
+### 7-5. 서피싱 세부 튜닝
+
+서피싱 동작을 세밀하게 조절하는 설정값들. `stm_proxy.json`의 `surfacing` 섹션에서 수정.
+
+**빈도 제어:**
+
+| 설정 | 기본값 | 설명 | 조절 팁 |
+|------|--------|------|---------|
+| `max_surfacings_per_minute` | `15` | 분당 최대 서피싱 횟수 | 노이즈 줄이려면 `5`~`10` |
+| `cooldown_seconds` | `5.0` | 유사 쿼리 억제 시간 | 빠른 연속 호출 시 `10.0` |
+| `min_response_chars` | `5000` | 이 크기 이하 응답은 서피싱 스킵 | 작은 응답에도 서피싱하려면 `0` |
+| `min_query_tokens` | `3` | 추출된 쿼리가 이보다 짧으면 스킵 | `1`로 낮추면 단순 경로도 트리거 |
+
+**품질 제어:**
+
+| 설정 | 기본값 | 설명 | 조절 팁 |
+|------|--------|------|---------|
+| `min_score` | `0.02` | 최소 검색 점수 | 관련 없는 결과 줄이려면 `0.1`~`0.3` |
+| `max_results` | `3` | 최대 서피싱 메모리 수 | 정보 과다 시 `1`~`2` |
+| `max_injection_chars` | `3000` | 주입 블록 최대 크기 | 토큰 절약 시 `1500` |
+| `context_window_size` | `0` | 인접 청크 확장 (0=비활성) | 맥락 필요 시 `2` |
+
+**안전장치:**
+
+| 설정 | 기본값 | 설명 |
+|------|--------|------|
+| `circuit_max_failures` | `3` | 연속 N회 실패 시 서피싱 중단 |
+| `circuit_reset_seconds` | `60.0` | 서킷 브레이커 리셋 시간 |
+| `timeout_seconds` | `3.0` | LTM 검색 타임아웃 |
+| `dedup_ttl_seconds` | `604800` | 7일간 같은 메모리 재서피싱 방지 |
+
+**자동 튜닝 (피드백 기반):**
+
+| 설정 | 기본값 | 설명 |
+|------|--------|------|
+| `auto_tune_enabled` | `true` | 피드백 기반 min_score 자동 조절 |
+| `auto_tune_min_samples` | `20` | 최소 피드백 수 (이하면 글로벌 비율 사용) |
+| `auto_tune_score_increment` | `0.002` | 피드백당 점수 조절 폭 |
+
+**도구별 오버라이드:**
+
+특정 도구에만 다른 설정을 적용:
+
+```json
+{
+  "surfacing": {
+    "context_tools": {
+      "read_file": {
+        "query_template": "file {arg.path}",
+        "namespace": "code-notes",
+        "min_score": 0.4,
+        "max_results": 2
+      },
+      "get_weather": {
+        "enabled": false
+      }
+    },
+    "exclude_tools": ["list_directory"]
+  }
+}
+```
+
+### 7-6. 압축 세부 설정
+
+서버별로 압축 동작을 세밀하게 조절:
+
+```json
+{
+  "upstream_servers": {
+    "filesystem": {
+      "prefix": "fs",
+      "compression": "auto",
+      "max_result_chars": 8000,
+      "tool_overrides": {
+        "read_file": {
+          "compression": "hybrid",
+          "max_result_chars": 16000
+        },
+        "list_directory": {
+          "compression": "truncate",
+          "max_result_chars": 1000
+        },
+        "internal_debug": {
+          "hidden": true
+        },
+        "search": {
+          "description_override": "Search files by name"
+        }
+      }
+    }
+  }
+}
+```
+
+**도구별 옵션:**
+
+| 옵션 | 설명 |
+|------|------|
+| `compression` | 이 도구에만 적용할 압축 전략 |
+| `max_result_chars` | 이 도구의 응답 예산 |
+| `hidden` | `true`면 에이전트에게 노출 안 함 |
+| `description_override` | 도구 설명을 짧게 대체 (토큰 절약) |
+
+**전역 토큰 절약:**
+
+| 설정 | 기본값 | 설명 |
+|------|--------|------|
+| `max_description_chars` | `200` | 도구 설명 최대 길이 (초과 시 잘림) |
+| `strip_schema_descriptions` | `false` | JSON 스키마에서 description/examples 제거 |
+| `min_result_retention` | `0.65` | 압축 후 최소 보존 비율 (65%) |
+
+**모델 기반 자동 예산 (선택):**
+
+소비 모델의 컨텍스트 윈도우에 비례해서 예산 자동 설정:
+
+```json
+{
+  "consumer_model": "gpt-4",
+  "context_budget_ratio": 0.05
+}
+```
+
+| 모델 | 컨텍스트 | 예산 (5%) |
+|------|---------|----------|
+| claude-sonnet-4 | 200K | 16,000 (기본값 캡) |
+| gpt-4o | 128K | 16,000 (캡) |
+| gpt-4 | 8K | 1,433자 |
+
+`consumer_model` 비워두면 (기본) 고정 예산 사용.
+
+### 7-7. STM 비활성화
 
 ```bash
 uv run mm stm reset
@@ -720,6 +1077,62 @@ Claude Code에서:
 "분석 결과를 메모리로 저장해줘"
   → mem_do(action="reflect_save") 호출
 ```
+
+### 10-5. 검색 파이프라인 튜닝
+
+검색 품질을 세밀하게 조절하는 환경변수들:
+
+**기본 검색 설정:**
+
+| 환경변수 | 기본값 | 설명 | 조절 팁 |
+|----------|--------|------|---------|
+| `MEMTOMEM_SEARCH__DEFAULT_TOP_K` | `10` | 반환 결과 수 | 정밀 검색: `5`, 탐색: `20` |
+| `MEMTOMEM_SEARCH__BM25_CANDIDATES` | `50` | BM25 사전 필터 후보 | 재현율 높이려면 `100` |
+| `MEMTOMEM_SEARCH__DENSE_CANDIDATES` | `50` | 벡터 검색 후보 | 재현율 높이려면 `100` |
+| `MEMTOMEM_SEARCH__RRF_K` | `60` | RRF 융합 스무딩 상수 | 높으면 순위 차이 줄어듦 |
+| `MEMTOMEM_SEARCH__ENABLE_BM25` | `true` | 키워드 검색 활성화 | 시맨틱만 쓰려면 `false` |
+| `MEMTOMEM_SEARCH__ENABLE_DENSE` | `true` | 벡터 검색 활성화 | 키워드만 쓰려면 `false` |
+| `MEMTOMEM_SEARCH__CACHE_TTL` | `30.0` | 검색 결과 캐시 TTL (초) | 실시간 필요 시 `0` |
+
+**RRF 가중치 조절 (BM25 vs 시맨틱):**
+
+```bash
+# BM25 키워드 매칭 강화 (정확한 용어 검색에 유리)
+export MEMTOMEM_SEARCH__RRF_WEIGHTS='[2.0, 1.0]'
+
+# 시맨틱 매칭 강화 (의미 기반 검색에 유리)
+export MEMTOMEM_SEARCH__RRF_WEIGHTS='[1.0, 2.0]'
+
+# 균등 (기본)
+export MEMTOMEM_SEARCH__RRF_WEIGHTS='[1.0, 1.0]'
+```
+
+또는 Claude Code에서 검색 시 직접 지정:
+
+```
+"'Flask' 키워드 매칭 위주로 검색해줘 (bm25_weight=2.0)"
+  → mem_search("Flask", bm25_weight=2.0)
+```
+
+**선택적 파이프라인 단계:**
+
+| 환경변수 | 기본값 | 효과 |
+|----------|--------|------|
+| `MEMTOMEM_DECAY__ENABLED` | `false` | 시간 감쇠 (오래된 메모리 점수 하락, 반감기 30일) |
+| `MEMTOMEM_MMR__ENABLED` | `false` | 다양성 (유사한 결과 중복 제거, lambda=0.7) |
+| `MEMTOMEM_ACCESS__ENABLED` | `false` | 접근 빈도 부스트 (자주 조회된 메모리 우선, 최대 1.5x) |
+| `MEMTOMEM_CONTEXT_WINDOW__ENABLED` | `false` | 인접 청크 확장 (±2 기본) |
+
+**인덱싱 설정:**
+
+| 환경변수 | 기본값 | 설명 |
+|----------|--------|------|
+| `MEMTOMEM_INDEXING__MAX_CHUNK_TOKENS` | `512` | 청크당 최대 토큰 (64~8192) |
+| `MEMTOMEM_INDEXING__MIN_CHUNK_TOKENS` | `128` | 이보다 짧은 청크는 병합 |
+| `MEMTOMEM_INDEXING__CHUNK_OVERLAP_TOKENS` | `0` | 인접 청크 간 겹침 (0이면 겹침 없음) |
+| `MEMTOMEM_EMBEDDING__BATCH_SIZE` | `64` | 임베딩 배치 크기 (1~1024) |
+
+> 이 값들은 `mm config set search.default_top_k 20` 으로 실시간 변경 가능.
 
 ---
 
