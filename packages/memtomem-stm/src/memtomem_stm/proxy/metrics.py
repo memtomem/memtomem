@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -11,6 +12,23 @@ if TYPE_CHECKING:
     from memtomem_stm.proxy.metrics_store import MetricsStore
 
 logger = logging.getLogger(__name__)
+
+
+def _percentile(sorted_vals: list[float], p: float) -> float:
+    """Compute the *p*-th percentile (0-100) from a pre-sorted list.
+
+    Uses linear interpolation between closest ranks (same as numpy 'linear').
+    """
+    if not sorted_vals:
+        return 0.0
+    n = len(sorted_vals)
+    if n == 1:
+        return sorted_vals[0]
+    k = (p / 100) * (n - 1)
+    lo = int(math.floor(k))
+    hi = min(lo + 1, n - 1)
+    frac = k - lo
+    return sorted_vals[lo] + frac * (sorted_vals[hi] - sorted_vals[lo])
 
 
 @dataclass
@@ -53,6 +71,11 @@ class TokenTracker:
         self._by_tool: dict[str, dict[str, int]] = defaultdict(
             lambda: {"calls": 0, "original_chars": 0, "compressed_chars": 0}
         )
+        # Per-call latencies for percentile computation
+        self._clean_latencies: list[float] = []
+        self._compress_latencies: list[float] = []
+        self._surface_latencies: list[float] = []
+        self._total_latencies: list[float] = []
 
     def record(self, metrics: CallMetrics) -> None:
         self._total_calls += 1
@@ -64,6 +87,13 @@ class TokenTracker:
         self._total_clean_ms += metrics.clean_ms
         self._total_compress_ms += metrics.compress_ms
         self._total_surface_ms += metrics.surface_ms
+
+        self._clean_latencies.append(metrics.clean_ms)
+        self._compress_latencies.append(metrics.compress_ms)
+        self._surface_latencies.append(metrics.surface_ms)
+        self._total_latencies.append(
+            metrics.clean_ms + metrics.compress_ms + metrics.surface_ms
+        )
 
         s = self._by_server[metrics.server]
         s["calls"] += 1
@@ -90,6 +120,17 @@ class TokenTracker:
 
     def record_reconnect(self) -> None:
         self._reconnects += 1
+
+    def _percentiles(self, values: list[float]) -> dict[str, float]:
+        """Return p50/p95/p99 for a list of latency values."""
+        if not values:
+            return {"p50": 0.0, "p95": 0.0, "p99": 0.0}
+        s = sorted(values)
+        return {
+            "p50": round(_percentile(s, 50), 2),
+            "p95": round(_percentile(s, 95), 2),
+            "p99": round(_percentile(s, 99), 2),
+        }
 
     def get_summary(self) -> dict:
         savings = (
@@ -127,5 +168,11 @@ class TokenTracker:
             "cache_hits": self._cache_hits,
             "cache_misses": self._cache_misses,
             "reconnects": self._reconnects,
+            "latency_percentiles": {
+                "clean_ms": self._percentiles(self._clean_latencies),
+                "compress_ms": self._percentiles(self._compress_latencies),
+                "surface_ms": self._percentiles(self._surface_latencies),
+                "total_ms": self._percentiles(self._total_latencies),
+            },
             "by_server": by_server,
         }
