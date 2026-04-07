@@ -21,11 +21,19 @@ class ChunkOut(BaseModel):
     updated_at: datetime
 
 
+class ContextInfoOut(BaseModel):
+    window_before: list[ChunkOut] = []
+    window_after: list[ChunkOut] = []
+    chunk_position: int = 0
+    total_chunks_in_file: int = 0
+
+
 class SearchResultOut(BaseModel):
     chunk: ChunkOut
     score: float
     rank: int
     source: str
+    context: ContextInfoOut | None = None
 
 
 class RetrievalStatsOut(BaseModel):
@@ -61,9 +69,19 @@ def chunk_to_out(chunk) -> ChunkOut:
 
 def to_result_out(r) -> SearchResultOut:
     """Convert a domain SearchResult to SearchResultOut schema."""
+    ctx_out = None
+    ctx = getattr(r, "context", None)
+    if ctx and (ctx.window_before or ctx.window_after):
+        ctx_out = ContextInfoOut(
+            window_before=[chunk_to_out(c) for c in ctx.window_before],
+            window_after=[chunk_to_out(c) for c in ctx.window_after],
+            chunk_position=ctx.chunk_position,
+            total_chunks_in_file=ctx.total_chunks_in_file,
+        )
     return SearchResultOut(
         chunk=chunk_to_out(r.chunk),
         score=r.score,
         rank=r.rank,
         source=r.source,
+        context=ctx_out,
     )

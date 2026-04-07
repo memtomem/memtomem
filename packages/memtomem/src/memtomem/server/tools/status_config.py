@@ -169,6 +169,7 @@ def _revert_to_stored(app: AppContext) -> str:
         decay_config=config.decay,
         mmr_config=config.mmr,
         access_config=config.access,
+        context_window_config=config.context_window,
     )
     app.index_engine = IndexEngine(
         storage=storage,

@@ -31,7 +31,19 @@ class SurfacingFormatter:
             meta = chunk.metadata
             ns_badge = f" [{meta.namespace}]" if meta.namespace != "default" else ""
             source = str(meta.source_file.name) if meta.source_file else ""
-            preview = chunk.content[:300].replace("\n", " ")
+
+            ctx = getattr(r, "context", None)
+            if ctx and (ctx.window_before or ctx.window_after):
+                parts = []
+                if ctx.window_before:
+                    parts.append("..." + ctx.window_before[-1].content[-150:].replace("\n", " "))
+                parts.append(chunk.content[:300].replace("\n", " "))
+                if ctx.window_after:
+                    parts.append(ctx.window_after[0].content[:150].replace("\n", " ") + "...")
+                preview = " | ".join(parts)
+            else:
+                preview = chunk.content[:300].replace("\n", " ")
+
             lines.append(f"- **{source}**{ns_badge} (score={r.score:.2f}): {preview}")
 
         if scratch_items:

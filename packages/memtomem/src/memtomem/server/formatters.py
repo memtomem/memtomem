@@ -13,7 +13,7 @@ def _display_path(path) -> str:
     """
     s = str(path)
     if sys.platform == "darwin" and s.startswith("/private/tmp/"):
-        return s[len("/private"):]
+        return s[len("/private") :]
     return s
 
 
@@ -33,8 +33,24 @@ def _format_single_result(r) -> str:
 
     chunk_id = str(r.chunk.id)
     source = _display_path(meta.source_file)
-    return (
-        f"**[{r.rank}]** score={r.score:.4f} | id={chunk_id} |{ns_badge} {source}"
-        + (f" | {hierarchy}" if hierarchy else "")
-        + f"\n```\n{r.chunk.content[:500]}\n```"
+    header = f"**[{r.rank}]** score={r.score:.4f} | id={chunk_id} |{ns_badge} {source}" + (
+        f" | {hierarchy}" if hierarchy else ""
     )
+
+    ctx = getattr(r, "context", None)
+    if ctx and (ctx.window_before or ctx.window_after):
+        pos_info = f"[chunk {ctx.chunk_position}/{ctx.total_chunks_in_file}]"
+        parts = [f"{header} {pos_info}"]
+        if ctx.window_before:
+            parts.append("--- context before ---")
+            for wc in ctx.window_before:
+                parts.append(f"...{wc.content[-200:]}")
+        parts.append("--- matched ---")
+        parts.append(f"```\n{r.chunk.content[:500]}\n```")
+        if ctx.window_after:
+            parts.append("--- context after ---")
+            for wc in ctx.window_after:
+                parts.append(f"{wc.content[:200]}...")
+        return "\n".join(parts)
+
+    return header + f"\n```\n{r.chunk.content[:500]}\n```"

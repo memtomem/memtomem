@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING
 
 from dataclasses import dataclass
 
-from memtomem.config import AccessConfig, DecayConfig, MMRConfig, SearchConfig
-from memtomem.models import NamespaceFilter, SearchResult
+from memtomem.config import AccessConfig, ContextWindowConfig, DecayConfig, MMRConfig, SearchConfig
+from memtomem.models import ContextInfo, NamespaceFilter, SearchResult
 from memtomem.search.fusion import reciprocal_rank_fusion
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,7 @@ class SearchPipeline:
         reranker: object | None = None,
         expansion_config: object | None = None,
         importance_config: object | None = None,
+        context_window_config: ContextWindowConfig | None = None,
     ) -> None:
         self._storage = storage
         self._embedder = embedder
@@ -59,6 +60,7 @@ class SearchPipeline:
         self._reranker = reranker
         self._expansion_config = expansion_config
         self._importance_config = importance_config
+        self._context_window_config = context_window_config
 
         # Search result TTL cache (per-instance)
         self._search_cache: dict[str, tuple[float, list[SearchResult], RetrievalStats]] = {}
@@ -71,9 +73,11 @@ class SearchPipeline:
         source_filter: str | None,
         tag_filter: str | None,
         namespace: str | list[str] | None,
+        context_window: int | None = None,
     ) -> str:
         import hashlib
 
+        ctx_win = self._resolve_context_window(context_window)
         raw = (
             f"{query}|{top_k}|{source_filter}|{tag_filter}|{namespace}"
             f"|bm25={self._config.enable_bm25}:{self._config.bm25_candidates}"
@@ -81,12 +85,68 @@ class SearchPipeline:
             f"|rrf_k={self._config.rrf_k}|w={tuple(self._config.rrf_weights)}"
             f"|decay={self._decay_config.enabled}:{self._decay_config.half_life_days}"
             f"|mmr={self._mmr_config.enabled}:{self._mmr_config.lambda_param}"
+            f"|ctx_win={ctx_win}"
         )
         return hashlib.md5(raw.encode()).hexdigest()
 
     def invalidate_cache(self) -> None:
         """Clear the search result TTL cache (call after config changes)."""
         self._search_cache.clear()
+
+    def _resolve_context_window(self, override: int | None) -> int:
+        """Return the effective context window size (0 = disabled)."""
+        if override is not None:
+            return max(0, min(override, 10))
+        cfg = self._context_window_config
+        if cfg and cfg.enabled:
+            return cfg.window_size
+        return 0
+
+    async def _expand_context(self, results: list[SearchResult], window: int) -> list[SearchResult]:
+        """Attach ±window adjacent chunks to each result (batch, single DB call)."""
+        if not results or window <= 0:
+            return results
+
+        source_files = list({r.chunk.metadata.source_file for r in results})
+        chunks_by_source = await self._storage.list_chunks_by_sources(source_files)
+
+        # Build per-file index: {chunk_id -> position}
+        file_indexes: dict[str, dict[str, int]] = {}
+        for sf, chunks in chunks_by_source.items():
+            file_indexes[str(sf)] = {str(c.id): i for i, c in enumerate(chunks)}
+
+        expanded: list[SearchResult] = []
+        for r in results:
+            sf_key = str(r.chunk.metadata.source_file)
+            idx_map = file_indexes.get(sf_key)
+            if idx_map is None:
+                expanded.append(r)
+                continue
+            pos = idx_map.get(str(r.chunk.id))
+            if pos is None:
+                expanded.append(r)
+                continue
+
+            file_chunks = chunks_by_source[r.chunk.metadata.source_file]
+            before = file_chunks[max(0, pos - window) : pos]
+            after = file_chunks[pos + 1 : pos + 1 + window]
+
+            expanded.append(
+                SearchResult(
+                    chunk=r.chunk,
+                    score=r.score,
+                    rank=r.rank,
+                    source=r.source,
+                    context=ContextInfo(
+                        window_before=tuple(before),
+                        window_after=tuple(after),
+                        chunk_position=pos + 1,
+                        total_chunks_in_file=len(file_chunks),
+                        context_tier_used="standard",
+                    ),
+                )
+            )
+        return expanded
 
     async def search(
         self,
@@ -96,6 +156,7 @@ class SearchPipeline:
         tag_filter: str | None = None,
         namespace: str | list[str] | None = None,
         rrf_weights: list[float] | None = None,
+        context_window: int | None = None,
     ) -> tuple[list[SearchResult], RetrievalStats]:
         top_k = top_k or self._config.default_top_k
         effective_weights = rrf_weights or self._config.rrf_weights
@@ -103,7 +164,9 @@ class SearchPipeline:
         # Check TTL cache for identical queries
         import time
 
-        cache_key = self._cache_key(query, top_k, source_filter, tag_filter, namespace)
+        cache_key = self._cache_key(
+            query, top_k, source_filter, tag_filter, namespace, context_window
+        )
         if cache_key in self._search_cache:
             ts, cached_results, cached_stats = self._search_cache[cache_key]
             if time.time() - ts < self._cache_ttl:
@@ -234,6 +297,11 @@ class SearchPipeline:
                 imp_scores,
                 max_boost=getattr(self._importance_config, "max_boost", 1.5),
             )
+
+        # Stage 8: Context window expansion (post-scoring, does not affect ranking)
+        ctx_win = self._resolve_context_window(context_window)
+        if ctx_win > 0 and fused:
+            fused = await self._expand_context(fused, ctx_win)
 
         stats.final_total = len(fused)
 

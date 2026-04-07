@@ -51,5 +51,6 @@ class SurfacingConfig(BaseModel):
     min_response_chars: int = 5000
     include_session_context: bool = True
     fire_webhook: bool = True
-    max_injection_chars: int = 2000
+    max_injection_chars: int = 3000
+    context_window_size: int = 0  # 0=disabled; >0 expands ±N adjacent chunks
     dedup_ttl_seconds: float = 604800.0  # 7 days

@@ -179,7 +179,5 @@ async def mem_cleanup_orphans(
         total_deleted += deleted
 
     return (
-        f"Cleanup complete:\n"
-        f"- Orphaned files: {len(orphaned)}\n"
-        f"- Chunks deleted: {total_deleted}"
+        f"Cleanup complete:\n- Orphaned files: {len(orphaned)}\n- Chunks deleted: {total_deleted}"
     )
