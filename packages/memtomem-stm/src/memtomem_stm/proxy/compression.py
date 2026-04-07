@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import time
 import uuid
@@ -24,6 +25,80 @@ from memtomem_stm.proxy.config import (
 from memtomem_stm.utils.circuit_breaker import CircuitBreaker as _CircuitBreaker
 
 logger = logging.getLogger(__name__)
+
+
+# ── Query-Aware Relevance Scoring ─────────────────────────────────────
+
+
+class QueryRelevanceScorer:
+    """BM25-like section relevance scoring with heading weighting.
+
+    Headings are weighted 3× over body text (headings use vocabulary closer
+    to user queries). Case-insensitive with basic suffix stemming.
+    """
+
+    _TOKEN_RE = re.compile(r"[a-zA-Z0-9\uac00-\ud7a3\u3040-\u309f\u30a0-\u30ff\u4e00-\u9fff_]+")
+    _SUFFIX_RE = re.compile(r"(ing|ed|ly|tion|ness|ment|ies|es|s)$")
+    _HEADING_WEIGHT = 3.0
+
+    def __init__(
+        self,
+        query: str,
+        sections: list[tuple[str, str]],
+        *,
+        k1: float = 1.5,
+        b: float = 0.75,
+    ) -> None:
+        self._k1 = k1
+        self._b = b
+        self._query_terms = self._tokenize(query)
+        self._sections = sections
+        # Pre-compute per-section token counts (heading-weighted)
+        self._doc_tfs: list[dict[str, float]] = []
+        self._doc_lens: list[float] = []
+        for title, body in sections:
+            heading_tokens = self._tokenize(title)
+            body_tokens = self._tokenize(body)
+            tf: dict[str, float] = {}
+            for t in heading_tokens:
+                tf[t] = tf.get(t, 0.0) + self._HEADING_WEIGHT
+            for t in body_tokens:
+                tf[t] = tf.get(t, 0.0) + 1.0
+            self._doc_tfs.append(tf)
+            self._doc_lens.append(len(heading_tokens) * self._HEADING_WEIGHT + len(body_tokens))
+        self._avgdl = sum(self._doc_lens) / len(self._doc_lens) if self._doc_lens else 1.0
+        # IDF per query term
+        n = len(sections)
+        self._idfs: dict[str, float] = {}
+        for t in set(self._query_terms):
+            df = sum(1 for tfs in self._doc_tfs if t in tfs)
+            self._idfs[t] = math.log((n - df + 0.5) / (df + 0.5) + 1.0)
+
+    def _tokenize(self, text: str) -> list[str]:
+        tokens = self._TOKEN_RE.findall(text.lower())
+        return [self._stem(t) for t in tokens]
+
+    def _stem(self, token: str) -> str:
+        if len(token) > 4:
+            return self._SUFFIX_RE.sub("", token)
+        return token
+
+    def score(self, section_idx: int) -> float:
+        if not self._query_terms:
+            return 0.0
+        tf_map = self._doc_tfs[section_idx]
+        dl = self._doc_lens[section_idx]
+        total = 0.0
+        for t in self._query_terms:
+            tf = tf_map.get(t, 0.0)
+            idf = self._idfs.get(t, 0.0)
+            num = tf * (self._k1 + 1.0)
+            den = tf + self._k1 * (1.0 - self._b + self._b * dl / self._avgdl)
+            total += idf * num / den if den > 0 else 0.0
+        return total
+
+    def score_all(self) -> list[float]:
+        return [self.score(i) for i in range(len(self._sections))]
 
 
 def _content_summary(text: str) -> str:
@@ -81,7 +156,7 @@ class TruncateCompressor:
     # Comment-section boundaries (-- Section Header)
     _COMMENT_SECTION_RE = re.compile(r"(?:^|\n)(--\s+\S.+)")
 
-    def compress(self, text: str, *, max_chars: int) -> str:
+    def compress(self, text: str, *, max_chars: int, context_query: str | None = None) -> str:
         if not text or len(text) <= max_chars:
             return text
 
@@ -95,14 +170,14 @@ class TruncateCompressor:
                     and len(data) >= 2
                     and all(isinstance(v, dict) for v in data.values())
                 ):
-                    return self._json_key_truncate(data, max_chars)
+                    return self._json_key_truncate(data, max_chars, context_query)
             except (json.JSONDecodeError, ValueError):
                 pass
 
         # Try section-aware truncation for markdown with headings
         headings = list(self._HEADING_RE.finditer(text))
         if len(headings) >= 2:
-            return self._section_aware_truncate(text, max_chars, headings)
+            return self._section_aware_truncate(text, max_chars, headings, context_query)
 
         # Try code-structure-aware truncation (function/class/SQL boundaries)
         code_boundaries = list(self._CODE_BOUNDARY_RE.finditer(text))
@@ -132,11 +207,14 @@ class TruncateCompressor:
         re.IGNORECASE,
     )
 
-    def _json_key_truncate(self, data: dict, max_chars: int) -> str:
+    def _json_key_truncate(
+        self, data: dict, max_chars: int, context_query: str | None = None
+    ) -> str:
         """Distribute budget across all top-level JSON keys.
 
         Each key gets a proportional share of the budget based on its
-        serialized size. This ensures no top-level section is completely lost.
+        serialized size. When context_query is provided, budget is weighted
+        by BM25 relevance (blended with size-proportional allocation).
         """
         # Serialize each top-level key separately to measure sizes
         key_sizes: list[tuple[str, str, int]] = []
@@ -148,16 +226,32 @@ class TruncateCompressor:
         overhead = 10  # {}, commas, newlines
         available = max_chars - overhead
 
-        # Build output: each key gets proportional budget
+        # Compute query-aware weights if applicable
+        relevance_weights: list[float] | None = None
+        if context_query and context_query.strip():
+            sections = [(k, ser) for k, ser, _ in key_sizes]
+            scorer = QueryRelevanceScorer(context_query, sections)
+            raw = scorer.score_all()
+            if any(s > 0 for s in raw):
+                relevance_weights = raw
+
+        # Build output: each key gets budget allocation
         parts: list[str] = []
-        for k, serialized, size in key_sizes:
-            key_budget = max(40, int(available * size / total_size))
+        for idx, (k, serialized, size) in enumerate(key_sizes):
+            # Size-proportional base
+            size_share = available * size / total_size if total_size else available / len(key_sizes)
+            if relevance_weights is not None:
+                total_rel = sum(relevance_weights)
+                rel_share = available * relevance_weights[idx] / total_rel if total_rel else 0
+                # Blend: 40% size-proportional + 60% relevance
+                key_budget = max(40, int(0.4 * size_share + 0.6 * rel_share))
+            else:
+                key_budget = max(40, int(size_share))
+
             if size <= key_budget:
-                # Fits entirely — use as-is (strip outer braces)
-                inner = serialized.strip()[1:-1].strip()  # remove { }
+                inner = serialized.strip()[1:-1].strip()
                 parts.append(inner)
             else:
-                # Truncate the value
                 v = data[k]
                 truncated = self._truncate_json_value(v, key_budget - len(k) - 6)
                 part = json.dumps({k: truncated}, ensure_ascii=False, indent=2)
@@ -252,12 +346,20 @@ class TruncateCompressor:
             result = result[:max_chars]
         return result
 
-    def _section_aware_truncate(self, text: str, max_chars: int, headings: list[re.Match]) -> str:
+    def _section_aware_truncate(
+        self,
+        text: str,
+        max_chars: int,
+        headings: list[re.Match],
+        context_query: str | None = None,
+    ) -> str:
         """Preserve information from ALL sections — minimum representation first.
 
         Strategy (eliminates head bias):
         1. Reserve minimum space: heading + first content line for EVERY section
-        2. Distribute remaining budget to enrich sections from the top
+        2. Distribute remaining budget:
+           - With context_query: proportional to BM25 relevance scores
+           - Without context_query: top-down sequential (original behavior)
         3. Detect and preserve summary/conclusion sections
         """
         # Parse sections: (title, body_text) pairs
@@ -283,9 +385,12 @@ class TruncateCompressor:
         # Heading + first meaningful content line (guarantees tail section visibility)
         minimums: list[str] = []  # one per section
         min_used = 0
-        for i, (_title, body) in enumerate(sections):
+        for i, (title, body) in enumerate(sections):
             lines = body.split("\n")
-            kept = [lines[0]]  # heading
+            # Skip leading empty lines (match position may include \n before heading)
+            while lines and not lines[0].strip():
+                lines = lines[1:]
+            kept = [lines[0]] if lines else [title]  # heading
             for line in lines[1:]:
                 if line.strip() and not line.strip().startswith("#"):
                     kept.append(line)
@@ -303,43 +408,57 @@ class TruncateCompressor:
         enriched: list[str] = list(minimums)  # start from minimums
 
         if enrich_budget > 0:
-            # Enrich sections top-down — replace minimum with fuller content
-            for i, (_title, body) in enumerate(sections):
-                if i == summary_idx:
-                    continue
-                extra = len(body) - len(minimums[i])
-                if extra <= 0:
-                    continue
-                if extra <= enrich_budget:
-                    # Full section fits
-                    enriched[i] = body
-                    enrich_budget -= extra
-                else:
-                    # Partial enrichment — add more lines from this section
-                    lines = body.split("\n")
-                    kept = enriched[i].split("\n")
-                    kept_set = set(kept)
-                    for line in lines:
-                        if line in kept_set:
-                            continue
-                        if len(line) + 1 > enrich_budget:
-                            break
-                        kept.append(line)
-                        enrich_budget -= len(line) + 1
-                    enriched[i] = "\n".join(kept)
-                    break  # budget exhausted
+            # Compute per-section relevance scores if query is provided
+            scores: list[float] | None = None
+            if context_query and context_query.strip():
+                scorer = QueryRelevanceScorer(context_query, sections)
+                raw_scores = scorer.score_all()
+                if any(s > 0 for s in raw_scores):
+                    scores = raw_scores
+
+            if scores is not None:
+                # ── Query-aware: allocate budget proportional to relevance ──
+                self._enrich_by_relevance(
+                    sections, minimums, enriched, scores, enrich_budget, summary_idx
+                )
+            else:
+                # ── Original: enrich sections top-down ──
+                for i, (_title, body) in enumerate(sections):
+                    if i == summary_idx:
+                        continue
+                    extra = len(body) - len(minimums[i])
+                    if extra <= 0:
+                        continue
+                    if extra <= enrich_budget:
+                        enriched[i] = body
+                        enrich_budget -= extra
+                    else:
+                        lines = body.split("\n")
+                        kept = enriched[i].split("\n")
+                        kept_set = set(kept)
+                        for line in lines:
+                            if line in kept_set:
+                                continue
+                            if len(line) + 1 > enrich_budget:
+                                break
+                            kept.append(line)
+                            enrich_budget -= len(line) + 1
+                        enriched[i] = "\n".join(kept)
+                        break
 
         # ── Phase 3: Summary section enrichment ──
-        if summary_idx >= 0 and enrich_budget > 50:
-            _, summary_body = sections[summary_idx]
-            extra = len(summary_body) - len(minimums[summary_idx])
-            if extra > 0:
-                if extra <= enrich_budget:
-                    enriched[summary_idx] = summary_body
-                else:
-                    enriched[summary_idx] = summary_body[
-                        : len(minimums[summary_idx]) + enrich_budget
-                    ]
+        if summary_idx >= 0:
+            remaining = max_chars - sum(len(e) + 2 for e in enriched) - footer_reserve
+            if remaining > 50:
+                _, summary_body = sections[summary_idx]
+                extra = len(summary_body) - len(enriched[summary_idx])
+                if extra > 0:
+                    if extra <= remaining:
+                        enriched[summary_idx] = summary_body
+                    else:
+                        enriched[summary_idx] = summary_body[
+                            : len(enriched[summary_idx]) + remaining
+                        ]
 
         # ── Assemble ──
         parts: list[str] = []
@@ -355,6 +474,77 @@ class TruncateCompressor:
         if len(result) > max_chars:
             result = result[:max_chars]
         return result
+
+    def _enrich_by_relevance(
+        self,
+        sections: list[tuple[str, str]],
+        minimums: list[str],
+        enriched: list[str],
+        scores: list[float],
+        budget: int,
+        summary_idx: int,
+    ) -> None:
+        """Distribute enrichment budget proportional to relevance scores.
+
+        Modifies *enriched* in-place. Higher-scored sections get more budget.
+        Each section's "extra" is capped by (full body - minimum).
+        """
+        # Compute per-section extras and weights
+        extras: list[int] = []
+        weights: list[float] = []
+        for i, (_title, body) in enumerate(sections):
+            extra = max(0, len(body) - len(minimums[i]))
+            extras.append(extra)
+            # summary gets enriched in Phase 3; exclude from relevance allocation
+            weights.append(scores[i] if i != summary_idx and extra > 0 else 0.0)
+
+        total_weight = sum(weights)
+        if total_weight <= 0:
+            return  # nothing to distribute
+
+        # Allocate budget proportionally, capped by each section's extra
+        allocations = [0] * len(sections)
+        remaining = budget
+        for i in range(len(sections)):
+            if weights[i] <= 0:
+                continue
+            share = int(budget * weights[i] / total_weight)
+            allocations[i] = min(share, extras[i])
+            remaining -= allocations[i]
+
+        # Distribute leftover to highest-scored sections with remaining capacity
+        if remaining > 0:
+            ranked = sorted(range(len(sections)), key=lambda j: -scores[j])
+            for i in ranked:
+                if remaining <= 0:
+                    break
+                gap = extras[i] - allocations[i]
+                if gap <= 0:
+                    continue
+                give = min(gap, remaining)
+                allocations[i] += give
+                remaining -= give
+
+        # Apply allocations: enrich each section up to its allocation
+        for i, (_title, body) in enumerate(sections):
+            if allocations[i] <= 0:
+                continue
+            if allocations[i] >= extras[i]:
+                enriched[i] = body
+            else:
+                # Partial: add lines until allocation exhausted
+                lines = body.split("\n")
+                kept = enriched[i].split("\n")
+                kept_set = set(kept)
+                alloc_left = allocations[i]
+                for line in lines:
+                    if line in kept_set:
+                        continue
+                    if len(line) + 1 > alloc_left:
+                        break
+                    kept.append(line)
+                    alloc_left -= len(line) + 1
+                enriched[i] = "\n".join(kept)
 
     def _code_aware_truncate(self, text: str, max_chars: int, boundaries: list[re.Match]) -> str:
         """Preserve signatures/names from ALL code blocks, not just the first ones.

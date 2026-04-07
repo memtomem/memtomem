@@ -204,26 +204,29 @@ def multilingual_tasks() -> list[BenchTask]:
 # Large document tasks (10K+ characters)
 # ═══════════════════════════════════════════════════════════════════════════
 
-_LARGE_API_LOG = "".join([
-    '{"logs": [\n',
-    *[
-        f'  {{"id": "log-{i:04d}", "timestamp": "2025-06-15T{10 + i // 60:02d}:{i % 60:02d}:00Z", '
-        f'"level": "{["INFO", "WARN", "ERROR", "DEBUG"][i % 4]}", '
-        f'"service": "{["api-gateway", "auth-service", "user-service", "payment-service"][i % 4]}", '
-        f'"message": "Request processed in {50 + i * 3}ms", '
-        f'"trace_id": "trace-{i:04d}", '
-        f'"status_code": {[200, 200, 200, 500, 429, 200, 200, 200, 503, 200][i % 10]}}},\n'
-        for i in range(200)
-    ],
-    '  {"id": "log-CRITICAL", "timestamp": "2025-06-15T13:37:00Z", '
-    '"level": "ERROR", "service": "payment-service", '
-    '"message": "Database connection pool exhausted — all 50 connections in use, '
-    '23 requests queued, oldest waiting 12.4 seconds", '
-    '"trace_id": "trace-CRITICAL", "status_code": 503}\n',
-    ']}\n',
-])
+_LARGE_API_LOG = "".join(
+    [
+        '{"logs": [\n',
+        *[
+            f'  {{"id": "log-{i:04d}", "timestamp": "2025-06-15T{10 + i // 60:02d}:{i % 60:02d}:00Z", '
+            f'"level": "{["INFO", "WARN", "ERROR", "DEBUG"][i % 4]}", '
+            f'"service": "{["api-gateway", "auth-service", "user-service", "payment-service"][i % 4]}", '
+            f'"message": "Request processed in {50 + i * 3}ms", '
+            f'"trace_id": "trace-{i:04d}", '
+            f'"status_code": {[200, 200, 200, 500, 429, 200, 200, 200, 503, 200][i % 10]}}},\n'
+            for i in range(200)
+        ],
+        '  {"id": "log-CRITICAL", "timestamp": "2025-06-15T13:37:00Z", '
+        '"level": "ERROR", "service": "payment-service", '
+        '"message": "Database connection pool exhausted — all 50 connections in use, '
+        '23 requests queued, oldest waiting 12.4 seconds", '
+        '"trace_id": "trace-CRITICAL", "status_code": 503}\n',
+        "]}\n",
+    ]
+)
 
-_LARGE_MARKDOWN_RFC = """# RFC: Unified Event Processing Architecture
+_LARGE_MARKDOWN_RFC = (
+    """# RFC: Unified Event Processing Architecture
 
 **Author:** Architecture Team
 **Status:** Draft
@@ -236,22 +239,43 @@ fragmented system of 7 independent message queues and 12 consumer services.
 
 ## Background
 
-""" + "\n".join([
-    f"### Problem {i+1}: {title}\n\n{desc}\n"
-    for i, (title, desc) in enumerate([
-        ("Inconsistent Event Schemas", "Currently 7 teams define their own event schemas with no validation. "
-         "This has caused 14 production incidents in the last quarter due to schema drift."),
-        ("Duplicate Processing", "Events are processed an average of 2.3 times across services. "
-         "The payment team found that 12% of refunds were triggered twice due to duplicate events."),
-        ("No Dead Letter Queue", "Failed events are silently dropped. "
-         "Analysis shows we lose approximately 0.3% of events daily (~45,000 events)."),
-        ("Scaling Bottlenecks", "Each consumer scales independently with different strategies. "
-         "The order service uses horizontal pods while auth uses thread pools, "
-         "leading to resource fragmentation."),
-        ("Monitoring Gaps", "No unified dashboard for event flow. "
-         "MTTR for event-related incidents averages 4.2 hours vs 1.1 hours for API issues."),
-    ])
-]) + """
+"""
+    + "\n".join(
+        [
+            f"### Problem {i + 1}: {title}\n\n{desc}\n"
+            for i, (title, desc) in enumerate(
+                [
+                    (
+                        "Inconsistent Event Schemas",
+                        "Currently 7 teams define their own event schemas with no validation. "
+                        "This has caused 14 production incidents in the last quarter due to schema drift.",
+                    ),
+                    (
+                        "Duplicate Processing",
+                        "Events are processed an average of 2.3 times across services. "
+                        "The payment team found that 12% of refunds were triggered twice due to duplicate events.",
+                    ),
+                    (
+                        "No Dead Letter Queue",
+                        "Failed events are silently dropped. "
+                        "Analysis shows we lose approximately 0.3% of events daily (~45,000 events).",
+                    ),
+                    (
+                        "Scaling Bottlenecks",
+                        "Each consumer scales independently with different strategies. "
+                        "The order service uses horizontal pods while auth uses thread pools, "
+                        "leading to resource fragmentation.",
+                    ),
+                    (
+                        "Monitoring Gaps",
+                        "No unified dashboard for event flow. "
+                        "MTTR for event-related incidents averages 4.2 hours vs 1.1 hours for API issues.",
+                    ),
+                ]
+            )
+        ]
+    )
+    + """
 ## Proposed Architecture
 
 ### Event Schema Registry
@@ -310,6 +334,7 @@ Phase 4 (Weeks 13-16): Decommission old queues, enable monitoring
 Approved by: CTO (2025-06-12), VP Engineering (2025-06-11)
 Start date: 2025-07-01
 """
+)
 
 
 def large_doc_tasks() -> list[BenchTask]:
@@ -334,7 +359,13 @@ def large_doc_tasks() -> list[BenchTask]:
             content=_LARGE_MARKDOWN_RFC,
             content_type="markdown",
             max_chars=1500,
-            expected_keywords=["Kafka", "schema registry", "dead letter queue", "exactly-once", "Avro"],
+            expected_keywords=[
+                "Kafka",
+                "schema registry",
+                "dead letter queue",
+                "exactly-once",
+                "Avro",
+            ],
             expect_headings=6,
             qa_pairs=[
                 QAPair("How many independent queues exist currently?", "7"),
@@ -408,8 +439,8 @@ def edge_case_tasks() -> list[BenchTask]:
             task_id="edge-binary-like",
             description="Text with binary-like garbage characters",
             content="HEADER\x00\x01DATA: key=value123\x00\x02 "
-                    "status=ok\x00\x03 count=42\n"
-                    "FOOTER: checksum=abc123",
+            "status=ok\x00\x03 count=42\n"
+            "FOOTER: checksum=abc123",
             content_type="text",
             max_chars=200,
             expected_keywords=["key=value123", "status=ok", "count=42"],
@@ -420,9 +451,12 @@ def edge_case_tasks() -> list[BenchTask]:
         BenchTask(
             task_id="edge-single-line",
             description="Extremely long single line — tests line-based processing",
-            content="METRIC " + " | ".join(
-                [f"cpu={50+i%50}% mem={30+i%40}% disk={10+i%60}% ts={i}"
-                 for i in range(100)]
+            content="METRIC "
+            + " | ".join(
+                [
+                    f"cpu={50 + i % 50}% mem={30 + i % 40}% disk={10 + i % 60}% ts={i}"
+                    for i in range(100)
+                ]
             ),
             content_type="text",
             max_chars=500,
@@ -432,13 +466,16 @@ def edge_case_tasks() -> list[BenchTask]:
         BenchTask(
             task_id="edge-repetitive",
             description="Highly repetitive content — dedup should help significantly",
-            content="\n".join([
-                f"[2025-06-15T10:{i:02d}:00Z] INFO health_check: status=ok latency={5+i%3}ms"
-                for i in range(60)
-            ] + [
-                "[2025-06-15T10:42:00Z] ERROR health_check: status=TIMEOUT latency=30012ms "
-                "error='connection refused to db-primary.internal:5432'"
-            ]),
+            content="\n".join(
+                [
+                    f"[2025-06-15T10:{i:02d}:00Z] INFO health_check: status=ok latency={5 + i % 3}ms"
+                    for i in range(60)
+                ]
+                + [
+                    "[2025-06-15T10:42:00Z] ERROR health_check: status=TIMEOUT latency=30012ms "
+                    "error='connection refused to db-primary.internal:5432'"
+                ]
+            ),
             content_type="text",
             max_chars=400,
             expected_keywords=["health_check", "TIMEOUT", "30012ms", "connection refused"],
@@ -725,7 +762,7 @@ def additional_markdown_tasks() -> list[BenchTask]:
 # Additional code tasks
 # ═══════════════════════════════════════════════════════════════════════════
 
-_CODE_GO_SERVER = '''package main
+_CODE_GO_SERVER = """package main
 
 import (
 \t"context"
@@ -794,7 +831,7 @@ func main() {
 \tmux := http.NewServeMux()
 \tmux.HandleFunc("/health", healthHandler(start))
 \tlog.Fatal(http.ListenAndServe(":8080", mux))
-}'''
+}"""
 
 _CODE_SQL_ANALYTICS = """-- Analytics queries for user engagement dashboard
 
@@ -1150,10 +1187,68 @@ def expanded_all_with_surfacing() -> list[BenchTask]:
     return tasks
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Context queries for query-aware compression benchmarking
+# ═══════════════════════════════════════════════════════════════════════════
+
+CONTEXT_QUERIES: dict[str, str] = {
+    # Original JSON tasks
+    "json-api-users": "admin 권한 사용자 찾기",
+    "json-app-config": "database connection pooling settings",
+    "json-ecommerce-events": "payment transaction failures",
+    # Original Markdown tasks
+    "md-tech-guide": "deployment architecture and scaling",
+    "md-sprint-retro": "action items and decisions",
+    "md-changelog": "security fixes and breaking changes",
+    # Original Code tasks
+    "code-python-etl": "error handling in data pipeline",
+    "code-ts-hooks": "state management with React hooks",
+    # Original Text tasks
+    "text-incident-p1": "root cause and remediation steps",
+    "text-ml-abstract": "scaling laws and performance results",
+    "text-legal-dpa": "data retention and deletion obligations",
+    # Multilingual
+    "kr-vector-db": "양자화 전략과 벤치마크 결과",
+    "jp-api-response": "レスポンスの購入データ",
+    "kr-meeting-notes": "인프라 작업 일정",
+    # Large documents
+    "large-api-log": "error status requests",
+    "large-rfc": "security considerations",
+    # Edge cases (no queries — these test robustness, not relevance)
+    # Additional JSON
+    "json-graphql": "user subscription status",
+    "json-metrics-ts": "anomaly detection in latency",
+    # Additional Markdown
+    "md-rfc-proposal": "migration strategy and rollback",
+    "md-tutorial": "authentication configuration steps",
+    "md-support-ticket": "resolution and workaround",
+    "md-sql-diagnostic": "query plan optimization",
+    # Additional Code
+    "code-go-http": "middleware error handling",
+    "code-rust-parser": "parse tree construction",
+    "code-sql-analytics": "window function aggregation",
+    # Additional Text
+    "text-email-thread": "budget approval timeline",
+    "text-support-case": "escalation steps",
+    "text-meeting-transcript": "action items assigned",
+    # Surfacing
+    "surf-api-with-memory": "authentication failure patterns",
+    "surf-incident-context": "previous incident resolution",
+    "surf-multi-memory": "deployment configuration history",
+    "surf-conflict-resolution": "conflicting version recommendations",
+}
+
+
 def full_benchmark_suite() -> list[BenchTask]:
     """Return the complete benchmark suite: original + expanded datasets."""
     from .datasets import all_tasks_with_surfacing as original_all
-    return [*original_all(), *expanded_all_with_surfacing()]
+
+    tasks = [*original_all(), *expanded_all_with_surfacing()]
+    # Populate context_query from CONTEXT_QUERIES map
+    for t in tasks:
+        if not t.context_query and t.task_id in CONTEXT_QUERIES:
+            t.context_query = CONTEXT_QUERIES[t.task_id]
+    return tasks
 
 
 def full_category_map() -> dict[str, str]:

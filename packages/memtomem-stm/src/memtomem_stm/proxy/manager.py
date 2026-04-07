@@ -356,6 +356,8 @@ class ProxyManager:
         hybrid_cfg: HybridConfig | None,
         server: str,
         tool: str,
+        *,
+        context_query: str | None = None,
     ) -> str:
         if compression == CompressionStrategy.AUTO:
             resolved = auto_select_strategy(text, max_chars=max_chars)
@@ -363,7 +365,15 @@ class ProxyManager:
             if resolved == CompressionStrategy.NONE:
                 return text
             return await self._apply_compression(
-                text, resolved, max_chars, sel_cfg, llm_cfg, hybrid_cfg, server, tool
+                text,
+                resolved,
+                max_chars,
+                sel_cfg,
+                llm_cfg,
+                hybrid_cfg,
+                server,
+                tool,
+                context_query=context_query,
             )
 
         if compression == CompressionStrategy.HYBRID:
@@ -384,6 +394,11 @@ class ProxyManager:
                 tool,
             )
             return TruncateCompressor().compress(text, max_chars=max_chars)
+
+        if compression == CompressionStrategy.TRUNCATE:
+            return TruncateCompressor().compress(
+                text, max_chars=max_chars, context_query=context_query
+            )
 
         return get_compressor(compression).compress(text, max_chars=max_chars)
 
@@ -715,6 +730,7 @@ class ProxyManager:
             tc.hybrid,
             server,
             tool,
+            context_query=context_query,
         )
         _compress_ms = (_time.monotonic() - _t0) * 1000
 

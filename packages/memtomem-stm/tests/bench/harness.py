@@ -17,7 +17,6 @@ from memtomem_stm.proxy.compression import (
     TruncateCompressor,
     auto_select_strategy,
 )
-from memtomem_stm.proxy.config import CompressionStrategy
 
 from .judge import RuleBasedJudge, _fuzzy_contains
 
@@ -62,6 +61,8 @@ class BenchTask:
     keyword_weights: list[float] | None = None
     # QA pairs for answer-based scoring
     qa_pairs: list[QAPair] = field(default_factory=list)
+    # Agent query context for query-aware compression
+    context_query: str = ""
 
 
 @dataclass
@@ -322,7 +323,12 @@ class BenchHarness:
         return max(budget, int(cleaned_len * min_r))
 
     def _run_pipeline(
-        self, task: BenchTask, compressor: Compressor | None = None, max_chars: int | None = None
+        self,
+        task: BenchTask,
+        compressor: Compressor | None = None,
+        max_chars: int | None = None,
+        *,
+        context_query: str | None = None,
     ) -> BenchResult:
         """Run clean → compress pipeline with optional overrides."""
         comp = compressor or self._compressor
@@ -338,7 +344,11 @@ class BenchHarness:
             budget = self._apply_retention(len(cleaned), budget)
 
             t0 = _time.monotonic()
-            compressed = comp.compress(cleaned, max_chars=budget)
+            # Pass context_query to TruncateCompressor for query-aware allocation
+            if context_query and isinstance(comp, TruncateCompressor):
+                compressed = comp.compress(cleaned, max_chars=budget, context_query=context_query)
+            else:
+                compressed = comp.compress(cleaned, max_chars=budget)
             compress_ms = (_time.monotonic() - t0) * 1000
 
             surfaced = compressed
@@ -438,6 +448,18 @@ class BenchHarness:
         direct = self.run_direct(task)
         stm = self.run_stm(task)
         return ComparisonReport(task_id=task.task_id, direct=direct, stm=stm)
+
+    def run_query_aware_comparison(self, task: BenchTask) -> ComparisonReport:
+        """Compare: truncate (no query) vs truncate (with context_query).
+
+        Uses the task's context_query field to evaluate whether query-aware
+        budget allocation improves quality over baseline truncation.
+        """
+        comp = TruncateCompressor()
+        baseline = self._run_pipeline(task, compressor=comp)
+        query = task.context_query or None
+        query_aware = self._run_pipeline(task, compressor=comp, context_query=query)
+        return ComparisonReport(task_id=task.task_id, direct=baseline, stm=query_aware)
 
     # ── Auto-strategy ────────────────────────────────────────────────
 
@@ -615,9 +637,7 @@ class BenchHarness:
 
         return StageBreakdown(task_id=task.task_id, stages=stages)
 
-    async def run_stage_breakdown_with_surfacing(
-        self, task: BenchTask
-    ) -> StageBreakdown:
+    async def run_stage_breakdown_with_surfacing(self, task: BenchTask) -> StageBreakdown:
         """Run full pipeline including surfacing, measure quality at each stage."""
         stages: list[StageScore] = []
 
@@ -653,9 +673,7 @@ class BenchHarness:
 
         # Without surfacing
         score_without = self._judge.score(task, compressed)
-        qa_without = sum(
-            1 for qa in task.qa_pairs if _fuzzy_contains(qa.answer, compressed)
-        )
+        qa_without = sum(1 for qa in task.qa_pairs if _fuzzy_contains(qa.answer, compressed))
 
         # With surfacing
         if self._surfacing is not None:
@@ -669,9 +687,7 @@ class BenchHarness:
             surfaced = compressed
 
         score_with = self._judge.score(task, surfaced)
-        qa_with = sum(
-            1 for qa in task.qa_pairs if _fuzzy_contains(qa.answer, surfaced)
-        )
+        qa_with = sum(1 for qa in task.qa_pairs if _fuzzy_contains(qa.answer, surfaced))
 
         # Count injected memories (check for surfacing marker)
         memories_injected = surfaced.count("score=0.") if surfaced != compressed else 0
