@@ -46,6 +46,7 @@ Agent (Claude Code, Cursor, etc.)
 - [MCP Tools](#mcp-tools-5--proxied)
 - [Safety & Resilience](#safety--resilience)
 - [Privacy](#privacy)
+- [Horizontal Scaling](#horizontal-scaling)
 - [Observability](#observability)
 - [Data Storage](#data-storage)
 - [Testing](#testing)
@@ -558,6 +559,12 @@ Full example with all options:
         "deduplicate": true,
         "collapse_links": true
       },
+      "selective": {
+        "max_pending": 100,
+        "pending_ttl_seconds": 300,
+        "pending_store": "memory",
+        "pending_store_path": "~/.memtomem/pending_selections.db"
+      },
       "hybrid": {
         "head_chars": 5000,
         "tail_mode": "toc",
@@ -682,7 +689,7 @@ Applied to both surfacing (LTM search) and LLM compression (external API calls).
 - **Response size gate**: Skips surfacing for responses under `min_response_chars` (default 5000)
 - **Session dedup**: Same memory ID not shown twice in one session
 - **Cross-session dedup**: Recently surfaced memory IDs persisted to SQLite; not re-surfaced within `dedup_ttl_seconds` (default 7 days). Set to `0` to disable.
-- **Injection size cap**: Memory block truncated if total exceeds `max_injection_chars` (default 2000)
+- **Injection size cap**: Memory block truncated if total exceeds `max_injection_chars` (default 3000)
 - **Boost guard**: Each surfacing event can only boost `access_count` once (duplicate feedback ignored)
 - **Fresh cache**: Proxy cache stores pre-surfacing content; surfacing is re-applied on cache hit so memories stay current
 
@@ -700,6 +707,32 @@ Sensitive content is auto-detected and never sent to external LLM compression:
 | Private keys | `BEGIN RSA PRIVATE KEY` |
 
 Detection scans the first 10K characters. When sensitive content is found, LLM compression falls back to local truncation.
+
+---
+
+## Horizontal Scaling
+
+By default, `SelectiveCompressor` stores pending TOC selections in memory. For multi-instance deployments, switch to SQLite-backed storage so instances share state:
+
+```json
+{
+  "upstream_servers": {
+    "filesystem": {
+      "selective": {
+        "pending_store": "sqlite",
+        "pending_store_path": "~/.memtomem/pending_selections.db"
+      }
+    }
+  }
+}
+```
+
+| Backend | Config value | Use case |
+|---------|-------------|----------|
+| `memory` (default) | In-process dict + deque | Single instance, zero overhead |
+| `sqlite` | SQLite with WAL mode | Multiple instances sharing TOC state |
+
+With `sqlite`, instance A can create a TOC and instance B can `stm_proxy_select_chunks` to retrieve sections from that TOC.
 
 ---
 
@@ -766,6 +799,7 @@ Traces proxy calls for latency analysis and debugging.
 | `~/.memtomem/proxy_cache.db` | Response cache (SQLite, WAL mode) | ProxyCache |
 | `~/.memtomem/proxy_metrics.db` | Compression metrics history | MetricsStore |
 | `~/.memtomem/stm_feedback.db` | Surfacing events & feedback ratings | FeedbackStore |
+| `~/.memtomem/pending_selections.db` | Shared pending TOC state (horizontal scaling) | SQLitePendingStore |
 | `~/.memtomem/proxy_index/*.md` | Auto-indexed responses | auto-index pipeline |
 
 ---
@@ -780,7 +814,7 @@ uv run pytest packages/memtomem-stm/tests/ -v
 uv run pytest packages/memtomem-stm/tests/test_compression.py -v
 ```
 
-639 tests covering:
+656 tests covering:
 
 | Test file | Coverage |
 |-----------|----------|
@@ -808,6 +842,7 @@ uv run pytest packages/memtomem-stm/tests/test_compression.py -v
 | `test_tool_metadata.py` | Description truncation, schema distillation, hidden tools, token savings |
 | `test_context_window.py` | Model context window lookup, effective_max_result_chars, prefix matching |
 | `test_observability.py` | RPSTracker, trace_id propagation, MetricsStore trace_id, upstream health |
+| `test_pending_store.py` | InMemory/SQLite PendingStore, persistence, concurrency, multi-instance sharing |
 | `test_bench_pipeline.py` | 181 benchmark tests: quality scoring, statistical analysis, dataset coverage |
 
 ## License
