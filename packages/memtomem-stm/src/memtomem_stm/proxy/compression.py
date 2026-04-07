@@ -1236,7 +1236,7 @@ class HybridCompressor:
     def selective_compressor(self) -> SelectiveCompressor:
         return self._selective
 
-    def compress(self, text: str, *, max_chars: int) -> str:
+    def compress(self, text: str, *, max_chars: int, context_query: str | None = None) -> str:
         if not text or len(text) <= max_chars:
             return text
         if len(text) <= self._head_chars:
@@ -1247,7 +1247,9 @@ class HybridCompressor:
         available = max_chars - separator_overhead
 
         if available <= 0:
-            return TruncateCompressor().compress(text, max_chars=max_chars)
+            return TruncateCompressor().compress(
+                text, max_chars=max_chars, context_query=context_query
+            )
 
         if self._head_chars + self._min_toc_budget <= available:
             head_budget = self._head_chars
@@ -1255,10 +1257,14 @@ class HybridCompressor:
             head_budget = max(self._min_head_chars, int(available * self._head_ratio))
 
         if head_budget > available or head_budget < self._min_head_chars:
-            return TruncateCompressor().compress(text, max_chars=max_chars)
+            return TruncateCompressor().compress(
+                text, max_chars=max_chars, context_query=context_query
+            )
 
         if available - head_budget < _MIN_TAIL:
-            return TruncateCompressor().compress(text, max_chars=max_chars)
+            return TruncateCompressor().compress(
+                text, max_chars=max_chars, context_query=context_query
+            )
 
         head_end = self._find_head_break(text, head_budget)
         head = text[:head_end]
@@ -1272,12 +1278,16 @@ class HybridCompressor:
 
         toc_budget = max_chars - len(head) - len(separator)
         if toc_budget < _MIN_TAIL:
-            return TruncateCompressor().compress(text, max_chars=max_chars)
+            return TruncateCompressor().compress(
+                text, max_chars=max_chars, context_query=context_query
+            )
 
         if self._tail_mode == TailMode.TOC:
             tail_compressed = self._selective.compress(tail_text, max_chars=toc_budget)
         else:
-            tail_compressed = TruncateCompressor().compress(tail_text, max_chars=toc_budget)
+            tail_compressed = TruncateCompressor().compress(
+                tail_text, max_chars=toc_budget, context_query=context_query
+            )
 
         result = head + separator + tail_compressed
         if len(result) > max_chars:

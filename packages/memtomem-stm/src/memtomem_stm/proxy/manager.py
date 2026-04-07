@@ -377,7 +377,9 @@ class ProxyManager:
             )
 
         if compression == CompressionStrategy.HYBRID:
-            return await self._apply_hybrid(text, max_chars, hybrid_cfg, sel_cfg)
+            return await self._apply_hybrid(
+                text, max_chars, hybrid_cfg, sel_cfg, context_query=context_query
+            )
 
         if compression == CompressionStrategy.SELECTIVE:
             async with self._selective_lock:
@@ -434,6 +436,8 @@ class ProxyManager:
         max_chars: int,
         hybrid_cfg: HybridConfig | None,
         sel_cfg: SelectiveConfig | None,
+        *,
+        context_query: str | None = None,
     ) -> str:
         cfg = hybrid_cfg or HybridConfig()
         async with self._selective_lock:
@@ -448,7 +452,7 @@ class ProxyManager:
             head_ratio=cfg.head_ratio,
             selective_compressor=self._selective_compressor,
         )
-        return compressor.compress(text, max_chars=max_chars)
+        return compressor.compress(text, max_chars=max_chars, context_query=context_query)
 
     async def _auto_index_response(
         self,
