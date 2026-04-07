@@ -13,7 +13,7 @@ Markdown-first, long-term memory infrastructure for AI agents. Provides hybrid B
 uv pip install -e "packages/memtomem[dev]"
 
 # Run all tests (pytest + pytest-asyncio, async tests auto-detected)
-uv run pytest                      # 1101 tests (core 819 + STM 282)
+uv run pytest                      # 1493 tests (core 837 + STM 656)
 
 # Run core tests only
 uv run pytest packages/memtomem/tests/ -v
@@ -64,7 +64,7 @@ All services live in `AppContext` (dataclass in `server/context.py`). Every MCP 
 
 ### MCP tools
 
-65 tools registered via `@register` decorator (in `server/tool_registry.py`) in `server/tools/*.py`, imported in `server/__init__.py`. Each tool is wrapped with `@tool_handler` for error handling. Tool visibility is controlled by `MEMTOMEM_TOOL_MODE` env var (`core`=9 tools including `mem_do`, `standard`=~30 + `mem_do`, `full`=65 + `mem_do`). Default mode is `core`. The `mem_do` meta-tool routes to 61 non-core actions via `mem_do(action="...", params={...})`. Action aliases (e.g. `health_report` → `eval`) are supported for discoverability.
+66 tools registered via `@register` decorator (in `server/tool_registry.py`) in `server/tools/*.py`, imported in `server/__init__.py`. Each tool is wrapped with `@tool_handler` for error handling. Tool visibility is controlled by `MEMTOMEM_TOOL_MODE` env var (`core`=9 tools including `mem_do`, `standard`=~30 + `mem_do`, `full`=66 + `mem_do`). Default mode is `core`. The `mem_do` meta-tool routes to 62 non-core actions via `mem_do(action="...", params={...})`. Action aliases (e.g. `health_report` → `eval`) are supported for discoverability. The `mem_expand` action provides targeted context expansion for individual search results.
 
 ### Storage: SQLite + FTS5 + sqlite-vec
 
@@ -79,8 +79,11 @@ All services live in `AppContext` (dataclass in `server/context.py`). Every MCP 
 4. Optional time-decay scoring
 5. Optional cross-encoder reranking
 6. MMR diversification
+7. Access-frequency boost
+8. Importance boost
+9. Context-window expansion (±N adjacent chunks from same source file)
 
-Results cached with 30s TTL.
+Results cached with 30s TTL. Context expansion uses batch `list_chunks_by_sources()` (single DB query). Per-call override via `search(context_window=N)` or global via `ContextWindowConfig`.
 
 ### Chunking
 
@@ -99,8 +102,8 @@ All config via `MEMTOMEM_` prefixed env vars with `__` nesting (e.g., `MEMTOMEM_
 `packages/memtomem-stm/` is a separate uv workspace package that proxies upstream MCP servers with a 4-stage pipeline:
 
 1. **CLEAN** — `proxy/cleaning.py`: HTML/script/style stripping, paragraph dedup, link flood collapse (supports links with trailing descriptions). `DefaultContentCleaner` accepts `CleaningConfig` in constructor.
-2. **COMPRESS** — `proxy/compression.py`: 6 strategies (none/truncate/selective/hybrid/extract_fields/LLM) + `auto_select_strategy()` for content-type detection. `TruncateCompressor` is section-aware for markdown (cuts at heading boundaries, preserves Summary/Conclusion sections at document end). `FieldExtractCompressor` shows first key-value pairs of nested dicts. `SelectiveCompressor` stores pending sections in deque-backed storage.
-3. **SURFACE** — `surfacing/engine.py`: proactive memory injection from LTM. Gated by `RelevanceGate` (rate limit, cooldown, write-tool heuristic), protected by `CircuitBreaker`, session dedup (same memory not shown twice), and `max_injection_chars` size cap. File paths are tokenized for query extraction.
+2. **COMPRESS** — `proxy/compression.py`: 9 strategies (none/auto/truncate/selective/hybrid/extract_fields/schema_pruning/skeleton/LLM) + `auto_select_strategy()` for content-type detection. `TruncateCompressor` is section-aware with "minimum representation first" pattern (heading + first line for ALL sections, then enriches top-down). `FieldExtractCompressor` shows first key-value pairs of nested dicts. `SelectiveCompressor` stores pending sections via `PendingStore` protocol (InMemory default, SQLite for horizontal scaling).
+3. **SURFACE** — `surfacing/engine.py`: proactive memory injection from LTM. Gated by `RelevanceGate` (rate limit, cooldown, write-tool heuristic), protected by `CircuitBreaker`, session dedup (same memory not shown twice), cross-session dedup (SQLite `seen_memories` table with 7-day TTL), and `max_injection_chars` size cap. Supports `context_window_size` for adjacent chunk expansion. File paths are tokenized for query extraction.
 4. **INDEX** — optional auto-indexing of large responses to LTM.
 
 Key patterns:
@@ -111,12 +114,17 @@ Key patterns:
 - `AutoTuner` adjusts per-tool `min_score` based on feedback ratios (>60% not_relevant → raise, <20% → lower), with global ratio fallback for cold-start tools
 - Feedback-driven search boost: "helpful" ratings increment `access_count` (once per surfacing event), feeding into core's access-frequency boost
 - `LLMCompressor` reuses `httpx.AsyncClient` for connection pooling
+- `PendingStore` protocol in `proxy/pending_store.py` — `InMemoryPendingStore` (default) or `SQLitePendingStore` (horizontal scaling)
+- Error classification via `ErrorCategory` (TRANSPORT, TIMEOUT, PROTOCOL, UPSTREAM_ERROR, PROGRAMMING) in `proxy/metrics.py`
+- `RPSTracker` sliding-window RPS, `trace_id` per call, latency percentiles (p50/p95/p99)
+- Tool metadata optimization: `hidden`, `description_override`, `max_description_chars`, `strip_schema_descriptions`
+- Context-window-aware compression: `consumer_model` + `context_budget_ratio` for model-based budget
 
 ## Testing
 
 - Framework: pytest + pytest-asyncio (asyncio_mode = "auto")
-- Core test root: `packages/memtomem/tests/` (819 tests)
-- STM test root: `packages/memtomem-stm/tests/` (282 tests)
+- Core test root: `packages/memtomem/tests/` (837 tests)
+- STM test root: `packages/memtomem-stm/tests/` (656 tests)
 - Both paths configured in `pyproject.toml` `testpaths`
 - Core fixtures in `conftest.py` create isolated SQLite DB per test
 - STM fixtures in `conftest.py` provide `surfacing_config`, `feedback_store`, `proxy_cache`, `token_tracker`
