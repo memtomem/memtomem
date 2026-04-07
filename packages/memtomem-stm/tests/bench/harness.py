@@ -268,9 +268,9 @@ def _get_compressor(strategy: str) -> Compressor:
     return TruncateCompressor()
 
 
-def resolve_auto_strategy(content: str) -> str:
+def resolve_auto_strategy(content: str, max_chars: int = 0) -> str:
     """Use auto_select_strategy to pick the best compression strategy for content."""
-    strategy = auto_select_strategy(content)
+    strategy = auto_select_strategy(content, max_chars=max_chars)
     return strategy.value
 
 
@@ -425,7 +425,7 @@ class BenchHarness:
         direct = self.run_direct(task)
         # Clean first so auto-select sees cleaned content
         cleaned = self._cleaner.clean(task.content)
-        strategy = resolve_auto_strategy(cleaned)
+        strategy = resolve_auto_strategy(cleaned, max_chars=task.max_chars)
         compressor = _get_compressor(strategy)
         stm = self._run_pipeline(task, compressor=compressor)
         return ComparisonReport(task_id=task.task_id, direct=direct, stm=stm)
@@ -444,7 +444,7 @@ class BenchHarness:
 
         for name in strategies:
             if name == "auto":
-                auto_name = resolve_auto_strategy(cleaned)
+                auto_name = resolve_auto_strategy(cleaned, max_chars=task.max_chars)
                 comp = _get_compressor(auto_name)
                 actual_name = f"auto({auto_name})"
             else:

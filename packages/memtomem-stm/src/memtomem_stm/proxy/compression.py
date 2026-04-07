@@ -1014,35 +1014,36 @@ def _json_depth(data: object, _current: int = 0) -> int:
     return _current
 
 
-def auto_select_strategy(text: str) -> CompressionStrategy:
+def auto_select_strategy(text: str, *, max_chars: int = 0) -> CompressionStrategy:
     """Detect content type and return the best compression strategy.
 
-    Selection priority: information preservation > compression ratio.
+    Principle: information preservation > compression ratio.
+    If a pattern is not recognized, prefer NONE (passthrough after cleaning)
+    over aggressive compression that may destroy information.
 
-    - JSON → SCHEMA_PRUNING (preserves all keys, prunes values)
-    - Markdown with many short parallel sections → SKELETON (all headings)
-    - Large markdown (5K+) with headings → HYBRID (head + TOC)
-    - Shorter markdown → TRUNCATE (section-aware)
-    - Code/text → TRUNCATE (code-aware / sentence-aware)
+    Args:
+        text: cleaned content to analyze
+        max_chars: budget hint (0 = unknown). When cleaning already fits
+                   within budget, returns NONE to skip compression entirely.
     """
     stripped = text.strip()
     if not stripped:
         return CompressionStrategy.NONE
 
-    # JSON detection — conservative: only use specialized compressors for proven patterns
+    # If content already fits within budget after cleaning → passthrough
+    if max_chars > 0 and len(stripped) <= max_chars:
+        return CompressionStrategy.NONE
+
+    # JSON detection — conservative: only for proven patterns
     if stripped[0] in "{[":
         try:
             data = json.loads(stripped)
-            # Schema pruning ONLY for JSON with a dominant large array (10+ items)
-            # These benefit from first+last item sampling (log streams, server lists)
             if isinstance(data, list) and len(data) >= 20:
                 return CompressionStrategy.SCHEMA_PRUNING
             if isinstance(data, dict):
                 arrays = [v for v in data.values() if isinstance(v, list) and len(v) >= 20]
                 if arrays:
                     return CompressionStrategy.SCHEMA_PRUNING
-            # Default: truncate handles JSON well with section-aware mode
-            # (extract_fields can lose nested values that truncate preserves)
             return CompressionStrategy.TRUNCATE
         except (json.JSONDecodeError, ValueError):
             pass
@@ -1051,7 +1052,7 @@ def auto_select_strategy(text: str) -> CompressionStrategy:
     heading_count = len(re.findall(r"(?:^|\n)#{1,6}\s", stripped))
 
     if heading_count >= 4:
-        # Skeleton ONLY for API-docs with HTTP method endpoints
+        # Skeleton for API-docs with HTTP method endpoints
         has_http_methods = bool(re.search(r"(?:POST|GET|PUT|DELETE|PATCH)\s+/", stripped))
         if has_http_methods:
             return CompressionStrategy.SKELETON
