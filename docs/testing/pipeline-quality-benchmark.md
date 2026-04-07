@@ -96,9 +96,9 @@ LLM (Claude Haiku / GPT-4o-mini)을 사용한 의미적 품질 평가:
 ### 전체 요약
 
 - **Tasks:** 34 (빈 응답 제외)
-- **Mean quality:** 6.59/10 (±2.90)
-- **95% CI:** [5.56, 7.48]
-- **Quality preservation:** 66.5%
+- **Mean quality:** 7.36/10 (±2.52)
+- **95% CI:** [6.42, 8.15]
+- **Quality preservation:** 74.6%
 - **Wilcoxon signed-rank:** W=0.0, p<0.0001 (유의미한 품질 차이)
 
 ### 카테고리별 결과
@@ -106,41 +106,44 @@ LLM (Claude Haiku / GPT-4o-mini)을 사용한 의미적 품질 평가:
 | 카테고리 | N | 평균 품질 | 표준편차 | 중앙값 | 보존율 | 95% CI |
 |---------|---|----------|---------|-------|--------|--------|
 | edge_case | 6 | 9.0 | 2.4 | 10.0 | 90% | [7.0, 10.0] |
+| code | 4 | 8.0 | 1.2 | 8.0 | 89% | [7.0, 9.0] |
 | surfacing | 4 | 8.5 | 3.0 | 10.0 | 85% | [5.5, 10.0] |
+| large_doc | 2 | 8.0 | 2.8 | 8.0 | 80% | [6.0, 10.0] |
 | multilingual | 3 | 7.7 | 3.2 | 9.0 | 77% | [4.0, 10.0] |
 | text | 5 | 7.2 | 1.1 | 8.0 | 72% | [6.4, 8.0] |
 | json | 5 | 5.6 | 2.7 | 6.0 | 56% | [3.6, 7.7] |
-| large_doc | 2 | 5.0 | 1.4 | 5.0 | 50% | [4.0, 6.0] |
-| code | 4 | 4.5 | 3.0 | 5.0 | 50% | [2.0, 7.0] |
-| markdown | 5 | 4.2 | 2.6 | 4.0 | 42% | [2.2, 6.4] |
+| markdown | 5 | 5.4 | 2.7 | 5.0 | 54% | [3.4, 7.4] |
 
 ### 태스크별 상세
 
 | Task | Direct | STM | 보존율 | 압축률 |
 |------|--------|-----|-------|--------|
-| ml-kr-vector-guide | 10.0 | 10.0 | 100% | 34% |
+| ml-kr-vector-guide | 10.0 | 10.0 | 100% | 45% |
+| large-rfc-event-arch | 10.0 | 10.0 | 100% | 54% |
 | surf-incident-with-history | 10.0 | 10.0 | 100% | 59% |
 | surf-multi-memory-debug | 10.0 | 10.0 | 100% | 0% |
 | surf-conflict-resolution | 10.0 | 10.0 | 100% | 0% |
-| ml-kr-meeting-notes | 10.0 | 9.0 | 90% | 39% |
+| code-ts-hooks | 9.0 | 9.0 | 100% | 83% |
+| code-go-server | 9.0 | 9.0 | 100% | 59% |
+| md-vector-db-guide | 10.0 | 9.0 | 90% | 68% |
+| ml-kr-meeting-notes | 10.0 | 9.0 | 90% | 46% |
 | json-api-users | 10.0 | 8.2 | 82% | 77% |
 | text-research-abstract | 10.0 | 8.0 | 80% | 59% |
 | text-legal-dpa | 10.0 | 8.0 | 80% | 54% |
-| md-vector-db-guide | 10.0 | 8.0 | 80% | 66% |
 | json-graphql-repo | 10.0 | 8.0 | 80% | 62% |
 | text-support-ticket | 10.0 | 8.0 | 80% | 61% |
-| code-ts-hooks | 9.0 | 7.0 | 78% | 78% |
-| code-go-server | 9.0 | 7.0 | 78% | 56% |
-| text-incident-report | 10.0 | 6.0 | 60% | 59% |
+| code-python-etl | 9.0 | 7.0 | 78% | 80% |
+| code-sql-analytics | 9.0 | 7.0 | 78% | 88% |
+| md-sprint-retro | 10.0 | 7.0 | 70% | 70% |
 | json-event-stream | 10.0 | 6.0 | 60% | 70% |
-| text-email-thread | 10.0 | 6.0 | 60% | 65% |
+| text-incident-report | 10.0 | 6.0 | 60% | 59% |
 | large-api-logs | 10.0 | 6.0 | 60% | 98% |
-| md-sprint-retro | 10.0 | 5.0 | 50% | 67% |
-| code-python-etl | 9.0 | 3.0 | 33% | 79% |
-| md-changelog | 10.0 | 3.0 | 30% | 58% |
+| text-email-thread | 10.0 | 6.0 | 60% | 65% |
+| md-changelog | 10.0 | 5.0 | 50% | 67% |
+| md-search-tutorial | 10.0 | 4.0 | 40% | 64% |
+| surf-api-with-context | 10.0 | 4.0 | 40% | 77% |
 | json-app-config | 10.0 | 2.0 | 20% | 65% |
-| md-api-docs | 10.0 | 1.0 | 10% | 55% |
-| code-sql-analytics | 9.0 | 1.0 | 11% | 74% |
+| md-api-docs | 10.0 | 2.0 | 20% | 65% |
 
 ### 전략별 비교 (대표 태스크)
 
@@ -148,18 +151,10 @@ LLM (Claude Haiku / GPT-4o-mini)을 사용한 의미적 품질 평가:
 |------|----------|--------|---------------|------|
 | json-api-users | 8.2 | 8.2 | **8.7** | extract_fields |
 | md-vector-db-guide | **8.0** | 4.0 | 0.0 | truncate |
-| code-python-etl | 3.0 | 3.0 | **5.0** | extract_fields |
+| code-python-etl | **7.0** | 7.0 | 5.0 | truncate (코드 구조 인식) |
 | text-incident-report | **6.0** | 4.0 | 6.0 | truncate |
-| ml-kr-vector-guide | **10.0** | 10.0 | 0.0 | truncate/hybrid |
-| large-rfc-event-arch | **4.0** | 3.0 | 1.0 | truncate |
-
-### 압축 커브 (예산 비율 → 품질)
-
-```
-json-api-users:     30% → 8.8   50% → 9.2   70% → 9.4   90% → 10.0
-code-python-etl:    30% → 3.0   50% → 5.0   70% → 5.0   90% → 7.0
-text-incident-report: 30% → 4.0   50% → 8.0   70% → 8.0   90% → 10.0
-```
+| ml-kr-vector-guide | **10.0** | 10.0 | 0.0 | truncate |
+| large-rfc-event-arch | **10.0** | 3.0 | 1.0 | truncate (섹션 분산) |
 
 ### 단계별 품질 분석 (Stage Breakdown)
 
@@ -169,17 +164,12 @@ text-incident-report: 30% → 4.0   50% → 8.0   70% → 8.0   90% → 10.0
 json-api-users:
   original    1710 chars  quality=10.0  QA=4/4
   cleaned     1710 chars  quality=10.0  QA=4/4  ← clean 손실 없음
-  compressed   392 chars  quality=8.2   QA=1/4  ← compress에서 -1.8, QA 3개 손실
-
-md-vector-db-guide:
-  original    2326 chars  quality=10.0  QA=4/4
-  cleaned     2325 chars  quality=10.0  QA=4/4  ← clean 손실 없음
-  compressed   800 chars  quality=8.0   QA=2/4  ← compress에서 -2.0, QA 2개 손실
+  compressed   392 chars  quality=8.2   QA=1/4  ← compress에서 -1.8
 
 code-python-etl:
   original    3894 chars  quality=9.0   QA=3/4
   cleaned     3893 chars  quality=9.0   QA=3/4  ← clean 손실 없음
-  compressed   821 chars  quality=3.0   QA=1/4  ← compress에서 -6.0, QA 2개 손실
+  compressed   821 chars  quality=7.0   QA=1/4  ← 코드 구조 인식으로 -2.0 (이전 -6.0)
 ```
 
 **관찰:** Clean 단계는 정보 손실 없음. 모든 정보 손실은 Compress 단계에서 발생.
@@ -219,19 +209,18 @@ code-python-etl:
 
 ## 핵심 발견
 
-### 1. 전략 선택이 품질에 결정적
+### 1. 구조 인식 절단이 정보 보존의 핵심
 
-- **JSON** → `extract_fields`가 최적 (8.7 vs truncate 8.2)
-- **Markdown** → `truncate`가 최적 (8.0 vs hybrid 4.0)
-- **Code** → task에 따라 다름 (ETL은 extract_fields, hooks는 truncate)
-- **Text** → `truncate`가 안정적 (6.0-8.0)
-- `auto_select_strategy()`는 JSON에서 정확, markdown에서는 hybrid를 선택하지만 truncate가 더 나은 경우 있음
+- **섹션 분산 절단**: 모든 섹션에서 스니펫을 보존 → 뒷부분 완전 소실 방지 (large-rfc: 4→10)
+- **코드 구조 인식**: `def`/`class`/SQL 경계 감지 → 함수 시그니처 보존 (code-sql: 1→7, code-etl: 3→7)
+- **JSON 스칼라 우선**: 중첩 JSON에서 scalar 값을 collection 앞에 배치 → 절단 시 핵심 값 생존
 
-### 2. 예산 50%가 실용적 기준점
+### 2. 전략 선택 가이드
 
-- JSON: 50% 예산에서 9.2/10 달성
-- Text: 50% 예산에서 8.0/10 달성
-- Code: 50% 예산에서도 5.0/10 — 코드는 더 많은 예산 필요
+- **JSON** → `extract_fields` (8.7 vs truncate 8.2)
+- **Markdown/Code/Text** → `truncate` (구조 인식 모드 자동 적용)
+- **대형 문서 (5K+)** → `hybrid` (head + TOC)
+- `auto_select_strategy()`는 문서 크기 기반으로 전략 자동 선택
 
 ### 3. Clean 단계는 정보를 보존
 
@@ -248,12 +237,11 @@ code-python-etl:
 - 한국어 기술 문서: 100% 보존 (budget 여유 시)
 - 일본어 JSON: 40% (FieldExtract가 일본어 키를 잘 처리 못함 → 개선 필요)
 
-### 6. 약점 영역
+### 6. 남은 약점 영역
 
-- **중첩 JSON 이벤트** (event-stream): 깊은 구조에서 핵심 값 손실
-- **코드 (ETL, SQL)**: 함수 본문이 잘리면 로직 손실 큼
-- **Markdown API 문서**: 엔드포인트가 많으면 뒤쪽 내용 손실
-- **일본어 JSON**: FieldExtract가 일본어 키명을 처리 못함
+- **중첩 JSON 설정/이벤트**: 깊은 구조에서 핵심 값 손실 (json-app-config: 2.0)
+- **Markdown API 문서**: 엔드포인트가 많으면 섹션별 스니펫도 부족 (md-api-docs: 2.0)
+- **일본어 JSON**: FieldExtract가 일본어 키명을 처리 못함 (ml-jp-api-response: 4.0)
 
 ---
 
@@ -263,7 +251,7 @@ CI에서 사용할 수 있는 품질 임계값:
 
 ```python
 # 전체 평균
-assert summary.overall.mean_quality >= 5.0      # 최소 평균 품질
+assert summary.overall.mean_quality >= 6.0      # 최소 평균 품질
 
 # 카테고리별
 assert cat_stats["text"].mean_quality >= 6.0    # 텍스트는 높은 기준
