@@ -278,7 +278,12 @@ class ProxyManager:
         cfg = conn.config
 
         compression = cfg.compression
-        max_chars = cfg.max_result_chars
+        # Use model-aware budget if server uses default max_result_chars
+        _default_server_max = UpstreamServerConfig.model_fields["max_result_chars"].default
+        if cfg.max_result_chars == _default_server_max:
+            max_chars = self._config.effective_max_result_chars()
+        else:
+            max_chars = cfg.max_result_chars
         llm_cfg = cfg.llm
         sel_cfg = cfg.selective
         hybrid_cfg = cfg.hybrid

@@ -131,6 +131,29 @@ class MetricsConfig(BaseModel):
     max_history: int = 10000
 
 
+# Static context window sizes (tokens) for known model families.
+# Used by ProxyConfig.effective_max_result_chars() to scale compression budget.
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "claude-opus-4": 200000,
+    "claude-sonnet-4": 200000,
+    "claude-haiku-4": 200000,
+    "claude-3.5": 200000,
+    "claude-3-opus": 200000,
+    "claude-3-sonnet": 200000,
+    "claude-3-haiku": 200000,
+    "gpt-4o": 128000,
+    "gpt-4o-mini": 128000,
+    "gpt-4-turbo": 128000,
+    "gpt-4.1": 1048576,
+    "gpt-4": 8192,
+    "gpt-3.5": 16385,
+    "o3": 200000,
+    "o4-mini": 200000,
+    "gemini-2": 1048576,
+    "gemini-1.5": 1048576,
+}
+
+
 class ProxyConfig(BaseModel):
     enabled: bool = False
     config_path: Path = Path("~/.memtomem/stm_proxy.json")
@@ -149,9 +172,31 @@ class ProxyConfig(BaseModel):
     """
     max_description_chars: int = 200
     strip_schema_descriptions: bool = False
+    consumer_model: str = ""
+    context_budget_ratio: float = 0.05
     cache: CacheConfig = Field(default_factory=CacheConfig)
     auto_index: AutoIndexConfig = Field(default_factory=AutoIndexConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
+
+    def effective_max_result_chars(self) -> int:
+        """Compute max_result_chars scaled by consumer model's context window.
+
+        If ``consumer_model`` is set and matches a known model prefix,
+        the budget is ``context_window * context_budget_ratio * 3.5``
+        (tokens → chars), capped at ``default_max_result_chars``.
+        """
+        if not self.consumer_model:
+            return self.default_max_result_chars
+        # Prefix match: "claude-sonnet-4-20250514" matches "claude-sonnet-4"
+        ctx_tokens = None
+        for prefix, tokens in MODEL_CONTEXT_WINDOWS.items():
+            if self.consumer_model.startswith(prefix):
+                ctx_tokens = tokens
+                break
+        if ctx_tokens is None:
+            return self.default_max_result_chars
+        model_budget = int(ctx_tokens * self.context_budget_ratio * 3.5)
+        return min(model_budget, self.default_max_result_chars)
 
     @staticmethod
     def load_from_file(path: Path) -> ProxyConfig:
