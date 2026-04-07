@@ -139,9 +139,7 @@ class TokenTracker:
         self._clean_latencies.append(metrics.clean_ms)
         self._compress_latencies.append(metrics.compress_ms)
         self._surface_latencies.append(metrics.surface_ms)
-        self._total_latencies.append(
-            metrics.clean_ms + metrics.compress_ms + metrics.surface_ms
-        )
+        self._total_latencies.append(metrics.clean_ms + metrics.compress_ms + metrics.surface_ms)
 
         s = self._by_server[metrics.server]
         s["calls"] += 1

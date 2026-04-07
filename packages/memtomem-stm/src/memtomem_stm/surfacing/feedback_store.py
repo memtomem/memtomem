@@ -192,15 +192,11 @@ class FeedbackStore:
             return 0
         cutoff = time.time() - ttl_seconds
         with self._lock:
-            cursor = self._db.execute(
-                "DELETE FROM seen_memories WHERE last_seen_at < ?", (cutoff,)
-            )
+            cursor = self._db.execute("DELETE FROM seen_memories WHERE last_seen_at < ?", (cutoff,))
             self._db.commit()
             return cursor.rowcount
 
-    def get_tool_not_relevant_ratio(
-        self, tool: str | None, min_samples: int = 20
-    ) -> float | None:
+    def get_tool_not_relevant_ratio(self, tool: str | None, min_samples: int = 20) -> float | None:
         """Return ratio of not_relevant feedback. None if insufficient samples.
 
         If tool is None, returns the global ratio across all tools (used
@@ -224,9 +220,7 @@ class FeedbackStore:
                 (tool,),
             ).fetchone()[0]
         else:
-            total = self._db.execute(
-                "SELECT COUNT(*) FROM surfacing_feedback"
-            ).fetchone()[0]
+            total = self._db.execute("SELECT COUNT(*) FROM surfacing_feedback").fetchone()[0]
             if total < min_samples:
                 return None
             not_relevant = self._db.execute(
