@@ -271,13 +271,13 @@ class TestSectionAwareTruncation:
         assert "condensed" in result or "Section" in result
 
     def test_remaining_section_titles_listed(self):
-        """Cut sections appear as condensed snippets or title list."""
+        """All sections have at least heading + first line representation."""
         text = "\n\n".join(f"## Topic {i}\n\n{'Details here. ' * 5}" for i in range(6))
         comp = TruncateCompressor()
-        result = comp.compress(text, max_chars=400)
-        # Some sections preserved, rest condensed with content
-        assert "Topic" in result
-        assert "condensed" in result or "original" in result
+        result = comp.compress(text, max_chars=600)
+        # Every section heading should be present (minimum representation)
+        for i in range(6):
+            assert f"Topic {i}" in result
 
     def test_plain_text_uses_classic_truncation(self):
         """Text without headings uses position-based truncation (backward compat)."""

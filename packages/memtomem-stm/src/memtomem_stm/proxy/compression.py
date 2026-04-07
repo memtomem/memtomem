@@ -257,14 +257,12 @@ class TruncateCompressor:
     def _section_aware_truncate(
         self, text: str, max_chars: int, headings: list[re.Match]
     ) -> str:
-        """Preserve information from ALL sections, not just the first ones.
+        """Preserve information from ALL sections — minimum representation first.
 
-        Strategy:
-        1. Keep full text of sections that fit within 60% of budget
-        2. For remaining sections, preserve heading + first line (key facts)
+        Strategy (eliminates head bias):
+        1. Reserve minimum space: heading + first content line for EVERY section
+        2. Distribute remaining budget to enrich sections from the top
         3. Detect and preserve summary/conclusion sections
-
-        This prevents total information loss from sections beyond the cutoff.
         """
         # Parse sections: (title, body_text) pairs
         sections: list[tuple[str, str]] = []
@@ -285,85 +283,74 @@ class TruncateCompressor:
             if self._SUMMARY_RE.search(last_title):
                 summary_idx = len(sections) - 1
 
-        # Phase 1: Keep full sections from the top
-        # Scale full_budget with document compression ratio
-        ratio = max_chars / len(text) if text else 1.0
-        full_pct = min(0.85, 0.5 + ratio * 0.4)  # 50-85% based on budget ratio
-        full_budget = int(max_chars * full_pct)
-        full_parts: list[str] = []
-        used = 0
-        full_count = 0
+        # ── Phase 1: Minimum representation for EVERY section ──
+        # Heading + first meaningful content line (guarantees tail section visibility)
+        minimums: list[str] = []  # one per section
+        min_used = 0
+        for i, (_title, body) in enumerate(sections):
+            lines = body.split("\n")
+            kept = [lines[0]]  # heading
+            for line in lines[1:]:
+                if line.strip() and not line.strip().startswith("#"):
+                    kept.append(line)
+                    break
+            snippet = "\n".join(kept)
+            minimums.append(snippet)
+            min_used += len(snippet) + 2
 
         if preamble:
-            full_parts.append(preamble)
-            used += len(preamble) + 1
+            min_used += len(preamble) + 2
 
-        for i, (title, body) in enumerate(sections):
-            if i == summary_idx:
-                continue  # Handle summary separately
-            if used + len(body) + 2 <= full_budget:
-                full_parts.append(body)
-                used += len(body) + 2
-                full_count = i + 1
-            else:
-                break
+        # ── Phase 2: Enrich sections with remaining budget ──
+        footer_reserve = 80
+        enrich_budget = max_chars - min_used - footer_reserve
+        enriched: list[str] = list(minimums)  # start from minimums
 
-        # Phase 2: For remaining sections, keep heading + first meaningful line
-        snippet_parts: list[str] = []
-        snippet_budget = max_chars - used - 100  # Reserve 100 for footer
-        snippet_used = 0
-
-        remaining_sections = [
-            (i, t, b) for i, (t, b) in enumerate(sections)
-            if i >= full_count and i != summary_idx
-        ]
-
-        if remaining_sections:
-            # Budget per remaining section (distribute evenly)
-            per_section = max(60, snippet_budget // max(1, len(remaining_sections)))
-            for idx, title, body in remaining_sections:
-                # Extract heading + first few meaningful content lines
-                lines = body.split("\n")
-                snippet_lines = [lines[0]]  # heading line
-                content_chars = 0
-                for line in lines[1:]:
-                    line_stripped = line.strip()
-                    if not line_stripped or line_stripped.startswith("#"):
-                        continue
-                    snippet_lines.append(line)
-                    content_chars += len(line)
-                    if content_chars >= per_section - len(lines[0]):
-                        break
-                snippet = "\n".join(snippet_lines)
-                if snippet_used + len(snippet) + 2 > snippet_budget:
-                    # Just add the title
-                    title_only = title.lstrip("#").strip()
-                    if snippet_used + len(title_only) + 4 <= snippet_budget:
-                        snippet_parts.append(f"- {title_only}")
-                        snippet_used += len(title_only) + 4
+        if enrich_budget > 0:
+            # Enrich sections top-down — replace minimum with fuller content
+            for i, (_title, body) in enumerate(sections):
+                if i == summary_idx:
+                    continue
+                extra = len(body) - len(minimums[i])
+                if extra <= 0:
+                    continue
+                if extra <= enrich_budget:
+                    # Full section fits
+                    enriched[i] = body
+                    enrich_budget -= extra
                 else:
-                    snippet_parts.append(snippet)
-                    snippet_used += len(snippet) + 2
+                    # Partial enrichment — add more lines from this section
+                    lines = body.split("\n")
+                    kept = enriched[i].split("\n")
+                    kept_set = set(kept)
+                    for line in lines:
+                        if line in kept_set:
+                            continue
+                        if len(line) + 1 > enrich_budget:
+                            break
+                        kept.append(line)
+                        enrich_budget -= len(line) + 1
+                    enriched[i] = "\n".join(kept)
+                    break  # budget exhausted
 
-        # Phase 3: Summary section
-        summary_part = ""
-        if summary_idx >= 0:
+        # ── Phase 3: Summary section enrichment ──
+        if summary_idx >= 0 and enrich_budget > 50:
             _, summary_body = sections[summary_idx]
-            budget_left = max_chars - used - snippet_used - 80
-            if budget_left >= 100:
-                if len(summary_body) <= budget_left:
-                    summary_part = summary_body
+            extra = len(summary_body) - len(minimums[summary_idx])
+            if extra > 0:
+                if extra <= enrich_budget:
+                    enriched[summary_idx] = summary_body
                 else:
-                    summary_part = summary_body[:budget_left - 20] + "\n... (summary truncated)"
+                    enriched[summary_idx] = summary_body[: len(minimums[summary_idx]) + enrich_budget]
 
-        # Assemble
-        result = "\n\n".join(full_parts)
-        if snippet_parts:
-            divider = f"\n\n... ({len(remaining_sections)} sections condensed)\n\n"
-            result += divider + "\n\n".join(snippet_parts)
-        if summary_part:
-            result += "\n\n" + summary_part
+        # ── Assemble ──
+        parts: list[str] = []
+        if preamble:
+            parts.append(preamble)
+        for i, section_text in enumerate(enriched):
+            parts.append(section_text)
 
+        result = "\n\n".join(parts)
         footer = f"\n(original: {len(text)} chars)"
         result += footer
 
@@ -1182,7 +1169,7 @@ def auto_select_strategy(text: str, *, max_chars: int = 0) -> CompressionStrateg
     if max_chars > 0 and len(stripped) <= max_chars:
         return CompressionStrategy.NONE
 
-    # JSON detection — conservative: only for proven patterns
+    # JSON detection
     if stripped[0] in "{[":
         try:
             data = json.loads(stripped)
@@ -1192,6 +1179,11 @@ def auto_select_strategy(text: str, *, max_chars: int = 0) -> CompressionStrateg
                 arrays = [v for v in data.values() if isinstance(v, list) and len(v) >= 20]
                 if arrays:
                     return CompressionStrategy.SCHEMA_PRUNING
+                # Dict-of-dicts (config-like): many top-level keys with nested structure
+                # → extract_fields preserves all keys vs truncate losing bottom half
+                nested = sum(1 for v in data.values() if isinstance(v, (dict, list)))
+                if nested >= 3:
+                    return CompressionStrategy.EXTRACT_FIELDS
             return CompressionStrategy.TRUNCATE
         except (json.JSONDecodeError, ValueError):
             pass

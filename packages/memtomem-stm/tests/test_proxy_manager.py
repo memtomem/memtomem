@@ -68,7 +68,7 @@ class TestToolConfigResolution:
         cfg = UpstreamServerConfig(prefix="gh", compression=CompressionStrategy.HYBRID)
         tc = _resolve(cfg, "list_repos")
         assert tc.compression == CompressionStrategy.HYBRID
-        assert tc.max_chars == 2000  # UpstreamServerConfig default
+        assert tc.max_chars == 8000  # UpstreamServerConfig default
         assert tc.cleaning.enabled is True
 
     def test_tool_override_compression(self):

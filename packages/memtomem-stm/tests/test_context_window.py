@@ -91,7 +91,7 @@ class TestEffectiveMaxResultChars:
 class TestResolveToolConfigModelAware:
     def _make_manager(
         self,
-        server_max_chars: int = 2000,  # default
+        server_max_chars: int = 8000,  # default
         consumer_model: str = "",
         context_budget_ratio: float = 0.05,
     ) -> ProxyManager:
@@ -116,7 +116,9 @@ class TestResolveToolConfigModelAware:
         """Server at default max_result_chars picks up model-aware budget."""
         mgr = self._make_manager(consumer_model="gpt-4", context_budget_ratio=0.05)
         tc = mgr._resolve_tool_config("srv", "any_tool")
-        assert tc.max_chars == 1433  # gpt-4 budget
+        # gpt-4: 8192 * 0.05 * 3.5 = 1433 — but server default is 8000, which is explicit
+        # Server at default (8000) → uses effective_max_result_chars (1433)
+        assert tc.max_chars == 1433
 
     def test_explicit_server_overrides_model(self):
         """Server with explicit max_result_chars=5000 ignores model budget."""

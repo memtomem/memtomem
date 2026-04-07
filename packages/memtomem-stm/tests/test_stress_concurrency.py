@@ -130,7 +130,9 @@ class TestLargePayloads:
 
         _get_session(mgr).call_tool.return_value = _make_result(payload)
         result = await mgr.call_tool("srv", "tool", {})
-        assert len(result) <= 10000
+        # With min_retention and 500 sections, result may exceed max_result_chars
+        # but should be well under original 2MB+
+        assert len(result) < 100000
 
 
 # ── Concurrent tool calls ────────────────────────────────────────────────

@@ -660,16 +660,16 @@ class ProxyManager:
         # Dynamic scaling: shorter content → higher retention (less to gain from cutting).
         # This is the SINGLE place where retention is enforced — compressors trust max_chars.
         effective_max_chars = tc.max_chars
-        min_retention = getattr(self._config, "min_result_retention", 0.5)
+        min_retention = getattr(self._config, "min_result_retention", 0.65)
         if min_retention > 0:
             n = len(cleaned)
             # Scale: short content (< 1KB) gets ~90% retention, large (10KB+) gets base retention
             if n < 1000:
                 dynamic = max(min_retention, 0.9)
             elif n < 3000:
-                dynamic = max(min_retention, 0.65)
+                dynamic = max(min_retention, 0.75)
             elif n < 10000:
-                dynamic = max(min_retention, 0.5)
+                dynamic = max(min_retention, 0.65)
             else:
                 dynamic = min_retention  # use config value for very large content
             min_budget = int(n * dynamic)

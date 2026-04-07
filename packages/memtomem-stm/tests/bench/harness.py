@@ -314,11 +314,11 @@ class BenchHarness:
         if cleaned_len < 1000:
             min_r = 0.9
         elif cleaned_len < 3000:
-            min_r = 0.65
+            min_r = 0.75
         elif cleaned_len < 10000:
-            min_r = 0.5
+            min_r = 0.65
         else:
-            min_r = 0.35
+            min_r = 0.5
         return max(budget, int(cleaned_len * min_r))
 
     def _run_pipeline(

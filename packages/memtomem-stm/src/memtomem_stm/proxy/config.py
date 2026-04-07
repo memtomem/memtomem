@@ -104,7 +104,7 @@ class UpstreamServerConfig(BaseModel):
     url: str = ""
     headers: dict[str, str] | None = None
     compression: CompressionStrategy = CompressionStrategy.AUTO
-    max_result_chars: int = 2000
+    max_result_chars: int = 8000
     llm: LLMCompressorConfig | None = None
     selective: SelectiveConfig | None = None
     hybrid: HybridConfig | None = None
@@ -160,7 +160,7 @@ class ProxyConfig(BaseModel):
     upstream_servers: dict[str, UpstreamServerConfig] = {}
     default_compression: CompressionStrategy = CompressionStrategy.AUTO
     default_max_result_chars: int = 16000
-    min_result_retention: float = 0.5
+    min_result_retention: float = 0.65
     """Minimum fraction of response to preserve after compression (0-1).
 
     If ``default_max_result_chars`` or per-tool ``max_result_chars`` would
