@@ -6,12 +6,23 @@ import logging
 import math
 from collections import defaultdict
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from memtomem_stm.proxy.metrics_store import MetricsStore
 
 logger = logging.getLogger(__name__)
+
+
+class ErrorCategory(StrEnum):
+    """Classification of proxy call errors for metrics tracking."""
+
+    TRANSPORT = "transport"  # OSError, ConnectionError, EOFError
+    TIMEOUT = "timeout"  # asyncio.TimeoutError
+    PROTOCOL = "protocol"  # JSON-RPC errors (-32600..-32603)
+    UPSTREAM_ERROR = "upstream_error"  # result.isError=True from upstream
+    PROGRAMMING = "programming"  # TypeError, AttributeError, etc.
 
 
 def _percentile(sorted_vals: list[float], p: float) -> float:
@@ -46,6 +57,10 @@ class CallMetrics:
     compress_ms: float = 0.0
     surface_ms: float = 0.0
     surfaced_chars: int = 0
+    # Error tracking
+    is_error: bool = False
+    error_category: ErrorCategory | None = None
+    error_code: int | None = None
 
 
 class TokenTracker:
@@ -71,6 +86,10 @@ class TokenTracker:
         self._by_tool: dict[str, dict[str, int]] = defaultdict(
             lambda: {"calls": 0, "original_chars": 0, "compressed_chars": 0}
         )
+        # Error tracking
+        self._total_errors = 0
+        self._errors_by_category: dict[str, int] = defaultdict(int)
+        self._errors_by_server: dict[str, int] = defaultdict(int)
         # Per-call latencies for percentile computation
         self._clean_latencies: list[float] = []
         self._compress_latencies: list[float] = []
@@ -120,6 +139,19 @@ class TokenTracker:
 
     def record_reconnect(self) -> None:
         self._reconnects += 1
+
+    def record_error(self, metrics: CallMetrics) -> None:
+        """Record a failed tool call for error tracking."""
+        self._total_errors += 1
+        if metrics.error_category is not None:
+            self._errors_by_category[metrics.error_category.value] += 1
+        self._errors_by_server[metrics.server] += 1
+
+        if self._metrics_store is not None:
+            try:
+                self._metrics_store.record(metrics)
+            except Exception:
+                logger.debug("Failed to persist error metrics", exc_info=True)
 
     def _percentiles(self, values: list[float]) -> dict[str, float]:
         """Return p50/p95/p99 for a list of latency values."""
@@ -174,5 +206,12 @@ class TokenTracker:
                 "surface_ms": self._percentiles(self._surface_latencies),
                 "total_ms": self._percentiles(self._total_latencies),
             },
+            "total_errors": self._total_errors,
+            "errors_by_category": dict(self._errors_by_category),
+            "error_rate": (
+                round(self._total_errors / (self._total_calls + self._total_errors) * 100, 1)
+                if (self._total_calls + self._total_errors) > 0
+                else 0.0
+            ),
             "by_server": by_server,
         }

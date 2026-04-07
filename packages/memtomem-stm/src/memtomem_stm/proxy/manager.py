@@ -40,7 +40,7 @@ from memtomem_stm.proxy.config import (
     TransportType,
     UpstreamServerConfig,
 )
-from memtomem_stm.proxy.metrics import CallMetrics, TokenTracker
+from memtomem_stm.proxy.metrics import CallMetrics, ErrorCategory, TokenTracker
 
 # JSON-RPC error codes that indicate bad input, not connection problems.
 # Retrying these wastes time and can damage the connection.
@@ -484,6 +484,10 @@ class ProxyManager:
                     not isinstance(exc, (OSError, ConnectionError, asyncio.TimeoutError, EOFError))
                     and err_code is None
                 ):
+                    self.tracker.record_error(CallMetrics(
+                        server=server, tool=tool, original_chars=0, compressed_chars=0,
+                        is_error=True, error_category=ErrorCategory.PROGRAMMING,
+                    ))
                     raise
 
                 # Protocol errors (bad params, unknown method) — don't retry,
@@ -492,6 +496,11 @@ class ProxyManager:
                     logger.debug(
                         "Protocol error %s for %s/%s, skipping retry", err_code, server, tool
                     )
+                    self.tracker.record_error(CallMetrics(
+                        server=server, tool=tool, original_chars=0, compressed_chars=0,
+                        is_error=True, error_category=ErrorCategory.PROTOCOL,
+                        error_code=err_code,
+                    ))
                     try:
                         await self._reconnect_server(server)
                     except Exception:
@@ -499,6 +508,15 @@ class ProxyManager:
                     raise
 
                 if attempt >= cfg.max_retries:
+                    cat = (
+                        ErrorCategory.TIMEOUT
+                        if isinstance(exc, asyncio.TimeoutError)
+                        else ErrorCategory.TRANSPORT
+                    )
+                    self.tracker.record_error(CallMetrics(
+                        server=server, tool=tool, original_chars=0, compressed_chars=0,
+                        is_error=True, error_category=cat,
+                    ))
                     # Reconnect before raising so the NEXT call starts fresh
                     try:
                         await self._reconnect_server(server)
@@ -541,6 +559,11 @@ class ProxyManager:
         original_text = "\n".join(text_parts)
 
         if result.isError:
+            self.tracker.record_error(CallMetrics(
+                server=server, tool=tool,
+                original_chars=len(original_text), compressed_chars=len(original_text),
+                is_error=True, error_category=ErrorCategory.UPSTREAM_ERROR,
+            ))
             return original_text
 
         # Resolve effective settings

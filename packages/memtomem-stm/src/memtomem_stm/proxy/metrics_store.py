@@ -48,6 +48,22 @@ class MetricsStore:
         self._db.execute(_CREATE)
         self._db.execute(_INDEX)
         self._db.commit()
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after initial schema (idempotent)."""
+        if self._db is None:
+            return
+        existing = {row[1] for row in self._db.execute("PRAGMA table_info(proxy_metrics)")}
+        migrations = {
+            "is_error": "ALTER TABLE proxy_metrics ADD COLUMN is_error INTEGER NOT NULL DEFAULT 0",
+            "error_category": "ALTER TABLE proxy_metrics ADD COLUMN error_category TEXT DEFAULT NULL",
+            "error_code": "ALTER TABLE proxy_metrics ADD COLUMN error_code INTEGER DEFAULT NULL",
+        }
+        for col, ddl in migrations.items():
+            if col not in existing:
+                self._db.execute(ddl)
+        self._db.commit()
 
     def close(self) -> None:
         if self._db:
@@ -60,14 +76,19 @@ class MetricsStore:
         now = time.time()
         with self._lock:
             self._db.execute(
-                "INSERT INTO proxy_metrics (server, tool, original_chars, compressed_chars, cleaned_chars, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO proxy_metrics "
+                "(server, tool, original_chars, compressed_chars, cleaned_chars, "
+                "is_error, error_category, error_code, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     metrics.server,
                     metrics.tool,
                     metrics.original_chars,
                     metrics.compressed_chars,
                     metrics.cleaned_chars,
+                    int(metrics.is_error),
+                    metrics.error_category.value if metrics.error_category else None,
+                    metrics.error_code,
                     now,
                 ),
             )
