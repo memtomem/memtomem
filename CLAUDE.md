@@ -13,7 +13,7 @@ Markdown-first, long-term memory infrastructure for AI agents. Provides hybrid B
 uv pip install -e "packages/memtomem[dev]"
 
 # Run all tests (pytest + pytest-asyncio, async tests auto-detected)
-uv run pytest                      # 1493 tests (core 837 + STM 656)
+uv run pytest                      # 1543 tests (core 846 + STM 697)
 
 # Run core tests only
 uv run pytest packages/memtomem/tests/ -v
@@ -102,7 +102,7 @@ All config via `MEMTOMEM_` prefixed env vars with `__` nesting (e.g., `MEMTOMEM_
 `packages/memtomem-stm/` is a separate uv workspace package that proxies upstream MCP servers with a 4-stage pipeline:
 
 1. **CLEAN** — `proxy/cleaning.py`: HTML/script/style stripping, paragraph dedup, link flood collapse (supports links with trailing descriptions). `DefaultContentCleaner` accepts `CleaningConfig` in constructor.
-2. **COMPRESS** — `proxy/compression.py`: 9 strategies (none/auto/truncate/selective/hybrid/extract_fields/schema_pruning/skeleton/LLM) + `auto_select_strategy()` for content-type detection. `TruncateCompressor` is section-aware with "minimum representation first" pattern (heading + first line for ALL sections, then enriches top-down). `FieldExtractCompressor` shows first key-value pairs of nested dicts. `SelectiveCompressor` stores pending sections via `PendingStore` protocol (InMemory default, SQLite for horizontal scaling).
+2. **COMPRESS** — `proxy/compression.py`: 9 strategies (none/auto/truncate/selective/hybrid/extract_fields/schema_pruning/skeleton/LLM) + `auto_select_strategy()` for content-type detection. `TruncateCompressor` is section-aware with "minimum representation first" pattern (heading + first line for ALL sections, then enriches by relevance). Query-aware compression: when `_context_query` is provided, `RelevanceScorer` scores sections and budget is allocated proportionally instead of top-down. `FieldExtractCompressor` shows first key-value pairs of nested dicts. `SelectiveCompressor` stores pending sections via `PendingStore` protocol (InMemory default, SQLite for horizontal scaling).
 3. **SURFACE** — `surfacing/engine.py`: proactive memory injection from LTM. Gated by `RelevanceGate` (rate limit, cooldown, write-tool heuristic), protected by `CircuitBreaker`, session dedup (same memory not shown twice), cross-session dedup (SQLite `seen_memories` table with 7-day TTL), and `max_injection_chars` size cap. Supports `context_window_size` for adjacent chunk expansion. File paths are tokenized for query extraction.
 4. **INDEX** — optional auto-indexing of large responses to LTM.
 
@@ -119,12 +119,13 @@ Key patterns:
 - `RPSTracker` sliding-window RPS, `trace_id` per call, latency percentiles (p50/p95/p99)
 - Tool metadata optimization: `hidden`, `description_override`, `max_description_chars`, `strip_schema_descriptions`
 - Context-window-aware compression: `consumer_model` + `context_budget_ratio` for model-based budget
+- Query-aware compression: `RelevanceScorer` protocol in `proxy/relevance.py` — `BM25Scorer` (default, zero-latency) or `EmbeddingScorer` (Ollama/OpenAI, switching with BM25 fallback). `RelevanceScorerConfig` in `ProxyConfig` for scorer selection
 
 ## Testing
 
 - Framework: pytest + pytest-asyncio (asyncio_mode = "auto")
-- Core test root: `packages/memtomem/tests/` (837 tests)
-- STM test root: `packages/memtomem-stm/tests/` (656 tests)
+- Core test root: `packages/memtomem/tests/` (846 tests)
+- STM test root: `packages/memtomem-stm/tests/` (697 tests)
 - Both paths configured in `pyproject.toml` `testpaths`
 - Core fixtures in `conftest.py` create isolated SQLite DB per test
 - STM fixtures in `conftest.py` provide `surfacing_config`, `feedback_store`, `proxy_cache`, `token_tracker`

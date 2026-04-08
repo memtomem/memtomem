@@ -179,7 +179,7 @@ Indexed files are written as markdown with frontmatter (source, timestamp, compr
 | **auto** (default) | All responses | Content-aware: picks the best strategy per response based on content type |
 | **hybrid** | Large structured docs | Preserves first ~5K chars + TOC for remainder |
 | **selective** | Large structured data | 2-phase: returns TOC only, then retrieve selected sections on demand |
-| **truncate** | Simple limiting | Section-aware for markdown (minimum representation for ALL sections, then enriches top-down); sentence-boundary for plain text |
+| **truncate** | Simple limiting | Section-aware for markdown (minimum representation for ALL sections, then enriches by relevance); query-aware budget allocation when `_context_query` provided |
 | **extract_fields** | JSON configs | Preserves all top-level keys with nested structure + first values |
 | **schema_pruning** | Large JSON arrays | Recursive pruning: first 2 + last 1 items sampled per array |
 | **skeleton** | API docs | All headings + first content line per section |
@@ -258,6 +258,29 @@ Routes through an external LLM for intelligent summarization:
 Providers: `openai`, `anthropic`, `ollama`. Falls back to truncation on API failure (circuit breaker protection).
 
 Sensitive content (API keys, passwords, PII) is auto-detected and **never** sent to external LLMs — falls back to local truncation.
+
+### Query-Aware Compression
+
+When an agent provides `_context_query` in tool arguments, compression allocates budget proportionally to section relevance instead of fixed top-down order. This preserves more information from query-relevant sections.
+
+```json
+{
+  "relevance_scorer": {
+    "scorer": "bm25",
+    "embedding_provider": "ollama",
+    "embedding_model": "nomic-embed-text",
+    "embedding_base_url": "http://localhost:11434",
+    "embedding_timeout": 10.0
+  }
+}
+```
+
+| Scorer | Latency | Cross-language | Dependencies |
+|--------|---------|----------------|--------------|
+| `bm25` (default) | <1ms | No | None |
+| `embedding` | 5-50ms | Yes | Ollama/OpenAI |
+
+`RelevanceScorer` protocol (`proxy/relevance.py`) enables custom scorer implementations. `EmbeddingScorer` uses sync httpx to call embedding APIs with automatic BM25 fallback on error.
 
 ### Per-server and Per-tool Overrides
 
@@ -814,7 +837,7 @@ uv run pytest packages/memtomem-stm/tests/ -v
 uv run pytest packages/memtomem-stm/tests/test_compression.py -v
 ```
 
-656 tests covering:
+697 tests covering:
 
 | Test file | Coverage |
 |-----------|----------|

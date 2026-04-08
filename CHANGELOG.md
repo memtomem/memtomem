@@ -3,6 +3,51 @@
 All notable changes will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
+## [Unreleased]
+
+### Core
+- **Context-window search (small-to-big retrieval)**: `search(context_window=N)` attaches ±N adjacent chunks via batch `list_chunks_by_sources()`. Per-call override or global via `ContextWindowConfig`
+- **`mem_expand` action**: targeted expansion of individual search results without re-running search — `mem_do(action="expand", params={"chunk_id": "...", "window": 2})`
+- Search result formatting: `[chunk M/T]` position + before/after sections in `_format_single_result()`
+- Web API: `context_window` query parameter on search endpoint
+- E2E integration tests: 9 tests verifying full pipeline with real Ollama (index → search → context-window → format)
+
+### STM Proxy
+- **Query-aware adaptive compression**: `_context_query` drives section budget allocation via `RelevanceScorer` protocol instead of fixed top-down order
+  - `BM25Scorer` (default): zero-latency, heading 3× weighting, suffix stemming
+  - `EmbeddingScorer` (opt-in): sync httpx to Ollama/OpenAI, automatic BM25 fallback on error
+  - Switching strategy (not blending): embedding when configured, else BM25
+  - `RelevanceScorerConfig` in `ProxyConfig` for scorer type and embedding settings
+  - Benchmark validated: 83% QA recovery vs 0% baseline at tight budgets (20%, 10 sections)
+  - Vocabulary mismatch confirmed: BM25 fails cross-language, embedding solves it
+- **HybridCompressor query-aware**: tail section compression now receives `context_query`
+- **Horizontal scaling**: `PendingStore` protocol — `InMemoryPendingStore` (default) + `SQLitePendingStore` (WAL mode, thread-safe) for multi-instance `SelectiveCompressor`
+- **Gateway production improvements** (4 phases):
+  - Error classification: `ErrorCategory` (TRANSPORT/TIMEOUT/PROTOCOL/UPSTREAM/PROGRAMMING), smart retry
+  - Tool metadata optimization: `hidden`, `description_override`, `max_description_chars`, `strip_schema_descriptions`
+  - Context-window-aware compression: `consumer_model` + `context_budget_ratio` for model-based budget
+  - Observability: `RPSTracker`, `trace_id`, latency percentiles (p50/p95/p99)
+- **Gateway audit fixes**: dual retention, token counting, error path tests, cross-session surfacing dedup (SQLite), stress/concurrency tests, catastrophic backtracking fix
+- **Compression pipeline**: AUTO strategy, section-distributed truncation, code-aware truncation, JSON key-distributed, tail anomaly detection, dynamic `min_retention` by content length
+- **Benchmark framework**: 35 tasks, `RuleBasedJudge` (keyword + fuzzy QA + source analysis), `LLMJudge`, bootstrap CI, Wilcoxon test, strategy matrix, compression curves
+- Surfacing: `context_window_size` wired to LTM search, `max_injection_chars` raised to 3000
+
+### Docs
+- Standalone test guide rewritten: 10 use cases, beginner-friendly, detailed config values
+- Per-client MCP setup guides: Claude Code, Gemini CLI, Google Antigravity, Cursor
+- CLAUDE.md updated with all new features
+
+### Bug Fixes
+- Section minimum extraction lost headings when match position included leading newline
+- `SchemaPruningCompressor` referenced undefined variable `t` — fixed to `TruncateCompressor()`
+- `GENERIC_RE` catastrophic backtracking in metrics
+
+### Testing
+- 1543 automated tests (core 846 + STM 697)
+- New: context-window (18), pending store (17), query-aware (22), E2E pipeline (9), bench framework (180+)
+
+---
+
 ## [0.1.0] — 2026-04-04
 
 Initial release.
