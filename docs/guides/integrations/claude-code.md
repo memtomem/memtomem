@@ -1,0 +1,277 @@
+# Claude Code x memtomem Integration Guide
+
+**Audience**: Developers using Claude Code who want to build memory automation with memtomem
+**Prerequisites**: memtomem installation complete ([Quick Start](../getting-started.md)), Claude Code installed
+**Estimated Time**: About 15 minutes
+
+---
+
+## Overview
+
+Claude Code has its own memory system including CLAUDE.md, MEMORY.md, topic files, and hooks.
+memtomem **does not replace** these, but complements Claude Code with **semantic search** it lacks.
+The most powerful automation pipeline is achieved when combined with Claude Code's hooks system.
+
+### Role Separation Between the Two Systems
+
+| Purpose | Responsible System |
+|---------|--------------------|
+| Project instructions (full loading) | CLAUDE.md |
+| Auto-memory index (200-line limit) | MEMORY.md + auto-memory |
+| Per-topic file on-demand reading | Claude Code built-in |
+| Project document **semantic search** | memtomem (`mem_search`) |
+| Hooks-based automation pipeline | memtomem CLI + hooks |
+
+---
+
+## MCP Server Setup
+
+### Add via Command
+
+```bash
+# PyPI (recommended)
+claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
+
+# Source (if running from git clone)
+# claude mcp add memtomem -s user -- uv run --directory /path/to/memtomem memtomem-server
+```
+
+### Direct Configuration via `.mcp.json`
+
+Create a `.mcp.json` file in the project root or `~/.claude/`:
+
+```json
+{
+  "mcpServers": {
+    "memtomem": {
+      "command": "uvx",
+      "args": ["--from", "memtomem", "memtomem-server"],
+
+      "env": {
+        "MEMTOMEM_STORAGE__SQLITE_PATH": "~/.memtomem/memtomem.db",
+        "MEMTOMEM_INDEXING__MEMORY_DIRS": "~/notes"
+      }
+    }
+  }
+}
+```
+
+---
+
+## Verify Connection
+
+In Claude Code (or run `/memtomem:status` if using the plugin):
+
+```
+Call the mem_status tool
+```
+
+Example of a successful response:
+```
+memtomem status:
+  - Storage backend: SQLite
+  - Total chunks: 0 (not yet indexed)
+  - Embedding model: ollama/nomic-embed-text
+```
+
+> **MCP Reconnection**: After changing `.mcp.json`, restart Claude Code or use the `/mcp` command to reconnect.
+
+---
+
+## First Indexing
+
+```
+Index my ~/notes directory
+```
+
+Agent:
+```
+mem_index(path="~/notes", recursive=True)
+→ "Indexed 47 files, 1284 chunks in 3.2s"
+```
+
+---
+
+## Hooks Automation Setup
+
+> **Plugin users**: Hooks are included in the plugin. You only need to install the CLI for them to activate:
+> ```bash
+> uv tool install memtomem   # or: pipx install memtomem
+> ```
+> Skip to [Tool Usage Guidelines](#tool-usage-guidelines-add-to-claudemd) if you're using the plugin.
+
+You can fully automate memtomem using Claude Code's hooks system.
+Add the following to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{
+      "matcher": "",
+      "hooks": [{
+        "type": "command",
+        "command": "memtomem search \"${prompt}\" --top-k 3 2>/dev/null || true"
+      }]
+    }],
+    "PostToolUse": [{
+      "matcher": "Write|Edit|MultiEdit",
+      "hooks": [{
+        "type": "command",
+        "command": "memtomem index \"${tool_input.file_path}\" 2>/dev/null || true"
+      }]
+    }],
+    "Stop": [{
+      "matcher": "",
+      "hooks": [{
+        "type": "command",
+        "command": "memtomem add \"Session ended: $(date '+%Y-%m-%d %H:%M')\" --tags session,auto 2>/dev/null || true"
+      }]
+    }]
+  }
+}
+```
+
+### Hook Event Summary
+
+| Hook Event | Trigger Timing | memtomem Action |
+|------------|---------------|----------------|
+| `UserPromptSubmit` | When a prompt is submitted | `memtomem search` → Automatically inject relevant memory into context |
+| `PostToolUse` (Write/Edit) | After file editing | `memtomem index` → Automatically re-index changed files |
+| `Stop` | When session ends | `memtomem add` → Automatically save session timestamp |
+
+### Automation Flow
+
+```
+User submits prompt
+  → UserPromptSubmit hook → mem_search context injection
+  → Claude edits code
+  → PostToolUse hook → mem_index auto-reindexing
+  → Session completes
+  → Stop hook → session summary mem_add
+```
+
+---
+
+## Tool Usage Guidelines (Add to CLAUDE.md)
+
+Adding the following to your project's `CLAUDE.md` helps Claude Code properly utilize memtomem tools:
+
+```markdown
+## Memory Tool Usage Guidelines
+
+### Claude Code Built-in Memory (CLAUDE.md, MEMORY.md)
+- Project rules, coding conventions, configuration guidelines
+- Current conversation context, task progress
+- Simple facts already in MEMORY.md
+
+### memtomem (`mem_search`, `mem_index`, `mem_recall`)
+- Project documents, ADRs, architecture document search
+- Code pattern history, debugging records, decision records
+- Detailed information beyond MEMORY.md's 200-line limit
+
+### Principles
+- Rules stated in CLAUDE.md → Follow as-is
+- Something to find in project documents/history → `mem_search`
+- Check recent work records → `mem_recall`
+
+### Dual Memory Search (MEMORY.md + mem_search)
+When users ask about past records or decisions ("previously", "what was decided", "what was it" etc.):
+1. Check MEMORY.md (auto-loaded 200 lines) first
+2. If absent or insufficient, use `mem_search` for semantic search
+3. Synthesize both results in the response
+```
+
+---
+
+## Usage Scenarios
+
+### Scenario A: Fully Automated Hooks Pipeline
+
+With hooks configured, tools operate automatically without manual invocation by the developer.
+
+```
+User: "Refactor the auth middleware"
+
+1. UserPromptSubmit hook auto-executes
+   → mem_search("auth middleware refactoring") → 3 related previous decisions injected
+2. Claude analyzes existing code and performs refactoring
+3. PostToolUse hook auto-executes
+   → Every Edit tool use auto-reindexes the changed file
+4. Stop hook auto-executes
+   → "Session ended: 2026-03-16 14:30" auto-saved
+```
+
+### Scenario B: Dual Memory Search -- Simultaneous MEMORY.md + mem_search
+
+Claude Code's auto-memory only auto-loads the first 200 lines of MEMORY.md.
+As a project grows, important information gets truncated.
+**Adding the dual memory search principle to CLAUDE.md** ensures both sources are automatically checked.
+
+Content to add to CLAUDE.md:
+```markdown
+## Memory Search Principle
+When users ask about past records or decisions ("previously", "what was decided", "what was it" etc.):
+1. Check MEMORY.md (auto-loaded 200 lines) first
+2. If absent or insufficient, use `mem_search` for semantic search
+3. Synthesize both results in the response
+```
+
+Conversation example:
+```
+User: "What was the caching strategy we decided on before?"
+
+Agent:
+1. Check MEMORY.md → Found some cache-related items ("Using Redis LRU")
+2. mem_search("caching strategy decision") → Returns detailed decision record
+3. Synthesize both results:
+→ "MEMORY.md has 'Using Redis LRU' recorded, and according to the detailed record,
+   the decision was for Redis Cluster + Local LRU 2-tier cache (2026-03-10)"
+```
+
+> **Key Point**: CLAUDE.md is auto-loaded at the start of every conversation, so stating the principle here
+> enables dual search in all conversations without separate hooks.
+
+### Scenario C: Project Document Indexing + Auto-Reference During Code Writing
+
+```
+User: "Implement endpoints based on the API design document"
+
+Agent:
+1. mem_search("API design endpoint spec") → Returns chunks from docs/api-spec.md
+2. Generate code matching the spec
+3. PostToolUse hook → Auto-indexes the generated file
+→ "Previously created API" searchable in the next session
+```
+
+---
+
+## Built-in Memory vs memtomem Comparison
+
+| Feature | Claude Code Built-in | memtomem |
+|---------|---------------------|---------|
+| Semantic search | None (full loading or filename-based) | BM25 + Dense + RRF hybrid search |
+| Auto memory | MEMORY.md 200-line limit | Unlimited semantic search |
+| Hooks integration | Event emission only | hooks + CLI for full automation |
+
+---
+
+## Frequently Asked Questions
+
+**Q: Does CLAUDE.md or MEMORY.md go away?**
+No. memtomem operates as separate MCP tools (`mem_search`, etc.) and coexists independently with the existing system. Continue using CLAUDE.md for project instructions as before.
+
+**Q: Do hooks slow down Claude Code?**
+The `2>/dev/null || true` pattern ignores errors, so hook failures do not interrupt Claude Code. Searches typically complete within 100ms.
+
+**Q: It doesn't work after changing `.mcp.json`.**
+Restart Claude Code or use the `/mcp` command to reconnect to MCP servers. Old processes may be using cached modules.
+
+**Q: Can the same content be stored in both auto-memory and memtomem?**
+Yes. Auto-memory automatically extracts from conversations, while memtomem only handles explicitly indexed/added targets.
+
+---
+
+## Next Steps
+
+- [User Guide](../user-guide.md) — Complete feature walkthrough
+- [Practical Use Cases](../use-cases.md) — Agent workflow scenarios

@@ -1,0 +1,690 @@
+# STM Proxy Gateway Guide
+
+**Audience**: Users who want proactive memory surfacing (automatic recall)
+**Prerequisites**: [Getting Started](getting-started.md) complete, memtomem working
+**Difficulty**: Intermediate — STM is optional. Basic search/add works without it.
+
+---
+
+## Do I need STM?
+
+| Without STM | With STM |
+|------------|---------|
+| You manually search: "What do I know about auth?" | Agent reads `auth.py` → related memories appear automatically |
+| Each tool call is independent | Tool calls are enriched with relevant context |
+| You control when to search | Memories surface proactively, like human recall |
+
+**Start without STM.** If you find yourself repeatedly searching for context that your agent should already know, STM is for you.
+
+---
+
+## What is STM?
+
+Your AI agent uses many tools — reading files, searching docs, calling APIs. **STM makes the agent automatically remember** what it learned before about each topic. No manual searching needed.
+
+```mermaid
+sequenceDiagram
+    participant Agent as AI agent
+    participant STM as STM Proxy
+    participant FS as File Server
+    participant LTM as Your memories
+
+    Agent->>STM: Read /src/auth.py
+    STM->>FS: Forward request
+    FS-->>STM: File content
+    STM->>STM: Compress (save tokens)
+    STM->>LTM: "What do I know about auth.py?"
+    LTM-->>STM: "Auth uses JWT with 24h expiry..."
+    STM-->>Agent: File content + related memories
+    
+    Note over Agent: Agent sees everything in one response
+```
+
+STM does two things:
+1. **Surfaces** relevant memories automatically when the agent uses any tool
+2. **Compresses** large tool responses to save tokens
+
+---
+
+## Quick Setup (recommended)
+
+The easiest way to set up STM:
+
+```bash
+# 1. Install
+pip install "memtomem-stm[ltm]"            # PyPI
+# or: uv pip install -e "packages/memtomem-stm[ltm]"  # source
+
+# 2. Run the interactive wizard
+mm stm init
+```
+
+The `mm stm init` wizard will:
+1. Detect your MCP client (Claude Code, Cursor, etc.) and list connected servers
+2. Let you choose which servers to proxy through STM
+3. Assign short prefixes (e.g., `fs__read_file`, `gh__search`)
+4. Choose a compression strategy
+5. Enable response cache (avoid redundant upstream calls)
+6. Configure Langfuse tracing (optional, for observability)
+7. Write `~/.memtomem/stm_proxy.json`
+8. Enable STM in your memtomem config
+
+Each step supports `b` (back) and `q` (quit).
+
+### Undo / Disable STM
+
+To disable STM and restore your original MCP server configs:
+
+```bash
+mm stm reset
+```
+
+This will:
+1. Restore proxied servers back to your editor's MCP config
+2. Set `stm_proxy.enabled = false` in memtomem config
+3. Remove `~/.memtomem/stm_proxy.json`
+4. Restart your editor to apply changes
+
+---
+
+## Manual Installation
+
+### Option A: Integrated mode (recommended)
+
+Runs STM inside the memtomem server. Zero-latency in-process surfacing.
+
+```bash
+pip install "memtomem-stm[ltm]"
+```
+
+### Option B: Standalone mode
+
+Runs as a separate MCP server. Connects to memtomem via MCP protocol.
+
+```bash
+pip install memtomem-stm
+```
+
+---
+
+## Setup
+
+### 1. Add upstream servers
+
+Register the MCP servers you want to proxy:
+
+```bash
+# Filesystem access
+memtomem-stm-proxy add filesystem \
+  --command npx \
+  --args "-y @modelcontextprotocol/server-filesystem /home/user/projects" \
+  --prefix fs
+
+# GitHub
+memtomem-stm-proxy add github \
+  --command npx \
+  --args "-y @modelcontextprotocol/server-github" \
+  --prefix gh \
+  --env GITHUB_TOKEN=ghp_xxx
+
+# Any MCP server via SSE
+memtomem-stm-proxy add docs \
+  --transport sse \
+  --url http://localhost:3000/sse \
+  --prefix docs \
+  --compression selective
+```
+
+### 2. Configure your MCP client
+
+**Integrated mode** — add to your memtomem MCP config:
+
+```json
+{
+  "mcpServers": {
+    "memtomem": {
+      "command": "uvx",
+      "args": ["--from", "memtomem", "memtomem-server"],
+      "env": {
+        "MEMTOMEM_INDEXING__MEMORY_DIRS": "~/notes",
+        "MEMTOMEM_STM_PROXY__ENABLED": "true"
+      }
+    }
+  }
+}
+```
+
+**Standalone mode** — add as a separate MCP server:
+
+```json
+{
+  "mcpServers": {
+    "memtomem": {
+      "command": "uvx",
+      "args": ["--from", "memtomem", "memtomem-server"]
+    },
+    "memtomem-stm": {
+      "command": "memtomem-stm"
+    }
+  }
+}
+```
+
+### 3. Verify
+
+Your agent should now see proxied tools like `fs__read_file`, `gh__search_repositories`, etc. Call `stm_proxy_stats` to check status.
+
+---
+
+## Compression Strategies
+
+Each upstream server can use a different compression strategy:
+
+| Strategy | Best for | How it works |
+|----------|----------|-------------|
+| **auto** (default) | All responses | Content-aware: detects type and picks the best strategy per response |
+| **hybrid** | Large structured docs | Preserves first 5K chars + TOC for remainder |
+| **selective** | Dense/large | 2-phase: returns TOC first, agent picks sections |
+| **truncate** | Simple text | Section-aware for markdown, sentence-boundary for plain text |
+| **extract_fields** | JSON configs | Preserves all top-level keys with nested structure preview |
+| **schema_pruning** | Large JSON arrays | Samples first+last items, prunes repeated structure |
+| **skeleton** | API docs | All headings + first content line per section |
+| **progressive** | Large any-type content | Zero-loss: delivers in chunks on demand via `stm_proxy_read_more` |
+| **llm_summary** | Dense content | LLM summarization (requires API key) |
+| **none** | Short responses | Pass-through, cache only |
+
+### AUTO strategy (default)
+
+When compression is set to `auto` (the default), STM analyzes each response and picks the best strategy:
+
+| Content type | Strategy selected |
+|-------------|------------------|
+| Content fits within budget | `none` (passthrough) |
+| JSON array with 20+ items | `schema_pruning` |
+| JSON dict with 3+ nested keys (config-like) | `extract_fields` |
+| Markdown API docs (HTTP method endpoints) | `skeleton` |
+| Large markdown (5+ headings, 5KB+) | `hybrid` |
+| Large code (6+ code fences, 5KB+) | `hybrid` |
+| Everything else | `truncate` |
+
+This eliminates the need to manually configure strategies per server. AUTO preserves information structure: JSON configs keep all top-level keys, changelogs keep all section headings.
+
+To force a specific strategy, set `"compression": "truncate"` (or any strategy) in server config.
+
+### Selective compression (2-phase)
+
+Phase 1: STM parses the response into sections and returns a compact TOC:
+
+```json
+{
+  "type": "toc",
+  "selection_key": "abc123",
+  "entries": [
+    {"key": "Installation", "type": "heading", "size": 450, "preview": "..."},
+    {"key": "API Reference", "type": "heading", "size": 8200, "preview": "..."}
+  ],
+  "hint": "Call stm_proxy_select_chunks(key='abc123', sections=[...]) to retrieve."
+}
+```
+
+Phase 2: Agent calls `stm_proxy_select_chunks` to get only the sections it needs.
+
+### Progressive delivery (cursor-based)
+
+For content where you want **zero information loss**, use progressive delivery. Instead of compressing, STM stores the full content and delivers it in chunks — like how Claude Code reads files 150 lines at a time.
+
+```
+Agent ← first 4000 chars + metadata footer
+Agent → stm_proxy_read_more(key="abc123", offset=4000)
+Agent ← next 4000 chars + metadata footer
+...
+Agent ← final chunk (has_more=false)
+```
+
+The metadata footer includes remaining headings, so the agent can decide whether to keep reading:
+
+```
+---
+[progressive: chars=0-4000/12500 | remaining=8500 | has_more=true]
+[Remaining: "## Config", "## API Reference", "## Conclusion"]
+[-> stm_proxy_read_more(key="abc123", offset=4000)]
+```
+
+**When to use progressive vs selective:**
+- **Selective** = "Show me just the Config section" (random access by name, requires structured content)
+- **Progressive** = "Let me read through this file" (sequential access, works on any content)
+
+Configure:
+
+```json
+{
+  "upstream_servers": {
+    "filesystem": {
+      "compression": "progressive",
+      "progressive": {
+        "chunk_size": 4000,
+        "max_stored": 200,
+        "ttl_seconds": 600
+      }
+    }
+  }
+}
+```
+
+Progressive is opt-in only — the `auto` strategy never selects it.
+
+### Budget & Retention Tuning
+
+STM preserves a minimum percentage of every response (dynamic retention):
+
+| Response size | Default retention | Meaning |
+|--------------|------------------|---------|
+| < 1 KB | 90% | Short responses barely compressed |
+| 1–3 KB | 75% | Light compression |
+| 3–10 KB | 65% | Moderate compression |
+| 10 KB+ | 50% | Heavier compression, structure preserved |
+
+**To adjust**, set `min_result_retention` in `~/.memtomem/stm_proxy.json`:
+
+```json
+{
+  "min_result_retention": 0.65,
+  "default_max_result_chars": 16000
+}
+```
+
+Setting `min_result_retention` to `0` disables dynamic retention and uses fixed budgets only.
+
+### Context-Window-Aware Budget
+
+If your agent uses a model with a small context window, STM can automatically scale budgets:
+
+```json
+{
+  "consumer_model": "gpt-4",
+  "context_budget_ratio": 0.05
+}
+```
+
+| Model | Context | Budget (at 5% ratio) |
+|-------|---------|---------------------|
+| claude-sonnet-4 | 200K | 16,000 (capped at default) |
+| gpt-4o | 128K | 16,000 (capped) |
+| gpt-4 | 8K | 1,433 chars |
+
+Leave `consumer_model` empty (default) to use fixed budgets. The budget is always capped at `default_max_result_chars`.
+
+### Per-tool overrides
+
+Override compression, budget, or visibility for specific tools:
+
+```json
+{
+  "upstream_servers": {
+    "filesystem": {
+      "prefix": "fs",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"],
+      "compression": "auto",
+      "max_result_chars": 8000,
+      "tool_overrides": {
+        "read_file": {
+          "compression": "hybrid",
+          "max_result_chars": 16000
+        },
+        "list_directory": {
+          "compression": "truncate",
+          "max_result_chars": 1000
+        },
+        "internal_debug": {
+          "hidden": true
+        },
+        "search": {
+          "description_override": "Search files by name"
+        }
+      }
+    }
+  }
+}
+```
+
+Per-tool options: `compression`, `max_result_chars`, `hidden` (exclude from tool list), `description_override` (replace upstream description).
+
+---
+
+## Proactive Surfacing
+
+### How context is extracted
+
+STM extracts a search query from each tool call:
+
+1. **Per-tool template**: `"query_template": "file {arg.path}"` → `"file /src/auth.py"`
+2. **Agent passthrough**: `_context_query` argument → used as-is
+3. **Path tokenization**: `/src/auth/jwt_handler.py` → `"src auth jwt handler py"` (auto-split on `/._-`)
+4. **Heuristic**: tool name + string arguments (UUIDs and hex strings excluded)
+
+### Surfacing safeguards
+
+STM applies multiple safeguards to prevent surfacing from becoming intrusive:
+
+| Safeguard | Default | Effect |
+|-----------|---------|--------|
+| **Write-tool filter** | `*write*`, `*create*`, `*delete*`, etc. | Skips surfacing for mutating operations |
+| **Rate limit** | 15/min | Prevents excessive surfacing in burst activity |
+| **Cooldown** | 5s | Suppresses near-identical queries (Jaccard > 0.95) |
+| **Min response size** | 5000 chars | Short responses don't trigger surfacing |
+| **Session dedup** | On | Same memory ID not shown twice in one session |
+| **Cross-session dedup** | 7 days | Recently surfaced memories suppressed across sessions |
+| **Injection size cap** | 3000 chars | Memory block truncated if too large |
+| **Circuit breaker** | 3 failures / 60s reset | Stops surfacing if LTM search keeps failing |
+| **Timeout** | 3s | Falls back to original response if search is slow |
+
+### Surfacing configuration
+
+```bash
+# Environment variables
+export MEMTOMEM_STM_SURFACING__MIN_SCORE=0.35
+export MEMTOMEM_STM_SURFACING__MAX_RESULTS=3
+export MEMTOMEM_STM_SURFACING__TIMEOUT_SECONDS=3.0
+export MEMTOMEM_STM_SURFACING__MAX_SURFACINGS_PER_MINUTE=15
+```
+
+### Per-tool surfacing overrides
+
+```json
+{
+  "surfacing": {
+    "context_tools": {
+      "read_file": {
+        "query_template": "file {arg.path}",
+        "namespace": "code-notes",
+        "min_score": 0.4
+      },
+      "search_issues": {
+        "min_score": 0.5,
+        "max_results": 2
+      },
+      "get_weather": {
+        "enabled": false
+      }
+    }
+  }
+}
+```
+
+---
+
+## Feedback & Auto-Tuning
+
+### Rating surfaced memories
+
+When memories are surfaced, a surfacing ID is shown. Rate it to improve future results:
+
+```
+→ stm_surfacing_feedback(surfacing_id="abc123", rating="helpful")
+→ stm_surfacing_feedback(surfacing_id="def456", rating="not_relevant")
+→ stm_surfacing_feedback(surfacing_id="ghi789", rating="already_known")
+```
+
+### Auto-tuning
+
+When enabled (default), STM automatically adjusts the `min_score` threshold per tool:
+
+- **>60% not_relevant** feedback → raises threshold (fewer, more relevant surfacings)
+- **<20% not_relevant** feedback → lowers threshold (more surfacings)
+- **20–60%** → no change (stable band)
+
+Requires at least 20 feedback samples per tool before adjusting. **Cold-start fallback**: new tools with insufficient samples use the global ratio across all tools instead of waiting for 20 per-tool samples.
+
+### Search boost from feedback
+
+When you rate memories as "helpful", their `access_count` is incremented in the core search index. With `access_config.enabled=True`, this creates a positive feedback loop:
+
+```
+surface → user rates helpful → access_count++ → higher search ranking → more likely to surface
+```
+
+**Safeguards** prevent this loop from becoming runaway:
+- Each surfacing event can only boost once (duplicate feedback on same ID ignored)
+- `max_boost=1.5` caps the score multiplier (logarithmic scaling)
+- Same memory won't surface again within the same session (session dedup)
+
+### Check effectiveness
+
+```
+→ stm_surfacing_stats()
+→ stm_surfacing_stats(tool="read_file")
+```
+
+---
+
+## Context-Window Search
+
+By default, search returns only the matched chunk (300-500 characters). **Context-window search** expands results with adjacent chunks from the same source file, giving your agent full surrounding context.
+
+### Two ways to expand
+
+**1. Bulk expansion via `mem_search`**
+
+Request context for all results at once:
+
+```
+→ mem_search("authentication flow", context_window=2)
+```
+
+Each result includes ±2 adjacent chunks. The `context_window` parameter (0-10) controls expansion size.
+
+**2. Targeted expansion via `mem_expand`**
+
+Expand a specific result after reviewing search output:
+
+```
+→ mem_search("JWT token handling")          # basic results
+→ mem_do(action="expand", params={          # expand one result
+    "chunk_id": "abc-123-def",
+    "window": 3
+  })
+```
+
+Returns the full content of ±3 adjacent chunks with section headings and line numbers.
+
+### Typical workflow
+
+1. `mem_search("query")` — get basic results
+2. Review results, identify the most relevant one
+3. `mem_expand(chunk_id, window=3)` — get full surrounding context
+4. Or re-search with `mem_search("query", context_window=2)` if all results need context
+
+### Configuration
+
+Enable globally (all searches get context expansion):
+
+```bash
+export MEMTOMEM_CONTEXT_WINDOW__ENABLED=true
+export MEMTOMEM_CONTEXT_WINDOW__WINDOW_SIZE=2
+```
+
+Or use per-call `context_window=N` parameter without global config.
+
+### STM surfacing with context
+
+When memories are surfaced proactively, expand them with adjacent context:
+
+```json
+{
+  "surfacing": {
+    "context_window_size": 2,
+    "max_injection_chars": 3000
+  }
+}
+```
+
+Setting `context_window_size` > 0 passes the window to LTM search, so surfaced memories include neighboring chunks for richer context.
+
+---
+
+## Response Caching
+
+Enable SQLite-backed caching to avoid redundant upstream calls:
+
+```json
+{
+  "cache": {
+    "enabled": true,
+    "db_path": "~/.memtomem/proxy_cache.db",
+    "default_ttl_seconds": 3600
+  }
+}
+```
+
+Manage cache:
+
+```
+→ stm_proxy_cache_clear()                    # clear all
+→ stm_proxy_cache_clear(server="filesystem") # clear specific server
+```
+
+---
+
+## Langfuse Tracing
+
+Langfuse records every proxy call for observability, debugging, and cost analysis. Requires a running [Langfuse](https://langfuse.com) instance (self-hosted or cloud).
+
+### Via `mm stm init`
+
+The wizard asks at step 6 — provide your Langfuse host and API keys.
+
+### Manual setup
+
+Set environment variables before starting memtomem:
+
+```bash
+export MEMTOMEM_STM_LANGFUSE__ENABLED=true
+export MEMTOMEM_STM_LANGFUSE__HOST=http://localhost:3000   # self-hosted
+export MEMTOMEM_STM_LANGFUSE__PUBLIC_KEY=pk-lf-...
+export MEMTOMEM_STM_LANGFUSE__SECRET_KEY=sk-lf-...
+```
+
+Or save to a file and load:
+
+```bash
+# mm stm init creates this automatically
+cat ~/.memtomem/stm_langfuse.env
+# MEMTOMEM_STM_LANGFUSE__ENABLED=true
+# MEMTOMEM_STM_LANGFUSE__HOST=http://localhost:3000
+# MEMTOMEM_STM_LANGFUSE__PUBLIC_KEY=pk-lf-...
+# MEMTOMEM_STM_LANGFUSE__SECRET_KEY=sk-lf-...
+
+export $(cat ~/.memtomem/stm_langfuse.env | xargs)
+```
+
+For **Claude Code MCP config**, add the env vars:
+
+```json
+{
+  "mcpServers": {
+    "memtomem": {
+      "command": "uvx",
+      "args": ["--from", "memtomem", "memtomem-server"],
+      "env": {
+        "MEMTOMEM_STM_LANGFUSE__ENABLED": "true",
+        "MEMTOMEM_STM_LANGFUSE__HOST": "http://localhost:3000",
+        "MEMTOMEM_STM_LANGFUSE__PUBLIC_KEY": "pk-lf-...",
+        "MEMTOMEM_STM_LANGFUSE__SECRET_KEY": "sk-lf-..."
+      }
+    }
+  }
+}
+```
+
+The STM dashboard in the Web UI shows a **Langfuse** badge when tracing is active.
+
+---
+
+## Privacy & Content Cleaning
+
+STM cleans tool responses before compression:
+
+- **HTML/JSX stripping**: removes tags, preserves code fences and TypeScript generics
+- **`<script>`/`<style>` removal**: content and tags fully stripped (not just tags)
+- **Paragraph dedup**: repeated paragraphs appear only once
+- **Link flood collapse**: paragraphs with 80%+ links replaced with `[N links omitted]`
+
+STM also detects sensitive content (API keys, passwords, PII, SSH keys) in tool responses. When detected:
+
+- LLM compression is blocked (falls back to local truncate/selective)
+- Content is never sent to external APIs
+
+---
+
+## LLM Compression Setup
+
+To use LLM-based summarization:
+
+```json
+{
+  "upstream_servers": {
+    "docs": {
+      "prefix": "docs",
+      "compression": "llm_summary",
+      "llm": {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "api_key": "sk-...",
+        "max_tokens": 500
+      }
+    }
+  }
+}
+```
+
+Supported providers: `openai`, `anthropic`, `ollama`.
+
+---
+
+## CLI Commands
+
+```bash
+memtomem-stm-proxy status    # show config, servers, enabled status
+memtomem-stm-proxy list      # list upstream servers
+memtomem-stm-proxy add ...   # add upstream server
+memtomem-stm-proxy remove    # remove upstream server
+```
+
+---
+
+## Web UI Monitoring
+
+When STM is installed and enabled, the Web UI automatically shows an **STM tab** between Timeline and More:
+
+```bash
+mm web     # open http://localhost:8080, click the STM tab
+```
+
+The dashboard shows:
+- **Status badges**: active/disabled, server count, surfacing, cache
+- **Server cards**: each upstream server with prefix, transport, compression
+- **Compression metrics**: total calls, original/compressed chars, savings % (filterable by period)
+- **Breakdown tables**: by server and by tool (click to filter history)
+- **Cache & Surfacing**: cache stats with clear button, surfacing feedback with helpfulness %
+- **Call history**: paginated table with server/tool filter, auto-refreshes every 10 seconds
+
+See [Web UI Guide](web-ui.md#stm-proxy-dashboard) for full details.
+
+---
+
+## Deployment Modes
+
+| Mode | Install | Surfacing | Use case |
+|------|---------|-----------|----------|
+| **Integrated** | `pip install "memtomem-stm[ltm]"` + `MEMTOMEM_STM_PROXY__ENABLED=true` | In-process (zero latency) | Primary setup |
+| **Standalone + LTM** | `pip install "memtomem-stm[ltm]"` | In-process | Separate MCP server |
+| **Standalone** | `pip install memtomem-stm` | MCP client to remote memtomem | Decoupled |
+
+---
+
+## Next Steps
+
+- [User Guide](user-guide.md) — Complete memtomem feature walkthrough
+- [Agent Memory Guide](agent-memory-guide.md) — Sessions, working memory, procedures
+- [STM README](../../packages/memtomem-stm/README.md) — Package reference

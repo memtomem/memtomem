@@ -1,0 +1,20 @@
+{
+  "id": "memtomem",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "command": {
+        "type": "string",
+        "default": "uvx",
+        "description": "Command to start the memtomem MCP server"
+      },
+      "serverArgs": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": ["--from", "memtomem", "memtomem-server"],
+        "description": "Arguments for the MCP server command"
+      }
+    },
+    "additionalProperties": false
+  }
+}

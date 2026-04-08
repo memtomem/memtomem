@@ -1,0 +1,350 @@
+"""Proxy gateway configuration."""
+
+from __future__ import annotations
+
+import json
+import logging
+from enum import StrEnum
+from pathlib import Path
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
+
+
+class CompressionStrategy(StrEnum):
+    NONE = "none"
+    AUTO = "auto"
+    TRUNCATE = "truncate"
+    EXTRACT_FIELDS = "extract_fields"
+    SCHEMA_PRUNING = "schema_pruning"
+    SKELETON = "skeleton"
+    LLM_SUMMARY = "llm_summary"
+    SELECTIVE = "selective"
+    HYBRID = "hybrid"
+    PROGRESSIVE = "progressive"
+
+
+class TailMode(StrEnum):
+    TOC = "toc"
+    TRUNCATE = "truncate"
+
+
+class TransportType(StrEnum):
+    STDIO = "stdio"
+    SSE = "sse"
+    STREAMABLE_HTTP = "streamable_http"
+
+
+class LLMProvider(StrEnum):
+    OPENAI = "openai"
+    ANTHROPIC = "anthropic"
+    OLLAMA = "ollama"
+
+
+class LLMCompressorConfig(BaseModel):
+    provider: LLMProvider = LLMProvider.OPENAI
+    model: str = "gpt-4o-mini"
+    api_key: str = ""
+    base_url: str = ""
+    system_prompt: str = (
+        "Summarize the following content concisely, preserving all key information. "
+        "Keep the summary under {max_chars} characters."
+    )
+    max_tokens: int = 500
+
+
+class CleaningConfig(BaseModel):
+    enabled: bool = True
+    strip_html: bool = True
+    deduplicate: bool = True
+    collapse_links: bool = True
+
+
+class HybridConfig(BaseModel):
+    head_chars: int = 5000
+    tail_mode: TailMode = TailMode.TOC
+    min_toc_budget: int = 200
+    min_head_chars: int = 100
+    head_ratio: float = 0.6
+
+
+class SelectiveConfig(BaseModel):
+    max_pending: int = 100
+    pending_ttl_seconds: float = 300.0
+    json_depth: int = 1
+    min_section_chars: int = 50
+    pending_store: str = "memory"  # "memory" | "sqlite"
+    pending_store_path: Path = Path("~/.memtomem/pending_selections.db")
+
+
+class AutoIndexConfig(BaseModel):
+    enabled: bool = False
+    min_chars: int = 2000
+    memory_dir: Path = Path("~/.memtomem/proxy_index")
+    namespace: str = "proxy-{server}"
+
+
+class ExtractionStrategy(StrEnum):
+    """Strategy for automatic fact extraction from tool responses."""
+
+    NONE = "none"
+    LLM = "llm"
+    HEURISTIC = "heuristic"
+    HYBRID = "hybrid"
+
+
+def _default_extraction_llm() -> LLMCompressorConfig:
+    """Default LLM config for fact extraction: Ollama qwen3:4b (no-think mode)."""
+    return LLMCompressorConfig(
+        provider=LLMProvider.OLLAMA,
+        model="qwen3:4b",
+        base_url="http://localhost:11434",
+        system_prompt=(
+            "/no_think\n"
+            "You are a knowledge extraction system. Extract discrete, atomic facts "
+            "from the following tool response.\n\n"
+            "Rules:\n"
+            "- Each fact must be a single, self-contained statement\n"
+            "- Categorize: decision, preference, technical, process, relationship, "
+            "definition, reference\n"
+            "- Rate confidence 0.0-1.0\n"
+            "- Extract up to {max_facts} most important facts\n"
+            "- Skip boilerplate, navigation, and UI text\n"
+            "- Include relevant tags\n\n"
+            "Respond ONLY with a JSON array:\n"
+            '[{{"content": "...", "category": "...", "confidence": 0.8, '
+            '"tags": ["tag1"]}}]'
+        ),
+        max_tokens=1000,
+    )
+
+
+class ExtractionConfig(BaseModel):
+    """Configuration for automatic fact extraction from tool responses."""
+
+    enabled: bool = False
+    strategy: ExtractionStrategy = ExtractionStrategy.LLM
+    llm: LLMCompressorConfig | None = None
+    max_facts: int = 10
+    min_response_chars: int = 500
+    dedup_threshold: float = 0.92
+    memory_dir: Path = Path("~/.memtomem/extracted_facts")
+    namespace: str = "facts-{server}"
+    background: bool = True
+    max_input_chars: int = 20000
+
+    def effective_llm(self) -> LLMCompressorConfig:
+        """Return user-provided LLM config or the default (Ollama qwen3:4b)."""
+        return self.llm or _default_extraction_llm()
+
+
+class ProgressiveConfig(BaseModel):
+    """Configuration for progressive (cursor-based) delivery."""
+
+    chunk_size: int = 4000
+    """Characters per chunk delivered to the agent."""
+    max_stored: int = 200
+    """Maximum concurrent stored progressive responses."""
+    ttl_seconds: float = 600.0
+    """Time-to-live for stored responses (seconds)."""
+    include_structure_hint: bool = True
+    """Include remaining headings/structure hint in first chunk footer."""
+
+
+class ToolOverrideConfig(BaseModel):
+    compression: CompressionStrategy | None = None
+    max_result_chars: int | None = None
+    llm: LLMCompressorConfig | None = None
+    selective: SelectiveConfig | None = None
+    hybrid: HybridConfig | None = None
+    progressive: ProgressiveConfig | None = None
+    cleaning: CleaningConfig | None = None
+    auto_index: bool | None = None
+    extraction: bool | None = None
+    hidden: bool = False
+    description_override: str | None = None
+
+
+class UpstreamServerConfig(BaseModel):
+    command: str = ""
+    args: list[str] = []
+    env: dict[str, str] | None = None
+    prefix: str
+    transport: TransportType = TransportType.STDIO
+    url: str = ""
+    headers: dict[str, str] | None = None
+    compression: CompressionStrategy = CompressionStrategy.AUTO
+    max_result_chars: int = 8000
+    llm: LLMCompressorConfig | None = None
+    selective: SelectiveConfig | None = None
+    hybrid: HybridConfig | None = None
+    progressive: ProgressiveConfig | None = None
+    cleaning: CleaningConfig | None = None
+    tool_overrides: dict[str, ToolOverrideConfig] = {}
+    auto_index: bool | None = None
+    extraction: bool | None = None
+    max_retries: int = 3
+    reconnect_delay_seconds: float = 1.0
+    max_reconnect_delay_seconds: float = 30.0
+    max_description_chars: int = 200
+    strip_schema_descriptions: bool = False
+
+
+class CacheConfig(BaseModel):
+    enabled: bool = True
+    db_path: Path = Path("~/.memtomem/proxy_cache.db")
+    default_ttl_seconds: float | None = 3600.0
+    max_entries: int = 10000
+
+
+class MetricsConfig(BaseModel):
+    enabled: bool = True
+    db_path: Path = Path("~/.memtomem/proxy_metrics.db")
+    max_history: int = 10000
+
+
+# Static context window sizes (tokens) for known model families.
+# Used by ProxyConfig.effective_max_result_chars() to scale compression budget.
+# Prefix-matched: "claude-sonnet-4-20250514" matches "claude-sonnet-4".
+# Ordered longest-prefix-first where ambiguity exists.
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    # Anthropic — Claude 4.x / 4.5 / 4.6
+    "claude-opus-4": 200000,
+    "claude-sonnet-4": 200000,
+    "claude-haiku-4": 200000,
+    # OpenAI — GPT-4.1 / o-series / GPT-4o
+    "gpt-4.1-mini": 1048576,
+    "gpt-4.1-nano": 1048576,
+    "gpt-4.1": 1048576,
+    "gpt-4o-mini": 128000,
+    "gpt-4o": 128000,
+    "o4-mini": 200000,
+    "o3-pro": 200000,
+    "o3-mini": 200000,
+    "o3": 200000,
+    "o1-pro": 200000,
+    "o1-mini": 128000,
+    "o1": 200000,
+    # Google — Gemini 2.x
+    "gemini-2.5-pro": 1048576,
+    "gemini-2.5-flash": 1048576,
+    "gemini-2.0-flash": 1048576,
+    "gemini-2": 1048576,
+    # Meta — Llama 4
+    "llama-4-maverick": 1048576,
+    "llama-4-scout": 512000,
+    "llama-4": 512000,
+    # Open-weight
+    "qwen-3": 131072,
+    "qwen3": 131072,
+    "deepseek-r1": 131072,
+    "deepseek-v3": 131072,
+    "mistral-large": 131072,
+    "codestral": 262144,
+    "command-a": 262144,
+}
+
+
+class RelevanceScorerConfig(BaseModel):
+    """Configuration for query-aware relevance scoring."""
+
+    scorer: str = "bm25"
+    """Scorer type: "bm25" (default, zero-latency) or "embedding" (semantic)."""
+    embedding_provider: str = "ollama"
+    """Embedding provider: "ollama" or "openai". Only used when scorer="embedding"."""
+    embedding_model: str = "nomic-embed-text"
+    """Embedding model name. Only used when scorer="embedding"."""
+    embedding_base_url: str = "http://localhost:11434"
+    """Embedding API base URL. Only used when scorer="embedding"."""
+    embedding_timeout: float = 10.0
+    """Embedding API timeout in seconds."""
+
+
+class ProxyConfig(BaseModel):
+    enabled: bool = False
+    config_path: Path = Path("~/.memtomem/stm_proxy.json")
+    upstream_servers: dict[str, UpstreamServerConfig] = {}
+    default_compression: CompressionStrategy = CompressionStrategy.AUTO
+    default_max_result_chars: int = 16000
+    min_result_retention: float = 0.65
+    relevance_scorer: RelevanceScorerConfig = Field(default_factory=RelevanceScorerConfig)
+    """Minimum fraction of response to preserve after compression (0-1).
+
+    If ``default_max_result_chars`` or per-tool ``max_result_chars`` would
+    retain less than this fraction of the cleaned response, the effective
+    budget is raised to ``len(response) * min_result_retention``.
+
+    Default 0.5 ensures at least 50% of every response survives compression.
+    Set to 0 to disable and use fixed budgets only.
+    """
+    max_description_chars: int = 200
+    strip_schema_descriptions: bool = False
+    consumer_model: str = ""
+    context_budget_ratio: float = 0.05
+    cache: CacheConfig = Field(default_factory=CacheConfig)
+    auto_index: AutoIndexConfig = Field(default_factory=AutoIndexConfig)
+    extraction: ExtractionConfig = Field(default_factory=ExtractionConfig)
+    metrics: MetricsConfig = Field(default_factory=MetricsConfig)
+
+    def effective_max_result_chars(self) -> int:
+        """Compute max_result_chars scaled by consumer model's context window.
+
+        If ``consumer_model`` is set and matches a known model prefix,
+        the budget is ``context_window * context_budget_ratio * 3.5``
+        (tokens → chars), capped at ``default_max_result_chars``.
+        """
+        if not self.consumer_model:
+            return self.default_max_result_chars
+        # Prefix match: "claude-sonnet-4-20250514" matches "claude-sonnet-4"
+        ctx_tokens = None
+        for prefix, tokens in MODEL_CONTEXT_WINDOWS.items():
+            if self.consumer_model.startswith(prefix):
+                ctx_tokens = tokens
+                break
+        if ctx_tokens is None:
+            return self.default_max_result_chars
+        model_budget = int(ctx_tokens * self.context_budget_ratio * 3.5)
+        return min(model_budget, self.default_max_result_chars)
+
+    @staticmethod
+    def load_from_file(path: Path) -> ProxyConfig:
+        resolved = path.expanduser().resolve()
+        if not resolved.exists():
+            logger.debug("Proxy config file not found: %s", resolved)
+            return ProxyConfig()
+        try:
+            data: dict[str, Any] = json.loads(resolved.read_text(encoding="utf-8"))
+            return ProxyConfig.model_validate(data)
+        except (json.JSONDecodeError, Exception) as exc:
+            logger.warning("Failed to parse proxy config %s: %s", resolved, exc)
+            return ProxyConfig()
+
+
+class ProxyConfigLoader:
+    """mtime-based hot-reload for proxy config file."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path.expanduser().resolve()
+        self._cached: ProxyConfig | None = None
+        self._mtime: float = 0.0
+
+    def seed(self, config: ProxyConfig) -> None:
+        self._cached = config
+        try:
+            self._mtime = self._path.stat().st_mtime
+        except OSError:
+            self._mtime = -1.0
+
+    def get(self) -> ProxyConfig:
+        try:
+            mtime = self._path.stat().st_mtime
+        except OSError:
+            if self._cached is not None:
+                return self._cached
+            return ProxyConfig.load_from_file(self._path)
+        if mtime != self._mtime or self._cached is None:
+            self._cached = ProxyConfig.load_from_file(self._path)
+            self._mtime = mtime
+        return self._cached

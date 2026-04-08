@@ -1,0 +1,55 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Test / CI artifacts
+.coverage
+coverage.json
+
+# Environment
+.env
+.env.*
+!.env.example
+!.env.*.example
+.mcp.json
+!.mcp.json.example
+
+# Claude Code
+.claude/
+CLAUDE.md
+.claude-plugin/
+
+# macOS
+.DS_Store
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+notebooks/**/.ipynb_checkpoints/
+
+# Notebooks
+notebooks/__pycache__/
+memories/
+node_modules/
+
+# Internal development artifacts
+docs/testing/
+docs/marketing/
+.claude-memory/
+BUG_REPORT.md
+*.png
+main.py
+
+# Dev repo: root tests excluded, package tests included
+tests/
+!packages/*/tests/
+.playwright-mcp/
+
+# Standalone test sandbox
+/tmp/memtomem-test/
