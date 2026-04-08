@@ -64,13 +64,13 @@ async def mem_search(
     output = _format_results(results)
 
     pipeline_info = []
-    if stats.bm25_candidates or 0:
+    if stats.bm25_candidates:
         pipeline_info.append(f"BM25:{stats.bm25_candidates}")
-    if stats.dense_candidates or 0:
+    if stats.dense_candidates:
         pipeline_info.append(f"Dense:{stats.dense_candidates}")
-    if stats.fused_total or 0:
+    if stats.fused_total:
         pipeline_info.append(f"RRF:{stats.fused_total}")
-    pipeline_info.append(f"Final:{stats.final_total or 0}")
+    pipeline_info.append(f"Final:{stats.final_total}")
     if stats.bm25_error:
         pipeline_info.append(f"BM25-err:{stats.bm25_error}")
     output += f"\n\n---\npipeline: {' → '.join(pipeline_info)}"

@@ -39,8 +39,6 @@ from memtomem.storage.sqlite_schema import create_tables
 
 logger = logging.getLogger(__name__)
 
-# Re-export for backward compatibility
-_norm_path = norm_path
 __all__ = ["SqliteBackend", "validate_namespace"]
 
 
