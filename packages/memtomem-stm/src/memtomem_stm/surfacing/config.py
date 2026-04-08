@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
+from memtomem_stm.proxy.config import MODEL_CONTEXT_WINDOWS
+
 
 class ToolSurfacingConfig(BaseModel):
     """Per-tool override for surfacing behavior."""
@@ -54,3 +56,44 @@ class SurfacingConfig(BaseModel):
     max_injection_chars: int = 3000
     context_window_size: int = 0  # 0=disabled; >0 expands ±N adjacent chunks
     dedup_ttl_seconds: float = 604800.0  # 7 days
+    consumer_model: str = ""
+
+    def _context_tokens(self) -> int | None:
+        if not self.consumer_model:
+            return None
+        for prefix, tokens in MODEL_CONTEXT_WINDOWS.items():
+            if self.consumer_model.startswith(prefix):
+                return tokens
+        return None
+
+    def effective_max_injection_chars(self) -> int:
+        """Scale max_injection_chars by model context window.
+
+        SLM (≤32K): 1500 chars — minimal, high-density injection
+        Medium (32K-200K): 3000 chars — default
+        LLM (>200K): 5000 chars — richer context from memories
+        """
+        ctx = self._context_tokens()
+        if ctx is None:
+            return self.max_injection_chars
+        if ctx <= 32000:
+            return min(self.max_injection_chars, 1500)
+        if ctx > 200000:
+            return max(self.max_injection_chars, 5000)
+        return self.max_injection_chars
+
+    def effective_max_results(self) -> int:
+        """Scale max_results by model context window.
+
+        SLM (≤32K): 2 results — fit in tight context
+        Medium (32K-200K): 3 results — default
+        LLM (>200K): 5 results — can process more memories
+        """
+        ctx = self._context_tokens()
+        if ctx is None:
+            return self.max_results
+        if ctx <= 32000:
+            return min(self.max_results, 2)
+        if ctx > 200000:
+            return max(self.max_results, 5)
+        return self.max_results

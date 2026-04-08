@@ -62,7 +62,7 @@ class SurfacingFormatter:
         memory_block = "\n".join(lines)
 
         # Enforce injection size limit to prevent context bloat
-        max_chars = self._config.max_injection_chars
+        max_chars = self._config.effective_max_injection_chars()
         if max_chars and len(memory_block) > max_chars:
             memory_block = memory_block[:max_chars] + "\n... (memory block truncated)"
 

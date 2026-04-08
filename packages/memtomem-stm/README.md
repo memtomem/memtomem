@@ -516,6 +516,40 @@ The namespace supports `{server}` and `{tool}` placeholders. Can be toggled per-
 
 ---
 
+## Model-Aware Defaults
+
+When `consumer_model` is set, STM automatically scales settings for the consuming model's context window. Set it once — compression budget, surfacing injection size, and result count all adjust.
+
+```bash
+export MEMTOMEM_STM_PROXY__CONSUMER_MODEL=claude-sonnet-4
+```
+
+### Recommended Settings by Model Size
+
+| Setting | SLM (≤32K) | Medium (32K-200K) | LLM (>200K) |
+|---------|------------|-------------------|--------------|
+| `max_result_chars` | ~5,600 | ~16,000 | ~35,000 |
+| `max_injection_chars` | 1,500 | 3,000 | 5,000 |
+| `max_results` (surfacing) | 2 | 3 | 5 |
+| `context_window` | 0-1 | 1-2 | 2-5 |
+| Compression strategy | skeleton / truncate | auto (default) | auto / none |
+
+### Model Examples
+
+| Model | Context | Tier | Notes |
+|-------|---------|------|-------|
+| `gpt-3.5` | 16K | SLM | Tight budget, minimal surfacing |
+| `gpt-4` | 8K | SLM | Very tight, consider skeleton |
+| `gpt-4o` | 128K | Medium | Default settings work well |
+| `gpt-4.1` | 1M | LLM | Generous budget, more surfacing |
+| `claude-sonnet-4` | 200K | Medium | Default settings work well |
+| `claude-opus-4` | 200K | Medium | Default settings work well |
+| `gemini-2` | 1M | LLM | Generous budget, more surfacing |
+
+All scaling is automatic when `consumer_model` is set. Override any value explicitly to disable auto-scaling for that setting.
+
+---
+
 ## Configuration Reference
 
 ### Environment Variables

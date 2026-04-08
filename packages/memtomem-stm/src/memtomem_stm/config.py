@@ -32,3 +32,8 @@ class STMConfig(BaseSettings):
     surfacing: SurfacingConfig = Field(default_factory=SurfacingConfig)
     langfuse: LangfuseConfig = Field(default_factory=LangfuseConfig)
     data_dir: Path = Path("~/.memtomem")
+
+    def model_post_init(self, __context: object) -> None:
+        # Propagate consumer_model from proxy to surfacing for model-aware defaults
+        if self.proxy.consumer_model and not self.surfacing.consumer_model:
+            self.surfacing.consumer_model = self.proxy.consumer_model

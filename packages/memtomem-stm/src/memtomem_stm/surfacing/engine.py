@@ -209,7 +209,9 @@ class SurfacingEngine:
                 tool_cfg.min_score if tool_cfg and tool_cfg.min_score else self._config.min_score
             )
         max_results = (
-            tool_cfg.max_results if tool_cfg and tool_cfg.max_results else self._config.max_results
+            tool_cfg.max_results
+            if tool_cfg and tool_cfg.max_results
+            else self._config.effective_max_results()
         )
         namespace = (
             tool_cfg.namespace
