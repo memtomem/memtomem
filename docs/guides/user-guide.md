@@ -63,7 +63,7 @@ sequenceDiagram
 
 ## MCP Tools at a Glance
 
-memtomem provides **65 MCP tools** organized into categories (plus optional STM proxy tools):
+memtomem provides **72 MCP tools** organized into categories:
 
 | Category | Tools | What they do |
 |----------|-------|-------------|
@@ -85,7 +85,7 @@ In **core** tool mode (default), most features are accessed through `mem_do(acti
 - **Maintenance** uses descriptive names: `dedup_scan`, `decay_expire`, `cleanup_orphans`
 - **Analytics** uses short names: `eval`, `activity`, `timeline`, `reflect`
 
-Use `mem_do(action="help")` to see all 61 actions, or `mem_do(action="help", params={"category": "sessions"})` for per-category details with parameter descriptions. Common aliases are supported (e.g. `health_report` → `eval`, `namespace_set` → `ns_set`).
+Use `mem_do(action="help")` to see all 63 actions, or `mem_do(action="help", params={"category": "sessions"})` for per-category details with parameter descriptions. Common aliases are supported (e.g. `health_report` → `eval`, `namespace_set` → `ns_set`).
 
 ---
 
@@ -865,10 +865,6 @@ mm context generate --agent all        # generate all agent files
 mm context diff                        # check sync status
 mm context sync                        # sync context.md → agent files
 
-# STM proxy (optional)
-mm stm init                            # interactive STM proxy setup wizard
-mm stm reset                           # disable STM, restore original MCP configs
-
 # Utilities
 mm shell                               # interactive REPL
 mm web                                 # launch Web UI (http://localhost:8080)
@@ -935,7 +931,7 @@ Running both `memtomem-server` (MCP) and `memtomem-web` simultaneously is suppor
 
 ## STM: Proactive Memory Surfacing (Optional)
 
-The **memtomem-stm** package adds a proxy that sits between your AI agent and other MCP servers. It automatically recalls relevant memories when your agent uses any tool.
+The **[memtomem-stm](https://github.com/memtomem/memtomem-stm)** package adds a proxy that sits between your AI agent and other MCP servers. It automatically recalls relevant memories when your agent uses any tool. STM is distributed as a separate package; it communicates with memtomem core entirely through the MCP protocol — no direct code coupling.
 
 ### How it works
 
@@ -957,41 +953,13 @@ sequenceDiagram
 
 The agent gets both the tool response and your previous notes about the topic — without asking.
 
-### Quick setup
+### Install
 
 ```bash
-pip install "memtomem-stm[ltm]"
-
-# Add an upstream MCP server
-memtomem-stm-proxy add filesystem \
-  --command npx \
-  --args "-y @modelcontextprotocol/server-filesystem /home/user" \
-  --prefix fs
-
-# Or run integrated with memtomem server
-export MEMTOMEM_STM_PROXY__ENABLED=true
+pip install memtomem-stm
 ```
 
-### STM tools
-
-| Tool | Description |
-|------|-------------|
-| `stm_proxy_stats` | Token savings and cache statistics |
-| `stm_proxy_select_chunks` | Retrieve sections from selective compression TOC |
-| `stm_proxy_read_more` | Read next chunk from progressive delivery response |
-| `stm_proxy_cache_clear` | Clear response cache |
-| `stm_surfacing_feedback` | Rate surfaced memories (helpful / not_relevant / already_known) |
-| `stm_surfacing_stats` | Surfacing effectiveness metrics |
-
-### Safety features
-
-- **Circuit breaker**: 3 LTM failures → 60s cooldown → auto-recovery
-- **Timeout**: 3s surfacing timeout, falls back to original response
-- **Rate limiting**: Max 15 surfacings per minute
-- **Write-tool skip**: Automatically skips surfacing for write/create/delete operations
-- **Auto-tuning**: Adjusts relevance threshold per tool based on feedback
-
-See [STM README](../../packages/memtomem-stm/README.md) for full documentation.
+For setup, CLI usage, compression strategies, surfacing configuration, and the full tool list, see the [memtomem-stm README](https://github.com/memtomem/memtomem-stm#readme).
 
 ---
 
@@ -1003,5 +971,5 @@ See [STM README](../../packages/memtomem-stm/README.md) for full documentation.
 - [LangGraph Integration](integrations/langgraph.md) — Python adapter for LangGraph/LangChain
 - [Practical Use Cases](use-cases.md) — Agent workflow scenarios
 - [Claude Code Hooks](hooks.md) — Automate memory with hooks
-- [STM Proxy Gateway](../../packages/memtomem-stm/README.md) — Proactive surfacing, compression, caching
-- [Full Tool Reference](../../packages/memtomem/README.md) — All 65 tools with parameters
+- [memtomem-stm](https://github.com/memtomem/memtomem-stm) — Proactive surfacing, compression, caching (separate package)
+- [Full Tool Reference](../../packages/memtomem/README.md) — All 72 tools with parameters

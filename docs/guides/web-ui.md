@@ -31,7 +31,6 @@ MEMTOMEM_WEB__PORT=9090 memtomem-web
 | **Index** | Index new directories or re-index existing ones |
 | **Tags** | Tag cloud/list, auto-tag untagged chunks |
 | **Timeline** | Chronological chunk browser with date range filter |
-| **STM** | STM proxy monitoring — only visible when `memtomem-stm` is installed |
 | **More** | Settings hub with system, maintenance, and harness sub-tabs |
 
 ---
@@ -44,71 +43,6 @@ The home tab shows a real-time overview:
 - **Charts**: Namespace distribution, file types, activity heatmap (1 year), chunk size distribution
 - **Recent sources**: Last indexed files with sizes
 - **Quick actions**: Search, index, reindex, export, dedup, auto-tag
-
----
-
-## STM Proxy Dashboard
-
-> This tab only appears when `memtomem-stm` is installed and STM proxy is enabled. See [STM Guide](stm-guide.md) for setup.
-
-The STM tab provides real-time monitoring of the proxy compression pipeline.
-
-### Status Bar
-
-Shows at-a-glance status badges:
-- **STM Active** / Disabled
-- Number of connected upstream servers
-- Surfacing ON/OFF
-- Cache, Auto-Index, Langfuse status (if enabled)
-
-### Upstream Servers
-
-Card grid showing each proxied MCP server:
-- Server name and tool prefix (e.g., `langchain__`)
-- Transport type (stdio, streamable_http)
-- Compression strategy (selective, truncate, none)
-- Max result characters
-
-### Compression Metrics
-
-Summary cards showing proxy effectiveness:
-- **Total Calls** — number of proxied tool calls
-- **Original** — total characters received from upstream
-- **Compressed** — total characters after compression
-- **Savings** — compression ratio + absolute saved characters
-
-Filter by time period: All / 1h / 24h / 7d / 30d.
-
-**Breakdown tables**:
-- By Server — click a row to filter call history
-- By Tool — click a row to filter call history
-
-### Cache & Surfacing
-
-Side-by-side panels:
-- **Cache**: total entries, expired entries, Clear Cache button
-- **Surfacing**: total surfacings, feedback breakdown with progress bars (helpful / not_relevant / already_known), helpfulness percentage
-
-### Call History
-
-Paginated table of recent proxy calls:
-- Time (relative, hover for absolute)
-- Server, Tool
-- Original / Compressed characters
-- Savings percentage
-
-Filter by server or tool name. Auto-refreshes every 10 seconds when the tab is active.
-
-### STM API Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/proxy/status` | STM status, server list, feature flags |
-| `GET` | `/api/proxy/metrics` | Compression statistics (optional `since` param) |
-| `GET` | `/api/proxy/cache` | Cache entry counts |
-| `POST` | `/api/proxy/cache/clear` | Clear cache entries |
-| `GET` | `/api/proxy/surfacing` | Surfacing feedback statistics |
-| `GET` | `/api/proxy/history` | Call history (server/tool filter, pagination) |
 
 ---
 

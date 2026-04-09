@@ -253,8 +253,6 @@ mm config set key value    # change a setting
 mm embedding-reset         # check/resolve embedding model mismatch
 mm context detect          # find agent config files
 mm context generate        # sync project rules to all editors
-mm stm init                # STM proxy setup wizard
-mm stm reset               # disable STM, restore original MCP configs
 mm shell                   # interactive REPL
 mm web                     # launch Web UI (http://localhost:8080)
 ```
@@ -313,15 +311,13 @@ mm context sync                  # update all after editing context.md
 
 STM automatically surfaces relevant memories when your agent uses other MCP tools. It's optional — basic search/add works without it.
 
+STM is a separate package: **[memtomem-stm](https://github.com/memtomem/memtomem-stm)**. Install via PyPI:
+
 ```bash
-uv pip install -e "packages/memtomem-stm[ltm]"   # install
-mm stm init                                        # interactive setup wizard
-mm stm reset                                       # disable STM, restore original configs
+pip install memtomem-stm
 ```
 
-The `mm stm init` wizard detects your existing MCP servers and configures STM to proxy them. To undo, `mm stm reset` restores the original MCP configs.
-
-See [STM Guide](stm-guide.md) for details.
+See the [memtomem-stm README](https://github.com/memtomem/memtomem-stm#readme) for proxy configuration, surfacing setup, and CLI usage.
 
 ---
 

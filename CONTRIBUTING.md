@@ -17,8 +17,8 @@ uv run pytest -m "not ollama"          # skip Ollama-dependent tests
 uv run pytest                          # full suite (requires running Ollama)
 
 # Lint and format
-uv run ruff check packages/memtomem/src packages/memtomem-stm/src --fix
-uv run ruff format packages/memtomem/src packages/memtomem-stm/src
+uv run ruff check packages/memtomem/src --fix
+uv run ruff format packages/memtomem/src
 
 # Type check
 uv run mypy packages/memtomem/src
@@ -27,7 +27,10 @@ uv run mypy packages/memtomem/src
 ## Project Structure
 
 - `packages/memtomem/` — Core: MCP server, CLI, web UI, search, storage, indexing
-- `packages/memtomem-stm/` — STM proxy gateway for proactive memory surfacing
+- `packages/memtomem-claude-plugin/` — Claude Code plugin (experimental)
+- `packages/memtomem-openclaw-plugin/` — OpenClaw plugin (experimental)
+
+The STM proxy gateway lives in a separate repository: [memtomem/memtomem-stm](https://github.com/memtomem/memtomem-stm).
 
 ## Pull Request Guidelines
 

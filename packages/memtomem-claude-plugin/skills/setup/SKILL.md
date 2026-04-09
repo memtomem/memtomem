@@ -53,7 +53,7 @@ uv tool install memtomem
 After CLI installation, hooks will activate automatically.
 Without CLI, hooks fail silently — MCP tools still work normally.
 
-> **Note**: If the user is already using the STM proxy (`memtomem-stm`), hooks are redundant — the proxy handles surfacing and indexing automatically.
+> **Note**: If the user is already using the [memtomem-stm](https://github.com/memtomem/memtomem-stm) proxy (separate package), hooks are redundant — the proxy handles surfacing and indexing automatically.
 
 ## Step 5: CLAUDE.md Integration
 

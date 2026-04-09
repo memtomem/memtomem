@@ -4,7 +4,7 @@ Markdown-first semantic memory for AI agents. This plugin adds hybrid BM25 + den
 
 ## Features
 
-- **63 MCP tools** — search, add, edit, delete, index, recall, browse, tags, cross-ref, fetch, namespace, dedup, decay, export/import (configurable via tool mode: core/standard/full)
+- **72 MCP tools** — search, add, edit, delete, index, recall, browse, tags, cross-ref, fetch, namespace, dedup, decay, export/import (configurable via tool mode: core/standard/full)
 - **5 slash commands** — `/memtomem:search`, `/memtomem:remember`, `/memtomem:index`, `/memtomem:status`, `/memtomem:setup`
 - **Automation hooks** — auto-search on prompt submit, auto-reindex on file edits
 - **Memory curator agent** — deduplicate, tag, and clean up stale entries
@@ -54,7 +54,7 @@ The plugin uses sensible defaults. Customize via environment variables or the `m
 | Embedding model | `nomic-embed-text` | `MEMTOMEM_EMBEDDING__MODEL` |
 | Database path | `~/.memtomem/memtomem.db` | `MEMTOMEM_STORAGE__SQLITE_PATH` |
 
-**Tool mode**: Controls how many tools are exposed to the AI agent. `core` (9 tools, default) for minimal context usage -- includes `mem_do` meta-tool to access all other actions via `mem_do(action="...", params={...})`. `standard` (~30 + `mem_do`) for normal use, `full` (63 + `mem_do`) for everything. Fewer tools = less context tokens, better accuracy.
+**Tool mode**: Controls how many tools are exposed to the AI agent. `core` (9 tools, default) for minimal context usage -- includes `mem_do` meta-tool to access all other actions via `mem_do(action="...", params={...})`. `standard` (~32 + `mem_do`) for normal use, `full` (72) for everything. Fewer tools = less context tokens, better accuracy.
 
 To set env vars for the MCP server, edit `.mcp.json` in the plugin directory:
 
@@ -93,7 +93,7 @@ uv tool install memtomem
 
 Without CLI installed, hooks fail silently — MCP tools work normally.
 
-> **Note**: Short prompts are skipped to avoid noise. Edit/MultiEdit are excluded — edited files are already indexed. If using the STM proxy, hooks are redundant. See [hooks guide](../../docs/guides/hooks.md) for details.
+> **Note**: Short prompts are skipped to avoid noise. Edit/MultiEdit are excluded — edited files are already indexed. If using the [memtomem-stm](https://github.com/memtomem/memtomem-stm) proxy (separate package), hooks are redundant. See [hooks guide](../../docs/guides/hooks.md) for details.
 
 ## Slash Commands
 

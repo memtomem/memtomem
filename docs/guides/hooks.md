@@ -16,7 +16,7 @@ Claude Code's hook system can automate manual MCP tool calls.
 
 > **Note**: Hooks require the CLI (`uv tool install memtomem`, or `uv run mm ...` from a git clone). `mm` is a shorthand alias for `memtomem`. The MCP server (`memtomem-server`) is a separate entry point for AI client connections.
 
-> **STM proxy users**: If you use the STM proxy (`memtomem-stm`), it already provides automatic memory surfacing and indexing. Hooks are redundant in that setup and can be skipped.
+> **STM proxy users**: If you use the [memtomem-stm](https://github.com/memtomem/memtomem-stm) proxy (separate package), it already provides automatic memory surfacing and indexing. Hooks are redundant in that setup and can be skipped.
 
 ---
 
