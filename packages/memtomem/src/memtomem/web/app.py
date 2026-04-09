@@ -9,7 +9,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -94,6 +94,14 @@ def create_app(lifespan=None) -> FastAPI:
             return response
 
     app.add_middleware(SecurityHeadersMiddleware)
+
+    _favicon = _STATIC_DIR / "favicon.svg"
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    @app.get("/apple-touch-icon.png", include_in_schema=False)
+    @app.get("/apple-touch-icon-precomposed.png", include_in_schema=False)
+    async def _favicon_fallback() -> FileResponse:
+        return FileResponse(_favicon, media_type="image/svg+xml")
 
     if _STATIC_DIR.exists():
         app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="static")
