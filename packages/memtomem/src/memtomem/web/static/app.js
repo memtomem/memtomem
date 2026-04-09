@@ -5776,7 +5776,7 @@ async function loadHarnessSessions() {
           <td>${relativeTime(s.started_at)}</td>
           <td>${ended}</td>
           <td>${summary}</td>
-          <td><button class="btn-ghost btn-xs" onclick="showSessionEvents('${s.id}')">Events</button></td>
+          <td><button class="btn-ghost btn-xs" data-action="session-events" data-id="${s.id}">Events</button></td>
         </tr>`;
       }).join('') +
       '</tbody></table>';
@@ -5837,8 +5837,8 @@ async function loadHarnessScratch() {
           <td>${ttl}</td>
           <td>${promoted}</td>
           <td>
-            <button class="btn-ghost btn-xs btn-danger-text" onclick="deleteScratchEntry('${e.key}')">Delete</button>
-            ${!e.promoted ? `<button class="btn-ghost btn-xs" onclick="promoteScratchEntry('${e.key}')">Promote</button>` : ''}
+            <button class="btn-ghost btn-xs btn-danger-text" data-action="scratch-delete" data-key="${e.key}">Delete</button>
+            ${!e.promoted ? `<button class="btn-ghost btn-xs" data-action="scratch-promote" data-key="${e.key}">Promote</button>` : ''}
           </td>
         </tr>`;
       }).join('') +
@@ -6193,7 +6193,7 @@ async function _loadStmMetrics() {
     const sBody = qs('stm-by-server')?.querySelector('tbody');
     if (sBody) {
       sBody.innerHTML = Object.entries(d.by_server).map(([name, s]) => `
-        <tr class="stm-clickable" onclick="_stmFilterHistory('${escapeAttr(name)}','')">
+        <tr class="stm-clickable" data-action="stm-filter" data-server="${escapeAttr(name)}" data-tool="">
           <td>${escapeHtml(name)}</td><td>${s.calls}</td><td>${_fmtChars(s.original_chars)}</td><td>${_fmtChars(s.compressed_chars)}</td><td>${s.savings_pct}%</td>
         </tr>
       `).join('') || '<tr><td colspan="5" class="stm-empty">No data</td></tr>';
@@ -6203,7 +6203,7 @@ async function _loadStmMetrics() {
     const tBody = qs('stm-by-tool')?.querySelector('tbody');
     if (tBody) {
       tBody.innerHTML = Object.entries(d.by_tool).map(([name, t]) => `
-        <tr class="stm-clickable" onclick="_stmFilterHistory('${escapeAttr(name.split('/')[0])}','${escapeAttr(name.split('/').slice(1).join('/'))}')">
+        <tr class="stm-clickable" data-action="stm-filter" data-server="${escapeAttr(name.split('/')[0])}" data-tool="${escapeAttr(name.split('/').slice(1).join('/'))}">
           <td>${escapeHtml(name)}</td><td>${t.calls}</td><td>${_fmtChars(t.original_chars)}</td><td>${_fmtChars(t.compressed_chars)}</td><td>${t.savings_pct}%</td>
         </tr>
       `).join('') || '<tr><td colspan="5" class="stm-empty">No data</td></tr>';
@@ -6228,7 +6228,7 @@ async function _loadStmCache() {
       detail = `<div class="stm-card-detail" hidden><table class="stm-table"><thead><tr><th>Server</th><th>Entries</th></tr></thead><tbody>${rows}</tbody></table></div>`;
     }
     qs('stm-cache-info').innerHTML = `
-      <div class="stm-card-expandable" onclick="this.nextElementSibling&&(this.nextElementSibling.hidden=!this.nextElementSibling.hidden)">
+      <div class="stm-card-expandable" data-action="toggle-next">
         <strong>${d.total_entries}</strong> entries${d.expired_entries ? ` <span style="color:var(--muted)">(${d.expired_entries} expired)</span>` : ''}
         ${d.total_entries > 0 ? ' <span style="color:var(--muted);font-size:0.75rem">click for details</span>' : ''}
       </div>
@@ -6265,7 +6265,7 @@ async function _loadStmSurfacing() {
     const pendingBadge = d.pending_feedback > 0 ? ` <span class="stm-badge stm-sm">${d.pending_feedback} pending</span>` : '';
 
     qs('stm-surfacing-info').innerHTML = `
-      <div class="stm-card-expandable" onclick="var d=this.parentElement.querySelector('.stm-card-detail');if(d)d.hidden=!d.hidden">
+      <div class="stm-card-expandable" data-action="toggle-detail">
         <strong>${d.total_surfacings}</strong> surfacings, <strong>${d.total_feedback}</strong> feedback${pendingBadge}
         ${d.recent_events?.length ? ' <span style="color:var(--muted);font-size:0.75rem">click for details</span>' : ''}
       </div>
@@ -6311,8 +6311,8 @@ async function _loadStmHistory() {
       const end = Math.min(_stmHistOffset + 50, d.total);
       pag.innerHTML = `
         <span>${d.total > 0 ? `Showing ${start}-${end} of ${d.total}` : '0 total'}</span>
-        ${hasPrev ? '<button class="btn-outline btn-sm" onclick="_stmHistPrev()">Prev</button>' : ''}
-        ${hasMore ? '<button class="btn-outline btn-sm" onclick="_stmHistNext()">Next</button>' : ''}
+        ${hasPrev ? '<button class="btn-outline btn-sm" data-action="stm-hist-prev">Prev</button>' : ''}
+        ${hasMore ? '<button class="btn-outline btn-sm" data-action="stm-hist-next">Next</button>' : ''}
       `;
     }
   } catch { /* history load failed */ }
@@ -6394,3 +6394,33 @@ document.querySelectorAll('.stm-period-btn').forEach(btn => {
 
 // Check STM availability on page load
 checkStmAvailability();
+
+// =====================================================================
+// GLOBAL EVENT DELEGATION (CSP-safe: no inline onclick)
+// =====================================================================
+
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  const action = el.dataset.action;
+
+  if (action === 'session-events') {
+    showSessionEvents(el.dataset.id);
+  } else if (action === 'scratch-delete') {
+    deleteScratchEntry(el.dataset.key);
+  } else if (action === 'scratch-promote') {
+    promoteScratchEntry(el.dataset.key);
+  } else if (action === 'stm-filter') {
+    _stmFilterHistory(el.dataset.server, el.dataset.tool);
+  } else if (action === 'toggle-next') {
+    const sib = el.nextElementSibling;
+    if (sib) sib.hidden = !sib.hidden;
+  } else if (action === 'toggle-detail') {
+    const d = el.parentElement.querySelector('.stm-card-detail');
+    if (d) d.hidden = !d.hidden;
+  } else if (action === 'stm-hist-prev') {
+    _stmHistPrev();
+  } else if (action === 'stm-hist-next') {
+    _stmHistNext();
+  }
+});
