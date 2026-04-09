@@ -3,6 +3,10 @@
 
 const API = '';  // same origin
 
+// ── Early declarations (referenced before their section) ──
+let _stmPollId = null;
+const _HELP_VISIBLE_KEY = 'm2m-help-visible';
+
 // ── Unified global state ──
 const STATE = {
   lastSettingsSection: 'config',
@@ -3642,6 +3646,7 @@ function _showReindexWarning(applied) {
 
 qs('exp-preview-btn').addEventListener('click', runExportPreview);
 qs('exp-download-btn').addEventListener('click', runExportDownload);
+qs('imp-file-trigger')?.addEventListener('click', () => qs('imp-file')?.click());
 qs('imp-file').addEventListener('change', () => {
   const files = qs('imp-file').files;
   qs('imp-btn').disabled = !files?.length;
@@ -5693,7 +5698,6 @@ document.addEventListener('keydown', e => {
 
 const _HELP_TABS = ['search', 'sources', 'tags', 'timeline'];
 const _HELP_STORAGE_KEY = 'm2m-help-dismissed';
-const _HELP_VISIBLE_KEY = 'm2m-help-visible';
 
 function _getHelpDismissed() {
   try { return JSON.parse(localStorage.getItem(_HELP_STORAGE_KEY) || '{}'); } catch { return {}; }
@@ -6073,7 +6077,6 @@ qs('watchdog-run-btn')?.addEventListener('click', runWatchdogNow);
 // STM PROXY DASHBOARD
 // =====================================================================
 
-let _stmPollId = null;
 let _stmPeriod = '';
 let _stmHistOffset = 0;
 let _stmPollFailures = 0;
