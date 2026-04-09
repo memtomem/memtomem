@@ -90,33 +90,35 @@ async def mem_add(
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         target = Path(base).expanduser().resolve() / f"{date_str}.md"
 
+    # Capture file size before append to locate the new entry afterwards
+    pre_size = target.stat().st_size if target.exists() else 0
+
     append_entry(target, content, title=title, tags=tags)
 
-    # Re-index just this file
     effective_ns = namespace or app.current_namespace
-    stats = await app.index_engine.index_file(target, namespace=effective_ns)
 
-    # Apply tags to the newly added chunk only (not all chunks in the file).
-    # The new entry is always appended to the end, so target the chunk with
-    # the highest end_line to avoid overwriting tags on earlier entries.
-    if tags and stats.indexed_chunks > 0:
-        chunks = await app.storage.list_chunks_by_source(target)
-        if chunks:
-            newest = max(chunks, key=lambda c: c.metadata.end_line)
-            merged = set(newest.metadata.tags) | set(tags)
-            if merged != set(newest.metadata.tags):
-                newest.metadata = newest.metadata.__class__(
-                    **{
-                        **{
-                            f: getattr(newest.metadata, f)
-                            for f in newest.metadata.__dataclass_fields__
-                        },
-                        "tags": tuple(sorted(merged)),
-                    }
-                )
-                await app.storage.upsert_chunks([newest])
+    # Read back only the appended block (the actual on-disk content)
+    file_text = target.read_text(encoding="utf-8")
+    entry_text = file_text[pre_size:].strip()
 
-    result = f"Memory added to {target}\n- Chunks indexed: {stats.indexed_chunks}\n- File: {target}"
+    # Build heading hierarchy from the entry's heading
+    heading_hierarchy: tuple[str, ...] = ()
+    for line in entry_text.split("\n"):
+        if line.startswith("## "):
+            heading_hierarchy = (line.strip(),)
+            break
+
+    # Index as a single chunk — mem_add entries are short and self-contained,
+    # so chunking would only split frontmatter from content unnecessarily.
+    chunk = await app.index_engine.index_entry(
+        entry_text,
+        target,
+        heading_hierarchy=heading_hierarchy,
+        tags=tuple(tags) if tags else (),
+        namespace=effective_ns,
+    )
+
+    result = f"Memory added to {target}\n- Chunks indexed: 1\n- File: {target}"
 
     # Semantic duplicate check: warn if very similar content already exists
     try:
@@ -144,7 +146,7 @@ async def mem_add(
 
         asyncio.create_task(
             app.webhook_manager.fire(
-                "add", {"file": str(target), "chunks_indexed": stats.indexed_chunks}
+                "add", {"file": str(target), "chunks_indexed": 1}
             )
         )
 

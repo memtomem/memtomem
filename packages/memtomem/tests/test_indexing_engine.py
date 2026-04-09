@@ -334,6 +334,52 @@ class TestMergeShortChunks:
         assert result[0].metadata.start_line == 1
         assert result[0].metadata.end_line == 10
 
+    def test_headingless_chunk_merges_into_next_section(self):
+        """Headingless chunk (e.g. frontmatter) should merge into the next heading section."""
+        frontmatter = _make_chunk_with("---\ntags: [redis]\n---", heading=())
+        section = _make_chunk_with("Redis LRU eviction policy", heading=("## Cache",))
+
+        result = _merge_short_chunks([frontmatter, section], min_tokens=50, max_tokens=2000)
+        assert len(result) == 1
+        assert "tags:" in result[0].content
+        assert "Redis LRU" in result[0].content
+        # Adopts the heading hierarchy of the section
+        assert result[0].metadata.heading_hierarchy == ("## Cache",)
+
+    def test_headingless_chunk_alone_stays(self):
+        """Headingless chunk with no following section stays as-is (already >= min_tokens)."""
+        big = _make_chunk_with("x" * 600, heading=())  # ~200 tokens
+        result = _merge_short_chunks([big], min_tokens=50, max_tokens=2000)
+        assert len(result) == 1
+
+    def test_two_different_headings_still_separate(self):
+        """Two chunks with different (non-empty) headings should NOT merge."""
+        c1 = _make_chunk_with("section one", heading=("## A",))
+        c2 = _make_chunk_with("section two", heading=("## B",))
+        result = _merge_short_chunks([c1, c2], min_tokens=50, max_tokens=2000)
+        assert len(result) == 2
+
+    def test_headingless_respects_max_tokens(self):
+        """Headingless merge should still respect max_tokens."""
+        frontmatter = _make_chunk_with("x" * 300, heading=())  # ~100 tokens
+        section = _make_chunk_with("y" * 300, heading=("## Big",))  # ~100 tokens
+
+        result = _merge_short_chunks([frontmatter, section], min_tokens=50, max_tokens=110)
+        assert len(result) == 2  # would exceed max_tokens
+
+    def test_headingless_chain_merges(self):
+        """Multiple headingless chunks before a heading all merge into it."""
+        c1 = _make_chunk_with("meta1", heading=())
+        c2 = _make_chunk_with("meta2", heading=())
+        c3 = _make_chunk_with("actual content", heading=("## Section",))
+
+        result = _merge_short_chunks([c1, c2, c3], min_tokens=50, max_tokens=2000)
+        assert len(result) == 1
+        assert "meta1" in result[0].content
+        assert "meta2" in result[0].content
+        assert "actual content" in result[0].content
+        assert result[0].metadata.heading_hierarchy == ("## Section",)
+
 
 # ===========================================================================
 # 5. _add_overlap
@@ -416,6 +462,67 @@ class TestEstimateTokens:
         # 300 chars -> 100 tokens
         text = "a" * 300
         assert _estimate_tokens(text) == 100
+
+
+# ===========================================================================
+# 6b. index_entry — single-chunk bypass for mem_add
+# ===========================================================================
+
+
+class TestIndexEntry:
+    """Tests for index_entry — stores a single chunk without chunking."""
+
+    async def test_basic_entry(self, components, memory_dir):
+        """index_entry creates a single chunk with embedding."""
+        f = memory_dir / "entry.md"
+        content = "## Decision\n\nChose LFU over LRU for Redis eviction."
+        f.write_text(content)
+
+        chunk = await components.index_engine.index_entry(
+            content, f, heading_hierarchy=("## Decision",), tags=("redis",)
+        )
+
+        assert chunk.content == content
+        assert chunk.metadata.heading_hierarchy == ("## Decision",)
+        assert "redis" in chunk.metadata.tags
+        assert len(chunk.embedding) > 0
+
+        # Verify stored in DB
+        stored = await components.storage.list_chunks_by_source(f)
+        assert len(stored) == 1
+        assert stored[0].content == content
+
+    async def test_entry_line_numbers(self, components, memory_dir):
+        """index_entry computes correct start/end lines from file tail."""
+        f = memory_dir / "multi.md"
+        # Simulate existing content + new appended entry
+        f.write_text("## Old Entry\n\nOld content.\n\n## New Entry\n\nNew content.\n")
+
+        new_content = "## New Entry\n\nNew content."
+        chunk = await components.index_engine.index_entry(new_content, f)
+
+        # New content occupies the tail of the file
+        assert chunk.metadata.end_line > 0
+        assert chunk.metadata.start_line > 1  # not from line 1
+
+    async def test_entry_with_namespace(self, components, memory_dir):
+        """index_entry respects explicit namespace."""
+        f = memory_dir / "ns.md"
+        f.write_text("namespaced memory")
+
+        chunk = await components.index_engine.index_entry(
+            "namespaced memory", f, namespace="work"
+        )
+        assert chunk.metadata.namespace == "work"
+
+    async def test_entry_no_heading(self, components, memory_dir):
+        """index_entry works without heading hierarchy."""
+        f = memory_dir / "plain.md"
+        f.write_text("Just a plain note.")
+
+        chunk = await components.index_engine.index_entry("Just a plain note.", f)
+        assert chunk.metadata.heading_hierarchy == ()
+        assert chunk.content == "Just a plain note."
 
 
 # ===========================================================================

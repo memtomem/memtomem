@@ -13,7 +13,7 @@ from memtomem.chunking.registry import ChunkerRegistry
 from memtomem.chunking.structured import StructuredChunker
 from memtomem.config import IndexingConfig, NamespaceConfig
 from memtomem.indexing.differ import compute_diff
-from memtomem.models import Chunk, ChunkMetadata, IndexingStats
+from memtomem.models import Chunk, ChunkMetadata, ChunkType, IndexingStats
 
 if TYPE_CHECKING:
     from memtomem.embedding.base import EmbeddingProvider
@@ -116,6 +116,50 @@ class IndexEngine:
             deleted_chunks=result["deleted"],
             duration_ms=duration,
         )
+
+    async def index_entry(
+        self,
+        content: str,
+        file_path: Path,
+        *,
+        heading_hierarchy: tuple[str, ...] = (),
+        tags: tuple[str, ...] = (),
+        namespace: str | None = None,
+    ) -> Chunk:
+        """Index a short entry as a single chunk, bypassing the chunker.
+
+        Intended for mem_add: the content is already a complete, small memory
+        entry so splitting it would only waste embeddings and create noise.
+        The file must already be written; line numbers are derived from the
+        current file content.
+        Returns the created Chunk (with embedding and stored in DB).
+        """
+        file_path = file_path.resolve()
+
+        # Compute line range: the entry occupies the tail of the file
+        file_text = file_path.read_text(encoding="utf-8", errors="replace")
+        total_file_lines = file_text.count("\n") + 1
+        entry_lines = content.count("\n") + 1
+        start_line = max(1, total_file_lines - entry_lines + 1)
+
+        resolved_ns = self._resolve_namespace(file_path, namespace)
+
+        meta = ChunkMetadata(
+            source_file=file_path,
+            heading_hierarchy=heading_hierarchy,
+            chunk_type=ChunkType.MARKDOWN_SECTION,
+            start_line=start_line,
+            end_line=total_file_lines,
+            tags=tags,
+            namespace=resolved_ns or "default",
+        )
+        chunk = Chunk(content=content, metadata=meta)
+
+        embeddings = await self._embedder.embed_texts([chunk.retrieval_content])
+        chunk.embedding = embeddings[0]
+
+        await self._storage.upsert_chunks([chunk])
+        return chunk
 
     async def is_duplicate(
         self,
@@ -407,6 +451,28 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 3)
 
 
+def _can_merge(current: Chunk, nxt: Chunk) -> bool:
+    """Check if two chunks can be merged.
+
+    Same-file + same-hierarchy is always allowed.
+    A headingless chunk (empty hierarchy, e.g. frontmatter) can merge into
+    the next chunk, adopting its hierarchy.
+    """
+    if current.metadata.source_file != nxt.metadata.source_file:
+        return False
+    if current.metadata.heading_hierarchy == nxt.metadata.heading_hierarchy:
+        return True
+    # Allow headingless short chunk to merge forward into the next section
+    if not current.metadata.heading_hierarchy:
+        return True
+    return False
+
+
+def _merged_hierarchy(current: Chunk, nxt: Chunk) -> tuple[str, ...]:
+    """Pick the more specific heading hierarchy when merging two chunks."""
+    return nxt.metadata.heading_hierarchy or current.metadata.heading_hierarchy
+
+
 def _merge_short_chunks(
     chunks: list[Chunk],
     min_tokens: int,
@@ -418,6 +484,8 @@ def _merge_short_chunks(
     - Walk forward through chunks.
     - While the current accumulated chunk is below min_tokens, merge the next
       chunk — but only if the result stays below max_tokens.
+    - Headingless chunks (e.g. frontmatter) are merged into the following
+      section so they don't become orphan micro-chunks.
     - If merging would exceed max_tokens, stop and emit what we have.
     """
     if min_tokens <= 0 or len(chunks) <= 1:
@@ -434,13 +502,10 @@ def _merge_short_chunks(
         cur_tokens = _estimate_tokens(c.content)
 
         # Accumulate short chunks by merging forward
-        # Only merge chunks from the same file AND same heading hierarchy
-        # (different headings represent separate logical entries)
         while (
             cur_tokens < min_tokens
             and i + 1 < len(chunks)
-            and chunks[i + 1].metadata.source_file == c.metadata.source_file
-            and chunks[i + 1].metadata.heading_hierarchy == c.metadata.heading_hierarchy
+            and _can_merge(c, chunks[i + 1])
         ):
             nxt = chunks[i + 1]
             nxt_tokens = _estimate_tokens(nxt.content)
@@ -450,12 +515,13 @@ def _merge_short_chunks(
             if merged_tokens >= max_tokens:
                 break
 
+            hierarchy = _merged_hierarchy(c, nxt)
             merged_content = c.content + "\n\n" + nxt.content
             c = Chunk(
                 content=merged_content,
                 metadata=ChunkMetadata(
                     source_file=c.metadata.source_file,
-                    heading_hierarchy=c.metadata.heading_hierarchy,
+                    heading_hierarchy=hierarchy,
                     chunk_type=c.metadata.chunk_type,
                     start_line=c.metadata.start_line,
                     end_line=nxt.metadata.end_line,
