@@ -72,6 +72,15 @@ async def mem_status(
         f"Source files:  {stats['total_sources']}",
     ]
 
+    # Orphan check — count source files no longer on disk
+    try:
+        source_files = await app.storage.get_all_source_files()
+        orphaned = sum(1 for sf in source_files if not sf.exists())
+        if orphaned:
+            lines[-1] = f"Source files:  {stats['total_sources']} ({orphaned} orphaned — run mem_cleanup_orphans)"
+    except Exception:
+        pass
+
     mismatch = getattr(app.storage, "embedding_mismatch", None)
     if mismatch is not None:
         cfg = mismatch["configured"]
