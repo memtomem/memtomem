@@ -124,7 +124,7 @@ sequenceDiagram
 
 ### Short-Term Memory (STM) — Proactive Surfacing
 
-Optional. STM proxy sits between your agent and other MCP tools. When the agent reads files or calls APIs, STM automatically surfaces relevant memories — no manual searching needed.
+Optional, distributed as a separate package. STM proxy sits between your agent and other MCP tools. When the agent reads files or calls APIs, STM automatically surfaces relevant memories from memtomem — no manual searching needed.
 
 ```mermaid
 sequenceDiagram
@@ -141,13 +141,7 @@ sequenceDiagram
     STM-->>Agent: File content + related memories
 ```
 
-```bash
-uv pip install -e "packages/memtomem-stm[ltm]"   # install STM
-mm stm init                                        # interactive setup wizard
-mm stm reset                                       # disable STM, restore original configs
-```
-
-[STM Guide](docs/guides/stm-guide.md)
+STM lives in its own repository: **[memtomem/memtomem-stm](https://github.com/memtomem/memtomem-stm)**. Communication with memtomem core happens entirely through the MCP protocol — no direct code coupling.
 
 ### Agent Context Sync — One Source, All Editors
 
@@ -175,8 +169,6 @@ mm config show             # view settings
 mm config set key value    # change a setting
 mm embedding-reset         # check/resolve embedding model mismatch
 mm context detect          # find agent config files
-mm stm init                # STM proxy setup wizard
-mm stm reset               # disable STM, restore original MCP configs
 mm shell                   # interactive REPL
 mm web                     # Web UI (http://localhost:8080)
 ```
@@ -189,8 +181,8 @@ mm web                     # Web UI (http://localhost:8080)
 |---------|-------------|------------|
 | **Agent memory** | Sessions, working memory, procedures, multi-agent, reflection | [Agent Memory Guide](docs/guides/agent-memory-guide.md) |
 | **Namespaces** | Organize memories into scoped groups (work, personal, project) | [User Guide](docs/guides/user-guide.md#4-namespace--mem_ns_) |
-| **Web UI** | Visual dashboard — search, browse, tags, sessions, health, STM monitoring | [Web UI Guide](docs/guides/web-ui.md) |
-| **65 MCP tools** | Core 9 tools + `mem_do` meta-tool routing to 61 actions | [Tool Reference](packages/memtomem/README.md) |
+| **Web UI** | Visual dashboard — search, browse, tags, sessions, health monitoring | [Web UI Guide](docs/guides/web-ui.md) |
+| **72 MCP tools** | Core 9 tools + `mem_do` meta-tool routing to 63 actions | [Tool Reference](packages/memtomem/README.md) |
 | **Maintenance** | Dedup, auto-tag, decay, consolidation, export/import | [User Guide](docs/guides/user-guide.md#5-maintenance--mem_dedup_-mem_decay_-mem_auto_tag) |
 
 ---
@@ -217,8 +209,8 @@ Switch models via `mm init` or `mm embedding-reset`.
 | [User Guide](docs/guides/user-guide.md) | Complete feature walkthrough |
 | [MCP Client Setup](docs/guides/mcp-clients.md) | Editor-specific configuration |
 | [Agent Memory Guide](docs/guides/agent-memory-guide.md) | Sessions, working memory, procedures |
-| [STM Guide](docs/guides/stm-guide.md) | Proactive memory surfacing (advanced) |
-| [Tool Reference](packages/memtomem/README.md) | All 65 tools with parameters |
+| [memtomem-stm](https://github.com/memtomem/memtomem-stm) | Optional STM proxy for proactive memory surfacing (separate package) |
+| [Tool Reference](packages/memtomem/README.md) | All 72 tools with parameters |
 | [Web UI Guide](docs/guides/web-ui.md) | Visual dashboard |
 
 ---
@@ -233,7 +225,7 @@ Switch models via `mm init` or `mm embedding-reset`.
 | **Hybrid search** | Combines BM25 keywords + embedding similarity for better results |
 | **Chunk** | A section of a file (e.g., one heading in a markdown file) — the unit of search |
 | **Namespace** | A label to organize memories into groups (e.g., "work", "personal") |
-| **STM** | Short-Term Memory proxy — automatically surfaces relevant memories |
+| **STM** | Short-Term Memory proxy — automatically surfaces relevant memories. Distributed as a [separate package](https://github.com/memtomem/memtomem-stm) |
 
 ---
 
@@ -244,8 +236,8 @@ git clone https://github.com/memtomem/memtomem.git
 cd memtomem
 uv venv --python 3.12 && source .venv/bin/activate
 uv pip install -e "packages/memtomem[all]"
-uv run pytest                    # 1581 tests (core 846 + STM 735)
-uv run ruff check packages/      # lint
+uv run pytest                            # 886 tests (core only — STM has its own repo)
+uv run ruff check packages/memtomem/src  # lint
 ```
 
 ---

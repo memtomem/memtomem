@@ -212,20 +212,11 @@ memtomem status:
 | **Evaluation** | `mem_eval` |
 | **Context** | `mem_context_detect`, `mem_context_generate`, `mem_context_diff`, `mem_context_sync` |
 
-> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 tools, default), `standard` (~30 + `mem_do`), or `full` (65 + `mem_do`) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
+> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 tools, default), `standard` (~32 + `mem_do`), or `full` (72 + `mem_do`) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
 
-### STM Proxy Tools (optional)
+### STM Proxy Tools (optional, separate package)
 
-With `memtomem-stm` installed and `MEMTOMEM_STM_PROXY__ENABLED=true`, additional tools become available:
-
-| Tool | Description |
-|------|-------------|
-| `stm_proxy_stats` | Token savings and cache statistics |
-| `stm_proxy_select_chunks` | Retrieve sections from TOC response |
-| `stm_proxy_cache_clear` | Clear response cache |
-| `stm_surfacing_feedback` | Rate surfaced memories |
-| `stm_surfacing_stats` | Surfacing effectiveness metrics |
-| `{prefix}__{tool}` | Proxied upstream tools (dynamic) |
+The STM proxy is distributed as a separate package: **[memtomem-stm](https://github.com/memtomem/memtomem-stm)**. Once installed and configured, it exposes additional tools including `stm_proxy_stats`, `stm_proxy_select_chunks`, `stm_proxy_read_more`, `stm_proxy_cache_clear`, `stm_surfacing_feedback`, `stm_surfacing_stats`, and dynamically proxied upstream tools (`{prefix}__{tool}`). See the [memtomem-stm README](https://github.com/memtomem/memtomem-stm#readme) for full setup and tool reference.
 
 ---
 

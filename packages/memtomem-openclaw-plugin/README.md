@@ -92,7 +92,7 @@ All 63 memtomem MCP tools are registered as OpenClaw agent tools:
 
 ## How It Works
 
-1. **Plugin registration**: All 63 tools are registered with OpenClaw using their full JSON Schema definitions
+1. **Plugin registration**: All 72 tools are registered with OpenClaw using their full JSON Schema definitions
 2. **Lazy connection**: The MCP server subprocess is started on the first tool call, not at gateway startup
 3. **Stdio bridge**: Tool calls are forwarded to the MCP server over stdin/stdout using the MCP protocol
 4. **Graceful shutdown**: A background service closes the bridge when the gateway stops

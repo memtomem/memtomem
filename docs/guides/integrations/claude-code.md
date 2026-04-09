@@ -149,7 +149,7 @@ User submits prompt (>20 chars)
 - **Error logging**: `2>>/tmp/mm-hook.log` preserves errors for debugging. Avoid `2>/dev/null` which hides real failures.
 - **No Stop hook**: A timestamp-only Stop hook pollutes search with meaningless data. Let the agent save summaries via `mem_add` when there is meaningful content.
 - **Write only**: `Edit` is excluded from PostToolUse — edited files are already indexed, so re-indexing on every edit is redundant.
-- **STM proxy overlap**: If using `memtomem-stm`, hooks are redundant — the proxy already handles surfacing and indexing.
+- **STM proxy overlap**: If using [memtomem-stm](https://github.com/memtomem/memtomem-stm) (separate package), hooks are redundant — the proxy already handles surfacing and indexing.
 
 ---
 
