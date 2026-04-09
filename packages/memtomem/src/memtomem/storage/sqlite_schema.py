@@ -317,6 +317,22 @@ def create_tables(
         )
     """)
 
+    # --- Health watchdog snapshots ---
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS health_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tier TEXT NOT NULL,
+            check_name TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'ok',
+            created_at REAL NOT NULL
+        )
+    """)
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_health_snap_name "
+        "ON health_snapshots(check_name, created_at)"
+    )
+
     db.commit()
 
     return dimension, dim_mismatch, model_mismatch

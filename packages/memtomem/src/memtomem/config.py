@@ -233,6 +233,18 @@ class ContextWindowConfig(BaseSettings):
         return v
 
 
+class HealthWatchdogConfig(BaseSettings):
+    """Periodic health monitoring and auto-maintenance."""
+
+    enabled: bool = False
+    heartbeat_interval_seconds: float = 60.0
+    diagnostic_interval_seconds: float = 300.0
+    deep_interval_seconds: float = 3600.0
+    max_snapshots: int = 1000
+    orphan_cleanup_threshold: int = 10
+    auto_maintenance: bool = True
+
+
 class StmProxyConfig(BaseSettings):
     """STM proxy gateway integration (requires memtomem-stm package)."""
 
@@ -267,6 +279,7 @@ class Mem2MemConfig(BaseSettings):
     entity_extraction: EntityExtractionConfig = Field(default_factory=EntityExtractionConfig)
     context_window: ContextWindowConfig = Field(default_factory=ContextWindowConfig)
     stm_proxy: StmProxyConfig = Field(default_factory=StmProxyConfig)
+    health_watchdog: HealthWatchdogConfig = Field(default_factory=HealthWatchdogConfig)
 
 
 # ---------------------------------------------------------------------------

@@ -33,6 +33,7 @@ class AppContext:
     dedup_scanner: DedupScanner | None = None
     webhook_manager: object | None = None
     stm_proxy_manager: object | None = None
+    health_watchdog: object | None = None
     current_namespace: str | None = None
     current_session_id: str | None = None
     _config_lock: asyncio.Lock = field(default_factory=asyncio.Lock)

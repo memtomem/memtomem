@@ -218,9 +218,23 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         scheduler = ConsolidationScheduler(ctx, config.consolidation_schedule)
         await scheduler.start()
 
+    # Health watchdog
+    watchdog = None
+    if config.health_watchdog.enabled:
+        from memtomem.server.health_watchdog import HealthWatchdog
+
+        watchdog = HealthWatchdog(ctx, config.health_watchdog)
+        await watchdog.start()
+        ctx.health_watchdog = watchdog
+
     try:
         yield ctx
     finally:
+        if watchdog:
+            try:
+                await watchdog.stop()
+            except Exception:
+                logger.warning("Failed to stop health watchdog", exc_info=True)
         if scheduler:
             try:
                 await scheduler.stop()

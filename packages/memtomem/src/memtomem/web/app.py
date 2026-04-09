@@ -29,6 +29,7 @@ from memtomem.web.routes import (
     tags,
     proxy,
     timeline,
+    watchdog,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ def create_app(lifespan=None) -> FastAPI:
     app.include_router(procedures.router, prefix="/api")
     app.include_router(evaluation.router, prefix="/api")
     app.include_router(proxy.router, prefix="/api")
+    app.include_router(watchdog.router, prefix="/api")
 
     @app.exception_handler(ValueError)
     async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:

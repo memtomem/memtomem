@@ -11,7 +11,7 @@ from memtomem.server.tool_registry import ACTIONS
 _ALIASES: dict[str, str] = {
     "health": "eval",
     "health_report": "eval",
-    "health_check": "eval",
+    "health_check": "watchdog",
     "suggest": "search_suggest",
     "history": "search_history",
     "namespace_set": "ns_set",
