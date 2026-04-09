@@ -15,8 +15,8 @@ jobs:
         with:
           version: "latest"
       - run: uv sync --frozen
-      - run: uv run ruff check packages/memtomem/src packages/memtomem-stm/src
-      - run: uv run ruff format --check packages/memtomem/src packages/memtomem-stm/src
+      - run: uv run ruff check packages/memtomem/src
+      - run: uv run ruff format --check packages/memtomem/src
 
   typecheck:
     runs-on: ubuntu-latest
