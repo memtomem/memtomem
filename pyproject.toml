@@ -6,11 +6,10 @@ requires-python = ">=3.12"
 dependencies = []
 
 [tool.uv.workspace]
-members = ["packages/memtomem", "packages/memtomem-stm"]
+members = ["packages/memtomem"]
 
 [tool.uv.sources]
 memtomem = { workspace = true }
-memtomem-stm = { workspace = true }
 
 [tool.ruff]
 target-version = "py312"
@@ -21,7 +20,7 @@ line-length = 100
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["packages/memtomem/tests", "packages/memtomem-stm/tests"]
+testpaths = ["packages/memtomem/tests"]
 markers = [
     "ollama: requires a running Ollama instance (auto-skipped when unavailable)",
 ]
@@ -33,22 +32,11 @@ ignore_missing_imports = true
 disable_error_code = ["has-type", "attr-defined"]
 
 [dependency-groups]
-ltm = [
+dev = [
     "memtomem[all]",
     "pytest>=8.3",
     "pytest-asyncio>=0.25",
     "pytest-cov>=6.0",
     "ruff>=0.9",
     "mypy>=1.14",
-]
-stm = [
-    "memtomem-stm",
-    "pytest>=8.3",
-    "pytest-asyncio>=0.25",
-    "pytest-cov>=6.0",
-    "ruff>=0.9",
-]
-dev = [
-    {include-group = "ltm"},
-    {include-group = "stm"},
 ]
