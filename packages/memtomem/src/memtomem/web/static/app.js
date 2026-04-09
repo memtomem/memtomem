@@ -328,6 +328,7 @@ function switchSettingsSection(sectionName) {
   if (sectionName === 'harness-scratch') loadHarnessScratch();
   if (sectionName === 'harness-procedures') loadHarnessProcedures();
   if (sectionName === 'harness-health') loadHarnessHealth();
+  if (sectionName === 'harness-watchdog') loadWatchdogStatus();
 }
 
 // Settings nav buttons
@@ -5974,6 +5975,91 @@ async function loadHarnessHealth() {
 }
 
 qs('health-refresh-btn')?.addEventListener('click', loadHarnessHealth);
+
+// =====================================================================
+// HEALTH WATCHDOG PANEL
+// =====================================================================
+
+function _wdDot(status) {
+  const cls = status === 'ok' ? 'health-ok' : status === 'warning' ? 'health-slow' : 'health-down';
+  return `<span class="health-dot ${cls}"></span>`;
+}
+
+function _wdLabel(status) {
+  return status === 'ok' ? 'OK' : status === 'warning' ? 'Warning' : 'Critical';
+}
+
+async function loadWatchdogStatus() {
+  const report = qs('watchdog-report');
+  const bar = qs('watchdog-status-bar');
+  bar.style.display = 'none';
+  report.innerHTML = '<div class="empty-state"><div class="spinner-panel"></div></div>';
+  try {
+    const d = await api('GET', '/api/watchdog/status');
+    if (!d.enabled) {
+      report.innerHTML = '<div class="empty-state">Health watchdog is disabled.<br><code>MEMTOMEM_HEALTH_WATCHDOG__ENABLED=true</code></div>';
+      return;
+    }
+    const checks = d.checks || {};
+    const names = Object.keys(checks).sort();
+    if (!names.length) {
+      report.innerHTML = '<div class="empty-state">Watchdog is running but no checks recorded yet.</div>';
+      return;
+    }
+    const criticals = names.filter(n => checks[n].status === 'critical').length;
+    const warnings = names.filter(n => checks[n].status === 'warning').length;
+    let summary;
+    if (criticals > 0) summary = `<span class="health-dot health-down"></span> ${criticals} critical, ${warnings} warning`;
+    else if (warnings > 0) summary = `<span class="health-dot health-slow"></span> ${warnings} warning`;
+    else summary = `<span class="health-dot health-ok"></span> All checks OK`;
+
+    report.innerHTML = `
+      <div class="health-section" style="margin-bottom:16px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;font-size:0.9rem">${summary} &mdash; ${names.length} checks</div>
+      </div>
+      <div class="health-grid">
+        ${names.map(n => {
+          const c = checks[n];
+          const val = c.value || {};
+          const detail = Object.entries(val).map(([k,v]) => `<span class="mono">${k}</span>: ${v}`).join(' &middot; ');
+          return `<div class="health-card card">
+            <div class="health-card-title" style="display:flex;align-items:center;gap:6px">${_wdDot(c.status)} ${n}</div>
+            <div style="font-size:0.85rem;font-weight:600;margin:4px 0">${_wdLabel(c.status)}</div>
+            <div class="health-card-detail">${detail || '—'}</div>
+            <div class="health-card-detail" style="opacity:0.5">${c.tier}</div>
+          </div>`;
+        }).join('')}
+      </div>
+    `;
+  } catch (e) {
+    report.innerHTML = `<div class="empty-state">Error: ${e.message}</div>`;
+  }
+}
+
+async function runWatchdogNow() {
+  const bar = qs('watchdog-status-bar');
+  const btn = qs('watchdog-run-btn');
+  btn.disabled = true;
+  btn.textContent = 'Running...';
+  bar.style.display = 'none';
+  try {
+    await api('POST', '/api/watchdog/run');
+    bar.className = 'status-msg ok';
+    bar.textContent = 'Health checks completed.';
+    bar.style.display = 'block';
+    await loadWatchdogStatus();
+  } catch (e) {
+    bar.className = 'status-msg err';
+    bar.textContent = 'Run failed: ' + e.message;
+    bar.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Run Now';
+  }
+}
+
+qs('watchdog-refresh-btn')?.addEventListener('click', loadWatchdogStatus);
+qs('watchdog-run-btn')?.addEventListener('click', runWatchdogNow);
 
 // =====================================================================
 // STM PROXY DASHBOARD

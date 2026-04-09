@@ -614,6 +614,7 @@
         <button class="settings-nav-btn" data-section="harness-scratch">Working Memory</button>
         <button class="settings-nav-btn" data-section="harness-procedures">Procedures</button>
         <button class="settings-nav-btn" data-section="harness-health">Health</button>
+        <button class="settings-nav-btn" data-section="harness-watchdog">Watchdog</button>
       </div>
       <div class="settings-content">
 
@@ -759,6 +760,21 @@
             <button id="health-refresh-btn" class="btn-ghost">Refresh</button>
           </div>
           <div id="health-report" class="harness-health">
+            <div class="empty-state">Loading...</div>
+          </div>
+        </div>
+
+        <!-- Harness: Watchdog -->
+        <div class="settings-section" id="settings-harness-watchdog">
+          <div class="harness-header">
+            <h2>Health Watchdog</h2>
+            <div style="display:flex;gap:8px">
+              <button id="watchdog-run-btn" class="btn-primary">Run Now</button>
+              <button id="watchdog-refresh-btn" class="btn-ghost">Refresh</button>
+            </div>
+          </div>
+          <div id="watchdog-status-bar" class="status-msg" style="display:none"></div>
+          <div id="watchdog-report">
             <div class="empty-state">Loading...</div>
           </div>
         </div>

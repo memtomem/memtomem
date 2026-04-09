@@ -40,7 +40,9 @@ class HealthWatchdog:
         if not self._config.enabled:
             return
 
-        db_path = self._app.config.storage.sqlite_path.expanduser().resolve()
+        from pathlib import Path
+
+        db_path = Path(self._app.config.storage.sqlite_path).expanduser().resolve()
         self._store = HealthStore(db_path, self._config.max_snapshots)
         self._store.initialize()
         self._maintenance = MaintenanceExecutor(self._app, self._config)

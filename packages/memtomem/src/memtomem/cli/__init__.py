@@ -24,6 +24,7 @@ def _register() -> None:
     from memtomem.cli.init_cmd import init
     from memtomem.cli.shell import shell
     from memtomem.cli.stm_cmd import stm
+    from memtomem.cli.watchdog_cmd import watchdog
     from memtomem.cli.web import web
 
     cli.add_command(init)
@@ -35,6 +36,7 @@ def _register() -> None:
     cli.add_command(context)
     cli.add_command(embedding_reset)
     cli.add_command(stm)
+    cli.add_command(watchdog)
     cli.add_command(web)
     cli.add_command(shell)
 
