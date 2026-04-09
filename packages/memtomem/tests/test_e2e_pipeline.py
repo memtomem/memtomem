@@ -212,9 +212,14 @@ class TestFullPipelineE2E:
         assert len(results) >= 1
 
         output = _format_single_result(results[0])
-        assert "score=" in output
+        assert "[1]" in output
+        assert "format_test.md" in output
+
+        # Verbose mode still works
+        verbose_output = _format_single_result(results[0], verbose=True)
+        assert "score=" in verbose_output
         if results[0].context and results[0].context.window_before:
-            assert "context before" in output
+            assert "context before" in verbose_output
 
     async def test_formatter_without_context(self, components, memory_dir):
         """Search results without context use standard format."""
@@ -228,8 +233,8 @@ class TestFullPipelineE2E:
         assert len(results) >= 1
 
         output = _format_single_result(results[0])
-        assert "score=" in output
-        assert "context before" not in output
+        assert "[1]" in output
+        assert "no_ctx.md" in output
 
     async def test_incremental_reindex_preserves_search(self, components, memory_dir):
         """Adding content to a file → re-index → new content searchable."""

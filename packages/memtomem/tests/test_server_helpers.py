@@ -14,7 +14,14 @@ from memtomem.config import Mem2MemConfig
 from memtomem.errors import StorageError
 from memtomem.models import Chunk, ChunkMetadata, SearchResult
 from memtomem.server.error_handler import tool_handler
-from memtomem.server.formatters import _display_path, _format_results, _format_single_result
+from memtomem.server.formatters import (
+    _display_path,
+    _format_compact_result,
+    _format_results,
+    _format_single_result,
+    _format_verbose_result,
+    _short_path,
+)
 from memtomem.server.helpers import _check_embedding_mismatch, _parse_recall_date, _set_config_key
 
 
@@ -44,6 +51,17 @@ class TestDisplayPath:
         assert _display_path("/home/user/file.md") == "/home/user/file.md"
 
 
+class TestShortPath:
+    def test_extracts_filename(self):
+        assert _short_path("/home/user/notes/test.md") == "test.md"
+
+    def test_single_filename(self):
+        assert _short_path("file.md") == "file.md"
+
+    def test_path_object(self):
+        assert _short_path(Path("/tmp/dir/readme.md")) == "readme.md"
+
+
 class TestFormatResults:
     def _make_result(self, rank: int = 1, score: float = 0.85, content: str = "hello"):
         chunk = Chunk(
@@ -63,11 +81,22 @@ class TestFormatResults:
         out = _format_results([])
         assert "Found 0 results" in out
 
-    def test_single_result_contains_fields(self):
+    def test_single_result_compact_default(self):
         r = self._make_result(rank=1, score=0.9234, content="test content")
         out = _format_results([r])
         assert "Found 1 results" in out
+        assert "0.92" in out
+        assert "test content" in out
+        # Compact: no UUID, no full path
+        assert "id=" not in out
+        assert "score=0.9234" not in out
+
+    def test_single_result_verbose(self):
+        r = self._make_result(rank=1, score=0.9234, content="test content")
+        out = _format_results([r], verbose=True)
+        assert "Found 1 results" in out
         assert "score=0.9234" in out
+        assert "id=" in out
         assert "test content" in out
 
     def test_multiple_results(self):
@@ -77,8 +106,8 @@ class TestFormatResults:
         assert "Found 2 results" in out
 
 
-class TestFormatSingleResult:
-    def test_includes_rank_score_source(self):
+class TestFormatCompactResult:
+    def test_compact_format_basic(self):
         chunk = Chunk(
             content="important memory",
             metadata=ChunkMetadata(
@@ -90,11 +119,15 @@ class TestFormatSingleResult:
             embedding=[],
         )
         r = SearchResult(chunk=chunk, score=0.8765, rank=3, source="bm25")
-        out = _format_single_result(r)
-        assert "**[3]**" in out
-        assert "score=0.8765" in out
-        assert "/home/user/test.md" in out
+        out = _format_compact_result(r)
+        assert "[3]" in out
+        assert "0.88" in out
+        assert "test.md" in out
         assert "Notes > Sub" in out
+        # No UUID, no full path, no code block
+        assert "id=" not in out
+        assert "/home/user/" not in out
+        assert "```" not in out
 
     def test_no_heading_hierarchy(self):
         chunk = Chunk(
@@ -108,8 +141,7 @@ class TestFormatSingleResult:
             embedding=[],
         )
         r = SearchResult(chunk=chunk, score=0.5, rank=1, source="dense")
-        out = _format_single_result(r)
-        # Should not contain a " | " after the source for empty hierarchy
+        out = _format_compact_result(r)
         assert "bare chunk" in out
 
     def test_namespace_badge_shown_for_non_default(self):
@@ -123,7 +155,7 @@ class TestFormatSingleResult:
             embedding=[],
         )
         r = SearchResult(chunk=chunk, score=0.5, rank=1, source="fused")
-        out = _format_single_result(r)
+        out = _format_compact_result(r)
         assert "[work]" in out
 
     def test_no_namespace_badge_for_default(self):
@@ -137,8 +169,58 @@ class TestFormatSingleResult:
             embedding=[],
         )
         r = SearchResult(chunk=chunk, score=0.5, rank=1, source="fused")
-        out = _format_single_result(r)
+        out = _format_compact_result(r)
         assert "[default]" not in out
+
+
+class TestFormatVerboseResult:
+    def test_verbose_includes_full_details(self):
+        chunk = Chunk(
+            content="important memory",
+            metadata=ChunkMetadata(
+                source_file=Path("/home/user/test.md"),
+                heading_hierarchy=("Notes", "Sub"),
+                namespace="default",
+            ),
+            id=uuid4(),
+            embedding=[],
+        )
+        r = SearchResult(chunk=chunk, score=0.8765, rank=3, source="bm25")
+        out = _format_verbose_result(r)
+        assert "**[3]**" in out
+        assert "score=0.8765" in out
+        assert "id=" in out
+        assert "/home/user/test.md" in out
+        assert "Notes > Sub" in out
+        assert "```" in out
+
+
+class TestFormatSingleResultDelegation:
+    """_format_single_result delegates to compact/verbose based on flag."""
+
+    def _make_result(self):
+        chunk = Chunk(
+            content="test",
+            metadata=ChunkMetadata(
+                source_file=Path("/tmp/t.md"),
+                namespace="default",
+            ),
+            id=uuid4(),
+            embedding=[],
+        )
+        return SearchResult(chunk=chunk, score=0.5, rank=1, source="fused")
+
+    def test_default_is_compact(self):
+        r = self._make_result()
+        out = _format_single_result(r)
+        assert "id=" not in out
+        assert "```" not in out
+
+    def test_verbose_flag(self):
+        r = self._make_result()
+        out = _format_single_result(r, verbose=True)
+        assert "id=" in out
+        assert "```" in out
 
 
 # ===========================================================================

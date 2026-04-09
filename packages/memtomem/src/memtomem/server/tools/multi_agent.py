@@ -92,8 +92,6 @@ async def mem_agent_search(
         return f"No results found for agent '{agent_id or 'current'}'."
 
     output = _format_results(results)
-    pipeline_info = f"pipeline: BM25:{stats.bm25_candidates} → Dense:{stats.dense_candidates} → Final:{stats.final_total}"
-    output += f"\n\n---\n{pipeline_info}"
     return output
 
 

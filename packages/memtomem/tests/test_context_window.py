@@ -303,8 +303,8 @@ class TestMemExpand:
 
 
 class TestCoreFormatter:
-    def test_with_context(self):
-        """Formatter shows before/after when context present."""
+    def test_with_context_compact(self):
+        """Compact formatter shows before/after content inline."""
         chunk = _make_chunk("matched content", heading=("Intro",))
         before = _make_chunk("before content")
         after = _make_chunk("after content")
@@ -318,21 +318,37 @@ class TestCoreFormatter:
         r = SearchResult(chunk=chunk, score=0.85, rank=1, source="fused", context=ctx)
         output = _format_single_result(r)
 
+        assert "[2/3]" in output
+        assert "before content" in output
+        assert "after content" in output
+        assert "matched content" in output
+
+    def test_with_context_verbose(self):
+        """Verbose formatter shows labeled sections with code blocks."""
+        chunk = _make_chunk("matched content", heading=("Intro",))
+        before = _make_chunk("before content")
+        after = _make_chunk("after content")
+        ctx = ContextInfo(
+            window_before=(before,),
+            window_after=(after,),
+            chunk_position=2,
+            total_chunks_in_file=3,
+            context_tier_used="standard",
+        )
+        r = SearchResult(chunk=chunk, score=0.85, rank=1, source="fused", context=ctx)
+        output = _format_single_result(r, verbose=True)
+
         assert "[chunk 2/3]" in output
         assert "context before" in output
         assert "context after" in output
         assert "matched" in output
-        assert "before content" in output
-        assert "after content" in output
 
     def test_without_context(self):
-        """Formatter uses original format when no context."""
+        """Formatter uses standard format when no context."""
         chunk = _make_chunk("just content")
         r = SearchResult(chunk=chunk, score=0.85, rank=1, source="fused")
         output = _format_single_result(r)
 
-        assert "context before" not in output
-        assert "```" in output
         assert "just content" in output
 
 

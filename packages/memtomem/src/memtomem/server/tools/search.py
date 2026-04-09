@@ -22,6 +22,7 @@ async def mem_search(
     bm25_weight: float | None = None,
     dense_weight: float | None = None,
     context_window: int = 0,
+    verbose: bool = False,
     ctx: CtxType = None,  # type: ignore[assignment]
 ) -> str:
     """Search across indexed memory files using hybrid BM25 + semantic search.
@@ -35,6 +36,7 @@ async def mem_search(
         bm25_weight: Override BM25 weight in RRF fusion (default 1.0). Set higher to favor keyword matches.
         dense_weight: Override dense/semantic weight in RRF fusion (default 1.0). Set higher to favor meaning.
         context_window: Expand each result with ±N adjacent chunks (0=disabled). Use for more context.
+        verbose: Show full details (UUID, full path, score 4dp, pipeline stats). Default: compact output.
     """
     if len(query) > 10_000:
         return "Error: query too long (max 10,000 characters)."
@@ -61,19 +63,20 @@ async def mem_search(
     if not results:
         return "No results found."
 
-    output = _format_results(results)
+    output = _format_results(results, verbose=verbose)
 
-    pipeline_info = []
-    if stats.bm25_candidates:
-        pipeline_info.append(f"BM25:{stats.bm25_candidates}")
-    if stats.dense_candidates:
-        pipeline_info.append(f"Dense:{stats.dense_candidates}")
-    if stats.fused_total:
-        pipeline_info.append(f"RRF:{stats.fused_total}")
-    pipeline_info.append(f"Final:{stats.final_total}")
-    if stats.bm25_error:
-        pipeline_info.append(f"BM25-err:{stats.bm25_error}")
-    output += f"\n\n---\npipeline: {' → '.join(pipeline_info)}"
+    if verbose:
+        pipeline_info = []
+        if stats.bm25_candidates:
+            pipeline_info.append(f"BM25:{stats.bm25_candidates}")
+        if stats.dense_candidates:
+            pipeline_info.append(f"Dense:{stats.dense_candidates}")
+        if stats.fused_total:
+            pipeline_info.append(f"RRF:{stats.fused_total}")
+        pipeline_info.append(f"Final:{stats.final_total}")
+        if stats.bm25_error:
+            pipeline_info.append(f"BM25-err:{stats.bm25_error}")
+        output += f"\n\n---\npipeline: {' → '.join(pipeline_info)}"
 
     # Fire webhook
     if app.webhook_manager:

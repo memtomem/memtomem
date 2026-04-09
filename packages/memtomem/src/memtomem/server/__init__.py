@@ -22,8 +22,11 @@ from memtomem.server.context import (
     _get_app as _get_app,
 )
 from memtomem.server.formatters import (
+    _format_compact_result as _format_compact_result,
     _format_results as _format_results,
     _format_single_result as _format_single_result,
+    _format_verbose_result as _format_verbose_result,
+    _short_path as _short_path,
 )
 from memtomem.server.helpers import (
     _parse_recall_date as _parse_recall_date,

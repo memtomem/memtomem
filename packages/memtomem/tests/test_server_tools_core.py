@@ -572,7 +572,7 @@ class TestFormatResults:
         output = _format_results([])
         assert "Found 0 results" in output
 
-    def test_format_single_result(self):
+    def test_format_single_result_compact(self):
         chunk = Chunk(
             content="Test content here",
             metadata=ChunkMetadata(
@@ -586,7 +586,29 @@ class TestFormatResults:
         output = _format_results([result])
 
         assert "Found 1 results" in output
+        assert "0.85" in output
+        assert "test.md" in output
+        assert "Test content here" in output
+        assert "Section > Subsection" in output
+        # Compact: no UUID, no full path prefix
+        assert "id=" not in output
+
+    def test_format_single_result_verbose(self):
+        chunk = Chunk(
+            content="Test content here",
+            metadata=ChunkMetadata(
+                source_file=Path("/tmp/test.md"),
+                heading_hierarchy=("Section", "Subsection"),
+                namespace="default",
+            ),
+            embedding=[],
+        )
+        result = SearchResult(chunk=chunk, score=0.85, rank=1, source="bm25")
+        output = _format_results([result], verbose=True)
+
+        assert "Found 1 results" in output
         assert "score=0.8500" in output
+        assert "id=" in output
         assert "Test content here" in output
         assert "Section > Subsection" in output
 
