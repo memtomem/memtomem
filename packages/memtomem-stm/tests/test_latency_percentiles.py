@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from memtomem_stm.proxy.metrics import CallMetrics, TokenTracker, _percentile
 

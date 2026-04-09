@@ -5,9 +5,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
-import pytest
 
 from memtomem_stm.proxy.config import (
     CompressionStrategy,

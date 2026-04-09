@@ -5,10 +5,9 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
-import pytest
 
 from memtomem_stm.surfacing.config import SurfacingConfig
 from memtomem_stm.surfacing.engine import SurfacingEngine
@@ -61,10 +60,11 @@ def _make_config(**overrides) -> SurfacingConfig:
     return SurfacingConfig(**defaults)
 
 
-def _make_search_pipeline(results: list[FakeSearchResult] | None = None):
-    pipeline = AsyncMock()
-    pipeline.search = AsyncMock(return_value=(results or [], {}))
-    return pipeline
+def _make_mcp_adapter(results: list[FakeSearchResult] | None = None):
+    """Build a mock McpClientSearchAdapter that returns the given results."""
+    adapter = AsyncMock()
+    adapter.search = AsyncMock(return_value=(results or [], {}))
+    return adapter
 
 
 LONG_RESPONSE = "x" * 200  # above min_response_chars=10
@@ -81,7 +81,7 @@ class TestSurfacingBasic:
         results = [FakeSearchResult(chunk=FakeChunk(content="Flask chosen"), score=0.5)]
         engine = SurfacingEngine(
             config=_make_config(),
-            search_pipeline=_make_search_pipeline(results),
+            mcp_adapter=_make_mcp_adapter(results),
         )
         output = await engine.surface("gh", "read_file", VALID_ARGS, LONG_RESPONSE)
         assert "Relevant Memories" in output
@@ -90,7 +90,7 @@ class TestSurfacingBasic:
     async def test_empty_results_returns_original(self):
         engine = SurfacingEngine(
             config=_make_config(),
-            search_pipeline=_make_search_pipeline([]),
+            mcp_adapter=_make_mcp_adapter([]),
         )
         output = await engine.surface("gh", "read_file", VALID_ARGS, LONG_RESPONSE)
         assert output == LONG_RESPONSE
@@ -98,22 +98,16 @@ class TestSurfacingBasic:
     async def test_disabled_returns_original(self):
         engine = SurfacingEngine(
             config=_make_config(enabled=False),
-            search_pipeline=_make_search_pipeline([FakeSearchResult(FakeChunk(), 0.9)]),
+            mcp_adapter=_make_mcp_adapter([FakeSearchResult(FakeChunk(), 0.9)]),
         )
         output = await engine.surface("gh", "tool", {}, LONG_RESPONSE)
         assert output == LONG_RESPONSE
-
-    async def test_no_search_pipeline_returns_original(self):
-        engine = SurfacingEngine(config=_make_config())
-        output = await engine.surface("gh", "tool", {}, LONG_RESPONSE)
-        assert output == LONG_RESPONSE
-
 
 class TestSurfacingGating:
     async def test_short_response_skipped(self):
         engine = SurfacingEngine(
             config=_make_config(min_response_chars=1000),
-            search_pipeline=_make_search_pipeline([FakeSearchResult(FakeChunk(), 0.9)]),
+            mcp_adapter=_make_mcp_adapter([FakeSearchResult(FakeChunk(), 0.9)]),
         )
         output = await engine.surface("gh", "tool", {}, "short")
         assert output == "short"
@@ -121,7 +115,7 @@ class TestSurfacingGating:
     async def test_write_tool_skipped(self):
         engine = SurfacingEngine(
             config=_make_config(),
-            search_pipeline=_make_search_pipeline([FakeSearchResult(FakeChunk(), 0.9)]),
+            mcp_adapter=_make_mcp_adapter([FakeSearchResult(FakeChunk(), 0.9)]),
         )
         output = await engine.surface("fs", "write_file", {"path": "x", "_context_query": "test"}, LONG_RESPONSE)
         assert output == LONG_RESPONSE
@@ -129,7 +123,7 @@ class TestSurfacingGating:
     async def test_delete_tool_skipped(self):
         engine = SurfacingEngine(
             config=_make_config(),
-            search_pipeline=_make_search_pipeline([FakeSearchResult(FakeChunk(), 0.9)]),
+            mcp_adapter=_make_mcp_adapter([FakeSearchResult(FakeChunk(), 0.9)]),
         )
         output = await engine.surface("fs", "delete_file", {"path": "x", "_context_query": "test"}, LONG_RESPONSE)
         assert output == LONG_RESPONSE
@@ -140,7 +134,7 @@ class TestSurfacingScoreFilter:
         results = [FakeSearchResult(chunk=FakeChunk(), score=0.01)]
         engine = SurfacingEngine(
             config=_make_config(min_score=0.02),
-            search_pipeline=_make_search_pipeline(results),
+            mcp_adapter=_make_mcp_adapter(results),
         )
         output = await engine.surface("gh", "read_file", VALID_ARGS, LONG_RESPONSE)
         assert output == LONG_RESPONSE  # filtered, no injection
@@ -149,7 +143,7 @@ class TestSurfacingScoreFilter:
         results = [FakeSearchResult(chunk=FakeChunk(content="exactly at threshold"), score=0.02)]
         engine = SurfacingEngine(
             config=_make_config(min_score=0.02),
-            search_pipeline=_make_search_pipeline(results),
+            mcp_adapter=_make_mcp_adapter(results),
         )
         output = await engine.surface("gh", "read_file", VALID_ARGS, LONG_RESPONSE)
         assert "exactly at threshold" in output
@@ -161,7 +155,7 @@ class TestSurfacingScoreFilter:
         ]
         engine = SurfacingEngine(
             config=_make_config(max_results=2),
-            search_pipeline=_make_search_pipeline(results),
+            mcp_adapter=_make_mcp_adapter(results),
         )
         output = await engine.surface("gh", "read_file", VALID_ARGS, LONG_RESPONSE)
         assert "result-0" in output
@@ -171,23 +165,23 @@ class TestSurfacingScoreFilter:
 
 class TestSurfacingCircuitBreaker:
     async def test_circuit_breaker_opens_after_failures(self):
-        failing_pipeline = AsyncMock()
-        failing_pipeline.search = AsyncMock(side_effect=RuntimeError("boom"))
+        failing_adapter = AsyncMock()
+        failing_adapter.search = AsyncMock(side_effect=RuntimeError("boom"))
 
         engine = SurfacingEngine(
             config=_make_config(circuit_max_failures=2, circuit_reset_seconds=60),
-            search_pipeline=failing_pipeline,
+            mcp_adapter=failing_adapter,
         )
 
         # First 2 failures should still return original (caught by except)
         await engine.surface("gh", "read_file", VALID_ARGS, LONG_RESPONSE)
         await engine.surface("gh", "read_file", {"path": "y"}, LONG_RESPONSE)
 
-        # Circuit should now be open — pipeline.search NOT called
-        failing_pipeline.search.reset_mock()
+        # Circuit should now be open — adapter.search NOT called
+        failing_adapter.search.reset_mock()
         output = await engine.surface("gh", "read_file", {"path": "z"}, LONG_RESPONSE)
         assert output == LONG_RESPONSE
-        failing_pipeline.search.assert_not_called()
+        failing_adapter.search.assert_not_called()
 
 
 class TestSurfacingTimeout:
@@ -196,12 +190,12 @@ class TestSurfacingTimeout:
             await asyncio.sleep(10)
             return [], {}
 
-        pipeline = AsyncMock()
-        pipeline.search = slow_search
+        adapter = AsyncMock()
+        adapter.search = slow_search
 
         engine = SurfacingEngine(
             config=_make_config(timeout_seconds=0.1),
-            search_pipeline=pipeline,
+            mcp_adapter=adapter,
         )
         output = await engine.surface("gh", "read_file", VALID_ARGS, LONG_RESPONSE)
         assert output == LONG_RESPONSE
@@ -220,7 +214,7 @@ class TestSessionDedup:
         ]
         engine = SurfacingEngine(
             config=_make_config(cooldown_seconds=0),
-            search_pipeline=_make_search_pipeline(results),
+            mcp_adapter=_make_mcp_adapter(results),
         )
 
         out1 = await engine.surface("s", "read_file", VALID_ARGS, LONG_RESPONSE)
@@ -242,19 +236,19 @@ class TestSessionDedup:
 class TestSurfacingCache:
     async def test_cache_hit_skips_search(self):
         results = [FakeSearchResult(chunk=FakeChunk(content="cached memory"), score=0.5)]
-        pipeline = _make_search_pipeline(results)
+        adapter = _make_mcp_adapter(results)
 
         engine = SurfacingEngine(
             config=_make_config(cooldown_seconds=0),
-            search_pipeline=pipeline,
+            mcp_adapter=adapter,
         )
 
         # First call — searches
         out1 = await engine.surface("gh", "read_file", VALID_ARGS, LONG_RESPONSE)
         assert "cached memory" in out1
-        assert pipeline.search.call_count == 1
+        assert adapter.search.call_count == 1
 
         # Second call — cache hit, no search
         out2 = await engine.surface("gh", "read_file", VALID_ARGS, LONG_RESPONSE)
         assert "cached memory" in out2
-        assert pipeline.search.call_count == 1  # not called again
+        assert adapter.search.call_count == 1  # not called again

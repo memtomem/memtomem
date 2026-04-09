@@ -7,15 +7,13 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
-import pytest
 
 from memtomem_stm.proxy.cleaning import DefaultContentCleaner
 from memtomem_stm.proxy.compression import HybridCompressor, SelectiveCompressor
-from memtomem_stm.proxy.config import CleaningConfig, HybridConfig, SelectiveConfig
+from memtomem_stm.proxy.config import CleaningConfig
 from memtomem_stm.surfacing.config import SurfacingConfig
 from memtomem_stm.surfacing.engine import SurfacingEngine
 from memtomem_stm.surfacing.feedback import AutoTuner, FeedbackTracker
-from memtomem_stm.surfacing.feedback_store import FeedbackStore
 
 
 @dataclass
@@ -82,7 +80,7 @@ class TestFullPipeline:
                 include_session_context=False,
                 fire_webhook=False,
             ),
-            search_pipeline=AsyncMock(search=AsyncMock(return_value=(results, {}))),
+            mcp_adapter=AsyncMock(search=AsyncMock(return_value=(results, {}))),
         )
         final = await engine.surface(
             "api", "read_file",

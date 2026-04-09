@@ -7,7 +7,7 @@ import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .harness import BenchTask, QAPair
+    from .harness import BenchTask
 
 
 def _normalize(text: str) -> str:

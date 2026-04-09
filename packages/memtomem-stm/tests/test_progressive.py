@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import time
 
-import pytest
 
 from memtomem_stm.proxy.compression import PendingSelection
 from memtomem_stm.proxy.config import (

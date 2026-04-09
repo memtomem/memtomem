@@ -18,10 +18,14 @@ class ToolSurfacingConfig(BaseModel):
 
 
 class SurfacingConfig(BaseModel):
-    """Proactive memory surfacing configuration."""
+    """Proactive memory surfacing configuration.
+
+    LTM access is always remote-only via the MCP protocol. The surfacing
+    engine spawns (or connects to) a memtomem MCP server using the
+    ltm_mcp_command / ltm_mcp_args settings below.
+    """
 
     enabled: bool = True
-    ltm_mode: str = "in_process"  # "in_process" | "mcp_client"
     ltm_mcp_command: str = "memtomem-server"
     ltm_mcp_args: list[str] = []
     min_score: float = 0.02

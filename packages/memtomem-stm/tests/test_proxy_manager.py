@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 
 import pytest
 
 from memtomem_stm.proxy.config import (
     CleaningConfig,
     CompressionStrategy,
-    HybridConfig,
-    ProxyConfig,
     SelectiveConfig,
     ToolOverrideConfig,
     UpstreamServerConfig,

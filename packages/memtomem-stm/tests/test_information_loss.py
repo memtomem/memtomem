@@ -12,9 +12,7 @@ can still do its job with the compressed output.
 from __future__ import annotations
 
 import json
-import re
 
-import pytest
 
 from memtomem_stm.proxy.compression import (
     FieldExtractCompressor,

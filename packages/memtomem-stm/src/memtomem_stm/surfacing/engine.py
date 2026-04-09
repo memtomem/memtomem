@@ -5,8 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from typing import TYPE_CHECKING, Any
-from uuid import UUID
+from typing import Any
 
 from memtomem_stm.surfacing.cache import SurfacingCache
 from memtomem_stm.surfacing.config import SurfacingConfig
@@ -15,33 +14,31 @@ from memtomem_stm.surfacing.formatter import SurfacingFormatter
 from memtomem_stm.surfacing.relevance import RelevanceGate
 from memtomem_stm.utils.circuit_breaker import CircuitBreaker
 
-if TYPE_CHECKING:
-    from memtomem.search.pipeline import SearchPipeline
-    from memtomem.storage.sqlite_backend import SqliteBackend
-
 logger = logging.getLogger(__name__)
 
 
 class SurfacingEngine:
     """Core proactive memory surfacing engine.
 
-    On each proxied tool call, extracts context, searches LTM,
-    and injects relevant memories into the response.
+    On each proxied tool call, extracts context, searches LTM via the
+    MCP client adapter, and injects relevant memories into the response.
+
+    LTM access is always remote-only via the MCP protocol (no in-process
+    SearchPipeline coupling). The adapter is responsible for talking to a
+    memtomem MCP server, whether spawned as a child process or addressed
+    over an existing transport.
     """
 
     def __init__(
         self,
         config: SurfacingConfig,
-        search_pipeline: SearchPipeline | None = None,
-        storage: SqliteBackend | None = None,
+        *,
+        mcp_adapter: Any,
         webhook_manager: Any | None = None,
-        mcp_adapter: Any | None = None,
         feedback_tracker: Any | None = None,
     ) -> None:
         self._config = config
-        self._search_pipeline = search_pipeline
         self._mcp_adapter = mcp_adapter
-        self._storage = storage
         self._webhook_manager = webhook_manager
         self._feedback_tracker = feedback_tracker
         self._auto_tuner = None
@@ -69,8 +66,6 @@ class SurfacingEngine:
                     )
             except Exception:
                 logger.debug("Failed to load cross-session seen IDs", exc_info=True)
-        # Track surfacing IDs already boosted to prevent double-counting
-        self._boosted_surfacings: set[str] = set()
 
     async def surface(
         self,
@@ -83,14 +78,11 @@ class SurfacingEngine:
 
         Returns the original response_text unmodified if:
         - surfacing is disabled
-        - no search pipeline available
         - circuit breaker is open
         - relevance gate rejects the call
         - timeout exceeded
         """
-        if not self._config.enabled or (
-            self._search_pipeline is None and self._mcp_adapter is None
-        ):
+        if not self._config.enabled:
             return response_text
 
         if len(response_text) < self._config.min_response_chars:
@@ -136,44 +128,19 @@ class SurfacingEngine:
         rating: str,
         memory_id: str | None = None,
     ) -> str:
-        """Record feedback and boost access count for helpful memories.
+        """Record feedback for a surfaced memory.
 
-        When rating is 'helpful', increments access_count on the surfaced
-        memory chunks in the core storage. This feeds into the search
-        pipeline's access-frequency boost, making helpful memories rank
-        higher in future searches.
+        Note: the previous in-process implementation also incremented
+        access_count on the surfaced chunks via direct SqliteBackend access
+        when the rating was "helpful". After the move to remote-only LTM
+        access this boost is temporarily disabled — it will be restored once
+        the core exposes an MCP action for incrementing access counts (see
+        follow-up task: mem_increment_access action).
         """
         if self._feedback_tracker is None:
             return "Feedback tracking is not enabled."
 
-        result = self._feedback_tracker.record_feedback(surfacing_id, rating, memory_id)
-
-        # Boost access count for helpful memories (once per surfacing event)
-        if (
-            rating == "helpful"
-            and self._storage is not None
-            and surfacing_id not in self._boosted_surfacings
-        ):
-            try:
-                if memory_id:
-                    ids = [UUID(memory_id)]
-                else:
-                    id_strs = self._feedback_tracker.store.get_memory_ids_for_surfacing(
-                        surfacing_id
-                    )
-                    ids = [UUID(mid) for mid in id_strs]
-                if ids:
-                    await self._storage.increment_access(ids)
-                    self._boosted_surfacings.add(surfacing_id)
-                    logger.debug(
-                        "Boosted access count for %d memories (surfacing %s)",
-                        len(ids),
-                        surfacing_id,
-                    )
-            except Exception:
-                logger.debug("Failed to boost access for feedback", exc_info=True)
-
-        return result
+        return self._feedback_tracker.record_feedback(surfacing_id, rating, memory_id)
 
     async def _do_surface(
         self,
@@ -219,10 +186,9 @@ class SurfacingEngine:
             else self._config.default_namespace
         )
 
-        # Search LTM (in-process or MCP client)
-        searcher = self._search_pipeline or self._mcp_adapter
+        # Search LTM via remote MCP client
         ctx_win = self._config.context_window_size or None
-        results, _stats = await searcher.search(
+        results, _stats = await self._mcp_adapter.search(
             query=query,
             top_k=max_results * 2,
             namespace=namespace,
@@ -252,13 +218,12 @@ class SurfacingEngine:
             "Surfacing %d memories for %s/%s (query=%s)", len(relevant), server, tool, query[:50]
         )
 
-        # Session context (working memory)
+        # Session context (working memory): temporarily disabled.
+        # The previous in-process implementation called SqliteBackend.scratch_list()
+        # directly. After the remote-only refactor it must go through the MCP
+        # adapter (mem_scratch_get). Tracked as follow-up: see
+        # McpClientSearchAdapter.scratch_list() task.
         scratch_items = None
-        if self._config.include_session_context and self._storage:
-            try:
-                scratch_items = await self._storage.scratch_list()
-            except Exception:
-                logger.debug("Failed to fetch scratch items", exc_info=True)
 
         # Generate surfacing ID and record event
         surfacing_id = uuid.uuid4().hex[:12]

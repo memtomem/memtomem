@@ -7,7 +7,6 @@ surfacing integration, and regression gates.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from dataclasses import field as dc_field
 from pathlib import Path
@@ -22,7 +21,6 @@ from memtomem_stm.proxy.compression import (
     FieldExtractCompressor,
     HybridCompressor,
     TruncateCompressor,
-    auto_select_strategy,
 )
 from memtomem_stm.proxy.config import CleaningConfig, CompressionStrategy
 from memtomem_stm.proxy.metrics import CallMetrics, TokenTracker
@@ -34,12 +32,9 @@ from bench.harness import (
     BenchResult,
     BenchTask,
     ComparisonReport,
-    CurvePoint,
     QAPair,
     SelectiveResult,
-    StageBreakdown,
     StageMetrics,
-    StageScore,
     StrategyResult,
     SurfacingValue,
     resolve_auto_strategy,
@@ -59,10 +54,8 @@ from bench.tasks import (
     CODE_FILE,
     DEPLOY_MEMORIES,
     HTML_MIXED,
-    LARGE_DIFF_OUTPUT,
     MARKDOWN_WITH_LINKS,
     MEETING_NOTES,
-    MULTILINGUAL_KR_EN,
     OPTIMAL_STRATEGIES,
     SHORT_RESPONSE,
     TASK_CATEGORIES,
@@ -100,8 +93,6 @@ from bench.datasets_expanded import (
 from bench.llm_judge import (
     LLMJudge,
     LLMJudgeResult,
-    JudgeDimension,
-    CorrelationResult,
     compute_correlation,
 )
 from bench.stats import (
@@ -113,8 +104,6 @@ from bench.stats import (
     format_latex_table,
     format_strategy_table,
     ConfidenceInterval,
-    WilcoxonResult,
-    CategoryStats,
     BenchmarkSummary,
 )
 
@@ -205,10 +194,10 @@ def _make_surfacing_config(**overrides) -> SurfacingConfig:
     return SurfacingConfig(**defaults)
 
 
-def _make_search_pipeline(results=None):
-    pipeline = AsyncMock()
-    pipeline.search = AsyncMock(return_value=(results or [], {}))
-    return pipeline
+def _make_mcp_adapter(results=None):
+    adapter = AsyncMock()
+    adapter.search = AsyncMock(return_value=(results or [], {}))
+    return adapter
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -700,8 +689,8 @@ class TestSurfacingIntegration:
             ),
         ]
         config = _make_surfacing_config()
-        pipeline = _make_search_pipeline(memories)
-        engine = SurfacingEngine(config=config, search_pipeline=pipeline)
+        pipeline = _make_mcp_adapter(memories)
+        engine = SurfacingEngine(config=config, mcp_adapter=pipeline)
 
         h = BenchHarness(
             cleaner=cleaner, compressor=truncate, surfacing_engine=engine, judge=judge
@@ -723,8 +712,8 @@ class TestSurfacingIntegration:
             for i in range(3)
         ]
         config = _make_surfacing_config()
-        pipeline = _make_search_pipeline(memories)
-        engine = SurfacingEngine(config=config, search_pipeline=pipeline)
+        pipeline = _make_mcp_adapter(memories)
+        engine = SurfacingEngine(config=config, mcp_adapter=pipeline)
 
         h = BenchHarness(
             cleaner=cleaner, compressor=truncate, surfacing_engine=engine, judge=judge
@@ -1074,7 +1063,6 @@ class TestProxyManagerIntegration:
         return ProxyManager(config=config, tracker=tracker)
 
     def _inject_mock_upstream(self, manager, server_name, response_text):
-        from dataclasses import dataclass as _dc
         from unittest.mock import AsyncMock, MagicMock
 
         from memtomem_stm.proxy.manager import UpstreamConnection
@@ -1281,8 +1269,8 @@ class TestStageBreakdown:
             ),
         ]
         config = _make_surfacing_config()
-        pipeline = _make_search_pipeline(memories)
-        engine = SurfacingEngine(config=config, search_pipeline=pipeline)
+        pipeline = _make_mcp_adapter(memories)
+        engine = SurfacingEngine(config=config, mcp_adapter=pipeline)
         h = BenchHarness(cleaner=cleaner, compressor=truncate, surfacing_engine=engine, judge=judge)
 
         task = [t for t in get_all_tasks() if t.task_id == "code_file_large"][0]
@@ -1366,8 +1354,8 @@ class TestSurfacingValue:
             for i, m in enumerate(AUTH_MEMORIES)
         ]
         config = _make_surfacing_config()
-        pipeline = _make_search_pipeline(memories)
-        engine = SurfacingEngine(config=config, search_pipeline=pipeline)
+        pipeline = _make_mcp_adapter(memories)
+        engine = SurfacingEngine(config=config, mcp_adapter=pipeline)
 
         h = BenchHarness(cleaner=cleaner, compressor=truncate, surfacing_engine=engine, judge=judge)
         value = await h.measure_surfacing_value(task)
@@ -1388,8 +1376,8 @@ class TestSurfacingValue:
             for i, m in enumerate(DEPLOY_MEMORIES)
         ]
         config = _make_surfacing_config()
-        pipeline = _make_search_pipeline(memories)
-        engine = SurfacingEngine(config=config, search_pipeline=pipeline)
+        pipeline = _make_mcp_adapter(memories)
+        engine = SurfacingEngine(config=config, mcp_adapter=pipeline)
 
         h = BenchHarness(cleaner=cleaner, compressor=truncate, surfacing_engine=engine, judge=judge)
         value = await h.measure_surfacing_value(task)
@@ -1413,8 +1401,8 @@ class TestSurfacingValue:
                 for m in (task.surfacing_memories or [])
             ]
             config = _make_surfacing_config()
-            pipeline = _make_search_pipeline(memories)
-            engine = SurfacingEngine(config=config, search_pipeline=pipeline)
+            pipeline = _make_mcp_adapter(memories)
+            engine = SurfacingEngine(config=config, mcp_adapter=pipeline)
             h = BenchHarness(cleaner=cleaner, compressor=truncate, surfacing_engine=engine, judge=judge)
             value = await h.measure_surfacing_value(task)
             # Surfacing should never reduce quality (it only adds content)
@@ -1518,8 +1506,8 @@ class TestDistractorRobustness:
                 for m in task.surfacing_memories
             ]
             config = _make_surfacing_config()
-            pipeline = _make_search_pipeline(memories)
-            engine = SurfacingEngine(config=config, search_pipeline=pipeline)
+            pipeline = _make_mcp_adapter(memories)
+            engine = SurfacingEngine(config=config, mcp_adapter=pipeline)
             h = BenchHarness(
                 cleaner=cleaner, compressor=truncate, surfacing_engine=engine, judge=judge
             )
@@ -1538,8 +1526,8 @@ class TestDistractorRobustness:
             for i, m in enumerate(task.surfacing_memories)
         ]
         config = _make_surfacing_config()
-        pipeline = _make_search_pipeline(memories)
-        engine = SurfacingEngine(config=config, search_pipeline=pipeline)
+        pipeline = _make_mcp_adapter(memories)
+        engine = SurfacingEngine(config=config, mcp_adapter=pipeline)
         h = BenchHarness(
             cleaner=cleaner, compressor=truncate, surfacing_engine=engine, judge=judge
         )
@@ -1559,7 +1547,7 @@ class TestDistractorRobustness:
             for m in AUTH_MEMORIES
         ]
         config = _make_surfacing_config()
-        clean_engine = SurfacingEngine(config=config, search_pipeline=_make_search_pipeline(clean_mems))
+        clean_engine = SurfacingEngine(config=config, mcp_adapter=_make_mcp_adapter(clean_mems))
         h_clean = BenchHarness(
             cleaner=cleaner, compressor=truncate, surfacing_engine=clean_engine, judge=judge
         )
@@ -1571,7 +1559,7 @@ class TestDistractorRobustness:
             FakeSearchResult(chunk=FakeChunk(content=m), score=0.5)
             for m in DISTRACTOR_MEMORIES_AUTH
         ]
-        noisy_engine = SurfacingEngine(config=config, search_pipeline=_make_search_pipeline(noisy_mems))
+        noisy_engine = SurfacingEngine(config=config, mcp_adapter=_make_mcp_adapter(noisy_mems))
         h_noisy = BenchHarness(
             cleaner=cleaner, compressor=truncate, surfacing_engine=noisy_engine, judge=judge
         )
@@ -1617,7 +1605,7 @@ class TestMultihop:
             for i, m in enumerate(MULTIHOP_MEMORIES)
         ]
         config = _make_surfacing_config()
-        engine = SurfacingEngine(config=config, search_pipeline=_make_search_pipeline(memories))
+        engine = SurfacingEngine(config=config, mcp_adapter=_make_mcp_adapter(memories))
         h = BenchHarness(
             cleaner=cleaner, compressor=truncate, surfacing_engine=engine, judge=judge
         )
@@ -1635,7 +1623,7 @@ class TestMultihop:
             for i, m in enumerate(MULTIHOP_MEMORIES)
         ]
         config = _make_surfacing_config()
-        engine = SurfacingEngine(config=config, search_pipeline=_make_search_pipeline(memories))
+        engine = SurfacingEngine(config=config, mcp_adapter=_make_mcp_adapter(memories))
         h = BenchHarness(
             cleaner=cleaner, compressor=truncate, surfacing_engine=engine, judge=judge
         )
@@ -1739,7 +1727,7 @@ class TestStructuredDatasets:
                 for i, m in enumerate(task.surfacing_memories)
             ]
             config = _make_surfacing_config()
-            engine = SurfacingEngine(config=config, search_pipeline=_make_search_pipeline(memories))
+            engine = SurfacingEngine(config=config, mcp_adapter=_make_mcp_adapter(memories))
             h = BenchHarness(cleaner=cleaner, compressor=truncate, surfacing_engine=engine, judge=judge)
             value = await h.measure_surfacing_value(task)
             assert value.qa_delta > 0, f"{task.task_id}: surfacing added no QA answers"
@@ -2196,7 +2184,7 @@ class TestExpandedDatasets:
             ]
             config = _make_surfacing_config()
             engine = SurfacingEngine(
-                config=config, search_pipeline=_make_search_pipeline(memories)
+                config=config, mcp_adapter=_make_mcp_adapter(memories)
             )
             h = BenchHarness(
                 cleaner=cleaner, compressor=truncate,

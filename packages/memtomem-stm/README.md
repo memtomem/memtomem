@@ -457,19 +457,26 @@ Fine-tune surfacing behavior per tool:
 
 Template variables: `{tool_name}`, `{server}`, `{arg.ARGUMENT_NAME}`
 
-### LTM Connection Modes
+### LTM Connection
 
-| Mode | Config | Description |
-|------|--------|-------------|
-| **in_process** (default) | `ltm_mode: "in_process"` | Imports memtomem directly (faster, requires `memtomem` installed) |
-| **mcp_client** | `ltm_mode: "mcp_client"` | Connects to remote memtomem server via MCP (isolated, works without local memtomem) |
-
-For MCP client mode:
+STM connects to the LTM exclusively over the MCP protocol. The surfacing
+engine spawns (or attaches to) a memtomem MCP server using these settings:
 
 ```bash
-export MEMTOMEM_STM_SURFACING__LTM_MODE=mcp_client
+# Default — spawns `memtomem-server` as a child process
 export MEMTOMEM_STM_SURFACING__LTM_MCP_COMMAND=memtomem-server
+
+# Pass extra arguments if needed (e.g. point at a custom config)
+export MEMTOMEM_STM_SURFACING__LTM_MCP_ARGS='["--config","/etc/memtomem.json"]'
 ```
+
+This makes memtomem just another MCP upstream as far as STM is concerned —
+the same compression / cache / surfacing pipeline applies, and a memtomem
+crash never takes down STM's other upstream connections.
+
+> **Note**: prior versions supported an in-process mode that imported
+> memtomem directly. That path was removed so STM has a single LTM
+> retrieval path and so core internals can evolve without breaking STM.
 
 ### Feedback & Auto-Tuning
 

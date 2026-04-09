@@ -170,7 +170,7 @@ def format_stage_breakdown(breakdown: StageBreakdown) -> str:
         lines.append(f"  {s.stage:<12} {s.chars:>8} {s.quality_score:>7.1f} {qa_str:>10}")
 
     # Deltas
-    lines.append(f"  ---")
+    lines.append("  ---")
     lines.append(f"  Clean info loss:    {breakdown.clean_info_loss:+.1f}")
     lines.append(f"  Compress info loss: {breakdown.compress_info_loss:+.1f}")
     lines.append(f"  Surfacing value:    {breakdown.surfacing_value:+.1f}")
@@ -198,7 +198,7 @@ def format_surfacing_value(values: list[SurfacingValue]) -> str:
 
     if values:
         n = len(values)
-        lines.append(f"  ---")
+        lines.append("  ---")
         lines.append(f"  Avg quality delta: {total_delta / n:+.1f}")
         lines.append(f"  Total QA gain:     +{total_qa_delta} answers")
 
