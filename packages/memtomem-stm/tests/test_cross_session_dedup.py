@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
-import pytest
 
 from memtomem_stm.surfacing.config import SurfacingConfig
 from memtomem_stm.surfacing.engine import SurfacingEngine
@@ -64,10 +63,10 @@ def _make_config(**overrides) -> SurfacingConfig:
     return SurfacingConfig(**defaults)
 
 
-def _make_search_pipeline(results=None):
-    pipeline = AsyncMock()
-    pipeline.search = AsyncMock(return_value=(results or [], {}))
-    return pipeline
+def _make_mcp_adapter(results=None):
+    adapter = AsyncMock()
+    adapter.search = AsyncMock(return_value=(results or [], {}))
+    return adapter
 
 
 LONG_RESPONSE = "x" * 200
@@ -208,7 +207,7 @@ class TestCrossSessionDedup:
         ]
         engine = SurfacingEngine(
             config=_make_config(),
-            search_pipeline=_make_search_pipeline(results),
+            mcp_adapter=_make_mcp_adapter(results),
             feedback_tracker=tracker,
         )
 
@@ -234,7 +233,7 @@ class TestCrossSessionDedup:
         results = [FakeSearchResult(chunk=chunk, score=0.5)]
         engine = SurfacingEngine(
             config=_make_config(),
-            search_pipeline=_make_search_pipeline(results),
+            mcp_adapter=_make_mcp_adapter(results),
             feedback_tracker=tracker,
         )
 
@@ -266,7 +265,7 @@ class TestCrossSessionDedup:
 
         engine = SurfacingEngine(
             config=_make_config(dedup_ttl_seconds=500),
-            search_pipeline=_make_search_pipeline([]),
+            mcp_adapter=_make_mcp_adapter([]),
             feedback_tracker=tracker,
         )
 
@@ -288,7 +287,7 @@ class TestCrossSessionDedup:
 
         engine = SurfacingEngine(
             config=_make_config(dedup_ttl_seconds=0),
-            search_pipeline=_make_search_pipeline([]),
+            mcp_adapter=_make_mcp_adapter([]),
             feedback_tracker=tracker,
         )
 
@@ -302,7 +301,7 @@ class TestCrossSessionDedup:
         results = [FakeSearchResult(chunk=chunk, score=0.5)]
         engine = SurfacingEngine(
             config=_make_config(),
-            search_pipeline=_make_search_pipeline(results),
+            mcp_adapter=_make_mcp_adapter(results),
         )
 
         output = await engine.surface("gh", "read_file", VALID_ARGS, LONG_RESPONSE)

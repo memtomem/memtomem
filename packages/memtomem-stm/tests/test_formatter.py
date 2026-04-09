@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
-import pytest
 
 from memtomem_stm.surfacing.config import SurfacingConfig
 from memtomem_stm.surfacing.formatter import SurfacingFormatter

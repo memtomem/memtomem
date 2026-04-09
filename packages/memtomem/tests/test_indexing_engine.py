@@ -469,8 +469,14 @@ class TestEstimateTokens:
 # ===========================================================================
 
 
+@pytest.mark.ollama
 class TestIndexEntry:
-    """Tests for index_entry — stores a single chunk without chunking."""
+    """Tests for index_entry — stores a single chunk without chunking.
+
+    Marked as `ollama` because index_entry triggers an embedding call against
+    a real Ollama instance; CI's `not ollama` filter excludes it when Ollama
+    is unavailable.
+    """
 
     async def test_basic_entry(self, components, memory_dir):
         """index_entry creates a single chunk with embedding."""

@@ -6,7 +6,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-import pytest
 
 from memtomem_stm.proxy.config import (
     ProxyConfig,

@@ -11,11 +11,7 @@ These tests verify that STM delivers actual value:
 
 from __future__ import annotations
 
-import time
-from pathlib import Path
-from unittest.mock import AsyncMock
 
-import pytest
 
 from memtomem_stm.proxy.cleaning import DefaultContentCleaner
 from memtomem_stm.proxy.compression import (
@@ -488,155 +484,12 @@ class TestAutoTunerColdStart:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class TestFeedbackBoost:
-    """Verify helpful feedback boosts memory access count for future search ranking."""
-
-    async def test_helpful_feedback_increments_access(self):
-        """'helpful' rating increments access_count on surfaced memories."""
-        from dataclasses import dataclass
-        from pathlib import Path
-        from uuid import uuid4
-
-        from memtomem_stm.surfacing.config import SurfacingConfig
-        from memtomem_stm.surfacing.engine import SurfacingEngine
-
-        # Mock storage with increment_access tracking
-        mock_storage = AsyncMock()
-        mock_storage.increment_access = AsyncMock()
-        mock_storage.scratch_list = AsyncMock(return_value=[])
-
-        # Mock search pipeline
-        @dataclass
-        class FakeMeta:
-            source_file: Path = Path("/test.md")
-            namespace: str = "default"
-
-        @dataclass
-        class FakeChunk:
-            id: str = ""
-            content: str = "test memory"
-            metadata: FakeMeta = None
-            def __post_init__(self):
-                if not self.id: self.id = str(uuid4())
-                if not self.metadata: self.metadata = FakeMeta()
-
-        @dataclass
-        class FakeResult:
-            chunk: FakeChunk = None
-            score: float = 0.5
-            rank: int = 1
-            def __post_init__(self):
-                if not self.chunk: self.chunk = FakeChunk()
-
-        chunk = FakeChunk()
-        results = [FakeResult(chunk=chunk)]
-        pipeline = AsyncMock()
-        pipeline.search = AsyncMock(return_value=(results, {}))
-
-        config = SurfacingConfig(
-            enabled=True, min_response_chars=10, cooldown_seconds=0,
-            max_surfacings_per_minute=1000, auto_tune_enabled=False,
-            include_session_context=False, fire_webhook=False,
-            feedback_enabled=True,
-        )
-
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            tracker = FeedbackTracker(config, Path(tmp) / "fb.db")
-            engine = SurfacingEngine(
-                config, search_pipeline=pipeline,
-                storage=mock_storage, feedback_tracker=tracker,
-            )
-
-            # Trigger surfacing to get a surfacing_id
-            response = "x" * 200
-            output = await engine.surface(
-                "gh", "read_file",
-                {"path": "/src/app.py", "_context_query": "Flask authentication"},
-                response,
-            )
-            assert "Relevant Memories" in output
-
-            # Extract surfacing_id from output
-            import re
-            match = re.search(r"Surfacing ID: (\w+)", output)
-            assert match, "Surfacing ID should be in output"
-            sid = match.group(1)
-
-            # Give helpful feedback
-            result = await engine.handle_feedback(sid, "helpful")
-            assert "helpful" in result.lower() or "recorded" in result.lower()
-
-            # Verify access_count was incremented
-            mock_storage.increment_access.assert_called_once()
-            called_ids = mock_storage.increment_access.call_args[0][0]
-            assert len(called_ids) >= 1
-
-    async def test_double_helpful_only_boosts_once(self):
-        """Same surfacing rated helpful twice → access_count incremented only once."""
-        from pathlib import Path
-        from unittest.mock import AsyncMock
-
-        from memtomem_stm.surfacing.config import SurfacingConfig
-        from memtomem_stm.surfacing.engine import SurfacingEngine
-
-        mock_storage = AsyncMock()
-        mock_storage.increment_access = AsyncMock()
-
-        config = SurfacingConfig(
-            enabled=True, auto_tune_enabled=False, feedback_enabled=True,
-        )
-
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            tracker = FeedbackTracker(config, Path(tmp) / "fb.db")
-            engine = SurfacingEngine(
-                config, storage=mock_storage, feedback_tracker=tracker,
-            )
-
-            # Register event via tracker (goes to same store engine uses)
-            from uuid import uuid4
-            mid = str(uuid4())
-            tracker.record_surfacing("dup-id", "gh", "read_file", "query", [mid], [0.5])
-
-            r1 = await engine.handle_feedback("dup-id", "helpful")
-            r2 = await engine.handle_feedback("dup-id", "helpful")
-
-            assert "recorded" in r1.lower() or "helpful" in r1.lower()
-            # Second call may record feedback but should NOT boost again
-            assert mock_storage.increment_access.call_count == 1
-
-    async def test_not_relevant_does_not_boost(self):
-        """'not_relevant' rating does NOT increment access_count."""
-        from pathlib import Path
-        from unittest.mock import AsyncMock
-
-        from memtomem_stm.surfacing.config import SurfacingConfig
-        from memtomem_stm.surfacing.engine import SurfacingEngine
-
-        mock_storage = AsyncMock()
-        mock_storage.increment_access = AsyncMock()
-
-        config = SurfacingConfig(
-            enabled=True, auto_tune_enabled=False, feedback_enabled=True,
-        )
-
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            tracker = FeedbackTracker(config, Path(tmp) / "fb.db")
-            engine = SurfacingEngine(
-                config, storage=mock_storage, feedback_tracker=tracker,
-            )
-
-            # Record a fake surfacing event
-            from uuid import uuid4
-            tracker.record_surfacing("test-id", "gh", "read_file", "query", [str(uuid4())], [0.5])
-
-            # Give negative feedback
-            await engine.handle_feedback("test-id", "not_relevant")
-
-            # Access should NOT be incremented
-            mock_storage.increment_access.assert_not_called()
+# NOTE: TestFeedbackBoost was removed when STM moved to remote-only LTM access.
+# The previous in-process implementation called SqliteBackend.increment_access
+# directly when a surfacing was rated "helpful". Restoring this behaviour over
+# MCP requires a new core action (mem_increment_access) — tracked as follow-up.
+# Once that lands, this class should be reintroduced using McpClientSearchAdapter
+# instead of a SqliteBackend mock.
 
 
 # ═══════════════════════════════════════════════════════════════════════════

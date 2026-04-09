@@ -82,28 +82,25 @@ class TestParseFactsJson:
 
 
 class TestExtractHeuristic:
-    def test_extracts_entities(self):
-        text = "Decision: We will use PostgreSQL for the database. Author: John Smith"
-        facts = _extract_heuristic(text, max_facts=10)
-        assert len(facts) > 0
-        categories = {f.category for f in facts}
-        assert "decision" in categories or "person" in categories
+    """Heuristic fallback is currently stubbed (returns empty list).
 
-    def test_respects_max_facts(self):
-        text = (
-            "TODO: fix auth\nTODO: add logging\nTODO: update docs\n"
-            "TODO: refactor\nTODO: test\nTODO: deploy"
-        )
-        facts = _extract_heuristic(text, max_facts=3)
-        assert len(facts) <= 3
+    The previous implementation imported memtomem.tools.entity_extraction,
+    which created an unwanted core dependency. A native STM heuristic is
+    tracked as follow-up work; until then this stub keeps the LLM extractor
+    as the sole extraction path.
+    """
 
-    def test_empty_text(self):
+    def test_stub_returns_empty(self):
+        text = "Decision: PostgreSQL chosen. Author: John Smith. TODO: ship by Friday."
+        assert _extract_heuristic(text, max_facts=10) == []
+
+    def test_stub_handles_empty_text(self):
         assert _extract_heuristic("", max_facts=10) == []
 
-    def test_no_entities(self):
-        facts = _extract_heuristic("just a simple sentence", max_facts=10)
-        # May or may not find entities, but should not crash
-        assert isinstance(facts, list)
+    def test_stub_returns_list_type(self):
+        result = _extract_heuristic("any text", max_facts=3)
+        assert isinstance(result, list)
+        assert len(result) <= 3
 
 
 # ---------------------------------------------------------------------------

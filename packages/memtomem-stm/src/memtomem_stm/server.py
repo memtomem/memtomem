@@ -59,69 +59,38 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[STMContext]:
 
     tracker = TokenTracker(metrics_store=metrics_store)
 
-    # Initialize surfacing engine (in-process mode with optional memtomem LTM)
+    # Initialize surfacing engine — LTM access is always remote-only via the
+    # MCP client adapter. The adapter spawns (or connects to) a memtomem
+    # MCP server using config.surfacing.ltm_mcp_command / ltm_mcp_args.
     surfacing_engine: SurfacingEngine | None = None
+    mcp_adapter = None
+    feedback_tracker: FeedbackTracker | None = None
     if config.surfacing.enabled:
-        search_pipeline = None
-        storage = None
-        webhook_manager = None
+        try:
+            from memtomem_stm.surfacing.mcp_client import McpClientSearchAdapter
 
-        mcp_adapter = None
+            mcp_adapter = McpClientSearchAdapter(config.surfacing)
+            await mcp_adapter.start()
+            logger.info(
+                "Surfacing engine connected via MCP client to %s",
+                config.surfacing.ltm_mcp_command,
+            )
+        except Exception:
+            logger.warning(
+                "MCP client surfacing initialization failed — surfacing disabled",
+                exc_info=True,
+            )
+            mcp_adapter = None
 
-        if config.surfacing.ltm_mode == "mcp_client":
-            # MCP Client mode: connect to a remote memtomem server
-            try:
-                from memtomem_stm.surfacing.mcp_client import McpClientSearchAdapter
-
-                mcp_adapter = McpClientSearchAdapter(config.surfacing)
-                await mcp_adapter.start()
-                logger.info(
-                    "Surfacing engine connected via MCP client to %s",
-                    config.surfacing.ltm_mcp_command,
-                )
-            except Exception:
-                logger.warning("MCP client surfacing initialization failed", exc_info=True)
-        else:
-            # In-process mode: import memtomem directly
-            try:
-                from memtomem.server.component_factory import create_components
-                from memtomem.config import Mem2MemConfig
-
-                ltm_config = Mem2MemConfig()
-                comp = await create_components(ltm_config)
-                search_pipeline = comp.search_pipeline
-                storage = comp.storage
-                logger.info("Surfacing engine connected to in-process LTM")
-            except ImportError:
-                logger.info("memtomem not installed — trying MCP client mode")
-                # Fall back to MCP client
-                try:
-                    from memtomem_stm.surfacing.mcp_client import McpClientSearchAdapter
-
-                    mcp_adapter = McpClientSearchAdapter(config.surfacing)
-                    await mcp_adapter.start()
-                    logger.info("Surfacing engine connected via MCP client fallback")
-                except Exception:
-                    logger.warning("MCP client fallback failed — surfacing disabled", exc_info=True)
-            except Exception:
-                logger.warning("Failed to initialize LTM for surfacing", exc_info=True)
-
-        # Initialize feedback tracker before engine so it can be injected
-        feedback_tracker: FeedbackTracker | None = None
         if config.surfacing.feedback_enabled:
             feedback_tracker = FeedbackTracker(config.surfacing)
 
-        if search_pipeline is not None or mcp_adapter is not None:
+        if mcp_adapter is not None:
             surfacing_engine = SurfacingEngine(
                 config.surfacing,
-                search_pipeline=search_pipeline,
-                storage=storage,
-                webhook_manager=webhook_manager,
                 mcp_adapter=mcp_adapter,
                 feedback_tracker=feedback_tracker,
             )
-    else:
-        feedback_tracker = None
 
     # Initialize proxy cache
     from memtomem_stm.proxy.cache import ProxyCache

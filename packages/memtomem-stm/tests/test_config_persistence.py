@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import json
 import time
-from pathlib import Path
 
-import pytest
 
-from memtomem_stm.proxy.config import ProxyConfig, ProxyConfigLoader, CompressionStrategy
+from memtomem_stm.proxy.config import ProxyConfig, ProxyConfigLoader
 from memtomem_stm.proxy.metrics import CallMetrics, TokenTracker
 from memtomem_stm.proxy.metrics_store import MetricsStore
 from memtomem_stm.proxy.privacy import contains_sensitive_content

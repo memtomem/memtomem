@@ -374,7 +374,7 @@ class TestMcpClientSearchAdapter:
     def test_init_stores_config(self) -> None:
         from memtomem_stm.surfacing.config import SurfacingConfig
 
-        cfg = SurfacingConfig(ltm_mode="mcp_client", ltm_mcp_command="test-server")
+        cfg = SurfacingConfig(ltm_mcp_command="test-server")
         adapter = McpClientSearchAdapter(cfg)
         assert adapter._config is cfg
         assert adapter._session is None

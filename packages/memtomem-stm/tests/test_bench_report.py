@@ -12,7 +12,7 @@ from memtomem_stm.proxy.cleaning import DefaultContentCleaner
 from memtomem_stm.proxy.compression import TruncateCompressor
 
 from bench.datasets_expanded import full_benchmark_suite, full_category_map
-from bench.harness import BenchHarness, ComparisonReport
+from bench.harness import BenchHarness
 from bench.judge import RuleBasedJudge
 from bench.stats import compute_summary
 

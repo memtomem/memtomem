@@ -61,33 +61,14 @@ def _parse_facts_json(raw: str, *, max_facts: int) -> list[ExtractedFact]:
 
 
 def _extract_heuristic(text: str, *, max_facts: int) -> list[ExtractedFact]:
-    """Heuristic fallback using regex entity extraction from core."""
-    try:
-        from memtomem.tools.entity_extraction import extract_entities
+    """Heuristic fallback for fact extraction.
 
-        entities = extract_entities(text)
-    except ImportError:
-        logger.debug("memtomem core not available for heuristic extraction")
-        return []
-
-    facts: list[ExtractedFact] = []
-    seen: set[str] = set()
-    for e in entities:
-        key = f"{e.entity_type}:{e.entity_value}"
-        if key in seen:
-            continue
-        seen.add(key)
-        facts.append(
-            ExtractedFact(
-                content=f"{e.entity_type}: {e.entity_value}",
-                category=e.entity_type,
-                confidence=e.confidence,
-                tags=[e.entity_type],
-            )
-        )
-        if len(facts) >= max_facts:
-            break
-    return facts
+    STM no longer imports memtomem core directly; the LLM extractor is the
+    primary path. This stub returns an empty list, so when LLM extraction
+    fails (circuit open, transport error) extraction silently yields no facts.
+    A native STM heuristic can be added later if demand emerges.
+    """
+    return []
 
 
 class FactExtractor:
