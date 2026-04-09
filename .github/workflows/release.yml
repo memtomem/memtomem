@@ -1,0 +1,59 @@
+name: Publish
+
+# Publishes the memtomem distribution to PyPI (or TestPyPI for dry-runs)
+# via PyPI Trusted Publishers (OIDC). No API tokens are stored.
+#
+# Tag conventions:
+#   v0.1.0          → PyPI                (production)
+#   test-v0.1.0a1   → TestPyPI            (dry run)
+#
+# Both paths share the same `pypi` GitHub environment, which is gated to
+# tag pushes matching `v*` only (see Settings → Environments → pypi).
+
+on:
+  push:
+    tags:
+      - "v[0-9]*"        # production
+      - "test-v[0-9]*"   # TestPyPI dry-run
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+      - name: Build distribution
+        working-directory: packages/memtomem
+        run: uv build
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: packages/memtomem/dist/
+
+  publish:
+    name: Publish to ${{ startsWith(github.ref_name, 'test-') && 'TestPyPI' || 'PyPI' }}
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: ${{ startsWith(github.ref_name, 'test-') && 'https://test.pypi.org/p/memtomem' || 'https://pypi.org/p/memtomem' }}
+    permissions:
+      id-token: write   # required for OIDC token
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to PyPI
+        if: ${{ !startsWith(github.ref_name, 'test-') }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Publish to TestPyPI
+        if: ${{ startsWith(github.ref_name, 'test-') }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
