@@ -188,9 +188,7 @@ async def check_full_health_report(app: AppContext) -> HealthSnapshot:
     )
 
 
-async def check_trend_comparison(
-    app: AppContext, store: HealthStore
-) -> HealthSnapshot:
+async def check_trend_comparison(app: AppContext, store: HealthStore) -> HealthSnapshot:
     """Compare current dead_memory_pct to 24h-ago baseline."""
     now = time.time()
     trend = store.get_trend("dead_memory_pct", hours=24.0)
@@ -237,7 +235,12 @@ async def check_db_fragmentation(app: AppContext) -> HealthSnapshot:
     return HealthSnapshot(
         tier="deep",
         check_name="db_fragmentation",
-        value={"page_count": page_count, "freelist": freelist, "frag_pct": frag_pct, "db_mb": db_mb},
+        value={
+            "page_count": page_count,
+            "freelist": freelist,
+            "frag_pct": frag_pct,
+            "db_mb": db_mb,
+        },
         status="warning" if frag_pct > 20 else "ok",
         created_at=now,
     )

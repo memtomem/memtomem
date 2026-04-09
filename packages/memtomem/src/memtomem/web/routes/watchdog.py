@@ -39,6 +39,8 @@ async def watchdog_run_now(request: Request) -> JSONResponse:
     """Force an immediate health check run."""
     wd = _get_watchdog(request)
     if wd is None:
-        return JSONResponse({"enabled": False, "message": "watchdog not configured"}, status_code=400)
+        return JSONResponse(
+            {"enabled": False, "message": "watchdog not configured"}, status_code=400
+        )
     results = await wd.run_now()
     return JSONResponse(results)

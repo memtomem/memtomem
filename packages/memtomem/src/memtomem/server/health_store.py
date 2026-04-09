@@ -77,9 +77,7 @@ class HealthStore:
             self._db.commit()
             self._trim()
 
-    def get_latest(
-        self, check_name: str | None = None, limit: int = 1
-    ) -> list[HealthSnapshot]:
+    def get_latest(self, check_name: str | None = None, limit: int = 1) -> list[HealthSnapshot]:
         if self._db is None:
             return []
         if check_name:

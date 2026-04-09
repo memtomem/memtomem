@@ -139,7 +139,11 @@ async def _watchdog_history(check_name: str, hours: float) -> None:
 # ── Formatting helpers ─────────────────────────────────────────────
 
 
-_MARKERS = {"ok": click.style("OK", fg="green"), "warning": click.style("WARN", fg="yellow"), "critical": click.style("CRIT", fg="red")}
+_MARKERS = {
+    "ok": click.style("OK", fg="green"),
+    "warning": click.style("WARN", fg="yellow"),
+    "critical": click.style("CRIT", fg="red"),
+}
 
 
 def _status_marker(status: str) -> str:

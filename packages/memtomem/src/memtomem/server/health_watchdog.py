@@ -84,9 +84,7 @@ class HealthWatchdog:
                 await self._run_tier("deep", DEEP_CHECKS)
                 # Trend comparison needs store
                 if self._store:
-                    await self._run_check(
-                        lambda app: check_trend_comparison(app, self._store)
-                    )
+                    await self._run_check(lambda app: check_trend_comparison(app, self._store))
                 last_deep = now
 
             await asyncio.sleep(min(self._config.heartbeat_interval_seconds, 10.0))
@@ -109,13 +107,13 @@ class HealthWatchdog:
                 if self._config.auto_maintenance and self._maintenance:
                     await self._auto_maintain(snapshot)
             elif snapshot.status == "warning":
-                logger.info(
-                    "Health check WARNING: %s — %s", snapshot.check_name, snapshot.value
-                )
+                logger.info("Health check WARNING: %s — %s", snapshot.check_name, snapshot.value)
         except asyncio.TimeoutError:
             logger.warning("Health check timed out: %s", getattr(check_fn, "__name__", "?"))
         except Exception:
-            logger.error("Health check failed: %s", getattr(check_fn, "__name__", "?"), exc_info=True)
+            logger.error(
+                "Health check failed: %s", getattr(check_fn, "__name__", "?"), exc_info=True
+            )
 
     async def _auto_maintain(self, snapshot: HealthSnapshot) -> None:
         if not self._maintenance:

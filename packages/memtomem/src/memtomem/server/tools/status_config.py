@@ -77,7 +77,9 @@ async def mem_status(
         source_files = await app.storage.get_all_source_files()
         orphaned = sum(1 for sf in source_files if not sf.exists())
         if orphaned:
-            lines[-1] = f"Source files:  {stats['total_sources']} ({orphaned} orphaned — run mem_cleanup_orphans)"
+            lines[-1] = (
+                f"Source files:  {stats['total_sources']} ({orphaned} orphaned — run mem_cleanup_orphans)"
+            )
     except Exception:
         pass
 

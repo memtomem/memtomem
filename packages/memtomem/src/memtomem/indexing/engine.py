@@ -502,11 +502,7 @@ def _merge_short_chunks(
         cur_tokens = _estimate_tokens(c.content)
 
         # Accumulate short chunks by merging forward
-        while (
-            cur_tokens < min_tokens
-            and i + 1 < len(chunks)
-            and _can_merge(c, chunks[i + 1])
-        ):
+        while cur_tokens < min_tokens and i + 1 < len(chunks) and _can_merge(c, chunks[i + 1]):
             nxt = chunks[i + 1]
             nxt_tokens = _estimate_tokens(nxt.content)
             merged_tokens = cur_tokens + nxt_tokens + 1  # +1 for separator
