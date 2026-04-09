@@ -1,9 +1,7 @@
 """Tests for storage backend operations."""
 
 import pytest
-from uuid import UUID, uuid4
-from pathlib import Path
-from memtomem.models import Chunk, ChunkMetadata
+from uuid import uuid4
 
 from helpers import make_chunk as _make_chunk
 

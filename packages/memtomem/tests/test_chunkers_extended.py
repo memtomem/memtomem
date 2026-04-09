@@ -13,7 +13,7 @@ from memtomem.models import Chunk, ChunkMetadata, ChunkType
 from memtomem.chunking.structured import StructuredChunker
 from memtomem.chunking.registry import ChunkerRegistry
 from memtomem.indexing.hasher import content_hash, file_hash
-from memtomem.indexing.differ import compute_diff, DiffResult
+from memtomem.indexing.differ import compute_diff
 
 from helpers import make_chunk
 

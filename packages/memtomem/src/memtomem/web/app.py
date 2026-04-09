@@ -27,7 +27,6 @@ from memtomem.web.routes import (
     sources,
     system,
     tags,
-    proxy,
     timeline,
     watchdog,
 )
@@ -62,7 +61,6 @@ def create_app(lifespan=None) -> FastAPI:
     app.include_router(scratch.router, prefix="/api")
     app.include_router(procedures.router, prefix="/api")
     app.include_router(evaluation.router, prefix="/api")
-    app.include_router(proxy.router, prefix="/api")
     app.include_router(watchdog.router, prefix="/api")
 
     @app.exception_handler(ValueError)

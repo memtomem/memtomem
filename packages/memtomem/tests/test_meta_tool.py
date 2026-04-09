@@ -1,6 +1,5 @@
 """Tests for mem_do meta-tool and tool_registry."""
 
-import pytest
 from memtomem.server.tool_registry import ACTIONS
 from memtomem.server.tools.meta import _help
 

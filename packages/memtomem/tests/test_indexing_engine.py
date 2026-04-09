@@ -6,11 +6,10 @@ import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-from helpers import make_chunk
 
-from memtomem.config import IndexingConfig, NamespaceConfig
+from memtomem.config import NamespaceConfig
 from memtomem.indexing.engine import IndexEngine, _merge_short_chunks, _add_overlap, _estimate_tokens
-from memtomem.models import Chunk, ChunkMetadata, ChunkType
+from memtomem.models import Chunk, ChunkMetadata
 
 
 # ---------------------------------------------------------------------------

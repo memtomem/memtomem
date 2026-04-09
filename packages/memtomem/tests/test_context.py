@@ -1,7 +1,6 @@
 """Tests for agent context management module."""
 
 import pytest
-from pathlib import Path
 
 from memtomem.context.parser import parse_context, sections_to_markdown
 from memtomem.context.detector import detect_agent_files

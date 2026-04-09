@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-from uuid import uuid4
 
 from memtomem.models import SearchResult
 from memtomem.search.fusion import reciprocal_rank_fusion

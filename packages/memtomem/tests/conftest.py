@@ -10,10 +10,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import httpx
 import pytest
-from uuid import uuid4
 
 from memtomem.config import Mem2MemConfig
-from memtomem.models import Chunk, ChunkMetadata
 from memtomem.server.component_factory import Components, create_components, close_components
 
 

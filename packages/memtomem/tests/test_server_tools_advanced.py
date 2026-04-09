@@ -7,7 +7,6 @@ history, dedup, export/import, cleanup orphans, and auto-tag.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -16,7 +15,7 @@ import pytest
 from helpers import make_chunk
 from memtomem.models import Chunk, ChunkMetadata
 from memtomem.tools.auto_tag import AutoTagStats, auto_tag_storage, extract_tags_keyword
-from memtomem.tools.export_import import ExportBundle, export_chunks, import_chunks
+from memtomem.tools.export_import import ExportBundle, export_chunks
 
 
 # ---------------------------------------------------------------------------

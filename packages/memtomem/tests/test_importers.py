@@ -1,7 +1,6 @@
 """Tests for Notion and Obsidian importers."""
 
 import pytest
-from pathlib import Path
 from memtomem.indexing.importers import (
     _clean_notion_filename,
     _clean_notion_markdown,

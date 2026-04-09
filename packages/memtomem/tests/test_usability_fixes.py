@@ -7,9 +7,7 @@ display path normalization, session title, cleanup_orphans.
 
 import json
 from pathlib import Path
-from uuid import uuid4
 
-import pytest
 
 from memtomem.chunking.markdown import MarkdownChunker
 from memtomem.server.tools.meta import _help, _ALIASES
