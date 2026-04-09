@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from memtomem.config import ContextWindowConfig, SearchConfig
-from memtomem.models import Chunk, ChunkMetadata, ChunkType, ContextInfo, SearchResult
+from memtomem.models import Chunk, ChunkMetadata, ContextInfo, SearchResult
 from memtomem.search.pipeline import SearchPipeline
 from memtomem.server.formatters import _format_single_result
 
@@ -352,49 +352,10 @@ class TestCoreFormatter:
         assert "just content" in output
 
 
-class TestSTMFormatter:
-    def test_with_context(self):
-        """STM formatter expands preview when context present."""
-        from memtomem_stm.surfacing.config import SurfacingConfig
-        from memtomem_stm.surfacing.formatter import SurfacingFormatter
-
-        chunk = _make_chunk("matched chunk content here")
-        before = _make_chunk("preceding paragraph with important details")
-        after = _make_chunk("following paragraph with conclusions")
-        ctx = ContextInfo(
-            window_before=(before,),
-            window_after=(after,),
-            chunk_position=2,
-            total_chunks_in_file=5,
-        )
-        r = SearchResult(chunk=chunk, score=0.7, rank=1, source="fused", context=ctx)
-
-        formatter = SurfacingFormatter(SurfacingConfig())
-        output = formatter.inject("Original response", [r], "test query")
-
-        assert "preceding paragraph" in output
-        assert "matched chunk" in output
-        assert "following paragraph" in output
-
-    def test_truncation_with_context(self):
-        """max_injection_chars caps expanded output."""
-        from memtomem_stm.surfacing.config import SurfacingConfig
-        from memtomem_stm.surfacing.formatter import SurfacingFormatter
-
-        chunk = _make_chunk("A" * 500)
-        before = _make_chunk("B" * 500)
-        after = _make_chunk("C" * 500)
-        ctx = ContextInfo(window_before=(before,), window_after=(after,))
-        r = SearchResult(chunk=chunk, score=0.7, rank=1, source="fused", context=ctx)
-
-        config = SurfacingConfig(max_injection_chars=200)
-        formatter = SurfacingFormatter(config)
-        output = formatter.inject("Response", [r], "q")
-
-        # Memory block portion should be truncated
-        memory_part = output.split("---")[-1] if "---" in output else output
-        # Total output may exceed 200 due to "Response" + separator
-        assert "truncated" in output
+# NOTE: TestSTMFormatter (which exercised SurfacingFormatter from
+# memtomem_stm) was removed when STM code was decoupled from core. Those
+# context-window assertions live with the STM package tests now and should
+# not be re-added here — core tests must not import memtomem_stm.
 
 
 # ── Integration: pipeline search() ──────────────────────────────────────

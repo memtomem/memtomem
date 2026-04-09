@@ -1,10 +1,7 @@
 """Tests for quality audit fixes: read pool, batch ops, error handler, linking, sessions."""
 
 import pytest
-from pathlib import Path
-from uuid import uuid4
 
-from memtomem.models import Chunk, ChunkMetadata
 
 from helpers import make_chunk as _make_chunk
 

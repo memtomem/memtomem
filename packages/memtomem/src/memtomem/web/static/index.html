@@ -41,7 +41,6 @@
     <button class="tab-btn" data-tab="index">Index</button>
     <button class="tab-btn" data-tab="tags">Tags</button>
     <button class="tab-btn" data-tab="timeline">Timeline</button>
-    <button class="tab-btn" data-tab="stm" id="stm-tab-btn" hidden>STM</button>
     <button class="tab-btn" data-tab="settings">More</button>
   </nav>
 
@@ -524,77 +523,6 @@
         </div>
       </div>
     </div>
-  </div>
-
-  <!-- ===== STM PROXY TAB ===== -->
-  <div id="tab-stm" class="tab-panel" hidden>
-  <div class="stm-scroll-container">
-    <!-- Status bar -->
-    <div id="stm-status-bar" class="stm-status-bar"></div>
-
-    <!-- Server cards -->
-    <div class="stm-section">
-      <h2>Upstream Servers</h2>
-      <div id="stm-servers" class="stm-servers-grid"></div>
-    </div>
-
-    <!-- Metrics summary -->
-    <div class="stm-section">
-      <div class="stm-section-header">
-        <h2>Compression Metrics</h2>
-        <div class="stm-period-filter">
-          <button class="stm-period-btn active" data-period="">All</button>
-          <button class="stm-period-btn" data-period="3600">1h</button>
-          <button class="stm-period-btn" data-period="86400">24h</button>
-          <button class="stm-period-btn" data-period="604800">7d</button>
-          <button class="stm-period-btn" data-period="2592000">30d</button>
-          <button id="stm-refresh-btn" class="btn-outline btn-sm">Refresh</button>
-        </div>
-      </div>
-      <div id="stm-metrics-summary" class="stm-metric-cards"></div>
-
-      <div class="stm-breakdown-grid">
-        <div>
-          <h3>By Server</h3>
-          <table id="stm-by-server" class="stm-table"><thead><tr><th>Server</th><th>Calls</th><th>Original</th><th>Compressed</th><th>Savings</th></tr></thead><tbody></tbody></table>
-        </div>
-        <div>
-          <h3>By Tool</h3>
-          <table id="stm-by-tool" class="stm-table"><thead><tr><th>Tool</th><th>Calls</th><th>Original</th><th>Compressed</th><th>Savings</th></tr></thead><tbody></tbody></table>
-        </div>
-      </div>
-    </div>
-
-    <!-- Cache -->
-    <div class="stm-section stm-row">
-      <div class="stm-subsection">
-        <h3>Cache</h3>
-        <div id="stm-cache-info"></div>
-        <button id="stm-cache-clear-btn" class="btn-outline btn-sm">Clear Cache</button>
-      </div>
-
-      <!-- Surfacing -->
-      <div class="stm-subsection">
-        <h3>Surfacing</h3>
-        <div id="stm-surfacing-info"></div>
-      </div>
-    </div>
-
-    <!-- Call history -->
-    <div class="stm-section">
-      <div class="stm-section-header">
-        <h2>Call History</h2>
-        <div class="stm-history-filters">
-          <input id="stm-hist-server" placeholder="Server filter" class="input-sm">
-          <input id="stm-hist-tool" placeholder="Tool filter" class="input-sm">
-          <button id="stm-hist-filter-btn" class="btn-outline btn-sm">Filter</button>
-          <button id="stm-hist-clear-btn" class="btn-outline btn-sm" hidden>Clear</button>
-        </div>
-      </div>
-      <table id="stm-history" class="stm-table"><thead><tr><th>Time</th><th>Server</th><th>Tool</th><th>Original</th><th>Cleaned</th><th>Compressed</th><th>Savings</th></tr></thead><tbody></tbody></table>
-      <div id="stm-hist-pagination" class="stm-pagination"></div>
-    </div>
-  </div><!-- stm-scroll-container -->
   </div>
 
   <!-- ===== SETTINGS HUB ===== -->

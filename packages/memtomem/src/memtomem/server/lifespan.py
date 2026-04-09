@@ -113,91 +113,6 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
 
         webhook_mgr = WebhookManager(config.webhook)
 
-    # STM proxy gateway (integrated mode)
-    stm_proxy_manager = None
-    stm_surfacing_engine = None
-    stm_feedback_tracker = None
-    stm_metrics_store = None
-    stm_proxy_cache = None
-    if config.stm_proxy.enabled:
-        try:
-            from memtomem_stm.config import STMConfig
-            from memtomem_stm.proxy.cache import ProxyCache
-            from memtomem_stm.proxy.manager import ProxyManager
-            from memtomem_stm.proxy.metrics import TokenTracker
-            from memtomem_stm.proxy.metrics_store import MetricsStore
-            from memtomem_stm.surfacing.engine import SurfacingEngine
-            from memtomem_stm.surfacing.feedback import FeedbackTracker
-
-            stm_config = STMConfig()
-
-            # Persistent metrics
-            if stm_config.proxy.metrics.enabled:
-                stm_metrics_store = MetricsStore(
-                    stm_config.proxy.metrics.db_path.expanduser().resolve(),
-                    max_history=stm_config.proxy.metrics.max_history,
-                )
-                stm_metrics_store.initialize()
-
-            # Response cache
-            if stm_config.proxy.cache.enabled:
-                stm_proxy_cache = ProxyCache(
-                    stm_config.proxy.cache.db_path.expanduser().resolve(),
-                    max_entries=stm_config.proxy.cache.max_entries,
-                )
-                stm_proxy_cache.initialize()
-
-            # Feedback tracker must be created before engine
-            if stm_config.surfacing.feedback_enabled:
-                stm_feedback_tracker = FeedbackTracker(stm_config.surfacing)
-
-            stm_surfacing_engine = SurfacingEngine(
-                stm_config.surfacing,
-                search_pipeline=comp.search_pipeline,
-                storage=comp.storage,
-                webhook_manager=webhook_mgr,
-                feedback_tracker=stm_feedback_tracker,
-            )
-
-            stm_tracker = TokenTracker(metrics_store=stm_metrics_store)
-            stm_proxy_manager = ProxyManager(
-                stm_config.proxy,
-                stm_tracker,
-                index_engine=comp.index_engine,
-                surfacing_engine=stm_surfacing_engine,
-                cache=stm_proxy_cache,
-            )
-            await stm_proxy_manager.start()
-
-            # Register proxy tools on the memtomem MCP server
-            from memtomem.server import mcp as _mcp
-            from memtomem_stm.proxy._fastmcp_compat import register_proxy_tool
-
-            def _make_proxy_handler(pm: ProxyManager, srv: str, tool_name: str):  # noqa: ANN202
-                async def proxy_tool(**kwargs: object) -> str | list:
-                    return await pm.call_tool(srv, tool_name, dict(kwargs))
-
-                return proxy_tool
-
-            for info in stm_proxy_manager.get_proxy_tools():
-                register_proxy_tool(
-                    _mcp,
-                    _make_proxy_handler(stm_proxy_manager, info.server, info.original_name),
-                    info,
-                )
-
-            logger.info(
-                "STM proxy started: %d upstream tools, surfacing=%s",
-                len(stm_proxy_manager.get_proxy_tools()),
-                "enabled" if stm_config.surfacing.enabled else "disabled",
-            )
-        except ImportError:
-            logger.info(
-                "memtomem-stm not installed — STM proxy disabled (pip install memtomem-stm)"
-            )
-        except Exception:
-            logger.warning("STM proxy initialization failed", exc_info=True)
-
     ctx = AppContext(
         config=config,
         storage=comp.storage,
@@ -207,7 +122,6 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         watcher=watcher,
         dedup_scanner=dedup_scanner,
         webhook_manager=webhook_mgr,
-        stm_proxy_manager=stm_proxy_manager,
     )
 
     # Auto-consolidation scheduler
@@ -240,28 +154,6 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
                 await scheduler.stop()
             except Exception:
                 logger.warning("Failed to stop scheduler", exc_info=True)
-        if stm_proxy_manager is not None:
-            from memtomem.server import mcp as _mcp
-
-            for info in stm_proxy_manager.get_proxy_tools():
-                try:
-                    _mcp.remove_tool(info.prefixed_name)
-                except Exception:
-                    pass
-            try:
-                await stm_proxy_manager.stop()
-            except Exception:
-                logger.warning("Failed to stop STM proxy manager", exc_info=True)
-        for resource, name in [
-            (stm_feedback_tracker, "stm_feedback_tracker"),
-            (stm_proxy_cache, "stm_proxy_cache"),
-            (stm_metrics_store, "stm_metrics_store"),
-        ]:
-            if resource is not None:
-                try:
-                    resource.close()
-                except Exception:
-                    logger.warning("Failed to close %s", name, exc_info=True)
         if webhook_mgr:
             try:
                 await webhook_mgr.close()

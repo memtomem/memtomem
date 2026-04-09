@@ -245,13 +245,6 @@ class HealthWatchdogConfig(BaseSettings):
     auto_maintenance: bool = True
 
 
-class StmProxyConfig(BaseSettings):
-    """STM proxy gateway integration (requires memtomem-stm package)."""
-
-    enabled: bool = False
-    config_path: str = "~/.memtomem/stm_proxy.json"
-
-
 class Mem2MemConfig(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="MEMTOMEM_",
@@ -278,7 +271,6 @@ class Mem2MemConfig(BaseSettings):
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
     entity_extraction: EntityExtractionConfig = Field(default_factory=EntityExtractionConfig)
     context_window: ContextWindowConfig = Field(default_factory=ContextWindowConfig)
-    stm_proxy: StmProxyConfig = Field(default_factory=StmProxyConfig)
     health_watchdog: HealthWatchdogConfig = Field(default_factory=HealthWatchdogConfig)
 
 

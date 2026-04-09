@@ -10,17 +10,15 @@ Covers:
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 
 from memtomem.config import EmbeddingConfig
-from memtomem.embedding.base import EmbeddingProvider
 from memtomem.embedding.factory import create_embedder
 from memtomem.embedding.ollama import OllamaEmbedder
-from memtomem.embedding.openai import OpenAIEmbedder, _RateLimitError
+from memtomem.embedding.openai import OpenAIEmbedder
 from memtomem.embedding.retry import _parse_retry_after, with_retry
 from memtomem.errors import ConfigError, EmbeddingError
 

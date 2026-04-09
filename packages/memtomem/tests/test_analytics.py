@@ -2,7 +2,6 @@
 
 import pytest
 from pathlib import Path
-from uuid import uuid4
 from memtomem.models import Chunk, ChunkMetadata
 
 from helpers import make_chunk

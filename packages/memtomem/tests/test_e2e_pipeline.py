@@ -8,7 +8,6 @@ Requires a running Ollama instance with bge-m3 model.
 
 from __future__ import annotations
 
-from pathlib import Path
 
 import pytest
 

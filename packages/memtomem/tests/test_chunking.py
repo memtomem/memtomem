@@ -1,6 +1,5 @@
 """Tests for adaptive markdown chunking."""
 
-import pytest
 from pathlib import Path
 from memtomem.chunking.markdown import MarkdownChunker
 

@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from memtomem.models import Chunk, ChunkMetadata, SearchResult
+from memtomem.models import Chunk, ChunkMetadata
 from memtomem.web.app import create_app
 
 

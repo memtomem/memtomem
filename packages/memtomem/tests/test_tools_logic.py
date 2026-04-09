@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from helpers import make_chunk
 
-from memtomem.tools.entity_extraction import ExtractedEntity, extract_entities
+from memtomem.tools.entity_extraction import extract_entities
 from memtomem.tools.policy_engine import (
     PolicyRunResult,
     _VALID_TYPES,

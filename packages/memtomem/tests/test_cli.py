@@ -43,7 +43,7 @@ class TestCLIGroup:
         """All expected subcommands appear in help output."""
         result = runner.invoke(cli, ["--help"])
         for cmd in ("search", "add", "recall", "index", "config", "context",
-                     "embedding-reset", "stm", "web", "shell", "init"):
+                     "embedding-reset", "web", "shell", "init"):
             assert cmd in result.output, f"'{cmd}' not found in help output"
 
     def test_unknown_command(self, runner: CliRunner) -> None:
@@ -249,9 +249,3 @@ class TestSubcommandHelp:
         result = runner.invoke(cli, ["shell", "--help"])
         assert result.exit_code == 0
         assert "Interactive" in result.output
-
-    def test_stm_help(self, runner: CliRunner) -> None:
-        result = runner.invoke(cli, ["stm", "--help"])
-        assert result.exit_code == 0
-        assert "init" in result.output
-        assert "reset" in result.output
