@@ -93,7 +93,7 @@ When enabled, search results include surrounding chunks from the same source fil
 |----------|---------|-------------|
 | `MEMTOMEM_TOOL_MODE` | `core` | Which MCP tools are exposed: `core` (9 tools), `standard` (~32 + `mem_do`), `full` (72) |
 
-In `core` mode, use `mem_do(action="...", params={...})` to access any of the 63 non-core actions. Fewer tools means less context usage for AI agents.
+In `core` mode, use `mem_do(action="...", params={...})` to access any of the 64 non-core actions. Fewer tools means less context usage for AI agents.
 
 ## Querying and Modifying at Runtime
 
