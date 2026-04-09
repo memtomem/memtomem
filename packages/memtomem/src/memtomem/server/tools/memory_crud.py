@@ -110,7 +110,7 @@ async def mem_add(
 
     # Index as a single chunk — mem_add entries are short and self-contained,
     # so chunking would only split frontmatter from content unnecessarily.
-    chunk = await app.index_engine.index_entry(
+    await app.index_engine.index_entry(
         entry_text,
         target,
         heading_hierarchy=heading_hierarchy,
