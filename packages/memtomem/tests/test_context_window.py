@@ -299,6 +299,94 @@ class TestMemExpand:
         assert "not found" in result
 
 
+# ── mem_increment_access action tests ──────────────────────────────────
+
+
+class TestMemIncrementAccess:
+    """Tests for mem_increment_access — used by external surfacing systems
+    (e.g. memtomem-stm) to record positive feedback as a search-ranking boost.
+    """
+
+    async def test_action_registered_in_search_category(self):
+        """The action should be discoverable via the mem_do registry."""
+        from memtomem.server.tool_registry import ACTIONS
+
+        assert "increment_access" in ACTIONS
+        assert ACTIONS["increment_access"].category == "search"
+        assert "chunk_ids" in ACTIONS["increment_access"].params
+
+    async def test_empty_chunk_ids_returns_message(self):
+        """Empty list short-circuits with a friendly message — no storage call."""
+        from memtomem.server.tools.search import mem_increment_access
+
+        app = MagicMock()
+        app.storage.increment_access = AsyncMock()
+
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr("memtomem.server.tools.search._get_app", lambda _: app)
+            result = await mem_increment_access(chunk_ids=[], ctx=SimpleNamespace())
+
+        assert "No chunk_ids" in result
+        app.storage.increment_access.assert_not_called()
+
+    async def test_all_invalid_uuids_rejected(self):
+        """All-invalid input returns error and never touches storage."""
+        from memtomem.server.tools.search import mem_increment_access
+
+        app = MagicMock()
+        app.storage.increment_access = AsyncMock()
+
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr("memtomem.server.tools.search._get_app", lambda _: app)
+            result = await mem_increment_access(
+                chunk_ids=["not-a-uuid", "also-bad"],
+                ctx=SimpleNamespace(),
+            )
+
+        assert "no valid UUIDs" in result
+        assert "rejected: 2" in result
+        app.storage.increment_access.assert_not_called()
+
+    async def test_valid_uuids_increments_storage(self):
+        """Valid UUIDs are converted and forwarded to storage.increment_access."""
+        from memtomem.server.tools.search import mem_increment_access
+
+        app = MagicMock()
+        app.storage.increment_access = AsyncMock()
+
+        ids = [str(uuid4()), str(uuid4()), str(uuid4())]
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr("memtomem.server.tools.search._get_app", lambda _: app)
+            result = await mem_increment_access(chunk_ids=ids, ctx=SimpleNamespace())
+
+        assert "3 chunk(s)" in result
+        app.storage.increment_access.assert_awaited_once()
+        called_ids = app.storage.increment_access.call_args.args[0]
+        assert len(called_ids) == 3
+        assert all(isinstance(c, UUID) for c in called_ids)
+
+    async def test_mixed_valid_invalid_partial_increment(self):
+        """Mixed input increments the valid ones and reports the skipped count."""
+        from memtomem.server.tools.search import mem_increment_access
+
+        app = MagicMock()
+        app.storage.increment_access = AsyncMock()
+
+        valid_id = str(uuid4())
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr("memtomem.server.tools.search._get_app", lambda _: app)
+            result = await mem_increment_access(
+                chunk_ids=[valid_id, "not-a-uuid"],
+                ctx=SimpleNamespace(),
+            )
+
+        assert "1 chunk(s)" in result
+        assert "Skipped 1 invalid" in result
+        app.storage.increment_access.assert_awaited_once()
+        called_ids = app.storage.increment_access.call_args.args[0]
+        assert len(called_ids) == 1
+
+
 # ── Formatter tests ─────────────────────────────────────────────────────
 
 

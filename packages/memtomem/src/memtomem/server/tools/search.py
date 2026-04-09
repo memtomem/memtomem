@@ -156,3 +156,45 @@ async def mem_expand(
             parts.append(f"{header}\n```\n{c.content}\n```")
 
     return "\n\n".join(parts)
+
+
+@register("search")
+async def mem_increment_access(
+    chunk_ids: list[str],
+    ctx: CtxType = None,  # type: ignore[assignment]
+) -> str:
+    """Increment access_count for the given chunks (drives access-frequency boost in search ranking).
+
+    Used by external surfacing systems (e.g. memtomem-stm) to record positive
+    feedback as a future search-ranking boost. Each call increments the count
+    by 1 per chunk; the search pipeline applies a logarithmic transform with
+    ``max_boost`` capping (default 1.5×) so this never produces runaway scores.
+
+    Idempotency / per-event capping is the caller's responsibility — this
+    action just forwards the IDs to storage.
+
+    Args:
+        chunk_ids: List of chunk UUIDs (strings) to boost
+    """
+    app = _get_app(ctx)
+
+    if not chunk_ids:
+        return "No chunk_ids provided."
+
+    valid: list[UUID] = []
+    invalid: list[str] = []
+    for cid in chunk_ids:
+        try:
+            valid.append(UUID(cid))
+        except (ValueError, TypeError):
+            invalid.append(str(cid))
+
+    if not valid:
+        return f"Error: no valid UUIDs in chunk_ids (rejected: {len(invalid)})."
+
+    await app.storage.increment_access(valid)
+
+    msg = f"Incremented access_count for {len(valid)} chunk(s)."
+    if invalid:
+        msg += f" Skipped {len(invalid)} invalid id(s)."
+    return msg
