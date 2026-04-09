@@ -85,7 +85,7 @@ In **core** tool mode (default), most features are accessed through `mem_do(acti
 - **Maintenance** uses descriptive names: `dedup_scan`, `decay_expire`, `cleanup_orphans`
 - **Analytics** uses short names: `eval`, `activity`, `timeline`, `reflect`
 
-Use `mem_do(action="help")` to see all 63 actions, or `mem_do(action="help", params={"category": "sessions"})` for per-category details with parameter descriptions. Common aliases are supported (e.g. `health_report` → `eval`, `namespace_set` → `ns_set`).
+Use `mem_do(action="help")` to see all 64 actions, or `mem_do(action="help", params={"category": "sessions"})` for per-category details with parameter descriptions. Common aliases are supported (e.g. `health_report` → `eval`, `namespace_set` → `ns_set`).
 
 ---
 

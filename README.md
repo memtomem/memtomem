@@ -87,7 +87,7 @@ For terminal use, install the CLI separately and run `mm init` for an interactiv
 - **🏷️ Namespaces** — organize memories into scoped groups, optional auto-derivation from folder names
 - **🧹 Maintenance** — near-duplicate detection, time-based decay, TTL expiration, auto-tagging
 - **🌐 Web UI** — visual dashboard for search, sources, tags, sessions, health monitoring
-- **🛠️ 72 MCP tools** — full feature surface as MCP tools, with `mem_do` meta-tool routing 63 actions in `core` mode (default) for minimal context usage
+- **🛠️ 72 MCP tools** — full feature surface as MCP tools, with `mem_do` meta-tool routing 64 actions in `core` mode (default) for minimal context usage
 - **🧠 Optional STM** — proactive memory surfacing via the [memtomem-stm](https://github.com/memtomem/memtomem-stm) companion package (separate repo)
 
 ---
@@ -116,7 +116,7 @@ git clone https://github.com/memtomem/memtomem.git
 cd memtomem
 uv venv --python 3.12 && source .venv/bin/activate
 uv pip install -e "packages/memtomem[all]"
-uv run pytest                            # 886 tests (core only — STM has its own repo)
+uv run pytest                            # 891 tests (core only — STM has its own repo)
 uv run ruff check packages/memtomem/src  # lint
 ```
 

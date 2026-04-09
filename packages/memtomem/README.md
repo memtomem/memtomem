@@ -63,7 +63,7 @@ That's it. Your agent now has a long-term memory built from plain markdown files
 - **🧹 Maintenance** — near-duplicate detection with merge, time-based score decay, TTL expiration, auto-tagging
 - **🔄 Export / import** — JSON bundle backup and restore with re-embedding
 - **🌐 Web UI** — full-featured SPA dashboard for search, sources, indexing, tags, sessions, health monitoring
-- **🛠️ 72 MCP tools** — full feature surface as MCP tools, with `mem_do` meta-tool routing 63 actions in `core` mode (default) for minimal context usage
+- **🛠️ 72 MCP tools** — full feature surface as MCP tools, with `mem_do` meta-tool routing 64 actions in `core` mode (default) for minimal context usage
 
 ## Documentation
 
