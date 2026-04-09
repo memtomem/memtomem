@@ -166,13 +166,12 @@ Restart the Agent session, then ask: "Call mem_stats to check the memtomem statu
 
 **Required Tools**: Claude Code hooks + memtomem CLI (`uv tool install memtomem`, or `uv run mm ...` from a git clone)
 
-**Hook Event Summary**:
+**Recommended Hooks** (UserPromptSubmit + PostToolUse only):
 
 | Hook Event | Description | CLI Command |
 |------------|-------------|-------------|
 | `UserPromptSubmit` | Auto-search related memories on prompt submission | `mm search "$PROMPT" --top-k 3` |
-| `PostToolUse` (Write/Edit) | Auto-reindex after file edits | `mm index "$FILE_PATH"` |
-| `Stop` | Auto-save key decisions on session end | `mm add "..."` |
+| `PostToolUse` (Write) | Auto-reindex after new file creation | `mm index "$FILE_PATH"` |
 
 **Configuration**: `~/.claude/settings.json`
 
@@ -183,21 +182,16 @@ Restart the Agent session, then ask: "Call mem_stats to check the memtomem statu
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "mm search \"${prompt}\" --top-k 3 2>/dev/null || true"
+        "command": "P=$(printf '%s' \"${prompt}\" | head -c 500); [ ${#P} -gt 20 ] && mm search \"$P\" --top-k 3 2>>/tmp/mm-hook.log || true",
+        "timeout": 5000
       }]
     }],
     "PostToolUse": [{
-      "matcher": "Write|Edit|MultiEdit",
+      "matcher": "Write",
       "hooks": [{
         "type": "command",
-        "command": "mm index \"${tool_input.file_path}\" 2>/dev/null || true"
-      }]
-    }],
-    "Stop": [{
-      "matcher": "",
-      "hooks": [{
-        "type": "command",
-        "command": "mm add \"Session end: $(date '+%Y-%m-%d %H:%M')\" --tags session,auto 2>/dev/null || true"
+        "command": "mm index \"${tool_input.file_path}\" 2>>/tmp/mm-hook.log || true",
+        "timeout": 10000
       }]
     }]
   }
@@ -206,7 +200,14 @@ Restart the Agent session, then ask: "Call mem_stats to check the memtomem statu
 
 > **Note**: Hooks use the `mm` CLI (not `memtomem-server`). The CLI requires separate installation (`uv tool install memtomem`, or `uv run mm ...` from a git clone). The MCP server is only for AI client connections.
 
-> **Tip**: Using `2>/dev/null || true` suppresses errors so memtomem failures don't disrupt the Claude session.
+**Important caveats**:
+
+- **Short prompt filtering**: The `[ ${#P} -gt 20 ]` guard skips searches for short prompts like "yes", "ok", "commit" that would return irrelevant results.
+- **Input sanitization**: `printf '%s'` and `head -c 500` prevent shell injection from prompt content and cap query length.
+- **Stop hook not recommended**: A naive Stop hook (e.g., `mm add "Session end: ..."`) saves meaningless timestamps that pollute search results. If you want session summaries, let the agent decide what to save via `mem_add` during the conversation.
+- **Error logging**: Use `2>>/tmp/mm-hook.log` instead of `2>/dev/null` so you can diagnose real failures (DB corruption, disk full) without disrupting the session.
+- **PostToolUse scope**: Matching only `Write` (not `Edit`) avoids redundant re-indexing on every small edit. Edited files are already indexed; only new files need it.
+- **STM proxy overlap**: If you use the STM proxy (`memtomem-stm`), it already provides automatic memory surfacing and indexing. Hooks are redundant in that setup.
 
 ---
 

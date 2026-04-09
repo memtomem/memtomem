@@ -6,29 +6,20 @@
         "hooks": [
           {
             "type": "command",
-            "command": "mm search \"${prompt}\" --top-k 3 --format context 2>/dev/null || true"
+            "command": "P=$(printf '%s' \"${prompt}\" | head -c 500); [ ${#P} -gt 20 ] && mm search \"$P\" --top-k 3 --format context 2>>/tmp/mm-hook.log || true",
+            "timeout": 5000
           }
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "Write|Edit|MultiEdit",
+        "matcher": "Write",
         "hooks": [
           {
             "type": "command",
-            "command": "mm index \"${tool_input.file_path}\" 2>/dev/null || true"
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "mm add \"Session ended: $(date '+%Y-%m-%d %H:%M')\" --tags session,auto 2>/dev/null || true"
+            "command": "mm index \"${tool_input.file_path}\" 2>>/tmp/mm-hook.log || true",
+            "timeout": 10000
           }
         ]
       }

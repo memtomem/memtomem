@@ -37,8 +37,8 @@ Confirm results are returned.
 ## Step 4: Hooks Activation (Optional)
 
 The plugin includes automation hooks that:
-- **UserPromptSubmit**: Auto-search relevant memories on every prompt
-- **PostToolUse**: Auto-reindex files after edits
+- **UserPromptSubmit**: Auto-search relevant memories on prompts >20 characters
+- **PostToolUse (Write)**: Auto-index newly created files
 
 Hooks require the memtomem CLI in PATH. Guide the user:
 ```bash
@@ -52,6 +52,8 @@ uv tool install memtomem
 
 After CLI installation, hooks will activate automatically.
 Without CLI, hooks fail silently — MCP tools still work normally.
+
+> **Note**: If the user is already using the STM proxy (`memtomem-stm`), hooks are redundant — the proxy handles surfacing and indexing automatically.
 
 ## Step 5: CLAUDE.md Integration
 

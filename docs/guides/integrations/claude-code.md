@@ -100,7 +100,7 @@ mem_index(path="~/notes", recursive=True)
 > ```
 > Skip to [Tool Usage Guidelines](#tool-usage-guidelines-add-to-claudemd) if you're using the plugin.
 
-You can fully automate memtomem using Claude Code's hooks system.
+You can automate memtomem using Claude Code's hooks system.
 Add the following to `~/.claude/settings.json`:
 
 ```json
@@ -110,21 +110,16 @@ Add the following to `~/.claude/settings.json`:
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "memtomem search \"${prompt}\" --top-k 3 2>/dev/null || true"
+        "command": "P=$(printf '%s' \"${prompt}\" | head -c 500); [ ${#P} -gt 20 ] && memtomem search \"$P\" --top-k 3 2>>/tmp/mm-hook.log || true",
+        "timeout": 5000
       }]
     }],
     "PostToolUse": [{
-      "matcher": "Write|Edit|MultiEdit",
+      "matcher": "Write",
       "hooks": [{
         "type": "command",
-        "command": "memtomem index \"${tool_input.file_path}\" 2>/dev/null || true"
-      }]
-    }],
-    "Stop": [{
-      "matcher": "",
-      "hooks": [{
-        "type": "command",
-        "command": "memtomem add \"Session ended: $(date '+%Y-%m-%d %H:%M')\" --tags session,auto 2>/dev/null || true"
+        "command": "memtomem index \"${tool_input.file_path}\" 2>>/tmp/mm-hook.log || true",
+        "timeout": 10000
       }]
     }]
   }
@@ -136,19 +131,25 @@ Add the following to `~/.claude/settings.json`:
 | Hook Event | Trigger Timing | memtomem Action |
 |------------|---------------|----------------|
 | `UserPromptSubmit` | When a prompt is submitted | `memtomem search` → Automatically inject relevant memory into context |
-| `PostToolUse` (Write/Edit) | After file editing | `memtomem index` → Automatically re-index changed files |
-| `Stop` | When session ends | `memtomem add` → Automatically save session timestamp |
+| `PostToolUse` (Write) | After new file creation | `memtomem index` → Automatically index the new file |
 
 ### Automation Flow
 
 ```
-User submits prompt
+User submits prompt (>20 chars)
   → UserPromptSubmit hook → mem_search context injection
-  → Claude edits code
-  → PostToolUse hook → mem_index auto-reindexing
-  → Session completes
-  → Stop hook → session summary mem_add
+  → Claude creates new files
+  → PostToolUse hook → mem_index auto-indexing
 ```
+
+### Important Caveats
+
+- **Short prompt guard**: Prompts under 20 characters are skipped to avoid noise from "yes", "ok", etc.
+- **Input sanitization**: `printf '%s'` + `head -c 500` prevent shell injection and cap query length.
+- **Error logging**: `2>>/tmp/mm-hook.log` preserves errors for debugging. Avoid `2>/dev/null` which hides real failures.
+- **No Stop hook**: A timestamp-only Stop hook pollutes search with meaningless data. Let the agent save summaries via `mem_add` when there is meaningful content.
+- **Write only**: `Edit` is excluded from PostToolUse — edited files are already indexed, so re-indexing on every edit is redundant.
+- **STM proxy overlap**: If using `memtomem-stm`, hooks are redundant — the proxy already handles surfacing and indexing.
 
 ---
 
@@ -195,10 +196,8 @@ User: "Refactor the auth middleware"
 1. UserPromptSubmit hook auto-executes
    → mem_search("auth middleware refactoring") → 3 related previous decisions injected
 2. Claude analyzes existing code and performs refactoring
-3. PostToolUse hook auto-executes
-   → Every Edit tool use auto-reindexes the changed file
-4. Stop hook auto-executes
-   → "Session ended: 2026-03-16 14:30" auto-saved
+3. Claude creates new files → PostToolUse hook auto-indexes them
+4. Claude saves key decisions via mem_add (agent-driven, not automated)
 ```
 
 ### Scenario B: Dual Memory Search -- Simultaneous MEMORY.md + mem_search
@@ -251,7 +250,7 @@ Agent:
 |---------|---------------------|---------|
 | Semantic search | None (full loading or filename-based) | BM25 + Dense + RRF hybrid search |
 | Auto memory | MEMORY.md 200-line limit | Unlimited semantic search |
-| Hooks integration | Event emission only | hooks + CLI for full automation |
+| Hooks integration | Event emission only | Hooks + CLI for automation (UserPromptSubmit, PostToolUse) |
 
 ---
 
@@ -261,7 +260,7 @@ Agent:
 No. memtomem operates as separate MCP tools (`mem_search`, etc.) and coexists independently with the existing system. Continue using CLAUDE.md for project instructions as before.
 
 **Q: Do hooks slow down Claude Code?**
-The `2>/dev/null || true` pattern ignores errors, so hook failures do not interrupt Claude Code. Searches typically complete within 100ms.
+Searches typically complete within 100–500ms depending on the embedding provider. The `timeout: 5000` setting ensures hooks don't block the session. Errors are logged to `/tmp/mm-hook.log` instead of discarded, so you can diagnose issues without disrupting the session.
 
 **Q: It doesn't work after changing `.mcp.json`.**
 Restart Claude Code or use the `/mcp` command to reconnect to MCP servers. Old processes may be using cached modules.

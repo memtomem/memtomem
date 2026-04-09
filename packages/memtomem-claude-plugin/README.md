@@ -88,10 +88,12 @@ uv tool install memtomem
 
 | Hook | Trigger | Action |
 |------|---------|--------|
-| `UserPromptSubmit` | Every prompt | Auto-search related memories |
-| `PostToolUse` | After file edits | Auto-reindex changed files |
+| `UserPromptSubmit` | Prompts >20 chars | Auto-search related memories |
+| `PostToolUse` | After `Write` (new files) | Auto-index new files |
 
 Without CLI installed, hooks fail silently — MCP tools work normally.
+
+> **Note**: Short prompts are skipped to avoid noise. Edit/MultiEdit are excluded — edited files are already indexed. If using the STM proxy, hooks are redundant. See [hooks guide](../../docs/guides/hooks.md) for details.
 
 ## Slash Commands
 
