@@ -69,6 +69,22 @@ uv venv --python 3.12 && source .venv/bin/activate
 uv pip install -e "packages/memtomem[all]"
 ```
 
+`[all]` installs every optional dependency. You can also install only what you need:
+
+| Extra | What it adds |
+|-------|-------------|
+| `ollama` | Local embedding via Ollama (`nomic-embed-text`) |
+| `openai` | Cloud embedding via OpenAI |
+| `korean` | Korean tokenizer (`kiwipiepy`) |
+| `code` | Code chunking (`tree-sitter` for Python/JS/TS) |
+| `web` | Web UI (`fastapi`, `uvicorn`) |
+| `all` | All of the above |
+
+```bash
+# Example: only Ollama embeddings + web UI
+uv pip install -e "packages/memtomem[ollama,web]"
+```
+
 Verify it works:
 ```bash
 uv run mm -h               # CLI help
