@@ -5992,14 +5992,17 @@ function _wdLabel(status) {
 async function loadWatchdogStatus() {
   const report = qs('watchdog-report');
   const bar = qs('watchdog-status-bar');
+  const runBtn = qs('watchdog-run-btn');
   bar.style.display = 'none';
   report.innerHTML = '<div class="empty-state"><div class="spinner-panel"></div></div>';
   try {
     const d = await api('GET', '/api/watchdog/status');
     if (!d.enabled) {
       report.innerHTML = '<div class="empty-state">Health watchdog is disabled.<br><code>MEMTOMEM_HEALTH_WATCHDOG__ENABLED=true</code></div>';
+      if (runBtn) { runBtn.disabled = true; runBtn.title = 'Watchdog is disabled'; }
       return;
     }
+    if (runBtn) { runBtn.disabled = false; runBtn.title = ''; }
     const checks = d.checks || {};
     const names = Object.keys(checks).sort();
     if (!names.length) {
