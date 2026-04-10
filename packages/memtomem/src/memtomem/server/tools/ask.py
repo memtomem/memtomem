@@ -46,6 +46,8 @@ async def mem_ask(
         source_filter: Filter by source file path.
         tag_filter: Filter by tags (comma-separated, OR logic).
     """
+    if not question.strip():
+        return "Error: question cannot be empty."
     if len(question) > 10_000:
         return "Error: question too long (max 10,000 characters)."
     if not 1 <= top_k <= 20:

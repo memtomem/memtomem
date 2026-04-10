@@ -47,6 +47,9 @@ async def mem_do(
         action: The action name (e.g. "session_start", "tag_list", "help")
         params: Optional dict of parameters for the action
     """
+    if not action or not action.strip():
+        return "Error: action name cannot be empty. Use action='help' to list all."
+
     if action == "help":
         category = (params or {}).get("category")
         return _help(category)

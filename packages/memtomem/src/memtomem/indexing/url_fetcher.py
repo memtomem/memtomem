@@ -60,9 +60,11 @@ async def fetch_url(url: str, output_dir: Path) -> Path:
         # Handle redirects manually to validate each hop
         redirects = 0
         while resp.is_redirect and redirects < 5:
+            if resp.next_request is None:
+                break
             location = resp.headers.get("location", "")
             if location:
-                _validate_url(str(resp.next_request.url) if resp.next_request else location)
+                _validate_url(str(resp.next_request.url))
             resp = await client.send(resp.next_request)
             redirects += 1
         resp.raise_for_status()

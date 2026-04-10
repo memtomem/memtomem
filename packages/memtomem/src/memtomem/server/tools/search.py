@@ -82,6 +82,16 @@ async def mem_search(
                 f"({stats.fused_total} results found before filtering). "
                 f"Try broader filters or remove source_filter/tag_filter."
             )
+        if stats.bm25_error and stats.dense_error:
+            return (
+                "Search unavailable: both keyword and semantic search failed.\n"
+                f"- BM25: {stats.bm25_error}\n"
+                f"- Dense: {stats.dense_error}"
+            )
+        if stats.bm25_error:
+            return f"No results found. (Note: keyword search unavailable: {stats.bm25_error})"
+        if stats.dense_error:
+            return f"No results found. (Note: semantic search unavailable: {stats.dense_error})"
         return "No results found."
 
     output = _format_results(results, verbose=verbose)
@@ -100,6 +110,8 @@ async def mem_search(
         pipeline_info.append(f"Final:{stats.final_total}")
         if stats.bm25_error:
             pipeline_info.append(f"BM25-err:{stats.bm25_error}")
+        if stats.dense_error:
+            pipeline_info.append(f"Dense-err:{stats.dense_error}")
         output += f"\n\n---\npipeline: {' → '.join(pipeline_info)}"
 
     # Fire webhook

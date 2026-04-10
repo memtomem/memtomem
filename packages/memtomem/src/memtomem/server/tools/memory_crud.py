@@ -161,6 +161,9 @@ async def mem_edit(
         chunk_id: The UUID of the chunk to edit (shown in mem_search results)
         new_content: The replacement content
     """
+    if not new_content.strip():
+        return "Error: new_content cannot be empty."
+
     from memtomem.tools.memory_writer import replace_lines
 
     app = _get_app(ctx)
@@ -301,11 +304,13 @@ async def mem_batch_add(
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         target = Path(base).expanduser().resolve() / f"{date_str}.md"
 
+    skipped = 0
     for entry in entries:
         key = entry.get("key") or entry.get("title", "")
         value = entry.get("value") or entry.get("content", "")
         entry_tags = entry.get("tags")
         if not value:
+            skipped += 1
             continue
         append_entry(target, value, title=key or None, tags=entry_tags)
 
@@ -338,8 +343,11 @@ async def mem_batch_add(
             await app.storage.upsert_chunks(updated)
 
     display_ns = effective_ns or app.config.namespace.default_namespace
-    return (
+    result = (
         f"Batch add complete ({len(entries)} entries) → {target}\n"
         f"- Namespace: {display_ns}\n"
         f"- Chunks indexed: {stats.indexed_chunks}"
     )
+    if skipped:
+        result += f"\n- Skipped: {skipped} entries (empty content)"
+    return result

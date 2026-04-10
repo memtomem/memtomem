@@ -81,10 +81,25 @@ async def mem_reflect(
     if connected:
         lines.append("### Most Connected Memories")
         for row in connected:
-            chunk = await storage.get_chunk(row["chunk_id"]) if len(row["chunk_id"]) == 36 else None
+            chunk = None
+            try:
+                from uuid import UUID
+
+                UUID(row["chunk_id"])
+                chunk = await storage.get_chunk(row["chunk_id"])
+            except (ValueError, TypeError):
+                pass
             preview = chunk.content[:50].replace("\n", " ") if chunk else row["chunk_id"][:8]
             lines.append(f"  {row['link_count']} links — {preview}...")
         lines.append("")
+
+    # If no data was found at all, give helpful guidance
+    if len(lines) == 1:  # Only the header
+        return (
+            "No memory activity to reflect on yet.\n\n"
+            "Add memories with `mem_add` and search with `mem_search` to build activity, "
+            "then run `mem_reflect` again."
+        )
 
     lines.append("---")
     lines.append("Use `mem_reflect_save` to record insights derived from this report.")

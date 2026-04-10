@@ -50,6 +50,9 @@ async def mem_search_suggest(
         prefix: The query prefix to match.
         limit: Maximum suggestions (default 5).
     """
+    if not prefix.strip():
+        return "Error: prefix cannot be empty."
+
     app = _get_app(ctx)
     suggestions = await app.storage.suggest_queries(prefix=prefix, limit=limit)
     if not suggestions:

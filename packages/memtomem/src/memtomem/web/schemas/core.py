@@ -43,6 +43,7 @@ class RetrievalStatsOut(BaseModel):
     fused_total: int = 0
     final_total: int = 0
     bm25_error: str | None = None
+    dense_error: str | None = None
 
 
 class DeleteResponse(BaseModel):

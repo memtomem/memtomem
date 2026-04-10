@@ -67,7 +67,11 @@ async def import_memories(
     if not file.filename or not file.filename.endswith(".json"):
         raise HTTPException(status_code=422, detail="Only .json bundle files are accepted.")
 
-    content = await file.read()
+    # Limit upload size to 100 MB
+    max_size = 100 * 1024 * 1024
+    content = await file.read(max_size + 1)
+    if len(content) > max_size:
+        raise HTTPException(status_code=413, detail="File too large (max 100 MB).")
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
         tmp.write(content)
         tmp_path = Path(tmp.name)

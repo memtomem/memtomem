@@ -30,6 +30,7 @@ class RetrievalStats:
     fused_total: int = 0
     final_total: int = 0
     bm25_error: str | None = None
+    dense_error: str | None = None
 
 
 if TYPE_CHECKING:
@@ -204,6 +205,7 @@ class SearchPipeline:
             bm25_task = asyncio.create_task(
                 self._storage.bm25_search(query, top_k=bm25_k, namespace_filter=ns_filter)
             )
+        dense_error: str | None = None
         if use_dense:
             try:
                 query_embedding = await self._embedder.embed_query(query)
@@ -213,6 +215,7 @@ class SearchPipeline:
             except Exception as exc:
                 logger.warning("Dense search unavailable: %s", exc)
                 dense_results = []
+                dense_error = str(exc)
         if use_bm25:
             try:
                 bm25_results = await bm25_task
@@ -225,6 +228,7 @@ class SearchPipeline:
             bm25_candidates=len(bm25_results),
             dense_candidates=len(dense_results),
             bm25_error=bm25_error,
+            dense_error=dense_error,
         )
 
         # Stage 3: fusion (or single-retriever passthrough)

@@ -39,8 +39,10 @@ async def mem_policy_add(
             auto_tag: {"max_tags": 5}
         namespace_filter: Only apply to chunks in this namespace
     """
+    if not name or not name.strip():
+        return "Error: policy name cannot be empty."
     if policy_type not in _VALID_TYPES:
-        return f"Error: policy_type must be one of {_VALID_TYPES}"
+        return f"Error: policy_type must be one of: {', '.join(sorted(_VALID_TYPES))}"
 
     try:
         cfg = json.loads(config)

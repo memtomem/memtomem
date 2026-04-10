@@ -49,6 +49,9 @@ async def mem_recall(
     except ValueError as exc:
         return f"Error: {exc}"
 
+    if since_dt and until_dt and since_dt >= until_dt:
+        return "Error: 'since' must be earlier than 'until'."
+
     effective_ns = namespace or app.current_namespace
     ns_filter = NamespaceFilter.parse(effective_ns)
     chunks = await app.storage.recall_chunks(

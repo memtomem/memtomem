@@ -92,7 +92,11 @@ async def mem_consolidate(
             break
 
     if not groups:
-        return "No consolidation candidates found."
+        return (
+            "No consolidation candidates found.\n"
+            f"(Checked {len(sources)} source files, "
+            f"min_group_size={min_group_size}, max_groups={max_groups})"
+        )
 
     lines = [f"Consolidation candidates: {len(groups)} groups\n"]
     for g in groups:
@@ -104,8 +108,11 @@ async def mem_consolidate(
         lines.append(f"  → Use mem_consolidate_apply(group_id={g['group_id']}, summary='...')")
         lines.append("")
 
-    # Store group info for apply step
+    # Store group info for apply step (with timestamp for staleness check)
+    import time
+
     app._consolidation_groups = groups  # type: ignore[attr-defined]
+    app._consolidation_ts = time.time()  # type: ignore[attr-defined]
 
     return "\n".join(lines)
 
@@ -131,9 +138,15 @@ async def mem_consolidate_apply(
     """
     app = _get_app(ctx)
 
+    import time
+
     groups = getattr(app, "_consolidation_groups", None)
     if not groups:
         return "Error: run mem_consolidate first to identify groups."
+
+    ts = getattr(app, "_consolidation_ts", 0)
+    if time.time() - ts > 3600:
+        return "Error: consolidation groups are stale (>1 hour). Run mem_consolidate again."
 
     group = next((g for g in groups if g["group_id"] == group_id), None)
     if group is None:

@@ -55,8 +55,14 @@ async def mem_timeline(
         return f"No memories found for topic '{topic}'."
 
     # Parse date filters
-    since_dt = _parse_recall_date(since) if since else None
-    until_dt = _parse_recall_date(until, end_of_period=True) if until else None
+    try:
+        since_dt = _parse_recall_date(since) if since else None
+        until_dt = _parse_recall_date(until, end_of_period=True) if until else None
+    except ValueError as exc:
+        return f"Error: {exc}"
+
+    if since_dt and until_dt and since_dt >= until_dt:
+        return "Error: 'since' must be earlier than 'until'."
 
     # Convert search results to dicts for timeline builder
     chunks = []
@@ -109,19 +115,25 @@ async def mem_activity(
 
     # Default: last 30 days
     now = datetime.now(timezone.utc)
-    if since:
-        since_dt = _parse_recall_date(since)
-        since_str = since_dt.strftime("%Y-%m-%d")
-    else:
-        since_dt = now - timedelta(days=30)
-        since_str = since_dt.strftime("%Y-%m-%d")
+    try:
+        if since:
+            since_dt = _parse_recall_date(since)
+            since_str = since_dt.strftime("%Y-%m-%d")
+        else:
+            since_dt = now - timedelta(days=30)
+            since_str = since_dt.strftime("%Y-%m-%d")
 
-    if until:
-        until_dt = _parse_recall_date(until, end_of_period=True)
-        until_str = until_dt.strftime("%Y-%m-%d")
-    else:
-        until_dt = now
-        until_str = until_dt.strftime("%Y-%m-%d")
+        if until:
+            until_dt = _parse_recall_date(until, end_of_period=True)
+            until_str = until_dt.strftime("%Y-%m-%d")
+        else:
+            until_dt = now
+            until_str = until_dt.strftime("%Y-%m-%d")
+    except ValueError as exc:
+        return f"Error: {exc}"
+
+    if since_dt >= until_dt:
+        return "Error: 'since' must be earlier than 'until'."
 
     # Get activity from storage
     summary = await app.storage.get_activity_summary(
