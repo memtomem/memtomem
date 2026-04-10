@@ -92,6 +92,7 @@ class SqliteBackend(
 
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
+        self._db.execute("PRAGMA foreign_keys=ON")
 
         # Read-only connection pool for concurrent search operations
         self._read_pool: list[sqlite3.Connection] = []
@@ -143,6 +144,10 @@ class SqliteBackend(
         if hasattr(self, "_read_pool"):
             self._read_pool.clear()
         if self._db:
+            try:
+                self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:
+                pass
             self._db.close()
             self._db = None
 
@@ -927,15 +932,19 @@ class SqliteBackend(
             overlap_after=oa,
         )
 
-        # --- timestamps ---
+        # --- timestamps (always timezone-aware) ---
         try:
             ca = datetime.fromisoformat(created_at)
+            if ca.tzinfo is None:
+                ca = ca.replace(tzinfo=timezone.utc)
         except (ValueError, TypeError):
             logger.warning("Corrupted created_at for chunk %s", chunk_id)
             ca = datetime.now(timezone.utc)
 
         try:
             ua = datetime.fromisoformat(updated_at)
+            if ua.tzinfo is None:
+                ua = ua.replace(tzinfo=timezone.utc)
         except (ValueError, TypeError):
             logger.warning("Corrupted updated_at for chunk %s", chunk_id)
             ua = datetime.now(timezone.utc)

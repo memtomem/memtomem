@@ -209,6 +209,64 @@ class TestErrorHandler:
         assert "RuntimeError" in result
         assert "something broke" in result
 
+    @pytest.mark.asyncio
+    async def test_embedding_error_shows_message(self):
+        from memtomem.errors import EmbeddingError
+        from memtomem.server.error_handler import tool_handler
+
+        @tool_handler
+        async def bad_tool():
+            raise EmbeddingError("Ollama unreachable")
+
+        result = await bad_tool()
+        assert result == "Error: Ollama unreachable"
+
+    @pytest.mark.asyncio
+    async def test_connection_error_shows_message(self):
+        from memtomem.server.error_handler import tool_handler
+
+        @tool_handler
+        async def bad_tool():
+            raise ConnectionError("connection refused")
+
+        result = await bad_tool()
+        assert result == "Error: connection refused"
+
+    @pytest.mark.asyncio
+    async def test_timeout_error_shows_message(self):
+        from memtomem.server.error_handler import tool_handler
+
+        @tool_handler
+        async def bad_tool():
+            raise TimeoutError("request timed out")
+
+        result = await bad_tool()
+        assert result == "Error: request timed out"
+
+    @pytest.mark.asyncio
+    async def test_retryable_error_tagged(self):
+        from memtomem.errors import RetryableError
+        from memtomem.server.error_handler import tool_handler
+
+        @tool_handler
+        async def bad_tool():
+            raise RetryableError("rate limited")
+
+        result = await bad_tool()
+        assert result == "Error (retryable): rate limited"
+
+    @pytest.mark.asyncio
+    async def test_permanent_error_tagged(self):
+        from memtomem.errors import PermanentError
+        from memtomem.server.error_handler import tool_handler
+
+        @tool_handler
+        async def bad_tool():
+            raise PermanentError("invalid API key")
+
+        result = await bad_tool()
+        assert result == "Error (permanent): invalid API key"
+
 
 # ── Session Duplicate Handling ────────────────────────────────────────
 
@@ -347,3 +405,91 @@ class TestDBIndexes:
             "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_chunks_importance'"
         ).fetchall()
         assert len(indexes) == 1
+
+
+# ── Foreign Keys Enabled ─────────────────────────────────────────────
+
+
+class TestForeignKeys:
+    @pytest.mark.asyncio
+    async def test_foreign_keys_pragma_enabled(self, storage):
+        """PRAGMA foreign_keys should be ON for CASCADE to work."""
+        db = storage._get_db()
+        result = db.execute("PRAGMA foreign_keys").fetchone()
+        assert result[0] == 1
+
+
+# ── Datetime Timezone Normalization ──────────────────────────────────
+
+
+class TestDatetimeNormalization:
+    @pytest.mark.asyncio
+    async def test_naive_datetime_gets_utc(self, storage):
+        """Chunks with naive datetime stored should get UTC tzinfo on read."""
+        from datetime import timezone
+        chunk = _make_chunk("tz test")
+        await storage.upsert_chunks([chunk])
+
+        # Manually set a naive datetime in DB
+        db = storage._get_db()
+        db.execute(
+            "UPDATE chunks SET created_at = '2024-01-01T12:00:00' WHERE id = ?",
+            (str(chunk.id),),
+        )
+        db.commit()
+
+        result = await storage.get_chunk(chunk.id)
+        assert result is not None
+        assert result.created_at.tzinfo is not None
+        assert result.created_at.tzinfo == timezone.utc
+
+
+# ── Formatter Truncation Indicator ───────────────────────────────────
+
+
+class TestFormatterTruncation:
+    def test_short_content_no_ellipsis(self):
+        """Content under 500 chars should not get '...' appended."""
+        from memtomem.server.formatters import _format_compact_result
+
+        class FakeChunkMeta:
+            heading_hierarchy = []
+            namespace = "default"
+            source_file = "/tmp/test.md"
+
+        class FakeChunk:
+            content = "short content"
+            metadata = FakeChunkMeta()
+            id = "test-id"
+
+        class FakeResult:
+            chunk = FakeChunk()
+            score = 0.95
+            rank = 1
+            context = None
+
+        result = _format_compact_result(FakeResult())
+        assert not result.endswith("...")
+
+    def test_long_content_has_ellipsis(self):
+        """Content over 500 chars should get '...' appended."""
+        from memtomem.server.formatters import _format_compact_result
+
+        class FakeChunkMeta:
+            heading_hierarchy = []
+            namespace = "default"
+            source_file = "/tmp/test.md"
+
+        class FakeChunk:
+            content = "x" * 600
+            metadata = FakeChunkMeta()
+            id = "test-id"
+
+        class FakeResult:
+            chunk = FakeChunk()
+            score = 0.95
+            rank = 1
+            context = None
+
+        result = _format_compact_result(FakeResult())
+        assert result.endswith("...")

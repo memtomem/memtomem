@@ -38,6 +38,8 @@ async def mem_search(
         context_window: Expand each result with ±N adjacent chunks (0=disabled). Use for more context.
         verbose: Show full details (UUID, full path, score 4dp, pipeline stats). Default: compact output.
     """
+    if not query.strip():
+        return "Error: query cannot be empty."
     if len(query) > 10_000:
         return "Error: query too long (max 10,000 characters)."
     if not 1 <= top_k <= 100:
@@ -61,9 +63,18 @@ async def mem_search(
     )
 
     if not results:
+        if (source_filter or tag_filter) and stats.fused_total > 0:
+            return (
+                f"No results match your filters "
+                f"({stats.fused_total} results found before filtering). "
+                f"Try broader filters or remove source_filter/tag_filter."
+            )
         return "No results found."
 
     output = _format_results(results, verbose=verbose)
+
+    if stats.bm25_error and not verbose:
+        output += "\n\n(Note: keyword index unavailable — results from semantic search only)"
 
     if verbose:
         pipeline_info = []

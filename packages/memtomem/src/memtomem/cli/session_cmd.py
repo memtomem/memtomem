@@ -39,6 +39,7 @@ def _clear_current_session() -> None:
 # mm session
 # ---------------------------------------------------------------------------
 
+
 @click.group()
 def session() -> None:
     """Manage agent sessions — start, end, list, events."""
@@ -104,7 +105,11 @@ async def _end(session_id: str, summary: str | None, auto_summary: bool) -> None
                 t = ev["event_type"]
                 type_counts[t] = type_counts.get(t, 0) + 1
             parts = [f"{v}x {k}" for k, v in sorted(type_counts.items(), key=lambda x: -x[1])]
-            summary = f"Session had {len(events)} events: {', '.join(parts)}" if parts else "Session ended (no events)"
+            summary = (
+                f"Session had {len(events)} events: {', '.join(parts)}"
+                if parts
+                else "Session ended (no events)"
+            )
 
         metadata = {"event_count": len(events)}
         await comp.storage.end_session(session_id, summary, metadata)
@@ -183,13 +188,19 @@ async def _events(session_id: str) -> None:
 # mm activity
 # ---------------------------------------------------------------------------
 
+
 @click.group()
 def activity() -> None:
     """Log agent activity events to the current session."""
 
 
 @activity.command("log")
-@click.option("--type", "event_type", default="tool_call", help="Event type (tool_call, subagent_start, subagent_stop, decision, error)")
+@click.option(
+    "--type",
+    "event_type",
+    default="tool_call",
+    help="Event type (tool_call, subagent_start, subagent_stop, decision, error)",
+)
 @click.option("--content", "-c", required=True, help="Event description")
 @click.option("--meta", default=None, help="JSON metadata")
 def log_event(event_type: str, content: str, meta: str | None) -> None:
@@ -205,20 +216,17 @@ def log_event(event_type: str, content: str, meta: str | None) -> None:
         pass  # hooks must never block
 
 
-async def _log_event(
-    session_id: str, event_type: str, content: str, metadata: dict | None
-) -> None:
+async def _log_event(session_id: str, event_type: str, content: str, metadata: dict | None) -> None:
     from memtomem.cli._bootstrap import cli_components
 
     async with cli_components() as comp:
-        await comp.storage.add_session_event(
-            session_id, event_type, content, metadata=metadata
-        )
+        await comp.storage.add_session_event(session_id, event_type, content, metadata=metadata)
 
 
 # ---------------------------------------------------------------------------
 # mm session wrap
 # ---------------------------------------------------------------------------
+
 
 @session.command()
 @click.option("--agent-id", "-a", default="headless", help="Agent identifier")
@@ -269,9 +277,7 @@ async def _wrap_start(session_id: str, agent_id: str, title: str) -> None:
     from memtomem.cli._bootstrap import cli_components
 
     async with cli_components() as comp:
-        await comp.storage.create_session(
-            session_id, agent_id, "default", {"title": title}
-        )
+        await comp.storage.create_session(session_id, agent_id, "default", {"title": title})
 
 
 async def _wrap_end(session_id: str, summary: str, exit_code: int) -> None:

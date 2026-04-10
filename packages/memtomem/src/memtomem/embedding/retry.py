@@ -58,6 +58,10 @@ def with_retry(
                     last_exc = exc
                     if attempt < max_attempts - 1:
                         delay = min(base_delay * (2**attempt), max_delay)
+                        # Honour Retry-After from rate-limit responses
+                        ra = getattr(exc, "retry_after", None)
+                        if ra is not None and isinstance(ra, (int, float)):
+                            delay = max(delay, float(ra))
                         logger.warning(
                             "Retry %d/%d for %s after %.1fs: %s",
                             attempt + 1,

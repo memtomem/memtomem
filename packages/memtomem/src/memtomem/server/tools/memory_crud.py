@@ -62,6 +62,11 @@ async def mem_add(
         template: Use a built-in template (adr, meeting, debug, decision).
                   Content can be JSON with field values or plain text.
     """
+    if not content.strip():
+        return "Error: content cannot be empty."
+    if len(content) > 100_000:
+        return "Error: content too large (max 100,000 characters)."
+
     from datetime import datetime, timezone
 
     from memtomem.tools.memory_writer import append_entry
@@ -97,12 +102,9 @@ async def mem_add(
     # Re-index the whole file via the standard pipeline so the watcher
     # (which also calls index_file) produces identical hashes → no duplicates.
     stats = await app.index_engine.index_file(target, namespace=effective_ns)
+    app.search_pipeline.invalidate_cache()
 
-    result = (
-        f"Memory added to {target}\n"
-        f"- Chunks indexed: {stats.indexed_chunks}\n"
-        f"- File: {target}"
-    )
+    result = f"Memory added to {target}\n- Chunks indexed: {stats.indexed_chunks}\n- File: {target}"
 
     # Semantic duplicate check: warn if very similar content already exists
     try:
@@ -111,8 +113,7 @@ async def mem_add(
             dupes = [
                 s
                 for s in similar
-                if s.score >= 0.90
-                and s.score < 0.9999  # exclude exact self-match
+                if s.score >= 0.90 and s.score < 0.9999  # exclude exact self-match
             ]
             if dupes:
                 result += "\n\n⚠ Similar memories found:"
@@ -164,6 +165,7 @@ async def mem_edit(
     try:
         replace_lines(meta.source_file, meta.start_line, meta.end_line, new_content)
         stats = await app.index_engine.index_file(meta.source_file, force=True)
+        app.search_pipeline.invalidate_cache()
     except Exception as exc:
         meta.source_file.write_text(original, encoding="utf-8")
         logger.error("mem_edit rollback after indexing failure: %s", exc, exc_info=True)
@@ -213,6 +215,7 @@ async def mem_delete(
         try:
             remove_lines(meta.source_file, meta.start_line, meta.end_line)
             stats = await app.index_engine.index_file(meta.source_file, force=True)
+            app.search_pipeline.invalidate_cache()
         except Exception as exc:
             meta.source_file.write_text(original, encoding="utf-8")
             logger.error("mem_delete rollback after indexing failure: %s", exc, exc_info=True)
@@ -228,10 +231,12 @@ async def mem_delete(
         if sf_err:
             return sf_err
         deleted = await app.storage.delete_by_source(sf_path)
+        app.search_pipeline.invalidate_cache()
         return f"Removed {deleted} chunks from index for {source_file}"
 
     if namespace:
         deleted = await app.storage.delete_by_namespace(namespace)
+        app.search_pipeline.invalidate_cache()
         return f"Removed {deleted} chunks from namespace '{namespace}'"
 
     return "Provide chunk_id, source_file, or namespace."
@@ -257,6 +262,9 @@ async def mem_batch_add(
         namespace: Namespace for all entries (default: config default)
         file: Target .md file.  If omitted, a timestamped file is created.
     """
+    if len(entries) > 500:
+        return "Error: batch too large (max 500 entries)."
+
     from datetime import datetime, timezone
 
     from memtomem.tools.memory_writer import append_entry
@@ -290,6 +298,7 @@ async def mem_batch_add(
 
     effective_ns = namespace or app.current_namespace
     stats = await app.index_engine.index_file(target, namespace=effective_ns)
+    app.search_pipeline.invalidate_cache()
 
     # Apply collected tags to indexed chunks
     if all_tags and stats.indexed_chunks > 0:

@@ -13,7 +13,7 @@ from memtomem.chunking.registry import ChunkerRegistry
 from memtomem.chunking.structured import StructuredChunker
 from memtomem.config import IndexingConfig, NamespaceConfig
 from memtomem.indexing.differ import compute_diff
-from memtomem.models import Chunk, ChunkMetadata, ChunkType, IndexingStats
+from memtomem.models import Chunk, ChunkMetadata, IndexingStats
 
 if TYPE_CHECKING:
     from memtomem.embedding.base import EmbeddingProvider

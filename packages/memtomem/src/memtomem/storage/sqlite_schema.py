@@ -55,8 +55,9 @@ def create_tables(
     # Idempotent migration: add namespace column to existing DBs
     try:
         db.execute("ALTER TABLE chunks ADD COLUMN namespace TEXT NOT NULL DEFAULT 'default'")
-    except sqlite3.OperationalError:
-        pass  # column already exists
+    except sqlite3.OperationalError as e:
+        if "duplicate column" not in str(e).lower():
+            raise
 
     # Idempotent migration: personalization columns
     for col_sql in (
@@ -66,8 +67,9 @@ def create_tables(
     ):
         try:
             db.execute(col_sql)
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
 
     # Idempotent migration: overlap columns for chunk_overlap_tokens
     for col_sql in (
@@ -76,14 +78,16 @@ def create_tables(
     ):
         try:
             db.execute(col_sql)
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
 
     # Idempotent migration: importance_score column
     try:
         db.execute("ALTER TABLE chunks ADD COLUMN importance_score REAL NOT NULL DEFAULT 0.0")
-    except sqlite3.OperationalError:
-        pass  # column already exists
+    except sqlite3.OperationalError as e:
+        if "duplicate column" not in str(e).lower():
+            raise
 
     db.execute("""
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts

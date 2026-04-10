@@ -56,13 +56,13 @@ def _format_compact_result(r) -> str:
         if ctx.window_before:
             for wc in ctx.window_before:
                 parts.append(f"...{wc.content[-200:]}")
-        parts.append(r.chunk.content[:500])
+        parts.append(r.chunk.content[:500] + ("..." if len(r.chunk.content) > 500 else ""))
         if ctx.window_after:
             for wc in ctx.window_after:
                 parts.append(f"{wc.content[:200]}...")
         return "\n".join(parts)
 
-    return header + "\n" + r.chunk.content[:500]
+    return header + "\n" + r.chunk.content[:500] + ("..." if len(r.chunk.content) > 500 else "")
 
 
 def _format_verbose_result(r) -> str:
@@ -86,11 +86,16 @@ def _format_verbose_result(r) -> str:
             for wc in ctx.window_before:
                 parts.append(f"...{wc.content[-200:]}")
         parts.append("--- matched ---")
-        parts.append(f"```\n{r.chunk.content[:500]}\n```")
+        parts.append(
+            f"```\n{r.chunk.content[:500] + ('...' if len(r.chunk.content) > 500 else '')}\n```"
+        )
         if ctx.window_after:
             parts.append("--- context after ---")
             for wc in ctx.window_after:
                 parts.append(f"{wc.content[:200]}...")
         return "\n".join(parts)
 
-    return header + f"\n```\n{r.chunk.content[:500]}\n```"
+    return (
+        header
+        + f"\n```\n{r.chunk.content[:500] + ('...' if len(r.chunk.content) > 500 else '')}\n```"
+    )

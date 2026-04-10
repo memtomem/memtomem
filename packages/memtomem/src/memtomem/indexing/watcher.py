@@ -35,7 +35,10 @@ class _MarkdownEventHandler(FileSystemEventHandler):
     def _enqueue(self, path: str) -> None:
         p = Path(path)
         if p.suffix in self._supported:
-            self._loop.call_soon_threadsafe(self._queue.put_nowait, p)
+            try:
+                self._loop.call_soon_threadsafe(self._queue.put_nowait, p)
+            except asyncio.QueueFull:
+                logger.warning("File watcher queue full, dropping event for %s", p.name)
 
     def on_modified(self, event: FileSystemEvent) -> None:
         if not event.is_directory:
@@ -66,7 +69,7 @@ class FileWatcher:
         self._config = config
         self._debounce_s = debounce_ms / 1000.0
         self._observer: Observer | None = None
-        self._queue: asyncio.Queue[Path] = asyncio.Queue()
+        self._queue: asyncio.Queue[Path] = asyncio.Queue(maxsize=1000)
         self._task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:

@@ -70,6 +70,15 @@ def create_app(lifespan=None) -> FastAPI:
         msg = re.sub(r"(?:[A-Za-z]:)?(?:[/\\][\w.\-]+){2,}", "<path>", str(exc))
         return JSONResponse(status_code=400, content={"detail": msg})
 
+    @app.exception_handler(KeyError)
+    async def key_error_handler(request: Request, exc: KeyError) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": f"Not found: {exc}"})
+
+    @app.exception_handler(Exception)
+    async def generic_error_handler(request: Request, exc: Exception) -> JSONResponse:
+        logger.error("Unhandled exception: %s", exc, exc_info=True)
+        return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
     app.add_middleware(
         CORSMiddleware,
         allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
@@ -102,6 +111,14 @@ def create_app(lifespan=None) -> FastAPI:
     @app.get("/apple-touch-icon-precomposed.png", include_in_schema=False)
     async def _favicon_fallback() -> FileResponse:
         return FileResponse(_favicon, media_type="image/svg+xml")
+
+    @app.api_route(
+        "/api/{path:path}",
+        methods=["GET", "POST", "PATCH", "DELETE"],
+        include_in_schema=False,
+    )
+    async def api_not_found() -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": "API endpoint not found"})
 
     if _STATIC_DIR.exists():
         app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="static")

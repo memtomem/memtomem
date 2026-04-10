@@ -64,7 +64,13 @@ async def mem_do(
 
     kwargs = dict(params) if params else {}
     kwargs["ctx"] = ctx
-    return await info.fn(**kwargs)
+    try:
+        return await info.fn(**kwargs)
+    except TypeError as exc:
+        return (
+            f"Error: invalid parameter for action '{resolved}' — {exc}. "
+            f'Use action=\'help\' with params={{"category": "{info.category}"}} for details.'
+        )
 
 
 def _help(category: str | None = None) -> str:
