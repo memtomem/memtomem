@@ -577,7 +577,7 @@ def _add_overlap(chunks: list[Chunk], overlap_tokens: int) -> list[Chunk]:
     if overlap_tokens <= 0 or len(chunks) <= 1:
         return chunks
 
-    overlap_chars = overlap_tokens * 3  # rough token→char conversion
+    overlap_chars = min(overlap_tokens * 3, 5000)  # rough token→char, capped
 
     result: list[Chunk] = []
     for i, c in enumerate(chunks):

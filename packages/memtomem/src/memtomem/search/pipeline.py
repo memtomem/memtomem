@@ -181,9 +181,10 @@ class SearchPipeline:
             query, top_k, source_filter, tag_filter, namespace, context_window
         )
         version_at_start = self._cache_version
+        ttl_snapshot = self._cache_ttl
         if cache_key in self._search_cache:
             ts, ver, cached_results, cached_stats = self._search_cache[cache_key]
-            if ver == self._cache_version and time.time() - ts < self._cache_ttl:
+            if ver == self._cache_version and time.time() - ts < ttl_snapshot:
                 return cached_results, cached_stats
             self._search_cache.pop(cache_key, None)
 

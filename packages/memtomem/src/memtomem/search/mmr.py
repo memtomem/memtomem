@@ -17,7 +17,7 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     dot = sum(x * y for x, y in zip(a, b))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(x * x for x in b))
-    if norm_a == 0.0 or norm_b == 0.0:
+    if norm_a < 1e-10 or norm_b < 1e-10:
         return 0.0
     return dot / (norm_a * norm_b)
 
@@ -62,7 +62,7 @@ def apply_mmr(
 
     # Normalize scores to [0, 1] for MMR computation
     max_score = max(r.score for r in results) if results else 1.0
-    if max_score == 0.0:
+    if max_score < 1e-10:
         max_score = 1.0
 
     # Pre-compute pairwise similarity matrix -- O(n^2) once, then O(1) lookups

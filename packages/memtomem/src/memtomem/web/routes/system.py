@@ -267,55 +267,61 @@ async def patch_config(
     applied: list[ConfigPatchChange] = []
     rejected: list[str] = []
 
-    async with _config_patch_lock:
-        for section_name, updates in req.model_dump(exclude_none=True).items():
-            allowed = _MUTABLE_FIELDS.get(section_name, set())
-            section_obj = getattr(config, section_name, None)
-            if section_obj is None:
-                rejected.append(f"{section_name}: unknown section")
-                continue
+    try:
+        async with _asyncio.timeout(60):
+            async with _config_patch_lock:
+                for section_name, updates in req.model_dump(exclude_none=True).items():
+                    allowed = _MUTABLE_FIELDS.get(section_name, set())
+                    section_obj = getattr(config, section_name, None)
+                    if section_obj is None:
+                        rejected.append(f"{section_name}: unknown section")
+                        continue
 
-            for key, value in updates.items():
-                full_key = f"{section_name}.{key}"
-                if key not in allowed:
-                    rejected.append(f"{full_key}: read-only field")
-                    continue
+                    for key, value in updates.items():
+                        full_key = f"{section_name}.{key}"
+                        if key not in allowed:
+                            rejected.append(f"{full_key}: read-only field")
+                            continue
 
-                constraint = _FIELD_CONSTRAINTS.get(full_key)
-                try:
-                    coerced = _coerce_and_validate(value, constraint)
-                except ValueError as e:
-                    rejected.append(f"{full_key}: {e}")
-                    continue
+                        constraint = _FIELD_CONSTRAINTS.get(full_key)
+                        try:
+                            coerced = _coerce_and_validate(value, constraint)
+                        except ValueError as e:
+                            rejected.append(f"{full_key}: {e}")
+                            continue
 
-                old_val = getattr(section_obj, key)
-                setattr(section_obj, key, coerced)
-                applied.append(
-                    ConfigPatchChange(
-                        field=full_key,
-                        old_value=str(old_val),
-                        new_value=str(coerced),
+                        old_val = getattr(section_obj, key)
+                        setattr(section_obj, key, coerced)
+                        applied.append(
+                            ConfigPatchChange(
+                                field=full_key,
+                                old_value=str(old_val),
+                                new_value=str(coerced),
+                            )
+                        )
+
+                # Re-initialize tokenizer if changed — auto-rebuild FTS index
+                if any(c.field == "search.tokenizer" for c in applied):
+                    from memtomem.storage.fts_tokenizer import set_tokenizer
+
+                    set_tokenizer(config.search.tokenizer)
+                    count = await storage.rebuild_fts()
+                    logger.info(
+                        "FTS index rebuilt with tokenizer=%s (%d chunks)",
+                        config.search.tokenizer,
+                        count,
                     )
-                )
 
-        # Re-initialize tokenizer if changed — auto-rebuild FTS index
-        if any(c.field == "search.tokenizer" for c in applied):
-            from memtomem.storage.fts_tokenizer import set_tokenizer
+                # Invalidate search cache so config changes take effect immediately
+                if applied:
+                    search_pipeline.invalidate_cache()
 
-            set_tokenizer(config.search.tokenizer)
-            count = await storage.rebuild_fts()
-            logger.info(
-                "FTS index rebuilt with tokenizer=%s (%d chunks)", config.search.tokenizer, count
-            )
+                if persist:
+                    from memtomem.config import save_config_overrides
 
-        # Invalidate search cache so config changes take effect immediately
-        if applied:
-            search_pipeline.invalidate_cache()
-
-        if persist:
-            from memtomem.config import save_config_overrides
-
-            save_config_overrides(config, _MUTABLE_FIELDS)
+                    save_config_overrides(config, _MUTABLE_FIELDS)
+    except TimeoutError:
+        raise HTTPException(503, "Config update timed out — another update may be in progress")
 
     return ConfigPatchResponse(applied=applied, rejected=rejected)
 
