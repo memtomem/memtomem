@@ -50,6 +50,7 @@ memtomem-web = "memtomem.web.app:main"
 [project.urls]
 Homepage = "https://github.com/memtomem/memtomem"
 Repository = "https://github.com/memtomem/memtomem"
+Issues = "https://github.com/memtomem/memtomem/issues"
 
 [build-system]
 requires = ["hatchling"]
