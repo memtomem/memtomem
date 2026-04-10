@@ -116,7 +116,12 @@ async def mem_agent_share(
 
     app = _get_app(ctx)
 
-    chunk = await app.storage.get_chunk(UUID(chunk_id))
+    try:
+        uid = UUID(chunk_id)
+    except (ValueError, TypeError):
+        return f"Error: invalid chunk ID format: {chunk_id}"
+
+    chunk = await app.storage.get_chunk(uid)
     if chunk is None:
         return f"Chunk {chunk_id} not found."
 

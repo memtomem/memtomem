@@ -176,6 +176,9 @@ async def _cmd_add(comp, args: list[str]) -> None:
 
     from memtomem.tools.memory_writer import append_entry
 
+    if not comp.config.indexing.memory_dirs:
+        click.secho("No memory directories configured. Run 'mm init' first.", fg="red")
+        return
     base = Path(comp.config.indexing.memory_dirs[0]).expanduser().resolve()
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     target = base / f"{date_str}.md"
@@ -243,6 +246,9 @@ async def _cmd_index(comp, args: list[str]) -> None:
     if args:
         path = Path(args[0]).expanduser().resolve()
     else:
+        if not comp.config.indexing.memory_dirs:
+            click.secho("No memory directories configured. Run 'mm init' first.", fg="red")
+            return
         path = Path(comp.config.indexing.memory_dirs[0]).expanduser().resolve()
 
     if not path.exists():

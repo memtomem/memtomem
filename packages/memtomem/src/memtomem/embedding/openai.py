@@ -110,7 +110,11 @@ class OpenAIEmbedder:
         return results
 
     async def embed_query(self, text: str) -> list[float]:
+        if not text or not text.strip():
+            raise EmbeddingError("Query text cannot be empty")
         embeddings = await self.embed_texts([text])
+        if not embeddings:
+            raise EmbeddingError("No embeddings returned for query")
         return embeddings[0]
 
     async def close(self) -> None:

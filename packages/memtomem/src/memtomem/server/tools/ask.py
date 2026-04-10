@@ -2,9 +2,22 @@
 
 from __future__ import annotations
 
+import logging
+
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app
 from memtomem.server.error_handler import tool_handler
+
+logger = logging.getLogger(__name__)
+
+
+def _webhook_error_cb(task: "asyncio.Task") -> None:  # noqa: F821
+    """Log errors from fire-and-forget webhook tasks."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        logger.warning("Webhook fire failed: %s", exc)
 
 
 @mcp.tool()
@@ -101,7 +114,7 @@ async def mem_ask(
     if app.webhook_manager:
         import asyncio
 
-        asyncio.create_task(
+        task = asyncio.create_task(
             app.webhook_manager.fire(
                 "ask",
                 {
@@ -110,5 +123,6 @@ async def mem_ask(
                 },
             )
         )
+        task.add_done_callback(_webhook_error_cb)
 
     return "\n".join(lines)

@@ -22,6 +22,9 @@ async def mem_search_history(
         limit: Maximum number of queries to return (default 20).
         since: ISO date filter — only queries after this date.
     """
+    if not 1 <= limit <= 200:
+        return "Error: limit must be between 1 and 200."
+
     app = _get_app(ctx)
     rows = await app.storage.get_query_history(limit=limit, since=since)
     if not rows:

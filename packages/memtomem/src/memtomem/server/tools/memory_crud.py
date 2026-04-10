@@ -14,6 +14,15 @@ from memtomem.server.tool_registry import register
 logger = logging.getLogger(__name__)
 
 
+def _webhook_error_cb(task: "asyncio.Task") -> None:  # noqa: F821
+    """Log errors from fire-and-forget webhook tasks."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        logger.warning("Webhook fire failed: %s", exc)
+
+
 def _validate_path(path_str: str, memory_dirs: list) -> tuple[Path | None, str | None]:
     """Validate and resolve a user-supplied path.
 
@@ -127,9 +136,10 @@ async def mem_add(
     if app.webhook_manager:
         import asyncio
 
-        asyncio.create_task(
+        task = asyncio.create_task(
             app.webhook_manager.fire("add", {"file": str(target), "chunks_indexed": 1})
         )
+        task.add_done_callback(_webhook_error_cb)
 
     return result
 
@@ -155,7 +165,12 @@ async def mem_edit(
 
     app = _get_app(ctx)
 
-    chunk = await app.storage.get_chunk(UUID(chunk_id))
+    try:
+        uid = UUID(chunk_id)
+    except (ValueError, TypeError):
+        return f"Error: invalid chunk ID format: {chunk_id}"
+
+    chunk = await app.storage.get_chunk(uid)
     if chunk is None:
         return f"Error: chunk {chunk_id} not found."
 
@@ -205,7 +220,12 @@ async def mem_delete(
     app = _get_app(ctx)
 
     if chunk_id:
-        chunk = await app.storage.get_chunk(UUID(chunk_id))
+        try:
+            uid = UUID(chunk_id)
+        except (ValueError, TypeError):
+            return f"Error: invalid chunk ID format: {chunk_id}"
+
+        chunk = await app.storage.get_chunk(uid)
         if chunk is None:
             return f"Error: chunk {chunk_id} not found."
 

@@ -95,7 +95,11 @@ class OllamaEmbedder:
         return results
 
     async def embed_query(self, query: str) -> list[float]:
+        if not query or not query.strip():
+            raise EmbeddingError("Query text cannot be empty")
         embeddings = await self.embed_texts([query])
+        if not embeddings:
+            raise EmbeddingError("No embeddings returned for query")
         return embeddings[0]
 
     async def close(self) -> None:

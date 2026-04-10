@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+
+logger = logging.getLogger(__name__)
 
 
 @mcp.tool()
@@ -28,6 +32,9 @@ async def mem_reflect(
         since: Only analyze activity after this date (YYYY-MM-DD)
         limit: Maximum items per category
     """
+    if not 1 <= limit <= 200:
+        return "Error: limit must be between 1 and 200."
+
     app = _get_app(ctx)
     storage = app.storage
 
@@ -134,7 +141,9 @@ async def mem_reflect_save(
                         insight_id,
                         "informs_reflection",
                     )
+                except (ValueError, TypeError):
+                    logger.debug("Skipping invalid UUID in related_chunks: %s", cid)
                 except Exception:
-                    pass
+                    logger.warning("Failed to link chunk %s to reflection", cid, exc_info=True)
 
     return f"Insight saved.\n{result}"

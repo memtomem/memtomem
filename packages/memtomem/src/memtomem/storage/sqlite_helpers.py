@@ -30,6 +30,8 @@ def norm_path(p: Path) -> str:
 
 def placeholders(n: int) -> str:
     """Return ``n`` comma-separated SQL ``?`` placeholders."""
+    if n <= 0:
+        raise ValueError(f"placeholders() requires n > 0, got {n}")
     return ",".join("?" * n)
 
 

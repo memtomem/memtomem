@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -88,6 +88,15 @@ class IndexingConfig(BaseSettings):
         if v < 0:
             raise ValueError("must be non-negative")
         return v
+
+    @model_validator(mode="after")
+    def check_chunk_token_range(self) -> "IndexingConfig":
+        if self.min_chunk_tokens > self.max_chunk_tokens:
+            raise ValueError(
+                f"min_chunk_tokens ({self.min_chunk_tokens}) must be "
+                f"<= max_chunk_tokens ({self.max_chunk_tokens})"
+            )
+        return self
 
 
 class DecayConfig(BaseSettings):
@@ -304,6 +313,8 @@ def load_config_overrides(config: Mem2MemConfig) -> None:
     for section_name, updates in data.items():
         section_obj = getattr(config, section_name, None)
         if section_obj is None or not isinstance(updates, dict):
+            if section_obj is None and isinstance(updates, dict):
+                _log.warning("Unknown config section '%s' in %s (ignored)", section_name, path)
             continue
         for key, value in updates.items():
             if hasattr(section_obj, key):

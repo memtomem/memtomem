@@ -36,6 +36,9 @@ async def mem_recall(
         mem_recall(since="2025-06-01", source_filter="notes")
         mem_recall(namespace="work", limit=10)
     """
+    if not 1 <= limit <= 500:
+        return "Error: limit must be between 1 and 500."
+
     from memtomem.models import NamespaceFilter
 
     app = _get_app(ctx)

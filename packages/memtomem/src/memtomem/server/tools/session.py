@@ -107,6 +107,9 @@ async def mem_session_list(
         since: Only sessions started after this date (YYYY-MM-DD or ISO)
         limit: Maximum sessions to return (default 10)
     """
+    if not 1 <= limit <= 200:
+        return "Error: limit must be between 1 and 200."
+
     app = _get_app(ctx)
     sessions = await app.storage.list_sessions(agent_id=agent_id, since=since, limit=limit)
 

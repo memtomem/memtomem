@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from uuid import UUID
 
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+
+logger = logging.getLogger(__name__)
 
 
 @mcp.tool()
@@ -31,6 +34,11 @@ async def mem_consolidate(
         max_groups: Maximum number of groups to return
         min_group_size: Minimum chunks per group (default 3)
     """
+    if not 1 <= max_groups <= 50:
+        return "Error: max_groups must be between 1 and 50."
+    if min_group_size < 2:
+        return "Error: min_group_size must be at least 2."
+
     app = _get_app(ctx)
     effective_ns = namespace or app.current_namespace
 
@@ -155,8 +163,10 @@ async def mem_consolidate_apply(
                     "consolidated_into",
                 )
                 linked += 1
+            except (ValueError, TypeError):
+                logger.debug("Skipping invalid UUID in consolidation: %s", cid)
             except Exception:
-                pass
+                logger.warning("Failed to link chunk %s in consolidation", cid, exc_info=True)
 
     return (
         f"Consolidation applied for group {group_id}.\n"

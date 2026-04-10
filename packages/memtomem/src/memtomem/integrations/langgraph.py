@@ -133,6 +133,8 @@ class MemtomemStore:
         if file:
             target = Path(file).expanduser().resolve()
         else:
+            if not comp.config.indexing.memory_dirs:
+                return {"error": "No memory directories configured. Run 'mm init' first."}
             base = Path(comp.config.indexing.memory_dirs[0]).expanduser().resolve()
             date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             target = base / f"{date_str}.md"

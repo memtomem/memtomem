@@ -4,11 +4,24 @@ from __future__ import annotations
 
 from uuid import UUID
 
+import logging
+
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.formatters import _display_path, _format_results
 from memtomem.server.tool_registry import register
+
+logger = logging.getLogger(__name__)
+
+
+def _webhook_error_cb(task: "asyncio.Task") -> None:  # noqa: F821
+    """Log errors from fire-and-forget webhook tasks."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        logger.warning("Webhook fire failed: %s", exc)
 
 
 @mcp.tool()
@@ -93,9 +106,10 @@ async def mem_search(
     if app.webhook_manager:
         import asyncio
 
-        asyncio.create_task(
+        task = asyncio.create_task(
             app.webhook_manager.fire("search", {"query": query, "result_count": len(results)})
         )
+        task.add_done_callback(_webhook_error_cb)
 
     return output
 
@@ -120,7 +134,12 @@ async def mem_expand(
     window = max(0, min(window, 10))
     app = _get_app(ctx)
 
-    chunk = await app.storage.get_chunk(UUID(chunk_id))
+    try:
+        uid = UUID(chunk_id)
+    except (ValueError, TypeError):
+        return f"Error: invalid chunk ID format: {chunk_id}"
+
+    chunk = await app.storage.get_chunk(uid)
     if chunk is None:
         return f"Chunk {chunk_id} not found."
 

@@ -23,6 +23,8 @@ def decay_factor(age_days: float, half_life_days: float) -> float:
     """
     if age_days <= 0:
         return 1.0
+    if half_life_days <= 0:
+        return 1.0
     return math.exp(-math.log(2) * age_days / half_life_days)
 
 

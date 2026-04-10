@@ -34,15 +34,21 @@ async def mem_link(
 
     app = _get_app(ctx)
 
+    try:
+        src_uid = UUID(source_id)
+        tgt_uid = UUID(target_id)
+    except (ValueError, TypeError) as exc:
+        return f"Error: invalid UUID format: {exc}"
+
     # Verify both chunks exist
-    src = await app.storage.get_chunk(UUID(source_id))
-    tgt = await app.storage.get_chunk(UUID(target_id))
+    src = await app.storage.get_chunk(src_uid)
+    tgt = await app.storage.get_chunk(tgt_uid)
     if src is None:
         return f"Chunk {source_id} not found."
     if tgt is None:
         return f"Chunk {target_id} not found."
 
-    await app.storage.add_relation(UUID(source_id), UUID(target_id), relation_type)
+    await app.storage.add_relation(src_uid, tgt_uid, relation_type)
 
     src_preview = src.content[:60].replace("\n", " ")
     tgt_preview = tgt.content[:60].replace("\n", " ")
@@ -68,7 +74,14 @@ async def mem_unlink(
         target_id: UUID of the second chunk
     """
     app = _get_app(ctx)
-    removed = await app.storage.delete_relation(UUID(source_id), UUID(target_id))
+
+    try:
+        src_uid = UUID(source_id)
+        tgt_uid = UUID(target_id)
+    except (ValueError, TypeError) as exc:
+        return f"Error: invalid UUID format: {exc}"
+
+    removed = await app.storage.delete_relation(src_uid, tgt_uid)
     if removed:
         return f"Unlinked: {source_id[:8]}... ↔ {target_id[:8]}..."
     return "No link found between these chunks."
@@ -90,11 +103,16 @@ async def mem_related(
     """
     app = _get_app(ctx)
 
-    chunk = await app.storage.get_chunk(UUID(chunk_id))
+    try:
+        uid = UUID(chunk_id)
+    except (ValueError, TypeError):
+        return f"Error: invalid chunk ID format: {chunk_id}"
+
+    chunk = await app.storage.get_chunk(uid)
     if chunk is None:
         return f"Chunk {chunk_id} not found."
 
-    relations = await app.storage.get_related(UUID(chunk_id))
+    relations = await app.storage.get_related(uid)
     if not relations:
         return f"No related chunks for {chunk_id[:8]}..."
 

@@ -37,6 +37,8 @@ async def mem_import_notion(
     if not export_path.exists():
         return f"Error: Path not found: {export_path}"
 
+    if not app.config.indexing.memory_dirs:
+        return "Error: no memory directories configured. Run 'mm init' first."
     memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
     output_dir = memory_dir / "_imported" / "notion"
 
@@ -107,6 +109,8 @@ async def mem_import_obsidian(
     if not vault.exists() or not vault.is_dir():
         return f"Error: Obsidian vault not found: {vault}"
 
+    if not app.config.indexing.memory_dirs:
+        return "Error: no memory directories configured. Run 'mm init' first."
     memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
     output_dir = memory_dir / "_imported" / "obsidian"
 

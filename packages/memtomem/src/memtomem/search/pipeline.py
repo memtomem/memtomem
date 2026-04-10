@@ -101,7 +101,7 @@ class SearchPipeline:
             return max(0, min(override, 10))
         cfg = self._context_window_config
         if cfg and cfg.enabled:
-            return cfg.window_size
+            return max(0, min(cfg.window_size, 10))
         return 0
 
     async def _expand_context(self, results: list[SearchResult], window: int) -> list[SearchResult]:

@@ -17,7 +17,7 @@ router = APIRouter(tags=["search"])
 
 @router.get("/search", response_model=SearchResponse)
 async def search(
-    q: str = Query(..., description="Search query"),
+    q: str = Query(..., description="Search query", min_length=1, max_length=10_000),
     top_k: int = Query(10, ge=1, le=100),
     source_filter: str | None = Query(None),
     tag_filter: str | None = Query(None),
@@ -25,6 +25,10 @@ async def search(
     context_window: int = Query(0, ge=0, le=10, description="Expand ±N adjacent chunks"),
     pipeline=Depends(get_search_pipeline),
 ) -> SearchResponse:
+    q = q.strip()
+    if not q:
+        raise HTTPException(status_code=422, detail="Query cannot be empty or whitespace-only")
+
     try:
         results, rstats = await pipeline.search(
             query=q,
@@ -36,7 +40,9 @@ async def search(
         )
     except Exception as exc:
         logger.error("Search failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail="Search failed") from exc
+        raise HTTPException(
+            status_code=500, detail=f"Search failed ({type(exc).__name__})"
+        ) from exc
     out = [to_result_out(r) for r in results]
     return SearchResponse(
         results=out,

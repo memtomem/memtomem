@@ -36,6 +36,8 @@ async def mem_fetch(
         return "Error: URL must start with http:// or https://"
 
     app = _get_app(ctx)
+    if not app.config.indexing.memory_dirs:
+        return "Error: no memory directories configured. Run 'mm init' first."
     memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
     output_dir = memory_dir / "_fetched"
 
