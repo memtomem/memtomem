@@ -60,7 +60,24 @@ uv tool install memtomem    # or: pipx install memtomem
 
 Skip to [Connect to your AI editor](#connect-to-your-ai-editor).
 
-### Option B: From source (for development or testing)
+### Option B: Project dependency (per-project isolation)
+
+Add memtomem as a project dependency — version pinned in `pyproject.toml`:
+
+```bash
+uv add memtomem                 # or: uv add memtomem[all]
+```
+
+All CLI commands need the `uv run` prefix:
+```bash
+uv run mm init                  # setup wizard
+uv run mm search "query"        # search
+uv run mm web                   # web UI
+```
+
+The wizard auto-detects project installs and registers the MCP server with `uv run` instead of `uvx`.
+
+### Option C: From source (for development or testing)
 
 ```bash
 git clone https://github.com/memtomem/memtomem.git
@@ -99,8 +116,8 @@ uv run pytest              # 1101 tests pass
 The fastest way to configure everything:
 
 ```bash
-mm init        # PyPI install
-uv run mm init # Source install
+mm init         # PyPI global install
+uv run mm init  # Project or source install
 ```
 
 The wizard walks you through 7 steps. Type `b` to go back, `q` to quit at any step.
@@ -124,8 +141,11 @@ If you skipped the wizard's editor step, or want to configure manually:
 ### Claude Code
 
 ```bash
-# PyPI
+# PyPI (global)
 claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
+
+# Project dependency
+claude mcp add memtomem -s user -- uv run --directory /path/to/project memtomem-server
 
 # Source
 claude mcp add memtomem -s user -- uv run --directory /path/to/memtomem memtomem-server

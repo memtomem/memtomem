@@ -68,6 +68,26 @@ def _detect_source_dir() -> str | None:
     return None
 
 
+def _is_project_install() -> bool:
+    """Detect project-scoped install (uv add memtomem)."""
+    check = Path.cwd()
+    for _ in range(5):
+        if (check / "pyproject.toml").exists() and not (check / "packages").exists():
+            return True
+        check = check.parent
+    return False
+
+
+def _detect_project_dir() -> str | None:
+    """Find project root for project-scoped install."""
+    check = Path.cwd()
+    for _ in range(5):
+        if (check / "pyproject.toml").exists() and not (check / "packages").exists():
+            return str(check)
+        check = check.parent
+    return None
+
+
 # ── Step functions ────────────────────────────────────────────────────
 
 
@@ -221,6 +241,8 @@ def _write_config_and_summary(state: dict) -> None:
 
     source_install = state.get("source_install", False)
     source_dir = state.get("source_dir")
+    project_install = state.get("project_install", False)
+    project_dir = state.get("project_dir")
 
     # Write ~/.memtomem/config.json
     click.secho("Writing configuration...", fg="green")
@@ -249,6 +271,9 @@ def _write_config_and_summary(state: dict) -> None:
     if source_install and source_dir:
         server_cmd = "uv"
         server_args = ["run", "--directory", source_dir, "memtomem-server"]
+    elif project_install and project_dir:
+        server_cmd = "uv"
+        server_args = ["run", "--directory", project_dir, "memtomem-server"]
     else:
         server_cmd = "uvx"
         server_args = ["--from", "memtomem", "memtomem-server"]
@@ -294,7 +319,7 @@ def _write_config_and_summary(state: dict) -> None:
     click.echo(f"  Namespace:  {ns_label} (default: {state['default_ns']})")
     click.echo(f"  Search:     top_k={state['top_k']}, tokenizer={state['tokenizer']}")
     click.echo(f"  Decay:      {'on' if state['decay_enabled'] else 'off'}")
-    install_type = "source" if source_install else "PyPI"
+    install_type = "source" if source_install else "project" if project_install else "PyPI"
     click.echo(f"  Install:    {install_type}")
     click.echo()
     click.echo(f"  Config:     {config_path}")
@@ -303,7 +328,7 @@ def _write_config_and_summary(state: dict) -> None:
     click.secho("  MCP config only contains the server command (no env overrides).", dim=True)
     click.echo()
     click.secho("  Next steps:", fg="cyan")
-    run_prefix = "uv run " if source_install else ""
+    run_prefix = "uv run " if source_install or project_install else ""
     click.echo(f"    1. {run_prefix}mm index {state['memory_dir']}")
     click.echo(f"    2. {run_prefix}mm search 'your first query'")
 
@@ -311,7 +336,7 @@ def _write_config_and_summary(state: dict) -> None:
     # installed, surface a hint here rather than letting `mm web` fail later.
     from memtomem.cli.web import _missing_web_deps, _web_install_hint
 
-    if not source_install and _missing_web_deps() is not None:
+    if not source_install and not project_install and _missing_web_deps() is not None:
         click.echo(f"    3. mm web  (first: {_web_install_hint()})")
     else:
         click.echo(f"    3. {run_prefix}mm web  (browse & manage your memories)")
@@ -347,14 +372,22 @@ def init() -> None:
     click.secho("  ─────────────", fg="cyan")
     click.echo()
 
+    source_install = _is_source_install()
+    project_install = not source_install and _is_project_install()
     state: dict = {
-        "source_install": _is_source_install(),
-        "source_dir": _detect_source_dir() if _is_source_install() else None,
+        "source_install": source_install,
+        "source_dir": _detect_source_dir() if source_install else None,
+        "project_install": project_install,
+        "project_dir": _detect_project_dir() if project_install else None,
     }
 
     if state["source_install"]:
         click.secho("  Detected: source install", fg="blue")
         click.echo(f"  Source directory: {state['source_dir']}")
+        click.echo()
+    elif state["project_install"]:
+        click.secho("  Detected: project install", fg="blue")
+        click.echo(f"  Project directory: {state['project_dir']}")
         click.echo()
 
     steps = [

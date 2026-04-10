@@ -47,10 +47,23 @@ ollama pull nomic-embed-text    # ~270MB, one-time
 uv tool install memtomem        # or: pipx install memtomem
 ```
 
+<details>
+<summary><b>Project-scoped install</b></summary>
+
+Prefer per-project dependencies? Add memtomem to your project instead:
+
+```bash
+uv add memtomem                 # adds to pyproject.toml
+uv run mm init                  # use `uv run` prefix for all commands
+```
+
+</details>
+
 ### 3. Run the setup wizard
 
 ```bash
-mm init    # globally on PATH after `uv tool install` — no `uv run` needed
+mm init         # global install
+uv run mm init  # project install
 ```
 
 The 7-step wizard picks your embedding model, **creates or points at the folder you want indexed**, configures storage and namespace, and registers memtomem with Claude Code (or generates a `.mcp.json` for Cursor / Windsurf / Claude Desktop). Type `b` to go back, `q` to quit.
