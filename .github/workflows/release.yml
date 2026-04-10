@@ -15,6 +15,11 @@ name: Publish
 # previous attempt's build artifact. Keeping everything in one job means
 # every (re)run rebuilds locally and avoids the cross-attempt artifact
 # lookup entirely.
+#
+# `uv build` is given an explicit source path AND --out-dir so the
+# resulting dist/ lands at the workspace root regardless of monorepo
+# layout (uv otherwise picks the workspace root, not the cwd, when
+# building a workspace member).
 
 on:
   push:
@@ -37,16 +42,17 @@ jobs:
         with:
           version: "latest"
       - name: Build distribution
-        working-directory: packages/memtomem
-        run: uv build
+        run: uv build packages/memtomem --out-dir dist
       - name: Publish to PyPI
         if: ${{ !startsWith(github.ref_name, 'test-') }}
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          packages-dir: packages/memtomem/dist
+          packages-dir: dist
+          skip-existing: true
       - name: Publish to TestPyPI
         if: ${{ startsWith(github.ref_name, 'test-') }}
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
-          packages-dir: packages/memtomem/dist
+          packages-dir: dist
+          skip-existing: true
