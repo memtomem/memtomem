@@ -16,7 +16,7 @@ Claude Code's hook system can automate manual MCP tool calls.
 | Track tool activity | Call `mem_add` manually | **Automatic** — PostToolUse activity hook |
 | Close session on stop | Call `mem_session_end` | **Automatic** — Stop hook |
 
-> **Note**: Hooks require the CLI (`uv tool install memtomem`, or `uv run mm ...` from a git clone). `mm` is a shorthand alias for `memtomem`. The MCP server (`memtomem-server`) is a separate entry point for AI client connections.
+> **Note**: Hooks use the `mm` CLI, not the MCP server. Install via `uv tool install memtomem` (recommended), `pipx install memtomem`, or use `uv run mm ...` from a source checkout.
 
 > **STM proxy users**: If you use the [memtomem-stm](https://github.com/memtomem/memtomem-stm) proxy (separate package), it already provides automatic memory surfacing and indexing. Hooks are redundant in that setup and can be skipped.
 
