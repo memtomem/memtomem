@@ -50,7 +50,7 @@ uv tool install memtomem        # or: pipx install memtomem
 ### 3. Run the setup wizard
 
 ```bash
-mm init
+mm init    # globally on PATH after `uv tool install` — no `uv run` needed
 ```
 
 The 7-step wizard picks your embedding model, **creates or points at the folder you want indexed**, configures storage and namespace, and registers memtomem with Claude Code (or generates a `.mcp.json` for Cursor / Windsurf / Claude Desktop). Type `b` to go back, `q` to quit.

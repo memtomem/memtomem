@@ -19,7 +19,7 @@ ollama pull nomic-embed-text    # ~270MB, one-time
 uv tool install memtomem        # or: pipx install memtomem
 
 # 3. Run the 7-step setup wizard (picks embedding, memory folder, editor)
-mm init
+mm init    # on PATH after `uv tool install` — no `uv run` needed
 ```
 
 Then in your AI editor, ask:
