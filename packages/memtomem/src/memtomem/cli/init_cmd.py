@@ -302,6 +302,15 @@ def _write_config_and_summary(state: dict) -> None:
     run_prefix = "uv run " if source_install else ""
     click.echo(f"    1. {run_prefix}mm index {state['memory_dir']}")
     click.echo(f"    2. {run_prefix}mm search 'your first query'")
+
+    # Web UI is behind the [web] extra (fastapi + uvicorn). If it isn't
+    # installed, surface a hint here rather than letting `mm web` fail later.
+    from memtomem.cli.web import _missing_web_deps, _web_install_hint
+
+    if not source_install and _missing_web_deps() is not None:
+        click.echo(f"    3. mm web  (first: {_web_install_hint()})")
+    else:
+        click.echo(f"    3. {run_prefix}mm web  (browse & manage your memories)")
     click.echo()
 
 
