@@ -211,16 +211,19 @@ class StructuredChunker:
             )
         )
 
+    _MAX_DEPTH = 50
+
     def _recurse(
         self,
         file_path: Path,
         value: object,
         hierarchy: tuple[str, ...],
         chunks: list[Chunk],
+        depth: int = 0,
     ) -> None:
         serialized = json.dumps(value, indent=2, ensure_ascii=False, default=str)
 
-        if _estimate_tokens(serialized) <= self._max_tokens:
+        if depth >= self._MAX_DEPTH or _estimate_tokens(serialized) <= self._max_tokens:
             chunks.append(
                 Chunk(
                     content=serialized,
@@ -243,6 +246,7 @@ class StructuredChunker:
                     sub_val,
                     hierarchy=(*hierarchy, str(sub_key)),
                     chunks=chunks,
+                    depth=depth + 1,
                 )
             return
 
@@ -254,6 +258,7 @@ class StructuredChunker:
                     item,
                     hierarchy=(*hierarchy, f"[{i}]"),
                     chunks=chunks,
+                    depth=depth + 1,
                 )
             return
 

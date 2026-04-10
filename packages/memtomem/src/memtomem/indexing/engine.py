@@ -194,6 +194,17 @@ class IndexEngine:
         except OSError:
             return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
 
+        # Skip binary files (null bytes indicate non-text content)
+        if "\x00" in content[:8192]:
+            logger.warning("Skipping %s: appears to be a binary file", file_path.name)
+            return {
+                "total": 0,
+                "indexed": 0,
+                "skipped": 0,
+                "deleted": 0,
+                "errors": [f"{file_path.name}: binary file detected, skipping"],
+            }
+
         if self._registry.get(file_path.suffix) is None:
             return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
 

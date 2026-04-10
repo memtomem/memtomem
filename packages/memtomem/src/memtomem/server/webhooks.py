@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
+from urllib.parse import urlparse
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -15,12 +17,41 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _validate_webhook_url(url: str) -> str | None:
+    """Return an error message if the URL is unsafe, or None if valid."""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return "malformed URL"
+    if parsed.scheme not in ("http", "https"):
+        return f"unsupported scheme '{parsed.scheme}' (must be http or https)"
+    hostname = parsed.hostname or ""
+    try:
+        addr = ipaddress.ip_address(hostname)
+        if addr.is_private or addr.is_loopback or addr.is_reserved:
+            return f"private/reserved IP '{hostname}' not allowed"
+    except ValueError:
+        pass  # hostname is a DNS name, not an IP — acceptable
+    return None
+
+
 class WebhookManager:
     """Fires HTTP webhooks on memory lifecycle events."""
 
     def __init__(self, config: WebhookConfig):
         self._config = config
         self._client = None
+        if config.url:
+            err = _validate_webhook_url(config.url)
+            if err:
+                logger.warning("Webhook URL rejected: %s — webhooks disabled", err)
+                self._config = config.__class__(
+                    enabled=False,
+                    url=config.url,
+                    secret=config.secret,
+                    events=config.events,
+                    timeout_seconds=config.timeout_seconds,
+                )
 
     def _get_client(self):
         if self._client is None:

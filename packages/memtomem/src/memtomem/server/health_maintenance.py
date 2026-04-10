@@ -24,9 +24,22 @@ class MaintenanceExecutor:
         self._config = config
 
     async def cleanup_orphans(self) -> dict:
-        """Delete chunks whose source files no longer exist."""
+        """Delete chunks whose source files no longer exist.
+
+        Uses a two-pass check to avoid false positives from temporarily
+        inaccessible files (e.g., network mounts, permission changes).
+        """
+        import asyncio
+
         source_files = await self._app.storage.get_all_source_files()
-        orphaned: list[Path] = [sf for sf in source_files if not sf.exists()]
+        candidates: list[Path] = [sf for sf in source_files if not sf.exists()]
+
+        if not candidates:
+            return {"orphaned": 0, "deleted_chunks": 0}
+
+        # Second check after short delay to avoid transient failures
+        await asyncio.sleep(0.5)
+        orphaned: list[Path] = [sf for sf in candidates if not sf.exists()]
 
         if not orphaned:
             return {"orphaned": 0, "deleted_chunks": 0}
