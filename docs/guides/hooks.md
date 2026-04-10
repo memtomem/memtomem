@@ -18,7 +18,7 @@ Claude Code's hook system can automate manual MCP tool calls.
 
 > **Note**: Hooks use the `mm` CLI, not the MCP server. Install via `uv tool install memtomem` (recommended), `pipx install memtomem`, or use `uv run mm ...` from a source checkout.
 
-> **STM proxy users**: If you use the [memtomem-stm](https://github.com/memtomem/memtomem-stm) proxy (separate package), it already provides automatic memory surfacing and indexing. Hooks are redundant in that setup and can be skipped.
+> **STM proxy users**: If you use [memtomem-stm](https://github.com/memtomem/memtomem-stm) (separate package), its surfacing engine overlaps with the `UserPromptSubmit` search hook. You can skip that hook, but the other hooks (file indexing, activity tracking, session management) are still useful alongside STM.
 
 ---
 
