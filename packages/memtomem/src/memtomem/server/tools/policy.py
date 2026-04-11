@@ -34,7 +34,25 @@ async def mem_policy_add(
         name: Unique policy name
         policy_type: One of 'auto_archive', 'auto_expire', 'auto_tag'
         config: JSON config string. Examples:
-            auto_archive: {"max_age_days": 30, "archive_namespace": "archive"}
+            auto_archive (flat — single target):
+              {"max_age_days": 30, "archive_namespace": "archive"}
+
+            auto_archive (rule + categorized buckets):
+              {
+                "max_age_days": 90,
+                "age_field": "last_accessed_at",
+                "min_access_count": 3,
+                "max_importance_score": 0.3,
+                "archive_namespace_template": "archive:{first_tag}"
+              }
+              - age_field: "created_at" (default) or "last_accessed_at"
+                (null-safe: falls back to created_at via COALESCE).
+              - min_access_count: only chunks with access_count <= this.
+              - max_importance_score: only chunks with importance_score < this.
+              - archive_namespace_template: per-chunk target. Supports the
+                {first_tag} placeholder (empty tags → "misc"). Chunks already
+                in their resolved target namespace are skipped.
+
             auto_expire: {"max_age_days": 90}
             auto_tag: {"max_tags": 5}
         namespace_filter: Only apply to chunks in this namespace

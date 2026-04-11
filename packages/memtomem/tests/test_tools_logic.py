@@ -233,6 +233,231 @@ class TestPolicyEngine:
         )
         assert result.affected_count == 1
 
+    async def test_auto_archive_age_field_last_accessed_fallback(self, storage):
+        """age_field=last_accessed_at uses COALESCE with created_at for null values."""
+        old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+        recent_time = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+
+        c_null = make_chunk("null last_access")
+        c_recent = make_chunk("recent last_access")
+        c_old = make_chunk("old last_access")
+        await storage.upsert_chunks([c_null, c_recent, c_old])
+
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET created_at = ?", [old_time])
+        # c_null: last_accessed_at stays NULL → COALESCE falls back to old created_at (eligible)
+        db.execute(
+            "UPDATE chunks SET last_accessed_at = ? WHERE id = ?",
+            [recent_time, str(c_recent.id)],
+        )
+        db.execute(
+            "UPDATE chunks SET last_accessed_at = ? WHERE id = ?",
+            [old_time, str(c_old.id)],
+        )
+        db.commit()
+
+        result = await execute_auto_archive(
+            storage,
+            {"max_age_days": 30, "age_field": "last_accessed_at"},
+            namespace=None,
+            dry_run=False,
+        )
+        assert result.affected_count == 2  # c_null + c_old, not c_recent
+
+        row = db.execute(
+            "SELECT namespace FROM chunks WHERE id = ?", [str(c_recent.id)]
+        ).fetchone()
+        assert row[0] == "default"
+
+    async def test_auto_archive_min_access_count_filter(self, storage):
+        """min_access_count excludes chunks accessed more than the threshold."""
+        old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+
+        c_cold = make_chunk("never accessed")
+        c_hot = make_chunk("accessed a lot")
+        await storage.upsert_chunks([c_cold, c_hot])
+
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET created_at = ?", [old_time])
+        db.execute(
+            "UPDATE chunks SET access_count = 0 WHERE id = ?", [str(c_cold.id)]
+        )
+        db.execute(
+            "UPDATE chunks SET access_count = 10 WHERE id = ?", [str(c_hot.id)]
+        )
+        db.commit()
+
+        result = await execute_auto_archive(
+            storage,
+            {"max_age_days": 30, "min_access_count": 3},
+            namespace=None,
+            dry_run=True,
+        )
+        assert result.affected_count == 1  # only c_cold (0 <= 3)
+
+    async def test_auto_archive_max_importance_score_filter(self, storage):
+        """max_importance_score excludes chunks above the threshold."""
+        old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+
+        c_low = make_chunk("low priority")
+        c_high = make_chunk("high priority")
+        await storage.upsert_chunks([c_low, c_high])
+
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET created_at = ?", [old_time])
+        db.execute(
+            "UPDATE chunks SET importance_score = 0.1 WHERE id = ?", [str(c_low.id)]
+        )
+        db.execute(
+            "UPDATE chunks SET importance_score = 0.8 WHERE id = ?", [str(c_high.id)]
+        )
+        db.commit()
+
+        result = await execute_auto_archive(
+            storage,
+            {"max_age_days": 30, "max_importance_score": 0.5},
+            namespace=None,
+            dry_run=True,
+        )
+        assert result.affected_count == 1  # only c_low (0.1 < 0.5)
+
+    async def test_auto_archive_namespace_template_first_tag(self, storage):
+        """archive_namespace_template expands {first_tag} per chunk."""
+        old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+
+        c_dec = make_chunk("a decision", tags=("decisions", "important"))
+        c_tech = make_chunk("a tech note", tags=("tech",))
+        await storage.upsert_chunks([c_dec, c_tech])
+
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET created_at = ?", [old_time])
+        db.commit()
+
+        result = await execute_auto_archive(
+            storage,
+            {
+                "max_age_days": 30,
+                "archive_namespace_template": "archive:{first_tag}",
+            },
+            namespace=None,
+            dry_run=False,
+        )
+        assert result.affected_count == 2
+        assert "archive:decisions: 1" in result.details
+        assert "archive:tech: 1" in result.details
+
+        row = db.execute(
+            "SELECT namespace FROM chunks WHERE id = ?", [str(c_dec.id)]
+        ).fetchone()
+        assert row[0] == "archive:decisions"
+
+        row = db.execute(
+            "SELECT namespace FROM chunks WHERE id = ?", [str(c_tech.id)]
+        ).fetchone()
+        assert row[0] == "archive:tech"
+
+    async def test_auto_archive_template_misc_fallback(self, storage):
+        """Empty tags resolve {first_tag} to 'misc'."""
+        old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+
+        c_empty = make_chunk("no tags")
+        await storage.upsert_chunks([c_empty])
+
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET created_at = ?", [old_time])
+        db.commit()
+
+        result = await execute_auto_archive(
+            storage,
+            {
+                "max_age_days": 30,
+                "archive_namespace_template": "archive:{first_tag}",
+            },
+            namespace=None,
+            dry_run=False,
+        )
+        assert result.affected_count == 1
+        assert "archive:misc: 1" in result.details
+
+        row = db.execute(
+            "SELECT namespace FROM chunks WHERE id = ?", [str(c_empty.id)]
+        ).fetchone()
+        assert row[0] == "archive:misc"
+
+    async def test_auto_archive_template_skips_self_moves(self, storage):
+        """Chunks already in their resolved target namespace are skipped."""
+        old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+
+        c_already = make_chunk(
+            "already archived", tags=("decisions",), namespace="archive:decisions"
+        )
+        c_new = make_chunk("to archive", tags=("decisions",))
+        await storage.upsert_chunks([c_already, c_new])
+
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET created_at = ?", [old_time])
+        db.commit()
+
+        result = await execute_auto_archive(
+            storage,
+            {
+                "max_age_days": 30,
+                "archive_namespace_template": "archive:{first_tag}",
+            },
+            namespace=None,
+            dry_run=False,
+        )
+        assert result.affected_count == 1  # only c_new
+
+    async def test_auto_archive_combined_rule(self, storage):
+        """All new rule fields combine with AND semantics."""
+        old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+
+        c_match = make_chunk("matches everything", tags=("misc",))
+        c_hot = make_chunk("access count too high", tags=("misc",))
+        c_important = make_chunk("importance too high", tags=("misc",))
+        await storage.upsert_chunks([c_match, c_hot, c_important])
+
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET created_at = ?", [old_time])
+        db.execute(
+            "UPDATE chunks SET last_accessed_at=?, access_count=?, importance_score=? WHERE id=?",
+            [old_time, 1, 0.1, str(c_match.id)],
+        )
+        db.execute(
+            "UPDATE chunks SET last_accessed_at=?, access_count=?, importance_score=? WHERE id=?",
+            [old_time, 10, 0.1, str(c_hot.id)],
+        )
+        db.execute(
+            "UPDATE chunks SET last_accessed_at=?, access_count=?, importance_score=? WHERE id=?",
+            [old_time, 1, 0.8, str(c_important.id)],
+        )
+        db.commit()
+
+        result = await execute_auto_archive(
+            storage,
+            {
+                "max_age_days": 30,
+                "age_field": "last_accessed_at",
+                "min_access_count": 3,
+                "max_importance_score": 0.5,
+            },
+            namespace=None,
+            dry_run=True,
+        )
+        assert result.affected_count == 1  # only c_match passes every gate
+
+    async def test_auto_archive_invalid_age_field(self, storage):
+        """Invalid age_field returns a typed error result and mutates nothing."""
+        result = await execute_auto_archive(
+            storage,
+            {"max_age_days": 30, "age_field": "bogus"},
+            namespace=None,
+            dry_run=False,
+        )
+        assert result.affected_count == 0
+        assert "age_field must be" in result.details
+
     async def test_auto_expire_dry_run(self, storage):
         """Dry-run should count expired chunks but not delete."""
         old_time = (datetime.now(timezone.utc) - timedelta(days=100)).isoformat()
