@@ -21,7 +21,7 @@
   --radius:  6px;
   --font: 'Inter', system-ui, -apple-system, sans-serif;
   --mono: 'JetBrains Mono', 'Fira Code', monospace;
-  /* Aliases used by STM dashboard & proxy sections */
+  /* Semantic bg/text aliases used by harness UI sections */
   --bg-primary:     var(--surface);
   --bg-secondary:   var(--bg);
   --bg-card:        var(--surface);
@@ -1550,9 +1550,6 @@ select:focus-visible {
 
   /* Tab panels need scroll */
   .tab-panel.active { overflow-y: auto; }
-
-  /* Proxy: 2-col on mobile */
-  .proxy-metrics-summary { grid-template-columns: repeat(2, 1fr); }
 }
 
 /* ── Sprint 5: Chunk-type filter ── */
@@ -1875,70 +1872,6 @@ select:focus-visible {
 /* Task F: Tag empty hint */
 .tag-empty-hint { font-size: 0.78rem; color: var(--muted); font-style: italic; padding: 4px 0; }
 
-/* ── Proxy Settings ─────────────────────────────── */
-.proxy-layout { display: flex; flex-direction: column; gap: 16px; }
-.proxy-status-bar {
-  display: flex; align-items: center; gap: 8px;
-  padding: 10px 14px; border-radius: 8px;
-  background: var(--card-bg); border: 1px solid var(--border);
-  font-size: 0.88rem;
-}
-.proxy-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-.proxy-dot-active { background: var(--green); box-shadow: 0 0 6px var(--green); }
-.proxy-dot-inactive { background: var(--muted); }
-.proxy-config-path { margin-left: auto; color: var(--muted); font-size: 0.78rem; font-family: var(--mono); }
-.proxy-servers { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
-.proxy-server-card { padding: 12px 14px; }
-.proxy-server-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.proxy-server-name { font-weight: 600; font-size: 0.92rem; }
-.proxy-cache-section { padding: 14px; }
-.proxy-section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-.proxy-section-header h3 { font-size: 0.95rem; font-weight: 600; }
-.proxy-cache-summary { display: flex; gap: 16px; margin-bottom: 8px; }
-.proxy-cache-stat { font-size: 0.88rem; }
-.proxy-auto-index { padding: 14px; }
-.proxy-auto-index h3 { font-size: 0.95rem; font-weight: 600; margin-bottom: 8px; }
-
-/* Proxy Performance Metrics */
-.proxy-metrics-section { padding: 14px; }
-.proxy-metrics-actions { display: flex; gap: 8px; align-items: center; }
-.proxy-metrics-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
-.proxy-metric-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; text-align: center; }
-.proxy-metric-card .metric-value { font-size: 1.4rem; font-weight: 700; color: var(--accent); }
-.proxy-metric-card .metric-label { font-size: 0.75rem; color: var(--muted); margin-top: 4px; }
-.proxy-savings-bar { height: 6px; background: var(--border); border-radius: 3px; margin-top: 6px; overflow: hidden; }
-.proxy-savings-bar-fill { height: 100%; background: var(--green); border-radius: 3px; transition: width 0.3s; }
-.proxy-breakdown { margin-top: 12px; }
-.proxy-breakdown h4 { font-size: 0.85rem; font-weight: 600; margin-bottom: 8px; color: var(--muted); }
-
-/* Proxy Call History */
-.proxy-history-section { padding: 14px; }
-.proxy-history-filters { display: flex; gap: 8px; }
-.proxy-history-filters .input-sm { width: 120px; }
-.proxy-history-table { overflow-x: auto; }
-.proxy-history-table table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
-.proxy-history-table th { text-align: left; padding: 6px 8px; border-bottom: 2px solid var(--border); font-weight: 600; color: var(--muted); font-size: 0.75rem; text-transform: uppercase; }
-.proxy-history-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
-.proxy-history-table tr:hover td { background: var(--bg-hover); }
-.proxy-history-pagination { display: flex; justify-content: center; gap: 8px; margin-top: 10px; }
-
-/* Proxy Compression Evaluator */
-.proxy-eval-section { padding: 14px; }
-.proxy-eval-form { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
-.proxy-eval-textarea { width: 100%; resize: vertical; font-family: var(--mono); font-size: 0.82rem; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); }
-.proxy-eval-controls { display: flex; align-items: center; gap: 12px; }
-.proxy-eval-results table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
-.proxy-eval-results th { text-align: left; padding: 6px 8px; border-bottom: 2px solid var(--border); font-weight: 600; color: var(--muted); }
-.proxy-eval-results td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
-
-/* Langfuse link */
-.proxy-langfuse-link { font-size: 0.82rem; margin-left: 12px; color: var(--accent); text-decoration: none; font-weight: 500; }
-.proxy-langfuse-link:hover { text-decoration: underline; }
-.proxy-trace-link { color: var(--accent); text-decoration: none; font-size: 0.9rem; }
-.proxy-trace-link:hover { text-decoration: underline; }
-.proxy-filter-link { cursor: pointer; color: var(--accent); }
-.proxy-filter-link:hover { text-decoration: underline; }
-
 /* ═══════════════════════════════════════════════════════════════
    Phase 4a: Command Palette (Cmd+K)
    ═══════════════════════════════════════════════════════════════ */
@@ -2064,49 +1997,12 @@ select:focus-visible {
 
 
 /* ═══════════════════════════════════════════════════════════════
-   Phase 3a: Proxy Diff View
-   ═══════════════════════════════════════════════════════════════ */
-.proxy-history-table tr { cursor: pointer; }
-.proxy-history-table tr:hover td { background: rgba(var(--accent-rgb),0.06); }
-.proxy-diff-row td { padding: 0 !important; }
-.proxy-diff-body {
-  display: flex; gap: 0; max-height: 300px; overflow: hidden;
-  border-top: 1px solid var(--border);
-}
-.proxy-diff-pane {
-  flex: 1; overflow-y: auto; padding: 10px 12px;
-  font-family: var(--mono); font-size: 0.75rem; line-height: 1.5;
-  white-space: pre-wrap; word-break: break-word;
-}
-.proxy-diff-pane-left { background: rgba(224,90,90,0.04); }
-.proxy-diff-pane-right { background: rgba(76,175,125,0.04); }
-.proxy-diff-pane-header {
-  font-size: 0.68rem; color: var(--muted); font-weight: 600;
-  text-transform: uppercase; margin-bottom: 6px;
-}
-.proxy-diff-sep { width: 1px; background: var(--border); flex-shrink: 0; }
-
-/* ═══════════════════════════════════════════════════════════════
    Phase 3b: Server Health Indicator
    ═══════════════════════════════════════════════════════════════ */
 .health-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
 .health-ok { background: var(--green); box-shadow: 0 0 4px var(--green); }
 .health-slow { background: var(--yellow); box-shadow: 0 0 4px var(--yellow); }
 .health-down { background: var(--danger); box-shadow: 0 0 4px var(--danger); }
-
-/* ═══════════════════════════════════════════════════════════════
-   Phase 3c: Compression Trend Chart
-   ═══════════════════════════════════════════════════════════════ */
-.proxy-trend-chart { min-height: 160px; position: relative; margin-bottom: 12px; }
-.proxy-trend-chart svg { width: 100%; }
-.trend-line { fill: none; stroke-width: 2; }
-.trend-dot { r: 3; stroke: var(--surface); stroke-width: 1.5; }
-.trend-axis text { font-size: 0.65rem; fill: var(--muted); }
-.trend-axis line, .trend-axis path { stroke: var(--border); }
-.trend-grid line { stroke: var(--border); stroke-dasharray: 2 4; }
-.trend-legend { display: flex; gap: 12px; justify-content: center; }
-.trend-legend-item { display: flex; align-items: center; gap: 4px; font-size: 0.72rem; color: var(--muted); }
-.trend-legend-line { width: 16px; height: 2px; border-radius: 1px; }
 
 /* ── Tab Help Bar (dismissible description per tab) ── */
 .tab-help-bar {
