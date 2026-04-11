@@ -10,7 +10,7 @@ from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 
 # Known --include values (mirrors cli.context_cmd._KNOWN_INCLUDES).
-_KNOWN_INCLUDES: frozenset[str] = frozenset({"skills", "agents"})
+_KNOWN_INCLUDES: frozenset[str] = frozenset({"skills", "agents", "commands"})
 
 
 def _find_project_root() -> Path:
@@ -48,12 +48,14 @@ async def mem_context_detect(
     """Detect agent configuration files in the current project.
 
     Scans for CLAUDE.md, .cursorrules, GEMINI.md, AGENTS.md,
-    and .github/copilot-instructions.md. Pass ``include="skills,agents"`` to
-    also list runtime skill directories and sub-agent files.
+    and .github/copilot-instructions.md. Pass
+    ``include="skills,agents,commands"`` to also list runtime skill
+    directories, sub-agent files, and slash-command files.
     """
     from memtomem.context.detector import (
         detect_agent_dirs,
         detect_agent_files,
+        detect_command_dirs,
         detect_skill_dirs,
     )
 
@@ -94,6 +96,18 @@ async def mem_context_detect(
         else:
             lines.append("No sub-agent files found.")
 
+    if "commands" in inc:
+        cmds = detect_command_dirs(root)
+        if lines:
+            lines.append("")
+        if cmds:
+            lines.append(f"{len(cmds)} slash-command file(s):")
+            for c in cmds:
+                rel = c.path.relative_to(root) if c.path.is_relative_to(root) else c.path
+                lines.append(f"  {c.agent}: {rel} ({c.size} bytes)")
+        else:
+            lines.append("No slash-command files found.")
+
     return "\n".join(lines) if lines else "Nothing detected."
 
 
@@ -110,10 +124,16 @@ async def mem_context_generate(
 
     Args:
         agent: Agent name (claude, cursor, gemini, codex, copilot) or "all".
-        include: Comma-separated extra artifact kinds (``skills``, ``agents``).
-        strict: Promote dropped-field warnings to errors when converting sub-agents.
+        include: Comma-separated extra artifact kinds
+            (``skills``, ``agents``, ``commands``).
+        strict: Promote dropped-field warnings to errors when converting
+            sub-agents or slash commands.
     """
     from memtomem.context.agents import StrictDropError, generate_all_agents
+    from memtomem.context.commands import (
+        StrictDropError as CommandStrictDropError,
+        generate_all_commands,
+    )
     from memtomem.context.generator import GENERATORS
     from memtomem.context.parser import CONTEXT_FILENAME, parse_context
     from memtomem.context.skills import generate_all_skills
@@ -175,6 +195,25 @@ async def mem_context_generate(
         for runtime, agent_name, dropped in agent_result.dropped:
             results.append(f"  {runtime} dropped {dropped} from '{agent_name}'")
 
+    if "commands" in inc:
+        try:
+            command_result = generate_all_commands(root, strict=strict)
+        except CommandStrictDropError as exc:
+            return f"strict error: {exc}"
+        if command_result.generated:
+            results.append("")
+            results.append(f"Command fan-out: {len(command_result.generated)}")
+            for runtime, path in command_result.generated:
+                try:
+                    rel = path.relative_to(root) if path.is_relative_to(root) else path
+                except ValueError:
+                    rel = path
+                results.append(f"  {runtime}: {rel}")
+        for runtime, reason in command_result.skipped:
+            results.append(f"  skipped {runtime}: {reason}")
+        for runtime, cmd_name, dropped in command_result.dropped:
+            results.append(f"  {runtime} dropped {dropped} from '{cmd_name}'")
+
     return "Generated:\n" + "\n".join(results)
 
 
@@ -187,10 +226,11 @@ async def mem_context_diff(
 ) -> str:
     """Show sync status between context.md and agent files.
 
-    Pass ``include="skills,agents"`` to also compare canonical skills /
-    sub-agents against their runtime counterparts.
+    Pass ``include="skills,agents,commands"`` to also compare canonical
+    skills, sub-agents, and slash commands against their runtime counterparts.
     """
     from memtomem.context.agents import diff_agents
+    from memtomem.context.commands import diff_commands
     from memtomem.context.detector import detect_agent_files
     from memtomem.context.generator import GENERATORS
     from memtomem.context.parser import CONTEXT_FILENAME, parse_context
@@ -244,6 +284,17 @@ async def mem_context_diff(
         else:
             lines.append("No sub-agents to compare.")
 
+    if "commands" in inc:
+        rows = diff_commands(root)
+        if rows:
+            if lines:
+                lines.append("")
+            lines.append("Commands:")
+            for runtime, name, status in rows:
+                lines.append(f"  {runtime}: {name} [{status}]")
+        else:
+            lines.append("No commands to compare.")
+
     return "\n".join(lines) if lines else "Nothing to compare."
 
 
@@ -257,11 +308,16 @@ async def mem_context_sync(
 ) -> str:
     """Sync .memtomem/context.md to all detected agent files.
 
-    Pass ``include="skills,agents"`` to also fan out ``.memtomem/skills/`` and
-    ``.memtomem/agents/`` to their runtime targets (Claude Code, Gemini CLI,
-    Codex CLI). ``strict=True`` turns dropped sub-agent fields into errors.
+    Pass ``include="skills,agents,commands"`` to also fan out
+    ``.memtomem/skills/``, ``.memtomem/agents/``, and ``.memtomem/commands/``
+    to their runtime targets (Claude Code, Gemini CLI, Codex CLI).
+    ``strict=True`` turns dropped sub-agent / command fields into errors.
     """
     from memtomem.context.agents import StrictDropError, generate_all_agents
+    from memtomem.context.commands import (
+        StrictDropError as CommandStrictDropError,
+        generate_all_commands,
+    )
     from memtomem.context.detector import detect_agent_files
     from memtomem.context.generator import GENERATORS
     from memtomem.context.parser import CONTEXT_FILENAME, parse_context
@@ -328,5 +384,25 @@ async def mem_context_sync(
             results.append(f"  skipped {runtime}: {reason}")
         for runtime, agent_name, dropped in agent_result.dropped:
             results.append(f"  {runtime} dropped {dropped} from '{agent_name}'")
+
+    if "commands" in inc:
+        try:
+            command_result = generate_all_commands(root, strict=strict)
+        except CommandStrictDropError as exc:
+            return f"strict error: {exc}"
+        if command_result.generated:
+            if results:
+                results.append("")
+            results.append(f"Command fan-out: {len(command_result.generated)}")
+            for runtime, path in command_result.generated:
+                try:
+                    rel = path.relative_to(root) if path.is_relative_to(root) else path
+                except ValueError:
+                    rel = path
+                results.append(f"  {runtime}: {rel}")
+        for runtime, reason in command_result.skipped:
+            results.append(f"  skipped {runtime}: {reason}")
+        for runtime, cmd_name, dropped in command_result.dropped:
+            results.append(f"  {runtime} dropped {dropped} from '{cmd_name}'")
 
     return "Synced:\n" + "\n".join(results) if results else "Nothing to sync."

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-DetectedKind = Literal["file", "skill_dir", "agent_file"]
+DetectedKind = Literal["file", "skill_dir", "agent_file", "command_file"]
 
 
 @dataclass
@@ -49,6 +49,15 @@ SKILL_DIRS: dict[str, list[str]] = {
 AGENT_DIRS: dict[str, list[str]] = {
     "claude_agents": [".claude/agents"],
     "gemini_agents": [".gemini/agents"],
+}
+
+# Custom-command-runtime name → project-scope directories containing command files.
+# Claude uses ``.md`` files, Gemini uses ``.toml`` — the detector reports both so
+# context/commands.py can reverse-import whichever is present. Codex is deferred to
+# Phase 3.5 (upstream-deprecated) and omitted here.
+COMMAND_DIRS: dict[str, tuple[str, str]] = {
+    "claude_commands": (".claude/commands", ".md"),
+    "gemini_commands": (".gemini/commands", ".toml"),
 }
 
 
@@ -140,23 +149,54 @@ def detect_agent_dirs(project_root: Path) -> list[DetectedFile]:
     return sorted(found, key=lambda f: (f.agent, str(f.path)))
 
 
+def detect_command_dirs(project_root: Path) -> list[DetectedFile]:
+    """Scan project root for runtime-specific slash-command files.
+
+    Each file under a ``COMMAND_DIRS`` entry (matching the runtime's expected
+    extension — ``.md`` for Claude, ``.toml`` for Gemini) is reported as a
+    ``DetectedFile`` with ``kind="command_file"``.
+    """
+    found: list[DetectedFile] = []
+
+    for runtime, (rel_path, suffix) in COMMAND_DIRS.items():
+        root = project_root / rel_path
+        if not root.is_dir():
+            continue
+        for cmd_file in sorted(root.iterdir()):
+            if not cmd_file.is_file() or cmd_file.suffix != suffix:
+                continue
+            found.append(
+                DetectedFile(
+                    agent=runtime,
+                    path=cmd_file,
+                    size=cmd_file.stat().st_size,
+                    kind="command_file",
+                )
+            )
+
+    return sorted(found, key=lambda f: (f.agent, str(f.path)))
+
+
 def detect_all(project_root: Path) -> list[DetectedFile]:
-    """Return project-memory files, skill directories, and sub-agent files."""
+    """Return project-memory files, skill directories, sub-agent files, and commands."""
     return (
         detect_agent_files(project_root)
         + detect_skill_dirs(project_root)
         + detect_agent_dirs(project_root)
+        + detect_command_dirs(project_root)
     )
 
 
 __all__ = [
     "AGENT_DIRS",
     "AGENT_FILES",
+    "COMMAND_DIRS",
     "DetectedFile",
     "DetectedKind",
     "SKILL_DIRS",
     "detect_agent_dirs",
     "detect_agent_files",
     "detect_all",
+    "detect_command_dirs",
     "detect_skill_dirs",
 ]

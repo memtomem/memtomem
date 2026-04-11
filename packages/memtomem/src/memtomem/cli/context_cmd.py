@@ -12,9 +12,16 @@ from memtomem.context.agents import (
     extract_agents_to_canonical,
     generate_all_agents,
 )
+from memtomem.context.commands import (
+    StrictDropError as CommandStrictDropError,
+    diff_commands,
+    extract_commands_to_canonical,
+    generate_all_commands,
+)
 from memtomem.context.detector import (
     detect_agent_dirs,
     detect_agent_files,
+    detect_command_dirs,
     detect_skill_dirs,
 )
 from memtomem.context.generator import (
@@ -28,8 +35,8 @@ from memtomem.context.skills import (
     generate_all_skills,
 )
 
-# Phase 1-2 supports --include={skills,agents}. Phase 3+ will add commands / hooks / mcp.
-_KNOWN_INCLUDES: frozenset[str] = frozenset({"skills", "agents"})
+# Phase 1-3 supports --include={skills,agents,commands}. Phase 4 will add hooks / mcp.
+_KNOWN_INCLUDES: frozenset[str] = frozenset({"skills", "agents", "commands"})
 
 
 def _find_project_root() -> Path:
@@ -182,6 +189,66 @@ def _print_agents_diff(root: Path) -> None:
         click.secho(f"  {runtime:15s}  {name}  [{status}]", fg=color)
 
 
+# ── Slash-command sub-handlers (Phase 3) ─────────────────────────────
+
+
+def _print_commands_detect(root: Path) -> None:
+    cmds = detect_command_dirs(root)
+    if not cmds:
+        click.echo("  (no slash command files)")
+        return
+    click.secho(f"  {len(cmds)} command file(s):", fg="cyan")
+    for c in cmds:
+        rel = c.path.relative_to(root) if c.path.is_relative_to(root) else c.path
+        click.echo(f"    {c.agent:17s}  {rel}  ({c.size} bytes)")
+
+
+def _print_commands_init(root: Path, overwrite: bool) -> None:
+    imported = extract_commands_to_canonical(root, overwrite=overwrite)
+    if imported:
+        click.secho(
+            f"  Imported {len(imported)} command(s) → .memtomem/commands/", fg="green"
+        )
+        for p in imported:
+            click.echo(f"    {p.stem}")
+    else:
+        click.echo("  (no runtime commands to import)")
+
+
+def _print_commands_generate(root: Path, strict: bool) -> None:
+    try:
+        result = generate_all_commands(root, strict=strict)
+    except CommandStrictDropError as exc:
+        click.secho(f"  [strict] {exc}", fg="red")
+        raise click.Abort() from exc
+
+    if result.generated:
+        click.secho(f"  Command fan-out: {len(result.generated)}", fg="green")
+        for runtime, path in result.generated:
+            try:
+                rel = path.relative_to(root) if path.is_relative_to(root) else path
+            except ValueError:
+                rel = path
+            click.echo(f"    {runtime:17s}  {rel}")
+    for runtime, reason in result.skipped:
+        click.secho(f"  skipped {runtime}: {reason}", fg="yellow")
+    for runtime, cmd_name, dropped in result.dropped:
+        click.secho(
+            f"  {runtime} dropped {dropped} from '{cmd_name}'",
+            fg="yellow",
+        )
+
+
+def _print_commands_diff(root: Path) -> None:
+    rows = diff_commands(root)
+    if not rows:
+        click.echo("  (no commands to compare)")
+        return
+    for runtime, name, status in rows:
+        color = "green" if status == "in sync" else "yellow"
+        click.secho(f"  {runtime:17s}  {name}  [{status}]", fg=color)
+
+
 @click.group("context")
 def context() -> None:
     """Manage unified agent context (CLAUDE.md, .cursorrules, GEMINI.md, etc.)."""
@@ -212,6 +279,10 @@ def detect_cmd(include: tuple[str, ...]) -> None:
     if "agents" in inc:
         click.echo("")
         _print_agents_detect(root)
+
+    if "commands" in inc:
+        click.echo("")
+        _print_commands_detect(root)
 
 
 @context.command("init")
@@ -273,6 +344,10 @@ def init_cmd(include: tuple[str, ...], overwrite: bool) -> None:
         click.echo("")
         _print_agents_init(root, overwrite=overwrite)
 
+    if "commands" in inc:
+        click.echo("")
+        _print_commands_init(root, overwrite=overwrite)
+
 
 @context.command("generate")
 @click.option("--agent", "-a", default="all", help="Agent name or 'all'")
@@ -325,6 +400,10 @@ def generate_cmd(agent: str, include: tuple[str, ...], strict: bool) -> None:
         click.echo("")
         _print_agents_generate(root, strict=strict)
 
+    if "commands" in inc:
+        click.echo("")
+        _print_commands_generate(root, strict=strict)
+
     click.secho("Done.", fg="green")
 
 
@@ -372,6 +451,10 @@ def diff_cmd(include: tuple[str, ...]) -> None:
     if "agents" in inc:
         click.echo("")
         _print_agents_diff(root)
+
+    if "commands" in inc:
+        click.echo("")
+        _print_commands_diff(root)
 
 
 @context.command("sync")
@@ -423,5 +506,9 @@ def sync_cmd(include: tuple[str, ...], strict: bool) -> None:
     if "agents" in inc:
         click.echo("")
         _print_agents_generate(root, strict=strict)
+
+    if "commands" in inc:
+        click.echo("")
+        _print_commands_generate(root, strict=strict)
 
     click.secho("Synced.", fg="green")
