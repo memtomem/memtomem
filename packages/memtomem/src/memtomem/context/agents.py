@@ -383,9 +383,7 @@ def generate_all_agents(
 
     canonicals = list_canonical_agents(project_root)
     if not canonicals:
-        return AgentSyncResult(
-            generated=[], dropped=[], skipped=[("<all>", "no canonical agents")]
-        )
+        return AgentSyncResult(generated=[], dropped=[], skipped=[("<all>", "no canonical agents")])
 
     targets = runtimes if runtimes is not None else list(AGENT_GENERATORS.keys())
     for target in targets:
