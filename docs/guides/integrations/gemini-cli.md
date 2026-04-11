@@ -156,9 +156,14 @@ mm context sync --include=skills
 
 # Sub-agents: .memtomem/agents/<name>.md → .claude/agents/, .gemini/agents/, ~/.codex/agents/
 mm context sync --include=agents
+
+# Slash commands: .memtomem/commands/<name>.md → .claude/commands/*.md and .gemini/commands/*.toml
+mm context sync --include=commands
 ```
 
 > **Note**: Gemini CLI's sub-agent format is marked experimental as of 2026-03; the frontmatter schema may still change. memtomem currently maps `name`, `description`, `tools`, `model`, `kind`, `temperature` and drops the Claude-specific `skills` + `isolation` fields on the Gemini side.
+
+For slash commands memtomem parses Claude-flavoured Markdown (`$ARGUMENTS` placeholder) and emits Gemini TOML with the `prompt` + `description` fields and the `{{args}}` placeholder. Claude-only fields (`argument-hint`, `allowed-tools`, `model`) are dropped with a warning. Round-trip Gemini TOML → canonical Markdown is lossless because the TOML schema only has two fields.
 
 See the [full matrix](../user-guide.md#agent-context-management--mm-context) in the user guide.
 

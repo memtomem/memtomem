@@ -753,13 +753,14 @@ GEMINI.md                            ← same rules (copy-paste again)
 
 ### The solution
 
-memtomem treats `.memtomem/` as the single source of truth for three artifact kinds:
+memtomem treats `.memtomem/` as the single source of truth for four artifact kinds:
 
 | Artifact | Canonical source | Fan-out target(s) |
 |---|---|---|
 | Project memory | `.memtomem/context.md` | `CLAUDE.md`, `.cursorrules`, `GEMINI.md`, `AGENTS.md`, `.github/copilot-instructions.md` |
 | Agent skills (Phase 1) | `.memtomem/skills/<name>/SKILL.md` | `.claude/skills/`, `.gemini/skills/`, `.agents/skills/` |
 | Sub-agents (Phase 2) | `.memtomem/agents/<name>.md` | `.claude/agents/<name>.md`, `.gemini/agents/<name>.md`, `~/.codex/agents/<name>.toml` |
+| Slash commands (Phase 3) | `.memtomem/commands/<name>.md` | `.claude/commands/<name>.md`, `.gemini/commands/<name>.toml` |
 
 ```mermaid
 flowchart TB
@@ -858,14 +859,15 @@ mem_do(action="context_generate", params={"agent": "cursor"})
 mem_do(action="context_diff")
 mem_do(action="context_sync")
 
-# Phase 1/2 artifact fan-out via the same tools
-mem_do(action="context_detect", params={"include": "skills,agents"})
+# Phase 1/2/3 artifact fan-out via the same tools
+mem_do(action="context_detect", params={"include": "skills,agents,commands"})
 mem_do(action="context_sync",   params={"include": "skills"})
 mem_do(action="context_sync",   params={"include": "agents", "strict": True})
-mem_do(action="context_diff",   params={"include": "skills,agents"})
+mem_do(action="context_sync",   params={"include": "commands"})
+mem_do(action="context_diff",   params={"include": "skills,agents,commands"})
 ```
 
-All four `mem_context_*` tools accept the same `include` parameter (comma-separated, values: `skills`, `agents`). `mem_context_generate` and `mem_context_sync` additionally accept `strict=True` to fail on any sub-agent field drop.
+All four `mem_context_*` tools accept the same `include` parameter (comma-separated, values: `skills`, `agents`, `commands`). `mem_context_generate` and `mem_context_sync` additionally accept `strict=True` to fail on any sub-agent or command field drop.
 
 ### Agent-specific sections
 
@@ -998,15 +1000,82 @@ mm context sync --include=skills,agents
 mm context diff --include=skills,agents
 ```
 
+### Slash commands fan-out — `--include=commands`
+
+Custom slash commands (`/review`, `/fix-issue`, etc.) are the fourth artifact kind. Claude Code and Gemini CLI both support user-authored commands, but they disagree on the file format: Claude uses Markdown + YAML frontmatter while Gemini uses TOML. memtomem parses one canonical Markdown file and emits the correct variant for each runtime, rewriting the argument placeholder (`$ARGUMENTS` ↔ `{{args}}`) along the way.
+
+```mermaid
+flowchart TB
+    CMD[".memtomem/commands/&lt;name&gt;.md"]
+    CMD -->|mm context sync --include=commands| C[".claude/commands/&lt;name&gt;.md"]
+    CMD -->|mm context sync --include=commands| G[".gemini/commands/&lt;name&gt;.toml"]
+```
+
+Canonical `.memtomem/commands/review.md`:
+
+```markdown
+---
+description: Review a file for issues
+argument-hint: [file-path]
+allowed-tools: [Read, Grep]
+model: sonnet
+---
+
+Review the file at $ARGUMENTS and report issues.
+```
+
+| Canonical field | `.claude/commands/*.md` | `.gemini/commands/*.toml` |
+|---|---|---|
+| `description` | ✓ | ✓ |
+| body (prompt) | ✓ (`$ARGUMENTS` preserved) | → `prompt` (rewritten to `{{args}}`) |
+| `argument-hint` | ✓ | **dropped** |
+| `allowed-tools` | ✓ | **dropped** |
+| `model` | ✓ | **dropped** |
+
+Resulting Gemini TOML:
+
+```toml
+description = "Review a file for issues"
+prompt = "Review the file at {{args}} and report issues."
+```
+
+Because Gemini's TOML schema only has two fields (`description` and `prompt`) and the placeholder rewrite is reversible, **Phase 3 conversions are lossless in both directions** — unlike Phase 2 sub-agents where Codex TOML cannot be safely reverse-imported. Running `mm context init --include=commands` successfully round-trips Gemini TOML files back into canonical Markdown, with `{{args}}` automatically rewritten to `$ARGUMENTS`.
+
+Running sync prints every dropped field so you can see what Gemini lost:
+
+```
+  Command fan-out: 2
+    claude_commands    .claude/commands/review.md
+    gemini_commands    .gemini/commands/review.toml
+  gemini_commands dropped ['argument-hint', 'allowed-tools', 'model'] from 'review'
+```
+
+Use `--strict` to fail on any drop:
+
+```bash
+mm context sync --include=commands --strict
+# [strict] strict mode: gemini_commands would drop [...] from 'review'
+# Aborted.
+```
+
+> **Codex is deferred to Phase 3.5.** OpenAI documents Codex CLI's `~/.codex/prompts/` custom-prompts feature as *deprecated* and recommends migrating command-like workflows to **skills** (which memtomem already fans out to Codex in Phase 1 via `.agents/skills/`). Phase 3 deliberately ships with Claude + Gemini only. Codex users who want a command-like workflow should author a skill instead.
+
+Combine every artifact kind in a single command:
+
+```bash
+mm context sync --include=skills,agents,commands
+mm context diff --include=skills,agents,commands
+```
+
 ### Supported targets
 
-| Runtime | Project memory file | Skills directory | Sub-agents |
-|---|---|---|---|
-| Claude Code | `CLAUDE.md` | `.claude/skills/` | `.claude/agents/*.md` |
-| Cursor | `.cursorrules` | — | — |
-| Gemini CLI | `GEMINI.md` | `.gemini/skills/` | `.gemini/agents/*.md` (experimental) |
-| OpenAI Codex CLI | `AGENTS.md` | `.agents/skills/` | `~/.codex/agents/*.toml` (user-scope) |
-| GitHub Copilot | `.github/copilot-instructions.md` | — | — |
+| Runtime | Project memory file | Skills directory | Sub-agents | Slash commands |
+|---|---|---|---|---|
+| Claude Code | `CLAUDE.md` | `.claude/skills/` | `.claude/agents/*.md` | `.claude/commands/*.md` |
+| Cursor | `.cursorrules` | — | — | — |
+| Gemini CLI | `GEMINI.md` | `.gemini/skills/` | `.gemini/agents/*.md` (experimental) | `.gemini/commands/*.toml` |
+| OpenAI Codex CLI | `AGENTS.md` | `.agents/skills/` | `~/.codex/agents/*.toml` (user-scope) | Phase 3.5 (deprecated upstream) |
+| GitHub Copilot | `.github/copilot-instructions.md` | — | — | — |
 
 ---
 

@@ -330,9 +330,9 @@ uv pip install -e "packages/memtomem[all]"  # Source
 
 ---
 
-## Optional: Sync project rules, skills, and sub-agents across editors
+## Optional: Sync project rules, skills, sub-agents, and commands across editors
 
-If you use multiple AI editors, keep their config files — and their agent **skills** and **sub-agents** — in sync from one source under `.memtomem/`:
+If you use multiple AI editors, keep their config files — and their agent **skills**, **sub-agents**, and **slash commands** — in sync from one source under `.memtomem/`:
 
 ```bash
 mm context init                         # create .memtomem/context.md from existing files
@@ -346,8 +346,12 @@ mm context sync --include=skills
 # (reports dropped fields per runtime; add --strict to fail on any drop)
 mm context sync --include=agents
 
+# Also fan out .memtomem/commands/  → .claude/commands/*.md, .gemini/commands/*.toml
+# (Markdown ↔ TOML conversion with $ARGUMENTS ↔ {{args}} placeholder rewrite)
+mm context sync --include=commands
+
 # Everything in one shot
-mm context sync --include=skills,agents
+mm context sync --include=skills,agents,commands
 ```
 
 See the [Agent Context Management section of the user guide](user-guide.md#agent-context-management--mm-context) for the full fan-out matrix and field-loss details.

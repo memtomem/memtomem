@@ -210,7 +210,7 @@ memtomem status:
 | **Data** | `mem_export`, `mem_import` |
 | **Config** | `mem_stats`, `mem_status`, `mem_config`, `mem_embedding_reset` |
 | **Evaluation** | `mem_eval` |
-| **Context** | `mem_context_detect`, `mem_context_generate`, `mem_context_diff`, `mem_context_sync` (each accepts `include="skills,agents"` to fan out `.memtomem/skills/` and `.memtomem/agents/` to Claude/Gemini/Codex runtimes; `generate`/`sync` also accept `strict=True` to fail on sub-agent field drops) |
+| **Context** | `mem_context_detect`, `mem_context_generate`, `mem_context_diff`, `mem_context_sync` (each accepts `include="skills,agents,commands"` to fan out `.memtomem/{skills,agents,commands}/` to Claude/Gemini/Codex runtimes; `generate`/`sync` also accept `strict=True` to fail on sub-agent or command field drops) |
 
 > **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 tools, default), `standard` (~32 + `mem_do`), or `full` (72 + `mem_do`) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
 
