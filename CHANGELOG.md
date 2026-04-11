@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-04-11
+
 ### Added
 - `examples/notebooks/` — six scenario-based Jupyter notebooks that walk
   through the Python API (`create_components()`, `search_pipeline.search()`,
@@ -33,7 +35,48 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `MEMTOMEM_TOOL_MODE` env var and which tutorial steps use the `mem_do`
   routing vs top-level calls.
 
+### Changed
+- `SqliteBackend.clear_embedding_mismatch()` is now a public method
+  (refactor 15136a0). The `needs_reindex_ids` and `needs_embed_ids`
+  tracking sets were previously reset via direct attribute mutation
+  through the protected `_backend` accessor, which leaked internal
+  state across module boundaries. Four writers (`_finalize_write`,
+  `_reset_all_state`, `web/app.py`'s force-reindex handler, and the
+  FTS rebuild path) now go through the public method, and the
+  protected-attribute touch is no longer needed outside storage.
+- STM decoupling CSS sweep — removed ~164 lines of orphan dashboard
+  CSS from `packages/memtomem/src/memtomem/web/static/style.css`.
+  The `.stm-*` block (59 lines, #15) and the parallel `.proxy-*`
+  plus `.trend-*` block (105 lines, #16, covering Proxy Settings,
+  Proxy Diff View, and Compression Trend Chart) had no HTML/JS
+  consumers — any rendering path for these selectors had already
+  moved to the external `memtomem-stm` package when STM was split
+  out. The six `--bg-*` / `--text-*` CSS aliases they previously
+  shared are retained since `.harness-*` sections still consume
+  them; the comment on `style.css` line 24 that documented their
+  purpose was rewritten to match the current consumers. The
+  `.health-*` rules are kept intact — `app.js` still uses them for
+  the generic system-health summary, which is unrelated to proxy.
+- `app_lifespan(server: FastMCP)` → `app_lifespan(_server: FastMCP)`
+  in `packages/memtomem/src/memtomem/server/lifespan.py`. The MCP
+  framework requires the parameter in the callback signature but
+  memtomem's lifespan never reads it; the underscore prefix makes
+  the "intentionally unused by framework contract" nature explicit
+  and silences dead-code detectors.
+
 ### Fixed
+- `docs/guides/user-guide.md` tab-overview table listed an **STM**
+  row (`Proxy monitoring — compression metrics, server status, call
+  history (only when STM installed)`) that described the dashboard
+  UI removed with the STM decoupling. The actual
+  `packages/memtomem/src/memtomem/web/static/index.html` has seven
+  tabs (Home, Search, Sources, Index, Tags, Timeline, More) — no
+  STM tab, and the styles backing the removed row were already
+  gone after #15 and #16. Dropped the stale row from the table.
+  The separate "STM: Proactive Memory Surfacing (Optional)" section
+  further down the same file is intentionally kept since it
+  correctly documents the external `memtomem-stm` package as a
+  cross-reference, not a core UI feature.
 - `MemtomemStore.index()` (LangGraph adapter) and the `mm` shell `index`
   command called a nonexistent `IndexEngine.index_directory()` method and
   would crash at runtime. Routed both to `index_path()` and added
