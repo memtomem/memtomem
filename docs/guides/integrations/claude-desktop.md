@@ -101,7 +101,13 @@ Index my ~/notes directory
 Agent:
 ```
 mem_index(path="~/notes", recursive=True)
-→ "Indexed 47 files, 1284 chunks in 3.2s"
+→ Indexing complete:
+  - Files scanned: 47
+  - Total chunks: 1284
+  - Indexed: 1284
+  - Skipped (unchanged): 0
+  - Deleted (stale): 0
+  - Duration: 3200ms
 ```
 
 ---

@@ -87,7 +87,13 @@ Index my ~/notes directory
 Agent:
 ```
 mem_index(path="~/notes", recursive=True)
-→ "Indexed 47 files, 1284 chunks in 3.2s"
+→ Indexing complete:
+  - Files scanned: 47
+  - Total chunks: 1284
+  - Indexed: 1284
+  - Skipped (unchanged): 0
+  - Deleted (stale): 0
+  - Duration: 3200ms
 ```
 
 ---
@@ -110,7 +116,7 @@ Add the following to `~/.claude/settings.json`:
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "P=$(printf '%s' \"${prompt}\" | head -c 500); [ ${#P} -gt 20 ] && memtomem search \"$P\" --top-k 3 2>>/tmp/mm-hook.log || true",
+        "command": "P=$(printf '%s' \"${prompt}\" | head -c 500); [ ${#P} -gt 20 ] && mm search \"$P\" --top-k 3 2>>/tmp/mm-hook.log || true",
         "timeout": 5000
       }]
     }],
@@ -118,7 +124,7 @@ Add the following to `~/.claude/settings.json`:
       "matcher": "Write",
       "hooks": [{
         "type": "command",
-        "command": "memtomem index \"${tool_input.file_path}\" 2>>/tmp/mm-hook.log || true",
+        "command": "mm index \"${tool_input.file_path}\" 2>>/tmp/mm-hook.log || true",
         "timeout": 10000
       }]
     }]
@@ -130,8 +136,8 @@ Add the following to `~/.claude/settings.json`:
 
 | Hook Event | Trigger Timing | memtomem Action |
 |------------|---------------|----------------|
-| `UserPromptSubmit` | When a prompt is submitted | `memtomem search` → Automatically inject relevant memory into context |
-| `PostToolUse` (Write) | After new file creation | `memtomem index` → Automatically index the new file |
+| `UserPromptSubmit` | When a prompt is submitted | `mm search` → Automatically inject relevant memory into context |
+| `PostToolUse` (Write) | After new file creation | `mm index` → Automatically index the new file |
 
 ### Automation Flow
 

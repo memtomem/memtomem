@@ -64,6 +64,49 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   section now explains that an edited section contributes to **both**
   `Indexed` (new hash) and `Deleted (stale)` (old hash) because the
   diff is hash-based.
+- Broad docs-vs-source audit (commit after 75d7146) found the same
+  class of drift in several more places. Fixed:
+  - `docs/guides/agent-memory-guide.md` — every non-core tool call
+    (`mem_scratch_set/get/promote`, `mem_session_start/end`,
+    `mem_procedure_save`, `mem_consolidate(_apply)`, `mem_reflect(_save)`,
+    `mem_eval`, `mem_agent_register/share/search`, `mem_fetch`) was
+    shown as a top-level call, which fails in the default
+    `MEMTOMEM_TOOL_MODE=core`. Every call is now routed through
+    `mem_do(action="...", params={...})`, with a tool-mode note at the
+    top of Scenario 1 pointing at the existing Tool Mode Configuration
+    section. The companion example outputs were also rewritten to
+    match the real return strings from `session.py`, `scratch.py`,
+    `procedure.py`, `consolidation.py`, `reflection.py`,
+    `evaluation.py`, `multi_agent.py`, and `url_index.py` (e.g. the
+    `- ` dash prefixes on `Session started`/`Agent registered`
+    outputs, the extra "Use namespace='...' for ..." two-line hint in
+    `agent_register`, the real `Memory added to ... / - Chunks
+    indexed / - File` shape from `mem_add` including in the template
+    scenarios).
+  - `docs/guides/user-guide.md` Google Drive section had another
+    `"Indexed 47 files (312 chunks)"` one-liner alongside the one
+    already fixed in section 1. Now uses the canonical
+    `Indexing complete:` block.
+  - `docs/guides/use-cases.md` Coding Tools section showed
+    `mem_stats() > "Total chunks: 0, Storage backend: sqlite"` and
+    `mem_index(path="...") > "Indexed 47 files, 1284 chunks"`. Both
+    replaced with the real multi-line responses.
+  - `docs/guides/integrations/claude-code.md` and
+    `docs/guides/integrations/claude-desktop.md` First-Indexing
+    examples both showed `→ "Indexed 47 files, 1284 chunks in 3.2s"`
+    — the `in 3.2s` suffix never existed in the code. Replaced with
+    the real `Indexing complete:` block (`Duration: 3200ms`).
+  - `docs/guides/integrations/claude-code.md` UserPromptSubmit and
+    PostToolUse hook examples called `memtomem search` / `memtomem
+    index` as shell commands, but the installed CLI binary is `mm`
+    (the `memtomem` entry point is for the MCP server). Copying the
+    config as-is would have produced `command not found`. Changed
+    both the `command:` values and the Hook Event Summary table to
+    use `mm search` / `mm index`.
+  - `docs/guides/hands-on-tutorial.md` Step 3.1 `mem_add` example
+    showed `"Added 1 chunk (saved to ...)\nTags: python, typing"`
+    which also does not match the real `memory_crud.py:116` return
+    (`Memory added to ... / - Chunks indexed / - File`). Updated.
 
 ## [0.1.3] — 2026-04-10
 

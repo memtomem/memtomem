@@ -208,11 +208,12 @@ You can add memories directly with `mem_add` without creating files manually.
 
 Example response:
 ```
-Added 1 chunk (saved to ~/.memtomem/memories/20260319_143022.md)
-Tags: python, typing
+Memory added to ~/.memtomem/memories/2026-04-11.md
+- Chunks indexed: 1
+- File: ~/.memtomem/memories/2026-04-11.md
 ```
 
-> `mem_add` automatically creates a markdown file in the `~/.memtomem/memories/` directory and indexes it.
+> `mem_add` automatically creates a markdown file in the `~/.memtomem/memories/` directory (one per UTC date by default) and re-indexes it so the new memory is immediately searchable.
 
 ### 3.2 Adding Multiple Notes at Once
 

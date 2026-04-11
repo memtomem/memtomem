@@ -20,10 +20,25 @@ claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
 ```
 
 > User: "Call mem_stats"
-> Agent: `mem_stats()` > "Total chunks: 0, Storage backend: sqlite"
+> Agent: `mem_stats()` returns:
+> ```
+> Memory index statistics:
+> - Total chunks: 0
+> - Total sources: 0
+> - Storage backend: sqlite
+> ```
 
 > User: "Index my notes directory"
-> Agent: `mem_index(path="/path/to/notes")` > "Indexed 47 files, 1284 chunks"
+> Agent: `mem_index(path="/path/to/notes")` returns:
+> ```
+> Indexing complete:
+> - Files scanned: 47
+> - Total chunks: 1284
+> - Indexed: 1284
+> - Skipped (unchanged): 0
+> - Deleted (stale): 0
+> - Duration: 3200ms
+> ```
 
 ### Cursor
 

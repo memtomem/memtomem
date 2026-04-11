@@ -661,7 +661,13 @@ Each device indexes the shared folder to build its local search index:
 
 ```
 mem_index(path="~/Google Drive/My Drive/memtomem-memories")
-→ "Indexed 47 files (312 chunks)"
+→ Indexing complete:
+  - Files scanned: 47
+  - Total chunks: 312
+  - Indexed: 312
+  - Skipped (unchanged): 0
+  - Deleted (stale): 0
+  - Duration: 2340ms
 ```
 
 ### Step 4: Daily workflow
