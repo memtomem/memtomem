@@ -2291,69 +2291,9 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 .health-section h3 { font-size: 0.95rem; margin-bottom: 8px; }
 
 /* =====================================================================
-   STM PROXY DASHBOARD
+   TAB NAVIGATION
    ===================================================================== */
 
 .tab-nav { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
 .tab-nav::-webkit-scrollbar { display: none; }
-
-.stm-scroll-container { flex: 1; min-height: 0; overflow-y: auto; padding: 0 20px 20px; }
-.stm-status-bar { display: flex; gap: 8px; flex-wrap: wrap; padding: 12px 0; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
-.stm-badge { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 12px; font-size: 0.8rem; font-weight: 500; background: var(--bg-secondary); color: var(--text-secondary); }
-.stm-badge.stm-on { background: color-mix(in srgb, var(--green, #28a745) 15%, var(--bg-primary)); color: var(--green, #28a745); }
-.stm-badge.stm-off { background: color-mix(in srgb, var(--red, #dc3545) 15%, var(--bg-primary)); color: var(--red, #dc3545); }
-.stm-badge.stm-sm { font-size: 0.7rem; padding: 2px 6px; }
-
-.stm-section { margin-bottom: 24px; }
-.stm-section h2 { font-size: 1.1rem; margin-bottom: 12px; }
-.stm-section h3 { font-size: 0.95rem; margin-bottom: 8px; color: var(--text-secondary); }
-.stm-section-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
-.stm-section-header h2 { margin-bottom: 0; }
-
-.stm-servers-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
-.stm-server-card { border: 1px solid var(--border); border-radius: 8px; padding: 14px; background: var(--bg-primary); }
-.stm-server-name { font-weight: 600; font-size: 0.95rem; margin-bottom: 6px; }
-.stm-server-meta { display: flex; gap: 8px; flex-wrap: wrap; font-size: 0.8rem; color: var(--text-secondary); }
-
-.stm-metric-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 16px; }
-.stm-metric-card { border: 1px solid var(--border); border-radius: 8px; padding: 16px; text-align: center; background: var(--bg-primary); }
-.stm-metric-card.stm-highlight { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 5%, var(--bg-primary)); }
-.stm-metric-value { font-size: 1.6rem; font-weight: 700; color: var(--text-primary); }
-.stm-metric-label { font-size: 0.8rem; color: var(--text-secondary); margin-top: 4px; }
-
-.stm-breakdown-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-@media (max-width: 768px) { .stm-breakdown-grid { grid-template-columns: 1fr; } }
-
-.stm-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-.stm-table th { text-align: left; padding: 8px; border-bottom: 2px solid var(--border); font-weight: 600; color: var(--text-secondary); }
-.stm-table td { padding: 8px; border-bottom: 1px solid var(--border); }
-.stm-table .stm-empty { text-align: center; color: var(--text-secondary); padding: 16px; }
-.stm-clickable { cursor: pointer; }
-.stm-clickable:hover { background: var(--bg-secondary); }
-
-.stm-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-@media (max-width: 768px) { .stm-row { grid-template-columns: 1fr; } }
-.stm-subsection { border: 1px solid var(--border); border-radius: 8px; padding: 16px; background: var(--bg-primary); }
-
-.stm-period-filter { display: flex; gap: 4px; align-items: center; }
-.stm-period-btn { padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-primary); cursor: pointer; font-size: 0.8rem; }
-.stm-period-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
-.stm-period-btn:hover:not(.active) { background: var(--bg-secondary); }
-
-.stm-history-filters { display: flex; gap: 6px; align-items: center; }
-.stm-pagination { display: flex; gap: 8px; align-items: center; margin-top: 8px; font-size: 0.85rem; color: var(--text-secondary); }
-.stm-metric-sub { font-size: 0.75rem; color: var(--text-secondary); margin-top: 2px; }
-.stm-empty-hint { text-align: center; color: var(--text-secondary); padding: 24px; font-size: 0.9rem; }
-.stm-rating-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; font-size: 0.8rem; }
-.stm-rating-label { min-width: 90px; }
-.stm-rating-bar { flex: 1; height: 8px; background: var(--bg-secondary); border-radius: 4px; overflow: hidden; }
-.stm-rating-fill { height: 100%; border-radius: 4px; transition: width 0.3s; }
-.stm-rating-fill.rating-helpful { background: var(--green); }
-.stm-rating-fill.rating-not-relevant { background: var(--danger); }
-.stm-rating-fill.rating-other { background: var(--yellow); }
-.stm-rating-count { min-width: 70px; text-align: right; color: var(--text-secondary); }
-@media (max-width: 480px) { .stm-metric-cards { grid-template-columns: repeat(2, 1fr); } }
-.stm-card-expandable { cursor: pointer; }
-.stm-card-expandable:hover { opacity: 0.8; }
-.stm-card-detail { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
 
