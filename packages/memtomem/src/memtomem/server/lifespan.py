@@ -94,7 +94,7 @@ async def _shutdown(watcher: FileWatcher, comp: Components) -> None:
 
 
 @asynccontextmanager
-async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
+async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
     _load_dotenv()
     _setup_logging()
 
