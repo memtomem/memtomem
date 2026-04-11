@@ -63,8 +63,7 @@ def _parse_include(include_tuple: tuple[str, ...]) -> set[str]:
                 continue
             if token not in _KNOWN_INCLUDES:
                 raise click.BadParameter(
-                    f"Unknown --include value '{token}'. "
-                    f"Supported: {sorted(_KNOWN_INCLUDES)}"
+                    f"Unknown --include value '{token}'. Supported: {sorted(_KNOWN_INCLUDES)}"
                 )
             values.add(token)
     return values
@@ -99,9 +98,7 @@ def _print_skills_detect(root: Path) -> None:
 def _print_skills_init(root: Path, overwrite: bool) -> None:
     imported = extract_skills_to_canonical(root, overwrite=overwrite)
     if imported:
-        click.secho(
-            f"  Imported {len(imported)} skill(s) → .memtomem/skills/", fg="green"
-        )
+        click.secho(f"  Imported {len(imported)} skill(s) → .memtomem/skills/", fg="green")
         for p in imported:
             click.echo(f"    {p.name}")
     else:
@@ -146,9 +143,7 @@ def _print_agents_detect(root: Path) -> None:
 def _print_agents_init(root: Path, overwrite: bool) -> None:
     imported = extract_agents_to_canonical(root, overwrite=overwrite)
     if imported:
-        click.secho(
-            f"  Imported {len(imported)} sub-agent(s) → .memtomem/agents/", fg="green"
-        )
+        click.secho(f"  Imported {len(imported)} sub-agent(s) → .memtomem/agents/", fg="green")
         for p in imported:
             click.echo(f"    {p.stem}")
     else:
@@ -206,9 +201,7 @@ def _print_commands_detect(root: Path) -> None:
 def _print_commands_init(root: Path, overwrite: bool) -> None:
     imported = extract_commands_to_canonical(root, overwrite=overwrite)
     if imported:
-        click.secho(
-            f"  Imported {len(imported)} command(s) → .memtomem/commands/", fg="green"
-        )
+        click.secho(f"  Imported {len(imported)} command(s) → .memtomem/commands/", fg="green")
         for p in imported:
             click.echo(f"    {p.stem}")
     else:
@@ -388,9 +381,7 @@ def generate_cmd(agent: str, include: tuple[str, ...], strict: bool) -> None:
         click.secho(f"{CONTEXT_FILENAME} not found. Run 'mm context init' first.", fg="red")
         return
     else:
-        click.secho(
-            f"  ({CONTEXT_FILENAME} missing — skipping project memory)", fg="yellow"
-        )
+        click.secho(f"  ({CONTEXT_FILENAME} missing — skipping project memory)", fg="yellow")
 
     if "skills" in inc:
         click.echo("")
@@ -431,18 +422,14 @@ def diff_cmd(include: tuple[str, ...]) -> None:
                 if current == expected:
                     click.secho(f"  {f.agent:10s}  {f.path.name}  [in sync]", fg="green")
                 else:
-                    click.secho(
-                        f"  {f.agent:10s}  {f.path.name}  [out of sync]", fg="yellow"
-                    )
+                    click.secho(f"  {f.agent:10s}  {f.path.name}  [out of sync]", fg="yellow")
         else:
             click.echo("No agent files to compare.")
     elif not inc:
         click.secho(f"{CONTEXT_FILENAME} not found.", fg="red")
         return
     else:
-        click.secho(
-            f"  ({CONTEXT_FILENAME} missing — skipping project memory)", fg="yellow"
-        )
+        click.secho(f"  ({CONTEXT_FILENAME} missing — skipping project memory)", fg="yellow")
 
     if "skills" in inc:
         click.echo("")
@@ -488,16 +475,13 @@ def sync_cmd(include: tuple[str, ...], strict: bool) -> None:
                 click.echo(f"  {agent_name:10s}  {gen.output_path}")
         else:
             click.echo(
-                "No agent files detected. "
-                "Use 'mm context generate --agent all' to create them."
+                "No agent files detected. Use 'mm context generate --agent all' to create them."
             )
     elif not inc:
         click.secho(f"{CONTEXT_FILENAME} not found. Run 'mm context init' first.", fg="red")
         return
     else:
-        click.secho(
-            f"  ({CONTEXT_FILENAME} missing — skipping project memory)", fg="yellow"
-        )
+        click.secho(f"  ({CONTEXT_FILENAME} missing — skipping project memory)", fg="yellow")
 
     if "skills" in inc:
         click.echo("")
