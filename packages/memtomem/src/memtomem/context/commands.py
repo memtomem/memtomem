@@ -1,17 +1,19 @@
 """Canonical ⇄ runtime slash/custom command fan-out.
 
-Phase 3 of the "memtomem as canonical context gateway" plan. A slash command
-lives at ``.memtomem/commands/<name>.md`` with YAML frontmatter (Claude
-Code-compatible superset) and a Markdown body that acts as the prompt
-template. From that single canonical source we fan out to:
+Phase 3 (+ Phase 3.5) of the "memtomem as canonical context gateway" plan. A
+slash command lives at ``.memtomem/commands/<name>.md`` with YAML frontmatter
+(Claude Code-compatible superset) and a Markdown body that acts as the prompt
+template. From that single canonical source we fan out to three runtimes:
 
 * ``.claude/commands/<name>.md`` — Claude Code (Markdown + YAML, pass-through)
 * ``.gemini/commands/<name>.toml`` — Gemini CLI (TOML: ``prompt`` + ``description``)
+* ``~/.codex/prompts/<name>.md`` — OpenAI Codex CLI (**user-scope**, Markdown +
+  YAML superset minus ``allowed-tools`` / ``model``)
 
-OpenAI Codex CLI is **intentionally deferred to Phase 3.5**. Codex's custom
-prompts feature is documented as *deprecated* upstream (OpenAI recommends
-migrating command-like workflows to skills instead), so Phase 3 sticks to the
-two runtimes where custom commands are first-class.
+Codex custom prompts are *upstream-deprecated* — OpenAI recommends migrating
+command-like workflows to **skills** (which memtomem already fans out to Codex
+via ``.agents/skills/`` in Phase 1). Phase 3.5 still provides fan-out for
+parity with the Claude + Gemini pipeline; new workflows should prefer skills.
 
 Placeholder normalization
 -------------------------
@@ -19,9 +21,12 @@ Claude's ``$ARGUMENTS`` placeholder and Gemini's ``{{args}}`` placeholder have
 the same semantics — both substitute the entire user-supplied argument string.
 When fanning out Claude-flavoured canonical → Gemini TOML we rewrite
 ``$ARGUMENTS`` → ``{{args}}``; the reverse import rewrites it back.
-``!{...}`` shell injection and ``@{...}`` file embed syntax are Gemini-only
-advanced features and remain out of scope for Phase 3 — users who need them
-can hand-edit ``.gemini/commands/*.toml`` directly.
+Codex natively supports ``$ARGUMENTS``, ``$1``..``$9``, ``$NAME``, and ``$$``
+(verbatim to Claude's surface), so the canonical body passes through unchanged
+for the Codex target — **no rewrite**. ``!{...}`` shell injection and
+``@{...}`` file embed syntax are Gemini-only advanced features and remain out
+of scope — users who need them can hand-edit ``.gemini/commands/*.toml``
+directly.
 """
 
 from __future__ import annotations
@@ -154,6 +159,37 @@ def _subcommand_to_claude_md(cmd: SlashCommand) -> tuple[str, list[str]]:
     return body, []
 
 
+def _subcommand_to_codex_md(cmd: SlashCommand) -> tuple[str, list[str]]:
+    """Render for ``~/.codex/prompts/<name>.md`` — Claude-compatible superset
+    minus ``allowed-tools`` / ``model``.
+
+    Codex documents exactly two frontmatter fields (``description``,
+    ``argument-hint``) and supports ``$1``..``$9``, ``$NAME``, and
+    ``$ARGUMENTS`` natively — so the body is passed through verbatim
+    (no placeholder rewrite). ``allowed-tools`` and ``model`` have no
+    documented Codex equivalent and are dropped (reported via the
+    standard ``dropped`` channel).
+    """
+    dropped: list[str] = []
+    if cmd.allowed_tools:
+        dropped.append("allowed-tools")
+    if cmd.model:
+        dropped.append("model")
+
+    lines: list[str] = []
+    if cmd.description:
+        lines.append(f"description: {cmd.description}")
+    if cmd.argument_hint:
+        lines.append(f"argument-hint: {cmd.argument_hint}")
+
+    body = cmd.body if cmd.body.endswith("\n") else cmd.body + "\n"
+    if lines:
+        frontmatter = "\n".join(lines)
+        return f"---\n{frontmatter}\n---\n\n{body}", dropped
+    # No frontmatter at all — Codex tolerates bare Markdown prompts.
+    return body, dropped
+
+
 def _subcommand_to_gemini_toml(cmd: SlashCommand) -> tuple[str, list[str]]:
     """Render for ``.gemini/commands/<name>.toml``.
 
@@ -225,8 +261,26 @@ class GeminiCommandsGenerator:
         return _subcommand_to_gemini_toml(cmd)
 
 
+@dataclass
+class CodexCommandsGenerator:
+    name: str = "codex_commands"
+    # Display-only — Codex is user-scope, so the real path is resolved from
+    # ``Path.home()`` inside ``target_file``. We keep a visible root string for
+    # CLI / MCP output consistency, mirroring ``CodexAgentsGenerator``.
+    output_root: str = "~/.codex/prompts"
+
+    def target_file(self, project_root: Path, command_name: str) -> Path:
+        # project_root intentionally ignored — Codex stores custom prompts
+        # under the user's home directory.
+        return Path.home() / ".codex/prompts" / f"{command_name}.md"
+
+    def render(self, cmd: SlashCommand) -> tuple[str, list[str]]:
+        return _subcommand_to_codex_md(cmd)
+
+
 _register(ClaudeCommandsGenerator())
 _register(GeminiCommandsGenerator())
+_register(CodexCommandsGenerator())
 
 
 # ── Fan-out: canonical → runtimes ───────────────────────────────────
@@ -314,6 +368,13 @@ def extract_commands_to_canonical(
     placeholder rewrite is reversible), so Gemini commands can be round-tripped
     back into canonical form — unlike Phase 2 Codex TOML.
 
+    Codex prompts (``~/.codex/prompts/*.md``) are intentionally **not**
+    imported even though the format is byte-compatible with Claude — the
+    user-scope path spans projects, which would break the "import runtime
+    files from *this* project" semantic (matching the Phase 2 Codex sub-agent
+    policy). Use ``.memtomem/commands/`` as the single authoring surface and
+    let ``generate_all_commands`` populate Codex.
+
     First occurrence wins: Claude runtime first, then Gemini.
     """
     canonical_root = project_root / CANONICAL_COMMAND_ROOT
@@ -362,6 +423,29 @@ def extract_commands_to_canonical(
 # ── Diff: canonical ↔ runtimes ──────────────────────────────────────
 
 
+def _runtime_command_names(gen_name: str, project_root: Path) -> set[str]:
+    """Return the set of command ``stem`` names present on disk for a runtime.
+
+    Handles Codex's user-scope path (``~/.codex/prompts``) separately from the
+    project-scope Claude / Gemini directories — mirrors the dispatch pattern
+    used by :func:`memtomem.context.agents._runtime_agent_names`.
+    """
+    if gen_name == "codex_commands":
+        runtime_root = Path.home() / ".codex/prompts"
+        suffix = ".md"
+    elif gen_name == "claude_commands":
+        runtime_root = project_root / ".claude/commands"
+        suffix = ".md"
+    elif gen_name == "gemini_commands":
+        runtime_root = project_root / ".gemini/commands"
+        suffix = ".toml"
+    else:
+        return set()
+    if not runtime_root.is_dir():
+        return set()
+    return {p.stem for p in runtime_root.iterdir() if p.is_file() and p.suffix == suffix}
+
+
 def diff_commands(project_root: Path) -> list[tuple[str, str, str]]:
     """Compare canonical commands against every registered runtime.
 
@@ -374,13 +458,7 @@ def diff_commands(project_root: Path) -> list[tuple[str, str, str]]:
     canonical_names = {p.stem for p in list_canonical_commands(project_root)}
 
     for gen_name, gen in COMMAND_GENERATORS.items():
-        runtime_root = project_root / gen.output_root
-        suffix = ".toml" if gen_name == "gemini_commands" else ".md"
-        runtime_names: set[str] = set()
-        if runtime_root.is_dir():
-            for entry in runtime_root.iterdir():
-                if entry.is_file() and entry.suffix == suffix:
-                    runtime_names.add(entry.stem)
+        runtime_names = _runtime_command_names(gen_name, project_root)
 
         for name in sorted(canonical_names | runtime_names):
             if name in canonical_names and name not in runtime_names:
@@ -411,6 +489,7 @@ __all__ = [
     "CANONICAL_COMMAND_ROOT",
     "COMMAND_GENERATORS",
     "ClaudeCommandsGenerator",
+    "CodexCommandsGenerator",
     "CommandGenerator",
     "CommandParseError",
     "CommandSyncResult",

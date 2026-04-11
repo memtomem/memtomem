@@ -5,6 +5,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+- Phase 3.5: canonical slash commands now fan out to Codex as well
+  (`~/.codex/prompts/<name>.md`, user-scope). Codex's custom-prompts
+  format is a Claude-compatible Markdown + YAML superset — `description`,
+  `argument-hint`, and the `$ARGUMENTS` / `$1..$9` / `$NAME` / `$$`
+  placeholders are all passed through verbatim; only `allowed-tools`
+  and `model` are dropped (reported via the standard `dropped` channel).
+  Codex custom prompts are upstream-deprecated — OpenAI recommends
+  migrating to skills, which memtomem already fans out to Codex via
+  `.agents/skills/` in Phase 1 — but fan-out is provided for parity
+  with the existing Claude + Gemini pipeline. The `mem_context_*` MCP
+  tools and the `mm context {generate,sync,diff} --include=commands`
+  CLI pick up the new `codex_commands` runtime automatically via the
+  registry (no new tools or flags). `extract_commands_to_canonical`
+  intentionally still skips Codex — user-scope paths span projects,
+  matching the Phase 2 Codex sub-agent policy.
+
 ## [0.1.4] — 2026-04-11
 
 ### Added

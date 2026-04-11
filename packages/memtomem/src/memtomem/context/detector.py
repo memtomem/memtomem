@@ -53,8 +53,10 @@ AGENT_DIRS: dict[str, list[str]] = {
 
 # Custom-command-runtime name → project-scope directories containing command files.
 # Claude uses ``.md`` files, Gemini uses ``.toml`` — the detector reports both so
-# context/commands.py can reverse-import whichever is present. Codex is deferred to
-# Phase 3.5 (upstream-deprecated) and omitted here.
+# context/commands.py can reverse-import whichever is present. Codex commands live
+# in ``~/.codex/prompts/`` (user-scope) and are therefore not discoverable via the
+# project root — use :func:`memtomem.context.commands.diff_commands` for the Codex
+# side (symmetric with ``AGENT_DIRS``).
 COMMAND_DIRS: dict[str, tuple[str, str]] = {
     "claude_commands": (".claude/commands", ".md"),
     "gemini_commands": (".gemini/commands", ".toml"),
