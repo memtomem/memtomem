@@ -40,6 +40,29 @@ The STM proxy gateway lives in a separate repository: [memtomem/memtomem-stm](ht
 4. Ensure `uv run ruff check` and `uv run ruff format --check` pass
 5. Ensure `uv run pytest -m "not ollama"` passes
 6. Write a clear commit message describing the "why"
+7. Sign the CLA on your first pull request (see below)
+
+## Contributor License Agreement (CLA)
+
+Before we can merge your first pull request, you need to sign the
+[Contributor License Agreement](CLA.md). The CLA Assistant bot will
+automatically comment on your PR with instructions — you sign by replying
+with:
+
+> I have read the CLA Document and I hereby sign the CLA
+
+You only need to sign once per GitHub account. Your signature is stored in
+`signatures/v1/cla.json` in this repository.
+
+The CLA is adapted from the Apache Software Foundation Individual
+Contributor License Agreement with one additional section covering future
+licensing rights. This preserves DAPADA Inc.'s ability to adopt different
+license terms for the Work in the future (for example, a dual-licensing
+arrangement) without needing to re-collect consent from every contributor.
+The CLA does not change the current license of the Work, which remains
+Apache License 2.0.
+
+For questions about the CLA, contact contact@dapada.co.kr.
 
 ## Reporting Issues
 

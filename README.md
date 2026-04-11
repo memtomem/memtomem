@@ -3,6 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/memtomem)](https://pypi.org/project/memtomem/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-green)](https://python.org)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+[![CLA](https://img.shields.io/badge/CLA-required-green)](CLA.md)
 
 **Give your AI agent a long-term memory.**
 
@@ -120,4 +121,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions and the contributo
 
 ## License
 
-[Apache License 2.0](LICENSE)
+[Apache License 2.0](LICENSE). Contributions are accepted under the terms of the [Contributor License Agreement](CLA.md).
