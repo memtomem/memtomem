@@ -53,6 +53,49 @@ early with a clear error message if it is not.
 | 03 | [`03_agent_memory_patterns.ipynb`](03_agent_memory_patterns.ipynb) | Build episodic + working memory for an agent: sessions, events, scratchpad, and time-based recall. | ~10 min |
 | 04 | [`04_search_tuning.ipynb`](04_search_tuning.ipynb) | Compare the same query under different search configurations — BM25-only, dense-only, balanced, with and without the context window. | ~15 min |
 | 05 | [`05_langgraph_integration.ipynb`](05_langgraph_integration.ipynb) | Wire `MemtomemStore` into a minimal two-node LangGraph agent that searches memtomem and writes findings back. | ~20 min |
+| 06 | [`06_lifecycle.ipynb`](06_lifecycle.ipynb) | The full memory lifecycle: hash-based incremental re-index on edit, surgical chunk delete, orphan cleanup after a file is removed, and `force=True` full re-embed. | ~10 min |
+
+## How memories are stored
+
+The notebooks deliberately exercise two different storage paths, and it
+helps to know which is which when you are reading the cells:
+
+**1. File-backed memories (notebooks 01, 02, 04, 05, 06 — most "document"
+style memory).** The notebook writes a real `.md` file into the temp
+`notes/` directory and then calls `index_engine.index_file(path)` (or
+`index_path(dir)`). The chunker reads the file, splits it into chunks,
+and the embedder stores those chunks in SQLite. This is exactly the same
+path the MCP server takes when a file lands in a configured memory
+directory. `MemtomemStore.add()` in notebook 05 also goes through this
+path — it appends to a dated markdown file under the hood and then calls
+`index_file`.
+
+**2. DB-only memories (notebook 03 — sessions, events, scratch).** These
+are agent working-memory primitives that do not correspond to any file.
+The notebook calls `storage.create_session()`, `add_session_event()`,
+`scratch_set()`, etc., and the data lands directly in dedicated SQLite
+tables (`sessions`, `session_events`, `scratch`). There is no markdown
+file to read or edit afterwards — the DB row *is* the memory.
+
+Either way, everything lives inside a single temp directory:
+
+```
+/var/folders/.../tmpXXXXXXXX/
+├── memory.db        ← chunks + embeddings + sessions + events + scratch
+└── notes/           ← the real markdown files (file-backed memories only)
+    ├── deployment.md
+    └── retrieval.md
+```
+
+Deletes work the same way, split across the two paths. Notebook 06 walks
+through the file-backed side end-to-end: edit a file → watch the
+hash-diff re-index (`indexed` / `skipped` / `deleted` counts),
+`storage.delete_chunks([uuid])` for a single surgical removal,
+`storage.get_all_source_files()` → filesystem diff → `delete_by_source()`
+to clean up orphans after a file is removed from disk, and `force=True`
+for a full rebuild after (for example) swapping embedding models. In a
+running MCP server the `FileWatcher` automates the edit and delete
+paths; the notebook calls them explicitly so every step is deterministic.
 
 ## How these notebooks stay safe
 
