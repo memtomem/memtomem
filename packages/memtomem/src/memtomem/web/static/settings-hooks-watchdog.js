@@ -49,16 +49,21 @@ async function loadHooksSync() {
 
     let html = '';
 
+    function _ruleLabel(item) {
+      return item.matcher ? `${item.event}:${item.matcher}` : item.event;
+    }
+
     // Conflicts
     if (data.hooks.conflicts.length) {
       html += '<h3 style="margin:1rem 0 0.5rem">Conflicts</h3>';
       for (const c of data.hooks.conflicts) {
+        const label = _ruleLabel(c);
         const oldText = JSON.stringify(c.existing, null, 2);
         const newText = JSON.stringify(c.proposed, null, 2);
         const ops = diffLines(oldText, newText);
-        html += `<div class="hooks-sync-card hooks-sync-conflict" data-hook="${escapeHtml(c.name)}">
+        html += `<div class="hooks-sync-card hooks-sync-conflict" data-event="${escapeHtml(c.event)}" data-matcher="${escapeHtml(c.matcher || '')}">
           <div class="hooks-sync-card-header">
-            <strong>${escapeHtml(c.name)}</strong>
+            <strong>${escapeHtml(label)}</strong>
             <button class="btn-sm btn-primary hooks-resolve-btn"
               data-i18n="settings.hooks.use_proposed">${t('settings.hooks.use_proposed', "Use memtomem's")}</button>
           </div>
@@ -71,10 +76,11 @@ async function loadHooksSync() {
     if (data.hooks.pending.length) {
       html += '<h3 style="margin:1rem 0 0.5rem">Pending</h3>';
       for (const p of data.hooks.pending) {
+        const label = _ruleLabel(p);
         html += `<div class="hooks-sync-card">
-          <div class="hooks-sync-card-header"><strong>${escapeHtml(p.name)}</strong>
+          <div class="hooks-sync-card-header"><strong>${escapeHtml(label)}</strong>
             <span class="badge badge-warning">will be added</span></div>
-          <pre class="hooks-sync-preview">${escapeHtml(JSON.stringify(p.hook, null, 2))}</pre>
+          <pre class="hooks-sync-preview">${escapeHtml(JSON.stringify(p.rule, null, 2))}</pre>
         </div>`;
       }
     }
@@ -84,7 +90,7 @@ async function loadHooksSync() {
       html += '<h3 style="margin:1rem 0 0.5rem">' + t('settings.hooks.synced', 'In sync') + '</h3>';
       html += '<div class="text-muted">';
       for (const s of data.hooks.synced) {
-        html += `<div style="padding:0.25rem 0">${escapeHtml(s.name)}</div>`;
+        html += `<div style="padding:0.25rem 0">${escapeHtml(_ruleLabel(s))}</div>`;
       }
       html += '</div>';
     }
@@ -99,19 +105,21 @@ async function loadHooksSync() {
     contentEl.querySelectorAll('.hooks-resolve-btn').forEach(btn => {
       btn.addEventListener('click', async () => {
         const card = btn.closest('.hooks-sync-card');
-        const hookName = card.dataset.hook;
+        const event = card.dataset.event;
+        const matcher = card.dataset.matcher || '';
+        const label = matcher ? `${event}:${matcher}` : event;
         const ok = await showConfirm({
-          title: 'Replace hook',
-          message: `Replace your "${hookName}" hook with memtomem's version?`,
+          title: 'Replace hook rule',
+          message: `Replace your "${label}" rule with memtomem's version?`,
           confirmText: 'Replace',
         });
         if (!ok) return;
         btnLoading(btn, true);
         try {
-          const r = await fetch('/api/settings-sync/resolve', {
+          const r = await fetch('/api/context/settings/resolve', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({hook_name: hookName, action: 'use_proposed'}),
+            body: JSON.stringify({event, matcher, action: 'use_proposed'}),
           });
           const result = await r.json();
           if (result.status === 'ok') {

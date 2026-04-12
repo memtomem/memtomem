@@ -2,7 +2,8 @@
 
 Phase D of the "memtomem as canonical context gateway" plan.  A project's
 canonical settings live at ``.memtomem/settings.json`` with a ``hooks``
-array.  From that single canonical source we fan out to:
+record (keyed by event name).  From that single canonical source we fan
+out to:
 
 * ``~/.claude/settings.json`` — Claude Code (JSON deep-merge into ``hooks``)
 
@@ -10,11 +11,24 @@ Gemini and Codex have no known settings-file equivalent as of 2026-04-12;
 runtimes can be added by implementing :class:`SettingsGenerator` and
 registering in :data:`SETTINGS_GENERATORS`.
 
+Hooks format (Claude Code ≥ 2.1.104)
+-------------------------------------
+``hooks`` is a **record** keyed by event name, not an array::
+
+    {
+      "hooks": {
+        "PostToolUse": [
+          {"matcher": "Edit|Write", "hooks": [{"type": "command", "command": "..."}]}
+        ]
+      }
+    }
+
 Merge semantics
 ---------------
 * **Additive-only**: memtomem contributions are appended, never overwritten.
-* **Hook name key**: entries in the ``hooks`` array are matched by ``name``.
-  On collision the user's existing hook wins and a guided warning is emitted.
+* **Identity key**: ``(event, matcher)`` — rules with the same event and
+  matcher string are considered the same rule.  On collision the user's
+  existing rule wins and a guided warning is emitted.
 * **Formatting**: ``json.dumps(indent=2, sort_keys=False)`` + trailing
   newline.  Byte-for-byte preservation of the user's original formatting is
   explicitly **not** guaranteed — semantic equality is the contract.
@@ -114,35 +128,49 @@ class ClaudeSettingsGenerator:
         existing: dict | None,
         contributions: dict,
     ) -> tuple[dict, list[str]]:
-        """Additive merge of ``hooks``.  User keys always win."""
+        """Additive merge of record-format ``hooks``.  User rules always win."""
         warnings: list[str] = []
         merged = dict(existing) if existing else {}
 
-        contrib_hooks: list[dict] = contributions.get("hooks", [])
-        existing_hooks: list = list(merged.get("hooks", []))
+        contrib_hooks: dict = contributions.get("hooks", {})
+        if not isinstance(contrib_hooks, dict):
+            contrib_hooks = {}
+        existing_hooks: dict = dict(merged.get("hooks", {}))
+        if not isinstance(existing_hooks, dict):
+            existing_hooks = {}
 
-        # Index existing hooks by name for conflict detection
-        existing_by_name: dict[str, dict] = {}
-        for hook in existing_hooks:
-            if isinstance(hook, dict) and "name" in hook:
-                existing_by_name[hook["name"]] = hook
-
-        for hook in contrib_hooks:
-            if not isinstance(hook, dict):
+        for event, rules in contrib_hooks.items():
+            if not isinstance(rules, list):
                 continue
-            hook_name = hook.get("name", "")
-            if hook_name and hook_name in existing_by_name:
-                # Check if semantically identical (already in sync)
-                if existing_by_name[hook_name] == hook:
+            if event not in existing_hooks:
+                existing_hooks[event] = list(rules)
+                continue
+
+            # Index existing rules by matcher for conflict detection
+            existing_rules: list = list(existing_hooks[event])
+            existing_by_matcher: dict[str, dict] = {}
+            for rule in existing_rules:
+                if isinstance(rule, dict):
+                    existing_by_matcher[rule.get("matcher", "")] = rule
+
+            for rule in rules:
+                if not isinstance(rule, dict):
                     continue
-                warnings.append(
-                    f"Hook '{hook_name}' already exists in the target "
-                    f"settings with different config. To use memtomem's "
-                    f"version, rename or remove your hook, then re-run "
-                    f"`mm context sync --include=settings`."
-                )
-                continue
-            existing_hooks.append(hook)
+                matcher = rule.get("matcher", "")
+                if matcher in existing_by_matcher:
+                    if existing_by_matcher[matcher] == rule:
+                        continue  # already in sync
+                    label = f"{event}:{matcher}" if matcher else event
+                    warnings.append(
+                        f"Hook rule '{label}' already exists in the target "
+                        f"settings with different config. To use memtomem's "
+                        f"version, remove the existing rule, then re-run "
+                        f"`mm context sync --include=settings`."
+                    )
+                    continue
+                existing_rules.append(rule)
+
+            existing_hooks[event] = existing_rules
 
         merged["hooks"] = existing_hooks
         return merged, warnings

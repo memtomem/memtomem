@@ -1,4 +1,8 @@
-"""Tests for context/settings.py — canonical → runtime settings.json fan-out (Phase D)."""
+"""Tests for context/settings.py — canonical → runtime settings.json fan-out (Phase D).
+
+Uses record-format hooks (Claude Code ≥ 2.1.104):
+    {"hooks": {"EventName": [{"matcher": "...", "hooks": [...]}]}}
+"""
 
 from __future__ import annotations
 
@@ -17,6 +21,14 @@ from memtomem.context.settings import (
     diff_settings,
     generate_all_settings,
 )
+
+
+# ── Helpers ────────────────────────────────────────────────────────
+
+
+def _rule(matcher: str = "", command: str = "echo ok", timeout: int = 5000) -> dict:
+    """Build a single hook rule in record format."""
+    return {"matcher": matcher, "hooks": [{"type": "command", "command": command, "timeout": timeout}]}
 
 
 # ── Fixtures ────────────────────────────────────────────────────────
@@ -46,7 +58,7 @@ def claude_home_missing(tmp_path, monkeypatch):
 def _make_canonical_settings(project_root, content: dict | str | None = None):
     """Write ``.memtomem/settings.json`` with the given content."""
     if content is None:
-        content = {"hooks": []}
+        content = {"hooks": {}}
     path = project_root / CANONICAL_SETTINGS_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(content, str):
@@ -71,22 +83,19 @@ class TestClaudeSettingsMergeEmpty:
     def test_creates_file_from_canonical(self, claude_home, tmp_path):
         _make_canonical_settings(
             tmp_path,
-            {"hooks": [{"event": "PostToolUse", "name": "mm-log", "command": "echo ok"}]},
+            {"hooks": {"PostToolUse": [_rule("Write", "echo ok")]}},
         )
         results = generate_all_settings(tmp_path)
         assert results["claude_settings"].status == "ok"
 
         written = _read_target(claude_home)
-        assert len(written["hooks"]) == 1
-        assert written["hooks"][0]["name"] == "mm-log"
+        assert "PostToolUse" in written["hooks"]
+        assert len(written["hooks"]["PostToolUse"]) == 1
+        assert written["hooks"]["PostToolUse"][0]["matcher"] == "Write"
 
 
 class TestClaudeSettingsMergeSemantic:
-    """Existing keys not owned by memtomem are preserved semantically.
-
-    Formatting (key order, indentation) is intentionally not preserved —
-    see the "Resolved design decisions" in the Phase D plan.
-    """
+    """Existing keys not owned by memtomem are preserved semantically."""
 
     def test_preserves_unrelated_keys(self, claude_home, tmp_path):
         target = claude_home / ".claude" / "settings.json"
@@ -97,7 +106,7 @@ class TestClaudeSettingsMergeSemantic:
         }
         target.write_text(json.dumps(existing, indent=4) + "\n")
 
-        _make_canonical_settings(tmp_path, {"hooks": []})
+        _make_canonical_settings(tmp_path, {"hooks": {}})
         results = generate_all_settings(tmp_path)
         assert results["claude_settings"].status == "ok"
 
@@ -105,39 +114,59 @@ class TestClaudeSettingsMergeSemantic:
         assert written["permissions"] == existing["permissions"]
         assert written["env"] == existing["env"]
         assert written["mcpServers"] == existing["mcpServers"]
-        assert written["hooks"] == []
+        assert written["hooks"] == {}
 
 
 class TestClaudeSettingsMergeAdditive:
-    """Existing user hooks are preserved; memtomem hooks are appended."""
+    """Existing user rules are preserved; memtomem rules are appended."""
 
-    def test_appends_without_touching_user_hooks(self, claude_home, tmp_path):
+    def test_appends_without_touching_user_rules(self, claude_home, tmp_path):
         target = claude_home / ".claude" / "settings.json"
-        user_hook = {"event": "Notification", "name": "my-notify", "command": "say done"}
-        target.write_text(json.dumps({"hooks": [user_hook]}) + "\n")
+        user_rule = _rule("", "say done")
+        target.write_text(json.dumps({"hooks": {"Stop": [user_rule]}}) + "\n")
 
-        mm_hook = {"event": "PostToolUse", "name": "mm-watch", "command": "mm watchdog"}
-        _make_canonical_settings(tmp_path, {"hooks": [mm_hook]})
+        mm_rule = _rule("Write", "mm index")
+        _make_canonical_settings(tmp_path, {"hooks": {"PostToolUse": [mm_rule]}})
 
         results = generate_all_settings(tmp_path)
         assert results["claude_settings"].status == "ok"
 
         written = _read_target(claude_home)
-        assert len(written["hooks"]) == 2
-        assert written["hooks"][0] == user_hook
-        assert written["hooks"][1] == mm_hook
+        assert written["hooks"]["Stop"] == [user_rule]
+        assert written["hooks"]["PostToolUse"] == [mm_rule]
+
+    def test_appends_rule_to_same_event(self, claude_home, tmp_path):
+        """Multiple rules under the same event with different matchers."""
+        target = claude_home / ".claude" / "settings.json"
+        user_rule = _rule("Bash", "echo user")
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [user_rule]}}) + "\n"
+        )
+
+        mm_rule = _rule("Write", "mm index")
+        _make_canonical_settings(tmp_path, {"hooks": {"PostToolUse": [mm_rule]}})
+
+        results = generate_all_settings(tmp_path)
+        assert results["claude_settings"].status == "ok"
+
+        written = _read_target(claude_home)
+        assert len(written["hooks"]["PostToolUse"]) == 2
+        assert written["hooks"]["PostToolUse"][0] == user_rule
+        assert written["hooks"]["PostToolUse"][1] == mm_rule
 
 
 class TestClaudeSettingsMergeConflict:
-    """Name collision → skip + emit warning.  User's hook wins."""
+    """Same (event, matcher) → skip + emit warning.  User's rule wins."""
 
-    def test_user_hook_wins_on_name_collision(self, claude_home, tmp_path):
+    def test_user_rule_wins_on_matcher_collision(self, claude_home, tmp_path):
         target = claude_home / ".claude" / "settings.json"
-        user_hook = {"event": "Notification", "name": "mm-watch", "command": "custom"}
-        target.write_text(json.dumps({"hooks": [user_hook]}) + "\n")
+        user_rule = _rule("Write", "echo custom")
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [user_rule]}}) + "\n"
+        )
 
-        mm_hook = {"event": "PostToolUse", "name": "mm-watch", "command": "mm watchdog"}
-        _make_canonical_settings(tmp_path, {"hooks": [mm_hook]})
+        mm_rule = _rule("Write", "mm index")
+        _make_canonical_settings(tmp_path, {"hooks": {"PostToolUse": [mm_rule]}})
 
         results = generate_all_settings(tmp_path)
         r = results["claude_settings"]
@@ -145,38 +174,45 @@ class TestClaudeSettingsMergeConflict:
         assert len(r.warnings) == 1
 
         written = _read_target(claude_home)
-        assert len(written["hooks"]) == 1
-        assert written["hooks"][0] == user_hook  # user wins
+        assert len(written["hooks"]["PostToolUse"]) == 1
+        assert written["hooks"]["PostToolUse"][0] == user_rule  # user wins
 
-    def test_identical_hook_is_silently_skipped(self, claude_home, tmp_path):
-        """If the user's hook is byte-identical, no warning is emitted."""
-        hook = {"event": "PostToolUse", "name": "mm-watch", "command": "mm watchdog"}
+    def test_identical_rule_is_silently_skipped(self, claude_home, tmp_path):
+        """If the user's rule is byte-identical, no warning is emitted."""
+        rule = _rule("Write", "mm index")
         target = claude_home / ".claude" / "settings.json"
-        target.write_text(json.dumps({"hooks": [hook]}) + "\n")
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [rule]}}) + "\n"
+        )
 
-        _make_canonical_settings(tmp_path, {"hooks": [hook]})
+        _make_canonical_settings(tmp_path, {"hooks": {"PostToolUse": [rule]}})
         results = generate_all_settings(tmp_path)
         assert results["claude_settings"].status == "ok"
         assert results["claude_settings"].warnings == []
 
 
 class TestClaudeSettingsMergeWarningContent:
-    """Warning messages must contain the hook name, reason, and remediation."""
+    """Warning messages must contain the rule label, reason, and remediation."""
 
     def test_warning_includes_required_parts(self, claude_home, tmp_path):
         target = claude_home / ".claude" / "settings.json"
-        target.write_text(json.dumps({"hooks": [{"name": "mm-watch", "x": 1}]}) + "\n")
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [_rule("Write", "old")]}}) + "\n"
+        )
 
-        _make_canonical_settings(tmp_path, {"hooks": [{"name": "mm-watch", "x": 2}]})
+        _make_canonical_settings(
+            tmp_path,
+            {"hooks": {"PostToolUse": [_rule("Write", "new")]}},
+        )
         results = generate_all_settings(tmp_path)
         w = results["claude_settings"].warnings[0]
 
-        # (a) hook name verbatim
-        assert "'mm-watch'" in w
+        # (a) rule label
+        assert "PostToolUse:Write" in w
         # (b) reason
         assert "already exists" in w
         # (c) concrete remediation step
-        assert "rename or remove" in w
+        assert "remove" in w
         assert "mm context sync --include=settings" in w
 
 
@@ -185,16 +221,16 @@ class TestClaudeSettingsMergeMalformed:
 
     def test_malformed_target_returns_error(self, claude_home, tmp_path):
         target = claude_home / ".claude" / "settings.json"
-        target.write_text('{"hooks":[', encoding="utf-8")  # truncated
+        target.write_text('{"hooks":{', encoding="utf-8")  # truncated
 
-        _make_canonical_settings(tmp_path, {"hooks": []})
+        _make_canonical_settings(tmp_path, {"hooks": {}})
         results = generate_all_settings(tmp_path)
         r = results["claude_settings"]
         assert r.status == "error"
         assert "not valid JSON" in r.reason
 
         # File should NOT have been modified
-        assert target.read_text() == '{"hooks":['
+        assert target.read_text() == '{"hooks":{'
 
     def test_malformed_canonical_returns_error(self, claude_home, tmp_path):
         _make_canonical_settings(tmp_path, "{bad json")
@@ -209,22 +245,13 @@ class TestClaudeSettingsMergeConcurrent:
 
     def test_aborts_on_mtime_change(self, claude_home, tmp_path):
         target = claude_home / ".claude" / "settings.json"
-        target.write_text(json.dumps({"hooks": []}) + "\n")
+        target.write_text(json.dumps({"hooks": {}}) + "\n")
 
         _make_canonical_settings(
             tmp_path,
-            {"hooks": [{"name": "new-hook", "event": "PostToolUse", "command": "echo"}]},
+            {"hooks": {"PostToolUse": [_rule("Write", "echo")]}},
         )
 
-        # Monkey-patch os.stat to simulate mtime change after first read.
-        # We wrap generate_all_settings so the target file is modified
-        # between the read and the write.
-        original_text = target.read_text()
-        call_count = {"stat": 0}
-        orig_stat = target.stat
-
-        # Simulate: after the generator reads the file, something else
-        # writes to it, bumping the mtime.
         import memtomem.context.settings as settings_mod
 
         orig_read_with_mtime = settings_mod._read_with_mtime
@@ -232,8 +259,7 @@ class TestClaudeSettingsMergeConcurrent:
         def patched_read_with_mtime(path):
             result = orig_read_with_mtime(path)
             if path == target:
-                # Bump mtime after read by re-writing with a small change
-                target.write_text(json.dumps({"hooks": [], "_bumped": True}) + "\n")
+                target.write_text(json.dumps({"hooks": {}, "_bumped": True}) + "\n")
             return result
 
         import unittest.mock
@@ -250,7 +276,7 @@ class TestClaudeSettingsNoClaudeCodeInstalled:
     """``~/.claude/`` does not exist → skip, never create it."""
 
     def test_skips_when_claude_not_installed(self, claude_home_missing, tmp_path):
-        _make_canonical_settings(tmp_path, {"hooks": []})
+        _make_canonical_settings(tmp_path, {"hooks": {}})
         results = generate_all_settings(tmp_path)
         r = results["claude_settings"]
         assert r.status == "skipped"
@@ -267,13 +293,16 @@ class TestClaudeSettingsDryRun:
     """diff_settings reports merge plan without writing."""
 
     def test_reports_missing_target(self, claude_home, tmp_path):
-        _make_canonical_settings(tmp_path, {"hooks": [{"name": "x", "e": "PostToolUse"}]})
+        _make_canonical_settings(
+            tmp_path,
+            {"hooks": {"PostToolUse": [_rule("Write")]}},
+        )
         results = diff_settings(tmp_path)
         assert results["claude_settings"].status == "missing target"
 
     def test_reports_in_sync(self, claude_home, tmp_path):
         target = claude_home / ".claude" / "settings.json"
-        content = {"hooks": [{"name": "x", "e": "PostToolUse"}]}
+        content = {"hooks": {"PostToolUse": [_rule("Write")]}}
         target.write_text(json.dumps(content, indent=2) + "\n")
 
         _make_canonical_settings(tmp_path, content)
@@ -282,10 +311,10 @@ class TestClaudeSettingsDryRun:
 
     def test_reports_out_of_sync(self, claude_home, tmp_path):
         target = claude_home / ".claude" / "settings.json"
-        target.write_text(json.dumps({"hooks": []}) + "\n")
+        target.write_text(json.dumps({"hooks": {}}) + "\n")
 
         _make_canonical_settings(
-            tmp_path, {"hooks": [{"name": "new", "e": "PostToolUse"}]}
+            tmp_path, {"hooks": {"PostToolUse": [_rule("Write")]}}
         )
         results = diff_settings(tmp_path)
         assert results["claude_settings"].status == "out of sync"
@@ -293,11 +322,11 @@ class TestClaudeSettingsDryRun:
     def test_does_not_write(self, claude_home, tmp_path):
         """diff must never modify the target file."""
         target = claude_home / ".claude" / "settings.json"
-        original = json.dumps({"hooks": []}) + "\n"
+        original = json.dumps({"hooks": {}}) + "\n"
         target.write_text(original)
 
         _make_canonical_settings(
-            tmp_path, {"hooks": [{"name": "new", "e": "PostToolUse"}]}
+            tmp_path, {"hooks": {"PostToolUse": [_rule("Write")]}}
         )
         diff_settings(tmp_path)
         assert target.read_text() == original
@@ -316,7 +345,7 @@ class TestClaudeSettingsCliInclude:
 
         _make_canonical_settings(
             tmp_path,
-            {"hooks": [{"name": "test-hook", "event": "PostToolUse", "command": "echo"}]},
+            {"hooks": {"PostToolUse": [_rule("Write", "echo test")]}},
         )
 
         from memtomem.cli.context_cmd import context
@@ -330,7 +359,7 @@ class TestClaudeSettingsCliInclude:
         target = claude_home / ".claude" / "settings.json"
         assert target.is_file()
         written = json.loads(target.read_text())
-        assert any(h.get("name") == "test-hook" for h in written.get("hooks", []))
+        assert "PostToolUse" in written.get("hooks", {})
 
     def test_include_settings_validation(self):
         """Unknown include values are rejected."""

@@ -490,39 +490,41 @@ class TestProcedures:
 
 
 class TestSettingsSync:
-    """Tests for the settings-sync route (hooks conflict resolution)."""
+    """Tests for the settings-sync route (record-format hooks)."""
+
+    @staticmethod
+    def _rule(matcher: str = "", command: str = "echo ok") -> dict:
+        return {"matcher": matcher, "hooks": [{"type": "command", "command": command}]}
 
     async def test_no_source_returns_no_source(self, app, client: AsyncClient, tmp_path):
         """When .memtomem/settings.json doesn't exist, status is no_source."""
         app.state.project_root = tmp_path
         resp = await client.get("/api/settings-sync")
         assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "no_source"
+        assert resp.json()["status"] == "no_source"
 
     async def test_in_sync(self, app, client: AsyncClient, tmp_path):
         """When hooks are identical in both files, status is in_sync."""
-        hook = {"name": "mm-test", "event": "PostToolUse", "command": "echo ok"}
+        rule = self._rule("Write", "echo ok")
+        hooks = {"hooks": {"PostToolUse": [rule]}}
 
         canonical = tmp_path / ".memtomem" / "settings.json"
         canonical.parent.mkdir()
-        canonical.write_text(json.dumps({"hooks": [hook]}))
+        canonical.write_text(json.dumps(hooks))
 
         target = Path.home() / ".claude" / "settings.json"
-        if target.is_file():
-            backup = target.read_text()
-        else:
-            backup = None
+        backup = target.read_text() if target.is_file() else None
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(json.dumps({"hooks": [hook]}))
+            target.write_text(json.dumps(hooks))
             app.state.project_root = tmp_path
 
             resp = await client.get("/api/settings-sync")
             data = resp.json()
             assert data["status"] == "in_sync"
             assert len(data["hooks"]["synced"]) == 1
-            assert data["hooks"]["synced"][0]["name"] == "mm-test"
+            assert data["hooks"]["synced"][0]["event"] == "PostToolUse"
+            assert data["hooks"]["synced"][0]["matcher"] == "Write"
         finally:
             if backup is not None:
                 target.write_text(backup)
@@ -530,21 +532,18 @@ class TestSettingsSync:
                 target.unlink()
 
     async def test_conflict_detected(self, app, client: AsyncClient, tmp_path):
-        """When hooks have same name but different config, status is conflicts."""
-        canonical_hook = {"name": "mm-hook", "event": "PostToolUse", "command": "echo new"}
-        target_hook = {"name": "mm-hook", "event": "PostToolUse", "command": "echo old"}
+        """Same event+matcher but different config → status is conflicts."""
+        canonical_rule = self._rule("Write", "echo new")
+        target_rule = self._rule("Write", "echo old")
 
         canonical = tmp_path / ".memtomem" / "settings.json"
         canonical.parent.mkdir()
-        canonical.write_text(json.dumps({"hooks": [canonical_hook]}))
+        canonical.write_text(json.dumps({"hooks": {"PostToolUse": [canonical_rule]}}))
 
         target = Path.home() / ".claude" / "settings.json"
-        if target.is_file():
-            backup = target.read_text()
-        else:
-            backup = None
+        backup = target.read_text() if target.is_file() else None
         try:
-            target.write_text(json.dumps({"hooks": [target_hook]}))
+            target.write_text(json.dumps({"hooks": {"PostToolUse": [target_rule]}}))
             app.state.project_root = tmp_path
 
             resp = await client.get("/api/settings-sync")
@@ -552,9 +551,10 @@ class TestSettingsSync:
             assert data["status"] == "conflicts"
             assert len(data["hooks"]["conflicts"]) == 1
             c = data["hooks"]["conflicts"][0]
-            assert c["name"] == "mm-hook"
-            assert c["existing"]["command"] == "echo old"
-            assert c["proposed"]["command"] == "echo new"
+            assert c["event"] == "PostToolUse"
+            assert c["matcher"] == "Write"
+            assert c["existing"]["hooks"][0]["command"] == "echo old"
+            assert c["proposed"]["hooks"][0]["command"] == "echo new"
         finally:
             if backup is not None:
                 target.write_text(backup)
@@ -562,61 +562,54 @@ class TestSettingsSync:
                 target.unlink()
 
     async def test_pending_hooks(self, app, client: AsyncClient, tmp_path):
-        """Hooks in canonical but not in target are pending."""
-        hook = {"name": "mm-new", "event": "PostToolUse", "command": "echo hi"}
+        """Rules in canonical but not in target are pending."""
+        rule = self._rule("Write", "echo hi")
 
         canonical = tmp_path / ".memtomem" / "settings.json"
         canonical.parent.mkdir()
-        canonical.write_text(json.dumps({"hooks": [hook]}))
+        canonical.write_text(json.dumps({"hooks": {"PostToolUse": [rule]}}))
 
         target = Path.home() / ".claude" / "settings.json"
-        if target.is_file():
-            backup = target.read_text()
-        else:
-            backup = None
+        backup = target.read_text() if target.is_file() else None
         try:
-            target.write_text(json.dumps({"hooks": []}))
+            target.write_text(json.dumps({"hooks": {}}))
             app.state.project_root = tmp_path
 
             resp = await client.get("/api/settings-sync")
             data = resp.json()
             assert data["status"] == "out_of_sync"
             assert len(data["hooks"]["pending"]) == 1
-            assert data["hooks"]["pending"][0]["name"] == "mm-new"
+            assert data["hooks"]["pending"][0]["event"] == "PostToolUse"
         finally:
             if backup is not None:
                 target.write_text(backup)
             elif target.is_file():
                 target.unlink()
 
-    async def test_resolve_replaces_hook(self, app, client: AsyncClient, tmp_path):
-        """POST /resolve replaces the target's hook with canonical version."""
-        canonical_hook = {"name": "mm-hook", "event": "PostToolUse", "command": "echo new"}
-        target_hook = {"name": "mm-hook", "event": "PostToolUse", "command": "echo old"}
+    async def test_resolve_replaces_rule(self, app, client: AsyncClient, tmp_path):
+        """POST /resolve replaces the target's rule with canonical version."""
+        canonical_rule = self._rule("Write", "echo new")
+        target_rule = self._rule("Write", "echo old")
 
         canonical = tmp_path / ".memtomem" / "settings.json"
         canonical.parent.mkdir()
-        canonical.write_text(json.dumps({"hooks": [canonical_hook]}))
+        canonical.write_text(json.dumps({"hooks": {"PostToolUse": [canonical_rule]}}))
 
         target = Path.home() / ".claude" / "settings.json"
-        if target.is_file():
-            backup = target.read_text()
-        else:
-            backup = None
+        backup = target.read_text() if target.is_file() else None
         try:
-            target.write_text(json.dumps({"hooks": [target_hook]}))
+            target.write_text(json.dumps({"hooks": {"PostToolUse": [target_rule]}}))
             app.state.project_root = tmp_path
 
             resp = await client.post(
                 "/api/settings-sync/resolve",
-                json={"hook_name": "mm-hook", "action": "use_proposed"},
+                json={"event": "PostToolUse", "matcher": "Write", "action": "use_proposed"},
             )
             data = resp.json()
             assert data["status"] == "ok"
 
-            # Verify the file was updated
             updated = json.loads(target.read_text())
-            assert updated["hooks"][0]["command"] == "echo new"
+            assert updated["hooks"]["PostToolUse"][0]["hooks"][0]["command"] == "echo new"
         finally:
             if backup is not None:
                 target.write_text(backup)
@@ -636,7 +629,7 @@ class TestSettingsSync:
         """POST /api/context/settings/sync runs the settings merge."""
         canonical = tmp_path / ".memtomem" / "settings.json"
         canonical.parent.mkdir()
-        canonical.write_text(json.dumps({"hooks": []}))
+        canonical.write_text(json.dumps({"hooks": {}}))
         app.state.project_root = tmp_path
 
         resp = await client.post(
@@ -644,36 +637,32 @@ class TestSettingsSync:
             headers={"Content-Type": "application/json"},
         )
         assert resp.status_code == 200
-        data = resp.json()
-        assert "results" in data
+        assert "results" in resp.json()
 
     async def test_alias_post_context_settings_resolve(self, app, client: AsyncClient, tmp_path):
         """POST /api/context/settings/resolve resolves a hook conflict."""
-        canonical_hook = {"name": "mm-alias", "event": "PostToolUse", "command": "echo v2"}
-        target_hook = {"name": "mm-alias", "event": "PostToolUse", "command": "echo v1"}
+        canonical_rule = self._rule("Edit", "echo v2")
+        target_rule = self._rule("Edit", "echo v1")
 
         canonical = tmp_path / ".memtomem" / "settings.json"
         canonical.parent.mkdir()
-        canonical.write_text(json.dumps({"hooks": [canonical_hook]}))
+        canonical.write_text(json.dumps({"hooks": {"PostToolUse": [canonical_rule]}}))
 
         target = Path.home() / ".claude" / "settings.json"
-        if target.is_file():
-            backup = target.read_text()
-        else:
-            backup = None
+        backup = target.read_text() if target.is_file() else None
         try:
-            target.write_text(json.dumps({"hooks": [target_hook]}))
+            target.write_text(json.dumps({"hooks": {"PostToolUse": [target_rule]}}))
             app.state.project_root = tmp_path
 
             resp = await client.post(
                 "/api/context/settings/resolve",
-                json={"hook_name": "mm-alias", "action": "use_proposed"},
+                json={"event": "PostToolUse", "matcher": "Edit", "action": "use_proposed"},
             )
             data = resp.json()
             assert data["status"] == "ok"
 
             updated = json.loads(target.read_text())
-            assert updated["hooks"][0]["command"] == "echo v2"
+            assert updated["hooks"]["PostToolUse"][0]["hooks"][0]["command"] == "echo v2"
         finally:
             if backup is not None:
                 target.write_text(backup)
