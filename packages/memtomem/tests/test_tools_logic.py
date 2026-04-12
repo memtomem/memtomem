@@ -979,6 +979,7 @@ def _fake_ctx(components):
 
 
 class TestMemAddCoreIntegration:
+    @pytest.mark.ollama
     async def test_mem_add_core_returns_indexing_stats(self, components, memory_dir):
         """_mem_add_core returns (message, stats) and stats.new_chunk_ids is
         populated with the UUID(s) of chunks freshly upserted during indexing.
@@ -1025,6 +1026,7 @@ class TestMemAddCoreIntegration:
 
 
 class TestMemConsolidateApplyIntegration:
+    @pytest.mark.ollama
     async def test_agent_path_writes_to_disk_and_links_relations(self, components, memory_dir):
         """Full file-first agent flow: summary appears in a disk file, the new
         chunk is indexed, and each original has a consolidated_into edge
@@ -1174,6 +1176,7 @@ class TestSystemNamespacePrefixFilter:
         with pytest.raises(ValueError, match="cap is 10"):
             SearchConfig(system_namespace_prefixes=too_many)
 
+    @pytest.mark.ollama
     async def test_default_search_excludes_archive_summary(self, components, memory_dir):
         """End-to-end: an archive:summary chunk is NOT returned by a
         bare search (no namespace), but IS returned when explicitly asked."""
@@ -1218,6 +1221,7 @@ class TestSystemNamespacePrefixFilter:
         # Sanity: we do get at least one result from the regular chunk.
         assert len(results) >= 1
 
+    @pytest.mark.ollama
     async def test_explicit_archive_summary_namespace_is_retrievable(self, components, memory_dir):
         """The same chunk that default search hides is returned when the
         caller explicitly scopes to archive:summary."""
