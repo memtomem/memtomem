@@ -190,7 +190,10 @@ class SearchPipeline:
 
         bm25_k = max(self._config.bm25_candidates, top_k)
         dense_k = max(self._config.dense_candidates, top_k)
-        ns_filter = NamespaceFilter.parse(namespace)
+        ns_filter = NamespaceFilter.parse(
+            namespace,
+            system_prefixes=tuple(self._config.system_namespace_prefixes),
+        )
 
         use_bm25 = self._config.enable_bm25
         use_dense = self._config.enable_dense

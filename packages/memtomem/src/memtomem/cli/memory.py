@@ -112,7 +112,10 @@ async def _recall(
     until_dt = _parse_recall_date(until) if until else None
 
     async with cli_components() as comp:
-        ns_filter = NamespaceFilter.parse(namespace)
+        ns_filter = NamespaceFilter.parse(
+            namespace,
+            system_prefixes=tuple(comp.config.search.system_namespace_prefixes),
+        )
         chunks = await comp.storage.recall_chunks(
             since=since_dt,
             until=until_dt,

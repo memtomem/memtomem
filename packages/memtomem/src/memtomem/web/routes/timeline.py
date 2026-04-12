@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, Query
 
 from memtomem.models import NamespaceFilter
-from memtomem.web.deps import get_storage
+from memtomem.web.deps import get_config, get_storage
 from memtomem.web.schemas.core import chunk_to_out
 from memtomem.web.schemas import TimelineResponse
 
@@ -21,10 +21,14 @@ async def get_timeline(
     namespace: str | None = Query(None, description="Namespace filter"),
     limit: int = Query(200, ge=1, le=1000),
     storage=Depends(get_storage),
+    config=Depends(get_config),
 ) -> TimelineResponse:
     """Return chunks created within the last *days* days, newest first."""
     since = datetime.now(timezone.utc) - timedelta(days=days)
-    ns_filter = NamespaceFilter.parse(namespace)
+    ns_filter = NamespaceFilter.parse(
+        namespace,
+        system_prefixes=tuple(config.search.system_namespace_prefixes),
+    )
     chunks = await storage.recall_chunks(
         since=since,
         source_filter=source,

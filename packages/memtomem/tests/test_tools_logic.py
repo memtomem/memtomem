@@ -1102,6 +1102,148 @@ class TestMemConsolidateApplyIntegration:
             )
 
 
+# ── System namespace prefix filter ───────────────────────────────────
+
+
+class TestSystemNamespacePrefixFilter:
+    """Feature: default search (namespace=None) hides system-generated
+    namespaces like ``archive:*`` while explicit requests still retrieve
+    them. See Phase A.5 docs for why this is necessary — without it, the
+    auto_consolidate ``archive:summary`` chunks would pollute daily
+    search results on every user query."""
+
+    def test_namespace_filter_parse_none_with_prefixes_sets_exclude(self):
+        from memtomem.models import NamespaceFilter
+
+        f = NamespaceFilter.parse(None, system_prefixes=["archive:"])
+        assert f is not None
+        assert f.exclude_prefixes == ("archive:",)
+        assert f.namespaces == ()
+        assert f.pattern is None
+
+    def test_namespace_filter_parse_none_without_prefixes_returns_none(self):
+        from memtomem.models import NamespaceFilter
+
+        assert NamespaceFilter.parse(None) is None
+        assert NamespaceFilter.parse(None, system_prefixes=[]) is None
+
+    def test_namespace_filter_parse_explicit_clears_exclude(self):
+        """Explicit namespace argument opts into whatever was named, even
+        when that namespace matches a system prefix. Parse layer decides."""
+        from memtomem.models import NamespaceFilter
+
+        f = NamespaceFilter.parse("archive:summary", system_prefixes=["archive:"])
+        assert f is not None
+        assert f.namespaces == ("archive:summary",)
+        assert f.exclude_prefixes == ()  # explicit wins, no exclusion
+
+    def test_namespace_filter_parse_explicit_glob_clears_exclude(self):
+        from memtomem.models import NamespaceFilter
+
+        f = NamespaceFilter.parse("archive:*", system_prefixes=["archive:"])
+        assert f is not None
+        assert f.pattern == "archive:*"
+        assert f.exclude_prefixes == ()
+
+    def test_namespace_sql_exclude_prefixes_emits_not_like(self):
+        from memtomem.models import NamespaceFilter
+        from memtomem.storage.sqlite_helpers import namespace_sql
+
+        f = NamespaceFilter(exclude_prefixes=("archive:", "system:"))
+        frag, params = namespace_sql(f)
+        # Two NOT LIKE clauses AND-joined, each with its own param.
+        assert frag.count("NOT LIKE") == 2
+        assert " AND " in frag
+        assert params == ["archive:%", "system:%"]
+
+    def test_namespace_sql_exclude_prefixes_cap_assert(self):
+        """namespace_sql refuses to emit a runaway clause list."""
+        from memtomem.models import NamespaceFilter
+        from memtomem.storage.sqlite_helpers import namespace_sql
+
+        too_many = tuple(f"prefix{i}:" for i in range(11))
+        f = NamespaceFilter(exclude_prefixes=too_many)
+        with pytest.raises(AssertionError, match="cap is 10"):
+            namespace_sql(f)
+
+    def test_config_validator_rejects_too_many_prefixes(self):
+        """The SearchConfig validator catches misconfiguration at startup."""
+        from memtomem.config import SearchConfig
+
+        too_many = [f"p{i}:" for i in range(11)]
+        with pytest.raises(ValueError, match="cap is 10"):
+            SearchConfig(system_namespace_prefixes=too_many)
+
+    async def test_default_search_excludes_archive_summary(self, components, memory_dir):
+        """End-to-end: an archive:summary chunk is NOT returned by a
+        bare search (no namespace), but IS returned when explicitly asked."""
+        from memtomem.tools.memory_writer import append_entry
+
+        # 1. Index a user-facing chunk in the default namespace.
+        user_file = memory_dir / "normal.md"
+        append_entry(
+            user_file,
+            "A regular memory about Python async context managers and their lifecycle.",
+            title="Regular Entry",
+        )
+        await components.index_engine.index_file(user_file)
+
+        # 2. Manually create an archive:summary chunk — same vocabulary
+        # so both would rank highly for the same query.
+        from memtomem.models import Chunk, ChunkMetadata, ChunkType
+
+        summary_chunk = Chunk(
+            content=(
+                "Summary of Python async notes: covers async context managers, "
+                "task lifecycle, and the asyncio event loop."
+            ),
+            metadata=ChunkMetadata(
+                source_file=Path("/tmp/normal.md.consolidated.md"),
+                chunk_type=ChunkType.MARKDOWN_SECTION,
+                tags=("consolidated", "summary"),
+                namespace="archive:summary",
+            ),
+            embedding=[0.1] * components.config.embedding.dimension,
+        )
+        await components.storage.upsert_chunks([summary_chunk])
+
+        # 3. Default search — the archive:summary chunk must be filtered.
+        results, _ = await components.search_pipeline.search(
+            "python async context manager lifecycle", top_k=10
+        )
+        namespaces_found = {r.chunk.metadata.namespace for r in results}
+        assert "archive:summary" not in namespaces_found, (
+            f"archive:summary leaked into default search: {namespaces_found}"
+        )
+        # Sanity: we do get at least one result from the regular chunk.
+        assert len(results) >= 1
+
+    async def test_explicit_archive_summary_namespace_is_retrievable(self, components, memory_dir):
+        """The same chunk that default search hides is returned when the
+        caller explicitly scopes to archive:summary."""
+        from memtomem.models import Chunk, ChunkMetadata, ChunkType
+
+        summary_chunk = Chunk(
+            content=("Explicitly requested summary about async context managers and lifecycle."),
+            metadata=ChunkMetadata(
+                source_file=Path("/tmp/other.md.consolidated.md"),
+                chunk_type=ChunkType.MARKDOWN_SECTION,
+                tags=("consolidated", "summary"),
+                namespace="archive:summary",
+            ),
+            embedding=[0.1] * components.config.embedding.dimension,
+        )
+        await components.storage.upsert_chunks([summary_chunk])
+
+        results, _ = await components.search_pipeline.search(
+            "async context manager lifecycle",
+            top_k=10,
+            namespace="archive:summary",
+        )
+        assert len(results) >= 1
+        assert all(r.chunk.metadata.namespace == "archive:summary" for r in results)
+
+
 # ── Temporal ─────────────────────────────────────────────────────────
 
 

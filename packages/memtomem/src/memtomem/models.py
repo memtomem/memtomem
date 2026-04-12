@@ -39,15 +39,36 @@ class ChunkMetadata:
 class NamespaceFilter:
     """Filter for namespace-scoped queries.
 
-    Supports exact match (single or union), glob patterns, and comma-separated lists.
+    Supports exact match (single or union), glob patterns, comma-separated
+    lists, and default-search exclusion of system namespace prefixes (e.g.
+    ``archive:``). Exclusion is applied *only* when no explicit namespace
+    is given — the idea is that callers who ask for ``archive:summary``
+    directly have already opted in.
     """
 
     namespaces: tuple[str, ...] = ()
     pattern: str | None = None
+    exclude_prefixes: tuple[str, ...] = ()
 
     @staticmethod
-    def parse(value: str | list[str] | None) -> NamespaceFilter | None:
+    def parse(
+        value: str | list[str] | None,
+        system_prefixes: tuple[str, ...] | list[str] | None = None,
+    ) -> NamespaceFilter | None:
+        """Parse a user-supplied namespace argument into a filter.
+
+        When ``value`` is ``None`` and ``system_prefixes`` is non-empty, the
+        returned filter carries ``exclude_prefixes`` so default searches
+        hide system-generated namespaces (``archive:*`` by default) without
+        affecting explicit queries. When ``value`` is any non-``None`` form
+        (exact string, comma list, glob), ``system_prefixes`` is ignored —
+        the caller explicitly opted into whatever namespace they named.
+        """
+        prefixes = tuple(system_prefixes) if system_prefixes else ()
+
         if value is None:
+            if prefixes:
+                return NamespaceFilter(exclude_prefixes=prefixes)
             return None
         if isinstance(value, list):
             return NamespaceFilter(namespaces=tuple(value))

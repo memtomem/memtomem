@@ -53,7 +53,13 @@ async def mem_recall(
         return "Error: 'since' must be earlier than 'until'."
 
     effective_ns = namespace or app.current_namespace
-    ns_filter = NamespaceFilter.parse(effective_ns)
+    # Mirror mem_search default behavior: when no explicit namespace is set,
+    # hide system namespaces (``archive:*`` by default) so archived and
+    # auto-consolidated chunks don't pollute the standard recall stream.
+    ns_filter = NamespaceFilter.parse(
+        effective_ns,
+        system_prefixes=tuple(app.config.search.system_namespace_prefixes),
+    )
     chunks = await app.storage.recall_chunks(
         since=since_dt,
         until=until_dt,

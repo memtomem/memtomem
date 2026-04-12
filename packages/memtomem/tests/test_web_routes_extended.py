@@ -76,6 +76,7 @@ class FakeConfig:
         enable_dense = True
         tokenizer = "unicode61"
         rrf_weights = [1.0, 1.0]
+        system_namespace_prefixes: list[str] = []
 
     class _Indexing:
         memory_dirs = [Path("/tmp/memories")]

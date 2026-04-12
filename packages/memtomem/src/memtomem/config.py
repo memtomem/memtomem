@@ -41,6 +41,14 @@ class SearchConfig(BaseSettings):
     tokenizer: str = "unicode61"  # "unicode61" or "kiwipiepy"
     rrf_weights: list[float] = Field(default_factory=lambda: [1.0, 1.0])  # [BM25, Dense]
     cache_ttl: float = 30.0  # search result cache TTL in seconds
+    # Namespaces starting with any of these prefixes are excluded from
+    # *default* search (``namespace=None``) but remain retrievable with an
+    # explicit namespace argument. Keeps system-generated buckets
+    # (auto_archive targets, auto_consolidate ``archive:summary`` summaries)
+    # out of day-to-day results while preserving their audit trail.
+    # Set to an empty list to restore the pre-Phase-A.5 behavior where every
+    # namespace is searchable by default.
+    system_namespace_prefixes: list[str] = Field(default_factory=lambda: ["archive:"])
 
     @field_validator("default_top_k", "bm25_candidates", "dense_candidates", "rrf_k")
     @classmethod
@@ -55,6 +63,19 @@ class SearchConfig(BaseSettings):
         allowed = {"unicode61", "kiwipiepy"}
         if v not in allowed:
             raise ValueError(f"tokenizer must be one of {allowed}")
+        return v
+
+    @field_validator("system_namespace_prefixes")
+    @classmethod
+    def prefix_count_capped(cls, v: list[str]) -> list[str]:
+        # Cap catches dynamic-generation mistakes at startup rather than
+        # emitting a runaway N × M LIKE clause every search call. 10 is
+        # generous — real configs are expected to have 1-3 entries.
+        if len(v) > 10:
+            raise ValueError(
+                f"system_namespace_prefixes has {len(v)} entries; cap is 10. "
+                "Did you accidentally generate prefixes dynamically?"
+            )
         return v
 
 
