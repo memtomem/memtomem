@@ -18,7 +18,7 @@ from memtomem.web.deps import get_project_root
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["settings-sync"])
+router = APIRouter(tags=["settings-sync", "context-gateway"])
 
 _MALFORMED = object()
 
@@ -101,6 +101,7 @@ def _compare_hooks(
 
 
 @router.get("/settings-sync")
+@router.get("/context/settings")
 async def get_settings_sync(
     project_root: Path = Depends(get_project_root),
 ) -> dict:
@@ -111,6 +112,7 @@ async def get_settings_sync(
 
 
 @router.post("/settings-sync")
+@router.post("/context/settings/sync")
 async def apply_settings_sync(
     project_root: Path = Depends(get_project_root),
 ) -> dict:
@@ -136,6 +138,7 @@ class ResolveRequest(BaseModel):
 
 
 @router.post("/settings-sync/resolve")
+@router.post("/context/settings/resolve")
 async def resolve_conflict(
     body: ResolveRequest,
     project_root: Path = Depends(get_project_root),

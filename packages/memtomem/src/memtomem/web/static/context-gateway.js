@@ -122,6 +122,8 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     for (const typ of types) {
       await fetch(`/api/context/${typ}/sync`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
     }
+    // Settings hooks sync (additive merge)
+    await fetch('/api/context/settings/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
     showToast(t('settings.ctx.sync_success', 'Sync completed'));
     loadCtxOverview();
   } catch (err) {

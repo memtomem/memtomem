@@ -623,6 +623,63 @@ class TestSettingsSync:
             elif target.is_file():
                 target.unlink()
 
+    # -- URL alias tests (/api/context/settings/*) ----------------------------
+
+    async def test_alias_get_context_settings(self, app, client: AsyncClient, tmp_path):
+        """GET /api/context/settings returns same result as /api/settings-sync."""
+        app.state.project_root = tmp_path
+        resp = await client.get("/api/context/settings")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "no_source"
+
+    async def test_alias_post_context_settings_sync(self, app, client: AsyncClient, tmp_path):
+        """POST /api/context/settings/sync runs the settings merge."""
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        canonical.write_text(json.dumps({"hooks": []}))
+        app.state.project_root = tmp_path
+
+        resp = await client.post(
+            "/api/context/settings/sync",
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "results" in data
+
+    async def test_alias_post_context_settings_resolve(self, app, client: AsyncClient, tmp_path):
+        """POST /api/context/settings/resolve resolves a hook conflict."""
+        canonical_hook = {"name": "mm-alias", "event": "PostToolUse", "command": "echo v2"}
+        target_hook = {"name": "mm-alias", "event": "PostToolUse", "command": "echo v1"}
+
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        canonical.write_text(json.dumps({"hooks": [canonical_hook]}))
+
+        target = Path.home() / ".claude" / "settings.json"
+        if target.is_file():
+            backup = target.read_text()
+        else:
+            backup = None
+        try:
+            target.write_text(json.dumps({"hooks": [target_hook]}))
+            app.state.project_root = tmp_path
+
+            resp = await client.post(
+                "/api/context/settings/resolve",
+                json={"hook_name": "mm-alias", "action": "use_proposed"},
+            )
+            data = resp.json()
+            assert data["status"] == "ok"
+
+            updated = json.loads(target.read_text())
+            assert updated["hooks"][0]["command"] == "echo v2"
+        finally:
+            if backup is not None:
+                target.write_text(backup)
+            elif target.is_file():
+                target.unlink()
+
 
 # ---------------------------------------------------------------------------
 # PATCH /api/config  (config mutation)
