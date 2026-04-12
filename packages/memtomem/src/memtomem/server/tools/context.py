@@ -10,7 +10,7 @@ from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 
 # Known --include values (mirrors cli.context_cmd._KNOWN_INCLUDES).
-_KNOWN_INCLUDES: frozenset[str] = frozenset({"skills", "agents", "commands"})
+_KNOWN_INCLUDES: frozenset[str] = frozenset({"skills", "agents", "commands", "settings"})
 
 
 def _find_project_root() -> Path:
@@ -107,6 +107,20 @@ async def mem_context_detect(
                 lines.append(f"  {c.agent}: {rel} ({c.size} bytes)")
         else:
             lines.append("No slash-command files found.")
+
+    if "settings" in inc:
+        from memtomem.context.detector import detect_settings_files
+
+        settings = detect_settings_files()
+        if lines:
+            lines.append("")
+        if settings:
+            lines.append(f"{len(settings)} settings file(s):")
+            for s in settings:
+                status = f"({s.size} bytes)" if s.size else "(not yet created)"
+                lines.append(f"  {s.agent}: {s.path} {status}")
+        else:
+            lines.append("No settings files detected.")
 
     return "\n".join(lines) if lines else "Nothing detected."
 
@@ -214,6 +228,20 @@ async def mem_context_generate(
         for runtime, cmd_name, dropped in command_result.dropped:
             results.append(f"  {runtime} dropped {dropped} from '{cmd_name}'")
 
+    if "settings" in inc:
+        from memtomem.context.settings import generate_all_settings
+
+        settings_results = generate_all_settings(root)
+        for sname, sr in settings_results.items():
+            if sr.status == "ok":
+                results.append(f"\nSettings: {sname} → {sr.target}")
+                for w in sr.warnings:
+                    results.append(f"  warning: {w}")
+            elif sr.status == "skipped":
+                results.append(f"  skipped {sname}: {sr.reason}")
+            elif sr.status in ("error", "aborted"):
+                results.append(f"  {sr.status} {sname}: {sr.reason}")
+
     return "Generated:\n" + "\n".join(results)
 
 
@@ -294,6 +322,24 @@ async def mem_context_diff(
                 lines.append(f"  {runtime}: {name} [{status}]")
         else:
             lines.append("No commands to compare.")
+
+    if "settings" in inc:
+        from memtomem.context.settings import diff_settings as _diff_settings
+
+        settings_results = _diff_settings(root)
+        if settings_results:
+            if lines:
+                lines.append("")
+            lines.append("Settings:")
+            for sname, sr in settings_results.items():
+                if sr.status in ("in sync", "out of sync", "missing target"):
+                    lines.append(f"  {sname} [{sr.status}]")
+                    for w in sr.warnings:
+                        lines.append(f"    warning: {w}")
+                elif sr.status == "skipped":
+                    lines.append(f"  skipped {sname}: {sr.reason}")
+                elif sr.status == "error":
+                    lines.append(f"  error {sname}: {sr.reason}")
 
     return "\n".join(lines) if lines else "Nothing to compare."
 
@@ -404,5 +450,21 @@ async def mem_context_sync(
             results.append(f"  skipped {runtime}: {reason}")
         for runtime, cmd_name, dropped in command_result.dropped:
             results.append(f"  {runtime} dropped {dropped} from '{cmd_name}'")
+
+    if "settings" in inc:
+        from memtomem.context.settings import generate_all_settings
+
+        settings_results = generate_all_settings(root)
+        for sname, sr in settings_results.items():
+            if sr.status == "ok":
+                if results:
+                    results.append("")
+                results.append(f"Settings: {sname} → {sr.target}")
+                for w in sr.warnings:
+                    results.append(f"  warning: {w}")
+            elif sr.status == "skipped":
+                results.append(f"  skipped {sname}: {sr.reason}")
+            elif sr.status in ("error", "aborted"):
+                results.append(f"  {sr.status} {sname}: {sr.reason}")
 
     return "Synced:\n" + "\n".join(results) if results else "Nothing to sync."

@@ -1149,6 +1149,8 @@ mm context init                        # create unified context.md
 mm context generate --agent all        # generate all agent files
 mm context diff                        # check sync status
 mm context sync                        # sync context.md → agent files
+mm context generate --include=settings # merge hooks → ~/.claude/settings.json
+mm context diff --include=settings     # check hook sync status
 
 # Utilities
 mm shell                               # interactive REPL
@@ -1245,6 +1247,65 @@ pip install memtomem-stm
 ```
 
 For setup, CLI usage, compression strategies, surfacing configuration, and the full tool list, see the [memtomem-stm README](https://github.com/memtomem/memtomem-stm#readme).
+
+---
+
+## Settings Hooks Integration (Phase D)
+
+memtomem can manage Claude Code hooks via a canonical
+`.memtomem/settings.json` file.  The `--include=settings` flag on
+`mm context generate/sync/diff` merges your hooks into
+`~/.claude/settings.json` additively.
+
+### Quick start
+
+```bash
+# 1. Create the canonical source (or let mm init create it)
+mkdir -p .memtomem
+echo '{"hooks": []}' > .memtomem/settings.json
+
+# 2. Add your hooks to .memtomem/settings.json, then sync
+mm context sync --include=settings
+
+# 3. Check sync status
+mm context diff --include=settings
+```
+
+### Merge rules
+
+- **Additive-only**: hooks are appended to the target, never overwritten.
+- **Name-based conflict detection**: if a hook with the same `name` already
+  exists in `~/.claude/settings.json`, memtomem skips it and emits a warning
+  with a concrete remediation step.
+- **User wins**: on conflict, your existing hook is preserved verbatim.
+- **`mm context diff --include=settings`** shows the merge plan without
+  writing (dry-run).
+
+### Caveats
+
+- **Formatting is not preserved.**  After `mm context sync --include=settings`,
+  `~/.claude/settings.json` is normalized to `json.dumps(indent=2)`.  If you
+  hand-edit the file with custom indentation or key order, expect the layout
+  to change on sync.
+- **Malformed JSON is skipped.**  If `~/.claude/settings.json` is not valid
+  JSON, the sync reports an error and does **not** modify the file.  Fix it
+  manually, then re-run the sync.
+- **Claude Code must be installed.**  If `~/.claude/` does not exist, the
+  settings runtime is silently skipped.  memtomem never creates `~/.claude/`.
+- **Concurrent writes.**  A basic mtime guard detects if another process
+  modifies `~/.claude/settings.json` during the merge and aborts rather than
+  overwriting.  Re-run the sync to retry.
+
+### MCP usage
+
+The same functionality is available through MCP tools:
+
+```
+mem_context_generate(include="settings")
+mem_context_sync(include="settings")
+mem_context_diff(include="settings")
+mem_context_detect(include="settings")
+```
 
 ---
 

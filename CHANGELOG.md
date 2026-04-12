@@ -5,6 +5,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+- **Phase D: Claude `settings.json` integration** — new `SettingsGenerator`
+  protocol and `ClaudeSettingsGenerator` implementation for merging memtomem
+  hooks into `~/.claude/settings.json`. Completes the LTM Manager roadmap
+  (Phases A → A.5 → B → C → D) and absorbs context-gateway Phase 4.
+  - New `--include=settings` flag for `mm context {generate,sync,diff,detect}`
+    (CLI and MCP `mem_context_*` tools).
+  - New `mm init` wizard step (Step 8) prompts for Claude Code hooks setup.
+  - Canonical source: `.memtomem/settings.json` with a `hooks` array.
+  - Additive-only merge: hooks are appended by name; on collision the user's
+    existing hook wins and a guided warning is emitted.
+  - Formatting: `json.dumps(indent=2)` normalization — byte-for-byte
+    preservation of hand-edited formatting is explicitly not guaranteed.
+  - Malformed `~/.claude/settings.json` is skipped with an error message
+    (not silently overwritten).
+  - If Claude Code is not installed (`~/.claude/` missing), the settings
+    runtime is silently skipped — memtomem never creates `~/.claude/`.
+  - Basic concurrent-write guard via mtime comparison between read and write.
+
 ## [0.1.5] — 2026-04-12
 
 ### Added
