@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.6] — 2026-04-12
+
 ### Added
 - **Phase D: Claude `settings.json` integration** — new `SettingsGenerator`
   protocol and `ClaudeSettingsGenerator` implementation for merging memtomem
