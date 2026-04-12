@@ -319,12 +319,60 @@ flowchart LR
     }
   )
 → Consolidation applied for group 0.
-Memory added to ~/.memtomem/memories/2026-04-11.md
+Memory added to ~/.memtomem/memories/2026-04-12.md
 - Chunks indexed: 1
-- File: ~/.memtomem/memories/2026-04-11.md
-- Original chunks: 16
+- File: ~/.memtomem/memories/2026-04-12.md
+- Summary chunk id: 7f3a2b1c-9e8d-4f5a-a1b2-c3d4e5f6a7b8
+- Originals linked: 16/16
 - Originals kept: True
 ```
+
+The summary is appended to the first configured `memory_dirs` (daily notes
+file by default) so it shows up in filesystem browsing, rsync backups, and
+git-tracked memory vaults. Each original chunk is linked to the new summary
+chunk via a `consolidated_into` relation, so `mem_related` / `mem_expand`
+can walk back to the originals whenever needed.
+
+### Automate Consolidation via Policy
+
+Manual `mem_consolidate` / `mem_consolidate_apply` is ideal when you want
+LLM-quality summaries that the agent writes itself. For unattended
+background consolidation, register an `auto_consolidate` policy instead —
+it produces a deterministic heuristic summary per source file and runs on
+demand through `mem_policy_run`:
+
+```
+> mem_do(
+    action="policy_add",
+    params={
+      "name": "weekly-consolidate",
+      "policy_type": "auto_consolidate",
+      "config": "{\"min_group_size\": 5, \"max_groups\": 10, \"keep_originals\": true}"
+    }
+  )
+→ Policy 'weekly-consolidate' created (type=auto_consolidate, id=1)
+
+> mem_do(action="policy_run", params={"name": "weekly-consolidate", "dry_run": true})
+→ [DRY RUN] Would consolidate 3 groups: meeting-notes.md, daily-2026-04-10.md, project-roadmap.md
+```
+
+Key differences between the two paths:
+
+| Aspect               | `mem_consolidate_apply` (agent) | `auto_consolidate` policy |
+|----------------------|---------------------------------|---------------------------|
+| Summary quality      | LLM-written (agent supplies)    | Deterministic heuristic (keyword-boosted bullets) |
+| Storage              | Real markdown file in `memory_dirs` | Virtual chunk (no file on disk) |
+| Namespace            | Same as originals               | `archive:summary` (hidden from default search, see below) |
+| Idempotency          | Agent decides when to run       | Source hash comparison + `consolidated_into` check |
+| Best for             | High-value knowledge merges     | Bulk decluttering, recurring scans |
+
+Policy-driven summaries land in the `archive:summary` namespace and are
+**excluded from default search** by the `search.system_namespace_prefixes`
+config (defaults to `["archive:"]`). They stay retrievable via
+`mem_search(..., namespace="archive:summary")`, `mem_related`, and
+`mem_expand` — the consolidation audit trail is preserved without
+cluttering day-to-day results. If you prefer archived content to remain
+searchable by default, set `search.system_namespace_prefixes = []`.
 
 ### Reflect on Patterns
 
