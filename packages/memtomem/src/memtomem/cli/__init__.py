@@ -19,6 +19,7 @@ def _register() -> None:
     from memtomem.cli.context_cmd import context
     from memtomem.cli.embedding_cmd import embedding_reset
     from memtomem.cli.indexing import index
+    from memtomem.cli.ingest_cmd import ingest
     from memtomem.cli.memory import add, recall
     from memtomem.cli.search import search
     from memtomem.cli.init_cmd import init
@@ -32,6 +33,7 @@ def _register() -> None:
     cli.add_command(add)
     cli.add_command(recall)
     cli.add_command(index)
+    cli.add_command(ingest)
     cli.add_command(config)
     cli.add_command(context)
     cli.add_command(embedding_reset)
