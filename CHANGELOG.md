@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.5] — 2026-04-12
+
 ### Added
 - Phase 3.5: canonical slash commands now fan out to Codex as well
   (`~/.codex/prompts/<name>.md`, user-scope). Codex's custom-prompts
