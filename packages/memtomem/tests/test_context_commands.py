@@ -277,9 +277,10 @@ class TestExtractCommandsToCanonical:
         d = tmp_path / ".claude/commands"
         d.mkdir(parents=True)
         (d / "review.md").write_text(SAMPLE_FULL_COMMAND)
-        imported = extract_commands_to_canonical(tmp_path)
-        assert len(imported) == 1
+        result = extract_commands_to_canonical(tmp_path)
+        assert len(result.imported) == 1
         assert (tmp_path / CANONICAL_COMMAND_ROOT / "review.md").is_file()
+        assert result.skipped == []
 
     def test_imports_gemini_toml_with_placeholder_rewrite(self, tmp_path):
         d = tmp_path / ".gemini/commands"
@@ -287,8 +288,8 @@ class TestExtractCommandsToCanonical:
         (d / "review.toml").write_text(
             'description = "Review a file"\nprompt = "Review {{args}} and report issues."\n'
         )
-        imported = extract_commands_to_canonical(tmp_path)
-        assert len(imported) == 1
+        result = extract_commands_to_canonical(tmp_path)
+        assert len(result.imported) == 1
         canonical = (tmp_path / CANONICAL_COMMAND_ROOT / "review.md").read_text()
         assert "description: Review a file" in canonical
         # {{args}} rewritten back to $ARGUMENTS
@@ -303,10 +304,14 @@ class TestExtractCommandsToCanonical:
             d = tmp_path / runtime
             d.mkdir(parents=True)
             (d / filename).write_text(content)
-        imported = extract_commands_to_canonical(tmp_path)
-        assert len(imported) == 1
+        result = extract_commands_to_canonical(tmp_path)
+        assert len(result.imported) == 1
         canonical = (tmp_path / CANONICAL_COMMAND_ROOT / "shared.md").read_text()
         assert "Simple prompt" in canonical  # claude version won
+        # Gemini copy was skipped.
+        assert len(result.skipped) == 1
+        assert result.skipped[0][0] == "shared"
+        assert "already imported" in result.skipped[0][1]
 
     def test_overwrite_flag(self, tmp_path):
         d = tmp_path / ".claude/commands"
@@ -318,12 +323,14 @@ class TestExtractCommandsToCanonical:
         canonical.parent.mkdir(parents=True)
         canonical.write_text("old")
 
-        imported = extract_commands_to_canonical(tmp_path)
-        assert imported == []
+        result = extract_commands_to_canonical(tmp_path)
+        assert result.imported == []
+        assert len(result.skipped) == 1
+        assert "canonical exists" in result.skipped[0][1]
         assert canonical.read_text() == "old"
 
-        imported = extract_commands_to_canonical(tmp_path, overwrite=True)
-        assert len(imported) == 1
+        result = extract_commands_to_canonical(tmp_path, overwrite=True)
+        assert len(result.imported) == 1
         assert "UPDATED" in canonical.read_text()
 
     def test_ignores_codex_prompts(self, tmp_path, codex_home):
@@ -332,8 +339,8 @@ class TestExtractCommandsToCanonical:
         Phase 2 ``test_ignores_codex_toml`` policy."""
         (codex_home / ".codex/prompts").mkdir(parents=True)
         (codex_home / ".codex/prompts/runtime-only.md").write_text(SAMPLE_MINIMAL_COMMAND)
-        imported = extract_commands_to_canonical(tmp_path)
-        assert imported == []
+        result = extract_commands_to_canonical(tmp_path)
+        assert result.imported == []
 
 
 class TestDiffCommands:
@@ -421,14 +428,49 @@ class TestDetectCommandDirs:
         assert found == []
 
 
+class TestOnDrop:
+    def test_on_drop_warn_logs(self, tmp_path, caplog):
+        _make_canonical_command(tmp_path, "review", SAMPLE_FULL_COMMAND)
+        with caplog.at_level("WARNING"):
+            result = generate_all_commands(
+                tmp_path, runtimes=["gemini_commands"], on_drop="warn"
+            )
+        assert len(result.generated) == 1
+        assert result.dropped
+        assert any("dropped" in r.message for r in caplog.records)
+
+    def test_on_drop_error_raises(self, tmp_path):
+        _make_canonical_command(tmp_path, "review", SAMPLE_FULL_COMMAND)
+        with pytest.raises(StrictDropError):
+            generate_all_commands(
+                tmp_path, runtimes=["gemini_commands"], on_drop="error"
+            )
+
+    def test_on_drop_ignore_is_silent(self, tmp_path, caplog):
+        _make_canonical_command(tmp_path, "review", SAMPLE_FULL_COMMAND)
+        with caplog.at_level("WARNING"):
+            result = generate_all_commands(
+                tmp_path, runtimes=["gemini_commands"], on_drop="ignore"
+            )
+        assert len(result.generated) == 1
+        assert result.dropped
+        assert not any("dropped" in r.message for r in caplog.records)
+
+    def test_strict_flag_still_works(self, tmp_path):
+        """Legacy ``strict=True`` behaves like ``on_drop='error'``."""
+        _make_canonical_command(tmp_path, "review", SAMPLE_FULL_COMMAND)
+        with pytest.raises(StrictDropError):
+            generate_all_commands(tmp_path, runtimes=["gemini_commands"], strict=True)
+
+
 class TestRoundtrip:
     def test_canonical_to_claude_and_back(self, tmp_path):
         _make_canonical_command(tmp_path, "review", SAMPLE_FULL_COMMAND)
         generate_all_commands(tmp_path, runtimes=["claude_commands"])
 
         shutil.rmtree(tmp_path / CANONICAL_COMMAND_ROOT)
-        imported = extract_commands_to_canonical(tmp_path)
-        assert len(imported) == 1
+        result = extract_commands_to_canonical(tmp_path)
+        assert len(result.imported) == 1
         reparsed = parse_canonical_command(tmp_path / CANONICAL_COMMAND_ROOT / "review.md")
         assert reparsed.name == "review"
         assert "$ARGUMENTS" in reparsed.body
@@ -439,8 +481,8 @@ class TestRoundtrip:
         generate_all_commands(tmp_path, runtimes=["gemini_commands"])
 
         shutil.rmtree(tmp_path / CANONICAL_COMMAND_ROOT)
-        imported = extract_commands_to_canonical(tmp_path)
-        assert len(imported) == 1
+        result = extract_commands_to_canonical(tmp_path)
+        assert len(result.imported) == 1
         canonical = (tmp_path / CANONICAL_COMMAND_ROOT / "hi.md").read_text()
         assert "description: Simple prompt" in canonical
         assert "$ARGUMENTS" in canonical

@@ -18,10 +18,13 @@ frontmatter rewriting without touching callers.
 
 from __future__ import annotations
 
+import logging
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
+
+logger = logging.getLogger(__name__)
 
 CANONICAL_SKILL_ROOT = ".memtomem/skills"
 SKILL_MANIFEST = "SKILL.md"
@@ -146,6 +149,14 @@ def copy_skill(src: Path, dst: Path) -> None:
 
 
 @dataclass
+class ExtractResult:
+    """Result of a reverse (runtime → canonical) import."""
+
+    imported: list[Path]
+    skipped: list[tuple[str, str]] = field(default_factory=list)  # (item_name, reason)
+
+
+@dataclass
 class SkillSyncResult:
     generated: list[tuple[str, Path]]  # (runtime_name, target_path)
     skipped: list[tuple[str, str]]  # (runtime_name, reason)
@@ -189,34 +200,45 @@ def generate_all_skills(
 def extract_skills_to_canonical(
     project_root: Path,
     overwrite: bool = False,
-) -> list[Path]:
+) -> ExtractResult:
     """Import existing runtime skills into ``.memtomem/skills/``.
 
     When the same skill name appears in multiple runtimes, the first one wins
     (deterministic order: ``claude_skills`` before ``gemini_skills`` per the
     ``SKILL_DIRS`` ordering in :mod:`memtomem.context.detector`).
     Existing canonical entries are preserved unless ``overwrite=True``.
+
+    Returns an :class:`ExtractResult` with both imported paths and skipped
+    items so the caller can warn the user about silent deduplication.
     """
     # Lazy import to avoid cycles at module import time.
     from memtomem.context.detector import detect_skill_dirs
 
     canonical_root = canonical_skills_root(project_root)
     imported: list[Path] = []
-    seen: set[str] = set()
+    skipped: list[tuple[str, str]] = []
+    seen: dict[str, str] = {}  # skill_name → first runtime label
 
     for detected in detect_skill_dirs(project_root):
         skill_name = detected.path.name
+        runtime_label = detected.agent  # e.g. "claude_skills"
         if skill_name in seen:
+            reason = f"already imported from {seen[skill_name]}"
+            skipped.append((skill_name, reason))
+            logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
             continue
         dst = canonical_root / skill_name
         if dst.exists() and not overwrite:
-            seen.add(skill_name)
+            reason = "canonical exists (use --overwrite)"
+            skipped.append((skill_name, reason))
+            logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
+            seen[skill_name] = runtime_label
             continue
         copy_skill(detected.path, dst)
         imported.append(dst)
-        seen.add(skill_name)
+        seen[skill_name] = runtime_label
 
-    return imported
+    return ExtractResult(imported=imported, skipped=skipped)
 
 
 # ── Diff: canonical ↔ runtimes ────────────────────────────────────────
@@ -285,6 +307,7 @@ def diff_skills(project_root: Path) -> list[tuple[str, str, str]]:
 __all__ = [
     "CANONICAL_SKILL_ROOT",
     "ClaudeSkillsGenerator",
+    "ExtractResult",
     "CodexSkillsGenerator",
     "GeminiSkillsGenerator",
     "SKILL_GENERATORS",

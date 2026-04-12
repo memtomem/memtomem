@@ -18,7 +18,7 @@ from memtomem.web.deps import get_project_root
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["settings-sync"])
+router = APIRouter(tags=["settings-sync", "context-gateway"])
 
 _MALFORMED = object()
 
@@ -27,11 +27,16 @@ def _claude_target() -> Path:
     return Path.home() / ".claude" / "settings.json"
 
 
+def _rule_label(event: str, matcher: str) -> str:
+    """Human-readable label for a hook rule: ``event`` or ``event:matcher``."""
+    return f"{event}:{matcher}" if matcher else event
+
+
 def _compare_hooks(
     canonical_path: Path,
     target_path: Path,
 ) -> dict:
-    """Compare hooks between canonical and target settings files."""
+    """Compare record-format hooks between canonical and target settings."""
     result: dict = {
         "canonical_path": str(canonical_path),
         "target_path": str(target_path),
@@ -48,11 +53,23 @@ def _compare_hooks(
         result["error"] = f"{canonical_path} is not valid JSON"
         return result
 
+    canonical_hooks: dict = canonical.get("hooks", {})
+    if not isinstance(canonical_hooks, dict):
+        result["status"] = "error"
+        result["error"] = "hooks must be a record (object), not an array"
+        return result
+
     if not target_path.is_file():
-        # All canonical hooks are pending
-        for hook in canonical.get("hooks", []):
-            if isinstance(hook, dict) and hook.get("name"):
-                result["hooks"]["pending"].append({"name": hook["name"], "hook": hook})
+        # All canonical rules are pending
+        for event, rules in canonical_hooks.items():
+            if not isinstance(rules, list):
+                continue
+            for rule in rules:
+                if isinstance(rule, dict):
+                    matcher = rule.get("matcher", "")
+                    result["hooks"]["pending"].append(
+                        {"event": event, "matcher": matcher, "rule": rule}
+                    )
         result["status"] = "out_of_sync" if result["hooks"]["pending"] else "in_sync"
         return result
 
@@ -62,33 +79,46 @@ def _compare_hooks(
         result["error"] = f"{target_path} is not valid JSON"
         return result
 
-    # Index target hooks by name
-    target_by_name: dict[str, dict] = {}
-    for hook in target.get("hooks", []):
-        if isinstance(hook, dict) and hook.get("name"):
-            target_by_name[hook["name"]] = hook
+    target_hooks: dict = target.get("hooks", {})
+    if not isinstance(target_hooks, dict):
+        target_hooks = {}
 
-    canonical_hooks = canonical.get("hooks", [])
-    for hook in canonical_hooks:
-        if not isinstance(hook, dict):
+    # Index target rules by (event, matcher)
+    target_index: dict[tuple[str, str], dict] = {}
+    for event, rules in target_hooks.items():
+        if not isinstance(rules, list):
             continue
-        name = hook.get("name", "")
-        if not name:
-            continue
+        for rule in rules:
+            if isinstance(rule, dict):
+                target_index[(event, rule.get("matcher", ""))] = rule
 
-        if name in target_by_name:
-            if target_by_name[name] == hook:
-                result["hooks"]["synced"].append({"name": name, "hook": hook})
+    for event, rules in canonical_hooks.items():
+        if not isinstance(rules, list):
+            continue
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            matcher = rule.get("matcher", "")
+            key = (event, matcher)
+
+            if key in target_index:
+                if target_index[key] == rule:
+                    result["hooks"]["synced"].append(
+                        {"event": event, "matcher": matcher, "rule": rule}
+                    )
+                else:
+                    result["hooks"]["conflicts"].append(
+                        {
+                            "event": event,
+                            "matcher": matcher,
+                            "existing": target_index[key],
+                            "proposed": rule,
+                        }
+                    )
             else:
-                result["hooks"]["conflicts"].append(
-                    {
-                        "name": name,
-                        "existing": target_by_name[name],
-                        "proposed": hook,
-                    }
+                result["hooks"]["pending"].append(
+                    {"event": event, "matcher": matcher, "rule": rule}
                 )
-        else:
-            result["hooks"]["pending"].append({"name": name, "hook": hook})
 
     if result["hooks"]["conflicts"]:
         result["status"] = "conflicts"
@@ -101,6 +131,7 @@ def _compare_hooks(
 
 
 @router.get("/settings-sync")
+@router.get("/context/settings")
 async def get_settings_sync(
     project_root: Path = Depends(get_project_root),
 ) -> dict:
@@ -111,6 +142,7 @@ async def get_settings_sync(
 
 
 @router.post("/settings-sync")
+@router.post("/context/settings/sync")
 async def apply_settings_sync(
     project_root: Path = Depends(get_project_root),
 ) -> dict:
@@ -131,34 +163,39 @@ async def apply_settings_sync(
 
 
 class ResolveRequest(BaseModel):
-    hook_name: str
+    event: str
+    matcher: str = ""
     action: str = "use_proposed"
 
 
 @router.post("/settings-sync/resolve")
+@router.post("/context/settings/resolve")
 async def resolve_conflict(
     body: ResolveRequest,
     project_root: Path = Depends(get_project_root),
 ) -> dict:
-    """Resolve a single hook conflict by replacing the target's hook."""
+    """Resolve a single hook conflict by replacing the target's rule."""
     if body.action != "use_proposed":
         return {"status": "error", "reason": f"Unknown action: {body.action}"}
+
+    label = _rule_label(body.event, body.matcher)
 
     canonical_path = project_root / CANONICAL_SETTINGS_FILE
     target_path = _claude_target()
 
-    # Read canonical hook
+    # Read canonical rule
     canonical = _safe_load_json(canonical_path)
     if not isinstance(canonical, dict):
         return {"status": "error", "reason": "Canonical source is not valid JSON"}
 
     proposed = None
-    for hook in canonical.get("hooks", []):
-        if isinstance(hook, dict) and hook.get("name") == body.hook_name:
-            proposed = hook
+    canonical_hooks: dict = canonical.get("hooks", {})
+    for rule in canonical_hooks.get(body.event, []):
+        if isinstance(rule, dict) and rule.get("matcher", "") == body.matcher:
+            proposed = rule
             break
     if proposed is None:
-        return {"status": "error", "reason": f"Hook '{body.hook_name}' not in canonical source"}
+        return {"status": "error", "reason": f"Rule '{label}' not in canonical source"}
 
     # Read target + mtime guard
     if not target_path.is_file():
@@ -169,17 +206,21 @@ async def resolve_conflict(
     if not isinstance(target, dict):
         return {"status": "error", "reason": "Target settings is not valid JSON"}
 
-    # Replace the hook in-place
-    hooks = target.get("hooks", [])
+    # Replace the rule in-place
+    target_hooks: dict = target.get("hooks", {})
+    if not isinstance(target_hooks, dict):
+        return {"status": "error", "reason": "Target hooks is not a record"}
+
+    rules = target_hooks.get(body.event, [])
     replaced = False
-    for i, hook in enumerate(hooks):
-        if isinstance(hook, dict) and hook.get("name") == body.hook_name:
-            hooks[i] = proposed
+    for i, rule in enumerate(rules):
+        if isinstance(rule, dict) and rule.get("matcher", "") == body.matcher:
+            rules[i] = proposed
             replaced = True
             break
 
     if not replaced:
-        return {"status": "error", "reason": f"Hook '{body.hook_name}' not found in target"}
+        return {"status": "error", "reason": f"Rule '{label}' not found in target"}
 
     # mtime check before write
     if target_path.stat().st_mtime != mtime:
@@ -188,6 +229,7 @@ async def resolve_conflict(
             "reason": "Target file was modified by another process. Retry.",
         }
 
-    target["hooks"] = hooks
+    target_hooks[body.event] = rules
+    target["hooks"] = target_hooks
     _write_json(target_path, target)
-    return {"status": "ok", "reason": f"Hook '{body.hook_name}' replaced with memtomem's version"}
+    return {"status": "ok", "reason": f"Rule '{label}' replaced with memtomem's version"}

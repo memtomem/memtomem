@@ -250,17 +250,22 @@ class TestExtractAgentsToCanonical:
         claude_dir = tmp_path / ".claude/agents"
         claude_dir.mkdir(parents=True)
         (claude_dir / "helper.md").write_text(SAMPLE_MINIMAL_AGENT)
-        imported = extract_agents_to_canonical(tmp_path)
-        assert len(imported) == 1
+        result = extract_agents_to_canonical(tmp_path)
+        assert len(result.imported) == 1
         assert (tmp_path / CANONICAL_AGENT_ROOT / "helper.md").is_file()
+        assert result.skipped == []
 
     def test_dedup_across_runtimes(self, tmp_path):
         for runtime in (".claude/agents", ".gemini/agents"):
             d = tmp_path / runtime
             d.mkdir(parents=True)
             (d / "helper.md").write_text(SAMPLE_MINIMAL_AGENT)
-        imported = extract_agents_to_canonical(tmp_path)
-        assert len(imported) == 1
+        result = extract_agents_to_canonical(tmp_path)
+        assert len(result.imported) == 1
+        # Gemini copy was skipped because Claude already imported it.
+        assert len(result.skipped) == 1
+        assert result.skipped[0][0] == "helper"
+        assert "already imported" in result.skipped[0][1]
 
     def test_overwrite_flag(self, tmp_path):
         claude_dir = tmp_path / ".claude/agents"
@@ -272,20 +277,22 @@ class TestExtractAgentsToCanonical:
         canonical.parent.mkdir(parents=True)
         canonical.write_text("old")
 
-        imported = extract_agents_to_canonical(tmp_path)
-        assert imported == []
+        result = extract_agents_to_canonical(tmp_path)
+        assert result.imported == []
+        assert len(result.skipped) == 1
+        assert "canonical exists" in result.skipped[0][1]
         assert canonical.read_text() == "old"
 
-        imported = extract_agents_to_canonical(tmp_path, overwrite=True)
-        assert len(imported) == 1
+        result = extract_agents_to_canonical(tmp_path, overwrite=True)
+        assert len(result.imported) == 1
         assert "UPDATED" in canonical.read_text()
 
     def test_ignores_codex_toml(self, tmp_path, codex_home):
         # Even when a Codex TOML exists, extract does not try to import it.
         (codex_home / ".codex/agents").mkdir(parents=True)
         (codex_home / ".codex/agents/helper.toml").write_text('name = "helper"\n')
-        imported = extract_agents_to_canonical(tmp_path)
-        assert imported == []
+        result = extract_agents_to_canonical(tmp_path)
+        assert result.imported == []
 
 
 class TestDiffAgents:
@@ -350,14 +357,59 @@ class TestDetectAgentDirs:
         assert found == []
 
 
+class TestOnDrop:
+    def test_on_drop_warn_logs(self, tmp_path, caplog):
+        _make_canonical_agent(tmp_path, "full", SAMPLE_FULL_AGENT)
+        with caplog.at_level("WARNING"):
+            result = generate_all_agents(
+                tmp_path, runtimes=["claude_agents"], on_drop="warn"
+            )
+        # Claude drops kind + temperature — should still generate.
+        assert len(result.generated) == 1
+        assert result.dropped
+        assert any("dropped" in r.message for r in caplog.records)
+
+    def test_on_drop_error_raises(self, tmp_path):
+        _make_canonical_agent(tmp_path, "full", SAMPLE_FULL_AGENT)
+        with pytest.raises(StrictDropError):
+            generate_all_agents(
+                tmp_path, runtimes=["claude_agents"], on_drop="error"
+            )
+
+    def test_on_drop_ignore_is_silent(self, tmp_path, caplog):
+        _make_canonical_agent(tmp_path, "full", SAMPLE_FULL_AGENT)
+        with caplog.at_level("WARNING"):
+            result = generate_all_agents(
+                tmp_path, runtimes=["claude_agents"], on_drop="ignore"
+            )
+        assert len(result.generated) == 1
+        assert result.dropped
+        assert not any("dropped" in r.message for r in caplog.records)
+
+    def test_strict_flag_still_works(self, tmp_path):
+        """Legacy ``strict=True`` behaves like ``on_drop='error'``."""
+        _make_canonical_agent(tmp_path, "full", SAMPLE_FULL_AGENT)
+        with pytest.raises(StrictDropError):
+            generate_all_agents(tmp_path, runtimes=["claude_agents"], strict=True)
+
+    def test_on_drop_overrides_strict(self, tmp_path, caplog):
+        """When both are supplied, ``on_drop`` wins."""
+        _make_canonical_agent(tmp_path, "full", SAMPLE_FULL_AGENT)
+        with caplog.at_level("WARNING"):
+            result = generate_all_agents(
+                tmp_path, runtimes=["claude_agents"], strict=True, on_drop="warn"
+            )
+        assert len(result.generated) == 1  # warn does not abort
+
+
 class TestRoundtrip:
     def test_canonical_to_claude_and_back(self, tmp_path):
         _make_canonical_agent(tmp_path, "helper", SAMPLE_MINIMAL_AGENT)
         generate_all_agents(tmp_path, runtimes=["claude_agents"])
 
         shutil.rmtree(tmp_path / CANONICAL_AGENT_ROOT)
-        imported = extract_agents_to_canonical(tmp_path)
-        assert len(imported) == 1
+        result = extract_agents_to_canonical(tmp_path)
+        assert len(result.imported) == 1
         reparsed = parse_canonical_agent(
             tmp_path / CANONICAL_AGENT_ROOT / "helper.md"
         )

@@ -194,17 +194,21 @@ class TestExtractSkills:
         skill = tmp_path / ".claude/skills/code-review"
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text(SAMPLE_SKILL_MD)
-        imported = extract_skills_to_canonical(tmp_path)
-        assert len(imported) == 1
+        result = extract_skills_to_canonical(tmp_path)
+        assert len(result.imported) == 1
         assert (tmp_path / CANONICAL_SKILL_ROOT / "code-review/SKILL.md").exists()
+        assert result.skipped == []
 
     def test_duplicate_across_runtimes_deduped(self, tmp_path):
         for runtime_dir in (".claude/skills", ".gemini/skills"):
             skill = tmp_path / runtime_dir / "shared"
             skill.mkdir(parents=True)
             (skill / "SKILL.md").write_text(SAMPLE_SKILL_MD)
-        imported = extract_skills_to_canonical(tmp_path)
-        assert len(imported) == 1
+        result = extract_skills_to_canonical(tmp_path)
+        assert len(result.imported) == 1
+        assert len(result.skipped) == 1
+        assert result.skipped[0][0] == "shared"
+        assert "already imported" in result.skipped[0][1]
 
     def test_does_not_overwrite_without_flag(self, tmp_path):
         src = tmp_path / ".claude/skills/existing"
@@ -215,8 +219,10 @@ class TestExtractSkills:
         canonical.mkdir(parents=True)
         (canonical / "SKILL.md").write_text("old")
 
-        imported = extract_skills_to_canonical(tmp_path)
-        assert imported == []
+        result = extract_skills_to_canonical(tmp_path)
+        assert result.imported == []
+        assert len(result.skipped) == 1
+        assert "canonical exists" in result.skipped[0][1]
         assert (canonical / "SKILL.md").read_text() == "old"
 
     def test_overwrite_flag(self, tmp_path):
@@ -228,8 +234,8 @@ class TestExtractSkills:
         canonical.mkdir(parents=True)
         (canonical / "SKILL.md").write_text("old")
 
-        imported = extract_skills_to_canonical(tmp_path, overwrite=True)
-        assert len(imported) == 1
+        result = extract_skills_to_canonical(tmp_path, overwrite=True)
+        assert len(result.imported) == 1
         assert (canonical / "SKILL.md").read_text() == "new"
 
 
@@ -274,8 +280,8 @@ class TestRoundtrip:
 
         shutil.rmtree(tmp_path / CANONICAL_SKILL_ROOT)
 
-        imported = extract_skills_to_canonical(tmp_path)
-        assert len(imported) == 1
+        result = extract_skills_to_canonical(tmp_path)
+        assert len(result.imported) == 1
 
         md = (tmp_path / CANONICAL_SKILL_ROOT / "code-review/SKILL.md").read_text()
         assert md == SAMPLE_SKILL_MD

@@ -26,10 +26,13 @@ scope for Phase 2 — the canonical frontmatter is intentionally flat.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
+
+logger = logging.getLogger(__name__)
 
 CANONICAL_AGENT_ROOT = ".memtomem/agents"
 
@@ -367,16 +370,41 @@ class AgentSyncResult:
     skipped: list[tuple[str, str]]  # (runtime_or_agent, reason)
 
 
+@dataclass
+class ExtractResult:
+    """Result of a reverse (runtime → canonical) import."""
+
+    imported: list[Path]
+    skipped: list[tuple[str, str]] = field(default_factory=list)  # (item_name, reason)
+
+
 class StrictDropError(ValueError):
-    """Raised under ``strict=True`` when a conversion would drop fields."""
+    """Raised under ``strict=True`` / ``on_drop="error"`` when a conversion would drop fields."""
+
+
+# Valid severity levels for the ``on_drop`` parameter.
+ON_DROP_LEVELS = ("ignore", "warn", "error")
 
 
 def generate_all_agents(
     project_root: Path,
     runtimes: list[str] | None = None,
     strict: bool = False,
+    on_drop: str = "ignore",
 ) -> AgentSyncResult:
-    """Fan out every canonical sub-agent to the requested runtimes."""
+    """Fan out every canonical sub-agent to the requested runtimes.
+
+    Args:
+        on_drop: Severity when fields are dropped during conversion.
+            ``"ignore"`` (default) — silently record in ``result.dropped``.
+            ``"warn"``  — log a warning per dropped-field set.
+            ``"error"`` — raise :class:`StrictDropError` immediately.
+        strict: Legacy alias for ``on_drop="error"``. If *both* are supplied,
+            ``on_drop`` takes precedence unless it is still the default.
+    """
+    # Resolve legacy ``strict`` flag.
+    effective_drop = on_drop if on_drop != "ignore" or not strict else "error"
+
     generated: list[tuple[str, Path]] = []
     dropped: list[tuple[str, str, list[str]]] = []
     skipped: list[tuple[str, str]] = []
@@ -398,10 +426,13 @@ def generate_all_agents(
                 skipped.append((agent_path.name, f"parse error: {exc}"))
                 continue
             content, dropped_fields = gen.render(agent)
-            if dropped_fields and strict:
-                raise StrictDropError(
-                    f"strict mode: {target} would drop {dropped_fields} from '{agent.name}'"
-                )
+            if dropped_fields:
+                if effective_drop == "error":
+                    raise StrictDropError(
+                        f"strict mode: {target} would drop {dropped_fields} from '{agent.name}'"
+                    )
+                if effective_drop == "warn":
+                    logger.warning("%s dropped %s from '%s'", target, dropped_fields, agent.name)
             out_path = gen.target_file(project_root, agent.name)
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(content, encoding="utf-8")
@@ -418,16 +449,20 @@ def generate_all_agents(
 def extract_agents_to_canonical(
     project_root: Path,
     overwrite: bool = False,
-) -> list[Path]:
+) -> ExtractResult:
     """Import existing Claude / Gemini agent files into ``.memtomem/agents/``.
 
     Codex TOML is **not** imported (one-way conversion; too lossy to round-trip
     without reconstructing fields we dropped on the way out). First occurrence
-    wins across runtimes.
+    wins across runtimes (Claude before Gemini — deterministic order).
+
+    Returns an :class:`ExtractResult` with both imported paths and skipped
+    items so the caller can warn the user about silent deduplication.
     """
     canonical_root = project_root / CANONICAL_AGENT_ROOT
     imported: list[Path] = []
-    seen: set[str] = set()
+    skipped: list[tuple[str, str]] = []
+    seen: dict[str, str] = {}  # agent_name → first runtime label
 
     for runtime_dir in (
         project_root / ".claude/agents",
@@ -435,20 +470,27 @@ def extract_agents_to_canonical(
     ):
         if not runtime_dir.is_dir():
             continue
+        runtime_label = runtime_dir.relative_to(project_root).as_posix()
         for md_file in sorted(runtime_dir.glob("*.md")):
             agent_name = md_file.stem
             if agent_name in seen:
+                reason = f"already imported from {seen[agent_name]}"
+                skipped.append((agent_name, reason))
+                logger.warning("skip %s from %s: %s", agent_name, runtime_label, reason)
                 continue
             dst = canonical_root / f"{agent_name}.md"
             if dst.exists() and not overwrite:
-                seen.add(agent_name)
+                reason = "canonical exists (use --overwrite)"
+                skipped.append((agent_name, reason))
+                logger.warning("skip %s from %s: %s", agent_name, runtime_label, reason)
+                seen[agent_name] = runtime_label
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(md_file.read_bytes())
             imported.append(dst)
-            seen.add(agent_name)
+            seen[agent_name] = runtime_label
 
-    return imported
+    return ExtractResult(imported=imported, skipped=skipped)
 
 
 # ── Diff: canonical ↔ runtimes ──────────────────────────────────────
@@ -514,9 +556,11 @@ __all__ = [
     "AgentParseError",
     "AgentSyncResult",
     "CANONICAL_AGENT_ROOT",
+    "ExtractResult",
     "ClaudeAgentsGenerator",
     "CodexAgentsGenerator",
     "GeminiAgentsGenerator",
+    "ON_DROP_LEVELS",
     "StrictDropError",
     "SubAgent",
     "diff_agents",

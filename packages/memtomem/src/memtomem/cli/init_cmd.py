@@ -299,7 +299,7 @@ def _step_settings(state: dict) -> None:
         canonical.parent.mkdir(parents=True, exist_ok=True)
         if not canonical.exists():
             canonical.write_text(
-                json.dumps({"hooks": []}, indent=2) + "\n",
+                json.dumps({"hooks": {}}, indent=2) + "\n",
                 encoding="utf-8",
             )
             click.secho(f"  Created {CANONICAL_SETTINGS_FILE}", fg="green")

@@ -31,6 +31,7 @@ directly.
 
 from __future__ import annotations
 
+import logging
 import re
 import tomllib
 from dataclasses import dataclass, field
@@ -42,6 +43,8 @@ from memtomem.context.agents import (
     _parse_flat_yaml,
     _toml_scalar,
 )
+
+logger = logging.getLogger(__name__)
 
 CANONICAL_COMMAND_ROOT = ".memtomem/commands"
 
@@ -293,16 +296,36 @@ class CommandSyncResult:
     skipped: list[tuple[str, str]]  # (runtime_or_command, reason)
 
 
+@dataclass
+class ExtractResult:
+    """Result of a reverse (runtime → canonical) import."""
+
+    imported: list[Path]
+    skipped: list[tuple[str, str]] = field(default_factory=list)  # (item_name, reason)
+
+
 class StrictDropError(ValueError):
-    """Raised under ``strict=True`` when a conversion would drop fields."""
+    """Raised under ``strict=True`` / ``on_drop="error"`` when a conversion would drop fields."""
 
 
 def generate_all_commands(
     project_root: Path,
     runtimes: list[str] | None = None,
     strict: bool = False,
+    on_drop: str = "ignore",
 ) -> CommandSyncResult:
-    """Fan out every canonical command to the requested runtimes."""
+    """Fan out every canonical command to the requested runtimes.
+
+    Args:
+        on_drop: Severity when fields are dropped during conversion.
+            ``"ignore"`` (default) — silently record in ``result.dropped``.
+            ``"warn"``  — log a warning per dropped-field set.
+            ``"error"`` — raise :class:`StrictDropError` immediately.
+        strict: Legacy alias for ``on_drop="error"``. If *both* are supplied,
+            ``on_drop`` takes precedence unless it is still the default.
+    """
+    effective_drop = on_drop if on_drop != "ignore" or not strict else "error"
+
     generated: list[tuple[str, Path]] = []
     dropped: list[tuple[str, str, list[str]]] = []
     skipped: list[tuple[str, str]] = []
@@ -326,10 +349,13 @@ def generate_all_commands(
                 skipped.append((cmd_path.name, f"parse error: {exc}"))
                 continue
             content, dropped_fields = gen.render(cmd)
-            if dropped_fields and strict:
-                raise StrictDropError(
-                    f"strict mode: {target} would drop {dropped_fields} from '{cmd.name}'"
-                )
+            if dropped_fields:
+                if effective_drop == "error":
+                    raise StrictDropError(
+                        f"strict mode: {target} would drop {dropped_fields} from '{cmd.name}'"
+                    )
+                if effective_drop == "warn":
+                    logger.warning("%s dropped %s from '%s'", target, dropped_fields, cmd.name)
             out_path = gen.target_file(project_root, cmd.name)
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(content, encoding="utf-8")
@@ -361,7 +387,7 @@ def _gemini_toml_to_canonical(toml_path: Path) -> str:
 def extract_commands_to_canonical(
     project_root: Path,
     overwrite: bool = False,
-) -> list[Path]:
+) -> ExtractResult:
     """Import existing Claude/Gemini command files into ``.memtomem/commands/``.
 
     Phase 3's conversion is lossless in both directions (only two TOML fields,
@@ -375,11 +401,14 @@ def extract_commands_to_canonical(
     policy). Use ``.memtomem/commands/`` as the single authoring surface and
     let ``generate_all_commands`` populate Codex.
 
-    First occurrence wins: Claude runtime first, then Gemini.
+    First occurrence wins: Claude runtime first, then Gemini.  Returns an
+    :class:`ExtractResult` with both imported paths and skipped items so the
+    caller can warn the user about silent deduplication.
     """
     canonical_root = project_root / CANONICAL_COMMAND_ROOT
     imported: list[Path] = []
-    seen: set[str] = set()
+    skipped: list[tuple[str, str]] = []
+    seen: dict[str, str] = {}  # cmd_name → first runtime label
 
     # Claude — direct copy (both sides are Markdown+YAML frontmatter).
     claude_dir = project_root / ".claude/commands"
@@ -387,15 +416,21 @@ def extract_commands_to_canonical(
         for md_file in sorted(claude_dir.glob("*.md")):
             cmd_name = md_file.stem
             if cmd_name in seen:
+                reason = f"already imported from {seen[cmd_name]}"
+                skipped.append((cmd_name, reason))
+                logger.warning("skip %s from .claude/commands: %s", cmd_name, reason)
                 continue
             dst = canonical_root / f"{cmd_name}.md"
             if dst.exists() and not overwrite:
-                seen.add(cmd_name)
+                reason = "canonical exists (use --overwrite)"
+                skipped.append((cmd_name, reason))
+                logger.warning("skip %s from .claude/commands: %s", cmd_name, reason)
+                seen[cmd_name] = ".claude/commands"
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(md_file.read_bytes())
             imported.append(dst)
-            seen.add(cmd_name)
+            seen[cmd_name] = ".claude/commands"
 
     # Gemini — TOML → canonical Markdown conversion.
     gemini_dir = project_root / ".gemini/commands"
@@ -403,21 +438,29 @@ def extract_commands_to_canonical(
         for toml_file in sorted(gemini_dir.glob("*.toml")):
             cmd_name = toml_file.stem
             if cmd_name in seen:
+                reason = f"already imported from {seen[cmd_name]}"
+                skipped.append((cmd_name, reason))
+                logger.warning("skip %s from .gemini/commands: %s", cmd_name, reason)
                 continue
             dst = canonical_root / f"{cmd_name}.md"
             if dst.exists() and not overwrite:
-                seen.add(cmd_name)
+                reason = "canonical exists (use --overwrite)"
+                skipped.append((cmd_name, reason))
+                logger.warning("skip %s from .gemini/commands: %s", cmd_name, reason)
+                seen[cmd_name] = ".gemini/commands"
                 continue
             try:
                 canonical_content = _gemini_toml_to_canonical(toml_file)
             except (tomllib.TOMLDecodeError, OSError):
+                skipped.append((cmd_name, "TOML parse error"))
+                logger.warning("skip %s from .gemini/commands: TOML parse error", cmd_name)
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_text(canonical_content, encoding="utf-8")
             imported.append(dst)
-            seen.add(cmd_name)
+            seen[cmd_name] = ".gemini/commands"
 
-    return imported
+    return ExtractResult(imported=imported, skipped=skipped)
 
 
 # ── Diff: canonical ↔ runtimes ──────────────────────────────────────
@@ -493,6 +536,7 @@ __all__ = [
     "CommandGenerator",
     "CommandParseError",
     "CommandSyncResult",
+    "ExtractResult",
     "GeminiCommandsGenerator",
     "SlashCommand",
     "StrictDropError",

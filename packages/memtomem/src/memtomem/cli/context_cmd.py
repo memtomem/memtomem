@@ -7,6 +7,7 @@ from pathlib import Path
 import click
 
 from memtomem.context.agents import (
+    ON_DROP_LEVELS,
     StrictDropError,
     diff_agents,
     extract_agents_to_canonical,
@@ -101,13 +102,15 @@ def _print_skills_detect(root: Path) -> None:
 
 
 def _print_skills_init(root: Path, overwrite: bool) -> None:
-    imported = extract_skills_to_canonical(root, overwrite=overwrite)
-    if imported:
-        click.secho(f"  Imported {len(imported)} skill(s) → .memtomem/skills/", fg="green")
-        for p in imported:
+    result = extract_skills_to_canonical(root, overwrite=overwrite)
+    if result.imported:
+        click.secho(f"  Imported {len(result.imported)} skill(s) → .memtomem/skills/", fg="green")
+        for p in result.imported:
             click.echo(f"    {p.name}")
     else:
         click.echo("  (no runtime skills to import)")
+    for name, reason in result.skipped:
+        click.secho(f"    skipped {name}: {reason}", fg="yellow")
 
 
 def _print_skills_generate(root: Path) -> None:
@@ -146,18 +149,22 @@ def _print_agents_detect(root: Path) -> None:
 
 
 def _print_agents_init(root: Path, overwrite: bool) -> None:
-    imported = extract_agents_to_canonical(root, overwrite=overwrite)
-    if imported:
-        click.secho(f"  Imported {len(imported)} sub-agent(s) → .memtomem/agents/", fg="green")
-        for p in imported:
+    result = extract_agents_to_canonical(root, overwrite=overwrite)
+    if result.imported:
+        click.secho(
+            f"  Imported {len(result.imported)} sub-agent(s) → .memtomem/agents/", fg="green"
+        )
+        for p in result.imported:
             click.echo(f"    {p.stem}")
     else:
         click.echo("  (no runtime sub-agents to import)")
+    for name, reason in result.skipped:
+        click.secho(f"    skipped {name}: {reason}", fg="yellow")
 
 
-def _print_agents_generate(root: Path, strict: bool) -> None:
+def _print_agents_generate(root: Path, strict: bool, on_drop: str = "ignore") -> None:
     try:
-        result = generate_all_agents(root, strict=strict)
+        result = generate_all_agents(root, strict=strict, on_drop=on_drop)
     except StrictDropError as exc:
         click.secho(f"  [strict] {exc}", fg="red")
         raise click.Abort()
@@ -204,18 +211,22 @@ def _print_commands_detect(root: Path) -> None:
 
 
 def _print_commands_init(root: Path, overwrite: bool) -> None:
-    imported = extract_commands_to_canonical(root, overwrite=overwrite)
-    if imported:
-        click.secho(f"  Imported {len(imported)} command(s) → .memtomem/commands/", fg="green")
-        for p in imported:
+    result = extract_commands_to_canonical(root, overwrite=overwrite)
+    if result.imported:
+        click.secho(
+            f"  Imported {len(result.imported)} command(s) → .memtomem/commands/", fg="green"
+        )
+        for p in result.imported:
             click.echo(f"    {p.stem}")
     else:
         click.echo("  (no runtime commands to import)")
+    for name, reason in result.skipped:
+        click.secho(f"    skipped {name}: {reason}", fg="yellow")
 
 
-def _print_commands_generate(root: Path, strict: bool) -> None:
+def _print_commands_generate(root: Path, strict: bool, on_drop: str = "ignore") -> None:
     try:
-        result = generate_all_commands(root, strict=strict)
+        result = generate_all_commands(root, strict=strict, on_drop=on_drop)
     except CommandStrictDropError as exc:
         click.secho(f"  [strict] {exc}", fg="red")
         raise click.Abort() from exc
@@ -401,9 +412,16 @@ def init_cmd(include: tuple[str, ...], overwrite: bool) -> None:
 @click.option(
     "--strict",
     is_flag=True,
-    help="Promote dropped-field warnings to errors when converting sub-agents.",
+    help="Legacy alias for --on-drop=error.",
 )
-def generate_cmd(agent: str, include: tuple[str, ...], strict: bool) -> None:
+@click.option(
+    "--on-drop",
+    "on_drop",
+    type=click.Choice(ON_DROP_LEVELS),
+    default="ignore",
+    help="Severity when fields are dropped: ignore (default), warn, or error.",
+)
+def generate_cmd(agent: str, include: tuple[str, ...], strict: bool, on_drop: str) -> None:
     """Generate agent files from .memtomem/context.md."""
     inc = _parse_include(include)
     root = _find_project_root()
@@ -442,11 +460,11 @@ def generate_cmd(agent: str, include: tuple[str, ...], strict: bool) -> None:
 
     if "agents" in inc:
         click.echo("")
-        _print_agents_generate(root, strict=strict)
+        _print_agents_generate(root, strict=strict, on_drop=on_drop)
 
     if "commands" in inc:
         click.echo("")
-        _print_commands_generate(root, strict=strict)
+        _print_commands_generate(root, strict=strict, on_drop=on_drop)
 
     if "settings" in inc:
         click.echo("")
@@ -510,9 +528,16 @@ def diff_cmd(include: tuple[str, ...]) -> None:
 @click.option(
     "--strict",
     is_flag=True,
-    help="Promote dropped-field warnings to errors when converting sub-agents.",
+    help="Legacy alias for --on-drop=error.",
 )
-def sync_cmd(include: tuple[str, ...], strict: bool) -> None:
+@click.option(
+    "--on-drop",
+    "on_drop",
+    type=click.Choice(ON_DROP_LEVELS),
+    default="ignore",
+    help="Severity when fields are dropped: ignore (default), warn, or error.",
+)
+def sync_cmd(include: tuple[str, ...], strict: bool, on_drop: str) -> None:
     """Sync context.md to all detected agent files."""
     inc = _parse_include(include)
     root = _find_project_root()
@@ -550,11 +575,11 @@ def sync_cmd(include: tuple[str, ...], strict: bool) -> None:
 
     if "agents" in inc:
         click.echo("")
-        _print_agents_generate(root, strict=strict)
+        _print_agents_generate(root, strict=strict, on_drop=on_drop)
 
     if "commands" in inc:
         click.echo("")
-        _print_commands_generate(root, strict=strict)
+        _print_commands_generate(root, strict=strict, on_drop=on_drop)
 
     if "settings" in inc:
         click.echo("")

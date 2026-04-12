@@ -15,6 +15,10 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from memtomem.web.routes import (
     chunks,
+    context_agents,
+    context_commands,
+    context_gateway,
+    context_skills,
     decay,
     dedup,
     evaluation,
@@ -64,6 +68,10 @@ def create_app(lifespan=None) -> FastAPI:
     app.include_router(evaluation.router, prefix="/api")
     app.include_router(watchdog.router, prefix="/api")
     app.include_router(settings_sync.router, prefix="/api")
+    app.include_router(context_gateway.router, prefix="/api")
+    app.include_router(context_skills.router, prefix="/api")
+    app.include_router(context_commands.router, prefix="/api")
+    app.include_router(context_agents.router, prefix="/api")
 
     @app.exception_handler(ValueError)
     async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:

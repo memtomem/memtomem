@@ -535,6 +535,11 @@
         <button class="settings-nav-btn active" data-section="config" data-i18n="settings.nav.config">Config</button>
         <button class="settings-nav-btn" data-section="namespaces" data-i18n="settings.nav.namespaces">Namespaces</button>
         <button class="settings-nav-btn" data-section="hooks-sync" data-i18n="settings.nav.hooks_sync">Hooks Sync</button>
+        <div class="settings-nav-group" data-i18n="settings.nav.context_gateway">Context Gateway</div>
+        <button class="settings-nav-btn" data-section="ctx-overview" data-i18n="settings.nav.ctx_overview">Overview</button>
+        <button class="settings-nav-btn" data-section="ctx-skills" data-i18n="settings.nav.ctx_skills">Skills</button>
+        <button class="settings-nav-btn" data-section="ctx-commands" data-i18n="settings.nav.ctx_commands">Commands</button>
+        <button class="settings-nav-btn" data-section="ctx-agents" data-i18n="settings.nav.ctx_agents">Agents</button>
         <div class="settings-nav-group" data-i18n="settings.nav.maintenance">Maintenance</div>
         <button class="settings-nav-btn" data-section="dedup" data-i18n="settings.nav.dedup">Dedup</button>
         <button class="settings-nav-btn" data-section="decay" data-i18n="settings.nav.decay">Decay</button>
@@ -588,6 +593,63 @@
           </div>
           <div id="hooks-sync-status"></div>
           <div id="hooks-sync-content"></div>
+        </div>
+
+        <!-- Context Gateway: Overview -->
+        <div class="settings-section" id="settings-ctx-overview">
+          <div class="ctx-header">
+            <h2 data-i18n="settings.ctx.overview_title">Context Gateway</h2>
+            <div>
+              <button id="ctx-detect-btn" class="btn-ghost" data-i18n="settings.ctx.detect">Detect</button>
+              <button id="ctx-sync-all-btn" class="btn-primary" data-i18n="settings.ctx.sync_all">Sync All</button>
+            </div>
+          </div>
+          <div id="ctx-overview-content"></div>
+        </div>
+
+        <!-- Context Gateway: Skills -->
+        <div class="settings-section" id="settings-ctx-skills">
+          <div class="ctx-header">
+            <h2 data-i18n="settings.ctx.skills_title">Skills</h2>
+            <div>
+              <button class="btn-ghost ctx-create-btn" data-type="skills" data-i18n="settings.ctx.create">Create</button>
+              <button class="btn-ghost ctx-import-btn" data-type="skills" data-i18n="settings.ctx.import">Import</button>
+              <button class="btn-primary ctx-sync-btn" data-type="skills" data-i18n="settings.ctx.sync">Sync</button>
+            </div>
+          </div>
+          <div id="ctx-skills-status"></div>
+          <div id="ctx-skills-list"></div>
+          <div id="ctx-skills-detail" hidden></div>
+        </div>
+
+        <!-- Context Gateway: Commands -->
+        <div class="settings-section" id="settings-ctx-commands">
+          <div class="ctx-header">
+            <h2 data-i18n="settings.ctx.commands_title">Commands</h2>
+            <div>
+              <button class="btn-ghost ctx-create-btn" data-type="commands" data-i18n="settings.ctx.create">Create</button>
+              <button class="btn-ghost ctx-import-btn" data-type="commands" data-i18n="settings.ctx.import">Import</button>
+              <button class="btn-primary ctx-sync-btn" data-type="commands" data-i18n="settings.ctx.sync">Sync</button>
+            </div>
+          </div>
+          <div id="ctx-commands-status"></div>
+          <div id="ctx-commands-list"></div>
+          <div id="ctx-commands-detail" hidden></div>
+        </div>
+
+        <!-- Context Gateway: Agents -->
+        <div class="settings-section" id="settings-ctx-agents">
+          <div class="ctx-header">
+            <h2 data-i18n="settings.ctx.agents_title">Agents</h2>
+            <div>
+              <button class="btn-ghost ctx-create-btn" data-type="agents" data-i18n="settings.ctx.create">Create</button>
+              <button class="btn-ghost ctx-import-btn" data-type="agents" data-i18n="settings.ctx.import">Import</button>
+              <button class="btn-primary ctx-sync-btn" data-type="agents" data-i18n="settings.ctx.sync">Sync</button>
+            </div>
+          </div>
+          <div id="ctx-agents-status"></div>
+          <div id="ctx-agents-list"></div>
+          <div id="ctx-agents-detail" hidden></div>
         </div>
 
         <!-- Dedup section -->
@@ -1016,6 +1078,13 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js"></script>
   <script src="/i18n.js?v=1"></script>
-  <script src="/app.js?v=62"></script>
+  <script src="/app.js?v=64"></script>
+  <script src="/settings-config.js?v=1"></script>
+  <script src="/settings-maintenance.js?v=1"></script>
+  <script src="/settings-namespaces.js?v=1"></script>
+  <script src="/settings-harness.js?v=1"></script>
+  <script src="/settings-hooks-watchdog.js?v=1"></script>
+  <script src="/timeline.js?v=1"></script>
+  <script src="/context-gateway.js?v=1"></script>
 </body>
 </html>
