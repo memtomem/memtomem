@@ -12,7 +12,7 @@ from memtomem.server.tool_registry import register
 
 logger = logging.getLogger(__name__)
 
-_VALID_TYPES = {"auto_archive", "auto_expire", "auto_tag"}
+_VALID_TYPES = {"auto_archive", "auto_consolidate", "auto_expire", "auto_tag"}
 
 
 @mcp.tool()
@@ -28,11 +28,13 @@ async def mem_policy_add(
     """Create a memory lifecycle policy.
 
     Policies automate memory management: archiving old memories,
-    expiring unused ones, or auto-tagging untagged chunks.
+    expiring unused ones, auto-tagging untagged chunks, or consolidating
+    related chunks into heuristic summaries.
 
     Args:
         name: Unique policy name
-        policy_type: One of 'auto_archive', 'auto_expire', 'auto_tag'
+        policy_type: One of 'auto_archive', 'auto_consolidate',
+            'auto_expire', 'auto_tag'
         config: JSON config string. Examples:
             auto_archive (flat — single target):
               {"max_age_days": 30, "archive_namespace": "archive"}
@@ -52,6 +54,25 @@ async def mem_policy_add(
               - archive_namespace_template: per-chunk target. Supports the
                 {first_tag} placeholder (empty tags → "misc"). Chunks already
                 in their resolved target namespace are skipped.
+
+            auto_consolidate:
+              {
+                "min_group_size": 3,
+                "max_groups": 10,
+                "max_bullets": 20,
+                "keep_originals": true,
+                "summary_namespace": "archive:summary"
+              }
+              - Groups chunks by source file (min chunks = min_group_size)
+                and creates one deterministic heuristic summary per source,
+                linking originals via ``consolidated_into`` relations.
+              - Idempotent: re-runs with the same chunk set are a no-op;
+                added/removed chunks trigger regeneration.
+              - Mixed-namespace sources are skipped with a warning.
+              - keep_originals=false soft-decays originals
+                (importance_score *= 0.5, floor 0.3) instead of deleting.
+              - Summaries default to the ``archive:summary`` namespace so
+                they don't pollute default search results.
 
             auto_expire: {"max_age_days": 90}
             auto_tag: {"max_tags": 5}

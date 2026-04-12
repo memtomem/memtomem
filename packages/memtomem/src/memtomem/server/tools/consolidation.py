@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from uuid import UUID
 
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app
@@ -133,16 +132,26 @@ async def mem_consolidate_apply(
 ) -> str:
     """Apply a consolidation by creating a summary chunk for a group.
 
-    The agent writes the summary; this tool creates it as a new chunk
-    and optionally links it to the originals via cross-references.
+    The agent writes the summary; this tool persists it as a chunk in the
+    ``archive:summary`` namespace (outside default search) and links each
+    original via a ``consolidated_into`` relation. The summary is a
+    storage-level virtual chunk — nothing is written to disk — and can be
+    regenerated idempotently because its content embeds a source hash.
 
     Args:
         group_id: Group ID from mem_consolidate output
         summary: The consolidated summary written by the agent
-        keep_originals: Keep original chunks (default True). If False, marks them for decay.
+        keep_originals: Keep original chunks (default True). If False,
+            originals are soft-decayed (``importance_score *= 0.5``, floor
+            0.3); never a hard delete.
     """
     import json
     from datetime import datetime, timezone
+
+    from memtomem.tools.consolidation_engine import (
+        DEFAULT_SUMMARY_NAMESPACE,
+        apply_consolidation,
+    )
 
     app = _get_app(ctx)
 
@@ -163,41 +172,28 @@ async def mem_consolidate_apply(
     if group is None:
         return f"Error: group_id {group_id} not found. Run mem_consolidate again."
 
-    # Create summary chunk via mem_add
-    from memtomem.server.tools.memory_crud import mem_add
+    try:
+        summary_id = await apply_consolidation(
+            app.storage,
+            group,
+            summary,
+            keep_originals=keep_originals,
+            summary_namespace=DEFAULT_SUMMARY_NAMESPACE,
+        )
+    except Exception as exc:
+        logger.warning("mem_consolidate_apply failed for group %s", group_id, exc_info=True)
+        return f"Error: consolidation failed: {exc}"
 
-    result = await mem_add(
-        content=summary,
-        title=f"Consolidated: {group['source'].split('/')[-1]}",
-        tags=["consolidated", "summary"],
-        namespace=group.get("namespace"),
-        ctx=ctx,
-    )
-
-    # Find the newly created summary chunk (most recently created)
-    linked = 0
-    recent = await app.storage.recall_chunks(limit=1)
-    if recent:
-        summary_id = recent[0].id
-        for cid in group["chunk_ids"]:
-            try:
-                await app.storage.add_relation(
-                    UUID(cid),
-                    summary_id,
-                    "consolidated_into",
-                )
-                linked += 1
-            except (ValueError, TypeError):
-                logger.debug("Skipping invalid UUID in consolidation: %s", cid)
-            except Exception:
-                logger.warning("Failed to link chunk %s in consolidation", cid, exc_info=True)
+    # Invalidate caches so the new summary chunk is immediately searchable.
+    app.search_pipeline.invalidate_cache()
 
     # Clean up scratch entry after successful apply
     await app.storage.scratch_delete("consolidation_groups")
 
     return (
         f"Consolidation applied for group {group_id}.\n"
-        f"{result}\n"
+        f"- Summary chunk id: {summary_id}\n"
+        f"- Namespace: {DEFAULT_SUMMARY_NAMESPACE}\n"
         f"- Original chunks: {group['chunk_count']}\n"
         f"- Originals kept: {keep_originals}"
     )

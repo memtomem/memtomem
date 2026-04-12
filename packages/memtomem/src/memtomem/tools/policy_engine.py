@@ -7,6 +7,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -253,8 +254,163 @@ async def execute_auto_tag(
     )
 
 
+async def execute_auto_consolidate(
+    storage: object,
+    config: dict,
+    namespace: str | None,
+    dry_run: bool,
+) -> PolicyRunResult:
+    """Group related chunks by source file and create heuristic summary chunks.
+
+    Candidates are source files with at least ``min_group_size`` chunks. Each
+    candidate produces one summary chunk in ``summary_namespace`` (default
+    ``archive:summary``) with ``consolidated_into`` edges back to the
+    originals. The summary chunk's content embeds a source hash so re-runs
+    are idempotent: matching hash → skip, mismatched hash → delete old
+    summary and regenerate. Sources with mixed namespaces are skipped with
+    a warning (YAGNI — full per-namespace groupby can land in a follow-up
+    if anyone hits that case).
+
+    Config fields (all optional):
+
+    - ``min_group_size`` (int, default 3): minimum chunks per source file
+      to qualify as a consolidation candidate.
+    - ``max_groups`` (int, default 10): cap on groups processed per run.
+    - ``max_bullets`` (int, default 20): cap on bullets in the summary.
+    - ``keep_originals`` (bool, default True): if False, halve importance
+      scores of originals (floor 0.3) so decay can evict them later.
+      Never a hard delete — see ``feedback_compression_priority.md``.
+    - ``summary_namespace`` (str, default ``archive:summary``): target
+      namespace for summary chunks. Keeps summaries out of default search
+      unless explicitly queried.
+
+    The ``namespace`` arg (from ``namespace_filter`` on the policy row) acts
+    as a coarse gate: sources whose chunks aren't in that namespace are
+    skipped. For same-source mixed-namespace rows, the whole source is
+    skipped regardless of filter.
+    """
+    from memtomem.tools.consolidation_engine import (
+        DEFAULT_SUMMARY_NAMESPACE,
+        CONSOLIDATED_SUFFIX,
+        apply_consolidation,
+        compute_source_hash,
+        make_heuristic_summary,
+        parse_source_hash,
+    )
+
+    min_group_size = config.get("min_group_size", 3)
+    max_groups = config.get("max_groups", 10)
+    max_bullets = config.get("max_bullets", 20)
+    keep_originals = config.get("keep_originals", True)
+    summary_namespace = config.get("summary_namespace", DEFAULT_SUMMARY_NAMESPACE)
+
+    if min_group_size < 2:
+        return PolicyRunResult(
+            policy_name="",
+            policy_type="auto_consolidate",
+            affected_count=0,
+            dry_run=dry_run,
+            details="Error: min_group_size must be at least 2",
+        )
+
+    raw_groups = await storage.get_consolidation_groups(  # type: ignore[attr-defined]
+        min_size=min_group_size,
+        max_groups=max_groups,
+    )
+
+    applied = 0
+    detail_parts: list[str] = []
+
+    for g in raw_groups:
+        source_path = Path(g["source"])
+
+        chunks = await storage.list_chunks_by_source(source_path, limit=20)  # type: ignore[attr-defined]
+        if len(chunks) < min_group_size:
+            continue
+
+        # Mixed-namespace sources → skip + warn. See plan for rationale.
+        ns_set = {c.metadata.namespace for c in chunks}
+        if len(ns_set) > 1:
+            logger.warning(
+                "auto_consolidate: skipping %s — mixed namespaces %s",
+                source_path,
+                sorted(ns_set),
+            )
+            detail_parts.append(f"{source_path.name} (SKIP: mixed ns)")
+            continue
+        chunk_ns = next(iter(ns_set))
+
+        # namespace policy filter — skip sources outside the target ns.
+        if namespace and chunk_ns != namespace:
+            continue
+
+        # Idempotency via content-embedded source hash. The virtual path
+        # lives in the same parent dir as the original source.
+        current_hash = compute_source_hash([c.id for c in chunks])
+        virtual_path = source_path.parent / f"{source_path.name}{CONSOLIDATED_SUFFIX}"
+        existing = await storage.list_chunks_by_source(virtual_path, limit=1)  # type: ignore[attr-defined]
+        stale = False
+        if existing:
+            old_hash = parse_source_hash(existing[0].content)
+            if old_hash == current_hash:
+                continue  # idempotent — same inputs, same output
+            stale = True  # regenerate below
+
+        if dry_run:
+            applied += 1
+            tag = " (stale)" if stale else ""
+            detail_parts.append(f"{source_path.name}{tag}")
+            continue
+
+        if stale:
+            await storage.delete_chunks([existing[0].id])  # type: ignore[attr-defined]
+
+        try:
+            summary = make_heuristic_summary(chunks, source_path, max_bullets=max_bullets)
+            group_dict = {
+                "source": str(source_path),
+                "chunk_ids": [str(c.id) for c in chunks],
+                "namespace": chunk_ns,
+                "chunk_count": len(chunks),
+            }
+            await apply_consolidation(
+                storage,  # type: ignore[arg-type]
+                group_dict,
+                summary,
+                keep_originals=keep_originals,
+                summary_namespace=summary_namespace,
+            )
+        except Exception:
+            logger.warning(
+                "auto_consolidate: failed to consolidate %s",
+                source_path,
+                exc_info=True,
+            )
+            detail_parts.append(f"{source_path.name} (FAILED)")
+            continue
+
+        applied += 1
+        tag = " (regen)" if stale else ""
+        detail_parts.append(f"{source_path.name}{tag}")
+
+    verb = "Would consolidate" if dry_run else "Consolidated"
+    if detail_parts:
+        details = f"{verb} {applied} groups: {', '.join(detail_parts)}"
+    else:
+        details = f"{verb} 0 groups (no candidates)"
+
+    return PolicyRunResult(
+        policy_name="",
+        policy_type="auto_consolidate",
+        affected_count=applied,
+        dry_run=dry_run,
+        details=details,
+    )
+
+
 _HANDLERS = {
     "auto_archive": execute_auto_archive,
+    "auto_consolidate": execute_auto_consolidate,
     "auto_expire": execute_auto_expire,
     "auto_tag": execute_auto_tag,
 }

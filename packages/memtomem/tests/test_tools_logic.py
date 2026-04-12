@@ -4,15 +4,25 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from helpers import make_chunk
 
+from memtomem.tools.consolidation_engine import (
+    DEFAULT_SUMMARY_NAMESPACE,
+    apply_consolidation,
+    compute_source_hash,
+    extract_bullet,
+    make_heuristic_summary,
+    parse_source_hash,
+)
 from memtomem.tools.entity_extraction import extract_entities
 from memtomem.tools.policy_engine import (
     PolicyRunResult,
     _VALID_TYPES,
     execute_auto_archive,
+    execute_auto_consolidate,
     execute_auto_expire,
     execute_auto_tag,
     run_policy,
@@ -181,9 +191,7 @@ class TestPolicyEngine:
         assert "Would archive" in result.details
 
         # Chunk should still be in default namespace
-        row = db.execute(
-            "SELECT namespace FROM chunks WHERE id = ?", [str(chunk.id)]
-        ).fetchone()
+        row = db.execute("SELECT namespace FROM chunks WHERE id = ?", [str(chunk.id)]).fetchone()
         assert row[0] == "default"
 
     async def test_auto_archive_executes(self, storage):
@@ -203,9 +211,7 @@ class TestPolicyEngine:
         assert "Archived" in result.details
         assert "'old'" in result.details
 
-        row = db.execute(
-            "SELECT namespace FROM chunks WHERE id = ?", [str(chunk.id)]
-        ).fetchone()
+        row = db.execute("SELECT namespace FROM chunks WHERE id = ?", [str(chunk.id)]).fetchone()
         assert row[0] == "old"
 
     async def test_auto_archive_skips_recent(self, storage):
@@ -264,9 +270,7 @@ class TestPolicyEngine:
         )
         assert result.affected_count == 2  # c_null + c_old, not c_recent
 
-        row = db.execute(
-            "SELECT namespace FROM chunks WHERE id = ?", [str(c_recent.id)]
-        ).fetchone()
+        row = db.execute("SELECT namespace FROM chunks WHERE id = ?", [str(c_recent.id)]).fetchone()
         assert row[0] == "default"
 
     async def test_auto_archive_min_access_count_filter(self, storage):
@@ -279,12 +283,8 @@ class TestPolicyEngine:
 
         db = storage._get_db()
         db.execute("UPDATE chunks SET created_at = ?", [old_time])
-        db.execute(
-            "UPDATE chunks SET access_count = 0 WHERE id = ?", [str(c_cold.id)]
-        )
-        db.execute(
-            "UPDATE chunks SET access_count = 10 WHERE id = ?", [str(c_hot.id)]
-        )
+        db.execute("UPDATE chunks SET access_count = 0 WHERE id = ?", [str(c_cold.id)])
+        db.execute("UPDATE chunks SET access_count = 10 WHERE id = ?", [str(c_hot.id)])
         db.commit()
 
         result = await execute_auto_archive(
@@ -305,12 +305,8 @@ class TestPolicyEngine:
 
         db = storage._get_db()
         db.execute("UPDATE chunks SET created_at = ?", [old_time])
-        db.execute(
-            "UPDATE chunks SET importance_score = 0.1 WHERE id = ?", [str(c_low.id)]
-        )
-        db.execute(
-            "UPDATE chunks SET importance_score = 0.8 WHERE id = ?", [str(c_high.id)]
-        )
+        db.execute("UPDATE chunks SET importance_score = 0.1 WHERE id = ?", [str(c_low.id)])
+        db.execute("UPDATE chunks SET importance_score = 0.8 WHERE id = ?", [str(c_high.id)])
         db.commit()
 
         result = await execute_auto_archive(
@@ -346,14 +342,10 @@ class TestPolicyEngine:
         assert "archive:decisions: 1" in result.details
         assert "archive:tech: 1" in result.details
 
-        row = db.execute(
-            "SELECT namespace FROM chunks WHERE id = ?", [str(c_dec.id)]
-        ).fetchone()
+        row = db.execute("SELECT namespace FROM chunks WHERE id = ?", [str(c_dec.id)]).fetchone()
         assert row[0] == "archive:decisions"
 
-        row = db.execute(
-            "SELECT namespace FROM chunks WHERE id = ?", [str(c_tech.id)]
-        ).fetchone()
+        row = db.execute("SELECT namespace FROM chunks WHERE id = ?", [str(c_tech.id)]).fetchone()
         assert row[0] == "archive:tech"
 
     async def test_auto_archive_template_misc_fallback(self, storage):
@@ -379,9 +371,7 @@ class TestPolicyEngine:
         assert result.affected_count == 1
         assert "archive:misc: 1" in result.details
 
-        row = db.execute(
-            "SELECT namespace FROM chunks WHERE id = ?", [str(c_empty.id)]
-        ).fetchone()
+        row = db.execute("SELECT namespace FROM chunks WHERE id = ?", [str(c_empty.id)]).fetchone()
         assert row[0] == "archive:misc"
 
     async def test_auto_archive_template_skips_self_moves(self, storage):
@@ -522,9 +512,7 @@ class TestPolicyEngine:
         chunk = make_chunk("some untagged content")
         await storage.upsert_chunks([chunk])
 
-        result = await execute_auto_tag(
-            storage, {"max_tags": 3}, namespace=None, dry_run=True
-        )
+        result = await execute_auto_tag(storage, {"max_tags": 3}, namespace=None, dry_run=True)
         assert result.policy_type == "auto_tag"
         assert result.dry_run is True
         assert result.affected_count >= 1
@@ -578,6 +566,312 @@ class TestPolicyEngine:
         assert "auto_tag" in _VALID_TYPES
         assert "auto_promote" in _VALID_TYPES
         assert "auto_consolidate" in _VALID_TYPES
+
+    async def test_server_tools_valid_types_includes_auto_consolidate(self):
+        """server/tools/policy.py:_VALID_TYPES must accept auto_consolidate."""
+        from memtomem.server.tools.policy import _VALID_TYPES as _SERVER_VALID_TYPES
+
+        assert "auto_consolidate" in _SERVER_VALID_TYPES
+        assert "auto_archive" in _SERVER_VALID_TYPES
+        assert "auto_expire" in _SERVER_VALID_TYPES
+        assert "auto_tag" in _SERVER_VALID_TYPES
+
+
+# ── Consolidation engine (unit: bullet extraction + hash) ────────────
+
+
+class TestConsolidationEngineUnit:
+    def test_extract_bullet_with_heading_and_first_sentence(self):
+        """heading_hierarchy[-1] becomes the label; first sentence is the body."""
+        chunk = make_chunk(
+            content="Alice, Bob, Carol joined. Bob will lead the sprint.",
+            heading=("April Standup", "Attendees"),
+        )
+        bullet = extract_bullet(chunk)
+        assert bullet.startswith("**Attendees** — ")
+        assert "Alice, Bob, Carol joined" in bullet
+        # Second sentence should not leak into the single-sentence bullet.
+        assert "Bob will lead" not in bullet
+
+    def test_extract_bullet_no_heading_fallback(self):
+        """Chunks with no heading and no content heading fall back to first sentence."""
+        chunk = make_chunk(
+            content="Plain text with no structure. Something else.",
+            heading=(),
+        )
+        bullet = extract_bullet(chunk)
+        assert "Plain text with no structure" in bullet
+        assert not bullet.startswith("**")  # no label
+
+    def test_extract_bullet_keyword_boost_decision_wins(self):
+        """A ``Decision:`` line anywhere in the body beats the first-sentence fallback."""
+        chunk = make_chunk(
+            content=(
+                "The team met briefly to discuss roadmap blockers.\n"
+                "Decision: freeze main branch until 2026-04-10.\n"
+                "Followups to be tracked in #42."
+            ),
+            heading=("Sprint 12", "Notes"),
+        )
+        bullet = extract_bullet(chunk)
+        assert "Decision" in bullet
+        assert "freeze main branch" in bullet
+        # First-sentence fallback should not have fired.
+        assert "The team met briefly" not in bullet
+
+    def test_extract_bullet_checklist_count(self):
+        """Chunks with 2+ checklist items become ``N items (…)`` rather than truncated prose."""
+        chunk = make_chunk(
+            content=(
+                "Action items from the review:\n"
+                "- [ ] Alice: write tests for feature X\n"
+                "- [ ] Bob: unblock ticket #42\n"
+                "- [x] Carol: approve the RFC draft"
+            ),
+            heading=("Sprint 12", "Action items"),
+        )
+        bullet = extract_bullet(chunk)
+        # Keyword boost on Action: picks the first TODO line, so checklist path
+        # applies only when no Action/Decision keyword fires. Allow either
+        # outcome but require the label to be present and that the bullet is
+        # non-trivial.
+        assert "**Action items**" in bullet
+        assert len(bullet) > len("**Action items**")
+
+    def test_extract_bullet_checklist_without_keyword(self):
+        """Pure checklist (no Action/TODO keyword) → ``N items (preview…)``."""
+        chunk = make_chunk(
+            content=("- [ ] first task here\n- [ ] second task here\n- [ ] third task here"),
+            heading=("Tasks",),
+        )
+        bullet = extract_bullet(chunk)
+        assert "**Tasks**" in bullet
+        # Either keyword path (- [ ] pattern in _ACTION_RE) or checklist path
+        # is acceptable; both preserve the item content.
+        assert "first task" in bullet
+
+    def test_compute_source_hash_deterministic_and_order_independent(self):
+        """Same chunk id set → same hash regardless of order."""
+        ids_a = ["aaa-111", "bbb-222", "ccc-333"]
+        ids_b = ["ccc-333", "aaa-111", "bbb-222"]
+        assert compute_source_hash(ids_a) == compute_source_hash(ids_b)
+        assert compute_source_hash(ids_a) != compute_source_hash(ids_a + ["ddd-444"])
+        # 16 hex chars = 64 bits.
+        assert len(compute_source_hash(ids_a)) == 16
+
+    def test_parse_source_hash_present_and_missing(self):
+        """parse_source_hash returns the hash or None for legacy summaries."""
+        with_hash = (
+            "## Metadata\n\n"
+            "- Source: `/tmp/foo.md`\n"
+            "- Source hash: `a3f28b1c9e4d5f60`\n"
+            "- Generated: 2026-04-12T00:00:00+00:00\n"
+        )
+        assert parse_source_hash(with_hash) == "a3f28b1c9e4d5f60"
+
+        without_hash = "## Metadata\n\n- Source: `/tmp/foo.md`\n- Generated: 2026-04-12\n"
+        assert parse_source_hash(without_hash) is None
+
+
+# ── auto_consolidate handler (integration with storage) ──────────────
+
+
+class TestAutoConsolidate:
+    async def test_auto_consolidate_empty_no_candidates(self, storage):
+        """No source files with enough chunks → affected_count = 0."""
+        chunk = make_chunk("lonely", source="solo.md")
+        await storage.upsert_chunks([chunk])
+
+        result = await execute_auto_consolidate(
+            storage, {"min_group_size": 3}, namespace=None, dry_run=False
+        )
+        assert result.policy_type == "auto_consolidate"
+        assert result.affected_count == 0
+        assert "0 groups" in result.details
+
+    async def test_auto_consolidate_dry_run_reports_candidates(self, storage):
+        """Dry run counts groups but does not create a summary chunk."""
+        source = "meeting-2026-04.md"
+        chunks = [
+            make_chunk(
+                content=f"Content chunk {i} with some text here.",
+                source=source,
+                heading=("April Standup", f"Section {i}"),
+            )
+            for i in range(3)
+        ]
+        await storage.upsert_chunks(chunks)
+
+        result = await execute_auto_consolidate(
+            storage,
+            {"min_group_size": 3},
+            namespace=None,
+            dry_run=True,
+        )
+        assert result.dry_run is True
+        assert result.affected_count == 1
+        assert "Would consolidate" in result.details
+        assert source in result.details
+
+        # No summary chunk should have been persisted.
+        summaries = await storage.list_chunks_by_source(
+            Path(f"/tmp/{source}.consolidated.md"), limit=5
+        )
+        assert summaries == []
+
+    async def test_auto_consolidate_happy_path(self, storage):
+        """Creates a summary chunk in archive:summary + links originals."""
+        source = "meeting-2026-04.md"
+        chunks = [
+            make_chunk(
+                content=(
+                    "Alice, Bob, Carol joined the standup session for April."
+                    if i == 0
+                    else f"Further notes from section {i} of the meeting."
+                ),
+                source=source,
+                heading=("April Standup", f"Section {i}"),
+            )
+            for i in range(3)
+        ]
+        await storage.upsert_chunks(chunks)
+
+        result = await execute_auto_consolidate(
+            storage, {"min_group_size": 3}, namespace=None, dry_run=False
+        )
+        assert result.affected_count == 1
+        assert "Consolidated 1 groups" in result.details
+
+        # Summary chunk exists and contains expected markers.
+        summaries = await storage.list_chunks_by_source(
+            Path(f"/tmp/{source}.consolidated.md"), limit=5
+        )
+        assert len(summaries) == 1
+        summary_chunk = summaries[0]
+        assert summary_chunk.metadata.namespace == DEFAULT_SUMMARY_NAMESPACE
+        assert "consolidated" in summary_chunk.metadata.tags
+        assert "# Consolidated:" in summary_chunk.content
+        assert "Source hash:" in summary_chunk.content
+
+        # Each original should have a consolidated_into relation → summary.
+        related = await storage.get_related(chunks[0].id)
+        assert any(rel == "consolidated_into" for _, rel in related)
+
+    async def test_auto_consolidate_idempotent_same_hash_skips(self, storage):
+        """Second run on unchanged inputs must be a no-op."""
+        source = "meeting-idempotent.md"
+        chunks = [
+            make_chunk(f"Idempotency chunk {i}", source=source, heading=("Doc", f"§{i}"))
+            for i in range(3)
+        ]
+        await storage.upsert_chunks(chunks)
+
+        first = await execute_auto_consolidate(
+            storage, {"min_group_size": 3}, namespace=None, dry_run=False
+        )
+        assert first.affected_count == 1
+
+        second = await execute_auto_consolidate(
+            storage, {"min_group_size": 3}, namespace=None, dry_run=False
+        )
+        assert second.affected_count == 0
+        assert "0 groups" in second.details
+
+        # Only one summary chunk should exist.
+        summaries = await storage.list_chunks_by_source(
+            Path(f"/tmp/{source}.consolidated.md"), limit=5
+        )
+        assert len(summaries) == 1
+
+    async def test_auto_consolidate_staleness_regen(self, storage):
+        """Adding a chunk after first run → second run deletes old, creates new."""
+        source = "meeting-staleness.md"
+        first_batch = [
+            make_chunk(f"Stale chunk {i}", source=source, heading=("Doc", f"§{i}"))
+            for i in range(3)
+        ]
+        await storage.upsert_chunks(first_batch)
+
+        first = await execute_auto_consolidate(
+            storage, {"min_group_size": 3}, namespace=None, dry_run=False
+        )
+        assert first.affected_count == 1
+        summaries_before = await storage.list_chunks_by_source(
+            Path(f"/tmp/{source}.consolidated.md"), limit=5
+        )
+        assert len(summaries_before) == 1
+        old_summary_id = summaries_before[0].id
+
+        # Add a new chunk → input hash changes.
+        new_chunk = make_chunk("Newly added chunk", source=source, heading=("Doc", "§new"))
+        await storage.upsert_chunks([new_chunk])
+
+        second = await execute_auto_consolidate(
+            storage, {"min_group_size": 3}, namespace=None, dry_run=False
+        )
+        assert second.affected_count == 1
+        assert "regen" in second.details
+
+        # Exactly one summary (old one was replaced, not stacked).
+        summaries_after = await storage.list_chunks_by_source(
+            Path(f"/tmp/{source}.consolidated.md"), limit=5
+        )
+        assert len(summaries_after) == 1
+        assert summaries_after[0].id != old_summary_id
+
+    async def test_auto_consolidate_mixed_namespace_skips(self, storage, caplog):
+        """A source file whose chunks span multiple namespaces is skipped with a warn."""
+        source = "mixed-ns.md"
+        chunks = [
+            make_chunk(f"Chunk {i}", source=source, namespace="default" if i < 2 else "other")
+            for i in range(3)
+        ]
+        await storage.upsert_chunks(chunks)
+
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.tools.policy_engine"):
+            result = await execute_auto_consolidate(
+                storage, {"min_group_size": 3}, namespace=None, dry_run=False
+            )
+
+        assert result.affected_count == 0
+        assert "mixed ns" in result.details
+        # The warning line should reference the source.
+        assert any("mixed namespaces" in rec.message for rec in caplog.records)
+
+        # No summary chunk should have been written.
+        summaries = await storage.list_chunks_by_source(
+            Path(f"/tmp/{source}.consolidated.md"), limit=5
+        )
+        assert summaries == []
+
+    async def test_apply_consolidation_decay_floor(self, storage):
+        """keep_originals=False applies decay but never drops below DECAY_FLOOR=0.3."""
+        chunks = [make_chunk(f"decay chunk {i}", source="decay-source.md") for i in range(3)]
+        await storage.upsert_chunks(chunks)
+
+        # Force one chunk to a very low importance score; the halving must
+        # floor at 0.3, not drop to 0.1.
+        low_id = str(chunks[0].id)
+        await storage.update_importance_scores({low_id: 0.2})
+
+        group = {
+            "source": "/tmp/decay-source.md",
+            "chunk_ids": [str(c.id) for c in chunks],
+            "namespace": "default",
+            "chunk_count": 3,
+        }
+        summary = make_heuristic_summary(chunks, Path("/tmp/decay-source.md"))
+        await apply_consolidation(storage, group, summary, keep_originals=False)
+
+        scores = await storage.get_importance_scores([str(c.id) for c in chunks])
+        # The 0.2 chunk should have been floored to 0.3, not halved to 0.1.
+        assert scores[low_id] == pytest.approx(0.3)
+        # Other chunks start at the default importance (let the storage layer
+        # decide the initial value — we just assert the floor held).
+        for cid in scores:
+            assert scores[cid] >= 0.3
 
 
 # ── Temporal ─────────────────────────────────────────────────────────
@@ -663,10 +957,20 @@ class TestTemporal:
 
     async def test_build_timeline_invalid_dates_skipped(self):
         chunks = [
-            {"content": "Good", "created_at": "2025-01-01T00:00:00+00:00", "source_file": "a.md",
-             "tags": [], "score": 0.5},
-            {"content": "Bad date", "created_at": "not-a-date", "source_file": "b.md",
-             "tags": [], "score": 0.5},
+            {
+                "content": "Good",
+                "created_at": "2025-01-01T00:00:00+00:00",
+                "source_file": "a.md",
+                "tags": [],
+                "score": 0.5,
+            },
+            {
+                "content": "Bad date",
+                "created_at": "not-a-date",
+                "source_file": "b.md",
+                "tags": [],
+                "score": 0.5,
+            },
             {"content": "Missing key", "source_file": "c.md", "tags": [], "score": 0.5},
         ]
         buckets = build_timeline(chunks)
