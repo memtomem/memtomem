@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 import click
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from memtomem.models import Chunk
     from memtomem.server.component_factory import Components
     from memtomem.storage.base import StorageBackend
@@ -38,6 +40,17 @@ _TAG_PREFIXES: tuple[tuple[str, str], ...] = (
 _NS_SAFE_RE = re.compile(r"[^\w\-.:@ ]")
 
 _NAMESPACE_PREFIX = "claude-memory:"
+
+# ── Gemini memory constants ─────────────────────────────────────────
+
+_GEMINI_NAMESPACE_PREFIX = "gemini-memory:"
+_GEMINI_BASE_TAG = "gemini-memory"
+
+# ── Codex memory constants ──────────────────────────────────────────
+
+_CODEX_NAMESPACE_PREFIX = "codex-memory:"
+_CODEX_BASE_TAG = "codex-memory"
+_CODEX_EXCLUDE_FILENAMES = frozenset({"README.md"})
 
 
 @click.group()
@@ -124,13 +137,18 @@ async def _ingest_files_with_components(
     comp: Components,
     files: list[Path],
     namespace: str,
+    *,
+    tag_fn: Callable[[Path], set[str]] | None = None,
 ) -> IngestSummary:
     """Index *files* via *comp.index_engine* and tag each freshly-indexed file.
 
-    Split out from ``_run_claude_ingest`` so tests can drive the ingestion
-    loop with a real ``components`` fixture instead of going through
-    ``cli_components()`` (which requires a global ~/.memtomem/config.json).
+    Split out from the per-source ``_run_*_ingest`` helpers so tests can
+    drive the ingestion loop with a real ``components`` fixture instead of
+    going through ``cli_components()`` (which requires a global config).
+
+    *tag_fn* defaults to ``_tags_for_file`` (Claude tags) when ``None``.
     """
+    effective_tag_fn = tag_fn if tag_fn is not None else _tags_for_file
     total_indexed = 0
     total_skipped = 0
     total_deleted = 0
@@ -144,7 +162,7 @@ async def _ingest_files_with_components(
             errors.extend(stats.errors)
 
         if stats.indexed_chunks > 0:
-            await _apply_tags(comp.storage, f, _tags_for_file(f))
+            await _apply_tags(comp.storage, f, effective_tag_fn(f))
 
     comp.search_pipeline.invalidate_cache()
     return IngestSummary(
@@ -189,14 +207,15 @@ def _derive_slug(source_path: Path) -> str:
     return source_path.name or "default"
 
 
-def _build_namespace(slug: str) -> str:
-    """Return ``claude-memory:<slug>`` with *slug* sanitized for storage.
+def _build_namespace(slug: str, prefix: str = _NAMESPACE_PREFIX) -> str:
+    """Return ``<prefix><slug>`` with *slug* sanitized for storage.
 
     Characters outside the SQLite namespace allowlist (``_NS_NAME_RE``) are
     replaced with ``_`` so downstream storage never rejects the namespace.
+    Default *prefix* is ``claude-memory:`` for backward compatibility.
     """
     safe = _NS_SAFE_RE.sub("_", slug)
-    return f"{_NAMESPACE_PREFIX}{safe}"
+    return f"{prefix}{safe}"
 
 
 def _tags_for_file(file_path: Path) -> set[str]:
@@ -244,3 +263,230 @@ async def _apply_tags(
         dirty.append(c)
     if dirty:
         await storage.upsert_chunks(dirty)
+
+
+# =====================================================================
+# mm ingest gemini-memory
+# =====================================================================
+
+
+@ingest.command("gemini-memory")
+@click.option(
+    "--source",
+    "source_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=True, path_type=Path),
+    help=(
+        "Path to a GEMINI.md file or a directory containing one. "
+        "Global memories live at ~/.gemini/GEMINI.md; per-project "
+        "memories sit in the project root."
+    ),
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be indexed without writing to storage.",
+)
+def gemini_memory(source_path: Path, dry_run: bool) -> None:
+    """Index a Gemini CLI GEMINI.md memory file into memtomem.
+
+    Read-only snapshot: the source file stays where it is — memtomem
+    records the absolute path as ``source_file`` and indexes the content
+    under namespace ``gemini-memory:<slug>``. Re-run to pick up changes;
+    unchanged content is skipped via content hash.
+    """
+    try:
+        asyncio.run(_run_gemini_ingest(source_path, dry_run))
+    except click.ClickException:
+        raise
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
+async def _run_gemini_ingest(source_path: Path, dry_run: bool) -> None:
+    resolved = source_path.expanduser().resolve()
+    files = _gemini_discover_files(resolved)
+    if not files:
+        click.echo(
+            click.style(
+                f"No indexable GEMINI.md file found at {resolved}",
+                fg="yellow",
+            )
+        )
+        return
+
+    slug = _gemini_derive_slug(files[0])
+    namespace = _build_namespace(slug, prefix=_GEMINI_NAMESPACE_PREFIX)
+
+    if dry_run:
+        click.echo(f"Would ingest {len(files)} file(s) into namespace '{namespace}' (dry-run):")
+        for f in files:
+            tags = sorted(_gemini_tags_for_file(f))
+            click.echo(f"  {f.name}  tags=[{', '.join(tags)}]")
+        return
+
+    from memtomem.cli._bootstrap import cli_components
+
+    async with cli_components() as comp:
+        summary = await _ingest_files_with_components(
+            comp, files, namespace, tag_fn=_gemini_tags_for_file
+        )
+
+    click.echo(
+        f"Ingested {len(files)} file(s) into '{namespace}': "
+        f"{summary.indexed} new, {summary.skipped} unchanged, "
+        f"{summary.deleted} deleted."
+    )
+    for err in summary.errors:
+        click.echo(click.style(f"  ERROR: {err}", fg="red"))
+
+
+def _gemini_discover_files(source: Path) -> list[Path]:
+    """Return the GEMINI.md file to index.
+
+    *source* may be a file (the GEMINI.md itself) or a directory
+    containing one. Returns a single-element list when found, empty
+    list otherwise.
+    """
+    if source.is_file():
+        return [source] if source.suffix == ".md" else []
+    # Directory — look for GEMINI.md directly inside.
+    candidate = source / "GEMINI.md"
+    if candidate.is_file():
+        return [candidate]
+    return []
+
+
+def _gemini_derive_slug(source_file: Path) -> str:
+    """Extract a namespace slug from the parent directory of *source_file*.
+
+    ``~/.gemini/GEMINI.md`` → ``global``.
+    ``/path/to/my-project/GEMINI.md`` → ``my-project``.
+    """
+    parent_name = source_file.parent.name
+    if parent_name in (".gemini", ""):
+        return "global"
+    return parent_name
+
+
+def _gemini_tags_for_file(file_path: Path) -> set[str]:
+    """Return the tag set for a Gemini memory file.
+
+    Every chunk gets the ``gemini-memory`` source marker.
+    """
+    return {_GEMINI_BASE_TAG}
+
+
+# =====================================================================
+# mm ingest codex-memory
+# =====================================================================
+
+
+@ingest.command("codex-memory")
+@click.option(
+    "--source",
+    "source_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    help="Path to a Codex memories directory (typically ~/.codex/memories/).",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be indexed without writing to storage.",
+)
+def codex_memory(source_path: Path, dry_run: bool) -> None:
+    """Index a Codex CLI memories directory into memtomem.
+
+    Read-only snapshot: the source files stay where they are — memtomem
+    records the absolute path as ``source_file`` and indexes the content
+    under namespace ``codex-memory:<slug>``. Re-run to pick up new or
+    changed files; unchanged files are skipped via content hash.
+    """
+    try:
+        asyncio.run(_run_codex_ingest(source_path, dry_run))
+    except click.ClickException:
+        raise
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
+async def _run_codex_ingest(source_path: Path, dry_run: bool) -> None:
+    resolved = source_path.expanduser().resolve()
+    slug = _codex_derive_slug(resolved)
+    namespace = _build_namespace(slug, prefix=_CODEX_NAMESPACE_PREFIX)
+
+    files = _codex_discover_files(resolved)
+    if not files:
+        click.echo(
+            click.style(
+                f"No indexable markdown files found in {resolved}",
+                fg="yellow",
+            )
+        )
+        return
+
+    if dry_run:
+        click.echo(f"Would ingest {len(files)} file(s) into namespace '{namespace}' (dry-run):")
+        for f in files:
+            tags = sorted(_codex_tags_for_file(f))
+            click.echo(f"  {f.name}  tags=[{', '.join(tags)}]")
+        return
+
+    from memtomem.cli._bootstrap import cli_components
+
+    async with cli_components() as comp:
+        summary = await _ingest_files_with_components(
+            comp, files, namespace, tag_fn=_codex_tags_for_file
+        )
+
+    click.echo(
+        f"Ingested {len(files)} file(s) into '{namespace}': "
+        f"{summary.indexed} new, {summary.skipped} unchanged, "
+        f"{summary.deleted} deleted."
+    )
+    for err in summary.errors:
+        click.echo(click.style(f"  ERROR: {err}", fg="red"))
+
+
+def _codex_discover_files(source_root: Path) -> list[Path]:
+    """Return indexable ``.md`` files directly under *source_root*.
+
+    Flat (non-recursive) — mirrors the Claude discovery pattern.
+    Sorted for deterministic output. Skips hidden files and README.md.
+    """
+    files: list[Path] = []
+    for f in sorted(source_root.iterdir()):
+        if not f.is_file():
+            continue
+        if f.suffix != ".md":
+            continue
+        if f.name.startswith("."):
+            continue
+        if f.name in _CODEX_EXCLUDE_FILENAMES:
+            continue
+        files.append(f)
+    return files
+
+
+def _codex_derive_slug(source_dir: Path) -> str:
+    """Extract a namespace slug from a Codex memories directory path.
+
+    ``~/.codex/memories/`` → ``global``.
+    ``/path/to/custom-dir/`` → ``custom-dir``.
+    """
+    name = source_dir.name
+    if name in ("memories", ""):
+        parent = source_dir.parent.name
+        if parent in (".codex", ""):
+            return "global"
+        return parent
+    return name
+
+
+def _codex_tags_for_file(file_path: Path) -> set[str]:
+    """Return the tag set for a Codex memory file.
+
+    Every chunk gets the ``codex-memory`` source marker.
+    """
+    return {_CODEX_BASE_TAG}
