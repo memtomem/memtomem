@@ -261,6 +261,8 @@ async def execute_auto_consolidate(
     config: dict,
     namespace: str | None,
     dry_run: bool,
+    *,
+    llm_provider: object | None = None,
 ) -> PolicyRunResult:
     """Group related chunks by source file and create heuristic summary chunks.
 
@@ -297,6 +299,7 @@ async def execute_auto_consolidate(
         apply_consolidation,
         compute_source_hash,
         make_heuristic_summary,
+        make_llm_summary,
         parse_source_hash,
         source_has_consolidation_relations,
     )
@@ -322,6 +325,7 @@ async def execute_auto_consolidate(
     )
 
     applied = 0
+    llm_fallback_count = 0
     detail_parts: list[str] = []
 
     for g in raw_groups:
@@ -386,7 +390,22 @@ async def execute_auto_consolidate(
             await storage.delete_chunks([existing[0].id])  # type: ignore[attr-defined]
 
         try:
-            summary = make_heuristic_summary(chunks, source_path, max_bullets=max_bullets)
+            # Try LLM summary first, fall back to heuristic on failure.
+            summary = None
+            if llm_provider is not None:
+                try:
+                    summary = await make_llm_summary(
+                        chunks, source_path, llm_provider, max_bullets=max_bullets
+                    )
+                except Exception:
+                    logger.warning(
+                        "auto_consolidate: LLM failed for %s, using heuristic",
+                        source_path,
+                        exc_info=True,
+                    )
+                    llm_fallback_count += 1
+            if summary is None:
+                summary = make_heuristic_summary(chunks, source_path, max_bullets=max_bullets)
             group_dict = {
                 "source": str(source_path),
                 "chunk_ids": [str(c.id) for c in chunks],
@@ -418,6 +437,8 @@ async def execute_auto_consolidate(
         details = f"{verb} {applied} groups: {', '.join(detail_parts)}"
     else:
         details = f"{verb} 0 groups (no candidates)"
+    if llm_fallback_count > 0:
+        details += f" (llm_fallback_count={llm_fallback_count})"
 
     return PolicyRunResult(
         policy_name="",
@@ -542,8 +563,13 @@ async def run_policy(
     storage: object,
     policy: dict,
     dry_run: bool = False,
+    *,
+    llm_provider: object | None = None,
 ) -> PolicyRunResult:
-    """Execute a single policy."""
+    """Execute a single policy.
+
+    ``llm_provider`` is forwarded to ``execute_auto_consolidate`` when set.
+    """
     ptype = policy["policy_type"]
     handler = _HANDLERS.get(ptype)
     if handler is None:
@@ -555,9 +581,21 @@ async def run_policy(
             details=f"Unknown policy type: {ptype}",
         )
 
-    result = await handler(
-        storage, policy.get("config", {}), policy.get("namespace_filter"), dry_run
-    )
+    if ptype == "auto_consolidate":
+        result = await handler(
+            storage,
+            policy.get("config", {}),
+            policy.get("namespace_filter"),
+            dry_run,
+            llm_provider=llm_provider,
+        )
+    else:
+        result = await handler(
+            storage,
+            policy.get("config", {}),
+            policy.get("namespace_filter"),
+            dry_run,
+        )
     return PolicyRunResult(
         policy_name=policy["name"],
         policy_type=result.policy_type,
@@ -571,6 +609,8 @@ async def run_all_enabled(
     storage: object,
     dry_run: bool = False,
     max_actions: int | None = None,
+    *,
+    llm_provider: object | None = None,
 ) -> list[PolicyRunResult]:
     """Run all enabled policies.
 
@@ -578,12 +618,13 @@ async def run_all_enabled(
         max_actions: If set, stop after cumulative affected_count reaches
             this limit.  The cap is checked between policies — individual
             handlers run atomically.
+        llm_provider: Optional LLM provider forwarded to consolidation.
     """
     policies = await storage.policy_get_enabled()  # type: ignore[attr-defined]
     results: list[PolicyRunResult] = []
     cumulative = 0
     for p in policies:
-        result = await run_policy(storage, p, dry_run=dry_run)
+        result = await run_policy(storage, p, dry_run=dry_run, llm_provider=llm_provider)
         if not dry_run:
             await storage.policy_update_last_run(p["name"])  # type: ignore[attr-defined]
         results.append(result)

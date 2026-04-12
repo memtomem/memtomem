@@ -19,6 +19,7 @@ from memtomem.storage.sqlite_backend import SqliteBackend
 
 if TYPE_CHECKING:
     from memtomem.embedding.base import EmbeddingProvider
+    from memtomem.llm.base import LLMProvider
 
 _log = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class Components:
     embedder: EmbeddingProvider
     index_engine: IndexEngine
     search_pipeline: SearchPipeline
+    llm: LLMProvider | None = None
 
 
 async def create_components(config: Mem2MemConfig | None = None) -> Components:
@@ -104,17 +106,27 @@ async def create_components(config: Mem2MemConfig | None = None) -> Components:
         context_window_config=config.context_window,
     )
 
+    # Create optional LLM provider
+    llm = None
+    if config.llm.enabled:
+        from memtomem.llm.factory import create_llm
+
+        llm = create_llm(config.llm)
+
     return Components(
         config=config,
         storage=storage,
         embedder=embedder,
         index_engine=index_engine,
         search_pipeline=search_pipeline,
+        llm=llm,
     )
 
 
 async def close_components(comp: Components) -> None:
     """Shut down components in reverse order."""
+    if comp.llm is not None:
+        await comp.llm.close()
     await comp.search_pipeline.close()
     await comp.embedder.close()
     await comp.storage.close()

@@ -125,6 +125,7 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
         watcher=watcher,
         dedup_scanner=dedup_scanner,
         webhook_manager=webhook_mgr,
+        llm_provider=comp.llm,
     )
 
     # Auto-consolidation scheduler

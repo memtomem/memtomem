@@ -18,6 +18,7 @@ from memtomem.storage.sqlite_backend import SqliteBackend
 
 if TYPE_CHECKING:
     from memtomem.embedding.base import EmbeddingProvider
+    from memtomem.llm.base import LLMProvider
 
 
 @dataclass
@@ -33,6 +34,7 @@ class AppContext:
     dedup_scanner: DedupScanner | None = None
     webhook_manager: object | None = None
     health_watchdog: object | None = None
+    llm_provider: LLMProvider | None = None
     current_namespace: str | None = None
     current_session_id: str | None = None
     _config_lock: asyncio.Lock = field(default_factory=asyncio.Lock)

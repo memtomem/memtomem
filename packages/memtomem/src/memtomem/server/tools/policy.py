@@ -181,13 +181,15 @@ async def mem_policy_run(
         policy = await app.storage.policy_get(name)
         if not policy:
             return f"Error: policy '{name}' not found."
-        result = await run_policy(app.storage, policy, dry_run=dry_run)
+        result = await run_policy(
+            app.storage, policy, dry_run=dry_run, llm_provider=app.llm_provider
+        )
         if not dry_run:
             await app.storage.policy_update_last_run(name)
             app.search_pipeline.invalidate_cache()
         return f"{'[DRY RUN] ' if dry_run else ''}{result.details}"
 
-    results = await run_all_enabled(app.storage, dry_run=dry_run)
+    results = await run_all_enabled(app.storage, dry_run=dry_run, llm_provider=app.llm_provider)
     if not results:
         return "No enabled policies to run."
 

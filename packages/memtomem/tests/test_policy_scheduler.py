@@ -67,7 +67,12 @@ class TestPolicyScheduler:
             return_value=[_result("p1", 0)],
         ) as mock_run:
             await sched._run_policies()
-            mock_run.assert_called_once_with(app.storage, dry_run=False, max_actions=100)
+            mock_run.assert_called_once_with(
+                app.storage,
+                dry_run=False,
+                max_actions=100,
+                llm_provider=app.llm_provider,
+            )
 
     @pytest.mark.asyncio
     async def test_cache_invalidated_when_affected(self):

@@ -27,6 +27,7 @@ from memtomem.models import Chunk, ChunkMetadata, ChunkType
 from memtomem.tools.entity_extraction import _ACTION_RE, _DECISION_RE
 
 if TYPE_CHECKING:
+    from memtomem.llm.base import LLMProvider
     from memtomem.storage.base import StorageBackend
 
 logger = logging.getLogger(__name__)
@@ -198,6 +199,66 @@ def make_heuristic_summary(
             "- Strategy: heuristic",
         ]
     )
+    return "\n".join(lines)
+
+
+_CONSOLIDATION_SYSTEM_PROMPT = (
+    "You are a memory consolidation assistant. Given a set of memory chunks "
+    "from the same source file, produce a concise summary that preserves all "
+    "key facts, decisions, and action items. Output markdown. Do NOT invent "
+    "information not present in the input."
+)
+
+
+async def make_llm_summary(
+    chunks: list[Chunk],
+    source: Path,
+    llm: LLMProvider,
+    max_bullets: int = 20,
+    max_tokens: int = 1024,
+) -> str:
+    """Build an LLM-generated markdown summary for a group of chunks.
+
+    Wraps the LLM output in the same template as ``make_heuristic_summary``
+    so that idempotency (source hash) and metadata work identically.
+    """
+    if not chunks:
+        raise ValueError("make_llm_summary: cannot summarize empty chunk list")
+
+    # Build prompt with chunk content
+    chunk_texts = []
+    for i, c in enumerate(chunks[:max_bullets], 1):
+        chunk_texts.append(f"--- Chunk {i} ---\n{c.content[:2000]}")
+    prompt = (
+        f"Summarize the following {len(chunks)} memory chunks from `{source}`.\n\n"
+        + "\n\n".join(chunk_texts)
+    )
+
+    llm_output = await llm.generate(
+        prompt, system=_CONSOLIDATION_SYSTEM_PROMPT, max_tokens=max_tokens
+    )
+
+    # Wrap in same template as heuristic — same metadata block for idempotency.
+    created_ats = [c.created_at for c in chunks]
+    range_start = min(created_ats).date().isoformat()
+    range_end = max(created_ats).date().isoformat()
+    source_hash = compute_source_hash([c.id for c in chunks])
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    lines: list[str] = [
+        f"# Consolidated: {source.name}",
+        "",
+        llm_output.strip(),
+        "",
+        "## Metadata",
+        "",
+        f"- Source: `{source}`",
+        f"- Chunks: {len(chunks)}",
+        f"- Range: {range_start} ~ {range_end}",
+        f"- Source hash: `{source_hash}`",
+        f"- Generated: {now}",
+        "- Strategy: llm",
+    ]
     return "\n".join(lines)
 
 

@@ -282,6 +282,30 @@ class HealthWatchdogConfig(BaseSettings):
     auto_maintenance: bool = True
 
 
+class LLMConfig(BaseSettings):
+    enabled: bool = False
+    provider: str = "ollama"
+    model: str = ""  # empty = provider-specific default resolved in factory
+    base_url: str = "http://localhost:11434"
+    api_key: str = ""
+    max_tokens: int = 1024
+    timeout: float = 60.0
+
+    @field_validator("max_tokens")
+    @classmethod
+    def max_tokens_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("must be positive")
+        return v
+
+    @field_validator("timeout")
+    @classmethod
+    def timeout_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("must be positive")
+        return v
+
+
 class Mem2MemConfig(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="MEMTOMEM_",
@@ -309,6 +333,7 @@ class Mem2MemConfig(BaseSettings):
     entity_extraction: EntityExtractionConfig = Field(default_factory=EntityExtractionConfig)
     context_window: ContextWindowConfig = Field(default_factory=ContextWindowConfig)
     health_watchdog: HealthWatchdogConfig = Field(default_factory=HealthWatchdogConfig)
+    llm: LLMConfig = Field(default_factory=LLMConfig)
     timezone: str = "UTC"  # Display timezone (e.g. "Asia/Seoul"). Storage remains UTC.
 
 

@@ -21,6 +21,10 @@ class IndexingError(Mem2MemError):
     """Indexing error."""
 
 
+class LLMError(Mem2MemError):
+    """LLM provider error."""
+
+
 class ConfigError(Mem2MemError):
     """Configuration error."""
 
