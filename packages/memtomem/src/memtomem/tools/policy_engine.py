@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from memtomem.storage.sqlite_helpers import escape_like
+
 logger = logging.getLogger(__name__)
 
 _NS_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
@@ -426,10 +428,112 @@ async def execute_auto_consolidate(
     )
 
 
+async def execute_auto_promote(
+    storage: object,
+    config: dict,
+    namespace: str | None,
+    dry_run: bool,
+) -> PolicyRunResult:
+    """Move archived chunks back to an active namespace based on access patterns.
+
+    This is the inverse of ``auto_archive``: chunks that were archived but
+    continue to be accessed (high access_count, recent last_accessed_at, or
+    high importance_score) are promoted back to an active namespace.
+
+    To prevent ping-pong with ``auto_archive``, promotion resets
+    ``last_accessed_at`` to the current time, so the chunk won't immediately
+    re-qualify for archival on the next policy run.
+
+    Config fields (all optional):
+
+    - ``source_prefix`` (str, default ``"archive"``): chunks whose namespace
+      starts with this prefix are candidates. Matches both ``"archive"``
+      (flat mode) and ``"archive:work"``, ``"archive:misc"`` etc.
+    - ``target_namespace`` (str, default ``"default"``): destination namespace
+      for promoted chunks.
+    - ``min_access_count`` (int, default 3): minimum ``access_count`` to
+      qualify for promotion.
+    - ``min_importance_score`` (float | None, default None): if set, only
+      promote chunks whose ``importance_score`` is at least this value.
+      Combined with ``min_access_count`` via AND.
+    - ``recency_days`` (int | None, default None): if set, only promote
+      chunks whose ``last_accessed_at`` is within this many days. Chunks
+      with null ``last_accessed_at`` are excluded. Note: this is the
+      opposite of ``auto_archive``'s age-based cutoff — here, *recent*
+      access qualifies a chunk for promotion.
+
+    The ``namespace`` arg (from ``namespace_filter`` on the policy row)
+    overrides ``source_prefix`` with an exact-match filter when set.
+    """
+    source_prefix = config.get("source_prefix", "archive")
+    target_ns = config.get("target_namespace", "default")
+    min_access_count = config.get("min_access_count", 3)
+    min_importance_score = config.get("min_importance_score")
+    recency_days = config.get("recency_days")
+
+    db = storage._get_db()  # type: ignore[attr-defined]
+
+    where_parts: list[str] = []
+    params: list = []
+
+    # Source filtering: namespace param (exact) overrides prefix.
+    if namespace:
+        where_parts.append("namespace = ?")
+        params.append(namespace)
+    else:
+        where_parts.append("namespace LIKE ? ESCAPE '\\'")
+        params.append(f"{escape_like(source_prefix)}%")
+
+    # Exclude chunks already in target namespace (prevent no-op moves).
+    where_parts.append("namespace != ?")
+    params.append(target_ns)
+
+    # Access count gate (always active).
+    where_parts.append("access_count >= ?")
+    params.append(min_access_count)
+
+    # Optional importance gate.
+    if min_importance_score is not None:
+        where_parts.append("importance_score >= ?")
+        params.append(min_importance_score)
+
+    # Optional recency gate — opposite of auto_archive: here, *recent*
+    # access qualifies a chunk. Null last_accessed_at disqualifies.
+    if recency_days is not None:
+        recency_cutoff = (datetime.now(timezone.utc) - timedelta(days=recency_days)).isoformat()
+        where_parts.append("last_accessed_at IS NOT NULL")
+        where_parts.append("last_accessed_at >= ?")
+        params.append(recency_cutoff)
+
+    query = "SELECT id FROM chunks WHERE " + " AND ".join(where_parts)
+    rows = db.execute(query, params).fetchall()
+    count = len(rows)
+
+    if not dry_run and count > 0:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        db.executemany(
+            "UPDATE chunks SET namespace = ?, last_accessed_at = ? WHERE id = ?",
+            [(target_ns, now_iso, r[0]) for r in rows],
+        )
+        db.commit()
+
+    verb = "Would promote" if dry_run else "Promoted"
+    details = f"{verb} {count} chunks → '{target_ns}'"
+
+    return PolicyRunResult(
+        policy_name="",
+        policy_type="auto_promote",
+        affected_count=count,
+        dry_run=dry_run,
+        details=details,
+    )
+
+
 _HANDLERS = {
     "auto_archive": execute_auto_archive,
     "auto_consolidate": execute_auto_consolidate,
     "auto_expire": execute_auto_expire,
+    "auto_promote": execute_auto_promote,
     "auto_tag": execute_auto_tag,
 }
 

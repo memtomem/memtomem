@@ -24,6 +24,7 @@ from memtomem.tools.policy_engine import (
     execute_auto_archive,
     execute_auto_consolidate,
     execute_auto_expire,
+    execute_auto_promote,
     execute_auto_tag,
     run_all_enabled,
     run_policy,
@@ -519,6 +520,196 @@ class TestPolicyEngine:
         assert result.affected_count >= 1
         assert "Would tag" in result.details
 
+    # ── auto_promote ──────────────────────────────────────────────────
+
+    async def test_auto_promote_dry_run(self, storage):
+        """Dry-run should count but not actually move chunks."""
+        chunk = make_chunk("archived content", namespace="archive")
+        await storage.upsert_chunks([chunk])
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET access_count = 5 WHERE id = ?", [str(chunk.id)])
+        db.commit()
+
+        result = await execute_auto_promote(
+            storage, {"min_access_count": 3}, namespace=None, dry_run=True
+        )
+        assert isinstance(result, PolicyRunResult)
+        assert result.policy_type == "auto_promote"
+        assert result.dry_run is True
+        assert result.affected_count == 1
+        assert "Would promote" in result.details
+
+        row = db.execute("SELECT namespace FROM chunks WHERE id = ?", [str(chunk.id)]).fetchone()
+        assert row[0] == "archive"
+
+    async def test_auto_promote_executes(self, storage):
+        """Non-dry-run should move qualifying chunks to target namespace."""
+        chunk = make_chunk("archived content", namespace="archive")
+        await storage.upsert_chunks([chunk])
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET access_count = 5 WHERE id = ?", [str(chunk.id)])
+        db.commit()
+
+        result = await execute_auto_promote(
+            storage,
+            {"min_access_count": 3, "target_namespace": "active"},
+            namespace=None,
+            dry_run=False,
+        )
+        assert result.affected_count == 1
+        assert result.dry_run is False
+        assert "Promoted" in result.details
+        assert "'active'" in result.details
+
+        row = db.execute(
+            "SELECT namespace, last_accessed_at FROM chunks WHERE id = ?",
+            [str(chunk.id)],
+        ).fetchone()
+        assert row[0] == "active"
+        assert row[1] is not None  # last_accessed_at reset for ping-pong prevention
+
+    async def test_auto_promote_skips_low_access(self, storage):
+        """Chunks below min_access_count should not be promoted."""
+        chunk = make_chunk("rarely accessed", namespace="archive")
+        await storage.upsert_chunks([chunk])
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET access_count = 1 WHERE id = ?", [str(chunk.id)])
+        db.commit()
+
+        result = await execute_auto_promote(
+            storage, {"min_access_count": 3}, namespace=None, dry_run=False
+        )
+        assert result.affected_count == 0
+
+    async def test_auto_promote_prefix_matches_subnamespaces(self, storage):
+        """source_prefix should match archive:* subnamespaces."""
+        c1 = make_chunk("decisions", namespace="archive:decisions")
+        c2 = make_chunk("tech", namespace="archive:tech")
+        c3 = make_chunk("notes", namespace="notes")
+        await storage.upsert_chunks([c1, c2, c3])
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET access_count = 5")
+        db.commit()
+
+        result = await execute_auto_promote(
+            storage,
+            {"source_prefix": "archive", "min_access_count": 3},
+            namespace=None,
+            dry_run=True,
+        )
+        assert result.affected_count == 2  # c1 + c2, not c3
+
+    async def test_auto_promote_namespace_filter_override(self, storage):
+        """namespace param should override source_prefix with exact match."""
+        c1 = make_chunk("in archive", namespace="archive")
+        c2 = make_chunk("in archive:tech", namespace="archive:tech")
+        await storage.upsert_chunks([c1, c2])
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET access_count = 5")
+        db.commit()
+
+        result = await execute_auto_promote(
+            storage,
+            {"min_access_count": 3},
+            namespace="archive:tech",
+            dry_run=True,
+        )
+        assert result.affected_count == 1  # only c2
+
+    async def test_auto_promote_min_importance_score(self, storage):
+        """min_importance_score filters via AND with min_access_count."""
+        c_high = make_chunk("high importance", namespace="archive")
+        c_low = make_chunk("low importance", namespace="archive")
+        await storage.upsert_chunks([c_high, c_low])
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET access_count = 5")
+        db.execute("UPDATE chunks SET importance_score = 0.8 WHERE id = ?", [str(c_high.id)])
+        db.execute("UPDATE chunks SET importance_score = 0.2 WHERE id = ?", [str(c_low.id)])
+        db.commit()
+
+        result = await execute_auto_promote(
+            storage,
+            {"min_access_count": 3, "min_importance_score": 0.5},
+            namespace=None,
+            dry_run=True,
+        )
+        assert result.affected_count == 1  # only c_high
+
+    async def test_auto_promote_recency_days(self, storage):
+        """recency_days filters by last_accessed_at; null disqualifies."""
+        recent_time = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+
+        c_recent = make_chunk("recent access", namespace="archive")
+        c_old = make_chunk("old access", namespace="archive")
+        c_null = make_chunk("null access", namespace="archive")
+        await storage.upsert_chunks([c_recent, c_old, c_null])
+
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET access_count = 5")
+        db.execute(
+            "UPDATE chunks SET last_accessed_at = ? WHERE id = ?",
+            [recent_time, str(c_recent.id)],
+        )
+        db.execute(
+            "UPDATE chunks SET last_accessed_at = ? WHERE id = ?",
+            [old_time, str(c_old.id)],
+        )
+        # c_null: last_accessed_at stays NULL
+        db.commit()
+
+        result = await execute_auto_promote(
+            storage,
+            {"min_access_count": 3, "recency_days": 7},
+            namespace=None,
+            dry_run=True,
+        )
+        assert result.affected_count == 1  # only c_recent
+
+    async def test_auto_promote_skips_already_in_target(self, storage):
+        """Chunks already in the target namespace should not be promoted."""
+        chunk = make_chunk("already active", namespace="default")
+        await storage.upsert_chunks([chunk])
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET access_count = 10 WHERE id = ?", [str(chunk.id)])
+        db.commit()
+
+        result = await execute_auto_promote(
+            storage, {"min_access_count": 3}, namespace=None, dry_run=False
+        )
+        assert result.affected_count == 0
+
+    async def test_auto_promote_no_ping_pong_with_auto_archive(self, storage):
+        """Promoted chunk should not be immediately re-archived."""
+        old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+        chunk = make_chunk("ping pong candidate", namespace="archive")
+        await storage.upsert_chunks([chunk])
+        db = storage._get_db()
+        db.execute(
+            "UPDATE chunks SET access_count = 5, created_at = ? WHERE id = ?",
+            [old_time, str(chunk.id)],
+        )
+        db.commit()
+
+        # Step 1: promote
+        await execute_auto_promote(storage, {"min_access_count": 3}, namespace=None, dry_run=False)
+        row = db.execute("SELECT namespace FROM chunks WHERE id = ?", [str(chunk.id)]).fetchone()
+        assert row[0] == "default"
+
+        # Step 2: run auto_archive with last_accessed_at age field —
+        # the promoted chunk's last_accessed_at was reset to now(), so
+        # it should NOT be re-archived even though created_at is old.
+        result = await execute_auto_archive(
+            storage,
+            {"max_age_days": 30, "age_field": "last_accessed_at"},
+            namespace=None,
+            dry_run=False,
+        )
+        assert result.affected_count == 0
+
+        row = db.execute("SELECT namespace FROM chunks WHERE id = ?", [str(chunk.id)]).fetchone()
+        assert row[0] == "default"  # still in default, not re-archived
+
     async def test_run_policy_unknown_type(self):
         """Unknown policy type returns an error result."""
         policy = {"name": "bad_policy", "policy_type": "auto_delete_everything", "config": {}}
@@ -575,6 +766,7 @@ class TestPolicyEngine:
         assert "auto_consolidate" in _SERVER_VALID_TYPES
         assert "auto_archive" in _SERVER_VALID_TYPES
         assert "auto_expire" in _SERVER_VALID_TYPES
+        assert "auto_promote" in _SERVER_VALID_TYPES
         assert "auto_tag" in _SERVER_VALID_TYPES
 
     async def test_max_actions_stops_early(self):

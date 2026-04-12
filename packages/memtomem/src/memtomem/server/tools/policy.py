@@ -12,7 +12,7 @@ from memtomem.server.tool_registry import register
 
 logger = logging.getLogger(__name__)
 
-_VALID_TYPES = {"auto_archive", "auto_consolidate", "auto_expire", "auto_tag"}
+_VALID_TYPES = {"auto_archive", "auto_consolidate", "auto_expire", "auto_promote", "auto_tag"}
 
 
 @mcp.tool()
@@ -34,7 +34,7 @@ async def mem_policy_add(
     Args:
         name: Unique policy name
         policy_type: One of 'auto_archive', 'auto_consolidate',
-            'auto_expire', 'auto_tag'
+            'auto_expire', 'auto_promote', 'auto_tag'
         config: JSON config string. Examples:
             auto_archive (flat — single target):
               {"max_age_days": 30, "archive_namespace": "archive"}
@@ -73,6 +73,25 @@ async def mem_policy_add(
                 (importance_score *= 0.5, floor 0.3) instead of deleting.
               - Summaries default to the ``archive:summary`` namespace so
                 they don't pollute default search results.
+
+            auto_promote (inverse of auto_archive):
+              {"min_access_count": 5, "target_namespace": "default"}
+              {
+                "source_prefix": "archive",
+                "target_namespace": "default",
+                "min_access_count": 3,
+                "min_importance_score": 0.5,
+                "recency_days": 30
+              }
+              - source_prefix: namespace prefix to scan (default "archive").
+              - target_namespace: destination (default "default").
+              - min_access_count: chunks need at least this many accesses.
+              - min_importance_score: optional importance floor (AND).
+              - recency_days: only if last_accessed_at is within N days
+                (opposite of auto_archive's age cutoff — *recent* access
+                qualifies). Null last_accessed_at disqualifies.
+              - Resets last_accessed_at on promotion to prevent immediate
+                re-archival (ping-pong prevention).
 
             auto_expire: {"max_age_days": 90}
             auto_tag: {"max_tags": 5}
