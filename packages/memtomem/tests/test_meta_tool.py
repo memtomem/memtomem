@@ -14,7 +14,7 @@ class TestToolRegistry:
         expected = {
             "crud", "namespace", "tags", "sessions", "scratch", "relations",
             "analytics", "maintenance", "policy", "entity", "multi_agent",
-            "importers", "procedures", "advanced", "context", "search",
+            "importers", "ingest", "procedures", "advanced", "context", "search",
         }
         assert categories == expected
 

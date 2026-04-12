@@ -93,6 +93,7 @@ from memtomem.server.tools.context import (
     mem_context_diff,
     mem_context_sync,
 )  # noqa: E402, F401
+from memtomem.server.tools.ingest import mem_ingest  # noqa: E402, F401
 from memtomem.server.tools.watchdog import mem_watchdog  # noqa: E402, F401
 from memtomem.server.tools.meta import mem_do  # noqa: E402, F401
 import memtomem.server.resources  # noqa: E402, F401  — register MCP resources

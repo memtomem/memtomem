@@ -41,6 +41,26 @@ _NS_SAFE_RE = re.compile(r"[^\w\-.:@ ]")
 
 _NAMESPACE_PREFIX = "claude-memory:"
 
+
+def _discover_claude_slug_dirs(parent: Path) -> list[Path]:
+    """Find all ``<slug>/memory/`` subdirectories under *parent*.
+
+    Used for multi-slug ingest when *parent* is e.g.
+    ``~/.claude/projects/``.  Returns the ``memory/`` paths sorted by
+    slug name for deterministic output.
+    """
+    dirs: list[Path] = []
+    if not parent.is_dir():
+        return dirs
+    for child in sorted(parent.iterdir()):
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        mem_dir = child / "memory"
+        if mem_dir.is_dir():
+            dirs.append(mem_dir)
+    return dirs
+
+
 # ── Gemini memory constants ─────────────────────────────────────────
 
 _GEMINI_NAMESPACE_PREFIX = "gemini-memory:"
@@ -89,18 +109,32 @@ def claude_memory(source_path: Path, dry_run: bool) -> None:
 
 async def _run_claude_ingest(source_path: Path, dry_run: bool) -> None:
     resolved = source_path.expanduser().resolve()
-    slug = _derive_slug(resolved)
-    namespace = _build_namespace(slug)
 
+    # Single-slug fast path: source is a memory/ directory with .md files.
     files = _discover_files(resolved)
-    if not files:
-        click.echo(
-            click.style(
-                f"No indexable markdown files found in {resolved}",
-                fg="yellow",
-            )
-        )
+    if files:
+        await _run_claude_single_slug(resolved, files, dry_run)
         return
+
+    # Multi-slug: source is a parent (e.g. ~/.claude/projects/) containing
+    # multiple <slug>/memory/ subdirectories.
+    slug_dirs = _discover_claude_slug_dirs(resolved)
+    if slug_dirs:
+        await _run_claude_multi_slug(slug_dirs, dry_run)
+        return
+
+    click.echo(
+        click.style(
+            f"No indexable markdown files found in {resolved}",
+            fg="yellow",
+        )
+    )
+
+
+async def _run_claude_single_slug(mem_dir: Path, files: list[Path], dry_run: bool) -> None:
+    """Ingest a single Claude memory directory."""
+    slug = _derive_slug(mem_dir)
+    namespace = _build_namespace(slug)
 
     if dry_run:
         click.echo(f"Would ingest {len(files)} file(s) into namespace '{namespace}' (dry-run):")
@@ -120,6 +154,53 @@ async def _run_claude_ingest(source_path: Path, dry_run: bool) -> None:
         f"{summary.deleted} deleted."
     )
     for err in summary.errors:
+        click.echo(click.style(f"  ERROR: {err}", fg="red"))
+
+
+async def _run_claude_multi_slug(slug_dirs: list[Path], dry_run: bool) -> None:
+    """Ingest all discovered Claude memory slug directories."""
+    total_indexed = 0
+    total_skipped = 0
+    total_deleted = 0
+    total_errors: list[str] = []
+
+    if dry_run:
+        click.echo(f"Discovered {len(slug_dirs)} slug(s) (dry-run):")
+        for mem_dir in slug_dirs:
+            slug = _derive_slug(mem_dir)
+            namespace = _build_namespace(slug)
+            files = _discover_files(mem_dir)
+            click.echo(f"\n  {namespace} ({len(files)} file(s)):")
+            for f in files:
+                tags = sorted(_tags_for_file(f))
+                click.echo(f"    {f.name}  tags=[{', '.join(tags)}]")
+        return
+
+    from memtomem.cli._bootstrap import cli_components
+
+    async with cli_components() as comp:
+        for mem_dir in slug_dirs:
+            slug = _derive_slug(mem_dir)
+            namespace = _build_namespace(slug)
+            files = _discover_files(mem_dir)
+            if not files:
+                continue
+            summary = await _ingest_files_with_components(comp, files, namespace)
+            total_indexed += summary.indexed
+            total_skipped += summary.skipped
+            total_deleted += summary.deleted
+            total_errors.extend(summary.errors)
+            click.echo(
+                f"  {namespace}: {summary.indexed} new, "
+                f"{summary.skipped} unchanged, {summary.deleted} deleted"
+            )
+
+    click.echo(
+        f"\nTotal across {len(slug_dirs)} slug(s): "
+        f"{total_indexed} new, {total_skipped} unchanged, "
+        f"{total_deleted} deleted."
+    )
+    for err in total_errors:
         click.echo(click.style(f"  ERROR: {err}", fg="red"))
 
 

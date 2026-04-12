@@ -23,6 +23,7 @@ from memtomem.cli.ingest_cmd import (
     _codex_discover_files,
     _codex_tags_for_file,
     _derive_slug,
+    _discover_claude_slug_dirs,
     _discover_files,
     _gemini_derive_slug,
     _gemini_discover_files,
@@ -145,6 +146,59 @@ class TestTagsForFile:
         """``feedbackXYZ.md`` starts with 'feedback' but is not a feedback
         note — the trailing underscore guard in _TAG_PREFIXES enforces this."""
         assert _tags_for_file(Path("feedbackXYZ.md")) == {"claude-memory"}
+
+
+class TestDiscoverClaudeSlugDirs:
+    """Unit tests for multi-slug discovery."""
+
+    def test_finds_slug_memory_dirs(self, tmp_path):
+        """Standard ~/.claude/projects/ layout with two slugs."""
+        for slug in ("-Users-me-Work-alpha", "-Users-me-Work-beta"):
+            mem = tmp_path / slug / "memory"
+            mem.mkdir(parents=True)
+            (mem / "project_x.md").write_text("x")
+
+        dirs = _discover_claude_slug_dirs(tmp_path)
+        assert len(dirs) == 2
+        assert all(d.name == "memory" for d in dirs)
+        slugs = sorted(d.parent.name for d in dirs)
+        assert slugs == ["-Users-me-Work-alpha", "-Users-me-Work-beta"]
+
+    def test_skips_dirs_without_memory_subdir(self, tmp_path):
+        """Slug directories without a memory/ child are ignored."""
+        good = tmp_path / "has-memory" / "memory"
+        good.mkdir(parents=True)
+        (good / "note.md").write_text("ok")
+
+        bad = tmp_path / "no-memory"
+        bad.mkdir()
+        (bad / "stray.md").write_text("stray")
+
+        dirs = _discover_claude_slug_dirs(tmp_path)
+        assert len(dirs) == 1
+        assert dirs[0].parent.name == "has-memory"
+
+    def test_skips_hidden_dirs(self, tmp_path):
+        hidden = tmp_path / ".hidden" / "memory"
+        hidden.mkdir(parents=True)
+        (hidden / "secret.md").write_text("hidden")
+
+        assert _discover_claude_slug_dirs(tmp_path) == []
+
+    def test_sorted_output(self, tmp_path):
+        for name in ("charlie", "alpha", "bravo"):
+            mem = tmp_path / name / "memory"
+            mem.mkdir(parents=True)
+        dirs = _discover_claude_slug_dirs(tmp_path)
+        assert [d.parent.name for d in dirs] == ["alpha", "bravo", "charlie"]
+
+    def test_empty_parent(self, tmp_path):
+        assert _discover_claude_slug_dirs(tmp_path) == []
+
+    def test_file_not_dir(self, tmp_path):
+        f = tmp_path / "not-a-dir.txt"
+        f.write_text("file")
+        assert _discover_claude_slug_dirs(f) == []
 
 
 # ── Integration tests ────────────────────────────────────────────────
@@ -540,3 +594,101 @@ class TestCodexIngestIntegration:
         )
         assert second.indexed == 0
         assert second.skipped >= 1
+
+
+# ── Multi-slug integration tests ──────────────────────────────────────
+
+
+@pytest.mark.ollama
+class TestMultiSlugIngestIntegration:
+    """End-to-end multi-slug discovery + ingest."""
+
+    @staticmethod
+    def _make_projects_dir(tmp_path: Path) -> Path:
+        """Build a fake ~/.claude/projects/ layout with two slugs."""
+        projects = tmp_path / "fake_home" / ".claude" / "projects"
+        for slug in ("-Users-test-Work-alpha", "-Users-test-Work-beta"):
+            mem = projects / slug / "memory"
+            mem.mkdir(parents=True)
+            (mem / "feedback_x.md").write_text(
+                f"# Feedback\n\nAlways lint before commit in {slug}.\n"
+            )
+            (mem / "project_y.md").write_text(f"# Project\n\nPhase 1 for {slug} is complete.\n")
+            (mem / "MEMORY.md").write_text("- [x](feedback_x.md)\n")
+        return projects
+
+    async def test_multi_slug_indexes_all_slugs(self, components, tmp_path):
+        projects = self._make_projects_dir(tmp_path)
+        slug_dirs = _discover_claude_slug_dirs(projects)
+        assert len(slug_dirs) == 2
+
+        for mem_dir in slug_dirs:
+            slug = _derive_slug(mem_dir)
+            ns = _build_namespace(slug)
+            files = _discover_files(mem_dir)
+            assert len(files) == 2  # feedback_x.md + project_y.md
+
+            summary = await _ingest_files_with_components(components, files, ns)
+            assert summary.indexed >= 2
+            assert summary.errors == ()
+
+            for f in files:
+                chunks = await components.storage.list_chunks_by_source(f)
+                assert chunks
+                for c in chunks:
+                    assert c.metadata.namespace == ns
+
+    async def test_multi_slug_rerun_skips_all(self, components, tmp_path):
+        projects = self._make_projects_dir(tmp_path)
+        slug_dirs = _discover_claude_slug_dirs(projects)
+
+        # First pass
+        for mem_dir in slug_dirs:
+            files = _discover_files(mem_dir)
+            ns = _build_namespace(_derive_slug(mem_dir))
+            await _ingest_files_with_components(components, files, ns)
+
+        # Second pass — all skipped
+        for mem_dir in slug_dirs:
+            files = _discover_files(mem_dir)
+            ns = _build_namespace(_derive_slug(mem_dir))
+            summary = await _ingest_files_with_components(components, files, ns)
+            assert summary.indexed == 0
+            assert summary.skipped >= 2
+
+
+# ── MCP ingest tool tests ─────────────────────────────────────────────
+
+
+class TestMemIngestValidation:
+    """Unit tests for mem_ingest input validation (no fixtures)."""
+
+    async def test_invalid_source_type(self):
+        from memtomem.server.tools.ingest import mem_ingest
+
+        result = await mem_ingest(source="/tmp", source_type="notion")
+        assert "unknown source_type" in result
+
+    async def test_nonexistent_path(self, tmp_path):
+        from memtomem.server.tools.ingest import mem_ingest
+
+        result = await mem_ingest(source=str(tmp_path / "nope"), source_type="claude")
+        assert "not found" in result
+
+    async def test_empty_dir_returns_message(self, tmp_path):
+        from memtomem.server.tools.ingest import mem_ingest
+
+        result = await mem_ingest(source=str(tmp_path), source_type="claude")
+        assert "No indexable" in result
+
+    async def test_empty_codex_dir_returns_message(self, tmp_path):
+        from memtomem.server.tools.ingest import mem_ingest
+
+        result = await mem_ingest(source=str(tmp_path), source_type="codex")
+        assert "No indexable" in result
+
+    async def test_empty_gemini_dir_returns_message(self, tmp_path):
+        from memtomem.server.tools.ingest import mem_ingest
+
+        result = await mem_ingest(source=str(tmp_path), source_type="gemini")
+        assert "No indexable" in result
