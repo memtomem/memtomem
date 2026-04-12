@@ -22,6 +22,7 @@ from memtomem.context.detector import (
     detect_agent_dirs,
     detect_agent_files,
     detect_command_dirs,
+    detect_settings_files,
     detect_skill_dirs,
 )
 from memtomem.context.generator import (
@@ -29,14 +30,18 @@ from memtomem.context.generator import (
     extract_sections_from_agent_file,
 )
 from memtomem.context.parser import CONTEXT_FILENAME, parse_context, sections_to_markdown
+from memtomem.context.settings import (
+    diff_settings,
+    generate_all_settings,
+)
 from memtomem.context.skills import (
     diff_skills,
     extract_skills_to_canonical,
     generate_all_skills,
 )
 
-# Phase 1-3 supports --include={skills,agents,commands}. Phase 4 will add hooks / mcp.
-_KNOWN_INCLUDES: frozenset[str] = frozenset({"skills", "agents", "commands"})
+# Phase 1-3 supports skills/agents/commands; Phase D adds settings.
+_KNOWN_INCLUDES: frozenset[str] = frozenset({"skills", "agents", "commands", "settings"})
 
 
 def _find_project_root() -> Path:
@@ -242,6 +247,50 @@ def _print_commands_diff(root: Path) -> None:
         click.secho(f"  {runtime:17s}  {name}  [{status}]", fg=color)
 
 
+# ── Settings sub-handlers (Phase D) ─────────────────────────────────
+
+
+def _print_settings_detect() -> None:
+    files = detect_settings_files()
+    if not files:
+        click.echo("  (no settings files detected)")
+        return
+    click.secho(f"  {len(files)} settings file(s):", fg="cyan")
+    for f in files:
+        status = f"({f.size} bytes)" if f.size else "(not yet created)"
+        click.echo(f"    {f.agent:17s}  {f.path}  {status}")
+
+
+def _print_settings_generate(root: Path) -> None:
+    results = generate_all_settings(root)
+    for name, r in results.items():
+        if r.status == "ok":
+            click.secho(f"  Settings: {name} → {r.target}", fg="green")
+            for w in r.warnings:
+                click.secho(f"    warning: {w}", fg="yellow")
+        elif r.status == "skipped":
+            click.secho(f"  skipped {name}: {r.reason}", fg="yellow")
+        elif r.status in ("error", "aborted"):
+            click.secho(f"  {r.status} {name}: {r.reason}", fg="red")
+
+
+def _print_settings_diff(root: Path) -> None:
+    results = diff_settings(root)
+    if not results:
+        click.echo("  (no settings to compare)")
+        return
+    for name, r in results.items():
+        if r.status in ("in sync", "out of sync", "missing target"):
+            color = "green" if r.status == "in sync" else "yellow"
+            click.secho(f"  {name:17s}  [{r.status}]", fg=color)
+            for w in r.warnings:
+                click.secho(f"    warning: {w}", fg="yellow")
+        elif r.status == "skipped":
+            click.secho(f"  skipped {name}: {r.reason}", fg="yellow")
+        elif r.status == "error":
+            click.secho(f"  error {name}: {r.reason}", fg="red")
+
+
 @click.group("context")
 def context() -> None:
     """Manage unified agent context (CLAUDE.md, .cursorrules, GEMINI.md, etc.)."""
@@ -276,6 +325,10 @@ def detect_cmd(include: tuple[str, ...]) -> None:
     if "commands" in inc:
         click.echo("")
         _print_commands_detect(root)
+
+    if "settings" in inc:
+        click.echo("")
+        _print_settings_detect()
 
 
 @context.command("init")
@@ -395,6 +448,10 @@ def generate_cmd(agent: str, include: tuple[str, ...], strict: bool) -> None:
         click.echo("")
         _print_commands_generate(root, strict=strict)
 
+    if "settings" in inc:
+        click.echo("")
+        _print_settings_generate(root)
+
     click.secho("Done.", fg="green")
 
 
@@ -442,6 +499,10 @@ def diff_cmd(include: tuple[str, ...]) -> None:
     if "commands" in inc:
         click.echo("")
         _print_commands_diff(root)
+
+    if "settings" in inc:
+        click.echo("")
+        _print_settings_diff(root)
 
 
 @context.command("sync")
@@ -494,5 +555,9 @@ def sync_cmd(include: tuple[str, ...], strict: bool) -> None:
     if "commands" in inc:
         click.echo("")
         _print_commands_generate(root, strict=strict)
+
+    if "settings" in inc:
+        click.echo("")
+        _print_settings_generate(root)
 
     click.secho("Synced.", fg="green")

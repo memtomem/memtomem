@@ -62,6 +62,12 @@ COMMAND_DIRS: dict[str, tuple[str, str]] = {
     "gemini_commands": (".gemini/commands", ".toml"),
 }
 
+# Settings runtimes are detected via the generators registered in
+# ``context/settings.py``.  Unlike the dicts above there is no static
+# mapping here — ``detect_settings_files()`` delegates to each
+# generator's ``is_available()`` / ``target_file()`` at call time so
+# that ``monkeypatch``-based HOME overrides in tests work correctly.
+
 
 def detect_agent_files(project_root: Path) -> list[DetectedFile]:
     """Scan project root for known agent configuration files.
@@ -179,13 +185,55 @@ def detect_command_dirs(project_root: Path) -> list[DetectedFile]:
     return sorted(found, key=lambda f: (f.agent, str(f.path)))
 
 
+def detect_settings_files() -> list[DetectedFile]:
+    """Detect user-scope settings files for registered runtimes.
+
+    Unlike the other ``detect_*`` functions this does **not** take a
+    *project_root* because settings files live in the user's home directory.
+    A runtime is reported only when its home directory exists (e.g.
+    ``~/.claude/``), matching :meth:`ClaudeSettingsGenerator.is_available`.
+
+    Delegates to generators from ``context/settings.py`` at call time (lazy
+    import) to ensure ``monkeypatch``-based HOME overrides in tests work.
+    """
+    from memtomem.context.settings import SETTINGS_GENERATORS
+
+    found: list[DetectedFile] = []
+    for name, gen in SETTINGS_GENERATORS.items():
+        if not gen.is_available():
+            continue
+        # project_root is not used by user-scope generators, but the
+        # protocol requires it — pass cwd as a harmless default.
+        target = gen.target_file(Path.cwd())
+        if target.is_file():
+            found.append(
+                DetectedFile(
+                    agent=name,
+                    path=target,
+                    size=target.stat().st_size,
+                    kind="file",
+                )
+            )
+        else:
+            found.append(
+                DetectedFile(
+                    agent=name,
+                    path=target,
+                    size=0,
+                    kind="file",
+                )
+            )
+    return sorted(found, key=lambda f: (f.agent, str(f.path)))
+
+
 def detect_all(project_root: Path) -> list[DetectedFile]:
-    """Return project-memory files, skill directories, sub-agent files, and commands."""
+    """Return project-memory files, skill dirs, sub-agents, commands, and settings."""
     return (
         detect_agent_files(project_root)
         + detect_skill_dirs(project_root)
         + detect_agent_dirs(project_root)
         + detect_command_dirs(project_root)
+        + detect_settings_files()
     )
 
 
@@ -200,5 +248,6 @@ __all__ = [
     "detect_agent_files",
     "detect_all",
     "detect_command_dirs",
+    "detect_settings_files",
     "detect_skill_dirs",
 ]

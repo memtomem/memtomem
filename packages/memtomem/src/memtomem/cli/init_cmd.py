@@ -221,6 +221,49 @@ def _step_language(state: dict) -> None:
     click.echo()
 
 
+def _step_settings(state: dict) -> None:
+    step_header(8, "Claude Code Hooks")
+
+    # Skip entirely if Claude Code is not installed
+    claude_dir = Path.home() / ".claude"
+    if not claude_dir.is_dir():
+        click.echo("  Claude Code not detected (~/.claude/ missing). Skipping.")
+        state["settings_hooks"] = False
+        click.echo()
+        return
+
+    click.echo("  memtomem can manage Claude Code hooks via .memtomem/settings.json.")
+    click.echo("  Hooks are merged into ~/.claude/settings.json additively.")
+    state["settings_hooks"] = nav_confirm(
+        "  Configure Claude Code hooks via memtomem?", default=False
+    )
+
+    if state["settings_hooks"]:
+        from memtomem.context.settings import CANONICAL_SETTINGS_FILE, generate_all_settings
+
+        project_root = Path.cwd()
+        canonical = project_root / CANONICAL_SETTINGS_FILE
+        canonical.parent.mkdir(parents=True, exist_ok=True)
+        if not canonical.exists():
+            canonical.write_text(
+                json.dumps({"hooks": []}, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            click.secho(f"  Created {CANONICAL_SETTINGS_FILE}", fg="green")
+
+        results = generate_all_settings(project_root)
+        for name, r in results.items():
+            if r.status == "ok":
+                click.secho(f"  Merged → {r.target}", fg="green")
+            elif r.status == "skipped":
+                click.secho(f"  skipped {name}: {r.reason}", fg="yellow")
+
+        click.echo()
+        click.echo("  Empty hooks file created. Add hooks to .memtomem/settings.json,")
+        click.echo("  then run 'mm context sync --include=settings' to apply.")
+    click.echo()
+
+
 def _step_mcp(state: dict) -> None:
     step_header(7, "Connect to AI Editor")
     click.echo("  How do you want to connect memtomem?")
@@ -462,6 +505,7 @@ def init(
             _step_search,
             _step_language,
             _step_mcp,
+            _step_settings,
         ]
         run_steps(steps, state)
 
