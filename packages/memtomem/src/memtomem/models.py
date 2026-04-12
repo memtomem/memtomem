@@ -124,3 +124,9 @@ class IndexingStats:
     deleted_chunks: int
     duration_ms: float
     errors: tuple[str, ...] = ()
+    # IDs of chunks actually upserted during this run. Empty when nothing new
+    # was written (all candidates were unchanged) or on the zero-result paths
+    # (missing file, too large, binary, etc). Consumers that need to act on
+    # freshly created chunks — e.g. ``mem_consolidate_apply`` linking a new
+    # summary — should read this instead of polling ``recall_chunks``.
+    new_chunk_ids: tuple[UUID, ...] = ()

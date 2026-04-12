@@ -132,15 +132,22 @@ async def mem_consolidate_apply(
 ) -> str:
     """Apply a consolidation by creating a summary chunk for a group.
 
-    The agent writes the summary; this tool persists it as a chunk in the
-    ``archive:summary`` namespace (outside default search) and links each
-    original via a ``consolidated_into`` relation. The summary is a
-    storage-level virtual chunk — nothing is written to disk — and can be
-    regenerated idempotently because its content embeds a source hash.
+    The agent writes the summary; this tool persists it via the normal
+    ``mem_add`` path — the summary becomes a real markdown entry in the
+    user's first ``memory_dirs`` daily notes file, and each original chunk
+    gets a ``consolidated_into`` relation pointing to the summary. This
+    preserves the file-based mental model: consolidation events are visible
+    in the filesystem and in git history, and the summary can be
+    hand-edited like any other markdown entry.
+
+    The policy-driven ``auto_consolidate`` flow deliberately takes a
+    different path (virtual chunk in the ``archive:summary`` namespace with
+    content-embedded source hash for idempotency). See
+    ``project_ltm_manager_roadmap.md`` Phase A.5 for the rationale.
 
     Args:
-        group_id: Group ID from mem_consolidate output
-        summary: The consolidated summary written by the agent
+        group_id: Group ID from mem_consolidate output.
+        summary: The consolidated summary written by the agent.
         keep_originals: Keep original chunks (default True). If False,
             originals are soft-decayed (``importance_score *= 0.5``, floor
             0.3); never a hard delete.
@@ -149,8 +156,8 @@ async def mem_consolidate_apply(
     from datetime import datetime, timezone
 
     from memtomem.tools.consolidation_engine import (
-        DEFAULT_SUMMARY_NAMESPACE,
-        apply_consolidation,
+        DECAY_FLOOR,
+        link_consolidation_relations,
     )
 
     app = _get_app(ctx)
@@ -172,28 +179,76 @@ async def mem_consolidate_apply(
     if group is None:
         return f"Error: group_id {group_id} not found. Run mem_consolidate again."
 
-    try:
-        summary_id = await apply_consolidation(
-            app.storage,
-            group,
-            summary,
-            keep_originals=keep_originals,
-            summary_namespace=DEFAULT_SUMMARY_NAMESPACE,
+    # Agent path is file-first: append to a daily notes file + index. We use
+    # ``_mem_add_core`` (not the MCP ``mem_add`` tool) so we can grab the
+    # IndexingStats and recover the new chunk id without the old
+    # ``recall_chunks(limit=1)`` trick, which raced with any concurrent
+    # write between mem_add and the lookup — silent data corruption
+    # territory.
+    from memtomem.server.tools.memory_crud import _mem_add_core
+
+    source_name = group["source"].split("/")[-1]
+    add_result, stats = await _mem_add_core(
+        content=summary,
+        title=f"Consolidated: {source_name}",
+        tags=["consolidated", "summary"],
+        file=None,
+        namespace=group.get("namespace"),
+        template=None,
+        ctx=ctx,
+    )
+
+    if stats is None or not stats.new_chunk_ids:
+        logger.warning(
+            "mem_consolidate_apply: mem_add produced no new chunk ids — "
+            "cannot link originals for group %s",
+            group_id,
         )
-    except Exception as exc:
-        logger.warning("mem_consolidate_apply failed for group %s", group_id, exc_info=True)
-        return f"Error: consolidation failed: {exc}"
+        await app.storage.scratch_delete("consolidation_groups")
+        return (
+            f"Consolidation applied for group {group_id} (unlinked).\n"
+            f"{add_result}\n"
+            f"- Original chunks: {group['chunk_count']}\n"
+            f"- Originals kept: {keep_originals}\n"
+            "- Warning: could not recover summary chunk id; relations not created."
+        )
 
-    # Invalidate caches so the new summary chunk is immediately searchable.
+    if len(stats.new_chunk_ids) > 1:
+        # Canary for chunker behavior drift. Today the Markdown chunker
+        # keeps a single ``Consolidated: ...`` H1 section together, so we
+        # expect exactly 1. If this warning ever fires, revisit the
+        # summary → chunk matching strategy (see Phase A.5 docs-review
+        # thread) — the current "take the first" rule is intentionally
+        # simple so the contract failure is loud.
+        logger.warning(
+            "mem_consolidate_apply: mem_add produced %d chunks, using first as summary_id",
+            len(stats.new_chunk_ids),
+        )
+
+    summary_id = stats.new_chunk_ids[0]
+
+    # Link originals → summary via the shared helper (same edge type that
+    # execute_auto_consolidate uses, so queries like mem_related / mem_expand
+    # work uniformly across both flows).
+    linked = await link_consolidation_relations(
+        app.storage,
+        group["chunk_ids"],
+        summary_id,
+    )
+
+    if not keep_originals and group["chunk_ids"]:
+        scores = await app.storage.get_importance_scores(group["chunk_ids"])
+        if scores:
+            floored = {cid: max(score * 0.5, DECAY_FLOOR) for cid, score in scores.items()}
+            await app.storage.update_importance_scores(floored)
+
     app.search_pipeline.invalidate_cache()
-
-    # Clean up scratch entry after successful apply
     await app.storage.scratch_delete("consolidation_groups")
 
     return (
         f"Consolidation applied for group {group_id}.\n"
+        f"{add_result}\n"
         f"- Summary chunk id: {summary_id}\n"
-        f"- Namespace: {DEFAULT_SUMMARY_NAMESPACE}\n"
-        f"- Original chunks: {group['chunk_count']}\n"
+        f"- Originals linked: {linked}/{group['chunk_count']}\n"
         f"- Originals kept: {keep_originals}"
     )

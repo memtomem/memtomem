@@ -76,30 +76,39 @@ class IndexEngine:
 
         sem = asyncio.Semaphore(8)
 
-        async def _bounded(fp: Path) -> dict[str, int]:
+        async def _bounded(fp: Path) -> dict[str, object]:
             async with sem:
                 return await self._index_file(fp, force, namespace=namespace)
 
         raw_results = await asyncio.gather(*[_bounded(f) for f in files], return_exceptions=True)
-        file_results: list[dict[str, int]] = []
+        file_results: list[dict[str, object]] = []
         all_errors: list[str] = []
         for i, r in enumerate(raw_results):
             if isinstance(r, dict):
                 file_results.append(r)
-                all_errors.extend(r.get("errors", []))
+                all_errors.extend(r.get("errors", []))  # type: ignore[arg-type]
             elif isinstance(r, Exception):
                 logger.error("Indexing failed for %s: %s", files[i], r)
                 all_errors.append(f"{files[i].name}: {r}")
 
+        # Aggregate new_chunk_ids across all files — preserves per-file order
+        # so callers that sort/filter by source get a consistent ordering.
+        all_new_chunk_ids: list = []
+        for r in file_results:
+            ids = r.get("new_chunk_ids", ())
+            if ids:
+                all_new_chunk_ids.extend(ids)  # type: ignore[arg-type]
+
         duration = (time.monotonic() - start) * 1000
         return IndexingStats(
             total_files=len(files),
-            total_chunks=sum(r["total"] for r in file_results),
-            indexed_chunks=sum(r["indexed"] for r in file_results),
-            skipped_chunks=sum(r["skipped"] for r in file_results),
-            deleted_chunks=sum(r["deleted"] for r in file_results),
+            total_chunks=sum(r["total"] for r in file_results),  # type: ignore[misc]
+            indexed_chunks=sum(r["indexed"] for r in file_results),  # type: ignore[misc]
+            skipped_chunks=sum(r["skipped"] for r in file_results),  # type: ignore[misc]
+            deleted_chunks=sum(r["deleted"] for r in file_results),  # type: ignore[misc]
             duration_ms=duration,
             errors=tuple(all_errors),
+            new_chunk_ids=tuple(all_new_chunk_ids),
         )
 
     async def index_file(
@@ -115,11 +124,12 @@ class IndexEngine:
             duration = (time.monotonic() - start) * 1000
         return IndexingStats(
             total_files=1,
-            total_chunks=result["total"],
-            indexed_chunks=result["indexed"],
-            skipped_chunks=result["skipped"],
-            deleted_chunks=result["deleted"],
+            total_chunks=result["total"],  # type: ignore[arg-type]
+            indexed_chunks=result["indexed"],  # type: ignore[arg-type]
+            skipped_chunks=result["skipped"],  # type: ignore[arg-type]
+            deleted_chunks=result["deleted"],  # type: ignore[arg-type]
             duration_ms=duration,
+            new_chunk_ids=tuple(result.get("new_chunk_ids", ())),  # type: ignore[arg-type]
         )
 
     async def is_duplicate(
@@ -189,7 +199,10 @@ class IndexEngine:
         file_path: Path,
         force: bool,
         namespace: str | None = None,
-    ) -> dict[str, int]:
+    ) -> dict[str, object]:
+        # Return shape: total/indexed/skipped/deleted (ints), errors (list[str]),
+        # new_chunk_ids (list[UUID]). Early zero-result paths may omit
+        # new_chunk_ids — consumers must tolerate missing keys.
         try:
             file_size = file_path.stat().st_size
         except OSError:
@@ -298,6 +311,7 @@ class IndexEngine:
             "skipped": len(diff_result.unchanged),
             "deleted": len(diff_result.to_delete) if not force else 0,
             "errors": [],
+            "new_chunk_ids": [c.id for c in diff_result.to_upsert],
         }
 
     async def index_path_stream(

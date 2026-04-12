@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+
+if TYPE_CHECKING:
+    from memtomem.models import IndexingStats
 
 logger = logging.getLogger(__name__)
 
@@ -44,37 +48,28 @@ def _validate_path(path_str: str, memory_dirs: list) -> tuple[Path | None, str |
     return target, None
 
 
-@mcp.tool()
-@tool_handler
-async def mem_add(
+async def _mem_add_core(
     content: str,
-    title: str | None = None,
-    tags: list[str] | None = None,
-    file: str | None = None,
-    namespace: str | None = None,
-    template: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
-) -> str:
-    """Add a new memory entry to a markdown file and immediately index it.
+    title: str | None,
+    tags: list[str] | None,
+    file: str | None,
+    namespace: str | None,
+    template: str | None,
+    ctx: CtxType,
+) -> tuple[str, "IndexingStats | None"]:
+    """Core logic for ``mem_add`` — also usable from internal callers that
+    need the ``IndexingStats`` (e.g. ``mem_consolidate_apply`` linking new
+    summary chunks by id without the old ``recall_chunks(limit=1)`` race).
 
-    The entry is appended to the target file (or a new timestamped file is
-    created in the first configured memory directory). The file is then
-    re-indexed so the entry is immediately searchable.
-
-    Args:
-        content: The memory content to store
-        title: Optional heading title for the entry
-        tags: Optional tags for categorisation
-        file: Target .md filename (relative or absolute). If omitted, a
-              timestamped file is created in the first memory_dir.
-        namespace: Assign indexed chunks to this namespace (default: config default)
-        template: Use a built-in template (adr, meeting, debug, decision).
-                  Content can be JSON with field values or plain text.
+    Returns:
+        Tuple of ``(user_facing_message, stats)``. ``stats`` is ``None``
+        for early error returns (empty content, oversized content, template
+        failure, invalid path) so callers must tolerate ``None``.
     """
     if not content.strip():
-        return "Error: content cannot be empty."
+        return ("Error: content cannot be empty.", None)
     if len(content) > 100_000:
-        return "Error: content too large (max 100,000 characters)."
+        return ("Error: content too large (max 100,000 characters).", None)
 
     from datetime import datetime, timezone
 
@@ -91,14 +86,14 @@ async def mem_add(
             # Template already includes its own heading — don't duplicate
             title = None
         except ValueError as exc:
-            return f"Error: {exc}\n\nAvailable templates:\n{list_templates()}"
+            return (f"Error: {exc}\n\nAvailable templates:\n{list_templates()}", None)
 
     mdirs = app.config.indexing.memory_dirs
 
     if file:
         target, err = _validate_path(file, mdirs)
         if err:
-            return err
+            return (err, None)
     else:
         base = app.config.indexing.memory_dirs[0] if app.config.indexing.memory_dirs else Path(".")
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -141,7 +136,46 @@ async def mem_add(
         )
         task.add_done_callback(_webhook_error_cb)
 
-    return result
+    return (result, stats)
+
+
+@mcp.tool()
+@tool_handler
+async def mem_add(
+    content: str,
+    title: str | None = None,
+    tags: list[str] | None = None,
+    file: str | None = None,
+    namespace: str | None = None,
+    template: str | None = None,
+    ctx: CtxType = None,  # type: ignore[assignment]
+) -> str:
+    """Add a new memory entry to a markdown file and immediately index it.
+
+    The entry is appended to the target file (or a new timestamped file is
+    created in the first configured memory directory). The file is then
+    re-indexed so the entry is immediately searchable.
+
+    Args:
+        content: The memory content to store
+        title: Optional heading title for the entry
+        tags: Optional tags for categorisation
+        file: Target .md filename (relative or absolute). If omitted, a
+              timestamped file is created in the first memory_dir.
+        namespace: Assign indexed chunks to this namespace (default: config default)
+        template: Use a built-in template (adr, meeting, debug, decision).
+                  Content can be JSON with field values or plain text.
+    """
+    message, _stats = await _mem_add_core(
+        content=content,
+        title=title,
+        tags=tags,
+        file=file,
+        namespace=namespace,
+        template=template,
+        ctx=ctx,
+    )
+    return message
 
 
 @mcp.tool()

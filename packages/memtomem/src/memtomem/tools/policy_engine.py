@@ -296,6 +296,7 @@ async def execute_auto_consolidate(
         compute_source_hash,
         make_heuristic_summary,
         parse_source_hash,
+        source_has_consolidation_relations,
     )
 
     min_group_size = config.get("min_group_size", 3)
@@ -344,8 +345,10 @@ async def execute_auto_consolidate(
         if namespace and chunk_ns != namespace:
             continue
 
-        # Idempotency via content-embedded source hash. The virtual path
-        # lives in the same parent dir as the original source.
+        # Idempotency layer 1 — policy-owned virtual summary + source hash.
+        # This is the definitive signal for the policy's own prior work:
+        # matching hash means nothing to do, mismatched hash means an input
+        # changed (chunk added/removed) and we must regenerate.
         current_hash = compute_source_hash([c.id for c in chunks])
         virtual_path = source_path.parent / f"{source_path.name}{CONSOLIDATED_SUFFIX}"
         existing = await storage.list_chunks_by_source(virtual_path, limit=1)  # type: ignore[attr-defined]
@@ -355,6 +358,21 @@ async def execute_auto_consolidate(
             if old_hash == current_hash:
                 continue  # idempotent — same inputs, same output
             stale = True  # regenerate below
+        else:
+            # Idempotency layer 2 — agent-driven consolidation already covers
+            # this source. When there is no policy-owned virtual summary but
+            # some original chunk already carries a ``consolidated_into``
+            # edge, the agent ran ``mem_consolidate_apply`` for this source
+            # already. We defer to their work rather than overwriting it
+            # with a heuristic summary. Re-runs after the user adds more
+            # chunks will flow through layer 1 once the user creates a
+            # policy-owned summary again (or the agent regenerates theirs).
+            if await source_has_consolidation_relations(
+                storage,  # type: ignore[arg-type]
+                [c.id for c in chunks],
+            ):
+                detail_parts.append(f"{source_path.name} (SKIP: agent-consolidated)")
+                continue
 
         if dry_run:
             applied += 1

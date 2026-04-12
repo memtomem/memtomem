@@ -873,6 +873,234 @@ class TestAutoConsolidate:
         for cid in scores:
             assert scores[cid] >= 0.3
 
+    async def test_auto_consolidate_defers_to_agent_consolidation(self, storage, caplog):
+        """Layer 2 (b) idempotency: if any chunk already has a consolidated_into
+        edge and there's no policy-owned virtual summary, skip with a tag. This
+        protects agent-written summaries from being overwritten by heuristic."""
+        source = "agent-consolidated.md"
+        chunks = [make_chunk(f"agent-done chunk {i}", source=source) for i in range(3)]
+        await storage.upsert_chunks(chunks)
+
+        # Simulate agent path having already consolidated this source: the
+        # agent's summary chunk is a real chunk in some other source file
+        # (e.g. the daily notes file written by mem_add). FK constraints on
+        # chunk_relations require both endpoints to exist.
+        agent_summary = make_chunk(
+            "Agent-written consolidated summary body.",
+            source="daily-2026-04-12.md",
+        )
+        await storage.upsert_chunks([agent_summary])
+        await storage.add_relation(chunks[0].id, agent_summary.id, "consolidated_into")
+
+        result = await execute_auto_consolidate(
+            storage, {"min_group_size": 3}, namespace=None, dry_run=False
+        )
+        assert result.affected_count == 0
+        assert "agent-consolidated" in result.details
+
+        # No virtual summary was created.
+        summaries = await storage.list_chunks_by_source(
+            Path(f"/tmp/{source}.consolidated.md"), limit=5
+        )
+        assert summaries == []
+
+    async def test_auto_consolidate_agent_any_not_all(self, storage):
+        """Only one chunk in a group needs a consolidated_into edge for the
+        whole group to be deferred (``any``, not ``all``)."""
+        source = "partial-agent.md"
+        chunks = [make_chunk(f"partial {i}", source=source) for i in range(4)]
+        await storage.upsert_chunks(chunks)
+
+        # Agent consolidated only 1 of the 4 chunks. FK requires a real target.
+        agent_summary = make_chunk("Agent summary for 1 of 4.", source="daily-2026-04-12.md")
+        await storage.upsert_chunks([agent_summary])
+        await storage.add_relation(chunks[2].id, agent_summary.id, "consolidated_into")
+
+        result = await execute_auto_consolidate(
+            storage, {"min_group_size": 3}, namespace=None, dry_run=False
+        )
+        assert result.affected_count == 0
+        assert "agent-consolidated" in result.details
+
+    async def test_auto_consolidate_own_relations_not_self_block(self, storage):
+        """A policy-owned virtual summary sets consolidated_into edges on its
+        originals. A subsequent re-run must find the virtual summary FIRST
+        (layer 1) and compare hashes, not match layer 2 on its own edges. The
+        first run creates + links, the second run must skip via hash match,
+        not via the ``source_has_consolidation_relations`` fallback."""
+        source = "own-relations.md"
+        chunks = [make_chunk(f"own chunk {i}", source=source) for i in range(3)]
+        await storage.upsert_chunks(chunks)
+
+        first = await execute_auto_consolidate(
+            storage, {"min_group_size": 3}, namespace=None, dry_run=False
+        )
+        assert first.affected_count == 1
+
+        # After first run: virtual summary exists AND originals have
+        # consolidated_into edges pointing to it. Re-run.
+        second = await execute_auto_consolidate(
+            storage, {"min_group_size": 3}, namespace=None, dry_run=False
+        )
+        # Must skip via layer 1 hash match — details say "0 groups" (idempotent),
+        # not "(SKIP: agent-consolidated)".
+        assert second.affected_count == 0
+        assert "agent-consolidated" not in second.details
+
+
+# ── mem_add core + mem_consolidate_apply integration ─────────────────
+#
+# These exercise the post-Phase-A.5 split: mem_consolidate_apply is back on
+# the file-first path via _mem_add_core, which also returns IndexingStats so
+# the caller can recover the new summary chunk id without racing on
+# recall_chunks(limit=1).
+
+
+def _fake_ctx(components):
+    """Minimal ctx stub that mimics what _get_app() unwraps.
+
+    The production MCP context is ``ctx.request_context.lifespan_context``.
+    We fabricate a SimpleNamespace matching that shape, filled with real
+    services from the ``components`` fixture plus the few AppContext fields
+    the tools access (``current_namespace``, ``webhook_manager``).
+    """
+    from types import SimpleNamespace
+
+    app = SimpleNamespace(
+        config=components.config,
+        storage=components.storage,
+        embedder=components.embedder,
+        index_engine=components.index_engine,
+        search_pipeline=components.search_pipeline,
+        current_namespace=None,
+        webhook_manager=None,
+    )
+    return SimpleNamespace(request_context=SimpleNamespace(lifespan_context=app))
+
+
+class TestMemAddCoreIntegration:
+    async def test_mem_add_core_returns_indexing_stats(self, components, memory_dir):
+        """_mem_add_core returns (message, stats) and stats.new_chunk_ids is
+        populated with the UUID(s) of chunks freshly upserted during indexing.
+        This is the hook that lets mem_consolidate_apply avoid the old
+        recall_chunks(limit=1) race."""
+        from memtomem.server.tools.memory_crud import _mem_add_core
+
+        ctx = _fake_ctx(components)
+
+        message, stats = await _mem_add_core(
+            content="A single atomic fact worth remembering for later search.",
+            title="Test Entry",
+            tags=["test"],
+            file="entry.md",
+            namespace=None,
+            template=None,
+            ctx=ctx,
+        )
+
+        assert "Memory added" in message
+        assert stats is not None
+        assert len(stats.new_chunk_ids) >= 1
+        # The reported chunk ids must actually be in the store.
+        fetched = await components.storage.get_chunks_batch(list(stats.new_chunk_ids))
+        assert len(fetched) == len(stats.new_chunk_ids)
+
+    async def test_mem_add_core_returns_none_on_early_error(self, components):
+        """Empty content short-circuits with (error_message, None) so callers
+        must tolerate None stats."""
+        from memtomem.server.tools.memory_crud import _mem_add_core
+
+        ctx = _fake_ctx(components)
+        message, stats = await _mem_add_core(
+            content="",
+            title=None,
+            tags=None,
+            file=None,
+            namespace=None,
+            template=None,
+            ctx=ctx,
+        )
+        assert "Error" in message
+        assert stats is None
+
+
+class TestMemConsolidateApplyIntegration:
+    async def test_agent_path_writes_to_disk_and_links_relations(self, components, memory_dir):
+        """Full file-first agent flow: summary appears in a disk file, the new
+        chunk is indexed, and each original has a consolidated_into edge
+        pointing to it. Replaces the old virtual-path test that reflected the
+        pre-Option-Y design."""
+        import json
+        from datetime import datetime, timedelta, timezone
+
+        from memtomem.server.tools.consolidation import mem_consolidate_apply
+        from memtomem.tools.memory_writer import append_entry
+
+        # Build a realistic source file with 3 real entries + index it so we
+        # have real chunk ids to hand to mem_consolidate_apply.
+        source_file = memory_dir / "apr-standup.md"
+        for i in range(3):
+            append_entry(
+                source_file,
+                f"Agenda item {i}: standup note with enough text to survive chunking.",
+                title=f"Item {i}",
+            )
+        stats = await components.index_engine.index_file(source_file)
+        assert stats.indexed_chunks >= 3
+        original_ids = [str(cid) for cid in stats.new_chunk_ids]
+
+        # Construct the scratch group entry that mem_consolidate_apply expects.
+        group = {
+            "group_id": 0,
+            "source": str(source_file),
+            "chunk_ids": original_ids,
+            "chunk_count": len(original_ids),
+            "namespace": None,
+            "previews": [],
+        }
+        expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(timespec="seconds")
+        await components.storage.scratch_set(
+            "consolidation_groups",
+            json.dumps([group]),
+            expires_at=expires_at,
+        )
+
+        ctx = _fake_ctx(components)
+        result = await mem_consolidate_apply(
+            group_id=0,
+            summary=(
+                "The April standup covered 3 items: progress on feature X, "
+                "a blocked ticket, and a decision to freeze the release branch."
+            ),
+            keep_originals=True,
+            ctx=ctx,
+        )
+
+        assert "Consolidation applied" in result
+        assert "Summary chunk id" in result
+
+        # There should be at least one NEW chunk on disk whose source_file is
+        # NOT the virtual .consolidated.md path — file-first means the
+        # summary landed in a real user-visible markdown file.
+        all_sources = await components.storage.get_all_source_files()
+        virtual_suffix = ".consolidated.md"
+        assert not any(str(s).endswith(virtual_suffix) for s in all_sources), (
+            "Agent path must not create a virtual consolidated chunk"
+        )
+
+        # The scratch entry should have been cleaned up after successful apply.
+        entry = await components.storage.scratch_get("consolidation_groups")
+        assert entry is None
+
+        # Each original must have a consolidated_into relation.
+        for oid in original_ids:
+            from uuid import UUID
+
+            related = await components.storage.get_related(UUID(oid))
+            assert any(rel == "consolidated_into" for _, rel in related), (
+                f"Original chunk {oid} missing consolidated_into edge"
+            )
+
 
 # ── Temporal ─────────────────────────────────────────────────────────
 

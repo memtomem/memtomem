@@ -204,12 +204,17 @@ def make_heuristic_summary(
 # ── Apply (storage mutations) ────────────────────────────────────────
 
 
-async def _link_consolidation_relations(
+async def link_consolidation_relations(
     storage: StorageBackend,
     source_ids: list[str],
     summary_id: UUID,
 ) -> int:
     """Link original chunks to the summary via ``consolidated_into`` edges.
+
+    Shared by both ``apply_consolidation`` (policy-driven path) and
+    ``mem_consolidate_apply`` (agent-driven path): they diverge in how they
+    create the summary chunk (virtual upsert vs. file-first via ``mem_add``)
+    but converge here to establish the relation graph.
 
     Invalid UUIDs are logged at DEBUG (harmless — they can appear if scratch
     state leaks stale data). Storage-level exceptions are logged at WARNING
@@ -225,6 +230,33 @@ async def _link_consolidation_relations(
         except Exception:
             logger.warning("consolidation: failed to link %r", cid, exc_info=True)
     return linked
+
+
+async def source_has_consolidation_relations(
+    storage: StorageBackend,
+    chunk_ids: list[UUID],
+) -> bool:
+    """Return True if any chunk in the group already has a ``consolidated_into``
+    edge — the idempotency fallback used by ``execute_auto_consolidate``.
+
+    Used specifically for the "has this source been consolidated by anyone?"
+    question when the policy handler's own virtual summary is absent (e.g.
+    the agent ran ``mem_consolidate_apply`` for this source already). The
+    ``any`` threshold is intentional: even a partial consolidation from the
+    agent's end is enough to defer to their work rather than overwriting it
+    with a heuristic summary. Source-hash staleness on the policy-owned
+    virtual summary is a separate signal and takes priority when the virtual
+    summary exists.
+    """
+    for cid in chunk_ids:
+        try:
+            related = await storage.get_related(cid)
+        except Exception:
+            logger.debug("get_related failed for %r", cid, exc_info=True)
+            continue
+        if any(rel == "consolidated_into" for _, rel in related):
+            return True
+    return False
 
 
 def _make_summary_chunk(
@@ -260,13 +292,19 @@ async def apply_consolidation(
     keep_originals: bool = True,
     summary_namespace: str = DEFAULT_SUMMARY_NAMESPACE,
 ) -> UUID:
-    """Create a summary chunk for ``group`` and link originals to it.
+    """Create a virtual summary chunk for ``group`` and link originals to it.
 
-    This is the out-of-ctx entry point for both ``mem_consolidate_apply``
-    (agent-written summary) and ``execute_auto_consolidate`` (heuristic
-    summary). It never touches the filesystem — the summary lives as a
-    virtual chunk identified by the ``.consolidated.md`` suffix, which the
-    policy handler later uses for idempotent re-runs.
+    Used by ``execute_auto_consolidate`` (policy-driven, unattended). The
+    agent-driven ``mem_consolidate_apply`` deliberately does NOT go through
+    here: it keeps the file-first flow via ``mem_add`` so the user's
+    ``memory_dirs`` reflect their own consolidation work in git / rsync /
+    plain file browsing. The two paths converge only in
+    ``link_consolidation_relations``.
+
+    The summary lives as a virtual chunk at ``<source>.consolidated.md``
+    under ``summary_namespace`` — nothing is written to disk — which gives
+    ``execute_auto_consolidate`` a stable lookup key for source-hash-based
+    idempotency and staleness regeneration.
 
     Args:
         storage: Storage backend implementing ``upsert_chunks``,
@@ -275,16 +313,15 @@ async def apply_consolidation(
         group: Dict with at minimum ``source`` (str path) and ``chunk_ids``
             (list of UUID strings). ``namespace`` / ``chunk_count`` are
             accepted but not required.
-        summary: The markdown summary text. For heuristic flows, use
-            ``make_heuristic_summary``; for agent flows, pass the
-            agent-written text as-is.
+        summary: The markdown summary text. The policy handler supplies
+            ``make_heuristic_summary`` output; custom callers may pass any
+            string with the expected Metadata block format.
         keep_originals: If ``False``, apply a soft decay to originals by
             halving their importance score with a ``DECAY_FLOOR`` floor of
             0.3 so already-low chunks don't get evicted instantly. Never a
             hard delete.
         summary_namespace: Namespace for the new summary chunk. Default
-            ``archive:summary`` keeps summaries out of regular search
-            results unless explicitly queried.
+            ``archive:summary``.
 
     Returns:
         The UUID of the newly created summary chunk.
@@ -297,7 +334,7 @@ async def apply_consolidation(
     await storage.upsert_chunks([summary_chunk])
 
     source_ids = [str(cid) for cid in group.get("chunk_ids", [])]
-    await _link_consolidation_relations(storage, source_ids, summary_chunk.id)
+    await link_consolidation_relations(storage, source_ids, summary_chunk.id)
 
     if not keep_originals and source_ids:
         scores = await storage.get_importance_scores(source_ids)
