@@ -494,6 +494,37 @@ How Obsidian files are processed:
 mem_do(action="import_notion", params={"path": "~/notion-export.zip", "namespace": "notion"})
 ```
 
+### Ingesting Claude Code auto-memory
+
+`mm ingest claude-memory` takes a **read-only snapshot** of a Claude Code
+auto-memory directory (`~/.claude/projects/<slug>/memory/`) and makes it
+searchable under namespace `claude-memory:<slug>`. Unlike the Obsidian/Notion
+importers, source files are **not copied** — `source_file` points at the
+original absolute path, so the files stay under Claude's control.
+
+```
+mm ingest claude-memory --source ~/.claude/projects/<slug>/memory/ --dry-run
+mm ingest claude-memory --source ~/.claude/projects/<slug>/memory/
+```
+
+How Claude memory files are processed:
+- **Namespace**: `claude-memory:<slug>`, where `<slug>` is the directory
+  name under `~/.claude/projects/`. Characters outside the namespace
+  allowlist are replaced with `_`.
+- **Tags**: every chunk gets `claude-memory`. Files matching a known
+  prefix also get a type tag: `feedback_*` → `feedback`, `project_*` →
+  `project`, `user_*` → `user`, `reference_*` → `reference`.
+- **Excluded**: `MEMORY.md` and `README.md` are skipped — the first is a
+  table of contents, the second is meta documentation. Indexing either
+  would pollute search with a high-score duplicate on every query.
+- **Delta on re-run**: `mm ingest claude-memory` uses content-hash
+  comparison just like `mem_index`, so re-running on the same directory
+  only re-indexes files whose content actually changed.
+- **One-way**: there is no sync back. memtomem never writes to the source
+  directory. If you edit a feedback note in memtomem's web UI, Claude's
+  auto-memory on disk is unchanged — and vice versa, new Claude memories
+  appear only after you re-run `mm ingest claude-memory`.
+
 ---
 
 ## 7. Config — `mem_stats`, `mem_status`, `mem_config`, `mem_embedding_reset`
