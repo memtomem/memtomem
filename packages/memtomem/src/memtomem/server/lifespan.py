@@ -132,6 +132,14 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
         scheduler = ConsolidationScheduler(ctx, config.consolidation_schedule)
         await scheduler.start()
 
+    # Policy scheduler
+    policy_scheduler = None
+    if config.policy.enabled:
+        from memtomem.server.scheduler import PolicyScheduler
+
+        policy_scheduler = PolicyScheduler(ctx, config.policy)
+        await policy_scheduler.start()
+
     # Health watchdog
     watchdog = None
     if config.health_watchdog.enabled:
@@ -149,6 +157,11 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
                 await watchdog.stop()
             except Exception:
                 logger.warning("Failed to stop health watchdog", exc_info=True)
+        if policy_scheduler:
+            try:
+                await policy_scheduler.stop()
+            except Exception:
+                logger.warning("Failed to stop policy scheduler", exc_info=True)
         if scheduler:
             try:
                 await scheduler.stop()

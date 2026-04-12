@@ -25,6 +25,7 @@ from memtomem.tools.policy_engine import (
     execute_auto_consolidate,
     execute_auto_expire,
     execute_auto_tag,
+    run_all_enabled,
     run_policy,
 )
 from memtomem.tools.temporal import (
@@ -575,6 +576,56 @@ class TestPolicyEngine:
         assert "auto_archive" in _SERVER_VALID_TYPES
         assert "auto_expire" in _SERVER_VALID_TYPES
         assert "auto_tag" in _SERVER_VALID_TYPES
+
+    async def test_max_actions_stops_early(self):
+        """run_all_enabled stops after cumulative affected_count >= max_actions."""
+        from unittest.mock import AsyncMock, patch
+
+        storage = AsyncMock()
+        storage.policy_get_enabled.return_value = [
+            {"name": "p1", "policy_type": "auto_archive", "config": {}},
+            {"name": "p2", "policy_type": "auto_archive", "config": {}},
+            {"name": "p3", "policy_type": "auto_archive", "config": {}},
+        ]
+
+        side = [
+            PolicyRunResult("p1", "auto_archive", 60, False, "60 archived"),
+            PolicyRunResult("p2", "auto_archive", 60, False, "60 archived"),
+            PolicyRunResult("p3", "auto_archive", 10, False, "10 archived"),
+        ]
+        with patch(
+            "memtomem.tools.policy_engine.run_policy",
+            side_effect=side,
+        ):
+            results = await run_all_enabled(storage, max_actions=100)
+
+        assert len(results) == 2
+        assert results[0].policy_name == "p1"
+        assert results[1].policy_name == "p2"
+
+    async def test_max_actions_none_runs_all(self):
+        """run_all_enabled with max_actions=None runs all policies."""
+        from unittest.mock import AsyncMock, patch
+
+        storage = AsyncMock()
+        storage.policy_get_enabled.return_value = [
+            {"name": "p1", "policy_type": "auto_archive", "config": {}},
+            {"name": "p2", "policy_type": "auto_expire", "config": {}},
+            {"name": "p3", "policy_type": "auto_tag", "config": {}},
+        ]
+
+        side = [
+            PolicyRunResult("p1", "auto_archive", 60, False, "60 archived"),
+            PolicyRunResult("p2", "auto_expire", 60, False, "60 expired"),
+            PolicyRunResult("p3", "auto_tag", 10, False, "10 tagged"),
+        ]
+        with patch(
+            "memtomem.tools.policy_engine.run_policy",
+            side_effect=side,
+        ):
+            results = await run_all_enabled(storage, max_actions=None)
+
+        assert len(results) == 3
 
 
 # ── Consolidation engine (unit: bullet extraction + hash) ────────────

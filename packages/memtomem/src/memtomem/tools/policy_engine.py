@@ -466,13 +466,30 @@ async def run_policy(
 async def run_all_enabled(
     storage: object,
     dry_run: bool = False,
+    max_actions: int | None = None,
 ) -> list[PolicyRunResult]:
-    """Run all enabled policies."""
+    """Run all enabled policies.
+
+    Args:
+        max_actions: If set, stop after cumulative affected_count reaches
+            this limit.  The cap is checked between policies — individual
+            handlers run atomically.
+    """
     policies = await storage.policy_get_enabled()  # type: ignore[attr-defined]
-    results = []
+    results: list[PolicyRunResult] = []
+    cumulative = 0
     for p in policies:
         result = await run_policy(storage, p, dry_run=dry_run)
         if not dry_run:
             await storage.policy_update_last_run(p["name"])  # type: ignore[attr-defined]
         results.append(result)
+        cumulative += result.affected_count
+        if max_actions is not None and cumulative >= max_actions:
+            logger.info(
+                "max_actions reached (%d/%d) — stopping after policy '%s'",
+                cumulative,
+                max_actions,
+                p["name"],
+            )
+            break
     return results
