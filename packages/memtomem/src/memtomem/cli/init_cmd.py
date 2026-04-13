@@ -357,6 +357,8 @@ def _write_config_and_summary(state: dict) -> None:
         "search": {"default_top_k": state["top_k"], "tokenizer": state["tokenizer"]},
         "decay": {"enabled": state["decay_enabled"]},
     }
+    if state["provider"] == "ollama":
+        config_data["embedding"]["base_url"] = "http://localhost:11434"
     if state.get("api_key"):
         config_data["embedding"]["api_key"] = state["api_key"]
     config_path = config_dir / "config.json"
