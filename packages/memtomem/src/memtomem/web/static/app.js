@@ -407,7 +407,6 @@ async function loadStats() {
 }
 
 loadStats();
-fetchServerConfig();
 checkEmbeddingMismatch();
 
 // ---------------------------------------------------------------------------
@@ -474,12 +473,13 @@ async function checkEmbeddingMismatch() {
 
 async function loadDashboard() {
   try {
-    const [stats, sourcesData, nsData, configData, embStatus] = await Promise.all([
+    const [stats, sourcesData, nsData, configData, embStatus, timelineData] = await Promise.all([
       api('GET', '/api/stats'),
       api('GET', '/api/sources'),
       api('GET', '/api/namespaces'),
       api('GET', '/api/config'),
       api('GET', '/api/embedding-status').catch(() => null),
+      api('GET', '/api/timeline?days=365&limit=1000').catch(() => ({ chunks: [] })),
     ]);
 
     const allSources = sourcesData.sources || [];
@@ -502,8 +502,8 @@ async function loadDashboard() {
       qs('home-scratch').textContent = scratchData.total;
     } catch { /* non-critical */ }
 
-    // B. Activity Heatmap
-    _renderActivityMap(allSources);
+    // B. Activity Heatmap (GitHub contribution graph)
+    _renderActivityMap(timelineData.chunks || []);
 
     // D. File Type Distribution
     _renderFileTypeChart(allSources);
@@ -527,33 +527,89 @@ async function loadDashboard() {
   }
 }
 
-// B. Activity Heatmap — last 14 days
-function _renderActivityMap(sources) {
+// B. Activity Heatmap — GitHub contribution graph (1 year)
+function _renderActivityMap(chunks) {
   const map = qs('home-activity-map');
   const now = new Date();
-  const days = 14;
-  const counts = [];
-  const labels = [];
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
-  for (let i = days - 1; i >= 0; i--) {
-    const d = new Date(now);
-    d.setDate(d.getDate() - i);
-    const key = d.toISOString().slice(0, 10);
-    labels.push(key);
-    let cnt = 0;
-    sources.forEach(s => {
-      if (s.last_indexed_at && s.last_indexed_at.slice(0, 10) === key) cnt++;
-    });
-    counts.push(cnt);
+  // Count chunks per date
+  const countByDate = {};
+  chunks.forEach(c => {
+    const key = (c.created_at || '').slice(0, 10);
+    if (key) countByDate[key] = (countByDate[key] || 0) + 1;
+  });
+
+  // Start from Sunday before 364 days ago
+  const startDate = new Date(today);
+  startDate.setDate(startDate.getDate() - 364 - startDate.getDay());
+  // Compute working range (but only show data for the last 364 days)
+  const dataStart = new Date(today);
+  dataStart.setDate(dataStart.getDate() - 364);
+
+  const totalDays = Math.round((today - startDate) / 86400000) + 1;
+  const cells = [];
+  let maxCount = 0;
+
+  for (let i = 0; i < totalDays; i++) {
+    const d = new Date(startDate);
+    d.setDate(d.getDate() + i);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const count = countByDate[key] || 0;
+    const isFuture = d > today;
+    const isBeforeRange = d < dataStart;
+    if (!isFuture && !isBeforeRange && count > maxCount) maxCount = count;
+    cells.push({ date: key, count, isFuture, isBeforeRange, month: d.getMonth() });
   }
 
-  const maxCount = Math.max(1, ...counts);
-  map.innerHTML = counts.map((c, i) => {
-    const h = Math.max(4, Math.round((c / maxCount) * 32));
-    const weekday = new Date(labels[i]).toLocaleDateString('en', { weekday: 'short' });
-    const opacity = c === 0 ? 0.15 : 0.3 + (c / maxCount) * 0.7;
-    return `<div class="home-activity-day" style="height:${h}px;background:var(--accent);opacity:${opacity}" data-tooltip="${weekday} ${labels[i]}: ${c} files"></div>`;
-  }).join('');
+  // Quartile-based levels (like GitHub)
+  const getLevel = (count) => {
+    if (count === 0 || maxCount === 0) return 0;
+    const q = count / maxCount;
+    if (q <= 0.25) return 1;
+    if (q <= 0.50) return 2;
+    if (q <= 0.75) return 3;
+    return 4;
+  };
+
+  // Month labels — detect when a new month starts in the first row (Sunday)
+  const numWeeks = Math.ceil(totalDays / 7);
+  const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const monthLabels = [];
+  let prevMonth = -1;
+  for (let w = 0; w < numWeeks; w++) {
+    const idx = w * 7;
+    if (idx < cells.length) {
+      const m = cells[idx].month;
+      if (m !== prevMonth) {
+        monthLabels.push({ col: w + 1, label: monthNames[m] });
+        prevMonth = m;
+      }
+    }
+  }
+
+  let html = '';
+
+  // Month labels row
+  html += `<div class="activity-months" style="grid-template-columns:repeat(${numWeeks},1fr);gap:2px">`;
+  monthLabels.forEach(m => {
+    html += `<span style="grid-column:${m.col}">${m.label}</span>`;
+  });
+  html += '</div>';
+
+  // Grid of cells (7 rows × N cols, auto-flow column = weeks)
+  html += `<div class="activity-grid" style="grid-template-columns:repeat(${numWeeks},1fr)">`;
+  cells.forEach(cell => {
+    if (cell.isFuture || cell.isBeforeRange) {
+      html += '<div class="activity-cell activity-empty"></div>';
+    } else {
+      const level = getLevel(cell.count);
+      html += `<div class="activity-cell" data-level="${level}" title="${cell.date}: ${cell.count}"></div>`;
+    }
+  });
+  html += '</div>';
+
+  map.innerHTML = html;
 }
 
 // D. File Type Distribution

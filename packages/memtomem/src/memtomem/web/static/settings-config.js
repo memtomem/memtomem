@@ -870,8 +870,8 @@ function _showReindexWarning(applied) {
   }
 }
 
-qs('exp-preview-btn').addEventListener('click', runExportPreview);
-qs('exp-download-btn').addEventListener('click', runExportDownload);
+qs('exp-preview-btn').addEventListener('click', () => runExportPreview());
+qs('exp-download-btn').addEventListener('click', () => runExportDownload());
 qs('imp-file-trigger')?.addEventListener('click', () => qs('imp-file')?.click());
 qs('imp-file').addEventListener('change', () => {
   const files = qs('imp-file').files;
@@ -879,5 +879,7 @@ qs('imp-file').addEventListener('change', () => {
   const nameEl = qs('imp-file-name');
   if (nameEl) nameEl.textContent = files?.length ? files[0].name : 'No file chosen';
 });
-qs('imp-btn').addEventListener('click', runImport);
+qs('imp-btn').addEventListener('click', () => runImport());
+
+fetchServerConfig();
 

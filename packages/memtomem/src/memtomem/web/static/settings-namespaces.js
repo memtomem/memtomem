@@ -518,55 +518,6 @@ _renderNsChart = function(namespaces) {
   chart.appendChild(legend);
 };
 
-// Override _renderActivityMap to use GitHub-style contribution grid
-const _origRenderActivity = _renderActivityMap;
-_renderActivityMap = function(sources) {
-  const map = qs('home-activity-map');
-  if (typeof d3 === 'undefined') { _origRenderActivity(sources); return; }
-
-  const now = new Date();
-  // Fill available card width: ~14px cell + 3px gap → aim for card width
-  // 52 weeks ≈ 900px, good fill for standard card
-  const days = 364; // 52 weeks
-  const counts = [];
-
-  for (let i = days - 1; i >= 0; i--) {
-    const d = new Date(now);
-    d.setDate(d.getDate() - i);
-    const key = d.toISOString().slice(0, 10);
-    let cnt = 0;
-    sources.forEach(s => {
-      if (s.last_indexed_at && s.last_indexed_at.slice(0, 10) === key) cnt++;
-    });
-    counts.push({ date: key, count: cnt, weekday: d.getDay() });
-  }
-
-  const maxCount = Math.max(1, ...counts.map(c => c.count));
-  const weekdays = ['', 'M', '', 'W', '', 'F', ''];
-  const firstDow = counts[0]?.weekday || 0;
-  const numWeeks = Math.ceil((counts.length + firstDow) / 7);
-
-  // Grid: rows=7, cols=numWeeks. Cells fill available width via minmax(0,1fr).
-  let html = `<div class="home-heatmap-grid" style="grid-template-columns: 16px repeat(${numWeeks}, minmax(0,1fr))">`;
-
-  for (let dow = 0; dow < 7; dow++) {
-    html += `<div class="heatmap-weekday">${weekdays[dow]}</div>`;
-    for (let w = 0; w < numWeeks; w++) {
-      const idx = w * 7 + dow - firstDow;
-      if (idx < 0 || idx >= counts.length) {
-        html += '<div class="heatmap-cell heatmap-empty"></div>';
-      } else {
-        const c = counts[idx];
-        const intensity = c.count === 0 ? 0 : 0.25 + (c.count / maxCount) * 0.75;
-        const bg = c.count === 0 ? 'var(--border)' : `rgba(var(--accent-rgb), ${intensity})`;
-        html += `<div class="heatmap-cell" style="background:${bg}" data-tooltip="${c.date}: ${c.count} files"></div>`;
-      }
-    }
-  }
-  html += '</div>';
-  map.innerHTML = html;
-};
-
 // ═══════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════
 // Phase 4a: Command Palette (Cmd+K)
