@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import PurePosixPath
 
@@ -99,3 +100,28 @@ def _format_verbose_result(r) -> str:
         header
         + f"\n```\n{r.chunk.content[:500] + ('...' if len(r.chunk.content) > 500 else '')}\n```"
     )
+
+
+def _format_structured_results(results: list) -> str:
+    """JSON structured format for machine consumption.
+
+    Returns a JSON string with all result fields untruncated.
+    Unlike compact/verbose, namespace is always included (even "default")
+    and content is not clipped to 500 chars.
+    """
+    out = []
+    for r in results:
+        meta = r.chunk.metadata
+        hierarchy = " > ".join(meta.heading_hierarchy) if meta.heading_hierarchy else ""
+        out.append(
+            {
+                "rank": r.rank,
+                "score": round(r.score, 4),
+                "source": _short_path(meta.source_file),
+                "hierarchy": hierarchy,
+                "namespace": meta.namespace,
+                "chunk_id": str(r.chunk.id),
+                "content": r.chunk.content,
+            }
+        )
+    return json.dumps({"results": out}, ensure_ascii=False)

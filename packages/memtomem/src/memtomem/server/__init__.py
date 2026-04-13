@@ -25,6 +25,7 @@ from memtomem.server.formatters import (
     _format_compact_result as _format_compact_result,
     _format_results as _format_results,
     _format_single_result as _format_single_result,
+    _format_structured_results as _format_structured_results,
     _format_verbose_result as _format_verbose_result,
     _short_path as _short_path,
 )

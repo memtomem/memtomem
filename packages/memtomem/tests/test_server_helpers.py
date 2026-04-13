@@ -19,6 +19,7 @@ from memtomem.server.formatters import (
     _format_compact_result,
     _format_results,
     _format_single_result,
+    _format_structured_results,
     _format_verbose_result,
     _short_path,
 )
@@ -221,6 +222,117 @@ class TestFormatSingleResultDelegation:
         out = _format_single_result(r, verbose=True)
         assert "id=" in out
         assert "```" in out
+
+
+class TestFormatStructuredResults:
+    """Tests for _format_structured_results JSON output."""
+
+    def _make_result(
+        self,
+        rank: int = 1,
+        score: float = 0.85,
+        content: str = "hello",
+        source_file: str = "/tmp/notes.md",
+        hierarchy: tuple[str, ...] = ("Section A",),
+        namespace: str = "default",
+    ):
+        chunk = Chunk(
+            content=content,
+            metadata=ChunkMetadata(
+                source_file=Path(source_file),
+                heading_hierarchy=hierarchy,
+                tags=("tag1",),
+                namespace=namespace,
+            ),
+            id=uuid4(),
+            embedding=[],
+        )
+        return SearchResult(chunk=chunk, score=score, rank=rank, source="fused")
+
+    def test_empty_results(self):
+        import json
+
+        out = _format_structured_results([])
+        parsed = json.loads(out)
+        assert parsed == {"results": []}
+
+    def test_required_fields(self):
+        import json
+
+        r = self._make_result()
+        parsed = json.loads(_format_structured_results([r]))
+        item = parsed["results"][0]
+        expected_keys = {"rank", "score", "source", "hierarchy", "namespace", "chunk_id", "content"}
+        assert set(item.keys()) == expected_keys
+
+    def test_score_precision(self):
+        import json
+
+        r = self._make_result(score=0.92345678)
+        parsed = json.loads(_format_structured_results([r]))
+        assert parsed["results"][0]["score"] == 0.9235
+
+    def test_source_filename_only(self):
+        import json
+
+        r = self._make_result(source_file="/home/user/deep/nested/file.md")
+        parsed = json.loads(_format_structured_results([r]))
+        assert parsed["results"][0]["source"] == "file.md"
+
+    def test_content_not_truncated(self):
+        import json
+
+        long_content = "x" * 1000
+        r = self._make_result(content=long_content)
+        parsed = json.loads(_format_structured_results([r]))
+        assert len(parsed["results"][0]["content"]) == 1000
+
+    def test_namespace_always_present(self):
+        import json
+
+        r = self._make_result(namespace="default")
+        parsed = json.loads(_format_structured_results([r]))
+        assert parsed["results"][0]["namespace"] == "default"
+
+    def test_chunk_id_is_uuid(self):
+        import json
+        from uuid import UUID
+
+        r = self._make_result()
+        parsed = json.loads(_format_structured_results([r]))
+        chunk_id = parsed["results"][0]["chunk_id"]
+        UUID(chunk_id)  # raises ValueError if not valid UUID
+
+    def test_hierarchy_joined(self):
+        import json
+
+        r = self._make_result(hierarchy=("A", "B", "C"))
+        parsed = json.loads(_format_structured_results([r]))
+        assert parsed["results"][0]["hierarchy"] == "A > B > C"
+
+    def test_hierarchy_empty(self):
+        import json
+
+        r = self._make_result(hierarchy=())
+        parsed = json.loads(_format_structured_results([r]))
+        assert parsed["results"][0]["hierarchy"] == ""
+
+    def test_valid_json(self):
+        import json
+
+        r = self._make_result()
+        out = _format_structured_results([r])
+        json.loads(out)  # should not raise
+
+    def test_preserves_input_order(self):
+        import json
+
+        r1 = self._make_result(rank=1, score=0.9)
+        r2 = self._make_result(rank=2, score=0.8)
+        r3 = self._make_result(rank=3, score=0.7)
+        parsed = json.loads(_format_structured_results([r1, r2, r3]))
+        ranks = [item["rank"] for item in parsed["results"]]
+        assert ranks == [1, 2, 3]
 
 
 # ===========================================================================

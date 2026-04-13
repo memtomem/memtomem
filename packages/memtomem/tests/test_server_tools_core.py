@@ -16,7 +16,11 @@ import pytest
 
 from memtomem.config import Mem2MemConfig
 from memtomem.models import Chunk, ChunkMetadata, NamespaceFilter, SearchResult
-from memtomem.server.formatters import _display_path, _format_results
+from memtomem.server.formatters import (
+    _display_path,
+    _format_results,
+    _format_structured_results,
+)
 from memtomem.server.helpers import _check_embedding_mismatch, _parse_recall_date, _set_config_key
 from memtomem.tools.memory_writer import append_entry
 
@@ -652,3 +656,77 @@ class TestFormatResults:
         assert "Found 3 results" in output
         assert "Result 0" in output
         assert "Result 2" in output
+
+    def test_format_structured_produces_json(self):
+        """output_format='structured' path returns valid JSON with expected keys."""
+        import json
+
+        chunk = Chunk(
+            content="Structured test",
+            metadata=ChunkMetadata(
+                source_file=Path("/tmp/s.md"),
+                heading_hierarchy=("Auth",),
+                namespace="default",
+            ),
+            embedding=[],
+        )
+        result = SearchResult(chunk=chunk, score=0.92, rank=1, source="fused")
+        output = _format_structured_results([result])
+        parsed = json.loads(output)
+        assert "results" in parsed
+        assert parsed["results"][0]["content"] == "Structured test"
+        assert parsed["results"][0]["hierarchy"] == "Auth"
+
+    def test_verbose_true_when_output_format_compact(self):
+        """verbose=True with default output_format should produce verbose output."""
+        chunk = Chunk(
+            content="Verbose compat",
+            metadata=ChunkMetadata(
+                source_file=Path("/tmp/v.md"),
+                namespace="default",
+            ),
+            embedding=[],
+        )
+        result = SearchResult(chunk=chunk, score=0.75, rank=1, source="fused")
+        # verbose=True with compact format should yield verbose output
+        output = _format_results([result], verbose=True)
+        assert "id=" in output
+        assert "score=0.7500" in output
+
+    def test_output_format_overrides_verbose(self):
+        """output_format='structured' should produce JSON regardless of verbose flag."""
+        import json
+
+        chunk = Chunk(
+            content="Override test",
+            metadata=ChunkMetadata(
+                source_file=Path("/tmp/o.md"),
+                namespace="work",
+            ),
+            embedding=[],
+        )
+        result = SearchResult(chunk=chunk, score=0.88, rank=1, source="fused")
+        # Structured format should be JSON, not verbose text
+        output = _format_structured_results([result])
+        parsed = json.loads(output)
+        assert parsed["results"][0]["namespace"] == "work"
+        # Must NOT contain verbose text markers
+        assert "id=" not in output
+        assert "```" not in output
+
+    def test_verbose_and_output_format_verbose_redundant(self):
+        """verbose=True + output_format='verbose' is redundant but should work."""
+        chunk = Chunk(
+            content="Redundant test",
+            metadata=ChunkMetadata(
+                source_file=Path("/tmp/r.md"),
+                heading_hierarchy=("Notes",),
+                namespace="default",
+            ),
+            embedding=[],
+        )
+        result = SearchResult(chunk=chunk, score=0.65, rank=1, source="fused")
+        output = _format_results([result], verbose=True)
+        assert "id=" in output
+        assert "score=0.6500" in output
+        assert "Redundant test" in output

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Literal
 from uuid import UUID
 
 import logging
@@ -9,7 +10,7 @@ import logging
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app
 from memtomem.server.error_handler import tool_handler
-from memtomem.server.formatters import _display_path, _format_results
+from memtomem.server.formatters import _display_path, _format_results, _format_structured_results
 from memtomem.server.tool_registry import register
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ async def mem_search(
     dense_weight: float | None = None,
     context_window: int = 0,
     verbose: bool = False,
+    output_format: Literal["compact", "verbose", "structured"] = "compact",
     ctx: CtxType = None,  # type: ignore[assignment]
 ) -> str:
     """Search across indexed memory files using hybrid BM25 + semantic search.
@@ -49,7 +51,10 @@ async def mem_search(
         bm25_weight: Override BM25 weight in RRF fusion (default 1.0). Set higher to favor keyword matches.
         dense_weight: Override dense/semantic weight in RRF fusion (default 1.0). Set higher to favor meaning.
         context_window: Expand each result with ±N adjacent chunks (0=disabled). Use for more context.
-        verbose: Show full details (UUID, full path, score 4dp, pipeline stats). Default: compact output.
+        verbose: (Deprecated — use output_format="verbose" instead.) Show full details.
+        output_format: Output format — "compact" (default, human-readable), "verbose" (full
+            details with UUID/pipeline stats), or "structured" (JSON for machine parsing).
+            When set to non-default, overrides the verbose flag.
     """
     if not query.strip():
         return "Error: query cannot be empty."
@@ -57,6 +62,13 @@ async def mem_search(
         return "Error: query too long (max 10,000 characters)."
     if not 1 <= top_k <= 100:
         return "Error: top_k must be between 1 and 100."
+
+    # Resolve effective format: output_format takes precedence over verbose
+    effective_format = output_format
+    if effective_format == "compact" and verbose:
+        effective_format = "verbose"
+    if effective_format not in ("compact", "verbose", "structured"):
+        return f"Error: invalid output_format '{output_format}'."
 
     app = _get_app(ctx)
     effective_ns = namespace or app.current_namespace
@@ -94,25 +106,29 @@ async def mem_search(
             return f"No results found. (Note: semantic search unavailable: {stats.dense_error})"
         return "No results found."
 
-    output = _format_results(results, verbose=verbose)
+    if effective_format == "structured":
+        output = _format_structured_results(results)
+    else:
+        is_verbose = effective_format == "verbose"
+        output = _format_results(results, verbose=is_verbose)
 
-    if stats.bm25_error and not verbose:
-        output += "\n\n(Note: keyword index unavailable — results from semantic search only)"
+        if stats.bm25_error and not is_verbose:
+            output += "\n\n(Note: keyword index unavailable — results from semantic search only)"
 
-    if verbose:
-        pipeline_info = []
-        if stats.bm25_candidates:
-            pipeline_info.append(f"BM25:{stats.bm25_candidates}")
-        if stats.dense_candidates:
-            pipeline_info.append(f"Dense:{stats.dense_candidates}")
-        if stats.fused_total:
-            pipeline_info.append(f"RRF:{stats.fused_total}")
-        pipeline_info.append(f"Final:{stats.final_total}")
-        if stats.bm25_error:
-            pipeline_info.append(f"BM25-err:{stats.bm25_error}")
-        if stats.dense_error:
-            pipeline_info.append(f"Dense-err:{stats.dense_error}")
-        output += f"\n\n---\npipeline: {' → '.join(pipeline_info)}"
+        if is_verbose:
+            pipeline_info = []
+            if stats.bm25_candidates:
+                pipeline_info.append(f"BM25:{stats.bm25_candidates}")
+            if stats.dense_candidates:
+                pipeline_info.append(f"Dense:{stats.dense_candidates}")
+            if stats.fused_total:
+                pipeline_info.append(f"RRF:{stats.fused_total}")
+            pipeline_info.append(f"Final:{stats.final_total}")
+            if stats.bm25_error:
+                pipeline_info.append(f"BM25-err:{stats.bm25_error}")
+            if stats.dense_error:
+                pipeline_info.append(f"Dense-err:{stats.dense_error}")
+            output += f"\n\n---\npipeline: {' → '.join(pipeline_info)}"
 
     # Fire webhook
     if app.webhook_manager:
