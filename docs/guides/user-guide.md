@@ -63,7 +63,7 @@ sequenceDiagram
 
 ## MCP Tools at a Glance
 
-memtomem provides **73 MCP tools** organized into categories:
+memtomem provides **74 MCP tools** organized into categories:
 
 | Category | Tools | What they do |
 |----------|-------|-------------|
@@ -73,7 +73,7 @@ memtomem provides **73 MCP tools** organized into categories:
 | **Namespace** | `mem_ns_list/set/get/assign/update/rename/delete` | Organize memories into groups |
 | **Maintenance** | `mem_dedup_scan/merge`, `mem_decay_scan/expire`, `mem_auto_tag`, `mem_cleanup_orphans` | Keep the index clean |
 | **Data** | `mem_export`, `mem_import` | Backup and restore |
-| **Config** | `mem_stats`, `mem_status`, `mem_config`, `mem_embedding_reset` | Monitor and configure |
+| **Config** | `mem_stats`, `mem_status`, `mem_config`, `mem_embedding_reset`, `mem_reset` | Monitor and configure |
 
 ### `mem_do` action naming convention
 
@@ -1037,6 +1037,29 @@ memtomem treats `.memtomem/` as the single source of truth for four artifact kin
 | Sub-agents (Phase 2) | `.memtomem/agents/<name>.md` | `.claude/agents/<name>.md`, `.gemini/agents/<name>.md`, `~/.codex/agents/<name>.toml` |
 | Slash commands (Phase 3) | `.memtomem/commands/<name>.md` | `.claude/commands/<name>.md`, `.gemini/commands/<name>.toml`, `~/.codex/prompts/<name>.md` |
 
+### Understanding scope
+
+Every fan-out target is either **project-scope** or **user-scope**:
+
+| Scope | Written relative to | Isolation | Example path |
+|---|---|---|---|
+| **Project** | project root (`.`) | Each project gets its own copy | `.claude/agents/reviewer.md` |
+| **User** | home directory (`~`) | Shared across every project on the machine | `~/.codex/agents/reviewer.toml` |
+
+Most targets are project-scope — the generated file lives inside the project tree, is committed to version control, and cannot collide with other projects. The exceptions are:
+
+| User-scope target | Phase | Path |
+|---|---|---|
+| Codex sub-agents | 2 (Agents) | `~/.codex/agents/<name>.toml` |
+| Codex slash commands | 3 (Commands) | `~/.codex/prompts/<name>.md` |
+| Claude Code settings | D (Settings) | `~/.claude/settings.json` |
+
+**Cross-project collision warning.** Because user-scope targets live under `~`, running `mm context sync` in two projects that define an agent or command with the same name will overwrite each other silently. This is a limitation of the runtimes' user-scope storage model, not of memtomem. To avoid surprises:
+
+- Use project-specific prefixes for agent/command names when sharing a machine across projects (e.g., `myapp-reviewer` instead of `reviewer`).
+- Run `mm context diff --include=agents,commands` after switching projects to check for unexpected overwrites.
+- Remember that `mm context init --include=agents` and `mm context init --include=commands` deliberately skip Codex user-scope targets to avoid pulling in artifacts that may belong to a different project.
+
 ```mermaid
 flowchart TB
     CTX[".memtomem/context.md\n(single source of truth)"]
@@ -1260,7 +1283,7 @@ mm context sync --include=agents --strict
 # Aborted.
 ```
 
-**Codex is user-scope only.** Codex CLI's documented sub-agent path is `~/.codex/agents/*.toml`, so canonical agents fan out to your home directory regardless of which project you run `mm context sync` in. Be aware that multiple projects sharing agent names will overwrite each other — that's a limitation of Codex's user-scope model, not of memtomem.
+**Codex sub-agents are user-scope** — they fan out to `~/.codex/agents/` regardless of project. See [Understanding scope](#understanding-scope) for collision implications and mitigation.
 
 Reverse import from runtime files back into canonical (Claude/Gemini only — Codex TOML is deliberately *not* imported because the conversion is lossy and memtomem would have to guess dropped fields):
 
@@ -1326,7 +1349,7 @@ argument-hint: [file-path]
 Review the file at $ARGUMENTS and report issues.
 ```
 
-The Gemini side is **lossless in both directions** (only two TOML fields; the `$ARGUMENTS` ↔ `{{args}}` rewrite is reversible), so `mm context init --include=commands` round-trips Gemini TOML back into canonical Markdown. The Codex side is **forward-only** — commands are fanned out to `~/.codex/prompts/` but never imported back, because the user-scope path spans projects and would break the "import runtime files from *this* project" semantic (matching the Phase 2 sub-agent policy for Codex TOML).
+The Gemini side is **lossless in both directions** (only two TOML fields; the `$ARGUMENTS` ↔ `{{args}}` rewrite is reversible), so `mm context init --include=commands` round-trips Gemini TOML back into canonical Markdown. The Codex side is **forward-only** — commands are fanned out to `~/.codex/prompts/` but never imported back, because the user-scope path spans projects and would break the "import runtime files from *this* project" semantic (matching the Phase 2 sub-agent policy for Codex TOML). See [Understanding scope](#understanding-scope) for more on user-scope targets and cross-project collision.
 
 Running sync prints every dropped field so you can see what each runtime lost:
 
@@ -1358,13 +1381,15 @@ mm context diff --include=skills,agents,commands
 
 ### Supported targets
 
-| Runtime | Project memory file | Skills directory | Sub-agents | Slash commands |
-|---|---|---|---|---|
-| Claude Code | `CLAUDE.md` | `.claude/skills/` | `.claude/agents/*.md` | `.claude/commands/*.md` |
-| Cursor | `.cursorrules` | — | — | — |
-| Gemini CLI | `GEMINI.md` | `.gemini/skills/` | `.gemini/agents/*.md` (experimental) | `.gemini/commands/*.toml` |
-| OpenAI Codex CLI | `AGENTS.md` | `.agents/skills/` | `~/.codex/agents/*.toml` (user-scope) | `~/.codex/prompts/*.md` (user-scope, deprecated upstream) |
-| GitHub Copilot | `.github/copilot-instructions.md` | — | — | — |
+| Runtime | Project memory | Skills | Sub-agents | Commands | Settings |
+|---|---|---|---|---|---|
+| Claude Code | `CLAUDE.md` | `.claude/skills/` | `.claude/agents/*.md` | `.claude/commands/*.md` | `~/.claude/settings.json` **U** |
+| Cursor | `.cursorrules` | — | — | — | — |
+| Gemini CLI | `GEMINI.md` | `.gemini/skills/` | `.gemini/agents/*.md` (experimental) | `.gemini/commands/*.toml` | — |
+| OpenAI Codex CLI | `AGENTS.md` | `.agents/skills/` | `~/.codex/agents/*.toml` **U** | `~/.codex/prompts/*.md` **U** | — |
+| GitHub Copilot | `.github/copilot-instructions.md` | — | — | — | — |
+
+**U** = user-scope (written to `~`, shared across projects). All other targets are project-scope. See [Understanding scope](#understanding-scope) for implications.
 
 ---
 
@@ -1386,6 +1411,8 @@ mm recall --since 2026-03-01           # recall by date
 mm config show                         # view all settings
 mm config set search.default_top_k 20  # change a setting
 mm embedding-reset                     # check/resolve embedding model mismatch
+mm reset                               # delete all data and reinitialize the DB
+mm reset --yes                         # skip confirmation prompt
 
 # Agent context sync
 mm context detect                      # find agent config files
@@ -1562,4 +1589,4 @@ mem_context_detect(include="settings")
 - [Practical Use Cases](use-cases.md) — Agent workflow scenarios
 - [Claude Code Hooks](hooks.md) — Automate memory with hooks
 - [memtomem-stm](https://github.com/memtomem/memtomem-stm) — Proactive surfacing, compression, caching (separate package)
-- [Full Tool Reference](../../packages/memtomem/README.md) — All 73 tools with parameters
+- [Full Tool Reference](../../packages/memtomem/README.md) — All 74 tools with parameters
