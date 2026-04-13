@@ -33,7 +33,7 @@ def _ollama_llm_config(**overrides) -> LLMConfig:
     defaults = dict(
         enabled=True,
         provider="ollama",
-        model="llama3.2",
+        model="gemma4:e2b",
         base_url="http://localhost:11434",
         api_key="",
         max_tokens=1024,
@@ -47,7 +47,7 @@ def _openai_llm_config(**overrides) -> LLMConfig:
     defaults = dict(
         enabled=True,
         provider="openai",
-        model="gpt-4o-mini",
+        model="gpt-4.1-mini",
         base_url="https://api.openai.com",
         api_key="sk-test",
         max_tokens=1024,
@@ -61,7 +61,7 @@ def _anthropic_llm_config(**overrides) -> LLMConfig:
     defaults = dict(
         enabled=True,
         provider="anthropic",
-        model="claude-sonnet-4-20250514",
+        model="claude-haiku-4-5-20251001",
         base_url="https://api.anthropic.com",
         api_key="sk-ant-test",
         max_tokens=1024,
@@ -156,7 +156,7 @@ class TestOllamaLLM:
         call_args = mock_client.post.call_args
         assert call_args[0][0] == "/api/generate"
         payload = call_args[1]["json"]
-        assert payload["model"] == "llama3.2"
+        assert payload["model"] == "gemma4:e2b"
         assert payload["prompt"] == "test prompt"
         assert payload["system"] == "sys"
 

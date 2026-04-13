@@ -7,9 +7,9 @@ from memtomem.errors import ConfigError
 
 # Provider-specific default models, used when config.model is empty.
 _DEFAULT_MODELS: dict[str, str] = {
-    "ollama": "llama3.2",
-    "openai": "gpt-4o-mini",
-    "anthropic": "claude-sonnet-4-20250514",
+    "ollama": "gemma4:e2b",
+    "openai": "gpt-4.1-mini",
+    "anthropic": "claude-haiku-4-5-20251001",
 }
 
 

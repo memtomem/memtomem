@@ -9,7 +9,7 @@ The simplest path — local Ollama:
 ```bash
 export MEMTOMEM_LLM__ENABLED=true
 export MEMTOMEM_LLM__PROVIDER=ollama
-# model defaults to llama3.2, base_url to localhost:11434
+# model defaults to gemma4:e2b, base_url to localhost:11434
 ```
 
 ## Supported Providers
@@ -19,7 +19,7 @@ export MEMTOMEM_LLM__PROVIDER=ollama
 ```bash
 export MEMTOMEM_LLM__ENABLED=true
 export MEMTOMEM_LLM__PROVIDER=ollama
-export MEMTOMEM_LLM__MODEL=llama3.2        # default when empty
+export MEMTOMEM_LLM__MODEL=gemma4:e2b      # default when empty
 export MEMTOMEM_LLM__BASE_URL=http://localhost:11434
 ```
 
@@ -28,7 +28,7 @@ export MEMTOMEM_LLM__BASE_URL=http://localhost:11434
 ```bash
 export MEMTOMEM_LLM__ENABLED=true
 export MEMTOMEM_LLM__PROVIDER=openai
-export MEMTOMEM_LLM__MODEL=gpt-4o-mini     # default when empty
+export MEMTOMEM_LLM__MODEL=gpt-4.1-mini    # default when empty
 export MEMTOMEM_LLM__API_KEY=sk-...
 ```
 
@@ -37,7 +37,7 @@ export MEMTOMEM_LLM__API_KEY=sk-...
 ```bash
 export MEMTOMEM_LLM__ENABLED=true
 export MEMTOMEM_LLM__PROVIDER=anthropic
-export MEMTOMEM_LLM__MODEL=claude-sonnet-4-20250514
+export MEMTOMEM_LLM__MODEL=claude-haiku-4-5-20251001
 export MEMTOMEM_LLM__API_KEY=sk-ant-...
 ```
 
@@ -125,7 +125,7 @@ All features gracefully degrade: if LLM is enabled but a call fails, the heurist
 | `MEMTOMEM_LLM__MAX_TOKENS` | `1024` | Maximum response tokens |
 | `MEMTOMEM_LLM__TIMEOUT` | `60.0` | Request timeout in seconds |
 
-Provider defaults when `MODEL` is empty: ollama → `llama3.2`, openai → `gpt-4o-mini`, anthropic → `claude-sonnet-4-20250514`.
+Provider defaults when `MODEL` is empty: ollama → `gemma4:e2b`, openai → `gpt-4.1-mini`, anthropic → `claude-haiku-4-5-20251001`.
 
 ## Troubleshooting
 
