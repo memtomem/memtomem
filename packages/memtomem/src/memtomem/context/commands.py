@@ -162,37 +162,6 @@ def _subcommand_to_claude_md(cmd: SlashCommand) -> tuple[str, list[str]]:
     return body, []
 
 
-def _subcommand_to_codex_md(cmd: SlashCommand) -> tuple[str, list[str]]:
-    """Render for ``~/.codex/prompts/<name>.md`` — Claude-compatible superset
-    minus ``allowed-tools`` / ``model``.
-
-    Codex documents exactly two frontmatter fields (``description``,
-    ``argument-hint``) and supports ``$1``..``$9``, ``$NAME``, and
-    ``$ARGUMENTS`` natively — so the body is passed through verbatim
-    (no placeholder rewrite). ``allowed-tools`` and ``model`` have no
-    documented Codex equivalent and are dropped (reported via the
-    standard ``dropped`` channel).
-    """
-    dropped: list[str] = []
-    if cmd.allowed_tools:
-        dropped.append("allowed-tools")
-    if cmd.model:
-        dropped.append("model")
-
-    lines: list[str] = []
-    if cmd.description:
-        lines.append(f"description: {cmd.description}")
-    if cmd.argument_hint:
-        lines.append(f"argument-hint: {cmd.argument_hint}")
-
-    body = cmd.body if cmd.body.endswith("\n") else cmd.body + "\n"
-    if lines:
-        frontmatter = "\n".join(lines)
-        return f"---\n{frontmatter}\n---\n\n{body}", dropped
-    # No frontmatter at all — Codex tolerates bare Markdown prompts.
-    return body, dropped
-
-
 def _subcommand_to_gemini_toml(cmd: SlashCommand) -> tuple[str, list[str]]:
     """Render for ``.gemini/commands/<name>.toml``.
 
@@ -264,26 +233,8 @@ class GeminiCommandsGenerator:
         return _subcommand_to_gemini_toml(cmd)
 
 
-@dataclass
-class CodexCommandsGenerator:
-    name: str = "codex_commands"
-    # Display-only — Codex is user-scope, so the real path is resolved from
-    # ``Path.home()`` inside ``target_file``. We keep a visible root string for
-    # CLI / MCP output consistency, mirroring ``CodexAgentsGenerator``.
-    output_root: str = "~/.codex/prompts"
-
-    def target_file(self, project_root: Path, command_name: str) -> Path:
-        # project_root intentionally ignored — Codex stores custom prompts
-        # under the user's home directory.
-        return Path.home() / ".codex/prompts" / f"{command_name}.md"
-
-    def render(self, cmd: SlashCommand) -> tuple[str, list[str]]:
-        return _subcommand_to_codex_md(cmd)
-
-
 _register(ClaudeCommandsGenerator())
 _register(GeminiCommandsGenerator())
-_register(CodexCommandsGenerator())
 
 
 # ── Fan-out: canonical → runtimes ───────────────────────────────────
@@ -467,16 +418,8 @@ def extract_commands_to_canonical(
 
 
 def _runtime_command_names(gen_name: str, project_root: Path) -> set[str]:
-    """Return the set of command ``stem`` names present on disk for a runtime.
-
-    Handles Codex's user-scope path (``~/.codex/prompts``) separately from the
-    project-scope Claude / Gemini directories — mirrors the dispatch pattern
-    used by :func:`memtomem.context.agents._runtime_agent_names`.
-    """
-    if gen_name == "codex_commands":
-        runtime_root = Path.home() / ".codex/prompts"
-        suffix = ".md"
-    elif gen_name == "claude_commands":
+    """Return the set of command ``stem`` names present on disk for a runtime."""
+    if gen_name == "claude_commands":
         runtime_root = project_root / ".claude/commands"
         suffix = ".md"
     elif gen_name == "gemini_commands":
@@ -532,7 +475,6 @@ __all__ = [
     "CANONICAL_COMMAND_ROOT",
     "COMMAND_GENERATORS",
     "ClaudeCommandsGenerator",
-    "CodexCommandsGenerator",
     "CommandGenerator",
     "CommandParseError",
     "CommandSyncResult",
