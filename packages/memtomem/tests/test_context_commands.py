@@ -19,14 +19,6 @@ from memtomem.context.commands import (
 from memtomem.context.detector import detect_command_dirs
 
 
-@pytest.fixture
-def codex_home(tmp_path, monkeypatch):
-    """Redirect HOME so Codex prompt writes don't touch the real ``~/.codex/prompts/``."""
-    fake_home = tmp_path / "home"
-    fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
-    monkeypatch.setenv("USERPROFILE", str(fake_home))  # Windows safety (no-op on macOS)
-    return fake_home
 
 
 SAMPLE_FULL_COMMAND = """---
@@ -156,93 +148,14 @@ class TestGeminiCommandRendering:
         assert result.dropped == []
 
 
-class TestCodexCommandRendering:
-    def test_renders_minimal_command(self, tmp_path, codex_home):
-        _make_canonical_command(tmp_path, "hi", SAMPLE_MINIMAL_COMMAND)
-        generate_all_commands(tmp_path, runtimes=["codex_commands"])
-        out_path = codex_home / ".codex/prompts/hi.md"
-        assert out_path.is_file()
-        out = out_path.read_text()
-        assert "description: Simple prompt" in out
-        assert "Say hi to $ARGUMENTS" in out
-
-    def test_renders_full_command(self, tmp_path, codex_home):
-        _make_canonical_command(tmp_path, "review", SAMPLE_FULL_COMMAND)
-        generate_all_commands(tmp_path, runtimes=["codex_commands"])
-        out = (codex_home / ".codex/prompts/review.md").read_text()
-        assert "description: Review a file for issues" in out
-        assert "argument-hint: [file-path]" in out
-        # allowed-tools and model are dropped — Codex has no equivalents.
-        assert "allowed-tools" not in out
-        assert "model:" not in out
-        assert "Review the file at $ARGUMENTS" in out
-
-    def test_preserves_arguments_placeholder(self, tmp_path, codex_home):
-        """REGRESSION GUARD: Codex's $ARGUMENTS is native — do NOT rewrite it.
-        A prior Phase 3.5 attempt broke semantics by rewriting $ARGUMENTS → $1."""
-        _make_canonical_command(tmp_path, "review", SAMPLE_FULL_COMMAND)
-        generate_all_commands(tmp_path, runtimes=["codex_commands"])
-        out = (codex_home / ".codex/prompts/review.md").read_text()
-        assert "$ARGUMENTS" in out
-        assert "$1" not in out
-        assert "{{args}}" not in out
-
-    def test_preserves_positional_and_named_placeholders(self, tmp_path, codex_home):
-        body = (
-            "---\ndescription: Mixed placeholders\n---\n\n"
-            "First: $1, second: $2, named: $PRIORITY, whole: $ARGUMENTS, dollar: $$\n"
-        )
-        _make_canonical_command(tmp_path, "mixed", body)
-        generate_all_commands(tmp_path, runtimes=["codex_commands"])
-        out = (codex_home / ".codex/prompts/mixed.md").read_text()
-        assert "$1" in out
-        assert "$2" in out
-        assert "$PRIORITY" in out
-        assert "$ARGUMENTS" in out
-        assert "$$" in out
-
-    def test_drops_allowed_tools_and_model(self, tmp_path, codex_home):
-        _make_canonical_command(tmp_path, "review", SAMPLE_FULL_COMMAND)
-        result = generate_all_commands(tmp_path, runtimes=["codex_commands"])
-        fields = result.dropped[0][2]
-        assert "allowed-tools" in fields
-        assert "model" in fields
-        # argument-hint is NOT dropped — Codex supports it natively.
-        assert "argument-hint" not in fields
-
-    def test_minimal_command_has_no_dropped_fields(self, tmp_path, codex_home):
-        _make_canonical_command(tmp_path, "hi", SAMPLE_MINIMAL_COMMAND)
-        result = generate_all_commands(tmp_path, runtimes=["codex_commands"])
-        assert result.dropped == []
-
-    def test_user_scope_path_uses_home(self, tmp_path, codex_home):
-        _make_canonical_command(tmp_path, "hi", SAMPLE_MINIMAL_COMMAND)
-        generate_all_commands(tmp_path, runtimes=["codex_commands"])
-        # project_root is intentionally ignored — the file lives under fake HOME,
-        # not under tmp_path.
-        assert (codex_home / ".codex/prompts/hi.md").is_file()
-        assert not (tmp_path / ".codex/prompts/hi.md").exists()
-
-    def test_frontmatter_omitted_when_no_fields(self, tmp_path, codex_home):
-        body = "Just a bare prompt with $ARGUMENTS.\n"
-        p = tmp_path / CANONICAL_COMMAND_ROOT / "bare.md"
-        p.parent.mkdir(parents=True)
-        p.write_text(body)  # no frontmatter at all
-        generate_all_commands(tmp_path, runtimes=["codex_commands"])
-        out = (codex_home / ".codex/prompts/bare.md").read_text()
-        assert out.startswith("Just a bare prompt")
-        assert "---" not in out
-
-
 class TestGenerateAllCommands:
-    def test_fans_out_to_all_three_runtimes(self, tmp_path, codex_home):
+    def test_fans_out_to_all_runtimes(self, tmp_path):
         _make_canonical_command(tmp_path, "hi", SAMPLE_MINIMAL_COMMAND)
         result = generate_all_commands(tmp_path)
         assert isinstance(result, CommandSyncResult)
-        assert len(result.generated) == 3
+        assert len(result.generated) == 2
         assert (tmp_path / ".claude/commands/hi.md").is_file()
         assert (tmp_path / ".gemini/commands/hi.toml").is_file()
-        assert (codex_home / ".codex/prompts/hi.md").is_file()
 
     def test_no_canonical_no_op(self, tmp_path):
         result = generate_all_commands(tmp_path)
@@ -252,7 +165,7 @@ class TestGenerateAllCommands:
     def test_registry_contents(self):
         assert "claude_commands" in COMMAND_GENERATORS
         assert "gemini_commands" in COMMAND_GENERATORS
-        assert "codex_commands" in COMMAND_GENERATORS
+        assert "codex_commands" not in COMMAND_GENERATORS
 
     def test_unknown_runtime_skipped(self, tmp_path):
         _make_canonical_command(tmp_path, "hi", SAMPLE_MINIMAL_COMMAND)
@@ -266,10 +179,10 @@ class TestStrictMode:
         with pytest.raises(StrictDropError):
             generate_all_commands(tmp_path, runtimes=["gemini_commands"], strict=True)
 
-    def test_strict_passes_with_minimal(self, tmp_path, codex_home):
+    def test_strict_passes_with_minimal(self, tmp_path):
         _make_canonical_command(tmp_path, "hi", SAMPLE_MINIMAL_COMMAND)
         result = generate_all_commands(tmp_path, strict=True)
-        assert len(result.generated) == 3
+        assert len(result.generated) == 2
 
 
 class TestExtractCommandsToCanonical:
@@ -333,33 +246,23 @@ class TestExtractCommandsToCanonical:
         assert len(result.imported) == 1
         assert "UPDATED" in canonical.read_text()
 
-    def test_ignores_codex_prompts(self, tmp_path, codex_home):
-        """Codex ~/.codex/prompts/ is user-scope — extract intentionally skips it
-        even though the format is byte-compatible with Claude. Parity with the
-        Phase 2 ``test_ignores_codex_toml`` policy."""
-        (codex_home / ".codex/prompts").mkdir(parents=True)
-        (codex_home / ".codex/prompts/runtime-only.md").write_text(SAMPLE_MINIMAL_COMMAND)
-        result = extract_commands_to_canonical(tmp_path)
-        assert result.imported == []
-
-
 class TestDiffCommands:
-    def test_empty_project(self, tmp_path, codex_home):
+    def test_empty_project(self, tmp_path):
         assert diff_commands(tmp_path) == []
 
-    def test_missing_target(self, tmp_path, codex_home):
+    def test_missing_target(self, tmp_path):
         _make_canonical_command(tmp_path, "hi", SAMPLE_MINIMAL_COMMAND)
         rows = diff_commands(tmp_path)
         assert rows
         assert all(status == "missing target" for _, _, status in rows)
 
-    def test_in_sync_after_generate(self, tmp_path, codex_home):
+    def test_in_sync_after_generate(self, tmp_path):
         _make_canonical_command(tmp_path, "hi", SAMPLE_MINIMAL_COMMAND)
         generate_all_commands(tmp_path)
         rows = diff_commands(tmp_path)
         assert all(status == "in sync" for _, _, status in rows)
 
-    def test_out_of_sync(self, tmp_path, codex_home):
+    def test_out_of_sync(self, tmp_path):
         _make_canonical_command(tmp_path, "hi", SAMPLE_MINIMAL_COMMAND)
         generate_all_commands(tmp_path)
         (tmp_path / ".claude/commands/hi.md").write_text("mutated")
@@ -367,26 +270,13 @@ class TestDiffCommands:
         status_by_runtime = {r: s for r, _, s in rows}
         assert status_by_runtime["claude_commands"] == "out of sync"
         assert status_by_runtime["gemini_commands"] == "in sync"
-        assert status_by_runtime["codex_commands"] == "in sync"
 
-    def test_missing_canonical(self, tmp_path, codex_home):
+    def test_missing_canonical(self, tmp_path):
         d = tmp_path / ".claude/commands"
         d.mkdir(parents=True)
         (d / "runtime-only.md").write_text(SAMPLE_MINIMAL_COMMAND)
         rows = diff_commands(tmp_path)
         assert any(status == "missing canonical" for _, _, status in rows)
-
-    def test_codex_user_scope_missing_canonical(self, tmp_path, codex_home):
-        """When a Codex prompt exists user-scope but no canonical file backs it,
-        ``diff_commands`` reports ``missing canonical`` for the ``codex_commands``
-        runtime — verifies the ``_runtime_command_names`` dispatch picks up
-        ``Path.home() / .codex/prompts``."""
-        (codex_home / ".codex/prompts").mkdir(parents=True)
-        (codex_home / ".codex/prompts/runtime-only.md").write_text(SAMPLE_MINIMAL_COMMAND)
-        rows = diff_commands(tmp_path)
-        codex_rows = [(n, s) for r, n, s in rows if r == "codex_commands"]
-        assert ("runtime-only", "missing canonical") in codex_rows
-
 
 class TestDetectCommandDirs:
     def test_empty(self, tmp_path):
@@ -417,16 +307,6 @@ class TestDetectCommandDirs:
         (d / "stray.md").write_text("not a toml command")
         found = detect_command_dirs(tmp_path)
         assert found == []
-
-    def test_codex_user_scope_not_in_project_detect(self, tmp_path, codex_home):
-        """detect_command_dirs only scans project-scope — Codex user-scope
-        prompts must never surface. Symmetric with the Phase 2 agents test of
-        the same name."""
-        (codex_home / ".codex/prompts").mkdir(parents=True)
-        (codex_home / ".codex/prompts/helper.md").write_text(SAMPLE_MINIMAL_COMMAND)
-        found = detect_command_dirs(tmp_path)
-        assert found == []
-
 
 class TestOnDrop:
     def test_on_drop_warn_logs(self, tmp_path, caplog):
