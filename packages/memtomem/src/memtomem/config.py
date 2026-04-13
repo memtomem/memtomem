@@ -86,8 +86,16 @@ class SearchConfig(BaseSettings):
         return v
 
 
+def _default_memory_dirs() -> list[Path]:
+    """Build default memory_dirs, auto-discovering well-known AI tool directories."""
+    dirs: list[Path] = [Path("~/.memtomem/memories")]
+    for d in _auto_discovered_memory_dirs():
+        dirs.append(d)
+    return dirs
+
+
 class IndexingConfig(BaseSettings):
-    memory_dirs: list[Path] = Field(default_factory=lambda: [Path("~/.memtomem/memories")])
+    memory_dirs: list[Path] = Field(default_factory=lambda: _default_memory_dirs())
     supported_extensions: frozenset[str] = frozenset(
         {
             ".md",
@@ -381,6 +389,35 @@ def load_config_overrides(config: Mem2MemConfig) -> None:
                         value,
                         exc,
                     )
+
+
+def ensure_auto_discovered_dirs(config: Mem2MemConfig) -> None:
+    """Append auto-discovered well-known dirs that aren't already in memory_dirs.
+
+    Call *after* ``load_config_overrides`` so that user overrides don't
+    suppress auto-discovery of AI tool directories like ``~/.claude/projects``.
+    """
+    existing = {Path(d).expanduser().resolve() for d in config.indexing.memory_dirs}
+    for d in _auto_discovered_memory_dirs():
+        resolved = d.expanduser().resolve()
+        if resolved not in existing:
+            config.indexing.memory_dirs.append(d)
+
+
+def _auto_discovered_memory_dirs() -> list[Path]:
+    """Return well-known AI tool directories that exist on this machine.
+
+    Checked directories:
+    - ``~/.claude/projects``  — Claude Code per-project auto-memory
+    - ``~/.gemini``           — Gemini CLI global GEMINI.md
+    - ``~/.codex/memories``   — Codex CLI global memories
+    """
+    candidates: list[Path] = [
+        Path("~/.claude/projects"),
+        Path("~/.gemini"),
+        Path("~/.codex/memories"),
+    ]
+    return [p.expanduser() for p in candidates if p.expanduser().is_dir()]
 
 
 def save_config_overrides(config: Mem2MemConfig, mutable_fields: dict[str, set[str]]) -> None:

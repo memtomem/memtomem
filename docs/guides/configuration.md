@@ -70,11 +70,32 @@ When enabled, search results include surrounding chunks from the same source fil
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMTOMEM_INDEXING__MEMORY_DIRS` | `["~/.memtomem/memories"]` | Directories to index |
+| `MEMTOMEM_INDEXING__MEMORY_DIRS` | `["~/.memtomem/memories"]` + auto-discovered | Directories to index (see below) |
 | `MEMTOMEM_INDEXING__MAX_CHUNK_TOKENS` | `512` | Maximum tokens per chunk |
 | `MEMTOMEM_INDEXING__MIN_CHUNK_TOKENS` | `128` | Merge threshold for short chunks |
 | `MEMTOMEM_INDEXING__CHUNK_OVERLAP_TOKENS` | `0` | Token overlap between adjacent chunks |
 | `MEMTOMEM_INDEXING__STRUCTURED_CHUNK_MODE` | `original` | JSON/YAML/TOML chunking: `original` or `recursive` |
+
+### Auto-discovered memory directories
+
+In addition to `~/.memtomem/memories`, memtomem automatically adds well-known
+AI tool directories to `memory_dirs` when they exist on the machine:
+
+| Directory | Tool | Scope |
+|-----------|------|-------|
+| `~/.claude/projects` | Claude Code | per-project auto-memory |
+| `~/.gemini` | Gemini CLI | global `GEMINI.md` |
+| `~/.codex/memories` | Codex CLI | global memories |
+
+Auto-discovered directories are appended after `config.json` overrides, so
+they are always available even if you override `memory_dirs` manually. This
+means `mem_index` and the file watcher accept paths under these directories
+without requiring explicit `MEMORY_DIRS` configuration.
+
+> **Tip:** Use `mm ingest claude-memory`, `mm ingest gemini-memory`, or
+> `mm ingest codex-memory` for richer ingestion with per-tool tagging and
+> namespace assignment. Auto-discovery only removes the path restriction —
+> it does not apply tool-specific tags or namespaces.
 
 ## Decay
 

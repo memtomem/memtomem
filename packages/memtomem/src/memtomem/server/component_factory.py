@@ -38,10 +38,11 @@ class Components:
 
 async def create_components(config: Mem2MemConfig | None = None) -> Components:
     """Create and initialise all core components."""
-    from memtomem.config import load_config_overrides
+    from memtomem.config import ensure_auto_discovered_dirs, load_config_overrides
 
     config = config or Mem2MemConfig()
     load_config_overrides(config)
+    ensure_auto_discovered_dirs(config)
 
     # Initialize FTS tokenizer from config
     from memtomem.storage.fts_tokenizer import set_tokenizer
