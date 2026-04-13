@@ -35,6 +35,8 @@ class SkillGenerator(Protocol):
 
     name: str
     output_root: str  # relative to project root, e.g. ".claude/skills"
+    scope: str  # "project" or "user"
+    default: bool  # included when scope filter is None (backward compat)
 
     def target_dir(self, project_root: Path, skill_name: str) -> Path:
         """Return the directory that should hold the rendered skill."""
@@ -55,6 +57,8 @@ def _register(gen: SkillGenerator) -> SkillGenerator:
 class ClaudeSkillsGenerator:
     name: str = "claude_skills"
     output_root: str = ".claude/skills"
+    scope: str = "project"
+    default: bool = True
 
     def target_dir(self, project_root: Path, skill_name: str) -> Path:
         return project_root / self.output_root / skill_name
@@ -64,6 +68,8 @@ class ClaudeSkillsGenerator:
 class GeminiSkillsGenerator:
     name: str = "gemini_skills"
     output_root: str = ".gemini/skills"
+    scope: str = "project"
+    default: bool = True
 
     def target_dir(self, project_root: Path, skill_name: str) -> Path:
         return project_root / self.output_root / skill_name
@@ -76,6 +82,8 @@ class CodexSkillsGenerator:
     # as an alias, which is why fanning out to all three runtimes creates a
     # slight amount of on-disk overlap — Gemini will silently de-dup it).
     output_root: str = ".agents/skills"
+    scope: str = "project"
+    default: bool = True
 
     def target_dir(self, project_root: Path, skill_name: str) -> Path:
         return project_root / self.output_root / skill_name
@@ -162,16 +170,29 @@ class SkillSyncResult:
     skipped: list[tuple[str, str]]  # (runtime_name, reason)
 
 
+def _select_generators(
+    generators: dict[str, SkillGenerator],
+    scope: str | None,
+) -> list[str]:
+    """Return generator names matching *scope*."""
+    if scope is None:
+        return [n for n, g in generators.items() if g.default]
+    if scope == "all":
+        return list(generators.keys())
+    return [n for n, g in generators.items() if g.scope == scope]
+
+
 def generate_all_skills(
     project_root: Path,
     runtimes: list[str] | None = None,
+    scope: str | None = None,
 ) -> SkillSyncResult:
     """Fan out every canonical skill to the requested runtime targets.
 
     Args:
         project_root: project root containing ``.memtomem/skills/``.
-        runtimes: list of generator names. ``None`` means all registered
-            runtimes (currently ``claude_skills`` + ``gemini_skills``).
+        runtimes: list of generator names. ``None`` means all registered.
+        scope: ``"project"`` / ``"user"`` / ``"all"`` / ``None``.
     """
     generated: list[tuple[str, Path]] = []
     skipped: list[tuple[str, str]] = []
@@ -180,7 +201,7 @@ def generate_all_skills(
     if not canonicals:
         return SkillSyncResult(generated=generated, skipped=[("<all>", "no canonical skills")])
 
-    targets = runtimes if runtimes is not None else list(SKILL_GENERATORS.keys())
+    targets = runtimes if runtimes is not None else _select_generators(SKILL_GENERATORS, scope)
     for target in targets:
         gen = SKILL_GENERATORS.get(target)
         if gen is None:
@@ -265,8 +286,11 @@ def _skill_dirs_equal(a: Path, b: Path) -> bool:
     return True
 
 
-def diff_skills(project_root: Path) -> list[tuple[str, str, str]]:
-    """Compare canonical skills against every registered runtime.
+def diff_skills(
+    project_root: Path,
+    scope: str | None = None,
+) -> list[tuple[str, str, str]]:
+    """Compare canonical skills against registered runtimes.
 
     Returns a sorted list of ``(runtime, skill_name, status)`` tuples where
     status is one of:
@@ -279,8 +303,11 @@ def diff_skills(project_root: Path) -> list[tuple[str, str, str]]:
     results: list[tuple[str, str, str]] = []
     canonical_root = canonical_skills_root(project_root)
     canonical_names = {p.name for p in list_canonical_skills(project_root)}
+    selected = _select_generators(SKILL_GENERATORS, scope)
 
     for gen_name, gen in SKILL_GENERATORS.items():
+        if gen_name not in selected:
+            continue
         runtime_root = project_root / gen.output_root
         runtime_names: set[str] = set()
         if runtime_root.is_dir():

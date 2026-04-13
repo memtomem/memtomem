@@ -86,6 +86,18 @@ _INCLUDE_OPTION = click.option(
     ),
 )
 
+_SCOPE_OPTION = click.option(
+    "--scope",
+    "scope",
+    type=click.Choice(["project", "user", "all"]),
+    default=None,
+    help=(
+        "Scope filter for fan-out targets. "
+        "'project' = project-scope only, 'user' = user-scope only, "
+        "'all' = both. Default: run only the original (default) generators."
+    ),
+)
+
 
 # ── Skill sub-handlers (shared by the commands below) ───────────────
 
@@ -113,8 +125,8 @@ def _print_skills_init(root: Path, overwrite: bool) -> None:
         click.secho(f"    skipped {name}: {reason}", fg="yellow")
 
 
-def _print_skills_generate(root: Path) -> None:
-    result = generate_all_skills(root)
+def _print_skills_generate(root: Path, scope: str | None = None) -> None:
+    result = generate_all_skills(root, scope=scope)
     if result.generated:
         click.secho(f"  Skills fan-out: {len(result.generated)}", fg="green")
         for runtime, path in result.generated:
@@ -124,8 +136,8 @@ def _print_skills_generate(root: Path) -> None:
         click.secho(f"  skipped {runtime}: {reason}", fg="yellow")
 
 
-def _print_skills_diff(root: Path) -> None:
-    rows = diff_skills(root)
+def _print_skills_diff(root: Path, scope: str | None = None) -> None:
+    rows = diff_skills(root, scope=scope)
     if not rows:
         click.echo("  (no skills to compare)")
         return
@@ -162,9 +174,11 @@ def _print_agents_init(root: Path, overwrite: bool) -> None:
         click.secho(f"    skipped {name}: {reason}", fg="yellow")
 
 
-def _print_agents_generate(root: Path, strict: bool, on_drop: str = "ignore") -> None:
+def _print_agents_generate(
+    root: Path, strict: bool, on_drop: str = "ignore", scope: str | None = None
+) -> None:
     try:
-        result = generate_all_agents(root, strict=strict, on_drop=on_drop)
+        result = generate_all_agents(root, strict=strict, on_drop=on_drop, scope=scope)
     except StrictDropError as exc:
         click.secho(f"  [strict] {exc}", fg="red")
         raise click.Abort()
@@ -186,8 +200,8 @@ def _print_agents_generate(root: Path, strict: bool, on_drop: str = "ignore") ->
         )
 
 
-def _print_agents_diff(root: Path) -> None:
-    rows = diff_agents(root)
+def _print_agents_diff(root: Path, scope: str | None = None) -> None:
+    rows = diff_agents(root, scope=scope)
     if not rows:
         click.echo("  (no sub-agents to compare)")
         return
@@ -224,9 +238,11 @@ def _print_commands_init(root: Path, overwrite: bool) -> None:
         click.secho(f"    skipped {name}: {reason}", fg="yellow")
 
 
-def _print_commands_generate(root: Path, strict: bool, on_drop: str = "ignore") -> None:
+def _print_commands_generate(
+    root: Path, strict: bool, on_drop: str = "ignore", scope: str | None = None
+) -> None:
     try:
-        result = generate_all_commands(root, strict=strict, on_drop=on_drop)
+        result = generate_all_commands(root, strict=strict, on_drop=on_drop, scope=scope)
     except CommandStrictDropError as exc:
         click.secho(f"  [strict] {exc}", fg="red")
         raise click.Abort() from exc
@@ -248,8 +264,8 @@ def _print_commands_generate(root: Path, strict: bool, on_drop: str = "ignore") 
         )
 
 
-def _print_commands_diff(root: Path) -> None:
-    rows = diff_commands(root)
+def _print_commands_diff(root: Path, scope: str | None = None) -> None:
+    rows = diff_commands(root, scope=scope)
     if not rows:
         click.echo("  (no commands to compare)")
         return
@@ -272,8 +288,8 @@ def _print_settings_detect() -> None:
         click.echo(f"    {f.agent:17s}  {f.path}  {status}")
 
 
-def _print_settings_generate(root: Path) -> None:
-    results = generate_all_settings(root)
+def _print_settings_generate(root: Path, scope: str | None = None) -> None:
+    results = generate_all_settings(root, scope=scope)
     for name, r in results.items():
         if r.status == "ok":
             click.secho(f"  Settings: {name} → {r.target}", fg="green")
@@ -285,8 +301,8 @@ def _print_settings_generate(root: Path) -> None:
             click.secho(f"  {r.status} {name}: {r.reason}", fg="red")
 
 
-def _print_settings_diff(root: Path) -> None:
-    results = diff_settings(root)
+def _print_settings_diff(root: Path, scope: str | None = None) -> None:
+    results = diff_settings(root, scope=scope)
     if not results:
         click.echo("  (no settings to compare)")
         return
@@ -409,6 +425,7 @@ def init_cmd(include: tuple[str, ...], overwrite: bool) -> None:
 @context.command("generate")
 @click.option("--agent", "-a", default="all", help="Agent name or 'all'")
 @_INCLUDE_OPTION
+@_SCOPE_OPTION
 @click.option(
     "--strict",
     is_flag=True,
@@ -421,7 +438,9 @@ def init_cmd(include: tuple[str, ...], overwrite: bool) -> None:
     default="ignore",
     help="Severity when fields are dropped: ignore (default), warn, or error.",
 )
-def generate_cmd(agent: str, include: tuple[str, ...], strict: bool, on_drop: str) -> None:
+def generate_cmd(
+    agent: str, include: tuple[str, ...], scope: str | None, strict: bool, on_drop: str
+) -> None:
     """Generate agent files from .memtomem/context.md."""
     inc = _parse_include(include)
     root = _find_project_root()
@@ -456,26 +475,27 @@ def generate_cmd(agent: str, include: tuple[str, ...], strict: bool, on_drop: st
 
     if "skills" in inc:
         click.echo("")
-        _print_skills_generate(root)
+        _print_skills_generate(root, scope=scope)
 
     if "agents" in inc:
         click.echo("")
-        _print_agents_generate(root, strict=strict, on_drop=on_drop)
+        _print_agents_generate(root, strict=strict, on_drop=on_drop, scope=scope)
 
     if "commands" in inc:
         click.echo("")
-        _print_commands_generate(root, strict=strict, on_drop=on_drop)
+        _print_commands_generate(root, strict=strict, on_drop=on_drop, scope=scope)
 
     if "settings" in inc:
         click.echo("")
-        _print_settings_generate(root)
+        _print_settings_generate(root, scope=scope)
 
     click.secho("Done.", fg="green")
 
 
 @context.command("diff")
 @_INCLUDE_OPTION
-def diff_cmd(include: tuple[str, ...]) -> None:
+@_SCOPE_OPTION
+def diff_cmd(include: tuple[str, ...], scope: str | None) -> None:
     """Show differences between context.md and agent files."""
     inc = _parse_include(include)
     root = _find_project_root()
@@ -508,23 +528,24 @@ def diff_cmd(include: tuple[str, ...]) -> None:
 
     if "skills" in inc:
         click.echo("")
-        _print_skills_diff(root)
+        _print_skills_diff(root, scope=scope)
 
     if "agents" in inc:
         click.echo("")
-        _print_agents_diff(root)
+        _print_agents_diff(root, scope=scope)
 
     if "commands" in inc:
         click.echo("")
-        _print_commands_diff(root)
+        _print_commands_diff(root, scope=scope)
 
     if "settings" in inc:
         click.echo("")
-        _print_settings_diff(root)
+        _print_settings_diff(root, scope=scope)
 
 
 @context.command("sync")
 @_INCLUDE_OPTION
+@_SCOPE_OPTION
 @click.option(
     "--strict",
     is_flag=True,
@@ -537,7 +558,7 @@ def diff_cmd(include: tuple[str, ...]) -> None:
     default="ignore",
     help="Severity when fields are dropped: ignore (default), warn, or error.",
 )
-def sync_cmd(include: tuple[str, ...], strict: bool, on_drop: str) -> None:
+def sync_cmd(include: tuple[str, ...], scope: str | None, strict: bool, on_drop: str) -> None:
     """Sync context.md to all detected agent files."""
     inc = _parse_include(include)
     root = _find_project_root()
@@ -571,18 +592,18 @@ def sync_cmd(include: tuple[str, ...], strict: bool, on_drop: str) -> None:
 
     if "skills" in inc:
         click.echo("")
-        _print_skills_generate(root)
+        _print_skills_generate(root, scope=scope)
 
     if "agents" in inc:
         click.echo("")
-        _print_agents_generate(root, strict=strict, on_drop=on_drop)
+        _print_agents_generate(root, strict=strict, on_drop=on_drop, scope=scope)
 
     if "commands" in inc:
         click.echo("")
-        _print_commands_generate(root, strict=strict, on_drop=on_drop)
+        _print_commands_generate(root, strict=strict, on_drop=on_drop, scope=scope)
 
     if "settings" in inc:
         click.echo("")
-        _print_settings_generate(root)
+        _print_settings_generate(root, scope=scope)
 
     click.secho("Synced.", fg="green")

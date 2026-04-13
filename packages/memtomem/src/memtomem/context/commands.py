@@ -191,6 +191,8 @@ class CommandGenerator(Protocol):
     """Protocol for runtime-specific command generators."""
 
     name: str
+    scope: str  # "project" or "user"
+    default: bool  # included when scope filter is None (backward compat)
 
     def target_file(self, project_root: Path, command_name: str) -> Path:
         """Return the file that should hold the rendered command."""
@@ -213,6 +215,8 @@ def _register(gen: CommandGenerator) -> CommandGenerator:
 class ClaudeCommandsGenerator:
     name: str = "claude_commands"
     output_root: str = ".claude/commands"
+    scope: str = "project"
+    default: bool = True
 
     def target_file(self, project_root: Path, command_name: str) -> Path:
         return project_root / self.output_root / f"{command_name}.md"
@@ -225,6 +229,8 @@ class ClaudeCommandsGenerator:
 class GeminiCommandsGenerator:
     name: str = "gemini_commands"
     output_root: str = ".gemini/commands"
+    scope: str = "project"
+    default: bool = True
 
     def target_file(self, project_root: Path, command_name: str) -> Path:
         return project_root / self.output_root / f"{command_name}.toml"
@@ -259,11 +265,24 @@ class StrictDropError(ValueError):
     """Raised under ``strict=True`` / ``on_drop="error"`` when a conversion would drop fields."""
 
 
+def _select_generators(
+    generators: dict[str, CommandGenerator],
+    scope: str | None,
+) -> list[str]:
+    """Return generator names matching *scope*."""
+    if scope is None:
+        return [n for n, g in generators.items() if g.default]
+    if scope == "all":
+        return list(generators.keys())
+    return [n for n, g in generators.items() if g.scope == scope]
+
+
 def generate_all_commands(
     project_root: Path,
     runtimes: list[str] | None = None,
     strict: bool = False,
     on_drop: str = "ignore",
+    scope: str | None = None,
 ) -> CommandSyncResult:
     """Fan out every canonical command to the requested runtimes.
 
@@ -274,6 +293,7 @@ def generate_all_commands(
             ``"error"`` — raise :class:`StrictDropError` immediately.
         strict: Legacy alias for ``on_drop="error"``. If *both* are supplied,
             ``on_drop`` takes precedence unless it is still the default.
+        scope: ``"project"`` / ``"user"`` / ``"all"`` / ``None``.
     """
     effective_drop = on_drop if on_drop != "ignore" or not strict else "error"
 
@@ -287,7 +307,7 @@ def generate_all_commands(
             generated=[], dropped=[], skipped=[("<all>", "no canonical commands")]
         )
 
-    targets = runtimes if runtimes is not None else list(COMMAND_GENERATORS.keys())
+    targets = runtimes if runtimes is not None else _select_generators(COMMAND_GENERATORS, scope)
     for target in targets:
         gen = COMMAND_GENERATORS.get(target)
         if gen is None:
@@ -432,8 +452,11 @@ def _runtime_command_names(gen_name: str, project_root: Path) -> set[str]:
     return {p.stem for p in runtime_root.iterdir() if p.is_file() and p.suffix == suffix}
 
 
-def diff_commands(project_root: Path) -> list[tuple[str, str, str]]:
-    """Compare canonical commands against every registered runtime.
+def diff_commands(
+    project_root: Path,
+    scope: str | None = None,
+) -> list[tuple[str, str, str]]:
+    """Compare canonical commands against registered runtimes.
 
     Returns ``(runtime, command_name, status)`` where status is one of
     ``"in sync"``, ``"out of sync"``, ``"missing target"``,
@@ -442,8 +465,11 @@ def diff_commands(project_root: Path) -> list[tuple[str, str, str]]:
     results: list[tuple[str, str, str]] = []
     canonical_root = project_root / CANONICAL_COMMAND_ROOT
     canonical_names = {p.stem for p in list_canonical_commands(project_root)}
+    selected = _select_generators(COMMAND_GENERATORS, scope)
 
     for gen_name, gen in COMMAND_GENERATORS.items():
+        if gen_name not in selected:
+            continue
         runtime_names = _runtime_command_names(gen_name, project_root)
 
         for name in sorted(canonical_names | runtime_names):

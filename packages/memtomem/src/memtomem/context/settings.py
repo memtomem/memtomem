@@ -57,6 +57,8 @@ class SettingsGenerator(Protocol):
     """Protocol for runtime-specific settings generators."""
 
     name: str
+    scope: str  # "project" or "user"
+    default: bool  # included when scope filter is None (backward compat)
 
     def is_available(self) -> bool:
         """``True`` if the runtime is installed (e.g. ``~/.claude/`` exists).
@@ -113,6 +115,8 @@ class ClaudeSettingsGenerator:
     """Fan out canonical hooks to ``~/.claude/settings.json``."""
 
     name: str = "claude_settings"
+    scope: str = "user"
+    default: bool = True
 
     def is_available(self) -> bool:
         return (Path.home() / ".claude").is_dir()
@@ -215,13 +219,29 @@ def _write_json(path: Path, data: dict) -> None:
 # ── Fan-out: canonical → runtimes ───────────────────────────────────
 
 
+def _select_generators(
+    generators: dict[str, SettingsGenerator],
+    scope: str | None,
+) -> list[str]:
+    """Return generator names matching *scope*."""
+    if scope is None:
+        return [n for n, g in generators.items() if g.default]
+    if scope == "all":
+        return list(generators.keys())
+    return [n for n, g in generators.items() if g.scope == scope]
+
+
 def generate_all_settings(
     project_root: Path,
+    scope: str | None = None,
 ) -> dict[str, SettingsSyncResult]:
     """Fan out ``.memtomem/settings.json`` to registered runtimes."""
     results: dict[str, SettingsSyncResult] = {}
+    selected = _select_generators(SETTINGS_GENERATORS, scope)
 
     for name, gen in SETTINGS_GENERATORS.items():
+        if name not in selected:
+            continue
         if not gen.is_available():
             results[name] = SettingsSyncResult(
                 status="skipped",
@@ -286,11 +306,15 @@ def generate_all_settings(
 
 def diff_settings(
     project_root: Path,
+    scope: str | None = None,
 ) -> dict[str, SettingsSyncResult]:
     """Dry-run: compute what :func:`generate_all_settings` would do."""
     results: dict[str, SettingsSyncResult] = {}
+    selected = _select_generators(SETTINGS_GENERATORS, scope)
 
     for name, gen in SETTINGS_GENERATORS.items():
+        if name not in selected:
+            continue
         if not gen.is_available():
             results[name] = SettingsSyncResult(
                 status="skipped",
