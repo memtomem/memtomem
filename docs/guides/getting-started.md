@@ -401,6 +401,22 @@ See [LLM Providers](llm-providers.md) for full setup including local servers (LM
 
 ---
 
+## Uninstall
+
+To completely remove memtomem, see the
+[Uninstalling memtomem](user-guide.md#uninstalling-memtomem) section of the
+User Guide. The short version:
+
+```bash
+# 1. Remove MCP server from your editor config (see table below)
+# 2. Uninstall the package
+uv tool uninstall memtomem    # or: pipx uninstall memtomem / uv remove memtomem
+# 3. Delete data
+rm -rf ~/.memtomem
+```
+
+---
+
 ## Next steps
 
 - [Hands-On Tutorial](hands-on-tutorial.md) — follow-along with example files
