@@ -71,8 +71,12 @@ memtomem provides **74 MCP tools** organized into categories:
 | **CRUD** | `mem_add`, `mem_batch_add`, `mem_edit`, `mem_delete` | Create, update, remove memories |
 | **Indexing** | `mem_index` | Build the knowledge base from files |
 | **Namespace** | `mem_ns_list/set/get/assign/update/rename/delete` | Organize memories into groups |
-| **Maintenance** | `mem_dedup_scan/merge`, `mem_decay_scan/expire`, `mem_auto_tag`, `mem_cleanup_orphans` | Keep the index clean |
+| **Maintenance** | `mem_dedup_scan/merge`, `mem_decay_scan/expire`, `mem_auto_tag` | Keep the index clean |
 | **Data** | `mem_export`, `mem_import` | Backup and restore |
+| **Ask** | `mem_ask` | Natural-language Q&A over indexed memories (requires LLM) |
+| **Health** | `mem_watchdog`, `mem_cleanup_orphans` | System health checks and orphan cleanup |
+| **Relations** | `mem_link`, `mem_unlink`, `mem_related` | Cross-reference links between chunks |
+| **Working Memory** | `mem_scratch_set/get/promote` | Ephemeral key-value scratch space |
 | **Config** | `mem_stats`, `mem_status`, `mem_config`, `mem_embedding_reset`, `mem_reset` | Monitor and configure |
 
 ### `mem_do` action naming convention
@@ -1422,6 +1426,24 @@ mm context diff                        # check sync status
 mm context sync                        # sync context.md → agent files
 mm context generate --include=settings # merge hooks → ~/.claude/settings.json
 mm context diff --include=settings     # check hook sync status
+
+# Sessions & activity
+mm session start                       # start a tracked session
+mm session end                         # end session with auto-summary
+mm session list                        # list sessions
+mm session events <id>                 # show events for a session
+mm session wrap -- CMD                 # wrap a command with session lifecycle
+mm activity log                        # log agent activity event
+
+# Health
+mm watchdog status                     # show latest health check results
+mm watchdog run                        # run all health checks immediately
+mm watchdog history <check>            # show historical results for a check
+
+# Ingest (cross-tool memory import)
+mm ingest claude-memory --source PATH  # index Claude Code auto-memory
+mm ingest gemini-memory --source PATH  # index Gemini CLI memory
+mm ingest codex-memory --source PATH   # index Codex CLI memory
 
 # Utilities
 mm shell                               # interactive REPL

@@ -137,7 +137,29 @@ Restart Claude Desktop after configuration.
 
 ---
 
-## 5. Antigravity
+## 5. Gemini CLI
+
+Create or edit the `~/.gemini/settings.json` file:
+
+```json
+{
+  "mcpServers": {
+    "memtomem": {
+      "command": "uvx",
+      "args": ["--from", "memtomem", "memtomem-server"],
+      "env": {
+        "MEMTOMEM_INDEXING__MEMORY_DIRS": "[\"~/memories\"]"
+      }
+    }
+  }
+}
+```
+
+Restart Gemini CLI after configuration. See the [Gemini CLI integration guide](integrations/gemini-cli.md) for advanced setup.
+
+---
+
+## 6. Antigravity
 
 1. Click the `...` menu at the top of the Agent panel > **MCP Servers**
 2. Click **Manage MCP Servers** at the top of the MCP Store
@@ -163,7 +185,7 @@ Restart Claude Desktop after configuration.
 
 ---
 
-## 6. Verifying Your Connection
+## 7. Verifying Your Connection
 
 These verification methods work across all clients.
 
@@ -225,7 +247,7 @@ The STM proxy is distributed as a separate package: **[memtomem-stm](https://git
 
 ---
 
-## 7. Environment Variable Overrides
+## 8. Environment Variable Overrides
 
 You can override settings by adding environment variables to the `env` block.
 

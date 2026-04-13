@@ -288,8 +288,14 @@ mm context generate        # sync project rules to all editors
 mm session start           # start a tracked session
 mm session end             # end session with auto-summary
 mm session list            # list sessions
+mm session events <id>     # show events for a session
 mm activity log            # log agent activity event
 mm session wrap -- CMD     # wrap a command with session lifecycle
+mm watchdog status         # show latest health check results
+mm watchdog run            # run health checks immediately
+mm ingest claude-memory    # index Claude Code auto-memory
+mm ingest gemini-memory    # index Gemini CLI memory
+mm ingest codex-memory     # index Codex CLI memory
 mm shell                   # interactive REPL
 mm web                     # launch Web UI (http://localhost:8080)
 ```

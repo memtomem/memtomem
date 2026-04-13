@@ -1,6 +1,6 @@
 # Embedding Providers
 
-memtomem supports three embedding providers: **ONNX** (local, no server), **Ollama** (local server), and **OpenAI** (cloud). The provider, model, and vector dimension must always be set together — dimension is **not auto-detected**, and a mismatch will cause indexing errors.
+memtomem supports three embedding providers: **ONNX** (local, no server), **Ollama** (local server), and **OpenAI** (cloud). Embedding is optional — memtomem works with **BM25-only mode** (provider `none`, the default) for keyword search without any embedding setup. The provider, model, and vector dimension must always be set together — dimension is **not auto-detected**, and a mismatch will cause indexing errors.
 
 ## Supported Models
 
