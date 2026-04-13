@@ -363,9 +363,60 @@ class CodexAgentsGenerator:
         return _subagent_to_codex_toml(agent)
 
 
+@dataclass
+class ClaudeUserAgentsGenerator:
+    """User-scope: ``~/.claude/agents/<name>.md``."""
+
+    name: str = "claude_user_agents"
+    output_root: str = "~/.claude/agents"
+    scope: str = "user"
+    default: bool = False
+
+    def target_file(self, project_root: Path, agent_name: str) -> Path:
+        return Path.home() / ".claude/agents" / f"{agent_name}.md"
+
+    def render(self, agent: SubAgent) -> tuple[str, list[str]]:
+        return _subagent_to_claude_md(agent)
+
+
+@dataclass
+class GeminiUserAgentsGenerator:
+    """User-scope: ``~/.gemini/agents/<name>.md``."""
+
+    name: str = "gemini_user_agents"
+    output_root: str = "~/.gemini/agents"
+    scope: str = "user"
+    default: bool = False
+
+    def target_file(self, project_root: Path, agent_name: str) -> Path:
+        return Path.home() / ".gemini/agents" / f"{agent_name}.md"
+
+    def render(self, agent: SubAgent) -> tuple[str, list[str]]:
+        return _subagent_to_gemini_md(agent)
+
+
+@dataclass
+class CodexProjectAgentsGenerator:
+    """Project-scope: ``.codex/agents/<name>.toml``."""
+
+    name: str = "codex_project_agents"
+    output_root: str = ".codex/agents"
+    scope: str = "project"
+    default: bool = False
+
+    def target_file(self, project_root: Path, agent_name: str) -> Path:
+        return project_root / self.output_root / f"{agent_name}.toml"
+
+    def render(self, agent: SubAgent) -> tuple[str, list[str]]:
+        return _subagent_to_codex_toml(agent)
+
+
 _register(ClaudeAgentsGenerator())
 _register(GeminiAgentsGenerator())
 _register(CodexAgentsGenerator())
+_register(ClaudeUserAgentsGenerator())
+_register(GeminiUserAgentsGenerator())
+_register(CodexProjectAgentsGenerator())
 
 
 # ── Fan-out: canonical → runtimes ───────────────────────────────────
@@ -525,17 +576,13 @@ def extract_agents_to_canonical(
 
 
 def _runtime_agent_names(gen_name: str, project_root: Path) -> set[str]:
-    if gen_name == "codex_agents":
-        runtime_root = Path.home() / ".codex/agents"
-        suffix = ".toml"
-    elif gen_name == "claude_agents":
-        runtime_root = project_root / ".claude/agents"
-        suffix = ".md"
-    elif gen_name == "gemini_agents":
-        runtime_root = project_root / ".gemini/agents"
-        suffix = ".md"
-    else:
+    """Return agent stem names on disk for *gen_name* (data-driven)."""
+    gen = AGENT_GENERATORS.get(gen_name)
+    if gen is None:
         return set()
+    probe = gen.target_file(project_root, "__probe__")
+    runtime_root = probe.parent
+    suffix = probe.suffix
     if not runtime_root.is_dir():
         return set()
     return {p.stem for p in runtime_root.iterdir() if p.is_file() and p.suffix == suffix}

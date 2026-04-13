@@ -415,3 +415,65 @@ class TestRoundtrip:
         )
         assert reparsed.name == "helper"
         assert "Help with things." in reparsed.body
+
+
+class TestDualScopeGenerators:
+    """Tests for user-scope and project-scope generator variants."""
+
+    def test_registry_has_all_generators(self):
+        expected = {
+            "claude_agents", "gemini_agents", "codex_agents",
+            "claude_user_agents", "gemini_user_agents", "codex_project_agents",
+        }
+        assert expected == set(AGENT_GENERATORS.keys())
+
+    def test_scope_fields(self):
+        assert AGENT_GENERATORS["claude_agents"].scope == "project"
+        assert AGENT_GENERATORS["codex_agents"].scope == "user"
+        assert AGENT_GENERATORS["claude_user_agents"].scope == "user"
+        assert AGENT_GENERATORS["codex_project_agents"].scope == "project"
+
+    def test_default_fields(self):
+        assert AGENT_GENERATORS["claude_agents"].default is True
+        assert AGENT_GENERATORS["claude_user_agents"].default is False
+
+    def test_scope_none_backward_compat(self, tmp_path, codex_home):
+        _make_canonical_agent(tmp_path, "helper", SAMPLE_MINIMAL_AGENT)
+        result = generate_all_agents(tmp_path, scope=None)
+        names = {r for r, _ in result.generated}
+        assert names == {"claude_agents", "gemini_agents", "codex_agents"}
+
+    def test_scope_project_only(self, tmp_path, codex_home):
+        _make_canonical_agent(tmp_path, "helper", SAMPLE_MINIMAL_AGENT)
+        result = generate_all_agents(tmp_path, scope="project")
+        names = {r for r, _ in result.generated}
+        assert names == {"claude_agents", "gemini_agents", "codex_project_agents"}
+
+    def test_scope_user_only(self, tmp_path, codex_home):
+        _make_canonical_agent(tmp_path, "helper", SAMPLE_MINIMAL_AGENT)
+        result = generate_all_agents(tmp_path, scope="user")
+        names = {r for r, _ in result.generated}
+        assert names == {"codex_agents", "claude_user_agents", "gemini_user_agents"}
+
+    def test_scope_all(self, tmp_path, codex_home):
+        _make_canonical_agent(tmp_path, "helper", SAMPLE_MINIMAL_AGENT)
+        result = generate_all_agents(tmp_path, scope="all")
+        assert len(result.generated) == 6
+
+    def test_claude_user_writes_to_home(self, tmp_path, codex_home):
+        _make_canonical_agent(tmp_path, "helper", SAMPLE_MINIMAL_AGENT)
+        generate_all_agents(tmp_path, runtimes=["claude_user_agents"])
+        assert (codex_home / ".claude/agents/helper.md").is_file()
+        assert not (tmp_path / ".claude/agents/helper.md").exists()
+
+    def test_codex_project_writes_to_project(self, tmp_path, codex_home):
+        _make_canonical_agent(tmp_path, "helper", SAMPLE_MINIMAL_AGENT)
+        generate_all_agents(tmp_path, runtimes=["codex_project_agents"])
+        assert (tmp_path / ".codex/agents/helper.toml").is_file()
+
+    def test_diff_scope_project(self, tmp_path, codex_home):
+        _make_canonical_agent(tmp_path, "helper", SAMPLE_MINIMAL_AGENT)
+        rows = diff_agents(tmp_path, scope="project")
+        runtimes = {r for r, _, _ in rows}
+        assert "codex_agents" not in runtimes
+        assert "claude_agents" in runtimes

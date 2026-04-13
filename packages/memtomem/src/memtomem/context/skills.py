@@ -89,9 +89,51 @@ class CodexSkillsGenerator:
         return project_root / self.output_root / skill_name
 
 
+@dataclass
+class ClaudeUserSkillsGenerator:
+    """User-scope: ``~/.claude/skills/<name>/``."""
+
+    name: str = "claude_user_skills"
+    output_root: str = "~/.claude/skills"
+    scope: str = "user"
+    default: bool = False
+
+    def target_dir(self, project_root: Path, skill_name: str) -> Path:
+        return Path.home() / ".claude/skills" / skill_name
+
+
+@dataclass
+class GeminiUserSkillsGenerator:
+    """User-scope: ``~/.gemini/skills/<name>/``."""
+
+    name: str = "gemini_user_skills"
+    output_root: str = "~/.gemini/skills"
+    scope: str = "user"
+    default: bool = False
+
+    def target_dir(self, project_root: Path, skill_name: str) -> Path:
+        return Path.home() / ".gemini/skills" / skill_name
+
+
+@dataclass
+class CodexUserSkillsGenerator:
+    """User-scope: ``~/.agents/skills/<name>/``."""
+
+    name: str = "codex_user_skills"
+    output_root: str = "~/.agents/skills"
+    scope: str = "user"
+    default: bool = False
+
+    def target_dir(self, project_root: Path, skill_name: str) -> Path:
+        return Path.home() / ".agents/skills" / skill_name
+
+
 _register(ClaudeSkillsGenerator())
 _register(GeminiSkillsGenerator())
 _register(CodexSkillsGenerator())
+_register(ClaudeUserSkillsGenerator())
+_register(GeminiUserSkillsGenerator())
+_register(CodexUserSkillsGenerator())
 
 
 # ── Canonical helpers ─────────────────────────────────────────────────

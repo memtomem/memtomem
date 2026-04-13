@@ -239,8 +239,42 @@ class GeminiCommandsGenerator:
         return _subcommand_to_gemini_toml(cmd)
 
 
+@dataclass
+class ClaudeUserCommandsGenerator:
+    """User-scope: ``~/.claude/commands/<name>.md``."""
+
+    name: str = "claude_user_commands"
+    output_root: str = "~/.claude/commands"
+    scope: str = "user"
+    default: bool = False
+
+    def target_file(self, project_root: Path, command_name: str) -> Path:
+        return Path.home() / ".claude/commands" / f"{command_name}.md"
+
+    def render(self, cmd: SlashCommand) -> tuple[str, list[str]]:
+        return _subcommand_to_claude_md(cmd)
+
+
+@dataclass
+class GeminiUserCommandsGenerator:
+    """User-scope: ``~/.gemini/commands/<name>.toml``."""
+
+    name: str = "gemini_user_commands"
+    output_root: str = "~/.gemini/commands"
+    scope: str = "user"
+    default: bool = False
+
+    def target_file(self, project_root: Path, command_name: str) -> Path:
+        return Path.home() / ".gemini/commands" / f"{command_name}.toml"
+
+    def render(self, cmd: SlashCommand) -> tuple[str, list[str]]:
+        return _subcommand_to_gemini_toml(cmd)
+
+
 _register(ClaudeCommandsGenerator())
 _register(GeminiCommandsGenerator())
+_register(ClaudeUserCommandsGenerator())
+_register(GeminiUserCommandsGenerator())
 
 
 # ── Fan-out: canonical → runtimes ───────────────────────────────────
@@ -438,15 +472,13 @@ def extract_commands_to_canonical(
 
 
 def _runtime_command_names(gen_name: str, project_root: Path) -> set[str]:
-    """Return the set of command ``stem`` names present on disk for a runtime."""
-    if gen_name == "claude_commands":
-        runtime_root = project_root / ".claude/commands"
-        suffix = ".md"
-    elif gen_name == "gemini_commands":
-        runtime_root = project_root / ".gemini/commands"
-        suffix = ".toml"
-    else:
+    """Return command stem names on disk for *gen_name* (data-driven)."""
+    gen = COMMAND_GENERATORS.get(gen_name)
+    if gen is None:
         return set()
+    probe = gen.target_file(project_root, "__probe__")
+    runtime_root = probe.parent
+    suffix = probe.suffix
     if not runtime_root.is_dir():
         return set()
     return {p.stem for p in runtime_root.iterdir() if p.is_file() and p.suffix == suffix}

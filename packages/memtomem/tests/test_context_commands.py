@@ -367,3 +367,52 @@ class TestRoundtrip:
         assert "description: Simple prompt" in canonical
         assert "$ARGUMENTS" in canonical
         assert "{{args}}" not in canonical
+
+
+@pytest.fixture
+def fake_home(tmp_path, monkeypatch):
+    """Redirect HOME for user-scope command writes."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    return home
+
+
+class TestDualScopeCommands:
+    """Tests for user-scope command generator variants."""
+
+    def test_registry_has_all_generators(self):
+        expected = {
+            "claude_commands", "gemini_commands",
+            "claude_user_commands", "gemini_user_commands",
+        }
+        assert expected == set(COMMAND_GENERATORS.keys())
+
+    def test_scope_none_backward_compat(self, tmp_path):
+        _make_canonical_command(tmp_path, "hi", SAMPLE_MINIMAL_COMMAND)
+        result = generate_all_commands(tmp_path, scope=None)
+        names = {r for r, _ in result.generated}
+        assert names == {"claude_commands", "gemini_commands"}
+
+    def test_scope_user_only(self, tmp_path, fake_home):
+        _make_canonical_command(tmp_path, "hi", SAMPLE_MINIMAL_COMMAND)
+        result = generate_all_commands(tmp_path, scope="user")
+        names = {r for r, _ in result.generated}
+        assert names == {"claude_user_commands", "gemini_user_commands"}
+
+    def test_scope_all(self, tmp_path, fake_home):
+        _make_canonical_command(tmp_path, "hi", SAMPLE_MINIMAL_COMMAND)
+        result = generate_all_commands(tmp_path, scope="all")
+        assert len(result.generated) == 4
+
+    def test_claude_user_writes_to_home(self, tmp_path, fake_home):
+        _make_canonical_command(tmp_path, "hi", SAMPLE_MINIMAL_COMMAND)
+        generate_all_commands(tmp_path, runtimes=["claude_user_commands"])
+        assert (fake_home / ".claude/commands/hi.md").is_file()
+        assert not (tmp_path / ".claude/commands/hi.md").exists()
+
+    def test_gemini_user_writes_toml_to_home(self, tmp_path, fake_home):
+        _make_canonical_command(tmp_path, "hi", SAMPLE_MINIMAL_COMMAND)
+        generate_all_commands(tmp_path, runtimes=["gemini_user_commands"])
+        assert (fake_home / ".gemini/commands/hi.toml").is_file()

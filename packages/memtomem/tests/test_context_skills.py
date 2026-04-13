@@ -287,3 +287,47 @@ class TestRoundtrip:
         assert md == SAMPLE_SKILL_MD
         script = (tmp_path / CANONICAL_SKILL_ROOT / "code-review/scripts/run.sh").read_text()
         assert script == SAMPLE_SCRIPT
+
+
+@pytest.fixture
+def fake_home(tmp_path, monkeypatch):
+    """Redirect HOME for user-scope skill writes."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    return home
+
+
+class TestDualScopeSkills:
+    """Tests for user-scope skill generator variants."""
+
+    def test_registry_has_all_generators(self):
+        expected = {
+            "claude_skills", "gemini_skills", "codex_skills",
+            "claude_user_skills", "gemini_user_skills", "codex_user_skills",
+        }
+        assert expected == set(SKILL_GENERATORS.keys())
+
+    def test_scope_none_backward_compat(self, tmp_path):
+        _make_canonical_skill(tmp_path, "review")
+        result = generate_all_skills(tmp_path, scope=None)
+        names = {r for r, _ in result.generated}
+        assert names == {"claude_skills", "gemini_skills", "codex_skills"}
+
+    def test_scope_user_only(self, tmp_path, fake_home):
+        _make_canonical_skill(tmp_path, "review")
+        result = generate_all_skills(tmp_path, scope="user")
+        names = {r for r, _ in result.generated}
+        assert names == {"claude_user_skills", "gemini_user_skills", "codex_user_skills"}
+
+    def test_scope_all(self, tmp_path, fake_home):
+        _make_canonical_skill(tmp_path, "review")
+        result = generate_all_skills(tmp_path, scope="all")
+        assert len(result.generated) == 6
+
+    def test_claude_user_writes_to_home(self, tmp_path, fake_home):
+        _make_canonical_skill(tmp_path, "review")
+        generate_all_skills(tmp_path, runtimes=["claude_user_skills"])
+        assert (fake_home / ".claude/skills/review/SKILL.md").is_file()
+        assert not (tmp_path / ".claude/skills/review/SKILL.md").exists()
