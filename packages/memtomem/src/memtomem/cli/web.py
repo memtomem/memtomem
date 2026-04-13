@@ -30,11 +30,15 @@ def web(host: str, port: int) -> None:
     missing = _missing_web_deps()
     if missing is not None:
         click.secho(
-            f"Error: Web UI requires extra dependencies (missing: {missing}).",
+            f"Error: Web UI requires the [web] extra (missing: {missing}).",
             fg="red",
         )
-        click.echo(f"Install with: {_web_install_hint()}")
-        click.echo('Or, if using pip: pip install "memtomem[web]"')
+        click.echo(
+            "The base install does not include web dependencies."
+            " To add them, reinstall with the [web] extra:"
+        )
+        click.echo(f"  {_web_install_hint()}")
+        click.echo('  Or, if using pip: pip install "memtomem[web]"')
         raise SystemExit(1)
 
     import uvicorn

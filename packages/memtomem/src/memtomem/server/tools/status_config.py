@@ -254,3 +254,33 @@ async def mem_embedding_reset(
 
     # mode == "revert_to_stored"
     return _revert_to_stored(app)
+
+
+@mcp.tool()
+@tool_handler
+@register("advanced")
+async def mem_reset(
+    confirm: bool = False,
+    ctx: CtxType = None,  # type: ignore[assignment]
+) -> str:
+    """Delete ALL data (chunks, sessions, history, etc.) and reinitialize the DB.
+
+    Embedding configuration is preserved. A re-index is required afterwards.
+
+    Args:
+        confirm: Must be True to proceed. Prevents accidental data loss.
+    """
+    if not confirm:
+        app = _get_app(ctx)
+        stats = await app.storage.get_stats()
+        total = stats.get("total_chunks", 0)
+        return (
+            f"Database has {total} chunks. "
+            "This will permanently delete ALL data. "
+            "Pass confirm=True to proceed."
+        )
+
+    app = _get_app(ctx)
+    deleted = await app.storage.reset_all()
+    summary = ", ".join(f"{t}: {c}" for t, c in deleted.items() if c > 0)
+    return f"Database reset complete. Deleted: {summary or 'empty'}. Run mem_index to re-index."

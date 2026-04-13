@@ -309,3 +309,64 @@ async function runImport() {
 }
 
 
+// ---------------------------------------------------------------------------
+// Database Reset
+// ---------------------------------------------------------------------------
+
+async function loadResetInfo() {
+  try {
+    const stats = await api('GET', '/api/stats');
+    qs('reset-chunk-count').textContent = stats.total_chunks ?? '—';
+  } catch {
+    qs('reset-chunk-count').textContent = '?';
+  }
+}
+
+qs('reset-btn').addEventListener('click', async () => {
+  const ok = await showConfirm({
+    title: t('settings.reset.confirm_title'),
+    message: t('settings.reset.confirm_message'),
+    confirmText: t('settings.reset.confirm_btn'),
+  });
+  if (!ok) return;
+
+  const btn = qs('reset-btn');
+  btnLoading(btn, true);
+  hide(qs('reset-result'));
+  hide(qs('reset-msg'));
+
+  try {
+    const data = await api('POST', '/api/reset', undefined, { timeout: 120_000 });
+    // Show per-table results
+    const table = qs('reset-result-table');
+    table.innerHTML = '';
+    for (const [name, count] of Object.entries(data.deleted)) {
+      if (count > 0) {
+        const row = document.createElement('tr');
+        row.innerHTML = `<td>${escapeHtml(name)}</td><td>${count}</td>`;
+        table.appendChild(row);
+      }
+    }
+    show(qs('reset-result'));
+    showToast(data.message, 'success');
+
+    STATE.lastResults = [];
+    renderResults([]);
+    _markDataStale();
+    loadStats();
+    qs('reset-chunk-count').textContent = '0';
+  } catch (err) {
+    setMsg(qs('reset-msg'), 'Reset failed: ' + err.message, true);
+  } finally {
+    btnLoading(btn, false);
+  }
+});
+
+// Load chunk count when reset section becomes visible
+const _resetObserver = new MutationObserver(() => {
+  const section = document.getElementById('settings-reset');
+  if (section && !section.hidden && section.classList.contains('active')) {
+    loadResetInfo();
+  }
+});
+_resetObserver.observe(document.getElementById('settings-reset'), { attributes: true });

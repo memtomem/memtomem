@@ -21,6 +21,7 @@ def _register() -> None:
     from memtomem.cli.indexing import index
     from memtomem.cli.ingest_cmd import ingest
     from memtomem.cli.memory import add, recall
+    from memtomem.cli.reset_cmd import reset
     from memtomem.cli.search import search
     from memtomem.cli.init_cmd import init
     from memtomem.cli.session_cmd import activity, session
@@ -37,6 +38,7 @@ def _register() -> None:
     cli.add_command(config)
     cli.add_command(context)
     cli.add_command(embedding_reset)
+    cli.add_command(reset)
     cli.add_command(session)
     cli.add_command(activity)
     cli.add_command(watchdog)

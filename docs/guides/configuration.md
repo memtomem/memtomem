@@ -167,9 +167,9 @@ The `openai` provider works with any OpenAI-compatible endpoint (LM Studio, vLLM
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMTOMEM_TOOL_MODE` | `core` | Which MCP tools are exposed: `core` (9 tools), `standard` (~32 + `mem_do`), `full` (73) |
+| `MEMTOMEM_TOOL_MODE` | `core` | Which MCP tools are exposed: `core` (9 tools), `standard` (~32 + `mem_do`), `full` (74) |
 
-In `core` mode, use `mem_do(action="...", params={...})` to access any of the 64+ non-core actions. Fewer tools means less context usage for AI agents.
+In `core` mode, use `mem_do(action="...", params={...})` to access any of the 65+ non-core actions. Fewer tools means less context usage for AI agents.
 
 ## Querying and Modifying at Runtime
 

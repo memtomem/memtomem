@@ -46,6 +46,7 @@ from memtomem.server.tools.search import mem_search, mem_expand  # noqa: E402, F
 from memtomem.server.tools.status_config import (
     mem_config,
     mem_embedding_reset,
+    mem_reset,
     mem_stats,
     mem_status,
 )  # noqa: E402, F401

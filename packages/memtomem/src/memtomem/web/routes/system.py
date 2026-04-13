@@ -469,6 +469,19 @@ async def reset_embedding(
     )
 
 
+@router.post("/reset", dependencies=[Depends(_require_localhost)])
+async def reset_all(storage=Depends(get_storage)):
+    """Delete ALL data and reinitialize the database. Embedding config preserved."""
+    deleted = await storage.reset_all()
+    total = sum(deleted.values())
+    return {
+        "ok": True,
+        "deleted": deleted,
+        "total_deleted": total,
+        "message": f"Database reset complete. {total} rows deleted across {len([v for v in deleted.values() if v])} tables.",
+    }
+
+
 @router.post("/fts-rebuild", dependencies=[Depends(_require_localhost)])
 async def rebuild_fts(storage=Depends(get_storage)):
     """Rebuild the FTS5 full-text index using the current tokenizer."""

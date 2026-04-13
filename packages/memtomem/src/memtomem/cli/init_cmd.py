@@ -436,7 +436,8 @@ def _write_config_and_summary(state: dict) -> None:
     from memtomem.cli.web import _missing_web_deps, _web_install_hint
 
     if not source_install and not project_install and _missing_web_deps() is not None:
-        click.echo(f"    3. mm web  (first: {_web_install_hint()})")
+        click.echo("    3. mm web  (requires [web] extra — not included in base install)")
+        click.echo(f"       → {_web_install_hint()}")
     else:
         click.echo(f"    3. {run_prefix}mm web  (browse & manage your memories)")
     click.echo()

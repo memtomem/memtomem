@@ -544,7 +544,7 @@ Control how many tools are exposed to the AI agent:
 |------|-------|-----------------|
 | `core` (default) | 9 (8 core + `mem_do`) | Simple search + add workflows; `mem_do` routes to all other actions |
 | `standard` | ~30 + `mem_do` | Normal use with editing, tags, sessions, procedures |
-| `full` | 63 + `mem_do` | Full harness including consolidation, reflection, evaluation |
+| `full` | 64 + `mem_do` | Full harness including consolidation, reflection, evaluation |
 
 Web UI and CLI always have full access regardless of tool mode.
 

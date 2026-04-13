@@ -183,7 +183,7 @@ memtomem status:
   - Embedding model: ollama/nomic-embed-text
 ```
 
-### Available MCP Tools (73)
+### Available MCP Tools (74)
 
 | Category | Tools |
 |----------|-------|
@@ -191,7 +191,7 @@ memtomem status:
 | **Browse** | `mem_list` (indexed sources), `mem_read` (chunk by UUID) |
 | **CRUD** | `mem_add`, `mem_edit`, `mem_delete`, `mem_batch_add` |
 | **Indexing** | `mem_index` (file/directory indexing, optional `auto_tag`) |
-| **Meta** | `mem_do` (routes to 65 registered actions, supports aliases) |
+| **Meta** | `mem_do` (routes to 66 registered actions, supports aliases) |
 | **Ask** | `mem_ask` (natural-language Q&A over indexed memories) |
 | **Namespace** | `mem_ns_list`, `mem_ns_set`, `mem_ns_get`, `mem_ns_assign`, `mem_ns_update`, `mem_ns_rename`, `mem_ns_delete` |
 | **Tags** | `mem_tag_list`, `mem_tag_rename`, `mem_tag_delete`, `mem_auto_tag` |
@@ -213,11 +213,11 @@ memtomem status:
 | **Import** | `mem_import_notion`, `mem_import_obsidian` |
 | **Maintenance** | `mem_dedup_scan`, `mem_dedup_merge`, `mem_decay_scan`, `mem_decay_expire` |
 | **Data** | `mem_export`, `mem_import` |
-| **Config** | `mem_stats`, `mem_status`, `mem_config`, `mem_embedding_reset` |
+| **Config** | `mem_stats`, `mem_status`, `mem_config`, `mem_embedding_reset`, `mem_reset` |
 | **Evaluation** | `mem_eval` |
 | **Context** | `mem_context_detect`, `mem_context_generate`, `mem_context_diff`, `mem_context_sync` (each accepts `include="skills,agents,commands"` to fan out `.memtomem/{skills,agents,commands}/` to Claude/Gemini/Codex runtimes; `generate`/`sync` also accept `strict=True` to fail on sub-agent or command field drops) |
 
-> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 tools, default), `standard` (core + common packs + `mem_do`), or `full` (all tools individually) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
+> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 tools, default), `standard` (core + common packs + `mem_do`), or `full` (all 74 tools individually) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
 
 ### STM Proxy Tools (optional, separate package)
 

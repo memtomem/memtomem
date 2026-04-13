@@ -4,7 +4,7 @@ Markdown-first semantic memory for AI agents. This plugin adds hybrid BM25 + den
 
 ## Features
 
-- **73 MCP tools** — search, add, edit, delete, index, recall, browse, tags, cross-ref, fetch, namespace, dedup, decay, export/import (configurable via tool mode: core/standard/full)
+- **74 MCP tools** — search, add, edit, delete, index, recall, browse, tags, cross-ref, fetch, namespace, dedup, decay, export/import, reset (configurable via tool mode: core/standard/full)
 - **5 slash commands** — `/memtomem:search`, `/memtomem:remember`, `/memtomem:index`, `/memtomem:status`, `/memtomem:setup`
 - **Automation hooks** — auto-search on prompt submit, auto-reindex on file edits
 - **Memory curator agent** — deduplicate, tag, and clean up stale entries

@@ -130,6 +130,7 @@ def app():
     storage.upsert_chunks = AsyncMock()
     storage.stored_embedding_info = None
     storage.embedding_mismatch = None
+    storage.reset_all = AsyncMock(return_value={"chunks": 42, "chunks_fts": 42, "chunks_vec": 42})
 
     # tags
     storage.get_tag_counts = AsyncMock(return_value=[("python", 10), ("memory", 5), ("docs", 2)])
@@ -920,6 +921,26 @@ class TestImport:
             files={"file": ("data.csv", b"a,b,c", "text/csv")},
         )
         assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# POST /api/reset
+# ---------------------------------------------------------------------------
+
+
+class TestResetAll:
+    async def test_reset_returns_deleted_counts(self, client: AsyncClient):
+        resp = await client.post("/api/reset")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["deleted"]["chunks"] == 42
+        assert data["total_deleted"] > 0
+
+    async def test_reset_calls_storage_reset_all(self, app, client: AsyncClient):
+        resp = await client.post("/api/reset")
+        assert resp.status_code == 200
+        app.state.storage.reset_all.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

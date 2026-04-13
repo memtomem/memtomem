@@ -303,3 +303,45 @@ class TestStorageExtended:
         assert storage.embedding_mismatch is None
         assert storage._dim_mismatch is None
         assert storage._model_mismatch is None
+
+    # ---- reset_all -----------------------------------------------------------
+
+    async def test_reset_all_deletes_all_chunks(self, components):
+        storage = components.storage
+        chunks = [make_chunk(content=f"chunk {i}", source=f"f{i}.md") for i in range(5)]
+        await storage.upsert_chunks(chunks)
+        stats_before = await storage.get_stats()
+        assert stats_before["total_chunks"] == 5
+
+        deleted = await storage.reset_all()
+
+        stats_after = await storage.get_stats()
+        assert stats_after["total_chunks"] == 0
+        assert deleted["chunks"] == 5
+
+    async def test_reset_all_on_empty_db(self, components):
+        storage = components.storage
+        deleted = await storage.reset_all()
+        assert deleted["chunks"] == 0
+        stats = await storage.get_stats()
+        assert stats["total_chunks"] == 0
+
+    async def test_reset_all_preserves_embedding_meta(self, components):
+        storage = components.storage
+        await storage.upsert_chunks([make_chunk(content="test")])
+        await storage.reset_all()
+
+        # Embedding dimension should survive reset
+        stored_dim = storage._get_stored_dimension()
+        assert stored_dim is not None
+
+    async def test_reset_all_allows_reindex(self, components):
+        """After reset, new chunks can be indexed normally."""
+        storage = components.storage
+        await storage.upsert_chunks([make_chunk(content="old data")])
+        await storage.reset_all()
+
+        new_chunk = make_chunk(content="new data", source="new.md")
+        await storage.upsert_chunks([new_chunk])
+        stats = await storage.get_stats()
+        assert stats["total_chunks"] == 1

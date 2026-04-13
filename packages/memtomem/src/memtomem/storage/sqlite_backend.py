@@ -268,6 +268,66 @@ class SqliteBackend(
         """Backward-compatible wrapper around reset_embedding_meta()."""
         await self.reset_embedding_meta(dimension=new_dimension)
 
+    async def reset_all(self) -> dict[str, int]:
+        """Drop all user data and reinitialize an empty schema.
+
+        Deletes every row from chunks, FTS, vectors, and all auxiliary tables
+        (access_log, query_history, sessions, etc.).  The ``_memtomem_meta``
+        table is preserved so embedding config survives.
+
+        Returns a dict mapping table name → number of deleted rows.
+        """
+        db = self._get_db()
+        # Tables to clear, in dependency-safe order (children before parents).
+        tables = [
+            "session_events",
+            "sessions",
+            "working_memory",
+            "chunk_relations",
+            "chunk_entities",
+            "access_log",
+            "query_history",
+            "namespace_metadata",
+            "memory_policies",
+            "health_snapshots",
+        ]
+        deleted: dict[str, int] = {}
+        try:
+            for tbl in tables:
+                exists = db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tbl,)
+                ).fetchone()
+                if exists:
+                    count = db.execute(f"SELECT COUNT(*) FROM [{tbl}]").fetchone()[0]  # noqa: S608
+                    db.execute(f"DELETE FROM [{tbl}]")  # noqa: S608
+                    deleted[tbl] = count
+
+            # Core content tables
+            chunk_count = db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            db.execute("DELETE FROM chunks")
+            deleted["chunks"] = chunk_count
+
+            # FTS virtual table — DELETE removes all content rows
+            db.execute("DELETE FROM chunks_fts")
+            deleted["chunks_fts"] = chunk_count
+
+            # Vector virtual table — drop + recreate is safest for vec0
+            db.execute("DROP TABLE IF EXISTS chunks_vec")
+            db.execute("DROP TABLE IF EXISTS chunks_vec_info")
+            db.execute(f"""
+                CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec
+                USING vec0(embedding float[{self._dimension}])
+            """)
+            deleted["chunks_vec"] = chunk_count
+
+            if not self._in_transaction:
+                db.commit()
+        except Exception as exc:
+            if not self._in_transaction:
+                db.rollback()
+            raise StorageError(f"reset_all failed, transaction rolled back: {exc}") from exc
+        return deleted
+
     # ---- chunk CRUD ----------------------------------------------------------
 
     async def upsert_chunks(self, chunks: Sequence[Chunk]) -> int:

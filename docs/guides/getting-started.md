@@ -282,6 +282,7 @@ mm recall --since 2026-04  # recall by date
 mm config show             # view settings
 mm config set key value    # change a setting
 mm embedding-reset         # check/resolve embedding model mismatch
+mm reset                   # delete all data and reinitialize the DB
 mm context detect          # find agent config files
 mm context generate        # sync project rules to all editors
 mm session start           # start a tracked session

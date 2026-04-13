@@ -3,6 +3,19 @@
 All notable changes will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
+## [Unreleased]
+
+### Added
+- **Database reset**: `mm reset` CLI command, `mem_reset` MCP tool (advanced
+  category, routed via `mem_do`), `POST /api/reset` web endpoint, and
+  Settings > Maintenance > Reset tab in Web UI. Deletes all data (chunks,
+  sessions, history, relations, entities, policies, health snapshots) and
+  reinitializes the DB; embedding configuration is preserved.
+- **Improved web extra messaging**: `mm web` and `mm init` now explain that
+  the `[web]` extra is not included in the base install, reducing confusion
+  when `uv tool install memtomem` registers the `memtomem-web` entry point
+  but FastAPI is missing.
+
 ## [0.1.7] — 2026-04-12
 
 ### Added

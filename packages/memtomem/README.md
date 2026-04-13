@@ -71,7 +71,7 @@ Or add to `.mcp.json` for Cursor / Windsurf / Claude Desktop:
 - **🧹 Maintenance** — near-duplicate detection with merge, time-based score decay, TTL expiration, auto-tagging
 - **🔄 Export / import** — JSON bundle backup and restore with re-embedding
 - **🌐 Web UI** — full-featured SPA dashboard for search, sources, indexing, tags, sessions, health monitoring
-- **🛠️ 73 MCP tools** — full feature surface as MCP tools, with `mem_do` meta-tool routing 65 actions in `core` mode (default) for minimal context usage
+- **🛠️ 74 MCP tools** — full feature surface as MCP tools, with `mem_do` meta-tool routing 66 actions in `core` mode (default) for minimal context usage
 
 ## Documentation
 

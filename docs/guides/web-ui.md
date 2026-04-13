@@ -57,6 +57,7 @@ The settings hub is organized into groups:
 ### Maintenance
 - **Dedup**: Scan for duplicate chunks by similarity threshold, merge candidates
 - **Decay**: Scan for stale chunks by age, preview and execute expiry
+- **Reset**: Delete all data (chunks, sessions, history, etc.) and reinitialize the DB. Embedding config is preserved. Requires double confirmation.
 
 ### Data Transfer
 - **Export / Import**: Download chunks as JSON bundle, upload and re-import

@@ -543,6 +543,7 @@
         <div class="settings-nav-group" data-i18n="settings.nav.maintenance">Maintenance</div>
         <button class="settings-nav-btn" data-section="dedup" data-i18n="settings.nav.dedup">Dedup</button>
         <button class="settings-nav-btn" data-section="decay" data-i18n="settings.nav.decay">Decay</button>
+        <button class="settings-nav-btn" data-section="reset" data-i18n="settings.nav.reset">Reset</button>
         <div class="settings-nav-group" data-i18n="settings.nav.data_transfer">Data Transfer</div>
         <button class="settings-nav-btn" data-section="export" data-i18n="settings.nav.export_import">Export / Import</button>
         <div class="settings-nav-group" data-i18n="settings.nav.harness">Harness</div>
@@ -708,6 +709,25 @@
             </table>
           </div>
           <div id="decay-msg" class="status-msg" hidden></div>
+        </div>
+
+        <!-- Reset section -->
+        <div class="settings-section" id="settings-reset">
+          <div class="reset-panel">
+            <div class="reset-warning">
+              <strong data-i18n="settings.reset.warning_title">Danger Zone</strong>
+              <p data-i18n="settings.reset.warning_text">This will permanently delete ALL data (chunks, sessions, history, relations, entities, etc.) and reinitialize the database. Embedding configuration is preserved.</p>
+            </div>
+            <div class="reset-info" id="reset-info">
+              <span data-i18n="settings.reset.chunk_count_label">Current chunks:</span>
+              <strong id="reset-chunk-count">—</strong>
+            </div>
+            <button id="reset-btn" class="btn-danger" data-i18n="settings.reset.reset_btn">Reset Database</button>
+            <div id="reset-result" hidden>
+              <table id="reset-result-table"></table>
+            </div>
+            <div id="reset-msg" class="status-msg" hidden></div>
+          </div>
         </div>
 
         <!-- Harness: Sessions -->

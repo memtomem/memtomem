@@ -182,6 +182,7 @@
   "settings.nav.maintenance": "Maintenance",
   "settings.nav.dedup": "Dedup",
   "settings.nav.decay": "Decay",
+  "settings.nav.reset": "Reset",
   "settings.nav.data_transfer": "Data Transfer",
   "settings.nav.export_import": "Export / Import",
   "settings.nav.harness": "Harness",
@@ -271,6 +272,14 @@
   "settings.decay.result.total": "Total chunks",
   "settings.decay.result.expired": "Expired candidates",
   "settings.decay.result.deleted": "Deleted chunks",
+
+  "settings.reset.warning_title": "Danger Zone",
+  "settings.reset.warning_text": "This will permanently delete ALL data (chunks, sessions, history, relations, entities, etc.) and reinitialize the database. Embedding configuration is preserved.",
+  "settings.reset.chunk_count_label": "Current chunks:",
+  "settings.reset.reset_btn": "Reset Database",
+  "settings.reset.confirm_title": "Reset Database",
+  "settings.reset.confirm_message": "This will permanently delete ALL data. This action cannot be undone. Are you sure?",
+  "settings.reset.confirm_btn": "Reset",
 
   "settings.sessions.title": "Episodic Sessions",
   "settings.sessions.refresh": "Refresh",

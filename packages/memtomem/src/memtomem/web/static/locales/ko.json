@@ -182,6 +182,7 @@
   "settings.nav.maintenance": "유지보수",
   "settings.nav.dedup": "중복 제거",
   "settings.nav.decay": "만료",
+  "settings.nav.reset": "초기화",
   "settings.nav.data_transfer": "데이터 전송",
   "settings.nav.export_import": "내보내기 / 가져오기",
   "settings.nav.harness": "하네스",
@@ -271,6 +272,14 @@
   "settings.decay.result.total": "전체 청크",
   "settings.decay.result.expired": "만료 후보",
   "settings.decay.result.deleted": "삭제된 청크",
+
+  "settings.reset.warning_title": "위험 구역",
+  "settings.reset.warning_text": "이 작업은 모든 데이터(청크, 세션, 이력, 관계, 엔티티 등)를 영구 삭제하고 데이터베이스를 초기화합니다. 임베딩 설정은 보존됩니다.",
+  "settings.reset.chunk_count_label": "현재 청크 수:",
+  "settings.reset.reset_btn": "데이터베이스 초기화",
+  "settings.reset.confirm_title": "데이터베이스 초기화",
+  "settings.reset.confirm_message": "모든 데이터가 영구적으로 삭제됩니다. 이 작업은 되돌릴 수 없습니다. 계속하시겠습니까?",
+  "settings.reset.confirm_btn": "초기화",
 
   "settings.sessions.title": "에피소딕 세션",
   "settings.sessions.refresh": "새로고침",

@@ -60,9 +60,9 @@ In `~/.openclaw/openclaw.json`:
 }
 ```
 
-## Tools (73)
+## Tools (74)
 
-All 73 memtomem MCP tools are registered as OpenClaw agent tools:
+All 74 memtomem MCP tools are registered as OpenClaw agent tools:
 
 | Category | Tools |
 |----------|-------|
@@ -70,7 +70,7 @@ All 73 memtomem MCP tools are registered as OpenClaw agent tools:
 | **Browse** | `mem_list`, `mem_read` |
 | **CRUD** | `mem_add`, `mem_edit`, `mem_delete`, `mem_batch_add` |
 | **Indexing** | `mem_index` |
-| **Meta** | `mem_do` (routes to 65 registered actions) |
+| **Meta** | `mem_do` (routes to 66 registered actions) |
 | **Ask** | `mem_ask` |
 | **Namespace** | `mem_ns_list`, `mem_ns_set`, `mem_ns_get`, `mem_ns_assign`, `mem_ns_update`, `mem_ns_rename`, `mem_ns_delete` |
 | **Tags** | `mem_tag_list`, `mem_tag_rename`, `mem_tag_delete`, `mem_auto_tag` |
@@ -94,11 +94,11 @@ All 73 memtomem MCP tools are registered as OpenClaw agent tools:
 | **Import** | `mem_import_notion`, `mem_import_obsidian` |
 | **Maintenance** | `mem_dedup_scan`, `mem_dedup_merge`, `mem_decay_scan`, `mem_decay_expire` |
 | **Data** | `mem_export`, `mem_import` |
-| **Config** | `mem_stats`, `mem_status`, `mem_config`, `mem_embedding_reset` |
+| **Config** | `mem_stats`, `mem_status`, `mem_config`, `mem_embedding_reset`, `mem_reset` |
 
 ## How It Works
 
-1. **Plugin registration**: All 73 tools are registered with OpenClaw using their full JSON Schema definitions
+1. **Plugin registration**: All 74 tools are registered with OpenClaw using their full JSON Schema definitions
 2. **Lazy connection**: The MCP server subprocess is started on the first tool call, not at gateway startup
 3. **Stdio bridge**: Tool calls are forwarded to the MCP server over stdin/stdout using the MCP protocol
 4. **Graceful shutdown**: A background service closes the bridge when the gateway stops
