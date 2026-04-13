@@ -1776,6 +1776,34 @@ select:focus-visible {
 .ns-edit-row input[type="color"] { width: 32px; height: 28px; padding: 2px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); cursor: pointer; }
 .ns-edit-actions { display: flex; gap: 6px; justify-content: flex-end; }
 
+/* ── Namespace Groups (collapsible prefix groups) ── */
+.ns-group { margin-bottom: 4px; }
+.ns-group-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 16px; cursor: pointer; user-select: none;
+  background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  transition: border-color 0.15s;
+}
+.ns-group-header:hover { border-color: var(--accent); }
+.ns-group-chevron {
+  font-size: 0.6rem; color: var(--muted);
+  transition: transform 0.15s; flex-shrink: 0;
+}
+.ns-group.collapsed .ns-group-chevron { transform: rotate(-90deg); }
+.ns-group.collapsed .ns-group-items { display: none; }
+.ns-group-name {
+  font-family: var(--mono); font-size: 0.88rem;
+  font-weight: 600; color: var(--text);
+}
+.ns-group-chunks {
+  font-size: 0.78rem; color: var(--muted); margin-left: auto; flex-shrink: 0;
+}
+.ns-group-items {
+  padding-left: 20px; display: flex;
+  flex-direction: column; gap: 6px; margin-top: 6px;
+}
+
 /* ── Chunk Card Actions (Sources tab) ── */
 .chunk-card-actions { display: flex; gap: 4px; margin-left: auto; flex-shrink: 0; }
 .chunk-card-actions button { font-size: 0.68rem; padding: 2px 7px; }

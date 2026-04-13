@@ -255,6 +255,7 @@
 
   "settings.ns.title": "Namespaces",
   "settings.ns.refresh": "Refresh",
+  "settings.ns.group_chunks": "{count} chunks",
 
   "settings.dedup.threshold_label": "Threshold",
   "settings.dedup.threshold_help": "Similarity above which chunks are considered duplicates. Default 0.92 catches near-identical content.",

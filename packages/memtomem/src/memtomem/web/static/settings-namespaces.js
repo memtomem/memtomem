@@ -5,6 +5,54 @@
  */
 
 // ---------------------------------------------------------------------------
+// Namespace grouping helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Group namespaces by their colon-delimited prefix.
+ *
+ * Splits on the **first** colon only — e.g. `claude-memory:slug-a` yields
+ * prefix `claude-memory`.  If the namespace format migrates to 3-depth
+ * (`claude:<project>:memory`), the first-colon split still produces a
+ * reasonable top-level group (`claude`).  Revisit if deeper grouping is
+ * needed.
+ *
+ * Single-member prefix groups are demoted to ungrouped to avoid a
+ * collapsed group of one.
+ */
+function _groupNamespaces(namespaces) {
+  const prefixMap = new Map();
+  const ungrouped = [];
+
+  namespaces.forEach(ns => {
+    const colonIdx = ns.namespace.indexOf(':');
+    if (colonIdx > 0) {
+      const prefix = ns.namespace.slice(0, colonIdx);
+      if (!prefixMap.has(prefix)) prefixMap.set(prefix, []);
+      prefixMap.get(prefix).push(ns);
+    } else {
+      ungrouped.push(ns);
+    }
+  });
+
+  const groups = [];
+  for (const [prefix, members] of prefixMap) {
+    if (members.length === 1) {
+      ungrouped.push(members[0]);
+    } else {
+      const totalChunks = members.reduce((s, m) => s + m.chunk_count, 0);
+      members.sort((a, b) => b.chunk_count - a.chunk_count);
+      groups.push({ prefix, members, totalChunks });
+    }
+  }
+
+  // Primary: totalChunks desc, secondary: prefix alphabetical
+  groups.sort((a, b) => b.totalChunks - a.totalChunks || a.prefix.localeCompare(b.prefix));
+  ungrouped.sort((a, b) => b.chunk_count - a.chunk_count);
+  return { groups, ungrouped };
+}
+
+// ---------------------------------------------------------------------------
 // Namespace filter dropdowns + Namespaces tab
 // ---------------------------------------------------------------------------
 
@@ -12,13 +60,26 @@ async function loadNamespaceDropdowns() {
   try {
     const data = await api('GET', '/api/namespaces');
     const namespaces = data.namespaces || [];
+    const { groups, ungrouped } = _groupNamespaces(namespaces);
     ['ns-filter', 'tl-namespace', 'exp-namespace'].forEach(id => {
       const sel = document.getElementById(id);
       if (!sel) return;
       const current = sel.value;
-      // Keep first option (All)
-      while (sel.options.length > 1) sel.remove(1);
-      namespaces.forEach(ns => {
+      // Keep first option (All Namespaces), remove rest + optgroups
+      while (sel.children.length > 1) sel.removeChild(sel.lastChild);
+      groups.forEach(g => {
+        const optgroup = document.createElement('optgroup');
+        optgroup.label = `${g.prefix} (${g.totalChunks} chunks)`;
+        g.members.forEach(ns => {
+          const opt = document.createElement('option');
+          opt.value = ns.namespace;
+          const suffix = ns.namespace.slice(g.prefix.length + 1);
+          opt.textContent = `${suffix} (${ns.chunk_count})`;
+          optgroup.appendChild(opt);
+        });
+        sel.appendChild(optgroup);
+      });
+      ungrouped.forEach(ns => {
         const opt = document.createElement('option');
         opt.value = ns.namespace;
         opt.textContent = `${ns.namespace} (${ns.chunk_count})`;
@@ -38,6 +99,71 @@ loadNamespaceDropdowns();
 // Namespaces tab
 qs('ns-refresh-btn').addEventListener('click', loadNamespacesTab);
 
+function _buildNsCard(ns, defaultNs) {
+  const card = document.createElement('div');
+  card.className = 'ns-card';
+
+  const dot = document.createElement('span');
+  dot.className = 'ns-color-dot';
+  dot.style.backgroundColor = ns.color || 'var(--muted)';
+
+  const name = document.createElement('span');
+  name.className = 'ns-name';
+  name.textContent = ns.namespace;
+  if (ns.namespace === defaultNs) {
+    const badge = document.createElement('span');
+    badge.className = 'badge badge-blue';
+    badge.style.marginLeft = '6px';
+    badge.style.fontSize = '0.7rem';
+    badge.textContent = 'Default';
+    name.appendChild(badge);
+  }
+
+  const desc = document.createElement('span');
+  desc.className = 'ns-desc';
+  desc.textContent = ns.description || '';
+
+  const count = document.createElement('span');
+  count.className = 'ns-count';
+  count.textContent = `${ns.chunk_count} chunks`;
+
+  const actions = document.createElement('span');
+  actions.className = 'ns-actions';
+
+  const editBtn = document.createElement('button');
+  editBtn.className = 'btn-ghost btn-xs';
+  editBtn.textContent = 'Edit';
+  editBtn.addEventListener('click', () => editNamespaceMeta(ns, card));
+
+  const renameBtn = document.createElement('button');
+  renameBtn.className = 'btn-ghost btn-xs';
+  renameBtn.textContent = 'Rename';
+  renameBtn.addEventListener('click', () => renameNamespace(ns.namespace));
+
+  const delBtn = document.createElement('button');
+  delBtn.className = 'btn-danger btn-xs';
+  delBtn.textContent = 'Delete';
+  delBtn.addEventListener('click', () => deleteNamespace(ns.namespace));
+
+  const sourcesBtn = document.createElement('button');
+  sourcesBtn.className = 'btn-ghost btn-xs';
+  sourcesBtn.textContent = 'Sources';
+  sourcesBtn.title = `View sources in namespace '${ns.namespace}'`;
+  sourcesBtn.addEventListener('click', () => navigateToSourcesByNs(ns.namespace));
+
+  actions.appendChild(sourcesBtn);
+  actions.appendChild(editBtn);
+  actions.appendChild(renameBtn);
+  actions.appendChild(delBtn);
+
+  card.appendChild(dot);
+  card.appendChild(name);
+  card.appendChild(desc);
+  card.appendChild(count);
+  card.appendChild(actions);
+  return card;
+}
+
 async function loadNamespacesTab() {
   const list = qs('ns-list');
   list.innerHTML = '<div class="loading-panel"><div class="spinner-panel"></div></div>';
@@ -51,70 +177,37 @@ async function loadNamespacesTab() {
     }
     list.innerHTML = '';
     const defaultNs = STATE.serverConfig?.namespace?.default_namespace || 'default';
-    namespaces.forEach(ns => {
-      const card = document.createElement('div');
-      card.className = 'ns-card';
+    const { groups, ungrouped } = _groupNamespaces(namespaces);
 
-      const dot = document.createElement('span');
-      dot.className = 'ns-color-dot';
-      dot.style.backgroundColor = ns.color || 'var(--muted)';
+    // Render collapsible groups
+    groups.forEach(g => {
+      const group = document.createElement('div');
+      group.className = 'ns-group';
 
-      const name = document.createElement('span');
-      name.className = 'ns-name';
-      name.textContent = ns.namespace;
-      if (ns.namespace === defaultNs) {
-        const badge = document.createElement('span');
-        badge.className = 'badge badge-blue';
-        badge.style.marginLeft = '6px';
-        badge.style.fontSize = '0.7rem';
-        badge.textContent = 'Default';
-        name.appendChild(badge);
-      }
+      const header = document.createElement('div');
+      header.className = 'ns-group-header';
+      header.setAttribute('role', 'button');
+      header.setAttribute('aria-expanded', 'true');
+      header.innerHTML = `<span class="ns-group-chevron">&#9660;</span>`
+        + `<span class="ns-group-name">${escapeHtml(g.prefix)}</span>`
+        + `<span class="badge badge-blue">${g.members.length}</span>`
+        + `<span class="ns-group-chunks">${t('settings.ns.group_chunks', { count: g.totalChunks })}</span>`;
+      header.addEventListener('click', () => {
+        group.classList.toggle('collapsed');
+        header.setAttribute('aria-expanded', String(!group.classList.contains('collapsed')));
+      });
 
-      const desc = document.createElement('span');
-      desc.className = 'ns-desc';
-      desc.textContent = ns.description || '';
+      const items = document.createElement('div');
+      items.className = 'ns-group-items';
+      g.members.forEach(ns => items.appendChild(_buildNsCard(ns, defaultNs)));
 
-      const count = document.createElement('span');
-      count.className = 'ns-count';
-      count.textContent = `${ns.chunk_count} chunks`;
-
-      const actions = document.createElement('span');
-      actions.className = 'ns-actions';
-
-      const editBtn = document.createElement('button');
-      editBtn.className = 'btn-ghost btn-xs';
-      editBtn.textContent = 'Edit';
-      editBtn.addEventListener('click', () => editNamespaceMeta(ns, card));
-
-      const renameBtn = document.createElement('button');
-      renameBtn.className = 'btn-ghost btn-xs';
-      renameBtn.textContent = 'Rename';
-      renameBtn.addEventListener('click', () => renameNamespace(ns.namespace));
-
-      const delBtn = document.createElement('button');
-      delBtn.className = 'btn-danger btn-xs';
-      delBtn.textContent = 'Delete';
-      delBtn.addEventListener('click', () => deleteNamespace(ns.namespace));
-
-      const sourcesBtn = document.createElement('button');
-      sourcesBtn.className = 'btn-ghost btn-xs';
-      sourcesBtn.textContent = 'Sources';
-      sourcesBtn.title = `View sources in namespace '${ns.namespace}'`;
-      sourcesBtn.addEventListener('click', () => navigateToSourcesByNs(ns.namespace));
-
-      actions.appendChild(sourcesBtn);
-      actions.appendChild(editBtn);
-      actions.appendChild(renameBtn);
-      actions.appendChild(delBtn);
-
-      card.appendChild(dot);
-      card.appendChild(name);
-      card.appendChild(desc);
-      card.appendChild(count);
-      card.appendChild(actions);
-      list.appendChild(card);
+      group.appendChild(header);
+      group.appendChild(items);
+      list.appendChild(group);
     });
+
+    // Render ungrouped cards
+    ungrouped.forEach(ns => list.appendChild(_buildNsCard(ns, defaultNs)));
   } catch (err) {
     list.innerHTML = `<div class="status-msg err">${escapeHtml(err.message)}</div>`;
   }

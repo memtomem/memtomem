@@ -6,6 +6,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 ## [Unreleased]
 
 ### Added
+- **Auto-discover AI tool memory directories**: `memory_dirs` now
+  automatically includes `~/.claude/projects`, `~/.gemini`, and
+  `~/.codex/memories` when they exist, so `mem_index` and the file
+  watcher accept paths under these directories without manual
+  `MEMORY_DIRS` configuration. Auto-discovered directories are appended
+  after `config.json` overrides via `ensure_auto_discovered_dirs()`.
 - **Database reset**: `mm reset` CLI command, `mem_reset` MCP tool (advanced
   category, routed via `mem_do`), `POST /api/reset` web endpoint, and
   Settings > Maintenance > Reset tab in Web UI. Deletes all data (chunks,
