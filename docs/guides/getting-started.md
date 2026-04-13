@@ -106,7 +106,7 @@ Verify it works:
 ```bash
 uv run mm -h               # CLI help
 uv run memtomem-server     # MCP server starts (Ctrl+C to stop)
-uv run pytest              # 897 tests pass
+uv run pytest              # tests pass
 ```
 
 ---
@@ -120,7 +120,7 @@ mm init         # PyPI global install
 uv run mm init  # Project or source install
 ```
 
-The wizard walks you through 7 steps. Type `b` to go back, `q` to quit at any step.
+The wizard walks you through 8 steps. Type `b` to go back, `q` to quit at any step.
 
 #### Non-interactive mode (CI / automation)
 

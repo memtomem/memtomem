@@ -27,7 +27,7 @@ For interactive setup, run `mm init` instead of editing env vars by hand.
 | `MEMTOMEM_EMBEDDING__PROVIDER` | `none` | `none` (BM25 only), `onnx` (local), `ollama` (local server), or `openai` (cloud) |
 | `MEMTOMEM_EMBEDDING__MODEL` | _(empty)_ | Embedding model name (depends on provider) |
 | `MEMTOMEM_EMBEDDING__DIMENSION` | `0` | Vector dimension (must match the model; 0 = BM25 only) |
-| `MEMTOMEM_EMBEDDING__BASE_URL` | `http://localhost:11434` | API endpoint URL |
+| `MEMTOMEM_EMBEDDING__BASE_URL` | _(empty)_ | API endpoint URL (Ollama defaults to `http://localhost:11434` when unset) |
 | `MEMTOMEM_EMBEDDING__API_KEY` | _(empty)_ | API key (required for OpenAI) |
 | `MEMTOMEM_EMBEDDING__BATCH_SIZE` | `64` | Texts per embedding API call |
 | `MEMTOMEM_EMBEDDING__MAX_CONCURRENT_BATCHES` | `4` | Max parallel embedding requests |
@@ -188,7 +188,7 @@ The `openai` provider works with any OpenAI-compatible endpoint (LM Studio, vLLM
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMTOMEM_TOOL_MODE` | `core` | Which MCP tools are exposed: `core` (9 tools), `standard` (~32 + `mem_do`), `full` (74) |
+| `MEMTOMEM_TOOL_MODE` | `core` | Which MCP tools are exposed: `core` (9 tools), `standard` (~32 incl. `mem_do`), `full` (74) |
 
 In `core` mode, use `mem_do(action="...", params={...})` to access any of the 65+ non-core actions. Fewer tools means less context usage for AI agents.
 

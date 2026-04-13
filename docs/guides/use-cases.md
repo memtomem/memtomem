@@ -185,7 +185,7 @@ Restart the Agent session, then ask: "Call mem_stats to check the memtomem statu
 
 | Hook Event | Description | CLI Command |
 |------------|-------------|-------------|
-| `UserPromptSubmit` | Auto-search related memories on prompt submission | `mm search "$PROMPT" --top-k 3` |
+| `UserPromptSubmit` | Auto-search related memories on prompt submission | `mm search "$PROMPT" --top-k 3 --format context` |
 | `PostToolUse` (Write) | Auto-reindex after new file creation | `mm index "$FILE_PATH"` |
 
 **Configuration**: `~/.claude/settings.json`
@@ -197,7 +197,7 @@ Restart the Agent session, then ask: "Call mem_stats to check the memtomem statu
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "P=$(printf '%s' \"${prompt}\" | head -c 500); [ ${#P} -gt 20 ] && mm search \"$P\" --top-k 3 2>>/tmp/mm-hook.log || true",
+        "command": "P=$(printf '%s' \"${prompt}\" | head -c 500); [ ${#P} -gt 20 ] && mm search \"$P\" --top-k 3 --format context 2>>/tmp/mm-hook.log || true",
         "timeout": 5000
       }]
     }],

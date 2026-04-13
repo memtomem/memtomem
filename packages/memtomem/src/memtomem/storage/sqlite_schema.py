@@ -166,10 +166,11 @@ def create_tables(
         if embedding_model:
             meta.set_meta("embedding_model", embedding_model)
 
-    db.execute(f"""
-        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec
-        USING vec0(embedding float[{dimension}])
-    """)
+    if dimension > 0:
+        db.execute(f"""
+            CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec
+            USING vec0(embedding float[{dimension}])
+        """)
 
     db.execute("""
         CREATE INDEX IF NOT EXISTS idx_chunks_source

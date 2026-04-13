@@ -191,7 +191,7 @@ memtomem status:
 | **Browse** | `mem_list` (indexed sources), `mem_read` (chunk by UUID) |
 | **CRUD** | `mem_add`, `mem_edit`, `mem_delete`, `mem_batch_add` |
 | **Indexing** | `mem_index` (file/directory indexing, optional `auto_tag`) |
-| **Meta** | `mem_do` (routes to 66 registered actions, supports aliases) |
+| **Meta** | `mem_do` (routes to all registered actions, supports aliases) |
 | **Ask** | `mem_ask` (natural-language Q&A over indexed memories) |
 | **Namespace** | `mem_ns_list`, `mem_ns_set`, `mem_ns_get`, `mem_ns_assign`, `mem_ns_update`, `mem_ns_rename`, `mem_ns_delete` |
 | **Tags** | `mem_tag_list`, `mem_tag_rename`, `mem_tag_delete`, `mem_auto_tag` |
@@ -254,7 +254,7 @@ You can override settings by adding environment variables to the `env` block.
 
 ### Changing the Embedding Model
 
-The default embedding model is `nomic-embed-text` (768d). To use a different model, set `MEMTOMEM_EMBEDDING__MODEL` and `MEMTOMEM_EMBEDDING__DIMENSION` in the `env` block.
+The recommended Ollama embedding model is `nomic-embed-text` (768d). To use a different model, set `MEMTOMEM_EMBEDDING__MODEL` and `MEMTOMEM_EMBEDDING__DIMENSION` in the `env` block.
 
 **Example: BGE-M3 (1024d)**
 

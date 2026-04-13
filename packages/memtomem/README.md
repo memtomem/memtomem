@@ -38,7 +38,7 @@ For full setup, OpenAI configuration, and troubleshooting, see the [Getting Star
 <details>
 <summary><b>Prefer no install? (uvx direct, MCP only)</b></summary>
 
-If you'd rather skip the CLI install, `uvx` will download and run memtomem on demand. `~/.memtomem/memories` is always indexed, and well-known AI tool directories (`~/.claude/projects`, `~/.gemini`, `~/.codex/memories`) are auto-discovered when they exist. Set `MEMORY_DIRS` to add custom paths.
+If you'd rather skip the CLI install, `uvx` will download and run memtomem on demand. `~/.memtomem/memories` is always indexed, and well-known AI tool directories (`~/.claude/projects`, `~/.gemini`, `~/.codex/memories`) are auto-discovered when they exist. Set `MEMTOMEM_INDEXING__MEMORY_DIRS` to add custom paths.
 
 ```bash
 claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
@@ -71,7 +71,7 @@ Or add to `.mcp.json` for Cursor / Windsurf / Claude Desktop:
 - **🧹 Maintenance** — near-duplicate detection with merge, time-based score decay, TTL expiration, auto-tagging
 - **🔄 Export / import** — JSON bundle backup and restore with re-embedding
 - **🌐 Web UI** — full-featured SPA dashboard for search, sources, indexing, tags, sessions, health monitoring
-- **🛠️ 74 MCP tools** — full feature surface as MCP tools, with `mem_do` meta-tool routing 66 actions in `core` mode (default) for minimal context usage
+- **🛠️ 74 MCP tools** — full feature surface as MCP tools, with `mem_do` meta-tool routing all registered actions in `core` mode (default) for minimal context usage
 
 ## Documentation
 

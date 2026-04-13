@@ -52,13 +52,13 @@ claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
 
 > **Note**: MCP clients run `memtomem-server` via `uvx`. `memtomem` (the CLI) is for terminal commands only.
 
-> **Tool mode**: By default the server exposes 9 core tools plus
-> `mem_do`, which routes to every other tool via
+> **Tool mode**: By default the server exposes 9 tools (8 core +
+> `mem_do`), which routes to every other action via
 > `mem_do(action="...", params={...})`. This tutorial uses the default
 > `core` mode and shows the `mem_do` form for non-core actions like
 > `edit` / `delete` / `batch_add` / `orphans`. If you prefer calling
 > them as top-level tools, add `"env": {"MEMTOMEM_TOOL_MODE": "standard"}`
-> (≈30 tools) or `"full"` (all 73) to the MCP server entry above.
+> (≈30 tools) or `"full"` (all 74) to the MCP server entry above.
 
 ### 1.3 First Tool Call
 
