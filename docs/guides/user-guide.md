@@ -1035,7 +1035,30 @@ memtomem treats `.memtomem/` as the single source of truth for four artifact kin
 | Project memory | `.memtomem/context.md` | `CLAUDE.md`, `.cursorrules`, `GEMINI.md`, `AGENTS.md`, `.github/copilot-instructions.md` |
 | Agent skills (Phase 1) | `.memtomem/skills/<name>/SKILL.md` | `.claude/skills/`, `.gemini/skills/`, `.agents/skills/` |
 | Sub-agents (Phase 2) | `.memtomem/agents/<name>.md` | `.claude/agents/<name>.md`, `.gemini/agents/<name>.md`, `~/.codex/agents/<name>.toml` |
-| Slash commands (Phase 3) | `.memtomem/commands/<name>.md` | `.claude/commands/<name>.md`, `.gemini/commands/<name>.toml`, `~/.codex/prompts/<name>.md` |
+| Slash commands (Phase 3) | `.memtomem/commands/<name>.md` | `.claude/commands/<name>.md`, `.gemini/commands/<name>.toml` |
+
+### Understanding scope
+
+Every fan-out target is either **project-scope** or **user-scope**:
+
+| Scope | Written relative to | Isolation | Example path |
+|---|---|---|---|
+| **Project** | project root (`.`) | Each project gets its own copy | `.claude/agents/reviewer.md` |
+| **User** | home directory (`~`) | Shared across every project on the machine | `~/.claude/agents/reviewer.md` |
+
+All three runtimes (Claude Code, Gemini CLI, Codex CLI) support **both scopes** for agents, skills, and commands. By default, `mm context sync` generates only project-scope targets. Use `--scope` to control which scope to write to:
+
+```bash
+mm context sync --include=agents                # project-scope only (default)
+mm context sync --include=agents --scope=user   # user-scope only
+mm context sync --include=agents --scope=all    # both scopes
+```
+
+**Cross-project collision warning.** User-scope targets live under `~`, so running `mm context sync --scope=user` in two projects that define an agent with the same name will overwrite each other. To avoid surprises:
+
+- Use project-specific prefixes for names (e.g., `myapp-reviewer` instead of `reviewer`).
+- Run `mm context diff --include=agents --scope=user` after switching projects.
+- `mm context init --include=agents` imports from project-scope only — user-scope artifacts are never reverse-imported to avoid cross-project leakage.
 
 ```mermaid
 flowchart TB
@@ -1260,7 +1283,7 @@ mm context sync --include=agents --strict
 # Aborted.
 ```
 
-**Codex is user-scope only.** Codex CLI's documented sub-agent path is `~/.codex/agents/*.toml`, so canonical agents fan out to your home directory regardless of which project you run `mm context sync` in. Be aware that multiple projects sharing agent names will overwrite each other — that's a limitation of Codex's user-scope model, not of memtomem.
+All three runtimes support both project-scope and user-scope sub-agents. Use `--scope=user` or `--scope=all` to write to user-scope paths. See [Understanding scope](#understanding-scope) for details.
 
 Reverse import from runtime files back into canonical (Claude/Gemini only — Codex TOML is deliberately *not* imported because the conversion is lossy and memtomem would have to guess dropped fields):
 
@@ -1277,14 +1300,15 @@ mm context diff --include=skills,agents
 
 ### Slash commands fan-out — `--include=commands`
 
-Custom slash commands (`/review`, `/fix-issue`, etc.) are the fourth artifact kind. Claude Code, Gemini CLI, and OpenAI Codex CLI all support user-authored commands, but they disagree on the file format: Claude and Codex use Markdown + YAML frontmatter, while Gemini uses TOML. memtomem parses one canonical Markdown file and emits the correct variant for each runtime, rewriting the argument placeholder only where needed (`$ARGUMENTS` ↔ `{{args}}` for Gemini; Codex supports `$ARGUMENTS` natively, so its body is passed through verbatim).
+Custom slash commands (`/review`, `/fix-issue`, etc.) are the fourth artifact kind. Claude Code and Gemini CLI support user-authored commands; Claude uses Markdown + YAML frontmatter while Gemini uses TOML. memtomem parses one canonical Markdown file and emits the correct variant for each runtime, rewriting the argument placeholder where needed (`$ARGUMENTS` ↔ `{{args}}` for Gemini).
+
+> **Note**: Codex CLI does not support custom slash commands. Its extensibility model uses **skills** (Phase 1) and **AGENTS.md** instructions instead.
 
 ```mermaid
 flowchart TB
     CMD[".memtomem/commands/&lt;name&gt;.md"]
     CMD -->|mm context sync --include=commands| C[".claude/commands/&lt;name&gt;.md"]
     CMD -->|mm context sync --include=commands| G[".gemini/commands/&lt;name&gt;.toml"]
-    CMD -->|mm context sync --include=commands| X["~/.codex/prompts/&lt;name&gt;.md (user-scope)"]
 ```
 
 Canonical `.memtomem/commands/review.md`:
@@ -1300,13 +1324,13 @@ model: sonnet
 Review the file at $ARGUMENTS and report issues.
 ```
 
-| Canonical field | `.claude/commands/*.md` | `.gemini/commands/*.toml` | `~/.codex/prompts/*.md` |
-|---|---|---|---|
-| `description` | ✓ | ✓ | ✓ |
-| body (prompt) | ✓ (`$ARGUMENTS` preserved) | → `prompt` (rewritten to `{{args}}`) | ✓ (`$ARGUMENTS` / `$1..$9` / `$NAME` / `$$` all native) |
-| `argument-hint` | ✓ | **dropped** | ✓ |
-| `allowed-tools` | ✓ | **dropped** | **dropped** |
-| `model` | ✓ | **dropped** | **dropped** |
+| Canonical field | `.claude/commands/*.md` | `.gemini/commands/*.toml` |
+|---|---|---|
+| `description` | ✓ | ✓ |
+| body (prompt) | ✓ (`$ARGUMENTS` preserved) | → `prompt` (rewritten to `{{args}}`) |
+| `argument-hint` | ✓ | **dropped** |
+| `allowed-tools` | ✓ | **dropped** |
+| `model` | ✓ | **dropped** |
 
 Resulting Gemini TOML:
 
@@ -1315,28 +1339,15 @@ description = "Review a file for issues"
 prompt = "Review the file at {{args}} and report issues."
 ```
 
-Resulting Codex prompt at `~/.codex/prompts/review.md`:
-
-```markdown
----
-description: Review a file for issues
-argument-hint: [file-path]
----
-
-Review the file at $ARGUMENTS and report issues.
-```
-
-The Gemini side is **lossless in both directions** (only two TOML fields; the `$ARGUMENTS` ↔ `{{args}}` rewrite is reversible), so `mm context init --include=commands` round-trips Gemini TOML back into canonical Markdown. The Codex side is **forward-only** — commands are fanned out to `~/.codex/prompts/` but never imported back, because the user-scope path spans projects and would break the "import runtime files from *this* project" semantic (matching the Phase 2 sub-agent policy for Codex TOML).
+The Gemini side is **lossless in both directions** (only two TOML fields; the `$ARGUMENTS` ↔ `{{args}}` rewrite is reversible), so `mm context init --include=commands` round-trips Gemini TOML back into canonical Markdown.
 
 Running sync prints every dropped field so you can see what each runtime lost:
 
 ```
-  Command fan-out: 3
+  Command fan-out: 2
     claude_commands    .claude/commands/review.md
     gemini_commands    .gemini/commands/review.toml
-    codex_commands     ~/.codex/prompts/review.md
   gemini_commands dropped ['argument-hint', 'allowed-tools', 'model'] from 'review'
-  codex_commands dropped ['allowed-tools', 'model'] from 'review'
 ```
 
 Use `--strict` to fail on any drop:
@@ -1347,7 +1358,7 @@ mm context sync --include=commands --strict
 # Aborted.
 ```
 
-> **Codex custom prompts are upstream-deprecated.** OpenAI's docs recommend migrating reusable command-like workflows to **skills** (which memtomem already fans out to Codex via `.agents/skills/` in Phase 1). memtomem still syncs canonical commands to `~/.codex/prompts/` for parity with Claude + Gemini, but for new authoring you should prefer a skill. Reverse import from `~/.codex/prompts/` is intentionally not supported — author under `.memtomem/commands/` and let fan-out populate Codex.
+Both runtimes support user-scope commands (`~/.claude/commands/`, `~/.gemini/commands/`). Use `--scope=user` or `--scope=all` to write to user-scope paths. See [Understanding scope](#understanding-scope).
 
 Combine every artifact kind in a single command:
 
@@ -1358,13 +1369,17 @@ mm context diff --include=skills,agents,commands
 
 ### Supported targets
 
-| Runtime | Project memory file | Skills directory | Sub-agents | Slash commands |
-|---|---|---|---|---|
-| Claude Code | `CLAUDE.md` | `.claude/skills/` | `.claude/agents/*.md` | `.claude/commands/*.md` |
-| Cursor | `.cursorrules` | — | — | — |
-| Gemini CLI | `GEMINI.md` | `.gemini/skills/` | `.gemini/agents/*.md` (experimental) | `.gemini/commands/*.toml` |
-| OpenAI Codex CLI | `AGENTS.md` | `.agents/skills/` | `~/.codex/agents/*.toml` (user-scope) | `~/.codex/prompts/*.md` (user-scope, deprecated upstream) |
-| GitHub Copilot | `.github/copilot-instructions.md` | — | — | — |
+All runtimes support both project-scope and user-scope for skills, agents, and commands (where applicable). Default `mm context sync` writes project-scope only; use `--scope=user` or `--scope=all` for user-scope.
+
+| Runtime | Project memory | Skills (P / U) | Sub-agents (P / U) | Commands (P / U) | Settings |
+|---|---|---|---|---|---|
+| Claude Code | `CLAUDE.md` | `.claude/skills/` / `~/.claude/skills/` | `.claude/agents/` / `~/.claude/agents/` | `.claude/commands/` / `~/.claude/commands/` | `~/.claude/settings.json` |
+| Cursor | `.cursorrules` | — | — | — | — |
+| Gemini CLI | `GEMINI.md` | `.gemini/skills/` / `~/.gemini/skills/` | `.gemini/agents/` / `~/.gemini/agents/` | `.gemini/commands/` / `~/.gemini/commands/` | — |
+| OpenAI Codex CLI | `AGENTS.md` | `.agents/skills/` / `~/.agents/skills/` | `.codex/agents/` / `~/.codex/agents/` | — | — |
+| GitHub Copilot | `.github/copilot-instructions.md` | — | — | — | — |
+
+**P** = project-scope, **U** = user-scope. See [Understanding scope](#understanding-scope) for implications.
 
 ---
 
