@@ -52,12 +52,13 @@ export MEMTOMEM_EMBEDDING__DIMENSION=1024
 # Pull the default model (one-time, ~270MB)
 ollama pull nomic-embed-text
 
-# These are the defaults — no env vars needed
+# Minimal config — base_url defaults to http://localhost:11434
 MEMTOMEM_EMBEDDING__PROVIDER=ollama
 MEMTOMEM_EMBEDDING__MODEL=nomic-embed-text
 MEMTOMEM_EMBEDDING__DIMENSION=768
-MEMTOMEM_EMBEDDING__BASE_URL=http://localhost:11434
 ```
+
+> **`base_url` is optional.** When provider is `ollama` and `base_url` is empty or unset, it defaults to `http://localhost:11434`. Override only if Ollama runs on a different host or port.
 
 For multilingual content, switch to `bge-m3`:
 
@@ -101,6 +102,13 @@ mm embedding-reset --mode revert-to-stored
 ```
 
 The same operation is available as the `mem_embedding_reset` MCP tool.
+
+## Troubleshooting
+
+- **"Request URL is missing an 'http://' or 'https://' protocol"** — your config has `embedding.provider` set to `ollama` but `embedding.base_url` is empty. Upgrade to the latest version (which defaults to `http://localhost:11434`) or add `"base_url": "http://localhost:11434"` to the `embedding` section of `~/.memtomem/config.json`.
+- **"Cannot connect to Ollama"** — verify `ollama serve` is running.
+- **"Model not found"** — run `ollama pull <model>` to download it.
+- **Dimension mismatch after model switch** — use `mm embedding-reset --mode apply-current` then re-index.
 
 ## Tuning Throughput
 
