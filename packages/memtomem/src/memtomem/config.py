@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field, FieldValidationInfo, field_validator, model_validator
+from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,7 +26,7 @@ class EmbeddingConfig(BaseSettings):
 
     @field_validator("batch_size", "max_concurrent_batches")
     @classmethod
-    def must_be_positive(cls, v: int, info: FieldValidationInfo) -> int:
+    def must_be_positive(cls, v: int, info: ValidationInfo) -> int:
         if v <= 0:
             raise ValueError(f"{info.field_name} must be positive, got {v}")
         return v
@@ -59,7 +59,7 @@ class SearchConfig(BaseSettings):
 
     @field_validator("default_top_k", "bm25_candidates", "dense_candidates", "rrf_k")
     @classmethod
-    def must_be_positive(cls, v: int, info: FieldValidationInfo) -> int:
+    def must_be_positive(cls, v: int, info: ValidationInfo) -> int:
         if v <= 0:
             raise ValueError(f"{info.field_name} must be positive, got {v}")
         return v
@@ -120,7 +120,7 @@ class IndexingConfig(BaseSettings):
         "max_chunk_tokens", "min_chunk_tokens", "chunk_overlap_tokens", "paragraph_split_threshold"
     )
     @classmethod
-    def must_be_non_negative(cls, v: int, info: FieldValidationInfo) -> int:
+    def must_be_non_negative(cls, v: int, info: ValidationInfo) -> int:
         if v < 0:
             raise ValueError(f"{info.field_name} must be non-negative, got {v}")
         return v
@@ -141,7 +141,7 @@ class DecayConfig(BaseSettings):
 
     @field_validator("half_life_days")
     @classmethod
-    def must_be_positive(cls, v: float, info: FieldValidationInfo) -> float:
+    def must_be_positive(cls, v: float, info: ValidationInfo) -> float:
         if v <= 0:
             raise ValueError(f"{info.field_name} must be positive, got {v}")
         return v
@@ -185,7 +185,7 @@ class RerankConfig(BaseSettings):
 
     @field_validator("top_k")
     @classmethod
-    def must_be_positive(cls, v: int, info: FieldValidationInfo) -> int:
+    def must_be_positive(cls, v: int, info: ValidationInfo) -> int:
         if v <= 0:
             raise ValueError(f"{info.field_name} must be positive, got {v}")
         return v
@@ -301,14 +301,14 @@ class LLMConfig(BaseSettings):
 
     @field_validator("max_tokens")
     @classmethod
-    def max_tokens_positive(cls, v: int, info: FieldValidationInfo) -> int:
+    def max_tokens_positive(cls, v: int, info: ValidationInfo) -> int:
         if v <= 0:
             raise ValueError(f"{info.field_name} must be positive, got {v}")
         return v
 
     @field_validator("timeout")
     @classmethod
-    def timeout_positive(cls, v: float, info: FieldValidationInfo) -> float:
+    def timeout_positive(cls, v: float, info: ValidationInfo) -> float:
         if v <= 0:
             raise ValueError(f"{info.field_name} must be positive, got {v}")
         return v
