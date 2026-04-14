@@ -219,7 +219,7 @@ Restart the Agent session, then ask: "Call mem_stats to check the memtomem statu
 
 - **Short prompt filtering**: The `[ ${#P} -gt 20 ]` guard skips searches for short prompts like "yes", "ok", "commit" that would return irrelevant results.
 - **Input sanitization**: `printf '%s'` and `head -c 500` prevent shell injection from prompt content and cap query length.
-- **Stop hook not recommended**: A naive Stop hook (e.g., `mm add "Session end: ..."`) saves meaningless timestamps that pollute search results. If you want session summaries, let the agent decide what to save via `mem_add` during the conversation.
+- **Stop hook = session close**: Use `mm session end --auto` in the Stop hook to close the active session with a structured summary (see [hooks.md](hooks.md)). Don't use a naive Stop hook (e.g., `mm add "Session end: ..."`) — raw timestamps pollute search results.
 - **Error logging**: Use `2>>/tmp/mm-hook.log` instead of `2>/dev/null` so you can diagnose real failures (DB corruption, disk full) without disrupting the session.
 - **PostToolUse scope**: Matching only `Write` (not `Edit`) avoids redundant re-indexing on every small edit. Edited files are already indexed; only new files need it.
 - **STM proxy overlap**: If you use the [memtomem-stm](https://github.com/memtomem/memtomem-stm) proxy (separate package), it already provides automatic memory surfacing and indexing. Hooks are redundant in that setup.
