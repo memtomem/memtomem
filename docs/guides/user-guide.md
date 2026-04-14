@@ -77,7 +77,9 @@ memtomem provides **74 MCP tools** organized into categories:
 | **Health** | `mem_watchdog`, `mem_cleanup_orphans` | System health checks and orphan cleanup |
 | **Relations** | `mem_link`, `mem_unlink`, `mem_related` | Cross-reference links between chunks |
 | **Working Memory** | `mem_scratch_set/get/promote` | Ephemeral key-value scratch space |
-| **Config** | `mem_stats`, `mem_status`, `mem_config`, `mem_embedding_reset`, `mem_reset` | Monitor and configure |
+| **Config** | `mem_stats`, `mem_status`, `mem_config`\*, `mem_embedding_reset`\*, `mem_reset`\* | Monitor and configure |
+
+\* Requires `MEMTOMEM_TOOL_MODE=full`. In `core` or `standard` mode, use `mm config` (CLI) or the Web UI Settings tab instead.
 
 ### `mem_do` action naming convention
 
@@ -604,6 +606,8 @@ discovery works the same way for `source_type="claude"`.
 ---
 
 ## 7. Config — `mem_stats`, `mem_status`, `mem_config`, `mem_embedding_reset`
+
+> **Tool mode note:** `mem_config`, `mem_embedding_reset`, and `mem_reset` require `MEMTOMEM_TOOL_MODE=full`. In `core` or `standard` mode, use `mm config` / `mm embedding-reset` (CLI) or the Web UI Settings tab.
 
 ### `mem_stats` / `mem_status`
 
