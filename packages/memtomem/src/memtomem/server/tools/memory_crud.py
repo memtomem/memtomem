@@ -130,8 +130,6 @@ async def _mem_add_core(
 
     # Fire webhook
     if app.webhook_manager:
-        import asyncio
-
         task = asyncio.create_task(
             app.webhook_manager.fire("add", {"file": str(target), "chunks_indexed": 1})
         )

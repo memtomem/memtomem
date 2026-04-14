@@ -132,8 +132,6 @@ async def mem_search(
 
     # Fire webhook
     if app.webhook_manager:
-        import asyncio
-
         task = asyncio.create_task(
             app.webhook_manager.fire("search", {"query": query, "result_count": len(results)})
         )

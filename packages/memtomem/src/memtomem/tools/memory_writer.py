@@ -31,8 +31,6 @@ def append_entry(
         block = f"\n{heading}\n\n> created: {now}{tag_str}\n\n{stripped}\n"
 
     with open(file_path, "a", encoding="utf-8") as f:
-        if file_path.stat().st_size == 0 if file_path.exists() else True:
-            pass  # append normally
         f.write(block)
 
 

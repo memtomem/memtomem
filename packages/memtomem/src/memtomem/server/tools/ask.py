@@ -115,8 +115,6 @@ async def mem_ask(
 
     # Fire webhook
     if app.webhook_manager:
-        import asyncio
-
         task = asyncio.create_task(
             app.webhook_manager.fire(
                 "ask",

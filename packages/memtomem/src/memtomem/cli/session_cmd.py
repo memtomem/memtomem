@@ -198,8 +198,9 @@ def activity() -> None:
 @click.option(
     "--type",
     "event_type",
+    type=click.Choice(["tool_call", "subagent_start", "subagent_stop", "decision", "error"]),
     default="tool_call",
-    help="Event type (tool_call, subagent_start, subagent_stop, decision, error)",
+    help="Event type",
 )
 @click.option("--content", "-c", required=True, help="Event description")
 @click.option("--meta", default=None, help="JSON metadata")
