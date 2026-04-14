@@ -108,10 +108,10 @@ def _patch_web_stack(server_mock: MagicMock):
     """Patch all external dependencies required to run ``web()``."""
     return [
         patch("memtomem.cli.web._missing_web_deps", return_value=None),
-        patch("memtomem.cli.web.uvicorn.Config", return_value=MagicMock()),
-        patch("memtomem.cli.web.uvicorn.Server", return_value=server_mock),
-        patch("memtomem.cli.web.create_app", return_value=MagicMock()),
-        patch("memtomem.cli.web._lifespan", MagicMock()),
+        patch("uvicorn.Config", return_value=MagicMock()),
+        patch("uvicorn.Server", return_value=server_mock),
+        patch("memtomem.web.app.create_app", return_value=MagicMock()),
+        patch("memtomem.web.app._lifespan", MagicMock())
     ]
 
 
