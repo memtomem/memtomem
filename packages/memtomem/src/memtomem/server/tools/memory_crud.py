@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -18,7 +19,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _webhook_error_cb(task: "asyncio.Task") -> None:  # noqa: F821
+def _webhook_error_cb(task: asyncio.Task) -> None:
     """Log errors from fire-and-forget webhook tasks."""
     if task.cancelled():
         return

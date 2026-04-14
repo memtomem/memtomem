@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Literal
 from uuid import UUID
-
-import logging
 
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app
@@ -16,7 +16,7 @@ from memtomem.server.tool_registry import register
 logger = logging.getLogger(__name__)
 
 
-def _webhook_error_cb(task: "asyncio.Task") -> None:  # noqa: F821
+def _webhook_error_cb(task: asyncio.Task) -> None:
     """Log errors from fire-and-forget webhook tasks."""
     if task.cancelled():
         return
