@@ -157,6 +157,7 @@ def main() -> None:
     except OSError:
         # Another server already holds the lock — proceed anyway (the editor
         # expects the process to stay alive), but log a warning.
+        _lock_fp.close()
         import sys
 
         print(
