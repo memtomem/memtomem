@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from memtomem import __version__
 from memtomem.web.routes import (
     chunks,
     context_agents,
@@ -46,7 +47,7 @@ def create_app(lifespan=None) -> FastAPI:
     app = FastAPI(
         title="memtomem Web UI",
         description="Web UI for memtomem memory infrastructure",
-        version="0.1.0",
+        version=__version__,
         lifespan=lifespan,
         docs_url="/api/docs",
         redoc_url="/api/redoc",
