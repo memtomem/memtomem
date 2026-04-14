@@ -56,15 +56,16 @@ def web(host: str, port: int, headless: bool) -> None:
         while not server.started:
             await asyncio.sleep(0.1)
         import webbrowser
+
         webbrowser.open(f"http://{host}:{port}")
-    
+
     async def start_server() -> None:
         web_config = uvicorn.Config(create_app(lifespan=_lifespan), host=host, port=port)
         web_server = uvicorn.Server(web_config)
-        
+
         await asyncio.gather(
             web_server.serve(),
             after_started(web_server, headless),
         )
-    
+
     asyncio.run(start_server())
