@@ -82,7 +82,7 @@ def create_app(lifespan=None) -> FastAPI:
 
     @app.exception_handler(KeyError)
     async def key_error_handler(request: Request, exc: KeyError) -> JSONResponse:
-        return JSONResponse(status_code=404, content={"detail": f"Not found: {exc}"})
+        return JSONResponse(status_code=404, content={"detail": "Not found"})
 
     @app.exception_handler(Exception)
     async def generic_error_handler(request: Request, exc: Exception) -> JSONResponse:

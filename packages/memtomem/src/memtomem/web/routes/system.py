@@ -108,7 +108,7 @@ async def embed_text(request: Request, embedder=Depends(get_embedder)):
         vectors = await embedder.embed_texts([text])
         return {"embedding": vectors[0]}
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Embedding failed: {type(exc).__name__}")
+        raise HTTPException(status_code=500, detail="Embedding failed") from exc
 
 
 def _build_config_response(cfg) -> ConfigResponse:
