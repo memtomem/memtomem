@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,6 +16,8 @@ from memtomem.server.helpers import _set_config_key
 
 if TYPE_CHECKING:
     from memtomem.server.context import AppContext
+
+logger = logging.getLogger(__name__)
 
 
 @mcp.tool()
@@ -88,7 +91,7 @@ async def mem_status(
                 f"Source files:  {stats['total_sources']} ({orphaned} orphaned — run mem_cleanup_orphans)"
             )
     except Exception:
-        pass
+        logger.debug("Orphan detection failed", exc_info=True)
 
     mismatch = getattr(app.storage, "embedding_mismatch", None)
     if mismatch is not None:
