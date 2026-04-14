@@ -25,7 +25,8 @@ def _web_install_hint() -> str:
 @click.command("web")
 @click.option("--host", default="127.0.0.1", help="Host to bind to")
 @click.option("--port", default=8080, type=int, help="Port to bind to")
-def web(host: str, port: int) -> None:
+@click.option("--headless", is_flag=True, help="Run without opening the browser")
+def web(host: str, port: int, headless: bool) -> None:
     """Launch the memtomem Web UI (FastAPI + SPA)."""
     missing = _missing_web_deps()
     if missing is not None:
@@ -45,5 +46,25 @@ def web(host: str, port: int) -> None:
 
     from memtomem.web.app import _lifespan, create_app
 
+    import asyncio
+
     click.echo(f"Starting memtomem Web UI at http://{host}:{port}")
-    uvicorn.run(create_app(lifespan=_lifespan), host=host, port=port)
+
+    async def after_started(server: uvicorn.Server, headless: bool) -> None:
+        if headless:
+            return
+        while not server.started:
+            await asyncio.sleep(0.1)
+        import webbrowser
+        webbrowser.open(f"http://{host}:{port}")
+    
+    async def start_server() -> None:
+        web_config = uvicorn.Config(create_app(lifespan=_lifespan), host=host, port=port)
+        web_server = uvicorn.Server(web_config)
+        
+        await asyncio.gather(
+            web_server.serve(),
+            after_started(web_server, headless),
+        )
+    
+    asyncio.run(start_server())
