@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from memtomem.storage.sqlite_helpers import escape_like
 
 if TYPE_CHECKING:
+    from memtomem.llm.base import LLMProvider
     from memtomem.storage.sqlite_backend import SqliteBackend
 
 logger = logging.getLogger(__name__)
@@ -266,7 +267,7 @@ async def execute_auto_consolidate(
     namespace: str | None,
     dry_run: bool,
     *,
-    llm_provider: object | None = None,
+    llm_provider: LLMProvider | None = None,
 ) -> PolicyRunResult:
     """Group related chunks by source file and create heuristic summary chunks.
 
@@ -568,7 +569,7 @@ async def run_policy(
     policy: dict,
     dry_run: bool = False,
     *,
-    llm_provider: object | None = None,
+    llm_provider: LLMProvider | None = None,
 ) -> PolicyRunResult:
     """Execute a single policy.
 
@@ -614,7 +615,7 @@ async def run_all_enabled(
     dry_run: bool = False,
     max_actions: int | None = None,
     *,
-    llm_provider: object | None = None,
+    llm_provider: LLMProvider | None = None,
 ) -> list[PolicyRunResult]:
     """Run all enabled policies.
 

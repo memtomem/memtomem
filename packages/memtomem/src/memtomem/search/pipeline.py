@@ -44,6 +44,7 @@ class RetrievalStats:
 
 if TYPE_CHECKING:
     from memtomem.embedding.base import EmbeddingProvider
+    from memtomem.llm.base import LLMProvider
     from memtomem.storage.base import StorageBackend
 
 
@@ -63,7 +64,7 @@ class SearchPipeline:
         expansion_config: object | None = None,
         importance_config: object | None = None,
         context_window_config: ContextWindowConfig | None = None,
-        llm_provider: object | None = None,
+        llm_provider: LLMProvider | None = None,
     ) -> None:
         self._storage = storage
         self._embedder = embedder
