@@ -87,7 +87,7 @@ class TestInitConfigMerge:
 
         # First init
         state = _make_init_state(tmp_path)
-        _write_config_and_summary(state)
+        _write_config_and_summary(state, tmp_path)
 
         # User modifies config post-init (simulate mm config set)
         config_path = config_dir / "config.json"
@@ -100,7 +100,7 @@ class TestInitConfigMerge:
         state["provider"] = "onnx"
         state["model"] = "all-MiniLM-L6-v2"
         state["dimension"] = 384
-        _write_config_and_summary(state)
+        _write_config_and_summary(state, tmp_path)
 
         result = json.loads(config_path.read_text(encoding="utf-8"))
 
@@ -124,7 +124,7 @@ class TestInitConfigMerge:
         config_dir.mkdir()
 
         state = _make_init_state(tmp_path)
-        _write_config_and_summary(state)
+        _write_config_and_summary(state, tmp_path)
 
         config_path = config_dir / "config.json"
         data = json.loads(config_path.read_text(encoding="utf-8"))

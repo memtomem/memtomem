@@ -59,7 +59,7 @@ class TestMemList:
         result = await storage.get_source_files_with_counts()
         assert len(result) == 2
         # Match by filename suffix since /tmp may resolve to /private/tmp on macOS
-        counts = {str(r[0]).split("/")[-1]: r[1] for r in result}
+        counts = {Path(r[0]).name: r[1] for r in result}
         assert counts["alpha.md"] == 1
         assert counts["beta.md"] == 2
 

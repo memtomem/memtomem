@@ -22,7 +22,7 @@ def _modules_with_mcp_tool() -> dict[str, set[str]]:
     for py in _TOOLS_DIR.glob("*.py"):
         if py.name == "__init__.py":
             continue
-        tree = ast.parse(py.read_text())
+        tree = ast.parse(py.read_text(encoding="utf-8"))
         names: set[str] = set()
         for node in ast.walk(tree):
             if not isinstance(node, ast.AsyncFunctionDef):
@@ -38,7 +38,7 @@ def _modules_with_mcp_tool() -> dict[str, set[str]]:
 
 def _imported_tool_modules() -> set[str]:
     """Return module stems imported from ``memtomem.server.tools.*`` in __init__.py."""
-    tree = ast.parse(_INIT_FILE.read_text())
+    tree = ast.parse(_INIT_FILE.read_text(encoding="utf-8"))
     modules: set[str] = set()
     for node in ast.walk(tree):
         if (

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 
 def _display_path(path) -> str:
@@ -13,7 +13,7 @@ def _display_path(path) -> str:
     On macOS, /tmp is a symlink to /private/tmp. Resolve back to the
     user-facing path so output isn't confusing.
     """
-    s = str(path)
+    s = Path(path).as_posix()
     if sys.platform == "darwin" and s.startswith("/private/tmp/"):
         return s[len("/private") :]
     return s
