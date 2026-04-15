@@ -59,9 +59,9 @@ async def mem_search(
     if not query.strip():
         return "Error: query cannot be empty."
     if len(query) > 10_000:
-        return "Error: query too long (max 10,000 characters)."
+        return f"Error: query too long (max 10,000 characters, got {len(query)})."
     if not 1 <= top_k <= 100:
-        return "Error: top_k must be between 1 and 100."
+        return f"Error: top_k must be between 1 and 100, got {top_k}."
 
     # Resolve effective format: output_format takes precedence over verbose
     effective_format = output_format

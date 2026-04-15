@@ -133,7 +133,7 @@ async def mem_entity_search(
         limit: Maximum results (default 20)
     """
     if not 1 <= limit <= 500:
-        return "Error: limit must be between 1 and 500."
+        return f"Error: limit must be between 1 and 500, got {limit}."
 
     app = _get_app(ctx)
     results = await app.storage.search_entities(

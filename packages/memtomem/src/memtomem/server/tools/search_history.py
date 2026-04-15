@@ -23,7 +23,7 @@ async def mem_search_history(
         since: ISO date filter — only queries after this date.
     """
     if not 1 <= limit <= 200:
-        return "Error: limit must be between 1 and 200."
+        return f"Error: limit must be between 1 and 200, got {limit}."
 
     app = _get_app(ctx)
     rows = await app.storage.get_query_history(limit=limit, since=since)

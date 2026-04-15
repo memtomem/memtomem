@@ -33,7 +33,7 @@ async def mem_reflect(
         limit: Maximum items per category
     """
     if not 1 <= limit <= 200:
-        return "Error: limit must be between 1 and 200."
+        return f"Error: limit must be between 1 and 200, got {limit}."
 
     app = _get_app(ctx)
     storage = app.storage

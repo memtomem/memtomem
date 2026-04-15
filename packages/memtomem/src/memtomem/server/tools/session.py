@@ -110,7 +110,7 @@ async def mem_session_list(
         limit: Maximum sessions to return (default 10)
     """
     if not 1 <= limit <= 200:
-        return "Error: limit must be between 1 and 200."
+        return f"Error: limit must be between 1 and 200, got {limit}."
 
     app = _get_app(ctx)
     sessions = await app.storage.list_sessions(agent_id=agent_id, since=since, limit=limit)

@@ -332,7 +332,7 @@ async def mem_batch_add(
         file: Target .md file.  If omitted, a timestamped file is created.
     """
     if len(entries) > 500:
-        return "Error: batch too large (max 500 entries)."
+        return f"Error: batch too large (max 500 entries, got {len(entries)})."
 
     from datetime import datetime, timezone
 

@@ -38,7 +38,7 @@ async def mem_timeline(
         limit: Maximum chunks to analyze (default 50)
     """
     if not 1 <= limit <= 500:
-        return "Error: limit must be between 1 and 500."
+        return f"Error: limit must be between 1 and 500, got {limit}."
 
     from memtomem.tools.temporal import build_timeline, format_timeline
 

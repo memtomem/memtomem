@@ -28,9 +28,9 @@ async def mem_dedup_scan(
         max_scan: Maximum chunks to inspect for near-duplicate search
     """
     if not 0.0 <= threshold <= 1.0:
-        return "Error: threshold must be between 0 and 1."
+        return f"Error: threshold must be between 0 and 1, got {threshold}."
     if not 1 <= limit <= 500:
-        return "Error: limit must be between 1 and 500."
+        return f"Error: limit must be between 1 and 500, got {limit}."
 
     app = _get_app(ctx)
     if app.dedup_scanner is None:
@@ -101,7 +101,7 @@ async def mem_decay_scan(
         source_filter: Only scan chunks from sources containing this substring.
     """
     if max_age_days <= 0:
-        return "Error: max_age_days must be positive."
+        return f"Error: max_age_days must be positive, got {max_age_days}."
 
     from memtomem.search.decay import expire_chunks
 
@@ -136,7 +136,7 @@ async def mem_decay_expire(
         dry_run: If True (default), preview without making any changes.
     """
     if max_age_days <= 0:
-        return "Error: max_age_days must be positive."
+        return f"Error: max_age_days must be positive, got {max_age_days}."
 
     from memtomem.search.decay import expire_chunks
 

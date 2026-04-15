@@ -37,7 +37,7 @@ async def mem_recall(
         mem_recall(namespace="work", limit=10)
     """
     if not 1 <= limit <= 500:
-        return "Error: limit must be between 1 and 500."
+        return f"Error: limit must be between 1 and 500, got {limit}."
 
     from memtomem.models import NamespaceFilter
 

@@ -30,7 +30,7 @@ async def mem_scratch_set(
     from datetime import datetime, timedelta, timezone
 
     if ttl_minutes is not None and ttl_minutes <= 0:
-        return "Error: ttl_minutes must be a positive number."
+        return f"Error: ttl_minutes must be a positive number, got {ttl_minutes}."
     app = _get_app(ctx)
     expires_at = None
     if ttl_minutes is not None and ttl_minutes > 0:
