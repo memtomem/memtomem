@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from memtomem.llm.base import LLMProvider
+    from memtomem.storage.sqlite_backend import SqliteBackend
 
 logger = logging.getLogger(__name__)
 
@@ -240,7 +241,7 @@ async def _extract_tags_with_fallback(
     text: str,
     max_tags: int = 5,
     heading_hierarchy: tuple[str, ...] = (),
-    llm_provider: object | None = None,
+    llm_provider: LLMProvider | None = None,
 ) -> list[str]:
     """Try LLM tagging; fall back to keyword heuristic on failure."""
     if llm_provider is not None:
@@ -249,7 +250,7 @@ async def _extract_tags_with_fallback(
                 text,
                 llm_provider,
                 max_tags,
-                heading_hierarchy,  # type: ignore[arg-type]
+                heading_hierarchy,
             )
         except Exception:
             logger.warning("LLM tagging failed, using keyword fallback", exc_info=True)
@@ -266,13 +267,13 @@ class AutoTagStats:
 
 
 async def auto_tag_storage(
-    storage: object,
+    storage: SqliteBackend,
     source_filter: str | None = None,
     namespace_filter: str | None = None,
     max_tags: int = 5,
     overwrite: bool = False,
     dry_run: bool = False,
-    llm_provider: object | None = None,
+    llm_provider: LLMProvider | None = None,
 ) -> AutoTagStats:
     """Apply keyword-based tags to chunks in storage.
 
@@ -295,7 +296,7 @@ async def auto_tag_storage(
     """
     from memtomem.models import Chunk, ChunkMetadata
 
-    sources = await storage.get_all_source_files()  # type: ignore[union-attr]
+    sources = await storage.get_all_source_files()
     if source_filter:
         sources = {s for s in sources if source_filter in str(s)}
 
@@ -304,9 +305,7 @@ async def auto_tag_storage(
     skipped = 0
 
     for source in sorted(sources):
-        chunks: list[Chunk] = await storage.list_chunks_by_source(  # type: ignore[union-attr]
-            source, limit=10_000
-        )
+        chunks: list[Chunk] = await storage.list_chunks_by_source(source, limit=10_000)
         if namespace_filter is not None:
             chunks = [c for c in chunks if c.metadata.namespace == namespace_filter]
         for chunk in chunks:
@@ -347,7 +346,7 @@ async def auto_tag_storage(
                     created_at=chunk.created_at,
                     updated_at=datetime.now(timezone.utc),
                 )
-                await storage.upsert_chunks([updated])  # type: ignore[union-attr]
+                await storage.upsert_chunks([updated])
 
             tagged += 1
 

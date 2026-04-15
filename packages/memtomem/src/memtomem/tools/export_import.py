@@ -11,9 +11,14 @@ import logging
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from memtomem.models import Chunk, ChunkMetadata, ChunkType
+
+if TYPE_CHECKING:
+    from memtomem.embedding.base import EmbeddingProvider
+    from memtomem.storage.sqlite_backend import SqliteBackend
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +66,7 @@ class ImportStats:
 
 
 async def export_chunks(
-    storage: object,
+    storage: SqliteBackend,
     output_path: Path | None = None,
     source_filter: str | None = None,
     tag_filter: str | None = None,
@@ -79,13 +84,13 @@ async def export_chunks(
     Returns:
         ExportBundle with the selected chunks.
     """
-    source_files = await storage.get_all_source_files()  # type: ignore[union-attr]
+    source_files = await storage.get_all_source_files()
 
     records: list[dict] = []
     for source in sorted(source_files):
         if source_filter and source_filter not in str(source):
             continue
-        chunks = await storage.list_chunks_by_source(source, limit=100_000)  # type: ignore[union-attr]
+        chunks = await storage.list_chunks_by_source(source, limit=100_000)
         for chunk in chunks:
             if tag_filter and tag_filter not in chunk.metadata.tags:
                 continue
@@ -131,8 +136,8 @@ def _chunk_to_dict(chunk: Chunk) -> dict:
 
 
 async def import_chunks(
-    storage: object,
-    embedder: object,
+    storage: SqliteBackend,
+    embedder: EmbeddingProvider,
     input_path: Path,
     namespace: str | None = None,
 ) -> ImportStats:
@@ -178,7 +183,7 @@ async def import_chunks(
         # Embed in one shot for efficiency
         contents = [c.content for c in batch]
         try:
-            embeddings = await embedder.embed_texts(contents)  # type: ignore[union-attr]
+            embeddings = await embedder.embed_texts(contents)
             for chunk, emb in zip(batch, embeddings):
                 chunk.embedding = emb
         except Exception as exc:
@@ -191,7 +196,7 @@ async def import_chunks(
             )
 
         try:
-            await storage.upsert_chunks(batch)  # type: ignore[union-attr]
+            await storage.upsert_chunks(batch)
             imported = len(batch)
         except Exception as exc:
             logger.error("Upsert failed during import: %s", exc)
