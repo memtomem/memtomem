@@ -15,9 +15,6 @@ from memtomem.config import Mem2MemConfig
 from memtomem.server.component_factory import Components, create_components, close_components
 
 
-from helpers import make_chunk  # noqa: E402 — re-export for fixture below
-
-
 def _ollama_available() -> bool:
     """Check if Ollama is reachable at localhost:11434."""
     try:
@@ -38,12 +35,6 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "ollama" in item.keywords:
             item.add_marker(skip)
-
-
-@pytest.fixture
-def chunk_factory():
-    """Fixture that returns the make_chunk factory function."""
-    return make_chunk
 
 
 @pytest.fixture
