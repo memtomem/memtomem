@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import ipaddress
 import re
 import socket
@@ -121,7 +122,7 @@ def _html_to_markdown(html: str) -> str:
     for i in range(6, 0, -1):
         text = re.sub(
             rf"<h{i}[^>]*>(.*?)</h{i}>",
-            lambda m, _lvl=i: _replace_heading(m, _lvl),
+            functools.partial(_replace_heading, lvl=i),
             text,
             flags=re.DOTALL | re.IGNORECASE,
         )
