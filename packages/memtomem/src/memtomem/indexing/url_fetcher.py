@@ -115,10 +115,13 @@ def _html_to_markdown(html: str) -> str:
     text = re.sub(r"<footer[^>]*>.*?</footer>", "", text, flags=re.DOTALL | re.IGNORECASE)
 
     # Headers
+    def _replace_heading(m: re.Match[str], lvl: int) -> str:
+        return f"\n{'#' * lvl} {m.group(1).strip()}\n"
+
     for i in range(6, 0, -1):
         text = re.sub(
             rf"<h{i}[^>]*>(.*?)</h{i}>",
-            lambda m, lvl=i: f"\n{'#' * lvl} {m.group(1).strip()}\n",
+            lambda m, _lvl=i: _replace_heading(m, _lvl),
             text,
             flags=re.DOTALL | re.IGNORECASE,
         )

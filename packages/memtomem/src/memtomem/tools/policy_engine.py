@@ -8,7 +8,8 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, cast
 
 from memtomem.storage.sqlite_helpers import escape_like
 
@@ -586,7 +587,10 @@ async def run_policy(
         )
 
     if ptype == "auto_consolidate":
-        result = await handler(
+        typed_handler: Callable[..., Awaitable[PolicyRunResult]] = cast(
+            Callable[..., Awaitable[PolicyRunResult]], handler,
+        )
+        result = await typed_handler(
             storage,
             policy.get("config", {}),
             policy.get("namespace_filter"),
