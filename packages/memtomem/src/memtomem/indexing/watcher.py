@@ -75,7 +75,7 @@ class FileWatcher:
         self._task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         handler = _MarkdownEventHandler(self._queue, loop, self._config.supported_extensions)
         self._observer = Observer()
 
