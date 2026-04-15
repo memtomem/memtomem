@@ -268,6 +268,7 @@ class AutoTagStats:
 async def auto_tag_storage(
     storage: object,
     source_filter: str | None = None,
+    namespace_filter: str | None = None,
     max_tags: int = 5,
     overwrite: bool = False,
     dry_run: bool = False,
@@ -281,6 +282,10 @@ async def auto_tag_storage(
     Args:
         storage: StorageBackend instance.
         source_filter: Only process sources whose path contains this substring.
+        namespace_filter: Only process chunks whose metadata namespace matches
+            this value exactly. Applied per-chunk after source-level filtering;
+            chunks in other namespaces are excluded entirely (not counted in
+            total/skipped), mirroring the source_filter semantics.
         max_tags: Maximum tags to extract per chunk (default 5).
         overwrite: If False (default), skip chunks that already have tags.
         dry_run: If True, compute tags but do NOT write to storage.
@@ -302,6 +307,8 @@ async def auto_tag_storage(
         chunks: list[Chunk] = await storage.list_chunks_by_source(  # type: ignore[union-attr]
             source, limit=10_000
         )
+        if namespace_filter is not None:
+            chunks = [c for c in chunks if c.metadata.namespace == namespace_filter]
         for chunk in chunks:
             total += 1
 
