@@ -19,6 +19,12 @@ logger = logging.getLogger(__name__)
 
 _STOP_SENTINEL = Path("/dev/null/__stop__")
 
+# Max pending file-change events buffered between the watchdog thread and the
+# async processor. When this fills (indexer is slower than the change rate),
+# new events — including the shutdown sentinel — are dropped and a warning
+# is logged. Raise this if you watch a very large tree with a slow indexer.
+_WATCHER_QUEUE_MAXSIZE = 1000
+
 
 class _MarkdownEventHandler(FileSystemEventHandler):
     """Watchdog event handler that enqueues changed .md files."""
@@ -71,7 +77,7 @@ class FileWatcher:
         self._config = config
         self._debounce_s = debounce_ms / 1000.0
         self._observer: Observer | None = None
-        self._queue: asyncio.Queue[Path] = asyncio.Queue(maxsize=1000)
+        self._queue: asyncio.Queue[Path] = asyncio.Queue(maxsize=_WATCHER_QUEUE_MAXSIZE)
         self._task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
