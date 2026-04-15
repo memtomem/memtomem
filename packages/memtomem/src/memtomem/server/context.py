@@ -40,8 +40,11 @@ class AppContext:
     _config_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
-CtxType = Context[ServerSession, AppContext]
+CtxType = Context[ServerSession, AppContext] | None
 
 
 def _get_app(ctx: CtxType) -> AppContext:
+    # FastMCP always injects the context at call time; the None default on
+    # tool signatures exists only so the param isn't positional-required.
+    assert ctx is not None, "MCP framework must inject ctx at call time"
     return ctx.request_context.lifespan_context

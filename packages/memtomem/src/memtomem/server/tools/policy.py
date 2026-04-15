@@ -23,7 +23,7 @@ async def mem_policy_add(
     policy_type: str,
     config: str = "{}",
     namespace_filter: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Create a memory lifecycle policy.
 
@@ -120,7 +120,7 @@ async def mem_policy_add(
 @tool_handler
 @register("policy")
 async def mem_policy_list(
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """List all memory lifecycle policies."""
     app = _get_app(ctx)
@@ -145,7 +145,7 @@ async def mem_policy_list(
 @register("policy")
 async def mem_policy_delete(
     name: str,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Delete a memory lifecycle policy.
 
@@ -165,7 +165,7 @@ async def mem_policy_delete(
 async def mem_policy_run(
     name: str | None = None,
     dry_run: bool = True,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Run memory lifecycle policies.
 

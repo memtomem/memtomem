@@ -13,7 +13,7 @@ from memtomem.server.tool_registry import register
 @register("advanced")
 async def mem_importance_scan(
     namespace: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Compute and update importance scores for all chunks.
 

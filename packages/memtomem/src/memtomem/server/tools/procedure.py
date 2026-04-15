@@ -17,7 +17,7 @@ async def mem_procedure_save(
     trigger: str | None = None,
     tags: list[str] | None = None,
     namespace: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Save a reusable procedure (workflow/pattern) to memory.
 
@@ -56,7 +56,7 @@ async def mem_procedure_save(
 @tool_handler
 @register("procedures")
 async def mem_procedure_list(
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """List all saved procedures."""
     app = _get_app(ctx)

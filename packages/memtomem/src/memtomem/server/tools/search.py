@@ -38,7 +38,7 @@ async def mem_search(
     context_window: int = 0,
     verbose: bool = False,
     output_format: Literal["compact", "verbose", "structured"] = "compact",
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Search across indexed memory files using hybrid BM25 + semantic search.
 
@@ -146,7 +146,7 @@ async def mem_search(
 async def mem_expand(
     chunk_id: str,
     window: int = 2,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Expand a chunk with adjacent context from the same source file.
 
@@ -218,7 +218,7 @@ async def mem_expand(
 @register("search")
 async def mem_increment_access(
     chunk_ids: list[str],
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Increment access_count for the given chunks (drives access-frequency boost in search ranking).
 

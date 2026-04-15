@@ -16,7 +16,7 @@ async def mem_auto_tag(
     max_tags: int = 5,
     overwrite: bool = False,
     dry_run: bool = False,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Extract and apply keyword-based tags to indexed memory chunks.
 

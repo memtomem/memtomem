@@ -15,7 +15,7 @@ async def mem_scratch_set(
     key: str,
     value: str,
     ttl_minutes: int | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Store a value in working memory (scratchpad).
 
@@ -55,7 +55,7 @@ async def mem_scratch_set(
 @register("scratch")
 async def mem_scratch_get(
     key: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Retrieve a value from working memory, or list all entries if no key given.
 
@@ -96,7 +96,7 @@ async def mem_scratch_promote(
     title: str | None = None,
     tags: list[str] | None = None,
     file: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Promote a working memory entry to long-term memory.
 

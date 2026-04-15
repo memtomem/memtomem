@@ -18,7 +18,7 @@ async def mem_dedup_scan(
     threshold: float = 0.92,
     limit: int = 50,
     max_scan: int = 500,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Scan for duplicate chunk candidates (dry-run, no mutations).
 
@@ -62,7 +62,7 @@ async def mem_dedup_scan(
 async def mem_dedup_merge(
     keep_id: str,
     delete_ids: list[str],
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Merge duplicate chunks: keep keep_id, delete delete_ids.
 
@@ -92,7 +92,7 @@ async def mem_dedup_merge(
 async def mem_decay_scan(
     max_age_days: float = 90,
     source_filter: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Preview chunks that would be expired by TTL (dry-run, no deletions).
 
@@ -124,7 +124,7 @@ async def mem_decay_expire(
     max_age_days: float = 90,
     source_filter: str | None = None,
     dry_run: bool = True,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Delete chunks older than max_age_days from the index.
 
@@ -160,7 +160,7 @@ async def mem_decay_expire(
 @register("maintenance")
 async def mem_cleanup_orphans(
     dry_run: bool = True,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Find and remove orphaned chunks whose source files no longer exist.
 

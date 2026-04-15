@@ -17,7 +17,7 @@ async def mem_recall(
     source_filter: str | None = None,
     namespace: str | None = None,
     limit: int = 20,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Recall memories created within a date range.
 

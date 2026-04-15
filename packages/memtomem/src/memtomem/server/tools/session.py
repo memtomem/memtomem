@@ -17,7 +17,7 @@ async def mem_session_start(
     agent_id: str = "default",
     title: str | None = None,
     namespace: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Start a new episodic memory session.
 
@@ -51,7 +51,7 @@ async def mem_session_start(
 @register("sessions")
 async def mem_session_end(
     summary: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """End the current episodic memory session.
 
@@ -100,7 +100,7 @@ async def mem_session_list(
     agent_id: str | None = None,
     since: str | None = None,
     limit: int = 10,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """List recent episodic memory sessions.
 

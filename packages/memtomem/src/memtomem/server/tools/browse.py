@@ -15,7 +15,7 @@ from memtomem.server.formatters import _display_path
 async def mem_list(
     source_filter: str | None = None,
     namespace: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """List all indexed source files with chunk counts and metadata.
 
@@ -67,7 +67,7 @@ async def mem_list(
 @tool_handler
 async def mem_read(
     chunk_id: str,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Read the full content and metadata of a specific chunk by its UUID.
 

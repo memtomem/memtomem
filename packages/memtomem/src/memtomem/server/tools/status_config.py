@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 @mcp.tool()
 @tool_handler
 async def mem_stats(
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Return current memory index statistics: total chunks, sources, and storage backend.
 
@@ -46,7 +46,7 @@ async def mem_stats(
 @mcp.tool()
 @tool_handler
 async def mem_status(
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Show indexing statistics and current configuration summary.
 
@@ -113,7 +113,7 @@ async def mem_config(
     key: str | None = None,
     value: str | None = None,
     persist: bool = False,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """View or update memtomem configuration values.
 
@@ -225,7 +225,7 @@ def _revert_to_stored(app: AppContext) -> str:
 @register("advanced")
 async def mem_embedding_reset(
     mode: str = "status",
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Check or resolve embedding configuration mismatches between DB and current config.
 
@@ -282,7 +282,7 @@ async def mem_embedding_reset(
 @register("advanced")
 async def mem_reset(
     confirm: bool = False,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Delete ALL data (chunks, sessions, history, etc.) and reinitialize the DB.
 
@@ -310,7 +310,7 @@ async def mem_reset(
 @tool_handler
 @register("advanced")
 async def mem_version(
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Return server version and supported capabilities for protocol negotiation.
 

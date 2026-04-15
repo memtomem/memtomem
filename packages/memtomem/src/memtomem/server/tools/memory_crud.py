@@ -147,7 +147,7 @@ async def mem_add(
     file: str | None = None,
     namespace: str | None = None,
     template: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Add a new memory entry to a markdown file and immediately index it.
 
@@ -186,7 +186,7 @@ async def mem_add(
 async def mem_edit(
     chunk_id: str,
     new_content: str,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Edit an existing memory entry in its source markdown file.
 
@@ -244,7 +244,7 @@ async def mem_delete(
     chunk_id: str | None = None,
     source_file: str | None = None,
     namespace: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Delete memory entries from the index (and optionally from the source file).
 
@@ -318,7 +318,7 @@ async def mem_batch_add(
     entries: list[dict],
     namespace: str | None = None,
     file: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Add multiple memory entries in one call (KV batch).
 

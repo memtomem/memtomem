@@ -29,7 +29,7 @@ _ALIASES: dict[str, str] = {
 async def mem_do(
     action: str,
     params: dict | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Execute a memtomem action by name.
 

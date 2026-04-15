@@ -29,7 +29,7 @@ async def mem_ask(
     namespace: str | None = None,
     source_filter: str | None = None,
     tag_filter: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Ask a question and get an answer grounded in your memories.
 

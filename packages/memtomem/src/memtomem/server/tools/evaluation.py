@@ -14,7 +14,7 @@ from memtomem.server.tool_registry import register
 async def mem_eval(
     since: str | None = None,
     namespace: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Evaluate memory system health and effectiveness.
 

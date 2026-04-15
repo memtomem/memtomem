@@ -20,7 +20,7 @@ async def mem_export(
     tag_filter: str | None = None,
     since: str | None = None,
     namespace: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Export indexed memory chunks to a JSON bundle file.
 
@@ -65,7 +65,7 @@ async def mem_export(
 async def mem_import(
     input_file: str,
     namespace: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Import memory chunks from a JSON bundle file (produced by mem_export).
 

@@ -14,7 +14,7 @@ from memtomem.server.tool_registry import register
 @tool_handler
 @register("namespace")
 async def mem_ns_list(
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """List all namespaces and their chunk counts."""
     app = _get_app(ctx)
@@ -35,7 +35,7 @@ async def mem_ns_list(
 @register("namespace")
 async def mem_ns_delete(
     namespace: str,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Delete all chunks in a namespace from the index.
 
@@ -56,7 +56,7 @@ async def mem_ns_delete(
 @register("namespace")
 async def mem_ns_set(
     namespace: str,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Set the session-default namespace. Subsequent search/add/recall use this unless overridden.
 
@@ -76,7 +76,7 @@ async def mem_ns_set(
 @tool_handler
 @register("namespace")
 async def mem_ns_get(
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Get the current session namespace."""
     app = _get_app(ctx)
@@ -92,7 +92,7 @@ async def mem_ns_get(
 async def mem_ns_rename(
     old: str,
     new: str,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Rename a namespace (SQL UPDATE, no re-indexing needed).
 
@@ -113,7 +113,7 @@ async def mem_ns_update(
     namespace: str,
     description: str | None = None,
     color: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Update namespace metadata (description and/or color).
 
@@ -134,7 +134,7 @@ async def mem_ns_assign(
     namespace: str,
     source_filter: str | None = None,
     old_namespace: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Assign existing chunks to a namespace without re-indexing.
 

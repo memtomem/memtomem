@@ -14,7 +14,7 @@ from memtomem.server.tool_registry import register
 async def mem_search_history(
     limit: int = 20,
     since: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """List past search queries with result counts.
 
@@ -42,7 +42,7 @@ async def mem_search_history(
 async def mem_search_suggest(
     prefix: str,
     limit: int = 5,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Autocomplete search queries from history.
 

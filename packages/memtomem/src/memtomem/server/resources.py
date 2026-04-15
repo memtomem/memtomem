@@ -10,7 +10,7 @@ from memtomem.server.context import CtxType, _get_app
 
 
 @mcp.resource("memtomem://sources")
-async def sources_resource(ctx: CtxType = None) -> str:  # type: ignore[assignment]
+async def sources_resource(ctx: CtxType = None) -> str:
     """List all indexed source files with chunk counts."""
     app = _get_app(ctx)
     rows = await app.storage.get_source_files_with_counts()
@@ -29,7 +29,7 @@ async def sources_resource(ctx: CtxType = None) -> str:  # type: ignore[assignme
 
 
 @mcp.resource("memtomem://namespaces")
-async def namespaces_resource(ctx: CtxType = None) -> str:  # type: ignore[assignment]
+async def namespaces_resource(ctx: CtxType = None) -> str:
     """List all namespaces and their chunk counts."""
     app = _get_app(ctx)
     ns_list = await app.storage.list_namespaces()
@@ -38,7 +38,7 @@ async def namespaces_resource(ctx: CtxType = None) -> str:  # type: ignore[assig
 
 
 @mcp.resource("memtomem://tags")
-async def tags_resource(ctx: CtxType = None) -> str:  # type: ignore[assignment]
+async def tags_resource(ctx: CtxType = None) -> str:
     """List all tags and their usage counts."""
     app = _get_app(ctx)
     tag_counts = await app.storage.get_tag_counts()
@@ -47,7 +47,7 @@ async def tags_resource(ctx: CtxType = None) -> str:  # type: ignore[assignment]
 
 
 @mcp.resource("memtomem://stats")
-async def stats_resource(ctx: CtxType = None) -> str:  # type: ignore[assignment]
+async def stats_resource(ctx: CtxType = None) -> str:
     """Current index statistics."""
     app = _get_app(ctx)
     stats = await app.storage.get_stats()
@@ -55,7 +55,7 @@ async def stats_resource(ctx: CtxType = None) -> str:  # type: ignore[assignment
 
 
 @mcp.resource("memtomem://chunks/{chunk_id}")
-async def chunk_resource(chunk_id: str, ctx: CtxType = None) -> str:  # type: ignore[assignment]
+async def chunk_resource(chunk_id: str, ctx: CtxType = None) -> str:
     """Read a specific chunk by UUID."""
     app = _get_app(ctx)
     chunk = await app.storage.get_chunk(UUID(chunk_id))

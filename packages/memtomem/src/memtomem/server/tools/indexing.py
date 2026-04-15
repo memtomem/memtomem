@@ -18,7 +18,7 @@ async def mem_index(
     force: bool = False,
     namespace: str | None = None,
     auto_tag: bool = False,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Index or re-index markdown files for hybrid search.
 
