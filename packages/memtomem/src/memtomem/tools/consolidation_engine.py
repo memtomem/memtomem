@@ -37,6 +37,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_SUMMARY_NAMESPACE = "archive:summary"
 DECAY_FLOOR = 0.3  # keep_originals=False → importance_score floor (never below)
 CONSOLIDATED_SUFFIX = ".consolidated.md"
+SUMMARY_MAX_LEN = 160
+KEYWORD_BOOST_MAX_LEN = 140
+CHECKLIST_PREVIEW_LEN = 60
+FALLBACK_BODY_LEN = 120
 _SOURCE_HASH_RE = re.compile(r"Source hash:\s*`([a-f0-9]+)`")
 _CHECKLIST_ITEM_RE = re.compile(r"^\s*-\s*\[\s*[ xX]?\s*\]\s+(.+)$", re.MULTILINE)
 
@@ -44,7 +48,7 @@ _CHECKLIST_ITEM_RE = re.compile(r"^\s*-\s*\[\s*[ xX]?\s*\]\s+(.+)$", re.MULTILIN
 # ── Bullet extraction ────────────────────────────────────────────────
 
 
-def _first_sentence(text: str, max_len: int = 160) -> str:
+def _first_sentence(text: str, max_len: int = SUMMARY_MAX_LEN) -> str:
     """Return the first sentence of ``text``, capped to ``max_len`` chars.
 
     Splits on ``. ? !`` followed by whitespace, or a blank line. Leading
@@ -90,24 +94,24 @@ def extract_bullet(chunk: Chunk) -> str:
     boosted: str | None = None
     dec = _DECISION_RE.search(body)
     if dec:
-        boosted = f"Decision: {dec.group(1).strip()[:140]}"
+        boosted = f"Decision: {dec.group(1).strip()[:KEYWORD_BOOST_MAX_LEN]}"
     else:
         act = _ACTION_RE.search(body)
         if act:
             # _ACTION_RE has 3 capture groups (TODO:, -[ ], Action item:)
             captured = (act.group(1) or act.group(2) or act.group(3) or "").strip()
             if captured:
-                boosted = f"Action: {captured[:140]}"
+                boosted = f"Action: {captured[:KEYWORD_BOOST_MAX_LEN]}"
 
     # 2. Checklist fallback — only if no keyword boost landed.
     if boosted is None:
         items = _CHECKLIST_ITEM_RE.findall(body)
         if len(items) >= 2:
-            previews = ", ".join(i.strip()[:60] for i in items[:2])
+            previews = ", ".join(i.strip()[:CHECKLIST_PREVIEW_LEN] for i in items[:2])
             tail = "…" if len(items) > 2 else ""
             boosted = f"{len(items)} items ({previews}{tail})"
 
-    sentence = boosted or _first_sentence(body, max_len=160)
+    sentence = boosted or _first_sentence(body, max_len=SUMMARY_MAX_LEN)
 
     if label and sentence:
         return f"**{label}** — {sentence}"
@@ -115,7 +119,7 @@ def extract_bullet(chunk: Chunk) -> str:
         return f"**{label}**"
     if sentence:
         return sentence
-    return body[:120].replace("\n", " ") or "(empty chunk)"
+    return body[:FALLBACK_BODY_LEN].replace("\n", " ") or "(empty chunk)"
 
 
 # ── Source hash for idempotency ──────────────────────────────────────
