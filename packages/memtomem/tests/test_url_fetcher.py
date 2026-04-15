@@ -33,9 +33,7 @@ class TestHtmlToMarkdown:
         assert "- Second" in md
 
     def test_removes_script_style(self):
-        md = _html_to_markdown(
-            "<script>alert('xss')</script><style>body{}</style><p>Content</p>"
-        )
+        md = _html_to_markdown("<script>alert('xss')</script><style>body{}</style><p>Content</p>")
         assert "alert" not in md
         assert "body{}" not in md
         assert "Content" in md

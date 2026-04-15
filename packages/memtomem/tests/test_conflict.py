@@ -33,7 +33,12 @@ class TestConflictCandidate:
     def test_conflict_score(self):
         from pathlib import Path
         from memtomem.models import Chunk, ChunkMetadata
-        chunk = Chunk(content="test", metadata=ChunkMetadata(source_file=Path("/t.md")), embedding=[])
-        c = ConflictCandidate(existing_chunk=chunk, similarity=0.9, text_overlap=0.1, conflict_score=0.8)
+
+        chunk = Chunk(
+            content="test", metadata=ChunkMetadata(source_file=Path("/t.md")), embedding=[]
+        )
+        c = ConflictCandidate(
+            existing_chunk=chunk, similarity=0.9, text_overlap=0.1, conflict_score=0.8
+        )
         assert c.conflict_score == pytest.approx(0.8)
         assert c.similarity > c.text_overlap

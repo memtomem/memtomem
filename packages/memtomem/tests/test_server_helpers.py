@@ -399,7 +399,11 @@ class TestCheckEmbeddingMismatch:
         app = MagicMock()
         app.storage.embedding_mismatch = {
             "stored": {"provider": "ollama", "model": "nomic-embed-text", "dimension": 768},
-            "configured": {"provider": "openai", "model": "text-embedding-3-small", "dimension": 1536},
+            "configured": {
+                "provider": "openai",
+                "model": "text-embedding-3-small",
+                "dimension": 1536,
+            },
         }
         msg = _check_embedding_mismatch(app)
         assert msg is not None

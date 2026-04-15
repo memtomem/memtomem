@@ -405,9 +405,7 @@ class TestOnnxEmbedder:
         """embed_texts returns list of float lists via mocked fastembed."""
         config = _onnx_config(dimension=3)
         embedder = OnnxEmbedder(config)
-        embedder._model = _make_fake_embedding_model(
-            [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
-        )
+        embedder._model = _make_fake_embedding_model([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
 
         result = await embedder.embed_texts(["hello", "world"])
 

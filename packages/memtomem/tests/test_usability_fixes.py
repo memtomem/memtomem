@@ -92,27 +92,37 @@ class TestWikilinkResolution:
 
 class TestTemplatePlaceholders:
     def test_missing_fields_removed(self):
-        result = render_template("meeting", json.dumps({
-            "title": "Standup",
-            "attendees": "Team",
-            "decisions": "None",
-        }))
+        result = render_template(
+            "meeting",
+            json.dumps(
+                {
+                    "title": "Standup",
+                    "attendees": "Team",
+                    "decisions": "None",
+                }
+            ),
+        )
         assert "(fill:" not in result
         assert "Agenda" not in result  # removed because not provided
-        assert "Attendees" in result   # provided field stays
+        assert "Attendees" in result  # provided field stays
 
     def test_heading_with_placeholder_title_kept(self):
         result = render_template("debug", "Crash on boot")
         assert "Debug:" in result  # heading kept even if title is placeholder
 
     def test_all_fields_provided_no_removal(self):
-        result = render_template("meeting", json.dumps({
-            "title": "Sprint",
-            "attendees": "All",
-            "agenda": "Review",
-            "decisions": "Ship it",
-            "action_items": "Deploy",
-        }))
+        result = render_template(
+            "meeting",
+            json.dumps(
+                {
+                    "title": "Sprint",
+                    "attendees": "All",
+                    "agenda": "Review",
+                    "decisions": "Ship it",
+                    "action_items": "Deploy",
+                }
+            ),
+        )
         assert "Attendees" in result
         assert "Agenda" in result
         assert "Decisions" in result

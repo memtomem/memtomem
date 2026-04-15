@@ -48,8 +48,19 @@ class TestCLIGroup:
     def test_registered_subcommands(self, runner: CliRunner) -> None:
         """All expected subcommands appear in help output."""
         result = runner.invoke(cli, ["--help"])
-        for cmd in ("search", "add", "recall", "index", "config", "context",
-                     "embedding-reset", "reset", "web", "shell", "init"):
+        for cmd in (
+            "search",
+            "add",
+            "recall",
+            "index",
+            "config",
+            "context",
+            "embedding-reset",
+            "reset",
+            "web",
+            "shell",
+            "init",
+        ):
             assert cmd in result.output, f"'{cmd}' not found in help output"
 
     def test_unknown_command(self, runner: CliRunner) -> None:
@@ -298,9 +309,13 @@ class TestSaveConfigOverrides:
         config_file = tmp_path / "config.json"
         monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
 
-        config_file.write_text(json.dumps({
-            "search": {"default_top_k": -5},  # violates min=1
-        }))
+        config_file.write_text(
+            json.dumps(
+                {
+                    "search": {"default_top_k": -5},  # violates min=1
+                }
+            )
+        )
 
         cfg = Mem2MemConfig()
         default_top_k = cfg.search.default_top_k
@@ -316,10 +331,14 @@ class TestSaveConfigOverrides:
         config_file = tmp_path / "config.json"
         monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
 
-        config_file.write_text(json.dumps({
-            "search": {"default_top_k": -5, "rrf_k": 80},
-            "decay": {"enabled": True},
-        }))
+        config_file.write_text(
+            json.dumps(
+                {
+                    "search": {"default_top_k": -5, "rrf_k": 80},
+                    "decay": {"enabled": True},
+                }
+            )
+        )
 
         cfg = Mem2MemConfig()
         load_config_overrides(cfg)
@@ -336,9 +355,13 @@ class TestSaveConfigOverrides:
         monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
 
         # Simulate mm init having written memory_dirs
-        config_file.write_text(json.dumps({
-            "indexing": {"memory_dirs": ["/pre/existing"]},
-        }))
+        config_file.write_text(
+            json.dumps(
+                {
+                    "indexing": {"memory_dirs": ["/pre/existing"]},
+                }
+            )
+        )
 
         cfg = Mem2MemConfig()
         load_config_overrides(cfg)

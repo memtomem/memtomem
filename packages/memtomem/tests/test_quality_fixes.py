@@ -95,10 +95,12 @@ class TestBatchOperations:
         c2 = _make_chunk("imp2", source="i2.md")
         await storage.upsert_chunks([c1, c2])
 
-        updated = await storage.update_importance_scores({
-            str(c1.id): 0.8,
-            str(c2.id): 0.3,
-        })
+        updated = await storage.update_importance_scores(
+            {
+                str(c1.id): 0.8,
+                str(c2.id): 0.3,
+            }
+        )
         assert updated == 2
 
         scores = await storage.get_importance_scores([c1.id, c2.id])
@@ -427,6 +429,7 @@ class TestDatetimeNormalization:
     async def test_naive_datetime_gets_utc(self, storage):
         """Chunks with naive datetime stored should get UTC tzinfo on read."""
         from datetime import timezone
+
         chunk = _make_chunk("tz test")
         await storage.upsert_chunks([chunk])
 

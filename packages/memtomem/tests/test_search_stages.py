@@ -15,8 +15,14 @@ from helpers import make_chunk
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _sr(content: str = "text", score: float = 1.0, rank: int = 1, source: str = "bm25",
-        embedding: list[float] | None = None) -> SearchResult:
+
+def _sr(
+    content: str = "text",
+    score: float = 1.0,
+    rank: int = 1,
+    source: str = "bm25",
+    embedding: list[float] | None = None,
+) -> SearchResult:
     """Create a SearchResult backed by a real Chunk."""
     chunk = make_chunk(content=content, embedding=embedding or [0.1] * 8)
     return SearchResult(chunk=chunk, score=score, rank=rank, source=source)
@@ -25,6 +31,7 @@ def _sr(content: str = "text", score: float = 1.0, rank: int = 1, source: str = 
 # ===================================================================
 # RRF fusion tests
 # ===================================================================
+
 
 class TestReciprocalRankFusion:
     """Tests for reciprocal_rank_fusion in search/fusion.py."""
@@ -78,9 +85,7 @@ class TestReciprocalRankFusion:
         doc_a = _sr("from_list1", score=1.0, rank=1)
         doc_b = _sr("from_list2", score=1.0, rank=1)
         # Weight list2 much higher
-        fused = reciprocal_rank_fusion(
-            [[doc_a], [doc_b]], k=60, top_k=2, weights=[1.0, 10.0]
-        )
+        fused = reciprocal_rank_fusion([[doc_a], [doc_b]], k=60, top_k=2, weights=[1.0, 10.0])
         assert fused[0].chunk.content == "from_list2"
 
     def test_empty_lists(self):
@@ -119,6 +124,7 @@ class TestReciprocalRankFusion:
 # Cosine similarity tests
 # ===================================================================
 
+
 class TestCosineSimilarity:
     """Tests for cosine_similarity in search/mmr.py."""
 
@@ -144,6 +150,7 @@ class TestCosineSimilarity:
 # ===================================================================
 # MMR tests
 # ===================================================================
+
 
 class TestApplyMMR:
     """Tests for apply_mmr in search/mmr.py."""

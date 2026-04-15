@@ -28,12 +28,18 @@ class TestEntityMixin:
         chunk = make_chunk("some content")
         await storage.upsert_chunks([chunk])
 
-        await storage.upsert_entities(str(chunk.id), [
-            {"entity_type": "person", "entity_value": "Old"},
-        ])
-        await storage.upsert_entities(str(chunk.id), [
-            {"entity_type": "person", "entity_value": "New"},
-        ])
+        await storage.upsert_entities(
+            str(chunk.id),
+            [
+                {"entity_type": "person", "entity_value": "Old"},
+            ],
+        )
+        await storage.upsert_entities(
+            str(chunk.id),
+            [
+                {"entity_type": "person", "entity_value": "New"},
+            ],
+        )
 
         result = await storage.get_entities_for_chunk(str(chunk.id))
         assert len(result) == 1
@@ -48,9 +54,12 @@ class TestEntityMixin:
     async def test_delete_entities(self, storage):
         chunk = make_chunk("test")
         await storage.upsert_chunks([chunk])
-        await storage.upsert_entities(str(chunk.id), [
-            {"entity_type": "tech", "entity_value": "Python"},
-        ])
+        await storage.upsert_entities(
+            str(chunk.id),
+            [
+                {"entity_type": "tech", "entity_value": "Python"},
+            ],
+        )
         deleted = await storage.delete_entities_for_chunk(str(chunk.id))
         assert deleted == 1
 
@@ -61,10 +70,13 @@ class TestEntityMixin:
     async def test_search_by_type(self, storage):
         chunk = make_chunk("Alice uses Python")
         await storage.upsert_chunks([chunk])
-        await storage.upsert_entities(str(chunk.id), [
-            {"entity_type": "person", "entity_value": "Alice"},
-            {"entity_type": "tech", "entity_value": "Python"},
-        ])
+        await storage.upsert_entities(
+            str(chunk.id),
+            [
+                {"entity_type": "person", "entity_value": "Alice"},
+                {"entity_type": "tech", "entity_value": "Python"},
+            ],
+        )
 
         results = await storage.search_entities(entity_type="person")
         assert len(results) == 1
@@ -74,10 +86,13 @@ class TestEntityMixin:
     async def test_search_by_value(self, storage):
         chunk = make_chunk("Bob in Paris")
         await storage.upsert_chunks([chunk])
-        await storage.upsert_entities(str(chunk.id), [
-            {"entity_type": "person", "entity_value": "Bob"},
-            {"entity_type": "location", "entity_value": "Paris"},
-        ])
+        await storage.upsert_entities(
+            str(chunk.id),
+            [
+                {"entity_type": "person", "entity_value": "Bob"},
+                {"entity_type": "location", "entity_value": "Paris"},
+            ],
+        )
 
         results = await storage.search_entities(value="Par")
         assert len(results) == 1
@@ -88,8 +103,12 @@ class TestEntityMixin:
         c1 = make_chunk("Alice", namespace="work")
         c2 = make_chunk("Bob", namespace="personal")
         await storage.upsert_chunks([c1, c2])
-        await storage.upsert_entities(str(c1.id), [{"entity_type": "person", "entity_value": "Alice"}])
-        await storage.upsert_entities(str(c2.id), [{"entity_type": "person", "entity_value": "Bob"}])
+        await storage.upsert_entities(
+            str(c1.id), [{"entity_type": "person", "entity_value": "Alice"}]
+        )
+        await storage.upsert_entities(
+            str(c2.id), [{"entity_type": "person", "entity_value": "Bob"}]
+        )
 
         results = await storage.search_entities(namespace="work")
         assert len(results) == 1
@@ -99,11 +118,14 @@ class TestEntityMixin:
     async def test_entity_type_counts(self, storage):
         chunk = make_chunk("test")
         await storage.upsert_chunks([chunk])
-        await storage.upsert_entities(str(chunk.id), [
-            {"entity_type": "person", "entity_value": "A"},
-            {"entity_type": "person", "entity_value": "B"},
-            {"entity_type": "tech", "entity_value": "C"},
-        ])
+        await storage.upsert_entities(
+            str(chunk.id),
+            [
+                {"entity_type": "person", "entity_value": "A"},
+                {"entity_type": "person", "entity_value": "B"},
+                {"entity_type": "tech", "entity_value": "C"},
+            ],
+        )
 
         counts = await storage.get_entity_type_counts()
         assert counts["person"] == 2

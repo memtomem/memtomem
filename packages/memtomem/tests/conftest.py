@@ -71,6 +71,7 @@ async def components(tmp_path):
 
     # Monkey-patch to skip config.json loading
     import memtomem.config as _cfg
+
     _orig = _cfg.load_config_overrides
     _cfg.load_config_overrides = lambda c: None
     comp = await create_components(config)
@@ -78,8 +79,12 @@ async def components(tmp_path):
     yield comp
     await close_components(comp)
 
-    for key in ("MEMTOMEM_STORAGE__SQLITE_PATH", "MEMTOMEM_INDEXING__MEMORY_DIRS",
-                "MEMTOMEM_EMBEDDING__MODEL", "MEMTOMEM_EMBEDDING__DIMENSION"):
+    for key in (
+        "MEMTOMEM_STORAGE__SQLITE_PATH",
+        "MEMTOMEM_INDEXING__MEMORY_DIRS",
+        "MEMTOMEM_EMBEDDING__MODEL",
+        "MEMTOMEM_EMBEDDING__DIMENSION",
+    ):
         os.environ.pop(key, None)
 
 

@@ -19,6 +19,7 @@ from memtomem.models import NamespaceFilter
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _varied_embedding(seed: float = 0.1, dim: int = 1024) -> list[float]:
     """Return a deterministic but varied embedding vector."""
     return [seed + i * 0.0001 for i in range(dim)]
@@ -68,7 +69,9 @@ class TestStorageExtended:
     async def test_dense_search_respects_top_k(self, components):
         storage = components.storage
         chunks = [
-            make_chunk(content=f"chunk {i}", source=f"f{i}.md", embedding=_varied_embedding(0.1 + i * 0.01))
+            make_chunk(
+                content=f"chunk {i}", source=f"f{i}.md", embedding=_varied_embedding(0.1 + i * 0.01)
+            )
             for i in range(5)
         ]
         await storage.upsert_chunks(chunks)
@@ -80,8 +83,12 @@ class TestStorageExtended:
         storage = components.storage
         emb = _varied_embedding(0.3)
         chunk_a = make_chunk(content="ns-work", namespace="work", embedding=emb, source="w.md")
-        chunk_b = make_chunk(content="ns-personal", namespace="personal",
-                            embedding=_similar_embedding(emb), source="p.md")
+        chunk_b = make_chunk(
+            content="ns-personal",
+            namespace="personal",
+            embedding=_similar_embedding(emb),
+            source="p.md",
+        )
         await storage.upsert_chunks([chunk_a, chunk_b])
 
         ns_filter = NamespaceFilter.parse("work")
@@ -262,7 +269,9 @@ class TestStorageExtended:
         chunk = make_chunk(content="before reset", embedding=[0.1] * 1024)
         await storage.upsert_chunks([chunk])
 
-        await storage.reset_embedding_meta(dimension=768, provider="openai", model="text-embedding-3-small")
+        await storage.reset_embedding_meta(
+            dimension=768, provider="openai", model="text-embedding-3-small"
+        )
 
         # Old vector data is gone; DB should accept 768-dim vectors now
         new_chunk = make_chunk(content="after reset", embedding=[0.2] * 768, source="new.md")

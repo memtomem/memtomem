@@ -253,9 +253,7 @@ class TestMaintenanceExecutor:
 
         app, _db = mock_app
         config = HealthWatchdogConfig(enabled=True)
-        app.search_pipeline._search_cache = {
-            str(i): (time.time() - i, [], None) for i in range(40)
-        }
+        app.search_pipeline._search_cache = {str(i): (time.time() - i, [], None) for i in range(40)}
 
         executor = MaintenanceExecutor(app, config)
         result = await executor.trim_search_cache(max_entries=10)

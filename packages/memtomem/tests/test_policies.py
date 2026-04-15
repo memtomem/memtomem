@@ -18,7 +18,9 @@ class TestPolicyMixin:
 
     @pytest.mark.asyncio
     async def test_add_with_namespace(self, storage):
-        await storage.policy_add("ns-policy", "auto-tag", {"tags": ["old"]}, namespace_filter="archive")
+        await storage.policy_add(
+            "ns-policy", "auto-tag", {"tags": ["old"]}, namespace_filter="archive"
+        )
         policy = await storage.policy_get("ns-policy")
         assert policy is not None
         assert policy["namespace_filter"] == "archive"

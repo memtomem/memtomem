@@ -48,7 +48,12 @@ class TestImportanceScores:
     async def test_update_and_get(self, storage, components):
         from pathlib import Path
         from memtomem.models import Chunk, ChunkMetadata
-        chunk = Chunk(content="test", metadata=ChunkMetadata(source_file=Path("/t.md")), embedding=[0.0] * components.config.embedding.dimension)
+
+        chunk = Chunk(
+            content="test",
+            metadata=ChunkMetadata(source_file=Path("/t.md")),
+            embedding=[0.0] * components.config.embedding.dimension,
+        )
         await storage.upsert_chunks([chunk])
 
         scores = {str(chunk.id): 0.75}
