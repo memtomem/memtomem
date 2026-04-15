@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
+from watchdog.observers.api import BaseObserver
 
 from memtomem.config import IndexingConfig
 
@@ -70,7 +71,7 @@ class FileWatcher:
         self._engine = index_engine
         self._config = config
         self._debounce_s = debounce_ms / 1000.0
-        self._observer: Observer | None = None
+        self._observer: BaseObserver | None = None
         self._queue: asyncio.Queue[Path] = asyncio.Queue(maxsize=1000)
         self._task: asyncio.Task[None] | None = None
 
