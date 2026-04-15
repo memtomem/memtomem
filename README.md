@@ -8,6 +8,7 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-green)](https://python.org)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![CLA](https://img.shields.io/badge/CLA-required-green)](CLA.md)
+[![Safety](https://img.shields.io/badge/safety-no%20vulnerabilities-brightgreen)](https://data.safetycli.com/packages/pypi/memtomem)
 
 **Give your AI agent a long-term memory.**
 
