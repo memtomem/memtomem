@@ -41,12 +41,6 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture
-def chunk_factory():
-    """Fixture that returns the make_chunk factory function."""
-    return make_chunk
-
-
-@pytest.fixture
 async def components(tmp_path):
     """Create components with a temporary DB for isolated testing."""
     import json
