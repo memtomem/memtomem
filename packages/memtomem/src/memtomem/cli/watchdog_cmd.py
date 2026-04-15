@@ -92,7 +92,7 @@ async def _watchdog_run(as_json: bool) -> None:
             embedder=comp.embedder,
             index_engine=comp.index_engine,
             search_pipeline=comp.search_pipeline,
-            watcher=FileWatcher([], None),
+            watcher=FileWatcher(comp.index_engine, comp.config.indexing),
         )
         config = HealthWatchdogConfig(enabled=True)
         wd = HealthWatchdog(ctx, config)

@@ -60,8 +60,8 @@ async def detect_conflicts(
     try:
         embedding = await embedder.embed_query(content)
         results = await storage.dense_search(embedding, top_k=10)
-    except Exception as exc:
-        logger.debug("Conflict detection failed: %s", exc)
+    except Exception:
+        logger.warning("Conflict detection failed", exc_info=True)
         return []
 
     candidates: list[ConflictCandidate] = []

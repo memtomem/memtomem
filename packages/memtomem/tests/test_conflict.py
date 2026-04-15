@@ -1,7 +1,9 @@
 """Tests for conflict detection."""
 
+import logging
+
 import pytest
-from memtomem.search.conflict import _jaccard_tokens, ConflictCandidate
+from memtomem.search.conflict import _jaccard_tokens, ConflictCandidate, detect_conflicts
 
 
 class TestJaccardTokens:
@@ -42,3 +44,45 @@ class TestConflictCandidate:
         )
         assert c.conflict_score == pytest.approx(0.8)
         assert c.similarity > c.text_overlap
+
+
+class TestDetectConflictsFailure:
+    """Conflict detection failure must surface as WARNING, not silent debug."""
+
+    @pytest.mark.asyncio
+    async def test_embedder_failure_logs_warning(self, caplog):
+        class _BrokenEmbedder:
+            async def embed_query(self, _text: str):
+                raise RuntimeError("embedder unavailable")
+
+        class _DummyStorage:
+            async def dense_search(self, *args, **kwargs):
+                return []
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.search.conflict"):
+            result = await detect_conflicts("new content", _DummyStorage(), _BrokenEmbedder())
+
+        assert result == []
+        assert any(
+            rec.levelno == logging.WARNING and "Conflict detection failed" in rec.message
+            for rec in caplog.records
+        ), "Expected WARNING log when conflict detection fails (not silent debug)"
+
+    @pytest.mark.asyncio
+    async def test_storage_failure_logs_warning(self, caplog):
+        class _DummyEmbedder:
+            async def embed_query(self, _text: str):
+                return [0.0, 0.0, 0.0]
+
+        class _BrokenStorage:
+            async def dense_search(self, *args, **kwargs):
+                raise RuntimeError("storage unavailable")
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.search.conflict"):
+            result = await detect_conflicts("new content", _BrokenStorage(), _DummyEmbedder())
+
+        assert result == []
+        assert any(
+            rec.levelno == logging.WARNING and "Conflict detection failed" in rec.message
+            for rec in caplog.records
+        )
