@@ -132,6 +132,7 @@ class AnalyticsMixin:
             ).fetchall()
             return [{"query": r[0], "count": r[1]} for r in rows]
         except Exception:
+            logger.debug("query_history query failed (table may not exist yet)", exc_info=True)
             return []
 
     async def get_most_connected(self, limit: int = 5) -> list[dict]:
