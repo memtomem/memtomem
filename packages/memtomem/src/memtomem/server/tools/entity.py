@@ -21,7 +21,7 @@ async def mem_entity_scan(
     entity_types: list[str] | None = None,
     overwrite: bool = False,
     dry_run: bool = False,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Scan indexed chunks and extract structured entities (people, dates, decisions, etc.).
 
@@ -120,7 +120,7 @@ async def mem_entity_search(
     value: str | None = None,
     namespace: str | None = None,
     limit: int = 20,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Search for chunks containing specific entities.
 
@@ -133,7 +133,7 @@ async def mem_entity_search(
         limit: Maximum results (default 20)
     """
     if not 1 <= limit <= 500:
-        return "Error: limit must be between 1 and 500."
+        return f"Error: limit must be between 1 and 500, got {limit}."
 
     app = _get_app(ctx)
     results = await app.storage.search_entities(

@@ -157,12 +157,12 @@ def main() -> None:
     except OSError:
         # Another server already holds the lock — proceed anyway (the editor
         # expects the process to stay alive), but log a warning.
-        import sys
+        _lock_fp.close()
+        import logging
 
-        print(
-            "memtomem-server: another instance is already running "
-            f"(pid file: {pid_file}). Concurrent writes may be slow.",
-            file=sys.stderr,
+        logging.getLogger(__name__).warning(
+            "Another instance is already running (pid file: %s). Concurrent writes may be slow.",
+            pid_file,
         )
     else:
         import os

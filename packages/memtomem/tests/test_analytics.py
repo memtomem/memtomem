@@ -1,5 +1,7 @@
 """Tests for analytics storage mixin methods."""
 
+import logging
+
 import pytest
 from pathlib import Path
 from memtomem.models import Chunk, ChunkMetadata
@@ -97,6 +99,21 @@ class TestKnowledgeGaps:
         assert len(gaps) == 1
         assert gaps[0]["query"] == "missing topic"
         assert gaps[0]["count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_db_error_logs_debug(self, storage, caplog):
+        # Drop the query_history table to force the query to fail — we want
+        # to verify the failure is logged (debug) rather than silently swallowed.
+        storage._get_db().execute("DROP TABLE IF EXISTS query_history")
+
+        with caplog.at_level(logging.DEBUG, logger="memtomem.storage.mixins.analytics"):
+            result = await storage.get_knowledge_gaps()
+
+        assert result == []
+        assert any(
+            rec.levelno == logging.DEBUG and "get_knowledge_gaps query failed" in rec.message
+            for rec in caplog.records
+        ), "Expected DEBUG log when get_knowledge_gaps query fails (not fully silent)"
 
 
 class TestMostConnected:

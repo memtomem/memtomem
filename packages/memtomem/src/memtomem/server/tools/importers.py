@@ -17,7 +17,7 @@ async def mem_import_notion(
     path: str,
     namespace: str | None = None,
     tags: list[str] | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Import a Notion export (ZIP or directory) into memtomem.
 
@@ -91,7 +91,7 @@ async def mem_import_obsidian(
     vault_path: str,
     namespace: str | None = None,
     tags: list[str] | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Import an Obsidian vault into memtomem.
 

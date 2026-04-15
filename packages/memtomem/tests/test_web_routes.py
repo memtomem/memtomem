@@ -223,7 +223,9 @@ class TestHealth:
         assert resp.status_code == 503
         data = resp.json()
         assert data["status"] == "degraded"
-        assert data["checks"]["storage"] == "RuntimeError"
+        assert data["checks"]["storage"] == "error"
+        # Exception class name must not leak to the response (see #75).
+        assert "RuntimeError" not in resp.text
 
 
 # ---------------------------------------------------------------------------

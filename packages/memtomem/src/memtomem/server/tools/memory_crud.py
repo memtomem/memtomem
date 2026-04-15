@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -18,7 +19,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _webhook_error_cb(task: "asyncio.Task") -> None:  # noqa: F821
+def _webhook_error_cb(task: asyncio.Task) -> None:
     """Log errors from fire-and-forget webhook tasks."""
     if task.cancelled():
         return
@@ -129,8 +130,6 @@ async def _mem_add_core(
 
     # Fire webhook
     if app.webhook_manager:
-        import asyncio
-
         task = asyncio.create_task(
             app.webhook_manager.fire("add", {"file": str(target), "chunks_indexed": 1})
         )
@@ -148,7 +147,7 @@ async def mem_add(
     file: str | None = None,
     namespace: str | None = None,
     template: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Add a new memory entry to a markdown file and immediately index it.
 
@@ -187,7 +186,7 @@ async def mem_add(
 async def mem_edit(
     chunk_id: str,
     new_content: str,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Edit an existing memory entry in its source markdown file.
 
@@ -245,7 +244,7 @@ async def mem_delete(
     chunk_id: str | None = None,
     source_file: str | None = None,
     namespace: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Delete memory entries from the index (and optionally from the source file).
 
@@ -319,7 +318,7 @@ async def mem_batch_add(
     entries: list[dict],
     namespace: str | None = None,
     file: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Add multiple memory entries in one call (KV batch).
 
@@ -333,7 +332,7 @@ async def mem_batch_add(
         file: Target .md file.  If omitted, a timestamped file is created.
     """
     if len(entries) > 500:
-        return "Error: batch too large (max 500 entries)."
+        return f"Error: batch too large (max 500 entries, got {len(entries)})."
 
     from datetime import datetime, timezone
 

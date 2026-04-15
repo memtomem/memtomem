@@ -40,9 +40,7 @@ async def search(
         )
     except Exception as exc:
         logger.error("Search failed: %s", exc, exc_info=True)
-        raise HTTPException(
-            status_code=500, detail=f"Search failed ({type(exc).__name__})"
-        ) from exc
+        raise HTTPException(status_code=500, detail="Search failed") from exc
     out = [to_result_out(r) for r in results]
     return SearchResponse(
         results=out,

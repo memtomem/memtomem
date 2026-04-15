@@ -71,6 +71,7 @@ async function loadCtxOverview() {
   panelLoading(el);
   try {
     const res = await fetch('/api/context/overview');
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Failed to load overview');
     const data = await res.json();
 
     const types = [
@@ -120,10 +121,12 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
   try {
     const types = ['skills', 'commands', 'agents'];
     for (const typ of types) {
-      await fetch(`/api/context/${typ}/sync`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+      const resp = await fetch(`/api/context/${typ}/sync`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+      if (!resp.ok) throw new Error(`Sync ${typ} failed`);
     }
     // Settings hooks sync (additive merge)
-    await fetch('/api/context/settings/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+    const settingsResp = await fetch('/api/context/settings/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+    if (!settingsResp.ok) throw new Error('Settings sync failed');
     showToast(t('settings.ctx.sync_success', 'Sync completed'));
     loadCtxOverview();
   } catch (err) {
@@ -156,6 +159,7 @@ async function loadCtxList(type) {
 
   try {
     const res = await fetch(`/api/context/${type}`);
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Failed to load ${type}`);
     const data = await res.json();
     const items = data[type] || [];
 
@@ -205,6 +209,7 @@ async function loadCtxDetail(type, name) {
       detailEl.innerHTML = emptyState('', `"${name}" not found`, t('settings.ctx.no_artifacts_hint'));
       return;
     }
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Failed to load ${name}`);
     const data = await res.json();
 
     let html = '<div class="ctx-detail">';
@@ -294,6 +299,11 @@ async function loadCtxDetail(type, name) {
           loadCtxDetail(type, name);
           return;
         }
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          showToast(err.detail || 'Save failed', 'error');
+          return;
+        }
         const result = await r.json();
         if (result.name) {
           showToast(t('settings.ctx.save_success', '"{name}" saved').replace('{name}', name));
@@ -321,6 +331,11 @@ async function loadCtxDetail(type, name) {
       if (!ok) return;
       try {
         const r = await fetch(`/api/context/${type}/${encodeURIComponent(name)}?cascade=false`, { method: 'DELETE' });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          showToast(err.detail || 'Delete failed', 'error');
+          return;
+        }
         const result = await r.json();
         if (result.deleted) {
           showToast(t('settings.ctx.delete_success', '"{name}" deleted').replace('{name}', name));
@@ -343,6 +358,7 @@ async function _ctxLoadDiff(type, name, detailEl) {
   pane.innerHTML = '<div class="empty-state"><div class="spinner-panel"></div></div>';
   try {
     const res = await fetch(`/api/context/${type}/${encodeURIComponent(name)}/diff`);
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Diff failed');
     const data = await res.json();
 
     let html = '';
@@ -384,6 +400,11 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
     btnLoading(btn, true);
     try {
       const r = await fetch(`/api/context/${type}/sync`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        showToast(err.detail || 'Sync failed', 'error');
+        return;
+      }
       const data = await r.json();
       const dropped = data.dropped || [];
       if (dropped.length) {
@@ -414,6 +435,11 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
       });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        showToast(err.detail || 'Import failed', 'error');
+        return;
+      }
       const data = await r.json();
       const statusEl = qs(`ctx-${type}-status`);
       if (statusEl) statusEl.innerHTML = renderImportResult(data);

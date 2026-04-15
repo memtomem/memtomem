@@ -17,7 +17,7 @@ async def mem_fetch(
     url: str,
     tags: list[str] | None = None,
     namespace: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Fetch a URL, convert to markdown, and index it for search.
 

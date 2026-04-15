@@ -8,8 +8,12 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from memtomem.storage.sqlite_helpers import escape_like
+
+if TYPE_CHECKING:
+    from memtomem.storage.sqlite_backend import SqliteBackend
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +58,7 @@ def _resolve_archive_ns(template: str, tags_json: str | None, fallback: str) -> 
 
 
 async def execute_auto_archive(
-    storage: object,
+    storage: SqliteBackend,
     config: dict,
     namespace: str | None,
     dry_run: bool,
@@ -101,7 +105,7 @@ async def execute_auto_archive(
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age)).isoformat()
 
-    db = storage._get_db()  # type: ignore[attr-defined]
+    db = storage._get_db()
 
     # Template mode needs current namespace + tags per chunk to route and
     # skip self-moves. Flat mode can fetch only ids.
@@ -178,7 +182,7 @@ async def execute_auto_archive(
 
 
 async def execute_auto_expire(
-    storage: object,
+    storage: SqliteBackend,
     config: dict,
     namespace: str | None,
     dry_run: bool,
@@ -187,7 +191,7 @@ async def execute_auto_expire(
     max_age = config.get("max_age_days", 90)
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age)).isoformat()
 
-    db = storage._get_db()  # type: ignore[attr-defined]
+    db = storage._get_db()
     query = "SELECT id FROM chunks WHERE created_at < ? AND access_count = 0"
     params: list = [cutoff]
     if namespace:
@@ -213,7 +217,7 @@ async def execute_auto_expire(
 
 
 async def execute_auto_tag(
-    storage: object,
+    storage: SqliteBackend,
     config: dict,
     namespace: str | None,
     dry_run: bool,
@@ -221,7 +225,7 @@ async def execute_auto_tag(
     """Run auto-tagging on untagged chunks."""
     max_tags = config.get("max_tags", 5)
 
-    db = storage._get_read_db()  # type: ignore[attr-defined]
+    db = storage._get_read_db()
     query = "SELECT COUNT(*) FROM chunks WHERE tags = '[]' OR tags = ''"
     if namespace:
         query += f" AND namespace = '{namespace}'"
@@ -257,7 +261,7 @@ async def execute_auto_tag(
 
 
 async def execute_auto_consolidate(
-    storage: object,
+    storage: SqliteBackend,
     config: dict,
     namespace: str | None,
     dry_run: bool,
@@ -319,7 +323,7 @@ async def execute_auto_consolidate(
             details="Error: min_group_size must be at least 2",
         )
 
-    raw_groups = await storage.get_consolidation_groups(  # type: ignore[attr-defined]
+    raw_groups = await storage.get_consolidation_groups(
         min_size=min_group_size,
         max_groups=max_groups,
     )
@@ -331,7 +335,7 @@ async def execute_auto_consolidate(
     for g in raw_groups:
         source_path = Path(g["source"])
 
-        chunks = await storage.list_chunks_by_source(source_path, limit=20)  # type: ignore[attr-defined]
+        chunks = await storage.list_chunks_by_source(source_path, limit=20)
         if len(chunks) < min_group_size:
             continue
 
@@ -357,7 +361,7 @@ async def execute_auto_consolidate(
         # changed (chunk added/removed) and we must regenerate.
         current_hash = compute_source_hash([c.id for c in chunks])
         virtual_path = source_path.parent / f"{source_path.name}{CONSOLIDATED_SUFFIX}"
-        existing = await storage.list_chunks_by_source(virtual_path, limit=1)  # type: ignore[attr-defined]
+        existing = await storage.list_chunks_by_source(virtual_path, limit=1)
         stale = False
         if existing:
             old_hash = parse_source_hash(existing[0].content)
@@ -374,7 +378,7 @@ async def execute_auto_consolidate(
             # chunks will flow through layer 1 once the user creates a
             # policy-owned summary again (or the agent regenerates theirs).
             if await source_has_consolidation_relations(
-                storage,  # type: ignore[arg-type]
+                storage,
                 [c.id for c in chunks],
             ):
                 detail_parts.append(f"{source_path.name} (SKIP: agent-consolidated)")
@@ -387,7 +391,7 @@ async def execute_auto_consolidate(
             continue
 
         if stale:
-            await storage.delete_chunks([existing[0].id])  # type: ignore[attr-defined]
+            await storage.delete_chunks([existing[0].id])
 
         try:
             # Try LLM summary first, fall back to heuristic on failure.
@@ -413,7 +417,7 @@ async def execute_auto_consolidate(
                 "chunk_count": len(chunks),
             }
             await apply_consolidation(
-                storage,  # type: ignore[arg-type]
+                storage,
                 group_dict,
                 summary,
                 keep_originals=keep_originals,
@@ -450,7 +454,7 @@ async def execute_auto_consolidate(
 
 
 async def execute_auto_promote(
-    storage: object,
+    storage: SqliteBackend,
     config: dict,
     namespace: str | None,
     dry_run: bool,
@@ -492,7 +496,7 @@ async def execute_auto_promote(
     min_importance_score = config.get("min_importance_score")
     recency_days = config.get("recency_days")
 
-    db = storage._get_db()  # type: ignore[attr-defined]
+    db = storage._get_db()
 
     where_parts: list[str] = []
     params: list = []
@@ -560,7 +564,7 @@ _HANDLERS = {
 
 
 async def run_policy(
-    storage: object,
+    storage: SqliteBackend,
     policy: dict,
     dry_run: bool = False,
     *,
@@ -606,7 +610,7 @@ async def run_policy(
 
 
 async def run_all_enabled(
-    storage: object,
+    storage: SqliteBackend,
     dry_run: bool = False,
     max_actions: int | None = None,
     *,
@@ -620,13 +624,13 @@ async def run_all_enabled(
             handlers run atomically.
         llm_provider: Optional LLM provider forwarded to consolidation.
     """
-    policies = await storage.policy_get_enabled()  # type: ignore[attr-defined]
+    policies = await storage.policy_get_enabled()
     results: list[PolicyRunResult] = []
     cumulative = 0
     for p in policies:
         result = await run_policy(storage, p, dry_run=dry_run, llm_provider=llm_provider)
         if not dry_run:
-            await storage.policy_update_last_run(p["name"])  # type: ignore[attr-defined]
+            await storage.policy_update_last_run(p["name"])
         results.append(result)
         cumulative += result.affected_count
         if max_actions is not None and cumulative >= max_actions:

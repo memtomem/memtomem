@@ -146,14 +146,14 @@ class SqliteBackend(
             try:
                 rconn.close()
             except Exception:
-                pass
+                logger.debug("Failed to close read pool connection", exc_info=True)
         if hasattr(self, "_read_pool"):
             self._read_pool.clear()
         if self._db:
             try:
                 self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             except Exception:
-                pass
+                logger.debug("WAL checkpoint failed during close", exc_info=True)
             self._db.close()
             self._db = None
 
@@ -615,7 +615,11 @@ class SqliteBackend(
             try:
                 result[row[0]] = deserialize_f32(row[1])
             except Exception:
-                pass
+                logger.warning(
+                    "Failed to deserialize embedding for chunk %s",
+                    row[0],
+                    exc_info=True,
+                )
         return result
 
     # ---- search --------------------------------------------------------------

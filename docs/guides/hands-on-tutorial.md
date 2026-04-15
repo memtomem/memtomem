@@ -58,7 +58,7 @@ claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
 > `core` mode and shows the `mem_do` form for non-core actions like
 > `edit` / `delete` / `batch_add` / `orphans`. If you prefer calling
 > them as top-level tools, add `"env": {"MEMTOMEM_TOOL_MODE": "standard"}`
-> (≈30 tools) or `"full"` (all 74) to the MCP server entry above.
+> (32 tools) or `"full"` (all 74) to the MCP server entry above.
 
 ### 1.3 First Tool Call
 
@@ -389,7 +389,9 @@ If you install the CLI (`uv tool install memtomem`, or `uv run mm ...` from a gi
 | `mem_add` | `mm add "note content"` |
 | `mem_recall` | `mm recall --since 2026-03-01` |
 | `mem_status` | (no CLI equivalent) |
-| `mem_config` | `mm config` |
+| `mem_config`\* | `mm config` |
+
+\* `mem_config` requires `MEMTOMEM_TOOL_MODE=full`. In core/standard mode, use `mm config` (CLI) or the Web UI Settings tab.
 
 ---
 

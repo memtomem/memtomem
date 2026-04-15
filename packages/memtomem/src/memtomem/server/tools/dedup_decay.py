@@ -18,7 +18,7 @@ async def mem_dedup_scan(
     threshold: float = 0.92,
     limit: int = 50,
     max_scan: int = 500,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Scan for duplicate chunk candidates (dry-run, no mutations).
 
@@ -28,9 +28,9 @@ async def mem_dedup_scan(
         max_scan: Maximum chunks to inspect for near-duplicate search
     """
     if not 0.0 <= threshold <= 1.0:
-        return "Error: threshold must be between 0 and 1."
+        return f"Error: threshold must be between 0 and 1, got {threshold}."
     if not 1 <= limit <= 500:
-        return "Error: limit must be between 1 and 500."
+        return f"Error: limit must be between 1 and 500, got {limit}."
 
     app = _get_app(ctx)
     if app.dedup_scanner is None:
@@ -62,7 +62,7 @@ async def mem_dedup_scan(
 async def mem_dedup_merge(
     keep_id: str,
     delete_ids: list[str],
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Merge duplicate chunks: keep keep_id, delete delete_ids.
 
@@ -92,7 +92,7 @@ async def mem_dedup_merge(
 async def mem_decay_scan(
     max_age_days: float = 90,
     source_filter: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Preview chunks that would be expired by TTL (dry-run, no deletions).
 
@@ -101,7 +101,7 @@ async def mem_decay_scan(
         source_filter: Only scan chunks from sources containing this substring.
     """
     if max_age_days <= 0:
-        return "Error: max_age_days must be positive."
+        return f"Error: max_age_days must be positive, got {max_age_days}."
 
     from memtomem.search.decay import expire_chunks
 
@@ -124,7 +124,7 @@ async def mem_decay_expire(
     max_age_days: float = 90,
     source_filter: str | None = None,
     dry_run: bool = True,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Delete chunks older than max_age_days from the index.
 
@@ -136,7 +136,7 @@ async def mem_decay_expire(
         dry_run: If True (default), preview without making any changes.
     """
     if max_age_days <= 0:
-        return "Error: max_age_days must be positive."
+        return f"Error: max_age_days must be positive, got {max_age_days}."
 
     from memtomem.search.decay import expire_chunks
 
@@ -160,7 +160,7 @@ async def mem_decay_expire(
 @register("maintenance")
 async def mem_cleanup_orphans(
     dry_run: bool = True,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Find and remove orphaned chunks whose source files no longer exist.
 

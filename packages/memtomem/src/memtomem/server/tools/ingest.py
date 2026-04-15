@@ -17,7 +17,7 @@ async def mem_ingest(
     source: str,
     source_type: str = "claude",
     dry_run: bool = False,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Ingest external agent memories (Claude, Gemini, Codex) into memtomem.
 

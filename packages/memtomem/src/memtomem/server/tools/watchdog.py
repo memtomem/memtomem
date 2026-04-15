@@ -17,7 +17,7 @@ async def mem_watchdog(
     command: str = "status",
     check: str | None = None,
     hours: float = 24.0,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Health watchdog: view status, trends, or force a check run.
 

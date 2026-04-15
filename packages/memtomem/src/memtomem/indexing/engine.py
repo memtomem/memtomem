@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from memtomem.chunking.markdown import MarkdownChunker
 from memtomem.chunking.registry import ChunkerRegistry
+from memtomem.chunking.restructured_text import ReStructuredTextChunker
 from memtomem.chunking.structured import StructuredChunker
 from memtomem.config import IndexingConfig, NamespaceConfig
 from memtomem.indexing.differ import compute_diff
@@ -39,6 +40,7 @@ class IndexEngine:
             [
                 MarkdownChunker(),
                 StructuredChunker(indexing_config=config),
+                ReStructuredTextChunker(),
             ]
         )
         self._index_lock = asyncio.Lock()  # prevent concurrent indexing of same files

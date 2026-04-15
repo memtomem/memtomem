@@ -1,3 +1,5 @@
 """memtomem: Markdown-first memory infrastructure for AI agents."""
 
-__version__ = "0.1.8"
+from importlib.metadata import version as _pkg_version
+
+__version__ = _pkg_version("memtomem")

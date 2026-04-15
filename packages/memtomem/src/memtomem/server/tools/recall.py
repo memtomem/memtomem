@@ -17,7 +17,7 @@ async def mem_recall(
     source_filter: str | None = None,
     namespace: str | None = None,
     limit: int = 20,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Recall memories created within a date range.
 
@@ -37,7 +37,7 @@ async def mem_recall(
         mem_recall(namespace="work", limit=10)
     """
     if not 1 <= limit <= 500:
-        return "Error: limit must be between 1 and 500."
+        return f"Error: limit must be between 1 and 500, got {limit}."
 
     from memtomem.models import NamespaceFilter
 

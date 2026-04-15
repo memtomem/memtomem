@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Literal
 from uuid import UUID
-
-import logging
 
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app
@@ -16,7 +16,7 @@ from memtomem.server.tool_registry import register
 logger = logging.getLogger(__name__)
 
 
-def _webhook_error_cb(task: "asyncio.Task") -> None:  # noqa: F821
+def _webhook_error_cb(task: asyncio.Task) -> None:
     """Log errors from fire-and-forget webhook tasks."""
     if task.cancelled():
         return
@@ -38,7 +38,7 @@ async def mem_search(
     context_window: int = 0,
     verbose: bool = False,
     output_format: Literal["compact", "verbose", "structured"] = "compact",
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Search across indexed memory files using hybrid BM25 + semantic search.
 
@@ -59,9 +59,9 @@ async def mem_search(
     if not query.strip():
         return "Error: query cannot be empty."
     if len(query) > 10_000:
-        return "Error: query too long (max 10,000 characters)."
+        return f"Error: query too long (max 10,000 characters, got {len(query)})."
     if not 1 <= top_k <= 100:
-        return "Error: top_k must be between 1 and 100."
+        return f"Error: top_k must be between 1 and 100, got {top_k}."
 
     # Resolve effective format: output_format takes precedence over verbose
     effective_format = output_format
@@ -132,8 +132,6 @@ async def mem_search(
 
     # Fire webhook
     if app.webhook_manager:
-        import asyncio
-
         task = asyncio.create_task(
             app.webhook_manager.fire("search", {"query": query, "result_count": len(results)})
         )
@@ -148,7 +146,7 @@ async def mem_search(
 async def mem_expand(
     chunk_id: str,
     window: int = 2,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Expand a chunk with adjacent context from the same source file.
 
@@ -220,7 +218,7 @@ async def mem_expand(
 @register("search")
 async def mem_increment_access(
     chunk_ids: list[str],
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Increment access_count for the given chunks (drives access-frequency boost in search ranking).
 

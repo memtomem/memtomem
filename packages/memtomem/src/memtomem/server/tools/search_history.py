@@ -14,7 +14,7 @@ from memtomem.server.tool_registry import register
 async def mem_search_history(
     limit: int = 20,
     since: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """List past search queries with result counts.
 
@@ -23,7 +23,7 @@ async def mem_search_history(
         since: ISO date filter — only queries after this date.
     """
     if not 1 <= limit <= 200:
-        return "Error: limit must be between 1 and 200."
+        return f"Error: limit must be between 1 and 200, got {limit}."
 
     app = _get_app(ctx)
     rows = await app.storage.get_query_history(limit=limit, since=since)
@@ -42,7 +42,7 @@ async def mem_search_history(
 async def mem_search_suggest(
     prefix: str,
     limit: int = 5,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Autocomplete search queries from history.
 

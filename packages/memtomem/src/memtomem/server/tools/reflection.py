@@ -19,7 +19,7 @@ async def mem_reflect(
     namespace: str | None = None,
     since: str | None = None,
     limit: int = 20,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Analyze recent memory activity and surface patterns for reflection.
 
@@ -33,7 +33,7 @@ async def mem_reflect(
         limit: Maximum items per category
     """
     if not 1 <= limit <= 200:
-        return "Error: limit must be between 1 and 200."
+        return f"Error: limit must be between 1 and 200, got {limit}."
 
     app = _get_app(ctx)
     storage = app.storage
@@ -114,7 +114,7 @@ async def mem_reflect_save(
     insight: str,
     related_chunks: list[str] | None = None,
     tags: list[str] | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Save a reflection insight derived from memory analysis.
 

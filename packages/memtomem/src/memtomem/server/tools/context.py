@@ -43,7 +43,7 @@ def _parse_include(include: str) -> set[str]:
 @register("context")
 async def mem_context_detect(
     include: str = "",
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Detect agent configuration files in the current project.
 
@@ -132,7 +132,7 @@ async def mem_context_generate(
     agent: str = "all",
     include: str = "",
     strict: bool = False,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Generate agent configuration files from .memtomem/context.md.
 
@@ -250,7 +250,7 @@ async def mem_context_generate(
 @register("context")
 async def mem_context_diff(
     include: str = "",
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Show sync status between context.md and agent files.
 
@@ -350,7 +350,7 @@ async def mem_context_diff(
 async def mem_context_sync(
     include: str = "",
     strict: bool = False,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Sync .memtomem/context.md to all detected agent files.
 

@@ -17,7 +17,7 @@ async def mem_link(
     source_id: str,
     target_id: str,
     relation_type: str = "related",
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Create a bidirectional link between two chunks.
 
@@ -65,7 +65,7 @@ async def mem_link(
 async def mem_unlink(
     source_id: str,
     target_id: str,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Remove a link between two chunks.
 
@@ -92,7 +92,7 @@ async def mem_unlink(
 @register("relations")
 async def mem_related(
     chunk_id: str,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Find all chunks linked to the given chunk.
 

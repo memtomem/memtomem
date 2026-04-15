@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -677,7 +676,7 @@ class TestIncrementalIndexing:
         components.index_engine._embedder = mock_embedder
 
         # First index
-        stats1 = await components.index_engine.index_file(md_path)
+        await components.index_engine.index_file(md_path)
         first_embed_count = mock_embedder.embed_texts.call_count
 
         # Modify the file — add a new section

@@ -14,7 +14,7 @@ from memtomem.server.tool_registry import register
 async def mem_conflict_check(
     content: str,
     threshold: float = 0.75,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Check for potential contradictions with existing memories.
 

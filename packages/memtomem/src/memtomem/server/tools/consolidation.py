@@ -20,7 +20,7 @@ async def mem_consolidate(
     source_filter: str | None = None,
     max_groups: int = 5,
     min_group_size: int = 3,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Find groups of related chunks that could be consolidated into summaries.
 
@@ -34,9 +34,9 @@ async def mem_consolidate(
         min_group_size: Minimum chunks per group (default 3)
     """
     if not 1 <= max_groups <= 50:
-        return "Error: max_groups must be between 1 and 50."
+        return f"Error: max_groups must be between 1 and 50, got {max_groups}."
     if min_group_size < 2:
-        return "Error: min_group_size must be at least 2."
+        return f"Error: min_group_size must be at least 2, got {min_group_size}."
 
     app = _get_app(ctx)
     effective_ns = namespace or app.current_namespace
@@ -128,7 +128,7 @@ async def mem_consolidate_apply(
     group_id: int,
     summary: str,
     keep_originals: bool = True,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Apply a consolidation by creating a summary chunk for a group.
 

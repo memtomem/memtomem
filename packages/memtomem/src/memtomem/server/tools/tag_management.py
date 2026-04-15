@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 @tool_handler
 @register("tags")
 async def mem_tag_list(
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """List all tags and their usage counts, ordered by frequency.
 
@@ -43,7 +43,7 @@ async def mem_tag_list(
 async def mem_tag_rename(
     old_tag: str,
     new_tag: str,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Rename a tag across all chunks that use it.
 
@@ -66,7 +66,7 @@ async def mem_tag_rename(
 @register("tags")
 async def mem_tag_delete(
     tag: str,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Remove a tag from all chunks that use it.
 

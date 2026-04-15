@@ -15,7 +15,7 @@ async def mem_agent_register(
     agent_id: str,
     description: str | None = None,
     color: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Register an agent in the multi-agent memory system.
 
@@ -58,7 +58,7 @@ async def mem_agent_search(
     agent_id: str | None = None,
     include_shared: bool = True,
     top_k: int = 10,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Search memories with multi-agent scope awareness.
 
@@ -105,7 +105,7 @@ async def mem_agent_search(
 async def mem_agent_share(
     chunk_id: str,
     target: str = "shared",
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Share a memory chunk with another agent or the shared namespace.
 

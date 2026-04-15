@@ -15,6 +15,7 @@ class ChunkType(StrEnum):
     PYTHON_FUNCTION = "python_function"
     PYTHON_CLASS = "python_class"
     JS_FUNCTION = "js_function"
+    RST_SECTION = "rst_section"
     RAW_TEXT = "raw_text"
     PROCEDURE = "procedure"
 

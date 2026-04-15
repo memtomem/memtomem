@@ -23,6 +23,7 @@ async def expand_query_tags(
     try:
         tag_counts = await storage.get_tag_counts()
     except Exception:
+        logger.debug("Tag expansion failed, returning original query", exc_info=True)
         return query
 
     query_lower = query.lower()
@@ -53,6 +54,7 @@ async def expand_query_headings(
         embedding = await embedder.embed_query(query)
         results = await storage.dense_search(embedding, top_k=3)
     except Exception:
+        logger.debug("Heading expansion failed, returning original query", exc_info=True)
         return query
 
     terms: list[str] = []

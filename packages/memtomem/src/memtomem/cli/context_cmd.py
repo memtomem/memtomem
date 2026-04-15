@@ -82,7 +82,7 @@ _INCLUDE_OPTION = click.option(
     metavar="KIND",
     help=(
         "Additional artifact kinds to process (repeatable or comma-separated). "
-        "Phase 1 supports: skills."
+        "Supported: skills, agents, commands, settings."
     ),
 )
 

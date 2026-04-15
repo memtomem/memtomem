@@ -563,7 +563,7 @@ class TestExportImport:
         await storage.upsert_chunks([chunk])
 
         output_path = tmp_path / "export.json"
-        bundle = await export_chunks(storage, output_path=output_path)
+        await export_chunks(storage, output_path=output_path)
 
         assert output_path.exists()
         data = json.loads(output_path.read_text())
@@ -805,6 +805,21 @@ class TestAutoTag:
         stats = await auto_tag_storage(storage, source_filter="python")
         assert stats.total_chunks == 1
         assert stats.tagged_chunks == 1
+
+    async def test_auto_tag_storage_namespace_filter(self, storage):
+        c1 = _chunk("Python code example function", namespace="proj_a", source="a.md")
+        c2 = _chunk("Rust memory safety ownership model", namespace="proj_b", source="b.md")
+        await storage.upsert_chunks([c1, c2])
+
+        stats = await auto_tag_storage(storage, namespace_filter="proj_a")
+        assert stats.total_chunks == 1
+        assert stats.tagged_chunks == 1
+
+        # Verify only the proj_a chunk was tagged
+        a_chunks = await storage.list_chunks_by_source(Path("/tmp/a.md"))
+        b_chunks = await storage.list_chunks_by_source(Path("/tmp/b.md"))
+        assert a_chunks[0].metadata.tags  # tagged
+        assert b_chunks[0].metadata.tags == ()  # untouched
 
 
 # ===================================================================

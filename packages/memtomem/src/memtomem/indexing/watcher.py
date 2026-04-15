@@ -94,7 +94,7 @@ class FileWatcher:
             try:
                 self._queue.put_nowait(_STOP_SENTINEL)
             except asyncio.QueueFull:
-                pass
+                logger.warning("File watcher queue full; could not signal graceful shutdown")
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
             except (TimeoutError, asyncio.CancelledError):

@@ -298,18 +298,18 @@ class TestSetConfigKey:
     def test_set_bool_field_false(self):
         config = Mem2MemConfig()
         config.decay.enabled = True
-        msg = _set_config_key(config, "decay.enabled", "false")
+        _set_config_key(config, "decay.enabled", "false")
         assert config.decay.enabled is False
 
     def test_set_float_field(self):
         config = Mem2MemConfig()
-        msg = _set_config_key(config, "decay.half_life_days", "7.5")
+        _set_config_key(config, "decay.half_life_days", "7.5")
         assert config.decay.half_life_days == 7.5
 
     def test_set_string_field(self):
         """Mutable string field (namespace.default_namespace) should be settable."""
         config = Mem2MemConfig()
-        msg = _set_config_key(config, "namespace.default_namespace", "work")
+        _set_config_key(config, "namespace.default_namespace", "work")
         assert config.namespace.default_namespace == "work"
 
     def test_init_only_field_rejected(self):

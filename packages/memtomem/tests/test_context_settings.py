@@ -7,17 +7,12 @@ Uses record-format hooks (Claude Code ≥ 2.1.104):
 from __future__ import annotations
 
 import json
-import os
-import re
 
 import pytest
 from click.testing import CliRunner
 
 from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
-    ClaudeSettingsGenerator,
-    SETTINGS_GENERATORS,
-    SettingsSyncResult,
     diff_settings,
     generate_all_settings,
 )

@@ -9,7 +9,8 @@ extra wasn't installed — because the old error handler only caught missing
 from __future__ import annotations
 
 import sys
-from unittest.mock import patch
+import contextlib
+from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
@@ -85,3 +86,118 @@ def test_wizard_next_steps_hint_respects_web_deps(
         from memtomem.cli.web import _missing_web_deps as check
 
         assert check() == "fastapi"
+
+
+def _make_server_mock(started: bool = True) -> MagicMock:
+    """Return a uvicorn.Server mock.
+
+    ``serve()`` completes immediately; ``started`` is fixed to the given value.
+    """
+    server = MagicMock()
+    server.started = started
+
+    async def _serve() -> None:
+        pass
+
+    server.serve = _serve
+    return server
+
+
+def _patch_web_stack(server_mock: MagicMock):
+    """Patch all external dependencies required to run ``web()``."""
+    return [
+        patch("memtomem.cli.web._missing_web_deps", return_value=None),
+        patch("uvicorn.Config", return_value=MagicMock()),
+        patch("uvicorn.Server", return_value=server_mock),
+        patch("memtomem.web.app.create_app", return_value=MagicMock()),
+        patch("memtomem.web.app._lifespan", MagicMock()),
+    ]
+
+
+def test_web_no_open_does_not_call_webbrowser() -> None:
+    """Without --open, webbrowser.open must never be called."""
+    runner = CliRunner()
+    server_mock = _make_server_mock(started=True)
+
+    with patch("webbrowser.open") as mock_browser:
+        with contextlib.ExitStack() as stack:
+            for p in _patch_web_stack(server_mock):
+                stack.enter_context(p)
+            result = runner.invoke(web, ["--host", "127.0.0.1", "--port", "9999"])
+
+    assert result.exit_code == 0
+    mock_browser.assert_not_called()
+
+
+def test_web_open_calls_webbrowser_when_server_starts() -> None:
+    """With --open, webbrowser.open must be called once the server is ready."""
+    runner = CliRunner()
+    server_mock = _make_server_mock(started=True)
+
+    with patch("webbrowser.open") as mock_browser:
+        with contextlib.ExitStack() as stack:
+            for p in _patch_web_stack(server_mock):
+                stack.enter_context(p)
+            result = runner.invoke(web, ["--host", "127.0.0.1", "--port", "9999", "--open"])
+
+    assert result.exit_code == 0
+    mock_browser.assert_called_once_with("http://127.0.0.1:9999")
+
+
+def test_web_open_timeout_warns_and_skips_browser() -> None:
+    """If the server never becomes ready within the timeout, emit a warning
+    and do not open the browser."""
+    runner = CliRunner()
+    server_mock = _make_server_mock(started=False)
+
+    with patch("webbrowser.open") as mock_browser:
+        with contextlib.ExitStack() as stack:
+            for p in _patch_web_stack(server_mock):
+                stack.enter_context(p)
+            result = runner.invoke(
+                web,
+                ["--host", "127.0.0.1", "--port", "9999", "--open", "--timeout", "1"],
+            )
+
+    assert result.exit_code == 0
+    mock_browser.assert_not_called()
+    assert "Warning" in result.output
+    assert "timeout" in result.output.lower()
+
+
+def test_web_open_zero_timeout_shows_warning() -> None:
+    """--timeout 0 means no timeout; a warning must be printed to inform the user."""
+    runner = CliRunner()
+    server_mock = _make_server_mock(started=True)
+
+    with patch("webbrowser.open"):
+        with contextlib.ExitStack() as stack:
+            for p in _patch_web_stack(server_mock):
+                stack.enter_context(p)
+            result = runner.invoke(
+                web,
+                ["--host", "127.0.0.1", "--port", "9999", "--open", "--timeout", "0"],
+            )
+
+    assert result.exit_code == 0
+    assert "Warning" in result.output
+    assert "timeout" in result.output.lower()
+
+
+def test_web_timeout_without_open_is_silent() -> None:
+    """Specifying --timeout without --open must exit cleanly with no warnings."""
+    runner = CliRunner()
+    server_mock = _make_server_mock(started=True)
+
+    with patch("webbrowser.open") as mock_browser:
+        with contextlib.ExitStack() as stack:
+            for p in _patch_web_stack(server_mock):
+                stack.enter_context(p)
+            result = runner.invoke(
+                web,
+                ["--host", "127.0.0.1", "--port", "9999", "--timeout", "5"],
+            )
+
+    assert result.exit_code == 0
+    mock_browser.assert_not_called()
+    assert "Warning" not in result.output

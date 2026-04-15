@@ -71,7 +71,8 @@ def with_retry(
                             exc,
                         )
                         await asyncio.sleep(delay)
-            raise last_exc  # type: ignore[misc]
+            assert last_exc is not None  # max_attempts >= 1 guarantees the loop ran
+            raise last_exc
 
         return wrapper
 

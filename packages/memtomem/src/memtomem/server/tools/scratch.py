@@ -15,7 +15,7 @@ async def mem_scratch_set(
     key: str,
     value: str,
     ttl_minutes: int | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Store a value in working memory (scratchpad).
 
@@ -30,7 +30,7 @@ async def mem_scratch_set(
     from datetime import datetime, timedelta, timezone
 
     if ttl_minutes is not None and ttl_minutes <= 0:
-        return "Error: ttl_minutes must be a positive number."
+        return f"Error: ttl_minutes must be a positive number, got {ttl_minutes}."
     app = _get_app(ctx)
     expires_at = None
     if ttl_minutes is not None and ttl_minutes > 0:
@@ -55,7 +55,7 @@ async def mem_scratch_set(
 @register("scratch")
 async def mem_scratch_get(
     key: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Retrieve a value from working memory, or list all entries if no key given.
 
@@ -96,7 +96,7 @@ async def mem_scratch_promote(
     title: str | None = None,
     tags: list[str] | None = None,
     file: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Promote a working memory entry to long-term memory.
 

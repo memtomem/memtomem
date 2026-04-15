@@ -116,8 +116,7 @@ async def update_chunk_tags(
     if chunk is None:
         raise HTTPException(status_code=404, detail="Chunk not found")
 
-    seen: set[str] = set()
-    deduped = [t for t in body.tags if not (t in seen or seen.add(t))]  # type: ignore[func-returns-value]
+    deduped = list(dict.fromkeys(body.tags))
 
     new_meta = chunk.metadata.__class__(
         source_file=chunk.metadata.source_file,

@@ -23,7 +23,7 @@ async def mem_timeline(
     until: str | None = None,
     namespace: str | None = None,
     limit: int = 50,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Show how memories about a topic evolved over time.
 
@@ -38,7 +38,7 @@ async def mem_timeline(
         limit: Maximum chunks to analyze (default 50)
     """
     if not 1 <= limit <= 500:
-        return "Error: limit must be between 1 and 500."
+        return f"Error: limit must be between 1 and 500, got {limit}."
 
     from memtomem.tools.temporal import build_timeline, format_timeline
 
@@ -97,7 +97,7 @@ async def mem_activity(
     since: str | None = None,
     until: str | None = None,
     namespace: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Show memory activity summary by day.
 

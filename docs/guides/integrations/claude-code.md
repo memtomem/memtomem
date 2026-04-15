@@ -127,6 +127,14 @@ Add the following to `~/.claude/settings.json`:
         "command": "mm index \"${tool_input.file_path}\" 2>>/tmp/mm-hook.log || true",
         "timeout": 10000
       }]
+    }],
+    "Stop": [{
+      "matcher": "",
+      "hooks": [{
+        "type": "command",
+        "command": "mm session end --auto 2>>/tmp/mm-hook.log || true",
+        "timeout": 5000
+      }]
     }]
   }
 }
@@ -138,6 +146,7 @@ Add the following to `~/.claude/settings.json`:
 |------------|---------------|----------------|
 | `UserPromptSubmit` | When a prompt is submitted | `mm search` → Automatically inject relevant memory into context |
 | `PostToolUse` (Write) | After new file creation | `mm index` → Automatically index the new file |
+| `Stop` | When the agent stops | `mm session end --auto` → Close session with structured summary |
 
 ### Automation Flow
 
@@ -146,6 +155,8 @@ User submits prompt (>20 chars)
   → UserPromptSubmit hook → mem_search context injection
   → Claude creates new files
   → PostToolUse hook → mem_index auto-indexing
+  → Agent stops
+  → Stop hook → mm session end --auto
 ```
 
 ### Important Caveats
@@ -153,7 +164,7 @@ User submits prompt (>20 chars)
 - **Short prompt guard**: Prompts under 20 characters are skipped to avoid noise from "yes", "ok", etc.
 - **Input sanitization**: `printf '%s'` + `head -c 500` prevent shell injection and cap query length.
 - **Error logging**: `2>>/tmp/mm-hook.log` preserves errors for debugging. Avoid `2>/dev/null` which hides real failures.
-- **No Stop hook**: A timestamp-only Stop hook pollutes search with meaningless data. Let the agent save summaries via `mem_add` when there is meaningful content.
+- **Stop hook = session close**: Use `mm session end --auto` in the Stop hook to close the active session with a structured summary (see [hooks.md](../hooks.md)). Don't use a Stop hook to call `mm add` with raw timestamps — those pollute search.
 - **Write only**: `Edit` is excluded from PostToolUse — edited files are already indexed, so re-indexing on every edit is redundant.
 - **STM proxy overlap**: If using [memtomem-stm](https://github.com/memtomem/memtomem-stm) (separate package), hooks are redundant — the proxy already handles surfacing and indexing.
 

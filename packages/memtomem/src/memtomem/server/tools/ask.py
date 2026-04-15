@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from memtomem.server import mcp
@@ -11,7 +12,7 @@ from memtomem.server.error_handler import tool_handler
 logger = logging.getLogger(__name__)
 
 
-def _webhook_error_cb(task: "asyncio.Task") -> None:  # noqa: F821
+def _webhook_error_cb(task: asyncio.Task) -> None:
     """Log errors from fire-and-forget webhook tasks."""
     if task.cancelled():
         return
@@ -28,7 +29,7 @@ async def mem_ask(
     namespace: str | None = None,
     source_filter: str | None = None,
     tag_filter: str | None = None,
-    ctx: CtxType = None,  # type: ignore[assignment]
+    ctx: CtxType = None,
 ) -> str:
     """Ask a question and get an answer grounded in your memories.
 
@@ -49,9 +50,9 @@ async def mem_ask(
     if not question.strip():
         return "Error: question cannot be empty."
     if len(question) > 10_000:
-        return "Error: question too long (max 10,000 characters)."
+        return f"Error: question too long (max 10,000 characters, got {len(question)})."
     if not 1 <= top_k <= 20:
-        return "Error: top_k must be between 1 and 20."
+        return f"Error: top_k must be between 1 and 20, got {top_k}."
 
     app = _get_app(ctx)
     effective_ns = namespace or app.current_namespace
@@ -114,8 +115,6 @@ async def mem_ask(
 
     # Fire webhook
     if app.webhook_manager:
-        import asyncio
-
         task = asyncio.create_task(
             app.webhook_manager.fire(
                 "ask",

@@ -194,7 +194,7 @@ In `core` mode, use `mem_do(action="...", params={...})` to access any of the 65
 
 ## Querying and Modifying at Runtime
 
-You can also inspect and change settings at runtime via the `mem_config` MCP tool:
+You can also inspect and change settings at runtime via the `mem_config` MCP tool (requires `MEMTOMEM_TOOL_MODE=full`; in `core` or `standard` mode, use `mm config` CLI or the Web UI Settings tab):
 
 ```
 mem_config()                                      # Output all settings as JSON
