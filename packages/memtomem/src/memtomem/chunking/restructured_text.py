@@ -65,7 +65,7 @@ class ReStructuredTextChunker:
         lines = content.splitlines()
         # Detect section headers and their levels.
         # level_order maps adornment character to its depth (0-indexed).
-        level_order: dict[str, int] = {}
+        level_order: dict[tuple[str, bool], int] = {}
         headers: list[tuple[int, str, int]] = []  # (line_idx, title, depth)
 
         for i, line in enumerate(lines):
@@ -79,7 +79,7 @@ class ReStructuredTextChunker:
                 title = lines[i - 1].strip()
                 if adorn_len >= len(title):
                     # Check for optional overline (line above title)
-                    has_overline = (
+                    has_overline = bool(
                         i >= 2 and _ADORNMENT_RE.match(lines[i - 2]) and lines[i - 2][0] == char
                     )
                     key = (char, has_overline)
@@ -102,7 +102,7 @@ class ReStructuredTextChunker:
             ]
 
         sections: list[dict] = []
-        current_hierarchy: list[str] = []
+        current_hierarchy: list[tuple[int, str]] = []
 
         # Content before first header
         if headers[0][0] > 0:
@@ -119,12 +119,8 @@ class ReStructuredTextChunker:
 
         for idx, (hdr_start, title, depth) in enumerate(headers):
             # Update hierarchy: keep only levels shallower than current
-            current_hierarchy = [
-                h
-                for h in current_hierarchy
-                if h[0] < depth  # type: ignore[index]
-            ]
-            current_hierarchy.append((depth, title))  # type: ignore[arg-type]
+            current_hierarchy = [h for h in current_hierarchy if h[0] < depth]
+            current_hierarchy.append((depth, title))
 
             # Section body starts after the underline
             # Find the underline: it's either hdr_start+1 (no overline) or hdr_start+2 (overline)
