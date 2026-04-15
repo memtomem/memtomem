@@ -124,9 +124,7 @@ class TestResearcherIndexing:
         await components.storage.upsert_chunks(chunks)
 
         # Search within namespace
-        results, _ = await components.search_pipeline.search(
-            "pipeline", top_k=5, namespace="work"
-        )
+        results, _ = await components.search_pipeline.search("pipeline", top_k=5, namespace="work")
         assert all(r.chunk.metadata.namespace == "work" for r in results)
 
     async def test_source_filter(self, components, memory_dir):

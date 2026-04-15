@@ -7,17 +7,12 @@ Uses record-format hooks (Claude Code ≥ 2.1.104):
 from __future__ import annotations
 
 import json
-import os
-import re
 
 import pytest
 from click.testing import CliRunner
 
 from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
-    ClaudeSettingsGenerator,
-    SETTINGS_GENERATORS,
-    SettingsSyncResult,
     diff_settings,
     generate_all_settings,
 )
@@ -28,7 +23,10 @@ from memtomem.context.settings import (
 
 def _rule(matcher: str = "", command: str = "echo ok", timeout: int = 5000) -> dict:
     """Build a single hook rule in record format."""
-    return {"matcher": matcher, "hooks": [{"type": "command", "command": command, "timeout": timeout}]}
+    return {
+        "matcher": matcher,
+        "hooks": [{"type": "command", "command": command, "timeout": timeout}],
+    }
 
 
 # ── Fixtures ────────────────────────────────────────────────────────
@@ -139,9 +137,7 @@ class TestClaudeSettingsMergeAdditive:
         """Multiple rules under the same event with different matchers."""
         target = claude_home / ".claude" / "settings.json"
         user_rule = _rule("Bash", "echo user")
-        target.write_text(
-            json.dumps({"hooks": {"PostToolUse": [user_rule]}}) + "\n"
-        )
+        target.write_text(json.dumps({"hooks": {"PostToolUse": [user_rule]}}) + "\n")
 
         mm_rule = _rule("Write", "mm index")
         _make_canonical_settings(tmp_path, {"hooks": {"PostToolUse": [mm_rule]}})
@@ -161,9 +157,7 @@ class TestClaudeSettingsMergeConflict:
     def test_user_rule_wins_on_matcher_collision(self, claude_home, tmp_path):
         target = claude_home / ".claude" / "settings.json"
         user_rule = _rule("Write", "echo custom")
-        target.write_text(
-            json.dumps({"hooks": {"PostToolUse": [user_rule]}}) + "\n"
-        )
+        target.write_text(json.dumps({"hooks": {"PostToolUse": [user_rule]}}) + "\n")
 
         mm_rule = _rule("Write", "mm index")
         _make_canonical_settings(tmp_path, {"hooks": {"PostToolUse": [mm_rule]}})
@@ -181,9 +175,7 @@ class TestClaudeSettingsMergeConflict:
         """If the user's rule is byte-identical, no warning is emitted."""
         rule = _rule("Write", "mm index")
         target = claude_home / ".claude" / "settings.json"
-        target.write_text(
-            json.dumps({"hooks": {"PostToolUse": [rule]}}) + "\n"
-        )
+        target.write_text(json.dumps({"hooks": {"PostToolUse": [rule]}}) + "\n")
 
         _make_canonical_settings(tmp_path, {"hooks": {"PostToolUse": [rule]}})
         results = generate_all_settings(tmp_path)
@@ -196,9 +188,7 @@ class TestClaudeSettingsMergeWarningContent:
 
     def test_warning_includes_required_parts(self, claude_home, tmp_path):
         target = claude_home / ".claude" / "settings.json"
-        target.write_text(
-            json.dumps({"hooks": {"PostToolUse": [_rule("Write", "old")]}}) + "\n"
-        )
+        target.write_text(json.dumps({"hooks": {"PostToolUse": [_rule("Write", "old")]}}) + "\n")
 
         _make_canonical_settings(
             tmp_path,
@@ -313,9 +303,7 @@ class TestClaudeSettingsDryRun:
         target = claude_home / ".claude" / "settings.json"
         target.write_text(json.dumps({"hooks": {}}) + "\n")
 
-        _make_canonical_settings(
-            tmp_path, {"hooks": {"PostToolUse": [_rule("Write")]}}
-        )
+        _make_canonical_settings(tmp_path, {"hooks": {"PostToolUse": [_rule("Write")]}})
         results = diff_settings(tmp_path)
         assert results["claude_settings"].status == "out of sync"
 
@@ -325,9 +313,7 @@ class TestClaudeSettingsDryRun:
         original = json.dumps({"hooks": {}}) + "\n"
         target.write_text(original)
 
-        _make_canonical_settings(
-            tmp_path, {"hooks": {"PostToolUse": [_rule("Write")]}}
-        )
+        _make_canonical_settings(tmp_path, {"hooks": {"PostToolUse": [_rule("Write")]}})
         diff_settings(tmp_path)
         assert target.read_text() == original
 

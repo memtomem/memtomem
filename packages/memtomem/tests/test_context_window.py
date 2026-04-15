@@ -166,10 +166,12 @@ class TestExpandContext:
         chunks_b = _make_file_chunks("/tmp/b.md", 4)
 
         results = [_make_result(chunks_a[1], rank=1), _make_result(chunks_b[2], rank=2)]
-        pipeline = _make_pipeline({
-            Path("/tmp/a.md"): chunks_a,
-            Path("/tmp/b.md"): chunks_b,
-        })
+        pipeline = _make_pipeline(
+            {
+                Path("/tmp/a.md"): chunks_a,
+                Path("/tmp/b.md"): chunks_b,
+            }
+        )
 
         expanded = await pipeline._expand_context(results, window=1)
 

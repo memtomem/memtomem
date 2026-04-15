@@ -224,9 +224,12 @@ class TestEntities:
     async def test_search_by_value_substring(self, storage):
         chunk = _chunk("Meeting with Alice Smith")
         await storage.upsert_chunks([chunk])
-        await storage.upsert_entities(str(chunk.id), [
-            {"entity_type": "person", "entity_value": "Alice Smith", "confidence": 0.9},
-        ])
+        await storage.upsert_entities(
+            str(chunk.id),
+            [
+                {"entity_type": "person", "entity_value": "Alice Smith", "confidence": 0.9},
+            ],
+        )
 
         results = await storage.search_entities(value="Alice")
         assert len(results) == 1
@@ -237,12 +240,18 @@ class TestEntities:
         c2 = _chunk("Entity in ns2", namespace="ns2")
         await storage.upsert_chunks([c1, c2])
 
-        await storage.upsert_entities(str(c1.id), [
-            {"entity_type": "concept", "entity_value": "concept-1"},
-        ])
-        await storage.upsert_entities(str(c2.id), [
-            {"entity_type": "concept", "entity_value": "concept-2"},
-        ])
+        await storage.upsert_entities(
+            str(c1.id),
+            [
+                {"entity_type": "concept", "entity_value": "concept-1"},
+            ],
+        )
+        await storage.upsert_entities(
+            str(c2.id),
+            [
+                {"entity_type": "concept", "entity_value": "concept-2"},
+            ],
+        )
 
         results = await storage.search_entities(namespace="ns1")
         assert len(results) == 1
@@ -252,12 +261,18 @@ class TestEntities:
         chunk = _chunk("overwrite test")
         await storage.upsert_chunks([chunk])
 
-        await storage.upsert_entities(str(chunk.id), [
-            {"entity_type": "person", "entity_value": "Old"},
-        ])
-        await storage.upsert_entities(str(chunk.id), [
-            {"entity_type": "person", "entity_value": "New"},
-        ])
+        await storage.upsert_entities(
+            str(chunk.id),
+            [
+                {"entity_type": "person", "entity_value": "Old"},
+            ],
+        )
+        await storage.upsert_entities(
+            str(chunk.id),
+            [
+                {"entity_type": "person", "entity_value": "New"},
+            ],
+        )
 
         result = await storage.get_entities_for_chunk(str(chunk.id))
         assert len(result) == 1
@@ -270,9 +285,12 @@ class TestEntities:
     async def test_delete_entities_for_chunk(self, storage):
         chunk = _chunk("deletable")
         await storage.upsert_chunks([chunk])
-        await storage.upsert_entities(str(chunk.id), [
-            {"entity_type": "person", "entity_value": "Gone"},
-        ])
+        await storage.upsert_entities(
+            str(chunk.id),
+            [
+                {"entity_type": "person", "entity_value": "Gone"},
+            ],
+        )
         deleted = await storage.delete_entities_for_chunk(str(chunk.id))
         assert deleted == 1
 
@@ -282,11 +300,14 @@ class TestEntities:
     async def test_entity_type_counts(self, storage):
         chunk = _chunk("mixed entities")
         await storage.upsert_chunks([chunk])
-        await storage.upsert_entities(str(chunk.id), [
-            {"entity_type": "person", "entity_value": "A"},
-            {"entity_type": "person", "entity_value": "B"},
-            {"entity_type": "org", "entity_value": "C"},
-        ])
+        await storage.upsert_entities(
+            str(chunk.id),
+            [
+                {"entity_type": "person", "entity_value": "A"},
+                {"entity_type": "person", "entity_value": "B"},
+                {"entity_type": "org", "entity_value": "C"},
+            ],
+        )
 
         counts = await storage.get_entity_type_counts()
         assert counts["person"] == 2
@@ -446,10 +467,7 @@ class TestAnalytics:
 
     async def test_consolidation_groups(self, storage):
         # Create 3+ chunks from same source to form a group
-        chunks = [
-            _chunk(f"content {i}", source="big_file.md")
-            for i in range(4)
-        ]
+        chunks = [_chunk(f"content {i}", source="big_file.md") for i in range(4)]
         await storage.upsert_chunks(chunks)
 
         groups = await storage.get_consolidation_groups(min_size=3)
@@ -545,7 +563,7 @@ class TestExportImport:
         await storage.upsert_chunks([chunk])
 
         output_path = tmp_path / "export.json"
-        bundle = await export_chunks(storage, output_path=output_path)
+        await export_chunks(storage, output_path=output_path)
 
         assert output_path.exists()
         data = json.loads(output_path.read_text())
@@ -730,7 +748,9 @@ class TestAutoTag:
 
     async def test_auto_tag_storage_basic(self, storage):
         """auto_tag_storage should tag untagged chunks."""
-        chunk = _chunk("Python programming language for data science applications", source="code.md")
+        chunk = _chunk(
+            "Python programming language for data science applications", source="code.md"
+        )
         await storage.upsert_chunks([chunk])
 
         stats = await auto_tag_storage(storage, max_tags=3)

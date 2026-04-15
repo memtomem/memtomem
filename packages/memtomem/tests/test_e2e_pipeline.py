@@ -181,9 +181,7 @@ class TestCrossLanguageE2E:
         )
         await components.index_engine.index_file(doc)
 
-        results, _ = await components.search_pipeline.search(
-            "기술 스택", top_k=1, context_window=1
-        )
+        results, _ = await components.search_pipeline.search("기술 스택", top_k=1, context_window=1)
         assert len(results) >= 1
 
 
@@ -199,9 +197,7 @@ class TestFullPipelineE2E:
 
         doc = memory_dir / "format_test.md"
         doc.write_text(
-            "## Intro\n\nWelcome.\n\n"
-            "## Core\n\nMain content here.\n\n"
-            "## Conclusion\n\nSummary.\n"
+            "## Intro\n\nWelcome.\n\n## Core\n\nMain content here.\n\n## Conclusion\n\nSummary.\n"
         )
         await components.index_engine.index_file(doc)
 

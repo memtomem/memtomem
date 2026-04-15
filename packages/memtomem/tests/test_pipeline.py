@@ -84,17 +84,20 @@ class TestImportanceCompute:
 
     def test_all_max(self):
         from memtomem.search.importance import compute_importance
+
         score = compute_importance(1000, 10, 50, 0.0)
         assert 0.8 <= score <= 1.0
 
     def test_all_zero_except_recency(self):
         from memtomem.search.importance import compute_importance
+
         score = compute_importance(0, 0, 0, 0.0)
         # recency factor = exp(0) = 1.0, weight = 0.2
         assert score == pytest.approx(0.2, abs=0.05)
 
     def test_very_old(self):
         from memtomem.search.importance import compute_importance
+
         score_new = compute_importance(10, 3, 2, 0.0)
         score_old = compute_importance(10, 3, 2, 1000.0)
         assert score_new > score_old

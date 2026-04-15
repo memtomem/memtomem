@@ -19,8 +19,6 @@ from memtomem.context.commands import (
 from memtomem.context.detector import detect_command_dirs
 
 
-
-
 SAMPLE_FULL_COMMAND = """---
 description: Review a file for issues
 argument-hint: [file-path]
@@ -246,6 +244,7 @@ class TestExtractCommandsToCanonical:
         assert len(result.imported) == 1
         assert "UPDATED" in canonical.read_text()
 
+
 class TestDiffCommands:
     def test_empty_project(self, tmp_path):
         assert diff_commands(tmp_path) == []
@@ -278,6 +277,7 @@ class TestDiffCommands:
         rows = diff_commands(tmp_path)
         assert any(status == "missing canonical" for _, _, status in rows)
 
+
 class TestDetectCommandDirs:
     def test_empty(self, tmp_path):
         assert detect_command_dirs(tmp_path) == []
@@ -308,13 +308,12 @@ class TestDetectCommandDirs:
         found = detect_command_dirs(tmp_path)
         assert found == []
 
+
 class TestOnDrop:
     def test_on_drop_warn_logs(self, tmp_path, caplog):
         _make_canonical_command(tmp_path, "review", SAMPLE_FULL_COMMAND)
         with caplog.at_level("WARNING"):
-            result = generate_all_commands(
-                tmp_path, runtimes=["gemini_commands"], on_drop="warn"
-            )
+            result = generate_all_commands(tmp_path, runtimes=["gemini_commands"], on_drop="warn")
         assert len(result.generated) == 1
         assert result.dropped
         assert any("dropped" in r.message for r in caplog.records)
@@ -322,16 +321,12 @@ class TestOnDrop:
     def test_on_drop_error_raises(self, tmp_path):
         _make_canonical_command(tmp_path, "review", SAMPLE_FULL_COMMAND)
         with pytest.raises(StrictDropError):
-            generate_all_commands(
-                tmp_path, runtimes=["gemini_commands"], on_drop="error"
-            )
+            generate_all_commands(tmp_path, runtimes=["gemini_commands"], on_drop="error")
 
     def test_on_drop_ignore_is_silent(self, tmp_path, caplog):
         _make_canonical_command(tmp_path, "review", SAMPLE_FULL_COMMAND)
         with caplog.at_level("WARNING"):
-            result = generate_all_commands(
-                tmp_path, runtimes=["gemini_commands"], on_drop="ignore"
-            )
+            result = generate_all_commands(tmp_path, runtimes=["gemini_commands"], on_drop="ignore")
         assert len(result.generated) == 1
         assert result.dropped
         assert not any("dropped" in r.message for r in caplog.records)

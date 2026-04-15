@@ -83,11 +83,13 @@ class TestImportNotion:
         notion_dir = tmp_path / "notion_export"
         notion_dir.mkdir()
         (notion_dir / "My Page abc123def4567890123456789abcdef0.md").write_text(
-            "# My Page\n\nSome content here.", encoding="utf-8",
+            "# My Page\n\nSome content here.",
+            encoding="utf-8",
         )
         (notion_dir / "Sub").mkdir()
         (notion_dir / "Sub" / "Child def4567890123456789012345abcdef0.md").write_text(
-            "# Child Page\n\nNested content.", encoding="utf-8",
+            "# Child Page\n\nNested content.",
+            encoding="utf-8",
         )
 
         output = tmp_path / "output"
@@ -110,13 +112,16 @@ class TestImportNotion:
         notion_dir = tmp_path / "notion_src"
         notion_dir.mkdir()
         (notion_dir / "Note abc123def4567890123456789abcdef0.md").write_text(
-            "# Note\n\nContent.", encoding="utf-8",
+            "# Note\n\nContent.",
+            encoding="utf-8",
         )
 
         zip_path = tmp_path / "notion.zip"
         with zipfile.ZipFile(zip_path, "w") as zf:
-            zf.write(notion_dir / "Note abc123def4567890123456789abcdef0.md",
-                     "Note abc123def4567890123456789abcdef0.md")
+            zf.write(
+                notion_dir / "Note abc123def4567890123456789abcdef0.md",
+                "Note abc123def4567890123456789abcdef0.md",
+            )
 
         output = tmp_path / "output"
         imported = await import_notion(zip_path, output)
@@ -133,7 +138,8 @@ class TestImportObsidian:
             encoding="utf-8",
         )
         (vault / "Project Plan.md").write_text(
-            "# Project Plan\n\n![[Architecture Diagram]]", encoding="utf-8",
+            "# Project Plan\n\n![[Architecture Diagram]]",
+            encoding="utf-8",
         )
         # Create .obsidian config (should be skipped)
         (vault / ".obsidian").mkdir()

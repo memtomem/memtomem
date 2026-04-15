@@ -7,25 +7,35 @@ from memtomem.templates import render_template, list_templates, TEMPLATE_NAMES
 
 class TestRenderTemplate:
     def test_adr_with_json(self):
-        result = render_template("adr", json.dumps({
-            "title": "Use Redis",
-            "status": "accepted",
-            "context": "Need caching",
-            "decision": "Redis cluster",
-            "consequences": "Ops overhead",
-        }))
+        result = render_template(
+            "adr",
+            json.dumps(
+                {
+                    "title": "Use Redis",
+                    "status": "accepted",
+                    "context": "Need caching",
+                    "decision": "Redis cluster",
+                    "consequences": "Ops overhead",
+                }
+            ),
+        )
         assert "ADR: Use Redis" in result
         assert "**Status**: accepted" in result
         assert "**Decision**: Redis cluster" in result
 
     def test_meeting_auto_date(self):
-        result = render_template("meeting", json.dumps({
-            "title": "Standup",
-            "attendees": "Team",
-            "agenda": "Updates",
-            "decisions": "None",
-            "action_items": "None",
-        }))
+        result = render_template(
+            "meeting",
+            json.dumps(
+                {
+                    "title": "Standup",
+                    "attendees": "Team",
+                    "agenda": "Updates",
+                    "decisions": "None",
+                    "action_items": "None",
+                }
+            ),
+        )
         assert "Meeting: Standup" in result
         assert "2026-" in result  # auto-filled date
 
@@ -35,12 +45,17 @@ class TestRenderTemplate:
         assert "Debug:" in result
 
     def test_procedure_template(self):
-        result = render_template("procedure", json.dumps({
-            "title": "Deploy",
-            "trigger": "new release",
-            "steps": "1. Build\n2. Test",
-            "tags": "deploy",
-        }))
+        result = render_template(
+            "procedure",
+            json.dumps(
+                {
+                    "title": "Deploy",
+                    "trigger": "new release",
+                    "steps": "1. Build\n2. Test",
+                    "tags": "deploy",
+                }
+            ),
+        )
         assert "Procedure: Deploy" in result
         assert "Trigger" in result
 

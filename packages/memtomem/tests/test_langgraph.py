@@ -8,19 +8,24 @@ import pytest
 class TestMemtomemStoreInit:
     def test_default_init(self):
         from memtomem.integrations.langgraph import MemtomemStore
+
         store = MemtomemStore()
         assert store._components is None
         assert store._config_overrides == {}
 
     def test_config_overrides(self):
         from memtomem.integrations.langgraph import MemtomemStore
-        store = MemtomemStore(config_overrides={
-            "storage": {"sqlite_path": "/tmp/test.db"},
-        })
+
+        store = MemtomemStore(
+            config_overrides={
+                "storage": {"sqlite_path": "/tmp/test.db"},
+            }
+        )
         assert store._config_overrides["storage"]["sqlite_path"] == "/tmp/test.db"
 
     def test_session_id_none_initially(self):
         from memtomem.integrations.langgraph import MemtomemStore
+
         store = MemtomemStore()
         assert store._current_session_id is None
 
@@ -95,6 +100,7 @@ class TestMemtomemStoreIntegration:
 
         # Prevent ~/.memtomem/config.json from overriding test settings
         import memtomem.config as _cfg
+
         _orig_load = _cfg.load_config_overrides
         _cfg.load_config_overrides = lambda c: None
 
@@ -120,8 +126,12 @@ class TestMemtomemStoreIntegration:
 
         finally:
             _cfg.load_config_overrides = _orig_load
-            for key in ("MEMTOMEM_STORAGE__SQLITE_PATH", "MEMTOMEM_INDEXING__MEMORY_DIRS",
-                        "MEMTOMEM_EMBEDDING__MODEL", "MEMTOMEM_EMBEDDING__DIMENSION"):
+            for key in (
+                "MEMTOMEM_STORAGE__SQLITE_PATH",
+                "MEMTOMEM_INDEXING__MEMORY_DIRS",
+                "MEMTOMEM_EMBEDDING__MODEL",
+                "MEMTOMEM_EMBEDDING__DIMENSION",
+            ):
                 os.environ.pop(key, None)
 
     @pytest.mark.asyncio
@@ -140,6 +150,7 @@ class TestMemtomemStoreIntegration:
         os.environ["MEMTOMEM_EMBEDDING__DIMENSION"] = "1024"
 
         import memtomem.config as _cfg
+
         _orig_load = _cfg.load_config_overrides
         _cfg.load_config_overrides = lambda c: None
 
@@ -159,6 +170,10 @@ class TestMemtomemStoreIntegration:
 
         finally:
             _cfg.load_config_overrides = _orig_load
-            for key in ("MEMTOMEM_STORAGE__SQLITE_PATH", "MEMTOMEM_INDEXING__MEMORY_DIRS",
-                        "MEMTOMEM_EMBEDDING__MODEL", "MEMTOMEM_EMBEDDING__DIMENSION"):
+            for key in (
+                "MEMTOMEM_STORAGE__SQLITE_PATH",
+                "MEMTOMEM_INDEXING__MEMORY_DIRS",
+                "MEMTOMEM_EMBEDDING__MODEL",
+                "MEMTOMEM_EMBEDDING__DIMENSION",
+            ):
                 os.environ.pop(key, None)

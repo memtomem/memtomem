@@ -40,7 +40,11 @@ class TestMemAskFormatting:
 
         sources_cited = []
         for r in results:
-            heading = " > ".join(r.chunk.metadata.heading_hierarchy) if r.chunk.metadata.heading_hierarchy else ""
+            heading = (
+                " > ".join(r.chunk.metadata.heading_hierarchy)
+                if r.chunk.metadata.heading_hierarchy
+                else ""
+            )
             source = str(r.chunk.metadata.source_file).split("/")[-1]
             label = heading or source
             lines.append(f"### [{r.rank}] {label} (relevance: {r.score:.2f})")
@@ -63,10 +67,7 @@ class TestMemAskFormatting:
 
     def test_no_results_message(self):
         question = "something unknown"
-        output = (
-            f'No relevant memories found for: "{question}"\n\n'
-            "Try broader keywords"
-        )
+        output = f'No relevant memories found for: "{question}"\n\nTry broader keywords'
         assert "No relevant memories" in output
         assert "broader keywords" in output
 
@@ -92,7 +93,8 @@ class TestMemAskIntegration:
 
         # Search (simulating what mem_ask does)
         results, stats = await components.search_pipeline.search(
-            "deployment strategy", top_k=5,
+            "deployment strategy",
+            top_k=5,
         )
 
         assert len(results) >= 1
@@ -117,7 +119,9 @@ class TestMemAskIntegration:
         await components.index_engine.index_file(test_file)
 
         results, _ = await components.search_pipeline.search(
-            "redis cache", top_k=3, tag_filter="redis",
+            "redis cache",
+            top_k=3,
+            tag_filter="redis",
         )
         # May or may not find results depending on auto-tagging
         # but the pipeline should not error
@@ -134,7 +138,10 @@ class TestShellCommands:
         test_cases = [
             ("search deployment", ("search", ["deployment"])),
             ("s deploy blue-green", ("s", ["deploy", "blue-green"])),
-            ("ask what is our deploy strategy?", ("ask", ["what", "is", "our", "deploy", "strategy?"])),
+            (
+                "ask what is our deploy strategy?",
+                ("ask", ["what", "is", "our", "deploy", "strategy?"]),
+            ),
             ("add new memory content", ("add", ["new", "memory", "content"])),
             ("recall --days 7", ("recall", ["--days", "7"])),
             ("tags", ("tags", [])),
@@ -157,7 +164,23 @@ class TestShellCommands:
         line = "deployment blue-green strategy"
         parts = shlex.split(line)
         cmd = parts[0].lower()
-        known = {"search", "s", "ask", "add", "recall", "r", "tags", "stats", "status", "index", "idx", "quit", "exit", "q", "help"}
+        known = {
+            "search",
+            "s",
+            "ask",
+            "add",
+            "recall",
+            "r",
+            "tags",
+            "stats",
+            "status",
+            "index",
+            "idx",
+            "quit",
+            "exit",
+            "q",
+            "help",
+        }
         assert cmd not in known  # should fall through to implicit search
 
     def test_quoted_args(self):
@@ -177,14 +200,17 @@ class TestShellCommands:
 class TestShellImport:
     def test_shell_command_exists(self):
         from memtomem.cli.shell import shell
+
         assert shell.name == "shell"
 
     def test_cli_has_shell(self):
         from memtomem.cli import cli
+
         commands = {cmd for cmd in cli.commands}
         assert "shell" in commands
 
     def test_help_function(self):
         from memtomem.cli.shell import _show_help
+
         # Should not raise
         _show_help()

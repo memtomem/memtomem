@@ -6,6 +6,7 @@ from memtomem.search.expansion import expand_query_tags
 
 class FakeStorage:
     """Mock storage for tag-based expansion tests."""
+
     def __init__(self, tags):
         self._tags = tags
 

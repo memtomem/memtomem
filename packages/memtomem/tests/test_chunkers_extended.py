@@ -24,12 +24,14 @@ from helpers import make_chunk
 try:
     import tree_sitter  # noqa: F401
     import tree_sitter_python  # noqa: F401
+
     HAS_TS_PYTHON = True
 except ImportError:
     HAS_TS_PYTHON = False
 
 try:
     import tree_sitter_javascript  # noqa: F401
+
     HAS_TS_JS = True
 except ImportError:
     HAS_TS_JS = False
@@ -42,12 +44,14 @@ needs_ts_js = pytest.mark.skipif(not HAS_TS_JS, reason="tree-sitter-javascript n
 # PythonChunker
 # ===================================================================
 
+
 class TestPythonChunker:
     """Tests for chunking/python_code.py."""
 
     @pytest.fixture
     def chunker(self):
         from memtomem.chunking.python_code import PythonChunker
+
         return PythonChunker()
 
     def test_supported_extensions(self, chunker):
@@ -72,11 +76,11 @@ def greet(name):
 
     @needs_ts_python
     def test_module_with_class(self, chunker):
-        code = '''\
+        code = """\
 class Dog:
     def bark(self):
         return "woof"
-'''
+"""
         chunks = chunker.chunk_file(Path("/animals.py"), code)
         class_chunks = [c for c in chunks if c.metadata.chunk_type == ChunkType.PYTHON_CLASS]
         assert len(class_chunks) == 1
@@ -115,12 +119,14 @@ def foo():
 # JavaScriptChunker
 # ===================================================================
 
+
 class TestJavaScriptChunker:
     """Tests for chunking/javascript.py."""
 
     @pytest.fixture
     def chunker(self):
         from memtomem.chunking.javascript import JavaScriptChunker
+
         return JavaScriptChunker()
 
     def test_supported_extensions(self, chunker):
@@ -147,7 +153,7 @@ class TestJavaScriptChunker:
 
     @needs_ts_js
     def test_const_arrow_function(self, chunker):
-        code = 'const add = (a, b) => a + b;\n'
+        code = "const add = (a, b) => a + b;\n"
         chunks = chunker.chunk_file(Path("/math.js"), code)
         assert len(chunks) >= 1
 
@@ -160,7 +166,7 @@ class TestJavaScriptChunker:
 
     @needs_ts_js
     def test_js_language_metadata(self, chunker):
-        code = 'function f() {}\n'
+        code = "function f() {}\n"
         chunks = chunker.chunk_file(Path("/app.js"), code)
         assert all(c.metadata.language == "javascript" for c in chunks)
 
@@ -173,6 +179,7 @@ class TestJavaScriptChunker:
 # ===================================================================
 # StructuredChunker
 # ===================================================================
+
 
 class TestStructuredChunker:
     """Tests for chunking/structured.py."""
@@ -257,6 +264,7 @@ class TestStructuredChunker:
 # ChunkerRegistry
 # ===================================================================
 
+
 class TestChunkerRegistry:
     """Tests for chunking/registry.py."""
 
@@ -266,15 +274,18 @@ class TestChunkerRegistry:
         from memtomem.chunking.javascript import JavaScriptChunker
         from memtomem.chunking.markdown import MarkdownChunker
 
-        return ChunkerRegistry([
-            PythonChunker(),
-            JavaScriptChunker(),
-            StructuredChunker(),
-            MarkdownChunker(),
-        ])
+        return ChunkerRegistry(
+            [
+                PythonChunker(),
+                JavaScriptChunker(),
+                StructuredChunker(),
+                MarkdownChunker(),
+            ]
+        )
 
     def test_get_python(self, registry):
         from memtomem.chunking.python_code import PythonChunker
+
         assert isinstance(registry.get(".py"), PythonChunker)
 
     def test_get_unknown_returns_none(self, registry):
@@ -302,6 +313,7 @@ class TestChunkerRegistry:
 # Indexing: hasher
 # ===================================================================
 
+
 class TestContentHash:
     """Tests for indexing/hasher.py."""
 
@@ -328,6 +340,7 @@ class TestContentHash:
 # Indexing: differ
 # ===================================================================
 
+
 class TestComputeDiff:
     """Tests for indexing/differ.py."""
 
@@ -336,6 +349,7 @@ class TestComputeDiff:
         c = make_chunk(content=content)
         if chunk_id is not None:
             from uuid import UUID
+
             c.id = UUID(chunk_id)
         return c
 
@@ -393,6 +407,7 @@ class TestComputeDiff:
         assert len(diff.to_delete) == 1  # hash_b is gone
         # Unchanged chunk gets the old ID
         from uuid import UUID
+
         assert diff.unchanged[0].id == UUID(id_a)
         # Deleted is chunk B
         assert str(diff.to_delete[0]) == id_b

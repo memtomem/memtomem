@@ -19,6 +19,7 @@ class TestWebhookManager:
         """WebhookManager should be None when disabled."""
         from memtomem.config import WebhookConfig
         from memtomem.server.webhooks import WebhookManager
+
         config = WebhookConfig(enabled=False, url="https://example.com")
         mgr = WebhookManager(config)
         await mgr.fire("add", {})
@@ -28,6 +29,7 @@ class TestWebhookManager:
         """No URL configured should skip webhook."""
         from memtomem.config import WebhookConfig
         from memtomem.server.webhooks import WebhookManager
+
         config = WebhookConfig(enabled=True, url="")
         mgr = WebhookManager(config)
         await mgr.fire("add", {})
@@ -37,6 +39,7 @@ class TestWebhookManager:
         """Events not in the configured list should be skipped."""
         from memtomem.config import WebhookConfig
         from memtomem.server.webhooks import WebhookManager
+
         config = WebhookConfig(enabled=True, url="https://example.com", events=["add"])
         mgr = WebhookManager(config)
         await mgr.fire("search", {})
@@ -47,6 +50,7 @@ class TestRerankerFactory:
     def test_disabled_returns_none(self):
         from memtomem.config import RerankConfig
         from memtomem.search.reranker.factory import create_reranker
+
         config = RerankConfig(enabled=False)
         assert create_reranker(config) is None
 
@@ -54,6 +58,7 @@ class TestRerankerFactory:
         from memtomem.config import RerankConfig
         from memtomem.search.reranker.factory import create_reranker
         from memtomem.search.reranker.cohere import CohereReranker
+
         config = RerankConfig(enabled=True, provider="cohere", api_key="test")
         reranker = create_reranker(config)
         assert isinstance(reranker, CohereReranker)
@@ -61,6 +66,7 @@ class TestRerankerFactory:
     def test_unknown_provider_raises(self):
         from memtomem.config import RerankConfig
         from memtomem.search.reranker.factory import create_reranker
+
         config = RerankConfig(enabled=True, provider="unknown")
         with pytest.raises(ValueError, match="Unknown reranker"):
             create_reranker(config)
@@ -69,6 +75,7 @@ class TestRerankerFactory:
 class TestConfigSections:
     def test_all_new_configs_default_disabled(self):
         from memtomem.config import Mem2MemConfig
+
         c = Mem2MemConfig()
         assert c.rerank.enabled is False
         assert c.query_expansion.enabled is False
@@ -79,15 +86,18 @@ class TestConfigSections:
 
     def test_rerank_config_validation(self):
         from memtomem.config import RerankConfig
+
         with pytest.raises(Exception):
             RerankConfig(top_k=0)
 
     def test_importance_max_boost_validation(self):
         from memtomem.config import ImportanceConfig
+
         with pytest.raises(Exception):
             ImportanceConfig(max_boost=0.5)
 
     def test_query_expansion_strategy_validation(self):
         from memtomem.config import QueryExpansionConfig
+
         with pytest.raises(Exception):
             QueryExpansionConfig(strategy="invalid")

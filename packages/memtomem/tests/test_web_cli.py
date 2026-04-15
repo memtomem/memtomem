@@ -9,9 +9,8 @@ extra wasn't installed — because the old error handler only caught missing
 from __future__ import annotations
 
 import sys
-import asyncio
 import contextlib
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
@@ -111,7 +110,7 @@ def _patch_web_stack(server_mock: MagicMock):
         patch("uvicorn.Config", return_value=MagicMock()),
         patch("uvicorn.Server", return_value=server_mock),
         patch("memtomem.web.app.create_app", return_value=MagicMock()),
-        patch("memtomem.web.app._lifespan", MagicMock())
+        patch("memtomem.web.app._lifespan", MagicMock()),
     ]
 
 

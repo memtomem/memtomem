@@ -52,10 +52,7 @@ class TestUnderlineHeaders:
         assert "Second" in chunks[1].content
 
     def test_hierarchy(self):
-        content = (
-            "Top\n===\n\nIntro.\n\n"
-            "Sub\n---\n\nDetail."
-        )
+        content = "Top\n===\n\nIntro.\n\nSub\n---\n\nDetail."
         chunks = _chunk(content)
         assert len(chunks) == 2
         assert chunks[0].metadata.heading_hierarchy == ("Top",)
@@ -88,11 +85,7 @@ class TestAdornmentCharacters:
         assert len(chunks) == 1
 
     def test_different_chars_different_levels(self):
-        content = (
-            "H1\n==\n\nA.\n\n"
-            "H2\n--\n\nB.\n\n"
-            "H3\n~~\n\nC."
-        )
+        content = "H1\n==\n\nA.\n\nH2\n--\n\nB.\n\nH3\n~~\n\nC."
         chunks = _chunk(content)
         assert len(chunks) == 3
         assert chunks[2].metadata.heading_hierarchy == ("H1", "H2", "H3")
