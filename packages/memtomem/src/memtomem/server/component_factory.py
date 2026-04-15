@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import logging
 
+from memtomem.chunking.base import Chunker
 from memtomem.chunking.markdown import MarkdownChunker
 from memtomem.chunking.registry import ChunkerRegistry
 from memtomem.chunking.restructured_text import ReStructuredTextChunker
@@ -63,7 +64,7 @@ async def create_components(config: Mem2MemConfig | None = None) -> Components:
         raise
 
     # Build chunker registry with optional code chunkers
-    chunkers: list[object] = [
+    chunkers: list[Chunker] = [
         MarkdownChunker(indexing_config=config.indexing),
         StructuredChunker(indexing_config=config.indexing),
         ReStructuredTextChunker(),

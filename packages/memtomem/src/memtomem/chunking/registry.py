@@ -4,19 +4,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from memtomem.chunking.base import Chunker
 from memtomem.models import Chunk
 
 
 class ChunkerRegistry:
     """Maps file extensions to chunkers and dispatches chunk_file calls."""
 
-    def __init__(self, chunkers: list[object]) -> None:
-        self._map: dict[str, object] = {}
+    def __init__(self, chunkers: list[Chunker]) -> None:
+        self._map: dict[str, Chunker] = {}
         for chunker in chunkers:
-            for ext in chunker.supported_extensions():  # type: ignore[union-attr]
+            for ext in chunker.supported_extensions():
                 self._map[ext] = chunker
 
-    def get(self, extension: str) -> object | None:
+    def get(self, extension: str) -> Chunker | None:
         return self._map.get(extension)
 
     def supported_extensions(self) -> frozenset[str]:
@@ -26,4 +27,4 @@ class ChunkerRegistry:
         chunker = self._map.get(file_path.suffix)
         if chunker is None:
             return []
-        return chunker.chunk_file(file_path, content)  # type: ignore[union-attr]
+        return chunker.chunk_file(file_path, content)

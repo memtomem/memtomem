@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from memtomem.models import SearchResult
+    from memtomem.storage.sqlite_backend import SqliteBackend
 
 
 def decay_factor(age_days: float, half_life_days: float) -> float:
@@ -82,7 +83,7 @@ class ExpireStats:
 
 
 async def expire_chunks(
-    storage: object,
+    storage: SqliteBackend,
     max_age_days: float,
     dry_run: bool = False,
     source_filter: str | None = None,
@@ -106,7 +107,7 @@ async def expire_chunks(
     now = datetime.now(timezone.utc)
     cutoff_seconds = max_age_days * 86400
 
-    sources = await storage.get_all_source_files()  # type: ignore[union-attr]
+    sources = await storage.get_all_source_files()
     if source_filter:
         sources = {s for s in sources if source_filter in str(s)}
 
@@ -114,9 +115,7 @@ async def expire_chunks(
     to_delete: list[UUID] = []
 
     for source in sorted(sources):
-        chunks = await storage.list_chunks_by_source(  # type: ignore[union-attr]
-            source, limit=10_000
-        )
+        chunks = await storage.list_chunks_by_source(source, limit=10_000)
         for chunk in chunks:
             total += 1
             updated_at = chunk.updated_at
@@ -127,7 +126,7 @@ async def expire_chunks(
 
     deleted = 0
     if not dry_run and to_delete:
-        deleted = await storage.delete_chunks(to_delete)  # type: ignore[union-attr]
+        deleted = await storage.delete_chunks(to_delete)
 
     return ExpireStats(
         total_chunks=total,
