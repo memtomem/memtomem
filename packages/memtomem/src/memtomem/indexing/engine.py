@@ -152,6 +152,7 @@ class IndexEngine:
             )
             return bool(results and results[0].score >= threshold)
         except Exception:
+            logger.warning("is_duplicate failed; treating as non-duplicate", exc_info=True)
             return False
 
     def _resolve_namespace(self, file_path: Path, explicit_ns: str | None) -> str | None:
