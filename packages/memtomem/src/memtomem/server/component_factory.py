@@ -74,13 +74,19 @@ async def create_components(config: Mem2MemConfig | None = None) -> Components:
 
         chunkers.append(PythonChunker())
     except Exception:
-        _log.debug("PythonChunker unavailable (missing tree-sitter deps)", exc_info=True)
+        _log.warning(
+            "PythonChunker unavailable — install memtomem[all] to enable tree-sitter code chunking",
+            exc_info=True,
+        )
     try:
         from memtomem.chunking.javascript import JavaScriptChunker
 
         chunkers.append(JavaScriptChunker())
     except Exception:
-        _log.debug("JavaScriptChunker unavailable (missing tree-sitter deps)", exc_info=True)
+        _log.warning(
+            "JavaScriptChunker unavailable — install memtomem[all] to enable tree-sitter code chunking",
+            exc_info=True,
+        )
     registry = ChunkerRegistry(chunkers)
 
     index_engine = IndexEngine(
