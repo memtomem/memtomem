@@ -223,7 +223,7 @@ class IndexEngine:
                 "deleted": 0,
                 "errors": [
                     f"{file_path.name}: file too large ({file_size // 1024 // 1024}MB,"
-                        f" max {_MAX_INDEX_FILE_BYTES // 1024 // 1024}MB)"
+                    f" max {_MAX_INDEX_FILE_BYTES // 1024 // 1024}MB)"
                 ],
             }
 
