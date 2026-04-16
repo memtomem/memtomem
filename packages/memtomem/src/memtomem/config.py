@@ -432,10 +432,18 @@ def coerce_and_validate(value: object, constraint: dict | None) -> object:
         coerced = cast("bool | int | float | str | list[object]", value)
 
     min_val = constraint.get("min")
-    if isinstance(min_val, (int, float)) and isinstance(coerced, (int, float)) and coerced < min_val:
+    if (
+        isinstance(min_val, (int, float))
+        and isinstance(coerced, (int, float))
+        and coerced < min_val
+    ):
         raise ValueError(f"must be >= {min_val}")
     max_val = constraint.get("max")
-    if isinstance(max_val, (int, float)) and isinstance(coerced, (int, float)) and coerced > max_val:
+    if (
+        isinstance(max_val, (int, float))
+        and isinstance(coerced, (int, float))
+        and coerced > max_val
+    ):
         raise ValueError(f"must be <= {max_val}")
     if "allowed" in constraint and coerced not in constraint["allowed"]:
         raise ValueError(f"must be one of {constraint['allowed']}")
