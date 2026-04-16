@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from pathlib import Path
 
 import click
+
+logger = logging.getLogger(__name__)
 
 # Session state file — stores active session UUID.
 _STATE_DIR = Path("~/.memtomem").expanduser()
@@ -214,7 +217,7 @@ def log_event(event_type: str, content: str, meta: str | None) -> None:
     try:
         asyncio.run(_log_event(session_id, event_type, content, metadata))
     except Exception:
-        pass  # hooks must never block
+        logger.warning("activity hook failed for session %s", session_id, exc_info=True)
 
 
 async def _log_event(session_id: str, event_type: str, content: str, metadata: dict | None) -> None:
