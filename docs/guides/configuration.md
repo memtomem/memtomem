@@ -46,6 +46,10 @@ See [Embedding Providers](embeddings.md) for the supported model list and the di
 | `MEMTOMEM_SEARCH__ENABLE_DENSE` | `true` | Enable semantic vector retriever |
 | `MEMTOMEM_SEARCH__RRF_WEIGHTS` | `[1.0, 1.0]` | RRF weights for `[BM25, Dense]` — adjust to favor one retriever |
 | `MEMTOMEM_SEARCH__TOKENIZER` | `unicode61` | FTS tokenizer (`unicode61` or `kiwipiepy`) |
+| `MEMTOMEM_SEARCH__CACHE_TTL` | `30.0` | Search result cache TTL in seconds |
+| `MEMTOMEM_SEARCH__SYSTEM_NAMESPACE_PREFIXES` | `["archive:"]` | Namespace prefixes excluded from default search (max 10) |
+
+Chunks in system namespaces (e.g. `archive:*`) are hidden from `namespace=None` searches but remain retrievable with an explicit namespace argument. Set to `[]` to make all namespaces searchable by default.
 
 ## Query Expansion
 
@@ -76,6 +80,7 @@ When enabled, search results include surrounding chunks from the same source fil
 | `MEMTOMEM_INDEXING__MIN_CHUNK_TOKENS` | `128` | Merge threshold for short chunks |
 | `MEMTOMEM_INDEXING__CHUNK_OVERLAP_TOKENS` | `0` | Token overlap between adjacent chunks |
 | `MEMTOMEM_INDEXING__STRUCTURED_CHUNK_MODE` | `original` | JSON/YAML/TOML chunking: `original` or `recursive` |
+| `MEMTOMEM_INDEXING__PARAGRAPH_SPLIT_THRESHOLD` | `800` | Split long prose into paragraphs above this token count (must be ≥ 0) |
 
 ### Auto-discovered memory directories
 
@@ -97,6 +102,46 @@ without requiring explicit `MEMORY_DIRS` configuration.
 > `mm ingest codex-memory` for richer ingestion with per-tool tagging and
 > namespace assignment. Auto-discovery only removes the path restriction —
 > it does not apply tool-specific tags or namespaces.
+
+## Rerank (Cross-Encoder)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMTOMEM_RERANK__ENABLED` | `false` | Enable cross-encoder reranking after fusion |
+| `MEMTOMEM_RERANK__PROVIDER` | `cohere` | `cohere` (cloud) or `local` |
+| `MEMTOMEM_RERANK__MODEL` | `rerank-english-v3.0` | Reranker model name |
+| `MEMTOMEM_RERANK__TOP_K` | `20` | Candidates passed to the reranker (must be > 0) |
+| `MEMTOMEM_RERANK__API_KEY` | _(empty)_ | API key (required for Cohere) |
+
+Reranking runs as Stage 3.5 in the search pipeline — after BM25 + dense fusion, before source/tag filters. If the reranker call fails, the pipeline falls back to the original fused order with a warning.
+
+## Access Frequency Boost
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMTOMEM_ACCESS__ENABLED` | `false` | Enable access-frequency score boost |
+| `MEMTOMEM_ACCESS__MAX_BOOST` | `1.5` | Maximum score multiplier (must be ≥ 1.0) |
+
+Frequently accessed chunks get a log-scale score multiplier: 0 accesses → 1.0×, ~10 → ~1.3×, ~100 → max_boost. Runs as Stage 6 in the search pipeline.
+
+## Importance Boost
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMTOMEM_IMPORTANCE__ENABLED` | `false` | Enable multi-factor importance scoring |
+| `MEMTOMEM_IMPORTANCE__MAX_BOOST` | `1.5` | Maximum score multiplier (must be ≥ 1.0) |
+| `MEMTOMEM_IMPORTANCE__WEIGHTS` | `[0.3, 0.2, 0.3, 0.2]` | Factor weights: `[access, tags, relations, recency]` |
+
+Computes a composite importance score from four factors:
+
+| Factor | Weight (default) | Calculation |
+|--------|-------------------|-------------|
+| Access count | 0.3 | `log(1 + count)` normalized to ~1.0 at 100 |
+| Tag count | 0.2 | `min(tags / 5, 1.0)` — well-tagged = curated |
+| Relation count | 0.3 | `log(1 + relations)` normalized to ~1.0 at 20 |
+| Recency | 0.2 | Exponential decay (`e^(-0.01 × age_days)`) |
+
+The composite score (0–1) maps to a boost of `[1.0, max_boost]`. Runs as Stage 7 in the search pipeline.
 
 ## Decay
 
@@ -207,6 +252,29 @@ expected = hmac.new(
 ).hexdigest()
 assert request.headers["X-Webhook-Signature"] == f"sha256={expected}"
 ```
+
+## Consolidation Schedule
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMTOMEM_CONSOLIDATION_SCHEDULE__ENABLED` | `false` | Enable periodic auto-consolidation |
+| `MEMTOMEM_CONSOLIDATION_SCHEDULE__INTERVAL_HOURS` | `24.0` | Hours between consolidation runs |
+| `MEMTOMEM_CONSOLIDATION_SCHEDULE__MIN_GROUP_SIZE` | `3` | Minimum chunks per source to trigger consolidation |
+| `MEMTOMEM_CONSOLIDATION_SCHEDULE__MAX_GROUPS` | `10` | Maximum source groups to process per run |
+
+## Health Watchdog
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMTOMEM_HEALTH_WATCHDOG__ENABLED` | `false` | Enable periodic health monitoring |
+| `MEMTOMEM_HEALTH_WATCHDOG__HEARTBEAT_INTERVAL_SECONDS` | `60.0` | Lightweight heartbeat check frequency |
+| `MEMTOMEM_HEALTH_WATCHDOG__DIAGNOSTIC_INTERVAL_SECONDS` | `300.0` | Diagnostic check frequency |
+| `MEMTOMEM_HEALTH_WATCHDOG__DEEP_INTERVAL_SECONDS` | `3600.0` | Deep/expensive check frequency |
+| `MEMTOMEM_HEALTH_WATCHDOG__MAX_SNAPSHOTS` | `1000` | Maximum historical health snapshots to retain |
+| `MEMTOMEM_HEALTH_WATCHDOG__ORPHAN_CLEANUP_THRESHOLD` | `10` | Orphaned files before auto-cleanup triggers |
+| `MEMTOMEM_HEALTH_WATCHDOG__AUTO_MAINTENANCE` | `true` | Perform auto-maintenance actions on critical alerts |
+
+The watchdog runs three tiers of checks at different intervals. Use `mem_watchdog` (or `mem_do(action="watchdog")`) to query health status on demand.
 
 ## LLM
 
