@@ -6,16 +6,35 @@ import asyncio
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import click
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from memtomem.indexing.engine import IndexEngine
     from memtomem.models import Chunk
-    from memtomem.server.component_factory import Components
+    from memtomem.search.pipeline import SearchPipeline
     from memtomem.storage.base import StorageBackend
+    from memtomem.storage.sqlite_backend import SqliteBackend
+
+
+class IngestComponents(Protocol):
+    """Structural contract consumed by :func:`_ingest_files_with_components`.
+
+    Both :class:`memtomem.server.component_factory.Components` and
+    :class:`memtomem.server.context.AppContext` conform: the helper only
+    reads ``index_engine``, ``storage``, and ``search_pipeline``, all of
+    which are present on both dataclasses.
+    """
+
+    @property
+    def index_engine(self) -> IndexEngine: ...
+    @property
+    def storage(self) -> SqliteBackend: ...
+    @property
+    def search_pipeline(self) -> SearchPipeline: ...
 
 
 # Files that sit inside a Claude memory directory but should never be
@@ -215,7 +234,7 @@ class IngestSummary:
 
 
 async def _ingest_files_with_components(
-    comp: Components,
+    comp: IngestComponents,
     files: list[Path],
     namespace: str,
     *,
