@@ -167,7 +167,7 @@ def _print_agents_generate(root: Path, strict: bool, on_drop: str = "ignore") ->
         result = generate_all_agents(root, strict=strict, on_drop=on_drop)
     except StrictDropError as exc:
         click.secho(f"  [strict] {exc}", fg="red")
-        raise click.Abort()
+        raise click.Abort() from None
 
     if result.generated:
         click.secho(f"  Sub-agent fan-out: {len(result.generated)}", fg="green")

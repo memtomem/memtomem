@@ -96,13 +96,13 @@ async def embed_text(request: Request, embedder=Depends(get_embedder)):
     try:
         body = await request.json()
     except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON")
+        raise HTTPException(status_code=400, detail="Invalid JSON") from None
 
     text = body.get("text", "").strip()
     if not text:
-        raise HTTPException(status_code=400, detail="text is required")
+        raise HTTPException(status_code=400, detail="text is required") from None
     if len(text) > 5000:
-        raise HTTPException(status_code=400, detail="text too long (max 5000 chars)")
+        raise HTTPException(status_code=400, detail="text too long (max 5000 chars)") from None
 
     try:
         vectors = await embedder.embed_texts([text])
@@ -256,7 +256,7 @@ async def add_memory_dir(request: Request, config=Depends(get_config)):
     body = await request.json()
     dir_path = body.get("path", "").strip()
     if not dir_path:
-        raise HTTPException(status_code=400, detail="path is required")
+        raise HTTPException(status_code=400, detail="path is required") from None
 
     resolved = Path(dir_path).expanduser().resolve()
     if not resolved.is_dir():
@@ -285,7 +285,7 @@ async def remove_memory_dir(request: Request, config=Depends(get_config)):
     body = await request.json()
     dir_path = body.get("path", "").strip()
     if not dir_path:
-        raise HTTPException(status_code=400, detail="path is required")
+        raise HTTPException(status_code=400, detail="path is required") from None
 
     resolved = Path(dir_path).expanduser().resolve()
     new_dirs = [
@@ -294,7 +294,7 @@ async def remove_memory_dir(request: Request, config=Depends(get_config)):
     if len(new_dirs) == len(config.indexing.memory_dirs):
         raise HTTPException(status_code=404, detail="Directory not in memory_dirs")
     if len(new_dirs) == 0:
-        raise HTTPException(status_code=400, detail="Cannot remove last memory_dir")
+        raise HTTPException(status_code=400, detail="Cannot remove last memory_dir") from None
 
     config.indexing.memory_dirs = new_dirs
     save_config_overrides(config)

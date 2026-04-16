@@ -88,11 +88,11 @@ def run_steps(
         except WizardCancel:
             click.echo()
             click.secho("  Wizard cancelled.", fg="yellow")
-            raise SystemExit(0)
+            raise SystemExit(0) from None
         except click.Abort:
             click.echo()
             click.secho("  Wizard cancelled.", fg="yellow")
-            raise SystemExit(0)
+            raise SystemExit(0) from None
     return state
 
 

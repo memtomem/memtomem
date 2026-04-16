@@ -55,20 +55,20 @@ def config_set(key: str, value: str) -> None:
     parts = key.split(".", 1)
     if len(parts) != 2:
         click.echo(click.style("Key must be section.field (e.g., search.default_top_k)", fg="red"))
-        raise SystemExit(1)
+        raise SystemExit(1) from None
 
     section_name, field_name = parts
     allowed = MUTABLE_FIELDS.get(section_name, set())
     if field_name not in allowed:
         click.echo(click.style(f"{key}: not a mutable field", fg="red"))
-        raise SystemExit(1)
+        raise SystemExit(1) from None
 
     constraint = FIELD_CONSTRAINTS.get(key)
     try:
         coerced = coerce_and_validate(value, constraint)
     except ValueError as e:
         click.echo(click.style(f"{key}: {e}", fg="red"))
-        raise SystemExit(1)
+        raise SystemExit(1) from None
 
     cfg = Mem2MemConfig()
     load_config_overrides(cfg)
