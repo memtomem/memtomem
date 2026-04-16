@@ -23,6 +23,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_MAX_INDEX_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
+
 
 class IndexEngine:
     def __init__(
@@ -212,8 +214,7 @@ class IndexEngine:
         except OSError:
             return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
 
-        max_size = 10 * 1024 * 1024  # 10 MB
-        if file_size > max_size:
+        if file_size > _MAX_INDEX_FILE_BYTES:
             logger.warning("Skipping %s: file too large (%d bytes)", file_path.name, file_size)
             return {
                 "total": 0,
@@ -221,7 +222,8 @@ class IndexEngine:
                 "skipped": 0,
                 "deleted": 0,
                 "errors": [
-                    f"{file_path.name}: file too large ({file_size // 1024 // 1024}MB, max 10MB)"
+                    f"{file_path.name}: file too large ({file_size // 1024 // 1024}MB,"
+                    f" max {_MAX_INDEX_FILE_BYTES // 1024 // 1024}MB)"
                 ],
             }
 
