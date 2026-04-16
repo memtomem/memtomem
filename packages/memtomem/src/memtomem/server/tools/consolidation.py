@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app
@@ -58,7 +59,7 @@ async def mem_consolidate(
         sources = [s for s in sources if s[3] and effective_ns in s[3].split(",")]
 
     # Find groups with enough chunks
-    groups = []
+    groups: list[dict[str, Any]] = []
     group_id = 0
     for path, count, updated, ns, avg_tok, _, _ in sources:
         if count < min_group_size:
