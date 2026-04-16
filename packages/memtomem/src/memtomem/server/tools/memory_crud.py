@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+
+from memtomem.server.webhooks import webhook_error_cb
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -18,14 +20,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-
-def _webhook_error_cb(task: asyncio.Task) -> None:
-    """Log errors from fire-and-forget webhook tasks."""
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc:
-        logger.warning("Webhook fire failed: %s", exc)
 
 
 def _validate_path(path_str: str, memory_dirs: list) -> tuple[Path | None, str | None]:
@@ -133,7 +127,7 @@ async def _mem_add_core(
         task = asyncio.create_task(
             app.webhook_manager.fire("add", {"file": str(target), "chunks_indexed": 1})
         )
-        task.add_done_callback(_webhook_error_cb)
+        task.add_done_callback(webhook_error_cb)
 
     return (result, stats)
 

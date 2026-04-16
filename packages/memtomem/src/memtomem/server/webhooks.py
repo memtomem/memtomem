@@ -17,6 +17,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def webhook_error_cb(task: asyncio.Task) -> None:
+    """Log errors from fire-and-forget webhook tasks."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        logger.warning("Webhook fire failed: %s", exc)
+
+
 def _validate_webhook_url(url: str) -> str | None:
     """Return an error message if the URL is unsafe, or None if valid."""
     try:
