@@ -80,7 +80,6 @@ class TestConfigSections:
         assert c.rerank.enabled is False
         assert c.query_expansion.enabled is False
         assert c.importance.enabled is False
-        assert c.conflict.enabled is False
         assert c.webhook.enabled is False
         assert c.consolidation_schedule.enabled is False
 

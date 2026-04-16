@@ -217,12 +217,6 @@ class ImportanceConfig(BaseSettings):
         return v
 
 
-class ConflictConfig(BaseSettings):
-    enabled: bool = False
-    threshold: float = 0.75
-    auto_check: bool = False  # auto-check on mem_add
-
-
 class WebhookConfig(BaseSettings):
     enabled: bool = False
     url: str = ""
@@ -244,24 +238,6 @@ class PolicyConfig(BaseSettings):
     enabled: bool = False
     scheduler_interval_minutes: float = 60.0
     max_actions_per_run: int = 100
-
-
-class EntityExtractionConfig(BaseSettings):
-    """Entity extraction from chunk content."""
-
-    enabled: bool = False
-    extract_on_index: bool = False
-    entity_types: list[str] = Field(
-        default_factory=lambda: [
-            "person",
-            "date",
-            "decision",
-            "action_item",
-            "technology",
-            "concept",
-        ]
-    )
-    min_confidence: float = 0.5
 
 
 class ContextWindowConfig(BaseSettings):
@@ -332,17 +308,14 @@ class Mem2MemConfig(BaseSettings):
     rerank: RerankConfig = Field(default_factory=RerankConfig)
     query_expansion: QueryExpansionConfig = Field(default_factory=QueryExpansionConfig)
     importance: ImportanceConfig = Field(default_factory=ImportanceConfig)
-    conflict: ConflictConfig = Field(default_factory=ConflictConfig)
     webhook: WebhookConfig = Field(default_factory=WebhookConfig)
     consolidation_schedule: ConsolidationScheduleConfig = Field(
         default_factory=ConsolidationScheduleConfig
     )
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
-    entity_extraction: EntityExtractionConfig = Field(default_factory=EntityExtractionConfig)
     context_window: ContextWindowConfig = Field(default_factory=ContextWindowConfig)
     health_watchdog: HealthWatchdogConfig = Field(default_factory=HealthWatchdogConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
-    timezone: str = "UTC"  # Display timezone (e.g. "Asia/Seoul"). Storage remains UTC.
 
 
 # ---------------------------------------------------------------------------
