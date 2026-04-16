@@ -617,6 +617,19 @@ class TestSettingsSync:
             elif target.is_file():
                 target.unlink()
 
+    async def test_resolve_missing_canonical_returns_404(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """POST /resolve when canonical file doesn't exist returns HTTP 404."""
+        # No .memtomem/settings.json created in tmp_path
+        app.state.project_root = tmp_path
+        resp = await client.post(
+            "/api/settings-sync/resolve",
+            json={"event": "PostToolUse", "matcher": "Write", "action": "use_proposed"},
+        )
+        assert resp.status_code == 404
+        assert "Canonical source does not exist" in resp.json()["detail"]
+
     async def test_resolve_unknown_action_returns_400(self, app, client: AsyncClient, tmp_path):
         """POST /resolve with invalid action returns HTTP 400."""
         app.state.project_root = tmp_path

@@ -184,6 +184,8 @@ async def resolve_conflict(
     target_path = _claude_target()
 
     # Read canonical rule
+    if not canonical_path.is_file():
+        raise HTTPException(404, detail="Canonical source does not exist")
     canonical = _safe_load_json(canonical_path)
     if not isinstance(canonical, dict):
         raise HTTPException(422, detail="Canonical source is not valid JSON")
