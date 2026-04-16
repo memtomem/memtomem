@@ -7,7 +7,7 @@ import logging
 import time
 from pathlib import Path
 from uuid import UUID
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from memtomem.chunking.markdown import MarkdownChunker
 from memtomem.chunking.registry import ChunkerRegistry
@@ -24,6 +24,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _MAX_INDEX_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+class _IndexFileBase(TypedDict):
+    total: int
+    indexed: int
+    skipped: int
+    deleted: int
+    errors: list[str]
+
+
+class IndexFileResult(_IndexFileBase, total=False):
+    new_chunk_ids: list[UUID]
 
 
 class IndexEngine:
@@ -81,17 +93,17 @@ class IndexEngine:
 
         sem = asyncio.Semaphore(8)
 
-        async def _bounded(fp: Path) -> dict[str, object]:
+        async def _bounded(fp: Path) -> IndexFileResult:
             async with sem:
                 return await self._index_file(fp, force, namespace=namespace)
 
         raw_results = await asyncio.gather(*[_bounded(f) for f in files], return_exceptions=True)
-        file_results: list[dict[str, object]] = []
+        file_results: list[IndexFileResult] = []
         all_errors: list[str] = []
         for i, r in enumerate(raw_results):
             if isinstance(r, dict):
                 file_results.append(r)
-                all_errors.extend(r.get("errors", []))  # type: ignore[arg-type]
+                all_errors.extend(r.get("errors", []))
             elif isinstance(r, Exception):
                 logger.error("Indexing failed for %s: %s", files[i], r)
                 all_errors.append(f"{files[i].name}: {r}")
@@ -102,15 +114,15 @@ class IndexEngine:
         for r in file_results:
             ids = r.get("new_chunk_ids", ())
             if ids:
-                all_new_chunk_ids.extend(ids)  # type: ignore[arg-type]
+                all_new_chunk_ids.extend(ids)
 
         duration = (time.monotonic() - start) * 1000
         return IndexingStats(
             total_files=len(files),
-            total_chunks=sum(r["total"] for r in file_results),  # type: ignore[misc]
-            indexed_chunks=sum(r["indexed"] for r in file_results),  # type: ignore[misc]
-            skipped_chunks=sum(r["skipped"] for r in file_results),  # type: ignore[misc]
-            deleted_chunks=sum(r["deleted"] for r in file_results),  # type: ignore[misc]
+            total_chunks=sum(r["total"] for r in file_results),
+            indexed_chunks=sum(r["indexed"] for r in file_results),
+            skipped_chunks=sum(r["skipped"] for r in file_results),
+            deleted_chunks=sum(r["deleted"] for r in file_results),
             duration_ms=duration,
             errors=tuple(all_errors),
             new_chunk_ids=tuple(all_new_chunk_ids),
@@ -129,12 +141,12 @@ class IndexEngine:
             duration = (time.monotonic() - start) * 1000
         return IndexingStats(
             total_files=1,
-            total_chunks=result["total"],  # type: ignore[arg-type]
-            indexed_chunks=result["indexed"],  # type: ignore[arg-type]
-            skipped_chunks=result["skipped"],  # type: ignore[arg-type]
-            deleted_chunks=result["deleted"],  # type: ignore[arg-type]
+            total_chunks=result["total"],
+            indexed_chunks=result["indexed"],
+            skipped_chunks=result["skipped"],
+            deleted_chunks=result["deleted"],
             duration_ms=duration,
-            new_chunk_ids=tuple(result.get("new_chunk_ids", ())),  # type: ignore[arg-type]
+            new_chunk_ids=tuple(result.get("new_chunk_ids", ())),
         )
 
     async def is_duplicate(
@@ -205,7 +217,7 @@ class IndexEngine:
         file_path: Path,
         force: bool,
         namespace: str | None = None,
-    ) -> dict[str, object]:
+    ) -> IndexFileResult:
         # Return shape: total/indexed/skipped/deleted (ints), errors (list[str]),
         # new_chunk_ids (list[UUID]). Early zero-result paths may omit
         # new_chunk_ids — consumers must tolerate missing keys.
