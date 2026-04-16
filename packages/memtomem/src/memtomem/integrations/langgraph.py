@@ -19,7 +19,7 @@ Usage::
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 from uuid import UUID, uuid4
 
 
@@ -38,7 +38,7 @@ class MemtomemStore:
         self._config_overrides = config_overrides or {}
         self._current_session_id: str | None = None
 
-    async def _ensure_init(self):
+    async def _ensure_init(self) -> None:
         if self._components is not None:
             return
         from memtomem.config import Mem2MemConfig
@@ -56,7 +56,7 @@ class MemtomemStore:
 
         self._components = await create_components(config)
 
-    async def close(self):
+    async def close(self) -> None:
         """Close all components and release resources."""
         if self._components:
             from memtomem.server.component_factory import close_components
@@ -200,7 +200,9 @@ class MemtomemStore:
         self._current_session_id = None
         return {"session_id": sid, "events": len(events), "event_counts": event_counts}
 
-    async def log_event(self, event_type: str, content: str, chunk_ids: list[str] | None = None):
+    async def log_event(
+        self, event_type: str, content: str, chunk_ids: list[str] | None = None
+    ) -> None:
         """Log an event to the current session."""
         if not self._current_session_id:
             return
@@ -214,7 +216,7 @@ class MemtomemStore:
 
     # ── Working Memory ────────────────────────────────────────────────────
 
-    async def scratch_set(self, key: str, value: str, ttl_minutes: int | None = None):
+    async def scratch_set(self, key: str, value: str, ttl_minutes: int | None = None) -> None:
         """Store a value in working memory."""
         await self._ensure_init()
         from datetime import datetime, timedelta, timezone
@@ -259,9 +261,9 @@ class MemtomemStore:
 
     # ── Context Manager ───────────────────────────────────────────────────
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> Self:
         await self._ensure_init()
         return self
 
-    async def __aexit__(self, *args):
+    async def __aexit__(self, *args: object) -> None:
         await self.close()
