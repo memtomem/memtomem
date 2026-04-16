@@ -59,7 +59,7 @@ async def list_commands(
     for runtime, cmd_name, status in diffs:
         by_name.setdefault(cmd_name, []).append({"runtime": runtime, "status": status})
 
-    commands = []
+    commands: list[dict[str, object]] = []
     for cmd_path in canonicals:
         name = cmd_path.stem
         commands.append(

@@ -58,7 +58,7 @@ async def list_skills(
     for runtime, skill_name, status in diffs:
         by_name.setdefault(skill_name, []).append({"runtime": runtime, "status": status})
 
-    skills = []
+    skills: list[dict[str, object]] = []
     for skill_dir in canonicals:
         skills.append(
             {
