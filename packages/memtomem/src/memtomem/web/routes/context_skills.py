@@ -156,7 +156,7 @@ async def update_skill(
     name: str,
     body: SkillUpdateRequest,
     project_root: Path = Depends(get_project_root),
-) -> dict:
+) -> JSONResponse:
     """Update a canonical skill's SKILL.md (mtime-guarded)."""
     skill_dir = _validate_name(name, project_root)
     if skill_dir is None:
@@ -180,7 +180,7 @@ async def update_skill(
 
     manifest.write_text(body.content, encoding="utf-8")
     new_mtime = manifest.stat().st_mtime
-    return {"name": name, "mtime": new_mtime}
+    return JSONResponse(content={"name": name, "mtime": new_mtime})
 
 
 # ── Delete ───────────────────────────────────────────────────────────────

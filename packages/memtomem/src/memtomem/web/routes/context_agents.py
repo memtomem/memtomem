@@ -129,7 +129,7 @@ async def read_agent(
 async def rendered_agent(
     name: str,
     project_root: Path = Depends(get_project_root),
-) -> dict:
+) -> JSONResponse:
     agent_path = _validate_name(name, project_root)
     if agent_path is None:
         raise ValueError(f"Invalid agent name: {name}")
@@ -164,13 +164,13 @@ async def rendered_agent(
         for f in _ALL_OPTIONAL_FIELDS:
             field_map[f][gen_name] = f not in dropped_set
 
-    return {
+    return JSONResponse(content={
         "name": name,
         "canonical_content": content,
         "fields": _agent_to_dict(parsed),
         "runtimes": runtimes,
         "field_map": field_map,
-    }
+    })
 
 
 # ── Create ───────────────────────────────────────────────────────────────
@@ -210,7 +210,7 @@ async def update_agent(
     name: str,
     body: AgentUpdateRequest,
     project_root: Path = Depends(get_project_root),
-) -> dict:
+) -> JSONResponse:
     agent_path = _validate_name(name, project_root)
     if agent_path is None:
         raise ValueError(f"Invalid agent name: {name}")
@@ -229,7 +229,7 @@ async def update_agent(
         )
 
     agent_path.write_text(body.content, encoding="utf-8")
-    return {"name": name, "mtime": agent_path.stat().st_mtime}
+    return JSONResponse(content={"name": name, "mtime": agent_path.stat().st_mtime})
 
 
 # ── Delete ───────────────────────────────────────────────────────────────

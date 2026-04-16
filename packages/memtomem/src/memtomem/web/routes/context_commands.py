@@ -118,7 +118,7 @@ async def read_command(
 async def rendered_command(
     name: str,
     project_root: Path = Depends(get_project_root),
-) -> dict:
+) -> JSONResponse:
     cmd_path = _validate_name(name, project_root)
     if cmd_path is None:
         raise ValueError(f"Invalid command name: {name}")
@@ -147,11 +147,11 @@ async def rendered_command(
             }
         )
 
-    return {
+    return JSONResponse(content={
         "name": name,
         "canonical_content": content,
         "runtimes": runtimes,
-    }
+    })
 
 
 # ── Create ───────────────────────────────────────────────────────────────
@@ -191,7 +191,7 @@ async def update_command(
     name: str,
     body: CommandUpdateRequest,
     project_root: Path = Depends(get_project_root),
-) -> dict:
+) -> JSONResponse:
     cmd_path = _validate_name(name, project_root)
     if cmd_path is None:
         raise ValueError(f"Invalid command name: {name}")
@@ -210,7 +210,7 @@ async def update_command(
         )
 
     cmd_path.write_text(body.content, encoding="utf-8")
-    return {"name": name, "mtime": cmd_path.stat().st_mtime}
+    return JSONResponse(content={"name": name, "mtime": cmd_path.stat().st_mtime})
 
 
 # ── Delete ───────────────────────────────────────────────────────────────
