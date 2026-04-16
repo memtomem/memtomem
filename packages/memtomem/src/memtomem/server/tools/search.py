@@ -14,17 +14,9 @@ from memtomem.server.formatters import _display_path, _format_results, _format_s
 from memtomem.server.tool_registry import register
 from memtomem.config import MAX_CONTEXT_WINDOW_CHUNKS
 from memtomem.server.validation import MAX_QUERY_LENGTH
+from memtomem.server.webhooks import webhook_error_cb
 
 logger = logging.getLogger(__name__)
-
-
-def _webhook_error_cb(task: asyncio.Task) -> None:
-    """Log errors from fire-and-forget webhook tasks."""
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc:
-        logger.warning("Webhook fire failed: %s", exc)
 
 
 @mcp.tool()
@@ -137,7 +129,7 @@ async def mem_search(
         task = asyncio.create_task(
             app.webhook_manager.fire("search", {"query": query, "result_count": len(results)})
         )
-        task.add_done_callback(_webhook_error_cb)
+        task.add_done_callback(webhook_error_cb)
 
     return output
 
