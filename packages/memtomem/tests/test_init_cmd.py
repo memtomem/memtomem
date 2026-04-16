@@ -132,6 +132,27 @@ class TestInitConfigMerge:
         assert data["search"]["default_top_k"] == 10
 
 
+def test_write_config_and_summary_without_base_dir_falls_back_to_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_write_config_and_summary`` must be callable without *base_dir*.
+
+    The interactive wizard's final step (``init_cmd.py:604``) invokes this
+    helper with no ``base_dir``, relying on the ``Path.home()`` fallback.
+    A previous refactor dropped the parameter default, making the call
+    crash with ``TypeError: missing 1 required positional argument`` —
+    this test pins the no-arg call as part of the contract.
+    """
+    from memtomem.cli.init_cmd import _write_config_and_summary
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    state = _make_init_state(tmp_path)
+    _write_config_and_summary(state)
+
+    assert (tmp_path / ".memtomem" / "config.json").exists()
+
+
 def test_memory_dirs_env_requires_json_array(monkeypatch: pytest.MonkeyPatch) -> None:
     """Documentation examples of MEMTOMEM_INDEXING__MEMORY_DIRS must be
     encoded as a JSON array string. A bare path crashes pydantic-settings.

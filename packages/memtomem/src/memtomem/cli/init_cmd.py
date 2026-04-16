@@ -330,7 +330,7 @@ def _step_mcp(state: dict) -> None:
 # ── Write config & summary ────────────────────────────────────────────
 
 
-def _write_config_and_summary(state: dict, base_dir: Path | None) -> None:
+def _write_config_and_summary(state: dict, base_dir: Path | None = None) -> None:
     """Write config files and show summary (runs after all steps)."""
     if base_dir is None:
         base_dir = Path.home()
