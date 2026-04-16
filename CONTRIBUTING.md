@@ -66,8 +66,16 @@ catches exceptions and returns one of four string prefixes:
   produce MCP protocol errors instead of user-friendly messages.
 - **`str(exc)` is the message surface.** `FileNotFoundError` and
   `PermissionError` include full file paths in their default `str()`.
-  This is acceptable for a local-only server but would need sanitisation
-  if the server were exposed over a network.
+  See "Deployment assumptions" below.
+
+**Deployment assumptions:** The error contract assumes a **local-only
+server** (stdio or localhost). `str(exc)` for `FileNotFoundError` and
+`PermissionError` exposes full filesystem paths in tool responses. If the
+server is deployed over a network (SSE/HTTP), these messages must be
+sanitised before reaching external clients — either by wrapping the
+exceptions in the decorator or by adding a response filter. Changing the
+deployment model without addressing this turns error messages into an
+information disclosure surface.
 
 ## Contributor License Agreement (CLA)
 
