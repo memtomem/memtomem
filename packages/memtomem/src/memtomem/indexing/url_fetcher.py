@@ -114,11 +114,16 @@ def _html_to_markdown(html: str) -> str:
     text = re.sub(r"<nav[^>]*>.*?</nav>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<footer[^>]*>.*?</footer>", "", text, flags=re.DOTALL | re.IGNORECASE)
 
-    # Headers
+    # Headers — loop from h6 down so inner tags render before their
+    # enclosing outer tag consumes them.
     for i in range(6, 0, -1):
+
+        def _replace_header(m: re.Match[str], lvl: int = i) -> str:
+            return f"\n{'#' * lvl} {m.group(1).strip()}\n"
+
         text = re.sub(
             rf"<h{i}[^>]*>(.*?)</h{i}>",
-            lambda m, lvl=i: f"\n{'#' * lvl} {m.group(1).strip()}\n",
+            _replace_header,
             text,
             flags=re.DOTALL | re.IGNORECASE,
         )

@@ -13,6 +13,8 @@ from watchdog.observers import Observer
 from memtomem.config import IndexingConfig
 
 if TYPE_CHECKING:
+    from watchdog.observers.api import BaseObserver
+
     from memtomem.indexing.engine import IndexEngine
 
 logger = logging.getLogger(__name__)
@@ -76,7 +78,7 @@ class FileWatcher:
         self._engine = index_engine
         self._config = config
         self._debounce_s = debounce_ms / 1000.0
-        self._observer: Observer | None = None
+        self._observer: BaseObserver | None = None
         self._queue: asyncio.Queue[Path] = asyncio.Queue(maxsize=_WATCHER_QUEUE_MAXSIZE)
         self._task: asyncio.Task[None] | None = None
 
