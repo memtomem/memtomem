@@ -76,7 +76,7 @@ async def list_agents(
     for runtime, agent_name, status in diffs:
         by_name.setdefault(agent_name, []).append({"runtime": runtime, "status": status})
 
-    agents = []
+    agents: list[dict[str, object]] = []
     for agent_path in canonicals:
         name = agent_path.stem
         agents.append(
