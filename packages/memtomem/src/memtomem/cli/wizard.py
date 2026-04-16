@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Callable
 
 import click
@@ -64,7 +65,7 @@ def nav_confirm(text: str, default: bool = False) -> bool:
 
 
 def run_steps(
-    steps: list[Callable[[dict], None]],
+    steps: Sequence[Callable[[dict], None]],
     state: dict | None = None,
 ) -> dict:
     """Run a list of step functions with back/cancel support.

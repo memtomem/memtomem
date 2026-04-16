@@ -84,6 +84,7 @@ def config_set(key: str, value: str) -> None:
     if key == "search.tokenizer":
         from memtomem.storage.fts_tokenizer import set_tokenizer
 
+        assert isinstance(coerced, str)
         set_tokenizer(coerced)
 
         from memtomem.storage.factory import create_storage

@@ -341,8 +341,8 @@ class SearchPipeline:
         if self._access_config.enabled and fused:
             from memtomem.search.access import apply_access_boost
 
-            chunk_ids = [r.chunk.id for r in fused]
-            access_counts = await self._storage.get_access_counts(chunk_ids)
+            access_chunk_ids = [r.chunk.id for r in fused]
+            access_counts = await self._storage.get_access_counts(access_chunk_ids)
             fused = apply_access_boost(
                 fused, access_counts, max_boost=self._access_config.max_boost
             )
