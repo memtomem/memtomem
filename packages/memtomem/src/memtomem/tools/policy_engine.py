@@ -227,10 +227,12 @@ async def execute_auto_tag(
     max_tags = config.get("max_tags", 5)
 
     db = storage._get_read_db()
-    query = "SELECT COUNT(*) FROM chunks WHERE tags = '[]' OR tags = ''"
+    query = "SELECT COUNT(*) FROM chunks WHERE (tags = '[]' OR tags = '')"
+    params: list = []
     if namespace:
-        query += f" AND namespace = '{namespace}'"
-    count = db.execute(query).fetchone()[0]
+        query += " AND namespace = ?"
+        params.append(namespace)
+    count = db.execute(query, params).fetchone()[0]
 
     if not dry_run and count > 0:
         try:
