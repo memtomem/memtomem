@@ -93,6 +93,7 @@ async def _mem_add_core(
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         target = Path(base).expanduser().resolve() / f"{date_str}.md"
 
+    assert target is not None
     await asyncio.to_thread(append_entry, target, content, title=title, tags=tags)
 
     effective_ns = namespace or app.current_namespace
@@ -294,6 +295,7 @@ async def mem_delete(
         sf_path, sf_err = _validate_path(source_file, app.config.indexing.memory_dirs)
         if sf_err:
             return sf_err
+        assert sf_path is not None
         deleted = await app.storage.delete_by_source(sf_path)
         app.search_pipeline.invalidate_cache()
         return f"Removed {deleted} chunks from index for {source_file}"
@@ -345,6 +347,7 @@ async def mem_batch_add(
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         target = Path(base).expanduser().resolve() / f"{date_str}.md"
 
+    assert target is not None
     skipped = 0
     for entry in entries:
         key = entry.get("key") or entry.get("title", "")
