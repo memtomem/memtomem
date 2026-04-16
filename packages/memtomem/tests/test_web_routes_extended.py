@@ -617,9 +617,7 @@ class TestSettingsSync:
             elif target.is_file():
                 target.unlink()
 
-    async def test_resolve_missing_canonical_returns_404(
-        self, app, client: AsyncClient, tmp_path
-    ):
+    async def test_resolve_missing_canonical_returns_404(self, app, client: AsyncClient, tmp_path):
         """POST /resolve when canonical file doesn't exist returns HTTP 404."""
         # No .memtomem/settings.json created in tmp_path
         app.state.project_root = tmp_path
