@@ -12,6 +12,7 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.validation import MAX_CONTENT_LENGTH
 
 if TYPE_CHECKING:
     from memtomem.models import IndexingStats
@@ -69,7 +70,7 @@ async def _mem_add_core(
     """
     if not content.strip():
         return ("Error: content cannot be empty.", None)
-    if len(content) > 100_000:
+    if len(content) > MAX_CONTENT_LENGTH:
         return ("Error: content too large (max 100,000 characters).", None)
 
     from datetime import datetime, timezone

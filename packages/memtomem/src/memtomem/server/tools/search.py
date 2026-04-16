@@ -12,6 +12,7 @@ from memtomem.server.context import CtxType, _get_app
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.formatters import _display_path, _format_results, _format_structured_results
 from memtomem.server.tool_registry import register
+from memtomem.server.validation import MAX_QUERY_LENGTH
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,7 @@ async def mem_search(
     """
     if not query.strip():
         return "Error: query cannot be empty."
-    if len(query) > 10_000:
+    if len(query) > MAX_QUERY_LENGTH:
         return f"Error: query too long (max 10,000 characters, got {len(query)})."
     if not 1 <= top_k <= 100:
         return f"Error: top_k must be between 1 and 100, got {top_k}."
