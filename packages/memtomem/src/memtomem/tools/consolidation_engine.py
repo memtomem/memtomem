@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 # ── Constants ────────────────────────────────────────────────────────
 
 DEFAULT_SUMMARY_NAMESPACE = "archive:summary"
+DECAY_FACTOR = 0.5  # keep_originals=False → halve importance score
 DECAY_FLOOR = 0.3  # keep_originals=False → importance_score floor (never below)
 CONSOLIDATED_SUFFIX = ".consolidated.md"
 SUMMARY_MAX_LEN = 160
@@ -404,7 +405,7 @@ async def apply_consolidation(
     if not keep_originals and source_ids:
         scores = await storage.get_importance_scores(source_ids)
         if scores:
-            floored = {cid: max(score * 0.5, DECAY_FLOOR) for cid, score in scores.items()}
+            floored = {cid: max(score * DECAY_FACTOR, DECAY_FLOOR) for cid, score in scores.items()}
             await storage.update_importance_scores(floored)
 
     return summary_chunk.id

@@ -156,6 +156,7 @@ async def mem_consolidate_apply(
     from datetime import datetime, timezone
 
     from memtomem.tools.consolidation_engine import (
+        DECAY_FACTOR,
         DECAY_FLOOR,
         link_consolidation_relations,
     )
@@ -239,7 +240,7 @@ async def mem_consolidate_apply(
     if not keep_originals and group["chunk_ids"]:
         scores = await app.storage.get_importance_scores(group["chunk_ids"])
         if scores:
-            floored = {cid: max(score * 0.5, DECAY_FLOOR) for cid, score in scores.items()}
+            floored = {cid: max(score * DECAY_FACTOR, DECAY_FLOOR) for cid, score in scores.items()}
             await app.storage.update_importance_scores(floored)
 
     app.search_pipeline.invalidate_cache()
