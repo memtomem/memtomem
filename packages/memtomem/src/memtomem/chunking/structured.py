@@ -337,7 +337,7 @@ class StructuredChunker:
             return json.loads(content)
         if suffix in (".yaml", ".yml"):
             try:
-                import yaml  # type: ignore[import]
+                import yaml
             except ImportError as exc:
                 raise ImportError(
                     "PyYAML is required for YAML chunking: pip install pyyaml"

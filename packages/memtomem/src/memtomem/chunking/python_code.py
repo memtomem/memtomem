@@ -32,8 +32,8 @@ class PythonChunker:
             return self._fallback(file_path, content)
 
     def _ast_chunk(self, file_path: Path, content: str) -> list[Chunk]:
-        import tree_sitter_python as tspython  # type: ignore[import]
-        from tree_sitter import Language, Parser  # type: ignore[import]
+        import tree_sitter_python as tspython
+        from tree_sitter import Language, Parser
 
         lang = Language(tspython.language())
         parser = Parser(lang)

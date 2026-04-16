@@ -43,15 +43,15 @@ class JavaScriptChunker:
             return self._fallback(file_path, content)
 
     def _ast_chunk(self, file_path: Path, content: str) -> list[Chunk]:
-        from tree_sitter import Language, Parser  # type: ignore[import]
+        from tree_sitter import Language, Parser
 
         if file_path.suffix in {".ts", ".tsx"}:
-            import tree_sitter_typescript as tsts  # type: ignore[import]
+            import tree_sitter_typescript as tsts
 
             lang = Language(tsts.language_typescript())
             lang_name = "typescript"
         else:
-            import tree_sitter_javascript as tsjs  # type: ignore[import]
+            import tree_sitter_javascript as tsjs
 
             lang = Language(tsjs.language())
             lang_name = "javascript"
