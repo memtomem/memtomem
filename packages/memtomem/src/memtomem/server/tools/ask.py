@@ -8,6 +8,7 @@ import logging
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app
 from memtomem.server.error_handler import tool_handler
+from memtomem.server.validation import MAX_QUERY_LENGTH
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ async def mem_ask(
     """
     if not question.strip():
         return "Error: question cannot be empty."
-    if len(question) > 10_000:
+    if len(question) > MAX_QUERY_LENGTH:
         return f"Error: question too long (max 10,000 characters, got {len(question)})."
     if not 1 <= top_k <= 20:
         return f"Error: top_k must be between 1 and 20, got {top_k}."
