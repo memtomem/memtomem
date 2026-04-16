@@ -617,6 +617,41 @@ class TestSettingsSync:
             elif target.is_file():
                 target.unlink()
 
+    async def test_resolve_unknown_action_returns_400(self, app, client: AsyncClient, tmp_path):
+        """POST /resolve with invalid action returns HTTP 400."""
+        app.state.project_root = tmp_path
+        resp = await client.post(
+            "/api/settings-sync/resolve",
+            json={"event": "PostToolUse", "matcher": "Write", "action": "bad_action"},
+        )
+        assert resp.status_code == 400
+        assert "Unknown action" in resp.json()["detail"]
+
+    async def test_resolve_missing_rule_returns_404(self, app, client: AsyncClient, tmp_path):
+        """POST /resolve for non-existent rule returns HTTP 404."""
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        canonical.write_text(json.dumps({"hooks": {}}))
+
+        target = Path.home() / ".claude" / "settings.json"
+        backup = target.read_text() if target.is_file() else None
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps({"hooks": {}}))
+            app.state.project_root = tmp_path
+
+            resp = await client.post(
+                "/api/settings-sync/resolve",
+                json={"event": "PostToolUse", "matcher": "Write", "action": "use_proposed"},
+            )
+            assert resp.status_code == 404
+            assert "not in canonical source" in resp.json()["detail"]
+        finally:
+            if backup is not None:
+                target.write_text(backup)
+            elif target.is_file():
+                target.unlink()
+
     # -- URL alias tests (/api/context/settings/*) ----------------------------
 
     async def test_alias_get_context_settings(self, app, client: AsyncClient, tmp_path):

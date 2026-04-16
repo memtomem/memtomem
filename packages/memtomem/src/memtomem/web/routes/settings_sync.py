@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from memtomem.context.settings import (
@@ -176,7 +176,7 @@ async def resolve_conflict(
 ) -> dict:
     """Resolve a single hook conflict by replacing the target's rule."""
     if body.action != "use_proposed":
-        return {"status": "error", "reason": f"Unknown action: {body.action}"}
+        raise HTTPException(400, detail=f"Unknown action: {body.action}")
 
     label = _rule_label(body.event, body.matcher)
 
@@ -186,7 +186,7 @@ async def resolve_conflict(
     # Read canonical rule
     canonical = _safe_load_json(canonical_path)
     if not isinstance(canonical, dict):
-        return {"status": "error", "reason": "Canonical source is not valid JSON"}
+        raise HTTPException(422, detail="Canonical source is not valid JSON")
 
     proposed = None
     canonical_hooks: dict = canonical.get("hooks", {})
@@ -195,21 +195,21 @@ async def resolve_conflict(
             proposed = rule
             break
     if proposed is None:
-        return {"status": "error", "reason": f"Rule '{label}' not in canonical source"}
+        raise HTTPException(404, detail=f"Rule '{label}' not in canonical source")
 
     # Read target + mtime guard
     if not target_path.is_file():
-        return {"status": "error", "reason": "Target settings file does not exist"}
+        raise HTTPException(404, detail="Target settings file does not exist")
 
     mtime = target_path.stat().st_mtime
     target = _safe_load_json(target_path)
     if not isinstance(target, dict):
-        return {"status": "error", "reason": "Target settings is not valid JSON"}
+        raise HTTPException(422, detail="Target settings is not valid JSON")
 
     # Replace the rule in-place
     target_hooks: dict = target.get("hooks", {})
     if not isinstance(target_hooks, dict):
-        return {"status": "error", "reason": "Target hooks is not a record"}
+        raise HTTPException(422, detail="Target hooks is not a record")
 
     rules = target_hooks.get(body.event, [])
     replaced = False
@@ -220,7 +220,7 @@ async def resolve_conflict(
             break
 
     if not replaced:
-        return {"status": "error", "reason": f"Rule '{label}' not found in target"}
+        raise HTTPException(404, detail=f"Rule '{label}' not found in target")
 
     # mtime check before write
     if target_path.stat().st_mtime != mtime:

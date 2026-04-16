@@ -121,12 +121,17 @@ async function loadHooksSync() {
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({event, matcher, action: 'use_proposed'}),
           });
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            showToast(err.detail || 'Request failed', 'error');
+            return;
+          }
           const result = await r.json();
           if (result.status === 'ok') {
             showToast(result.reason);
             loadHooksSync();
           } else {
-            showToast(result.reason, 'error');
+            showToast(result.reason || 'Unexpected response', 'error');
           }
         } finally { btnLoading(btn, false); }
       });
