@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from memtomem.server import mcp
@@ -170,7 +171,7 @@ async def mem_context_generate(
                 content = gen.generate(sections)
                 out_path = root / gen.output_path
                 out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_text(content, encoding="utf-8")
+                await asyncio.to_thread(out_path.write_text, content, encoding="utf-8")
                 results.append(f"{name}: {gen.output_path}")
         else:
             results.append(f"{CONTEXT_FILENAME} is empty.")
@@ -279,7 +280,7 @@ async def mem_context_diff(
                 gen = GENERATORS.get(f.agent)
                 if not gen:
                     continue
-                current = f.path.read_text(encoding="utf-8").strip()
+                current = (await asyncio.to_thread(f.path.read_text, encoding="utf-8")).strip()
                 expected = gen.generate(sections).strip()
                 status = "in sync" if current == expected else "out of sync"
                 lines.append(f"{f.agent}: {f.path.name} [{status}]")
@@ -389,7 +390,7 @@ async def mem_context_sync(
                     continue
                 content = gen.generate(sections)
                 out_path = root / gen.output_path
-                out_path.write_text(content, encoding="utf-8")
+                await asyncio.to_thread(out_path.write_text, content, encoding="utf-8")
                 results.append(f"{f.agent}: {gen.output_path}")
                 agents_synced.add(f.agent)
         elif not inc:
