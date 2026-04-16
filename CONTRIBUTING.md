@@ -42,6 +42,33 @@ The STM proxy gateway lives in a separate repository: [memtomem/memtomem-stm](ht
 6. Write a clear commit message describing the "why"
 7. Sign the CLA on your first pull request (see below)
 
+## MCP Tool Error Response Contract
+
+All MCP tool handlers use `@tool_handler` (`server/error_handler.py`) which
+catches exceptions and returns one of four string prefixes:
+
+| Prefix | When |
+|--------|------|
+| `Error: {msg}` | Known exceptions (`ValueError`, `StorageError`, etc.) or manual validation returns |
+| `Error (retryable): {msg}` | `RetryableError` — transient failure, safe to retry |
+| `Error (permanent): {msg}` | `PermanentError` — will not resolve with retries |
+| `Error: internal error ({ExcType}: {msg})` | Unexpected exceptions |
+
+**Key design decisions:**
+
+- **Errors are always string returns, never raised exceptions.** The decorator
+  catches all `Exception` subclasses and converts them to `"Error: …"` strings.
+  This means the MCP protocol-level `isError` flag is never set by LTM tools.
+  The STM proxy detects errors via `result.isError` (protocol level), not by
+  parsing the `"Error: "` prefix — currently there is no programmatic consumer
+  of the prefix in the STM proxy.
+- **All new tools must use `@tool_handler`.** Without it, unhandled exceptions
+  produce MCP protocol errors instead of user-friendly messages.
+- **`str(exc)` is the message surface.** `FileNotFoundError` and
+  `PermissionError` include full file paths in their default `str()`.
+  This is acceptable for a local-only server but would need sanitisation
+  if the server were exposed over a network.
+
 ## Contributor License Agreement (CLA)
 
 Before we can merge your first pull request, you need to sign the
