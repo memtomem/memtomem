@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+
+from memtomem.server.webhooks import webhook_error_cb
 import logging
 from typing import Literal
 from uuid import UUID
@@ -15,14 +17,6 @@ from memtomem.server.tool_registry import register
 
 logger = logging.getLogger(__name__)
 
-
-def _webhook_error_cb(task: asyncio.Task) -> None:
-    """Log errors from fire-and-forget webhook tasks."""
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc:
-        logger.warning("Webhook fire failed: %s", exc)
 
 
 @mcp.tool()
@@ -135,7 +129,7 @@ async def mem_search(
         task = asyncio.create_task(
             app.webhook_manager.fire("search", {"query": query, "result_count": len(results)})
         )
-        task.add_done_callback(_webhook_error_cb)
+        task.add_done_callback(webhook_error_cb)
 
     return output
 
