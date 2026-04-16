@@ -71,6 +71,7 @@ When enabled, search results include surrounding chunks from the same source fil
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEMTOMEM_INDEXING__MEMORY_DIRS` | `["~/.memtomem/memories"]` + auto-discovered | Directories to index (see below) |
+| `MEMTOMEM_INDEXING__SUPPORTED_EXTENSIONS` | `[".md",".json",".yaml",".yml",".toml",".py",".js",".ts",".tsx",".jsx"]` | File types accepted by the indexer and file watcher |
 | `MEMTOMEM_INDEXING__MAX_CHUNK_TOKENS` | `512` | Maximum tokens per chunk |
 | `MEMTOMEM_INDEXING__MIN_CHUNK_TOKENS` | `128` | Merge threshold for short chunks |
 | `MEMTOMEM_INDEXING__CHUNK_OVERLAP_TOKENS` | `0` | Token overlap between adjacent chunks |
@@ -163,6 +164,49 @@ depend on `policy_type`:
 | `max_bullets` | int | `20` | Maximum bullet points in heuristic summary |
 | `keep_originals` | bool | `true` | Keep original chunks after consolidation (recommended) |
 | `summary_namespace` | str | `"archive:summary"` | Namespace for generated summary chunks |
+
+## Webhook
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMTOMEM_WEBHOOK__ENABLED` | `false` | Enable webhook notifications |
+| `MEMTOMEM_WEBHOOK__URL` | _(empty)_ | HTTP(S) endpoint to receive POST requests |
+| `MEMTOMEM_WEBHOOK__EVENTS` | `["add", "delete", "search"]` | Event types to fire (currently emitted: `add`, `search`, `ask`) |
+| `MEMTOMEM_WEBHOOK__SECRET` | _(empty)_ | HMAC-SHA256 signing key — when set, each request includes `X-Webhook-Signature: sha256=<hex>` |
+| `MEMTOMEM_WEBHOOK__TIMEOUT_SECONDS` | `10.0` | HTTP request timeout per attempt |
+
+Webhooks fire asynchronously with up to 3 retries on failure. The URL must be `http` or `https` — private/loopback IPs are rejected at startup.
+
+### Minimal working example
+
+```bash
+export MEMTOMEM_WEBHOOK__ENABLED=true
+export MEMTOMEM_WEBHOOK__URL=https://example.com/hooks/memtomem
+export MEMTOMEM_WEBHOOK__SECRET=my-signing-key
+```
+
+The webhook body is JSON:
+
+```json
+{
+  "event": "add",
+  "data": {
+    "file": "/path/to/memory.md",
+    "chunks_indexed": 1
+  }
+}
+```
+
+To verify the signature in your handler:
+
+```python
+import hashlib, hmac
+
+expected = hmac.new(
+    b"my-signing-key", request.body, hashlib.sha256
+).hexdigest()
+assert request.headers["X-Webhook-Signature"] == f"sha256={expected}"
+```
 
 ## LLM
 
