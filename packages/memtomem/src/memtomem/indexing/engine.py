@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 from pathlib import Path
+from uuid import UUID
 from typing import TYPE_CHECKING
 
 from memtomem.chunking.markdown import MarkdownChunker
@@ -95,7 +96,7 @@ class IndexEngine:
 
         # Aggregate new_chunk_ids across all files — preserves per-file order
         # so callers that sort/filter by source get a consistent ordering.
-        all_new_chunk_ids: list = []
+        all_new_chunk_ids: list[UUID] = []
         for r in file_results:
             ids = r.get("new_chunk_ids", ())
             if ids:

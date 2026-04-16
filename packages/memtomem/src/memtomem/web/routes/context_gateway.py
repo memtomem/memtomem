@@ -35,7 +35,7 @@ async def context_overview(
     from memtomem.context.settings import diff_settings
     from memtomem.context.skills import diff_skills
 
-    result: dict = {}
+    result: dict[str, dict[str, int | bool | str]] = {}
 
     try:
         result["skills"] = _count_statuses(diff_skills(project_root))

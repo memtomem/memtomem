@@ -1,6 +1,10 @@
 """CLI: memtomem search <query>."""
 
 from __future__ import annotations
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from memtomem.models import SearchResult
 
 import asyncio
 import json
@@ -79,7 +83,7 @@ async def _search(
         if not results:
             return
         # Group by namespace, show tags, adjust detail by relevance
-        groups: dict[str, list] = {}
+        groups: dict[str, list[SearchResult]] = {}
         for r in results:
             ns = r.chunk.metadata.namespace or "default"
             groups.setdefault(ns, []).append(r)

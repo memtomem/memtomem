@@ -110,7 +110,7 @@ class NamespaceOps:
             )
         else:
             updates = []
-            params: list = []
+            params: list[object] = []
             if description is not None:
                 updates.append("description=?")
                 params.append(description)
