@@ -19,8 +19,11 @@ Usage::
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 from uuid import UUID, uuid4
+
+if TYPE_CHECKING:
+    from memtomem.server.component_factory import Components
 
 
 class MemtomemStore:
@@ -34,27 +37,28 @@ class MemtomemStore:
     """
 
     def __init__(self, config_overrides: dict[str, Any] | None = None):
-        self._components = None
+        self._components: Components | None = None
         self._config_overrides = config_overrides or {}
         self._current_session_id: str | None = None
 
-    async def _ensure_init(self) -> None:
-        if self._components is not None:
-            return
-        from memtomem.config import Mem2MemConfig
-        from memtomem.server.component_factory import create_components
+    async def _ensure_init(self) -> Components:
+        """Initialize components on first call; return the cached instance."""
+        if self._components is None:
+            from memtomem.config import Mem2MemConfig
+            from memtomem.server.component_factory import create_components
 
-        config = Mem2MemConfig()
+            config = Mem2MemConfig()
 
-        # Apply overrides
-        for section, updates in self._config_overrides.items():
-            section_obj = getattr(config, section, None)
-            if section_obj and isinstance(updates, dict):
-                for key, value in updates.items():
-                    if hasattr(section_obj, key):
-                        setattr(section_obj, key, value)
+            # Apply overrides
+            for section, updates in self._config_overrides.items():
+                section_obj = getattr(config, section, None)
+                if section_obj and isinstance(updates, dict):
+                    for key, value in updates.items():
+                        if hasattr(section_obj, key):
+                            setattr(section_obj, key, value)
 
-        self._components = await create_components(config)
+            self._components = await create_components(config)
+        return self._components
 
     async def close(self) -> None:
         """Close all components and release resources."""
@@ -80,12 +84,12 @@ class MemtomemStore:
 
         Returns list of dicts with keys: id, content, score, source, tags, namespace.
         """
-        await self._ensure_init()
+        comp = await self._ensure_init()
         rrf_weights = None
         if bm25_weight is not None or dense_weight is not None:
             rrf_weights = [bm25_weight or 1.0, dense_weight or 1.0]
 
-        results, stats = await self._components.search_pipeline.search(
+        results, stats = await comp.search_pipeline.search(
             query=query,
             top_k=top_k,
             namespace=namespace,
@@ -118,11 +122,9 @@ class MemtomemStore:
         template: str | None = None,
     ) -> dict:
         """Add a memory entry. Returns dict with file path and chunk count."""
-        await self._ensure_init()
+        comp = await self._ensure_init()
         from datetime import datetime, timezone
         from memtomem.tools.memory_writer import append_entry
-
-        comp = self._components
 
         # Apply template
         if template:
@@ -149,8 +151,8 @@ class MemtomemStore:
 
     async def get(self, chunk_id: str) -> dict | None:
         """Get a chunk by UUID. Returns dict or None."""
-        await self._ensure_init()
-        chunk = await self._components.storage.get_chunk(UUID(chunk_id))
+        comp = await self._ensure_init()
+        chunk = await comp.storage.get_chunk(UUID(chunk_id))
         if chunk is None:
             return None
         return {
@@ -163,38 +165,38 @@ class MemtomemStore:
 
     async def delete(self, chunk_id: str) -> bool:
         """Delete a chunk by UUID."""
-        await self._ensure_init()
-        deleted = await self._components.storage.delete_chunks([UUID(chunk_id)])
+        comp = await self._ensure_init()
+        deleted = await comp.storage.delete_chunks([UUID(chunk_id)])
         return deleted > 0
 
     # ── Sessions (Episodic Memory) ────────────────────────────────────────
 
     async def start_session(self, agent_id: str = "default", namespace: str | None = None) -> str:
         """Start an episodic memory session. Returns session_id."""
-        await self._ensure_init()
+        comp = await self._ensure_init()
         session_id = str(uuid4())
         ns = namespace or "default"
-        await self._components.storage.create_session(session_id, agent_id, ns)
+        await comp.storage.create_session(session_id, agent_id, ns)
         self._current_session_id = session_id
         return session_id
 
     async def end_session(self, summary: str | None = None) -> dict:
         """End the current session. Returns session stats."""
-        await self._ensure_init()
+        comp = await self._ensure_init()
         if not self._current_session_id:
             return {"error": "no active session"}
 
-        events = await self._components.storage.get_session_events(self._current_session_id)
+        events = await comp.storage.get_session_events(self._current_session_id)
         event_counts: dict[str, int] = {}
         for e in events:
             event_counts[e["event_type"]] = event_counts.get(e["event_type"], 0) + 1
 
-        await self._components.storage.end_session(
+        await comp.storage.end_session(
             self._current_session_id,
             summary,
             {"event_counts": event_counts},
         )
-        await self._components.storage.scratch_cleanup(session_id=self._current_session_id)
+        await comp.storage.scratch_cleanup(session_id=self._current_session_id)
 
         sid = self._current_session_id
         self._current_session_id = None
@@ -206,8 +208,8 @@ class MemtomemStore:
         """Log an event to the current session."""
         if not self._current_session_id:
             return
-        await self._ensure_init()
-        await self._components.storage.add_session_event(
+        comp = await self._ensure_init()
+        await comp.storage.add_session_event(
             self._current_session_id,
             event_type,
             content,
@@ -218,7 +220,7 @@ class MemtomemStore:
 
     async def scratch_set(self, key: str, value: str, ttl_minutes: int | None = None) -> None:
         """Store a value in working memory."""
-        await self._ensure_init()
+        comp = await self._ensure_init()
         from datetime import datetime, timedelta, timezone
 
         expires_at = None
@@ -226,20 +228,20 @@ class MemtomemStore:
             expires_at = (datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)).isoformat(
                 timespec="seconds"
             )
-        await self._components.storage.scratch_set(
+        await comp.storage.scratch_set(
             key, value, session_id=self._current_session_id, expires_at=expires_at
         )
 
     async def scratch_get(self, key: str) -> str | None:
         """Get a value from working memory."""
-        await self._ensure_init()
-        entry = await self._components.storage.scratch_get(key)
+        comp = await self._ensure_init()
+        entry = await comp.storage.scratch_get(key)
         return entry["value"] if entry else None
 
     async def scratch_list(self) -> list[dict]:
         """List all working memory entries."""
-        await self._ensure_init()
-        return await self._components.storage.scratch_list(session_id=self._current_session_id)
+        comp = await self._ensure_init()
+        return await comp.storage.scratch_list(session_id=self._current_session_id)
 
     # ── Index ─────────────────────────────────────────────────────────────
 
@@ -247,8 +249,8 @@ class MemtomemStore:
         self, path: str = ".", recursive: bool = True, namespace: str | None = None
     ) -> dict:
         """Index files for search."""
-        await self._ensure_init()
-        stats = await self._components.index_engine.index_path(
+        comp = await self._ensure_init()
+        stats = await comp.index_engine.index_path(
             Path(path).expanduser().resolve(),
             recursive=recursive,
             namespace=namespace,
