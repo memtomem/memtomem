@@ -19,6 +19,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_WAL_CRITICAL_BYTES = 50 * 1024 * 1024  # 50 MB
+_WAL_WARNING_BYTES = 20 * 1024 * 1024  # 20 MB
+
 # ---------------------------------------------------------------------------
 # Heartbeat tier — ~60s interval, near-zero cost
 # ---------------------------------------------------------------------------
@@ -134,9 +137,9 @@ async def check_wal_status(app: AppContext) -> HealthSnapshot:
     page_size = db.execute("PRAGMA page_size").fetchone()[0]
     wal_bytes = log_pages * page_size
 
-    if wal_bytes > 50 * 1024 * 1024:  # 50MB
+    if wal_bytes > _WAL_CRITICAL_BYTES:
         status = "critical"
-    elif wal_bytes > 20 * 1024 * 1024:  # 20MB
+    elif wal_bytes > _WAL_WARNING_BYTES:
         status = "warning"
     else:
         status = "ok"
