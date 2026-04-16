@@ -9,7 +9,14 @@ from typing import TYPE_CHECKING
 
 from dataclasses import dataclass
 
-from memtomem.config import AccessConfig, ContextWindowConfig, DecayConfig, MMRConfig, SearchConfig
+from memtomem.config import (
+    MAX_CONTEXT_WINDOW_CHUNKS,
+    AccessConfig,
+    ContextWindowConfig,
+    DecayConfig,
+    MMRConfig,
+    SearchConfig,
+)
 from memtomem.models import ContextInfo, NamespaceFilter, SearchResult
 from memtomem.search.fusion import reciprocal_rank_fusion
 
@@ -119,10 +126,10 @@ class SearchPipeline:
     def _resolve_context_window(self, override: int | None) -> int:
         """Return the effective context window size (0 = disabled)."""
         if override is not None:
-            return max(0, min(override, 10))
+            return max(0, min(override, MAX_CONTEXT_WINDOW_CHUNKS))
         cfg = self._context_window_config
         if cfg and cfg.enabled:
-            return max(0, min(cfg.window_size, 10))
+            return max(0, min(cfg.window_size, MAX_CONTEXT_WINDOW_CHUNKS))
         return 0
 
     async def _expand_context(self, results: list[SearchResult], window: int) -> list[SearchResult]:

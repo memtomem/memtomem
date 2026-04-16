@@ -12,6 +12,7 @@ from memtomem.server.context import CtxType, _get_app
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.formatters import _display_path, _format_results, _format_structured_results
 from memtomem.server.tool_registry import register
+from memtomem.config import MAX_CONTEXT_WINDOW_CHUNKS
 from memtomem.server.validation import MAX_QUERY_LENGTH
 
 logger = logging.getLogger(__name__)
@@ -158,7 +159,7 @@ async def mem_expand(
         chunk_id: The UUID of the chunk to expand (from mem_search results)
         window: Number of adjacent chunks before and after (default 2, max 10)
     """
-    window = max(0, min(window, 10))
+    window = max(0, min(window, MAX_CONTEXT_WINDOW_CHUNKS))
     app = _get_app(ctx)
 
     try:

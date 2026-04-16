@@ -240,6 +240,9 @@ class PolicyConfig(BaseSettings):
     max_actions_per_run: int = 100
 
 
+MAX_CONTEXT_WINDOW_CHUNKS = 10  # max ±N adjacent chunks around each hit
+
+
 class ContextWindowConfig(BaseSettings):
     """Context window expansion for search results (small-to-big retrieval)."""
 
@@ -249,8 +252,8 @@ class ContextWindowConfig(BaseSettings):
     @field_validator("window_size")
     @classmethod
     def must_be_in_range(cls, v: int) -> int:
-        if not 0 <= v <= 10:
-            raise ValueError("window_size must be 0-10")
+        if not 0 <= v <= MAX_CONTEXT_WINDOW_CHUNKS:
+            raise ValueError(f"window_size must be 0-{MAX_CONTEXT_WINDOW_CHUNKS}")
         return v
 
 
