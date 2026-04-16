@@ -916,6 +916,29 @@ class TestConsolidationEngineUnit:
         assert parse_source_hash(without_hash) is None
 
 
+class TestSourceHasConsolidationRelationsLogging:
+    @pytest.mark.asyncio
+    async def test_get_related_failure_logs_warning(self, caplog):
+        """get_related errors must be visible at warning level."""
+        import logging
+        from unittest.mock import AsyncMock
+        from uuid import uuid4
+
+        from memtomem.tools.consolidation_engine import source_has_consolidation_relations
+
+        storage = AsyncMock()
+        storage.get_related = AsyncMock(side_effect=RuntimeError("db error"))
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.tools.consolidation_engine"):
+            result = await source_has_consolidation_relations(storage, [uuid4()])
+
+        assert result is False
+        assert any("get_related failed" in r.message for r in caplog.records)
+        assert all(
+            r.levelno >= logging.WARNING for r in caplog.records if "get_related" in r.message
+        )
+
+
 # ── auto_consolidate handler (integration with storage) ──────────────
 
 

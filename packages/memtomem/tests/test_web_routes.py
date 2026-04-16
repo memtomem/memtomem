@@ -227,6 +227,15 @@ class TestHealth:
         # Exception class name must not leak to the response (see #75).
         assert "RuntimeError" not in resp.text
 
+    async def test_health_degraded_logs_warning(self, app, client: AsyncClient, caplog):
+        """Failures must be logged server-side so operators can diagnose."""
+        import logging
+
+        app.state.storage.get_stats.side_effect = RuntimeError("db down")
+        with caplog.at_level(logging.WARNING, logger="memtomem.web.routes.system"):
+            await client.get("/api/health")
+        assert any("storage" in r.message for r in caplog.records)
+
 
 # ---------------------------------------------------------------------------
 # GET /api/stats

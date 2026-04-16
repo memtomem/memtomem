@@ -363,10 +363,7 @@ class SearchPipeline:
         if fused:
 
             async def _increment():
-                try:
-                    await self._storage.increment_access([r.chunk.id for r in fused])
-                except Exception:
-                    logger.debug("Failed to increment access counts", exc_info=True)
+                await self._storage.increment_access([r.chunk.id for r in fused])
 
             t = asyncio.create_task(_increment())
             t.add_done_callback(_bg_task_error_cb)
@@ -375,16 +372,13 @@ class SearchPipeline:
 
         # Save to query history (fire-and-forget)
         async def _save_history():
-            try:
-                emb = query_embedding if use_dense else []
-                await self._storage.save_query_history(
-                    query,
-                    emb,
-                    [str(r.chunk.id) for r in fused[:top_k]],
-                    [r.score for r in fused[:top_k]],
-                )
-            except Exception:
-                logger.debug("Failed to save query history", exc_info=True)
+            emb = query_embedding if use_dense else []
+            await self._storage.save_query_history(
+                query,
+                emb,
+                [str(r.chunk.id) for r in fused[:top_k]],
+                [r.score for r in fused[:top_k]],
+            )
 
         t2 = asyncio.create_task(_save_history())
         t2.add_done_callback(_bg_task_error_cb)

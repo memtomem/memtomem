@@ -317,7 +317,7 @@ async def source_has_consolidation_relations(
         try:
             related = await storage.get_related(cid)
         except Exception:
-            logger.debug("get_related failed for %r", cid, exc_info=True)
+            logger.warning("get_related failed for %r", cid, exc_info=True)
             continue
         if any(rel == "consolidated_into" for _, rel in related):
             return True

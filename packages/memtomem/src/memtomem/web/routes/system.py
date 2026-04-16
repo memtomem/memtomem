@@ -73,12 +73,14 @@ async def health(storage=Depends(get_storage), embedder=Depends(get_embedder)):
         await storage.get_stats()
         checks["storage"] = "ok"
     except Exception:
+        logger.warning("Health check failed: storage", exc_info=True)
         checks["storage"] = "error"
 
     try:
         await embedder.embed_texts(["health check"])
         checks["embedding"] = "ok"
     except Exception:
+        logger.warning("Health check failed: embedding", exc_info=True)
         checks["embedding"] = "error"
 
     all_ok = all(v == "ok" for v in checks.values())

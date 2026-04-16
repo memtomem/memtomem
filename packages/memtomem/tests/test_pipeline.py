@@ -1,5 +1,7 @@
 """Tests for search pipeline stages (expansion, reranker, importance integration)."""
 
+import asyncio
+
 import pytest
 from pathlib import Path
 from uuid import uuid4
@@ -77,6 +79,50 @@ class TestPipelineImportanceBoost:
         boosted = apply_importance_boost([r1, r2], scores)
         assert boosted[0].chunk.id == r1.chunk.id
         assert boosted[0].score == pytest.approx(0.8)
+
+
+class TestBgTaskErrorCallback:
+    """_bg_task_error_cb must log at warning when a fire-and-forget task raises."""
+
+    @pytest.mark.asyncio
+    async def test_callback_logs_warning_on_exception(self, caplog):
+        import logging
+        from memtomem.search.pipeline import _bg_task_error_cb
+
+        async def _failing():
+            raise RuntimeError("storage down")
+
+        task = asyncio.create_task(_failing())
+        task.add_done_callback(_bg_task_error_cb)
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.search.pipeline"):
+            # Wait for the task to complete and the callback to fire.
+            try:
+                await task
+            except RuntimeError:
+                pass
+            # The callback runs synchronously after the task finishes, but we
+            # need a brief event-loop tick for it to execute.
+            await asyncio.sleep(0)
+
+        assert any("storage down" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_callback_silent_on_success(self, caplog):
+        import logging
+        from memtomem.search.pipeline import _bg_task_error_cb
+
+        async def _ok():
+            return 42
+
+        task = asyncio.create_task(_ok())
+        task.add_done_callback(_bg_task_error_cb)
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.search.pipeline"):
+            await task
+            await asyncio.sleep(0)
+
+        assert not any("Background task" in r.message for r in caplog.records)
 
 
 class TestImportanceCompute:
