@@ -17,6 +17,18 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# ── Confidence thresholds ─────────────────────────────────────────────
+CONFIDENCE_PERSON_CONTEXT = 0.8
+CONFIDENCE_PERSON_MENTION = 0.7
+CONFIDENCE_DATE_ISO = 0.95
+CONFIDENCE_DATE_NATURAL = 0.8
+CONFIDENCE_DECISION = 0.85
+CONFIDENCE_ACTION_ITEM = 0.9
+CONFIDENCE_TECH_KNOWN = 0.9
+CONFIDENCE_TECH_INFERRED = 0.5
+CONFIDENCE_CONCEPT = 0.7
+CONFIDENCE_LLM_FALLBACK = 0.7
+
 _MONTHS = (
     "January",
     "February",
@@ -201,18 +213,18 @@ def _extract_persons(text: str) -> list[ExtractedEntity]:
     for m in _PERSON_CONTEXT_RE.finditer(text):
         name = m.group(1).strip()
         if len(name) > 3:
-            results.append(ExtractedEntity("person", name, 0.8, m.start(1)))
+            results.append(ExtractedEntity("person", name, CONFIDENCE_PERSON_CONTEXT, m.start(1)))
     for m in _MENTION_RE.finditer(text):
-        results.append(ExtractedEntity("person", f"@{m.group(1)}", 0.7, m.start()))
+        results.append(ExtractedEntity("person", f"@{m.group(1)}", CONFIDENCE_PERSON_MENTION, m.start()))
     return results
 
 
 def _extract_dates(text: str) -> list[ExtractedEntity]:
     results: list[ExtractedEntity] = []
     for m in _ISO_DATE_RE.finditer(text):
-        results.append(ExtractedEntity("date", m.group(1), 0.95, m.start()))
+        results.append(ExtractedEntity("date", m.group(1), CONFIDENCE_DATE_ISO, m.start()))
     for m in _NATURAL_DATE_RE.finditer(text):
-        results.append(ExtractedEntity("date", m.group(1).strip(), 0.8, m.start()))
+        results.append(ExtractedEntity("date", m.group(1).strip(), CONFIDENCE_DATE_NATURAL, m.start()))
     return results
 
 
@@ -221,7 +233,7 @@ def _extract_decisions(text: str) -> list[ExtractedEntity]:
     for m in _DECISION_RE.finditer(text):
         value = m.group(1).strip()
         if len(value) > 5:
-            results.append(ExtractedEntity("decision", value[:200], 0.85, m.start()))
+            results.append(ExtractedEntity("decision", value[:200], CONFIDENCE_DECISION, m.start()))
     return results
 
 
@@ -230,7 +242,7 @@ def _extract_action_items(text: str) -> list[ExtractedEntity]:
     for m in _ACTION_RE.finditer(text):
         value = (m.group(1) or m.group(2) or m.group(3) or "").strip()
         if len(value) > 3:
-            results.append(ExtractedEntity("action_item", value[:200], 0.9, m.start()))
+            results.append(ExtractedEntity("action_item", value[:200], CONFIDENCE_ACTION_ITEM, m.start()))
     return results
 
 
@@ -244,13 +256,13 @@ def _extract_technologies(text: str) -> list[ExtractedEntity]:
         if idx >= 0:
             # Find the original-case version
             original = text[idx : idx + len(tech)]
-            results.append(ExtractedEntity("technology", original, 0.9, idx))
+            results.append(ExtractedEntity("technology", original, CONFIDENCE_TECH_KNOWN, idx))
 
     # PascalCase words (potential tech names)
     for m in _PASCAL_CASE_RE.finditer(text):
         word = m.group(1)
         if word.lower() not in _KNOWN_TECH and len(word) > 4:
-            results.append(ExtractedEntity("technology", word, 0.5, m.start()))
+            results.append(ExtractedEntity("technology", word, CONFIDENCE_TECH_INFERRED, m.start()))
 
     return results
 
@@ -261,7 +273,7 @@ def _extract_concepts(text: str) -> list[ExtractedEntity]:
     for m in _QUOTED_TERM_RE.finditer(text):
         term = m.group(1).strip()
         if len(term) > 3:
-            results.append(ExtractedEntity("concept", term, 0.7, m.start()))
+            results.append(ExtractedEntity("concept", term, CONFIDENCE_CONCEPT, m.start()))
     return results
 
 
@@ -311,10 +323,10 @@ def _parse_entity_response(
         if not value:
             continue
         try:
-            confidence = float(parts[2].strip()) if len(parts) >= 3 else 0.7
+            confidence = float(parts[2].strip()) if len(parts) >= 3 else CONFIDENCE_LLM_FALLBACK
             confidence = max(0.0, min(1.0, confidence))
         except (ValueError, IndexError):
-            confidence = 0.7
+            confidence = CONFIDENCE_LLM_FALLBACK
         results.append(ExtractedEntity(etype, value[:200], confidence, 0))
     return results
 
