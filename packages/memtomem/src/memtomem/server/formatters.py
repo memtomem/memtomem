@@ -132,3 +132,39 @@ def _format_structured_results(results: list, hints: list[str] | None = None) ->
     if hints:
         payload["hints"] = list(hints)
     return json.dumps(payload, ensure_ascii=False)
+
+
+def _format_recall_structured(chunks: list, hints: list[str] | None = None) -> str:
+    """JSON structured format for ``mem_recall`` output.
+
+    Recall returns bare ``Chunk`` objects (no rank/score), so this shares the
+    shared-meaning field names with ``_format_structured_results`` — namely
+    ``chunk_id``, ``namespace``, ``source``, ``hierarchy``, ``content`` — and
+    adds ``created_at`` + ``tags`` which are recall-specific. The top-level
+    ``kind`` field lets consumers distinguish recall from search payloads on
+    the first property; search remains ``kind``-less for backwards compat.
+
+    Matches ``_format_structured_results`` on two invariants:
+    * content is untruncated (machine consumer gets the full chunk)
+    * ``hints`` key is omitted when the hint list is empty, so clients do not
+      render an empty-array UI badge.
+    """
+    out = []
+    for c in chunks:
+        meta = c.metadata
+        hierarchy = " > ".join(meta.heading_hierarchy) if meta.heading_hierarchy else ""
+        out.append(
+            {
+                "chunk_id": str(c.id),
+                "namespace": meta.namespace,
+                "source": _short_path(meta.source_file),
+                "hierarchy": hierarchy,
+                "content": c.content,
+                "created_at": c.created_at.isoformat(),
+                "tags": list(meta.tags),
+            }
+        )
+    payload: dict[str, object] = {"kind": "recall", "results": out}
+    if hints:
+        payload["hints"] = list(hints)
+    return json.dumps(payload, ensure_ascii=False)
