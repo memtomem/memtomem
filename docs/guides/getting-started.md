@@ -21,27 +21,24 @@ memtomem gives your AI coding agent (Claude Code, Cursor, etc.) **long-term memo
 | Requirement | Install | Verify |
 |-------------|---------|--------|
 | **Python 3.12+** | [python.org](https://python.org) | `python3 --version` |
-| **Ollama** | [ollama.com](https://ollama.com) | `ollama list` |
 | **An AI editor** | Claude Code, Cursor, Windsurf, etc. | Any one is enough |
 
-> **No Ollama?** You can use OpenAI embeddings instead. The setup wizard will guide you — skip the `ollama pull` step below.
+### Pick an embedding path (optional)
 
-### Pull the embedding model
+memtomem ships with four embedding options. The setup wizard in the next
+section asks which one you want and writes the config for you — you
+don't have to decide now.
 
-```bash
-# English-only or light multilingual use:
-ollama pull nomic-embed-text
+| Option | Setup | When to pick it |
+|--------|-------|-----------------|
+| **Keyword-only (BM25)** | None | Default. Fast, no external deps. Great for short, exact-term notes. |
+| **ONNX (local, no server)** | `uv tool install 'memtomem[onnx]'` | Semantic search without running a server. ~22 MB–1.2 GB model on first use. |
+| **Ollama (local server)** | Install [Ollama](https://ollama.com), then `ollama pull nomic-embed-text` (English) or `ollama pull bge-m3` (multilingual, 1.2 GB). | Semantic search with full local control; best Korean/JP/CN quality with `bge-m3`. |
+| **OpenAI (cloud)** | `OPENAI_API_KEY` env var. | No local model to manage; pay-per-call. |
 
-# Korean, Japanese, Chinese, or heavy multilingual use (recommended):
-ollama pull bge-m3
-```
-
-| Model | Size | Dimensions | Best for |
-|-------|------|------------|----------|
-| `nomic-embed-text` | 270MB | 768 | English-primary, fast, lightweight |
-| `bge-m3` | 1.2GB | 1024 | Multilingual, cross-language search (KR/EN/JP/CN) |
-
-> **Multilingual tip**: `bge-m3` significantly outperforms `nomic-embed-text` for cross-language search (e.g., Korean query finding English content). If you work with multiple languages, use `bge-m3`.
+> **Multilingual tip**: if you work with Korean, Japanese, or Chinese,
+> pick Ollama with `bge-m3` or OpenAI `text-embedding-3-small` — both
+> significantly outperform English-only models for cross-language search.
 
 ---
 
@@ -128,7 +125,9 @@ The wizard walks you through 8 steps. Type `b` to go back, `q` to quit at any st
 Skip the wizard entirely with `-y`. All settings have sensible defaults:
 
 ```bash
-mm init -y                                              # all defaults (Ollama + nomic-embed-text)
+mm init -y                                              # all defaults (keyword-only, BM25)
+mm init -y --provider onnx --model all-MiniLM-L6-v2     # local dense embeddings, no server
+mm init -y --provider ollama --model nomic-embed-text   # Ollama (requires `ollama serve`)
 mm init -y --provider openai --api-key sk-...           # OpenAI
 mm init -y --memory-dir ~/notes --mcp claude            # custom dir + Claude Code auto-setup
 ```
