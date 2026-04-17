@@ -23,6 +23,7 @@ asyncio_mode = "auto"
 testpaths = ["packages/memtomem/tests"]
 markers = [
     "ollama: requires a running Ollama instance (auto-skipped when unavailable)",
+    "llm: requires a live LLM API key (OpenAI/Anthropic); CI runs these in the nightly job only",
 ]
 
 [tool.mypy]
