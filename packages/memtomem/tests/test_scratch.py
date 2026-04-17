@@ -66,3 +66,41 @@ class TestScratch:
         await storage.scratch_set("key", "v2")
         entry = await storage.scratch_get("key")
         assert entry["value"] == "v2"
+
+
+class TestWorkingMemoryIndexes:
+    """Verify schema declares indexes that back scratch_list (session_id +
+    created_at) and scratch_cleanup (expires_at IS NOT NULL)."""
+
+    @pytest.mark.asyncio
+    async def test_indexes_present(self, storage):
+        db = storage._get_db()
+        rows = db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'working_memory'"
+        ).fetchall()
+        names = {r[0] for r in rows}
+        assert "idx_working_session_created" in names
+        assert "idx_working_expires" in names
+
+    @pytest.mark.asyncio
+    async def test_session_query_uses_index(self, storage):
+        db = storage._get_db()
+        plan = db.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT key FROM working_memory WHERE session_id = ? ORDER BY created_at",
+            ("sess-x",),
+        ).fetchall()
+        text = " ".join(str(row) for row in plan)
+        assert "idx_working_session_created" in text, plan
+
+    @pytest.mark.asyncio
+    async def test_expires_query_uses_index(self, storage):
+        db = storage._get_db()
+        plan = db.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT key FROM working_memory "
+            "WHERE expires_at IS NOT NULL AND expires_at < ? AND promoted = 0",
+            ("2030-01-01T00:00:00",),
+        ).fetchall()
+        text = " ".join(str(row) for row in plan)
+        assert "idx_working_expires" in text, plan

@@ -279,6 +279,14 @@ def create_tables(
             promoted BOOLEAN DEFAULT 0
         )
     """)
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_working_session_created "
+        "ON working_memory(session_id, created_at)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_working_expires "
+        "ON working_memory(expires_at) WHERE expires_at IS NOT NULL"
+    )
 
     db.execute("""
         CREATE TABLE IF NOT EXISTS chunk_relations (
