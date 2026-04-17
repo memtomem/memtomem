@@ -40,11 +40,8 @@ flowchart LR
 ### 1. Install
 
 ```bash
-ollama pull nomic-embed-text          # local embeddings (~270MB, free)
 uv tool install memtomem             # or: pipx install memtomem
 ```
-
-> No GPU? Pick OpenAI in the wizard — see [Embeddings](docs/guides/embeddings.md).
 
 ### 2. Setup
 
@@ -52,7 +49,7 @@ uv tool install memtomem             # or: pipx install memtomem
 mm init                               # 8-step wizard (or: mm init -y for CI)
 ```
 
-The wizard picks your embedding model, points at the folder you want indexed, and registers memtomem with your AI editor.
+The wizard picks your embedding provider, points at the folder you want indexed, and registers memtomem with your AI editor. The default is **keyword-only** (BM25, no external dependencies) — you can also pick ONNX (local, no server), Ollama (local server), or OpenAI (cloud). See [Embeddings](docs/guides/embeddings.md) for details.
 
 ### 3. Use
 
