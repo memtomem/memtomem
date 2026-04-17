@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
+
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.formatters import _display_path
-from memtomem.server.helpers import _parse_recall_date
+from memtomem.server.helpers import _announce_dim_mismatch_once, _parse_recall_date
+
+logger = logging.getLogger(__name__)
 
 
 @mcp.tool()
@@ -68,6 +72,30 @@ async def mem_recall(
         namespace_filter=ns_filter,
     )
 
+    # Build trust-UX hints: archive count when no namespace was pinned, plus a
+    # one-shot embedding mismatch notice. Mirrors mem_search behaviour so
+    # archived/auto-consolidated memories are visible to the caller.
+    hints: list[str] = []
+    if effective_ns is None:
+        try:
+            hidden_count = await app.storage.count_chunks_by_ns_prefix(
+                tuple(app.config.search.system_namespace_prefixes)
+            )
+        except Exception:
+            logger.debug("count_chunks_by_ns_prefix failed; skipping hint", exc_info=True)
+            hidden_count = 0
+        if hidden_count > 0:
+            noun = "memory" if hidden_count == 1 else "memories"
+            hints.append(
+                f"{hidden_count} {noun} hidden in system namespaces "
+                f'(pass namespace="archive:..." to include them).'
+            )
+    dim_notice = await _announce_dim_mismatch_once(app)
+    if dim_notice:
+        hints.append(dim_notice)
+
+    tail = "\n\n" + "\n".join(f"({h})" for h in hints) if hints else ""
+
     if not chunks:
         filters = []
         if since:
@@ -79,7 +107,7 @@ async def mem_recall(
         if effective_ns:
             filters.append(f"namespace={effective_ns!r}")
         suffix = f" ({', '.join(filters)})" if filters else ""
-        return f"No memories found{suffix}."
+        return f"No memories found{suffix}." + tail
 
     parts: list[str] = []
     for i, chunk in enumerate(chunks, 1):
@@ -98,4 +126,4 @@ async def mem_recall(
     header = f"Found {len(chunks)} memor{'y' if len(chunks) == 1 else 'ies'}"
     if since or until:
         header += f" ({since or '…'} → {until or 'now'})"
-    return header + ":\n\n" + "\n\n".join(parts)
+    return header + ":\n\n" + "\n\n".join(parts) + tail
