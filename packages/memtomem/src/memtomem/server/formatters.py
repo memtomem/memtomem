@@ -102,12 +102,16 @@ def _format_verbose_result(r) -> str:
     )
 
 
-def _format_structured_results(results: list) -> str:
+def _format_structured_results(results: list, hints: list[str] | None = None) -> str:
     """JSON structured format for machine consumption.
 
     Returns a JSON string with all result fields untruncated.
     Unlike compact/verbose, namespace is always included (even "default")
     and content is not clipped to 500 chars.
+
+    When ``hints`` is non-empty, the output also includes a ``hints`` array
+    so machine consumers can surface the same trust-UX notices (archive
+    filter, embedding mismatch, etc.) that compact/verbose append as text.
     """
     out = []
     for r in results:
@@ -124,4 +128,7 @@ def _format_structured_results(results: list) -> str:
                 "content": r.chunk.content,
             }
         )
-    return json.dumps({"results": out}, ensure_ascii=False)
+    payload: dict[str, object] = {"results": out}
+    if hints:
+        payload["hints"] = list(hints)
+    return json.dumps(payload, ensure_ascii=False)

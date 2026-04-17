@@ -37,6 +37,10 @@ class AppContext:
     llm_provider: LLMProvider | None = None
     current_namespace: str | None = None
     current_session_id: str | None = None
+    # per-session, scoped to AppContext lifetime. Gate to emit a dim-mismatch
+    # hint only once per MCP session so repeated mem_add / mem_search calls
+    # do not spam the same notice. Writes go through ``_config_lock``.
+    _dim_mismatch_announced: bool = False
     _config_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 

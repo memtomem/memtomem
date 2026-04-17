@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from typing import Callable
+from typing import Callable, Sequence
 
 from memtomem.errors import StorageError
 from memtomem.storage.sqlite_helpers import escape_like, now_iso, placeholders
@@ -34,6 +34,24 @@ class NamespaceOps:
             "SELECT namespace, COUNT(*) FROM chunks GROUP BY namespace ORDER BY namespace"
         ).fetchall()
         return [(row[0], row[1]) for row in rows]
+
+    async def count_chunks_by_ns_prefix(self, prefixes: Sequence[str]) -> int:
+        """Count chunks whose namespace starts with any of the given prefixes.
+
+        Returns 0 when ``prefixes`` is empty. Each prefix is LIKE-escaped so
+        literal ``%`` / ``_`` in a system-namespace prefix does not become a
+        wildcard.
+        """
+        if not prefixes:
+            return 0
+        db = self._get_db()
+        clauses = " OR ".join("namespace LIKE ? ESCAPE '\\'" for _ in prefixes)
+        params = [f"{escape_like(p)}%" for p in prefixes]
+        row = db.execute(
+            f"SELECT COUNT(*) FROM chunks WHERE {clauses}",
+            params,
+        ).fetchone()
+        return int(row[0]) if row else 0
 
     async def delete_by_namespace(self, namespace: str) -> int:
         db = self._get_db()

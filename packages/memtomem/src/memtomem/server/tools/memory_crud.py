@@ -11,6 +11,7 @@ from uuid import UUID
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app
 from memtomem.server.error_handler import tool_handler
+from memtomem.server.helpers import _announce_dim_mismatch_once
 from memtomem.server.tool_registry import register
 from memtomem.server.validation import MAX_CONTENT_LENGTH
 from memtomem.server.webhooks import webhook_error_cb
@@ -128,6 +129,11 @@ async def _mem_add_core(
             app.webhook_manager.fire("add", {"file": str(target), "chunks_indexed": 1})
         )
         task.add_done_callback(webhook_error_cb)
+
+    # One-shot dim-mismatch hint — only emitted the first time per MCP session.
+    dim_notice = await _announce_dim_mismatch_once(app)
+    if dim_notice:
+        result += f"\n\n{dim_notice}"
 
     return (result, stats)
 

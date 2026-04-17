@@ -11,6 +11,7 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.formatters import _display_path, _format_results, _format_structured_results
+from memtomem.server.helpers import _announce_dim_mismatch_once
 from memtomem.server.tool_registry import register
 from memtomem.config import MAX_CONTEXT_WINDOW_CHUNKS
 from memtomem.server.validation import MAX_QUERY_LENGTH
@@ -81,6 +82,19 @@ async def mem_search(
         context_window=context_window if context_window > 0 else None,
     )
 
+    # Build trust-UX hints shared across formats: archive filter count and a
+    # one-shot embedding mismatch notice. Emitted for users who did NOT pin a
+    # namespace (otherwise the archive filter never engaged).
+    hints: list[str] = []
+    if effective_ns is None and stats.hidden_system_ns > 0:
+        hints.append(
+            f"{stats.hidden_system_ns} result(s) hidden in system namespaces "
+            f'(pass namespace="archive:..." to include them).'
+        )
+    dim_notice = await _announce_dim_mismatch_once(app)
+    if dim_notice:
+        hints.append(dim_notice)
+
     if not results:
         if (source_filter or tag_filter) and stats.fused_total > 0:
             return (
@@ -98,10 +112,13 @@ async def mem_search(
             return f"No results found. (Note: keyword search unavailable: {stats.bm25_error})"
         if stats.dense_error:
             return f"No results found. (Note: semantic search unavailable: {stats.dense_error})"
-        return "No results found."
+        # Even when the result set is empty, surface hints — the caller may
+        # have archived results they're unaware of.
+        tail = "\n\n" + "\n".join(f"({h})" for h in hints) if hints else ""
+        return "No results found." + tail
 
     if effective_format == "structured":
-        output = _format_structured_results(results)
+        output = _format_structured_results(results, hints=hints or None)
     else:
         is_verbose = effective_format == "verbose"
         output = _format_results(results, verbose=is_verbose)
@@ -123,6 +140,9 @@ async def mem_search(
             if stats.dense_error:
                 pipeline_info.append(f"Dense-err:{stats.dense_error}")
             output += f"\n\n---\npipeline: {' → '.join(pipeline_info)}"
+
+        for hint in hints:
+            output += f"\n\n({hint})"
 
     # Fire webhook
     if app.webhook_manager:

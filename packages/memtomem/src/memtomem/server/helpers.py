@@ -63,8 +63,51 @@ def _check_embedding_mismatch(app: object) -> str | None:
         f"  DB stored:  {stored['provider']}/{stored['model']} ({stored['dimension']}d)\n"
         f"  Config:     {configured['provider']}/{configured['model']} ({configured['dimension']}d)\n"
         f"Run 'mm embedding-reset --mode apply-current' (CLI) "
-        f'or mem_embedding_reset(mode="apply_current") (MCP) to reset DB.'
+        f'or mem_embedding_reset(mode="apply_current") (MCP) to reset DB.\n'
+        f"See docs/guides/configuration.md#reset-flow for the full flow."
     )
+
+
+def _dim_mismatch_hint(app: object) -> str | None:
+    """Return a short, user-facing hint when the DB/runtime embedding mismatch.
+
+    Short-form counterpart to :func:`_check_embedding_mismatch` — suitable
+    for appending to a successful ``mem_add`` / ``mem_search`` result rather
+    than blocking an operation. Returns ``None`` when there is no mismatch.
+    """
+    mismatch = getattr(getattr(app, "storage", None), "embedding_mismatch", None)
+    if mismatch is None:
+        return None
+    stored = mismatch["stored"]
+    configured = mismatch["configured"]
+    return (
+        f"Note: embedding dimension mismatch — DB stored "
+        f"{stored['provider']}/{stored['model']} ({stored['dimension']}d), "
+        f"config uses {configured['provider']}/{configured['model']} "
+        f"({configured['dimension']}d). Semantic search falls back to BM25 "
+        f"until resolved. Fix: `uv run mm embedding-reset --mode apply-current` "
+        f"(see docs/guides/configuration.md#reset-flow)."
+    )
+
+
+async def _announce_dim_mismatch_once(app: object) -> str | None:
+    """Return a one-shot dim-mismatch hint for ``mem_add`` / ``mem_search``.
+
+    Uses the AppContext ``_dim_mismatch_announced`` gate (protected by
+    ``_config_lock``) so repeated calls within the same MCP session do not
+    spam the same notice. Returns ``None`` when there is no mismatch or
+    the hint has already been emitted in this session.
+    """
+    if getattr(getattr(app, "storage", None), "embedding_mismatch", None) is None:
+        return None
+    lock = getattr(app, "_config_lock", None)
+    if lock is None:
+        return None
+    async with lock:
+        if getattr(app, "_dim_mismatch_announced", False):
+            return None
+        app._dim_mismatch_announced = True  # type: ignore[attr-defined]
+    return _dim_mismatch_hint(app)
 
 
 def _set_config_key(config: Mem2MemConfig, key: str, value: str) -> str:
