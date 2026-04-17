@@ -188,6 +188,9 @@ Combines keyword matching (exact words) with meaning-based search (similar conce
 | `source_filter` | File path substring (recommended) or glob | `"docs/adr"`, `".yaml"` |
 | `tag_filter` | Comma-separated tags, OR logic | `"redis,cache"` |
 | `namespace` | Scope to namespace | `"work"` |
+| `bm25_weight` / `dense_weight` | Override RRF weights (default `1.0`) | `2.0` |
+| `context_window` | Expand each result with ±N adjacent chunks (`0` = disabled) | `1` |
+| `output_format` | `"compact"` (default), `"verbose"`, or `"structured"` (JSON with `hints` field) | `"structured"` |
 
 ```
 mem_search(query="caching strategy", tag_filter="redis,cache", namespace="work")
@@ -195,6 +198,8 @@ mem_search(query="auth", source_filter="docs/adr", top_k=5)
 ```
 
 > **source_filter tip**: Use substrings like `"docs/adr"` or `".py"` for filtering. Glob patterns (`*`, `?`) are matched against the **full absolute path** via `fnmatch`, so `"*.py"` won't work as expected — use `".py"` instead.
+
+> **Trust-UX hints**: when you don't pin a namespace, results are followed by a parenthesized hint if chunks were hidden in system namespaces (e.g. `archive:*`) or if the configured embedding dimension disagrees with what's in the database. In `output_format="structured"` those hints are emitted as a `hints` array instead.
 
 ### Tuning search weights
 
@@ -255,7 +260,10 @@ mem_recall(namespace="project:*", limit=5)
 | `until` | Exclusive end date | same formats |
 | `source_filter` | File path substring or glob | `"notes"`, `"*.md"` |
 | `namespace` | Single, comma-separated, or glob | `"work"`, `"project:*"` |
-| `limit` | Max results (default 20) | `10` |
+| `limit` | Max results (default 20, max 500) | `10` |
+| `output_format` | `"compact"` (default) or `"structured"` (JSON with `hints` field) | `"structured"` |
+
+Like `mem_search`, `mem_recall` hides system namespaces (`archive:*` by default) when no namespace is pinned and appends a trust-UX hint if any chunks were filtered or if an embedding dimension mismatch is detected. `output_format="structured"` exposes those as a `hints` array for programmatic consumers.
 
 ---
 
@@ -620,6 +628,18 @@ mem_status()
   Embedding: ollama/bge-m3 (1024d), Top-K: 10, RRF k: 60
   Total chunks: 444, Source files: 104
 ```
+
+When configuration drift is detected (most commonly an embedding
+dimension mismatch between the DB and the runtime config), `mem_status`
+appends a `Warnings` block whose entries follow a stable schema so
+uptime probes and dashboards can pattern-match on the keys:
+
+| Key | Description |
+|-----|-------------|
+| `kind` | Open enum; current values include `embedding_dim_mismatch` (consumers must tolerate unknown kinds). |
+| `fix` | Canonical CLI command to resolve the warning (e.g. `mm embedding-reset --mode apply-current`). |
+| `doc` | Relative path into `docs/guides/` with the full remediation flow (see [`configuration.md#reset-flow`](configuration.md#reset-flow)). |
+| `stored` / `configured` | Present for embedding-mismatch entries; echoes the DB vs runtime provider/model/dimension. |
 
 ### `mem_config` — View and modify settings
 
