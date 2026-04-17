@@ -17,12 +17,27 @@
 
 ## Step 1 — Setup and First Run (5 min)
 
-### 1.1 Prepare the Embedding Model
+### 1.1 Pick an Embedding Path (optional)
+
+The MCP server runs out of the box in **keyword-only (BM25)** mode — no
+embedding model needed for this tutorial. If you want semantic search as
+well, pick one of the following before continuing:
 
 ```bash
+# Local dense embeddings, no server — add the onnx extra and memtomem
+# will download the model on first index.
+uv tool install 'memtomem[onnx]'
+
+# Local server — requires Ollama installed (ollama.com)
 ollama pull nomic-embed-text     # English-primary (768d, 270MB)
 # or: ollama pull bge-m3         # Multilingual recommended (1024d, 1.2GB)
+
+# Cloud — set OPENAI_API_KEY in the env passed to the MCP server.
 ```
+
+The wizard (`mm init`) writes the chosen provider into
+`~/.memtomem/config.json`; for this tutorial you can also leave the
+default and skip ahead.
 
 ### 1.2 Connect the MCP Server
 

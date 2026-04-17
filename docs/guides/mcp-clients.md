@@ -1,7 +1,7 @@
 # MCP Client Configuration Guide
 
 **Audience**: Users who want to connect memtomem to a specific AI editor
-**Prerequisite**: [Getting Started](getting-started.md) complete (Ollama running, model pulled)
+**Prerequisite**: [Getting Started](getting-started.md) complete (embedding path picked — BM25 default, or ONNX / Ollama / OpenAI via the wizard)
 **Estimated Time**: ~5 minutes
 
 > **Which editor should I use?**
@@ -197,12 +197,13 @@ Ask the AI:
 Call the mem_status tool to show the current status
 ```
 
-Expected response example:
+Expected response example (keyword-only default — the embedding line
+changes depending on the provider picked in the wizard):
 ```
 memtomem status:
   - Storage backend: SQLite
   - Total chunks: 0 (not yet indexed)
-  - Embedding model: ollama/nomic-embed-text
+  - Embedding model: none (BM25 keyword search only)
 ```
 
 ### Available MCP Tools (74)
@@ -302,8 +303,12 @@ ollama pull bge-m3
 
 | Model | Dimension | Pull Command |
 |-------|-----------|-------------|
-| `nomic-embed-text` (default) | 768 | `ollama pull nomic-embed-text` |
-| `bge-m3` | 1024 | `ollama pull bge-m3` |
+| `nomic-embed-text` | 768 | `ollama pull nomic-embed-text` |
+| `bge-m3` (multilingual) | 1024 | `ollama pull bge-m3` |
+
+> The server default is `provider = "none"` (BM25 keyword-only, no
+> embedding model). The models above are Ollama-specific choices; the
+> wizard also exposes ONNX (`fastembed`) and OpenAI options.
 
 > **Important**: `MEMTOMEM_EMBEDDING__DIMENSION` must match the model's output dimension. Mismatched values will cause indexing errors.
 
