@@ -120,6 +120,52 @@ class TestArchiveHint:
         # relative to that request — so no hint is warranted.
         assert stats.hidden_system_ns == 0
 
+    async def test_recall_emits_hidden_archive_hint(self, trust_components):
+        """mem_recall mirrors mem_search: when no namespace is pinned and
+        archive chunks exist, the response must include a hidden-count hint."""
+        from memtomem.server.tools.recall import mem_recall
+
+        comp, _ = trust_components
+        visible = make_chunk("a visible note", namespace="default")
+        archived_a = make_chunk("first archived note", namespace="archive:old")
+        archived_b = make_chunk("second archived note", namespace="archive:old")
+        await comp.storage.upsert_chunks([visible, archived_a, archived_b])
+
+        ctx = _recall_ctx(comp)
+        out = await mem_recall(limit=10, ctx=ctx)
+
+        assert "2 memories hidden in system namespaces" in out
+        assert 'pass namespace="archive:..." to include them' in out
+
+    async def test_recall_no_hint_when_namespace_pinned(self, trust_components):
+        """When the caller pins a namespace, no archive hint is emitted —
+        the archive filter never engaged. Mirrors mem_search behaviour."""
+        from memtomem.server.tools.recall import mem_recall
+
+        comp, _ = trust_components
+        visible = make_chunk("a visible note", namespace="default")
+        archived = make_chunk("an archived note", namespace="archive:old")
+        await comp.storage.upsert_chunks([visible, archived])
+
+        ctx = _recall_ctx(comp)
+        out = await mem_recall(namespace="archive:old", limit=10, ctx=ctx)
+
+        assert "hidden in system namespaces" not in out
+
+    async def test_recall_singular_hint_when_one_archived(self, trust_components):
+        """The hint must use 'memory' (singular) when count == 1."""
+        from memtomem.server.tools.recall import mem_recall
+
+        comp, _ = trust_components
+        archived = make_chunk("only one archived note", namespace="archive:old")
+        await comp.storage.upsert_chunks([archived])
+
+        ctx = _recall_ctx(comp)
+        out = await mem_recall(limit=10, ctx=ctx)
+
+        assert "1 memory hidden in system namespaces" in out
+        assert "1 memories" not in out
+
     def test_structured_formatter_emits_hints_field(self):
         meta = ChunkMetadata(source_file=Path("/tmp/x.md"), namespace="default")
         chunk = Chunk(content="hi", metadata=meta, embedding=[])
@@ -189,6 +235,22 @@ class TestDimMismatchHint:
         # actually appears it will still be surfaced.
         assert app._dim_mismatch_announced is False
 
+    async def test_recall_announces_dim_mismatch_once(self, trust_components):
+        """mem_recall must surface the dim-mismatch notice on first call only,
+        sharing the same once-per-session gate as mem_search and mem_add."""
+        from memtomem.server.tools.recall import mem_recall
+
+        comp, _ = trust_components
+        _install_mismatch(comp.storage)
+
+        ctx = _recall_ctx(comp)
+        first = await mem_recall(limit=5, ctx=ctx)
+        second = await mem_recall(limit=5, ctx=ctx)
+
+        assert "embedding-reset" in first
+        assert "configuration.md#reset-flow" in first
+        assert "embedding-reset" not in second  # dedup gate held
+
 
 # ---------------------------------------------------------------------------
 # Smoke flow — status → index → search → add → recall
@@ -256,3 +318,23 @@ class _StubApp:
         self.storage = storage
         self._dim_mismatch_announced = announced
         self._config_lock = asyncio.Lock()
+
+
+def _recall_ctx(components):
+    """Build an MCP-style ctx wrapping ``trust_components`` for mem_recall.
+
+    The recall tool only touches ``app.config``, ``app.storage``,
+    ``app.current_namespace``, ``app._dim_mismatch_announced``, and
+    ``app._config_lock``. Everything else can be stubbed cheaply.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    app = SimpleNamespace(
+        config=components.config,
+        storage=components.storage,
+        current_namespace=None,
+        _dim_mismatch_announced=False,
+        _config_lock=asyncio.Lock(),
+    )
+    return SimpleNamespace(request_context=SimpleNamespace(lifespan_context=app))
