@@ -3,10 +3,13 @@
 **If you are a new Claude session picking this up**: read this file
 first, then `b2-v2-design.md`, `b2-v2-phase1-validation.md`
 (§§ 8-11 for Phase 2a-c measurements — § 11 is the cost_opt
-counter-prediction writeup), `b2-v2-phase2b-ledger.md` (curation
-patterns + 3 boundary-case principles + formal definitions + security
-pre-registration), and `b2-v2-query-portfolio.md` in that order. That
-gives full methodology context + the current open-prediction state.
+counter-prediction writeup; § 12 reserved for security sensitivity),
+`b2-v2-phase2b-ledger.md` (curation patterns + 3 boundary-case
+principles + formal definitions + security pre-registration +
+Methodology Discontinuity 1 [security generator transition] +
+Gemini-regenerated security curation ledger), and
+`b2-v2-query-portfolio.md` in that order. That gives full
+methodology context + the current open-prediction state.
 
 ## Branch state
 
@@ -23,12 +26,12 @@ gives full methodology context + the current open-prediction state.
 | 2a | ✅ | caching × en × 4 genres; EN parity confirmed |
 | 2b | ✅ | postgres × 4 genres × 2 langs = 32 chunks; topic-strong pipeline invariance identified (B-2) |
 | 2c (cost_opt) | ✅ | cost_optimization × 4 genres × 2 langs = 32 chunks; **counter-prediction realized — topic-strong despite topic-weak prediction** (0/8 divergence); drift 0/32 |
-| **2c (security)** | **🔄 next** | **security × 4 genres × 2 langs (Gemini prompts already queued at `.claude/b2-v2-security-prompts.md`)** |
+| **2c (security)** | **🔄 3a done** | Gemini-regenerated (Methodology Discontinuity 1 → Option i); 32 chunks curated with 7 corrections = 21.9% drift (H1 supported); authoritative source `.claude/b2-v2-security-batches-gemini/`; IDF pre-measure + 3b fixtures + sensitivity + § 12 pending |
 | 2c kafka / k8s | 📋 | kafka role may change post-security (see Kafka cadence contingency in ledger) |
 | 2d onwards | 📋 | 11 remaining topics × 8 batches each |
 | 3-7 | 📋 | full curation (per-topic drift), query portfolio, calibration, CI wiring, PR |
 
-## Current state summary (2026-04-17, cost_optimization complete)
+## Current state summary (2026-04-17, security Phase 3a complete)
 
 **Cost_optimization measurements**:
 - Phase 3a drift: **0/32** (0%, vs postgres 9/32 = 28%). Category
@@ -39,6 +42,26 @@ gives full methodology context + the current open-prediction state.
   (predicted 6-8/8 KO divergence); measured 0/8 → reclassifies
   **topic-strong**. Original "subtopic-vocabulary-density" hypothesis
   **falsified**.
+
+**Security Phase 3a measurements (Gemini-regenerated, 2026-04-17)**:
+- Methodology Discontinuity 1 resolved via Option i: security
+  regenerated with Gemini for H1 / H2 / H3 testability. Prior Claude
+  Opus batches at `.claude/b2-v2-security-batches/` preserved as
+  design reference only. See `b2-v2-phase2b-ledger.md` §
+  "Methodology discontinuities".
+- Drift: **7 / 32 = 21.9%** — H1 "structural cleanliness dominant"
+  **supported** (postgres 28% → security 21.9% → cost_opt 0% pattern
+  consistent with structural-difficulty explanation).
+- Correction pattern: 6 intra-vocab reclassifications (encryption ↔
+  `auth/mtls`, encryption ↔ `networking/tls`, access_control ↔
+  `auth/rbac`) + 1 absent-topic secondary drop. Post-curation:
+  81% `security/*` primary + 19% reclassified to adjacent topics.
+- Subtopic skew: `security/incident` primary only 1/32 (Gemini pushes
+  it to postmortem-secondary more strictly than Claude's 2/32).
+  Phase 5 threshold calibration decision deferred (exclude incident-
+  primary from floor assertions, or looser floor).
+- **Sensitivity still pending** — n=2 → n=3 hypothesis update awaits
+  `measure_sensitivity.py --topic security` result.
 
 **Revised candidate hypothesis** (n=2, pending security
 falsification): chunk-level artifact density dominates topic-level
@@ -74,19 +97,26 @@ redefinition prohibited.
    `b2-v2-query-portfolio.md`. Do NOT run security Gemini until after
    reading.
 
-2. **Run security Gemini batches** — 8 prompts already queued at
-   `.claude/b2-v2-security-prompts.md` (gitignored, session-local).
-   User executes offline, returns 8 JSON arrays for Phase 3a curation.
-   Security pre-registered with joint H×D matrix (drift H1/H2/H3 +
-   divergence D1/D2/D3) — ranges locked, no post-hoc redefinition.
+2. ✅ **Run security Gemini batches** (2026-04-17). Regenerated with
+   Gemini per Methodology Discontinuity 1 Option i after prior
+   session generated with Claude Opus 4.7. Output at
+   `.claude/b2-v2-security-batches-gemini/` (gitignored, 8 JSON
+   files = 32 chunks). Prior Claude batches retained at
+   `.claude/b2-v2-security-batches/` as design reference.
 
-3. **Phase 3a curate** security batches. Apply P1/P2/P3 principles
-   for boundary cases (cite sources for P1). Log corrections under
-   `b2-v2-phase2b-ledger.md` § "Curation ledger" (new subsection,
-   don't rewrite cost_opt entries).
+3. ✅ **Phase 3a curate** (2026-04-17). **7 / 32 corrections =
+   21.9% drift** — H1 supported. 6 intra-vocab reclassifications to
+   `auth/mtls` (2), `auth/rbac` (2), `networking/tls` (2) + 1
+   absent-topic secondary drop. Full ledger at
+   `b2-v2-phase2b-ledger.md` § "Curation ledger — Phase 2c security,
+   Gemini-regenerated". P1/P2/P3 principles applied (see borderline
+   cases subsection). Claude-generated section of the ledger
+   superseded by Gemini section.
 
 4. **Pre-measure IDF + body overlap** for security queries BEFORE
-   divergence (Phase 2c-established rule, § 11.5):
+   divergence (Phase 2c-established rule, § 11.5). Build queries
+   from chunks at `.claude/b2-v2-security-batches-gemini/`
+   (authoritative source):
    ```bash
    # Add security queries to tools/retrieval-eval/compute_idf_baseline.py
    # QUERY_SETS, then:
