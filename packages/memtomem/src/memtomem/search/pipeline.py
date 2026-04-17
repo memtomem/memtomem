@@ -47,6 +47,12 @@ class RetrievalStats:
     final_total: int = 0
     bm25_error: str | None = None
     dense_error: str | None = None
+    # Chunks that live in namespaces matching ``system_namespace_prefixes``
+    # (e.g. ``archive:*``) and were therefore excluded from the default,
+    # namespace=None search. Non-zero only when the caller did not pick an
+    # explicit namespace — surfaces as a hint in mem_search's output so
+    # users know their archived memories still exist.
+    hidden_system_ns: int = 0
 
 
 if TYPE_CHECKING:
@@ -212,6 +218,18 @@ class SearchPipeline:
             system_prefixes=tuple(self._config.system_namespace_prefixes),
         )
 
+        # When the caller did not pin a namespace, count how many chunks sit
+        # behind a system-namespace prefix (e.g. archive:*) so the tool layer
+        # can hint "N hidden — pass namespace=... to include them".
+        hidden_system_ns = 0
+        if namespace is None and self._config.system_namespace_prefixes:
+            try:
+                hidden_system_ns = await self._storage.count_chunks_by_ns_prefix(
+                    list(self._config.system_namespace_prefixes)
+                )
+            except Exception:
+                logger.debug("count_chunks_by_ns_prefix failed; skipping hint", exc_info=True)
+
         use_bm25 = self._config.enable_bm25
         use_dense = self._config.enable_dense
 
@@ -283,6 +301,7 @@ class SearchPipeline:
             dense_candidates=len(dense_results),
             bm25_error=bm25_error,
             dense_error=dense_error,
+            hidden_system_ns=hidden_system_ns,
         )
 
         # Stage 3: fusion (or single-retriever passthrough)

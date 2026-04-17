@@ -53,6 +53,24 @@ async def mem_status(
     Reports storage backend, embedding info, chunk/source counts, and
     warns when orphaned source files are detected (files removed from
     disk but still indexed — run mem_cleanup_orphans to fix).
+
+    When a configuration drift is detected (e.g. embedding dimension
+    mismatch between the DB and the runtime config) the output carries
+    a ``Warnings`` block whose entries follow this schema — kept stable
+    across versions so external consumers (uptime probes, dashboards)
+    can pattern-match on the keys:
+
+    ``kind``    open enum describing the warning. Current values:
+                ``embedding_dim_mismatch``. Future releases may add
+                ``stale_index``, ``orphan_vectors``, etc. — consumers
+                must tolerate unknown kinds rather than erroring.
+    ``fix``     the canonical CLI command a user should run.
+    ``doc``     a relative-path link into ``docs/guides/`` with the full
+                remediation flow (see ``configuration.md#reset-flow``).
+
+    Embedding-mismatch entries also include ``stored`` and ``configured``
+    sub-blocks echoing the DB vs runtime provider/model/dimension so the
+    user can see what changed without consulting another tool.
     """
     app = _get_app(ctx)
     stats = await app.storage.get_stats()
@@ -95,13 +113,19 @@ async def mem_status(
 
     mismatch = getattr(app.storage, "embedding_mismatch", None)
     if mismatch is not None:
+        stored_info = mismatch["stored"]
         cfg = mismatch["configured"]
         lines.append("")
-        lines.append("Warning: Embedding mismatch")
-        lines.append(f"  Config:  {cfg['provider']}/{cfg['model']} ({cfg['dimension']}d)")
+        lines.append("Warnings")
+        lines.append("--------")
+        lines.append("- kind:       embedding_dim_mismatch")
         lines.append(
-            "  -> Run 'mm embedding-reset' (CLI) or mem_embedding_reset(mode=\"apply_current\") (MCP) to resolve."
+            f"  stored:     {stored_info['provider']}/{stored_info['model']} "
+            f"({stored_info['dimension']}d)"
         )
+        lines.append(f"  configured: {cfg['provider']}/{cfg['model']} ({cfg['dimension']}d)")
+        lines.append("  fix:        uv run mm embedding-reset --mode apply-current")
+        lines.append("  doc:        docs/guides/configuration.md#reset-flow")
 
     return "\n".join(lines)
 

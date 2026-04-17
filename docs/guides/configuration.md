@@ -34,6 +34,53 @@ For interactive setup, run `mm init` instead of editing env vars by hand.
 
 See [Embedding Providers](embeddings.md) for the supported model list and the dimension values you must use with each one.
 
+## Reset Flow
+
+Changing the embedding provider, model, or dimension *after* content is
+indexed produces a **dimension mismatch**: the DB stores vectors of one
+shape, the runtime computes another, so semantic search silently falls
+back to BM25 only. The tool surface advertises the fix via a `fix` hint,
+and `mem_status` reports the mismatch under `warnings[]` (see below).
+
+Resolving it is a two-step process — pick **one** of:
+
+- **Re-index from scratch (destructive, recommended when you really are
+  switching models):**
+
+  ```bash
+  uv run mm embedding-reset --mode apply-current   # drops old vectors
+  uv run mm index                                  # re-embed all files
+  ```
+
+  MCP equivalent: `mem_embedding_reset(mode="apply_current")` followed by
+  `mem_index(path="...")`.
+
+- **Revert the runtime to the stored model (non-destructive, useful if the
+  config drift was accidental):**
+
+  ```bash
+  uv run mm embedding-reset --mode revert-to-stored
+  ```
+
+  MCP equivalent: `mem_embedding_reset(mode="revert_to_stored")`. The DB
+  stays untouched; the server swaps its embedder to match what the DB
+  already contains.
+
+`mem_status` emits a `warnings[]` array entry with this schema when a
+mismatch is detected:
+
+```
+{"kind": "embedding_dim_mismatch",
+ "stored":  {"provider": "...", "model": "...", "dimension": N},
+ "configured": {"provider": "...", "model": "...", "dimension": M},
+ "fix": "uv run mm embedding-reset --mode apply-current",
+ "doc": "docs/guides/configuration.md#reset-flow"}
+```
+
+The `kind` field is an open enum — new warning kinds (e.g. `stale_index`,
+`orphan_vectors`) may be added in future releases without changing the
+envelope shape.
+
 ## Search
 
 | Variable | Default | Description |
