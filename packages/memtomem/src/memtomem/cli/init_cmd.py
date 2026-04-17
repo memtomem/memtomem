@@ -596,8 +596,8 @@ def init(
             _step_namespace,
             _step_search,
             _step_language,
-            _step_mcp,
             _step_settings,
+            _step_mcp,
         ]
         run_steps(steps, state)
 
