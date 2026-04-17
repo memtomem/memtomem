@@ -12,15 +12,17 @@ Markdown-first long-term memory infrastructure for AI agents. Hybrid keyword + s
 ## Quick Start
 
 ```bash
-# 1. Prerequisites — Python 3.12+ and Ollama (ollama.com)
-ollama pull nomic-embed-text    # ~270MB, one-time
-
-# 2. Install memtomem
+# 1. Install memtomem (requires Python 3.12+)
 uv tool install memtomem        # or: pipx install memtomem
 
-# 3. Run the 8-step setup wizard (picks embedding, memory folder, editor)
+# 2. Run the 8-step setup wizard
+#    (picks embedding provider, memory folder, MCP editor)
 mm init    # on PATH after `uv tool install` — no `uv run` needed
 ```
+
+The wizard's default is **keyword-only** (BM25, no external deps). Pick
+ONNX (local, no server), Ollama (local server), or OpenAI (cloud) for
+semantic search — see [Embeddings](https://github.com/memtomem/memtomem/blob/main/docs/guides/embeddings.md).
 
 Then in your AI editor, ask:
 
@@ -83,7 +85,7 @@ Full documentation lives in the [memtomem GitHub repo](https://github.com/memtom
 | [Hands-On Tutorial](https://github.com/memtomem/memtomem/blob/main/docs/guides/hands-on-tutorial.md) | Follow-along with example files |
 | [User Guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/user-guide.md) | Complete feature walkthrough — all tools and patterns |
 | [Configuration](https://github.com/memtomem/memtomem/blob/main/docs/guides/configuration.md) | All `MEMTOMEM_*` environment variables |
-| [Embeddings](https://github.com/memtomem/memtomem/blob/main/docs/guides/embeddings.md) | Ollama and OpenAI providers, model dimensions, switching models |
+| [Embeddings](https://github.com/memtomem/memtomem/blob/main/docs/guides/embeddings.md) | ONNX, Ollama, and OpenAI providers, model dimensions, switching models |
 | [MCP Client Setup](https://github.com/memtomem/memtomem/blob/main/docs/guides/mcp-clients.md) | Editor-specific configuration |
 | [Agent Memory Guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/agent-memory-guide.md) | Sessions, working memory, procedures, multi-agent |
 | [Web UI Guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/web-ui.md) | Visual dashboard reference |
