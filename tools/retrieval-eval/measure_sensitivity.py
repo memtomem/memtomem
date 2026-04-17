@@ -85,6 +85,19 @@ QUERIES = {
         ("observability chose over accepted re-evaluate revisit", "en", "adr"),
         ("observability likely root cause workaround symptom", "en", "troubleshooting"),
     ],
+    # KO uses "kubernetes" instead of "k8s" — kiwi tokenizer drops
+    # digit-containing abbreviations. Fixtures include "Kubernetes" in
+    # each KO chunk body for fair retrieval. EN keeps "k8s".
+    "k8s": [
+        ("kubernetes 절차 접속 CONFIG SET 수행", "ko", "runbook"),
+        ("kubernetes KST 원인 후속 조치 장애", "ko", "postmortem"),
+        ("kubernetes 대신 채택 결정 trade-off 감수", "ko", "adr"),
+        ("kubernetes 증상 의심 만약 점검 진단", "ko", "troubleshooting"),
+        ("k8s configure run verify inspect command", "en", "runbook"),
+        ("k8s at UTC root cause follow-up", "en", "postmortem"),
+        ("k8s chose over accepted re-evaluate revisit", "en", "adr"),
+        ("k8s likely root cause workaround symptom", "en", "troubleshooting"),
+    ],
     # Add new topic query sets here as Phase 2c / 2d progresses. Keep
     # the structure identical to preserve result comparability.
 }

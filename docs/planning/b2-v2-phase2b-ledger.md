@@ -1225,6 +1225,99 @@ count convention, k8s drift would be 11/32 = 34.4%, still in the
 Upper-outlier band. The event-count convention does not flip the
 band realization.
 
+### Pre-measurement (IDF + body overlap, 2026-04-18)
+
+Per § 11.5 of the validation doc, query fairness (IDF token count +
+sum) and body overlap were measured via
+`tools/retrieval-eval/compute_idf_baseline.py` before running
+sensitivity at § 14.
+
+**Methodology adjustment — KO tokenizer workaround**: the Korean
+topic token `k8s` is dropped by the kiwi tokenizer (alphanumeric
+abbreviation with digit; the split fragments fail the `len >= 2`
+filter). KO queries therefore use `kubernetes` as the topic token;
+each KO fixture chunk body includes a single `kubernetes` mention
+for retrieval fairness. EN queries retain `k8s` (the regex-based
+EN tokenizer handles alphanumerics uniformly). Full rationale and
+options in § "Methodology discontinuities" → "Discontinuity 2".
+
+**IDF fairness** — both languages within caching-baseline ± 15%:
+
+| Lang | Mean tokens | Mean idf_sum | Status |
+|---|---|---|---|
+| ko | 6.25 (target 5.7-7.8, -7.4%) | 15.66 (target 12.67-17.14, +5.1%) | OK |
+| en | 6.50 (target 6.4-8.6, -13.3%) | 12.85 (target 12.04-16.28, -9.2%) | OK |
+
+"Weak query" confound excluded post-workaround.
+
+**Body overlap** — 3 KO flags, 0 EN flags:
+
+| Topic | ko flags | en flags |
+|---|---|---|
+| caching (baseline) | 4/4 | 4/4 |
+| postgres | 1/4 (postmortem 0.50) | 0/4 |
+| cost_optimization | 1/4 (postmortem 0.50) | 1/4 (postmortem 1.00) |
+| security | 1/4 (postmortem 0.50) | 2/4 (postmortem 1.00, adr 1.00) |
+| observability | 0/4 | 0/4 |
+| **k8s** | **3/4 (postmortem 0.50, adr 0.50, troubleshooting 1.00)** | **0/4** |
+
+K8s KO flag rate (3/4) is the highest of all measured topics. Cause:
+the KO tokenizer workaround inserts `kubernetes` token into every
+chunk body for fair retrieval, elevating overlap in genres with few
+non-anchor query tokens (postmortem, adr, troubleshooting — 2, 2, 1
+topic tokens respectively). Per § 12.5 concordance rule, these
+flagged genres require concordance check during divergence
+measurement; flagged genres remain measurement-valid if BM25 and
+dense concordantly select the correct genre.
+
+EN 0/4 follows observability precedent (topic token absent from
+body, benign mismatch — Gemini did not naturally insert `k8s` as
+a body collocation).
+
+### Divergence measurement (2026-04-18, D1 realized)
+
+Measured: **0/8 divergence** (0/4 KO, 0/4 EN). BM25 top-1 7-8/8,
+dense top-1 7-8/8 (see determinism note below).
+
+**Cell readout**: D1 realized; topic-strong cluster extends to n=5
+(postgres + cost_opt + security + observability + k8s). Upper-
+outlier drift band (40.6%) combined with D1 → pre-registered cell
+(Upper-outlier, 0-2/8) → kafka as confirmation-only per § 12.7;
+baseline observation upper-edge exceeded (~25-30% insufficient at
+n=2 event-count); H1/H2/H3 reformulation at kafka per (A)-path.
+
+**Chunk-level artifact candidate**: cluster n=5 with no falsifying
+cases meets the k ≥ 4 confirmation threshold per § 11.4.
+**Working-hypothesis promotion eligibility**: met. Per (A)-path
+deferral, formal promotion happens at kafka measurement (the next
+topic, confirmation-only), not retrospectively from k8s.
+
+**Concordance check on KO body-overlap flags**: all 3 KO flagged
+genres (postmortem, adr, troubleshooting) produced concordant
+correct-direction top-1 across all 4 determinism runs — § 12.5
+concordance rule satisfied, measurement remains valid despite
+flag-elevated overlap.
+
+**Determinism note (first non-deterministic top-1 in v2 series)**:
+4 consecutive `PYTHONHASHSEED=0 OMP_NUM_THREADS=1` runs produced
+stable 0/8 divergence but alternated between 7/8 and 8/8 top-1 —
+the EN troubleshooting query "k8s likely root cause workaround
+symptom" assigned concordantly to either `troubleshooting.md` (hit,
+runs 2/4) or `postmortem.md` (concordant miss, runs 1/3). BM25 and
+dense remained concordant within each run — no cross-engine
+disagreement contributes to divergence. Observability was byte-
+identical across 2 runs; k8s is the first topic with top-1
+ranking instability. Likely cause: tight score spread on the EN
+troubleshooting query where "root"/"cause" are postmortem anchors
+and "likely"/"workaround"/"symptom" are troubleshooting anchors,
+amplifying tie-break instability on close scores. **Divergence
+(0/8) is stable and is the primary measurement**; top-1 flip-flop
+is a measurement-noise artifact, not a methodological issue with
+the divergence definition. Recorded in § 14 of
+`b2-v2-phase1-validation.md`.
+
+Full writeup: `b2-v2-phase1-validation.md` § 14.
+
 ## Methodology discontinuities
 
 This section tracks points where measurement methodology changed
@@ -1289,6 +1382,75 @@ Batch 7 required one rerun for YYYY-MM-DD literal-example-copy
 quality defect; all 8 batches ledgered. See
 `## Curation ledger — Phase 2c security, Gemini-regenerated` above
 for the authoritative drift measurement.
+
+### Discontinuity 2: KO tokenizer workaround at k8s (2026-04-18)
+
+**Scope**: k8s only (not postgres / cost_opt / security /
+observability / caching).
+
+**Trigger**: the Korean topic token `k8s` is dropped by the kiwi
+tokenizer. "k8s" contains a digit (`8`); kiwi appears to split such
+alphanumeric abbreviations into fragments, all of which fail the
+`len >= 2` filter applied by
+`tools/retrieval-eval/compute_idf_baseline.py::tokenize_ko` and
+`memtomem.storage.fts_tokenizer._kiwi_tokenize`. Result: the KO
+k8s query loses 1 token vs baseline, producing OUT-of-range IDF
+fairness (mean tokens -22.2%, idf_sum -18.2%).
+
+**Why it matters**: per the Phase 2b-established query fairness
+rule (see "Locked decisions from Phase 2b" in
+`b2-v2-handoff.md`), queries must match the caching baseline on
+token count (± 15%) and IDF-weighted token sum (± 15%) to exclude
+"weak query" as a confound. KO k8s query OUT-of-range would
+confound divergence measurement on the strongest pre-registered
+rule.
+
+**Options considered**:
+
+| Option | Cost | Pro | Con |
+|---|---|---|---|
+| (i) Replace KO topic token with `kubernetes` + add `kubernetes` mention to each KO fixture chunk body | ~10 min content edits | IDF fairness restored; body-overlap non-zero (retrieval matching enabled) | Per-language query asymmetry (KO `kubernetes`, EN `k8s`); body-overlap flags inflated by universal body mention (3 KO flags vs observability's 0) |
+| (ii) Replace KO topic token with `쿠버네티스` transliteration + add transliteration to KO fixtures | ~10 min content edits | Native Korean topic token | Same flag inflation as (i); adds non-English vocabulary to fixtures otherwise generated in Gemini's English-flavored KO prose |
+| (iii) Accept OUT-of-range IDF and flag as k8s-specific KO confound | 0 min | No fixture / query edits | Breaks Phase 2b query-fairness rule; divergence reading becomes "measurement-consistent but signal-confounded" on the strongest pre-registered rule |
+
+**Decision**: **(i)** — confirmed 2026-04-18.
+
+Rationale:
+- Option (iii) violates a pre-registered Phase 2b rule (query
+  fairness) rather than documenting an unavoidable measurement
+  limit. Rejected.
+- Option (ii) introduces Korean-native vocabulary into a fixture
+  set otherwise generated in Gemini's English-flavored KO prose,
+  breaking cross-topic fixture-style consistency. Rejected.
+- Option (i) uses `kubernetes` (a token both kiwi and EN regex
+  tokenize consistently), keeps fixture style consistent with
+  other topics, and accepts the flag inflation as a known
+  concordance-check cost.
+
+**Execution**:
+- `tools/retrieval-eval/compute_idf_baseline.py` and
+  `tools/retrieval-eval/measure_sensitivity.py` updated: KO query
+  topic token = `kubernetes`, EN query topic token = `k8s`.
+- 16 KO fixture chunks (4 files × 4 chunks at
+  `packages/memtomem/tests/fixtures/corpus_v2/ko/k8s/`) add a single
+  `kubernetes` mention per chunk at the opening of the first content
+  sentence. Minimal content change; no semantic drift.
+
+**Status**: **Complete** (2026-04-18). Post-workaround IDF fairness
+passes both languages (within caching-baseline ± 15%). Body overlap
+flag inflation recorded per § "Pre-measurement (IDF + body overlap,
+2026-04-18)" above; all 3 KO flagged genres produced concordant
+correct-direction top-1 per § 12.5 rule — measurement remains valid.
+
+**Scope of contamination for cross-topic comparability**: k8s KO
+queries use a different topic token than other topics' KO queries.
+Cross-topic divergence comparisons on KO remain valid under the
+divergence definition (set inequality of top-3 chunk IDs) — the
+tokenizer workaround ensures k8s KO query can retrieve its own
+topic fixtures competitively, which is the prerequisite for
+divergence to be measured at all. Direct token-count / IDF-sum
+comparisons between topic k8s KO and other topics' KO remain
+apples-to-apples (all within ± 15% of caching baseline).
 
 ## Deferred decisions (Phase 3b / Phase 5 / Option 2 backlog)
 

@@ -30,8 +30,8 @@ open-prediction state.
 | 2c (cost_opt) | ✅ | cost_optimization × 4 genres × 2 langs = 32 chunks; **counter-prediction realized — topic-strong despite topic-weak prediction** (0/8 divergence); drift 0/32 |
 | 2c (security) | ✅ | Gemini-regenerated; 32 chunks with 7 corrections = 21.9% drift (H1 supported, upper edge 10-20%); divergence **0/8** (D1 realized); joint cell (H1, D1) = chunk-level artifact candidate retained with H1 weighted heavily; § 12.7 decision: kafka → observability |
 | 2d (observability) | ✅ | 32 chunks; drift 9 events / 32 = 28.1% (event-count convention adopted at this topic; absent-topic 6 + intra-vocab 2 + missed secondary 1); divergence **0/8** (D1 realized); H1/H2/H3 all rejected (28.1% above every band) — framework retirement/reformulation deferred to kafka or Phase 5 per (A)-path; genre-boundary candidacy falsified (D1 not D2) |
-| **2e (k8s)** | **🔄 next** | clean topic-strong confirmation per post-observability decision rule (ledger § "Post-observability decision rules" 0-2/8 path); expected divergence D1 0-1/8, expected drift under new baseline observation ~25-30% event-count |
-| 2d kafka | 📋 | confirmation-only per § 12.7; runs after k8s |
+| 2e (k8s) | ✅ | 32 chunks; drift 13 events / 32 = 40.6% event-count (**Upper-outlier 32-45% realized**, 12.5 pp above observability's 28.1%); divergence **0/8** (D1 realized, cluster n=5 — chunk-level artifact k ≥ 4 threshold met, working-hypothesis promotion eligible); two systematic Gemini patterns (kubectl-logs / postmortem-genre conflations); Discontinuity 2 (KO tokenizer workaround, `k8s` → `kubernetes`); first non-deterministic top-1 in v2 (divergence stable) |
+| **2d (kafka)** | **🔄 next** | confirmation-only per § 12.7; baseline observation (~25-30%) upper-edge exceeded at k8s — kafka decisive on true range + H1/H2/H3 reformulation per (A)-path |
 | 2e onwards | 📋 | 9 remaining topics × 8 batches each |
 | 3-7 | 📋 | full curation (per-topic drift), query portfolio, calibration, CI wiring, PR |
 
@@ -231,12 +231,41 @@ failure mode.
    Chunk-count sensitivity check: 11/32 = 34.4%, still Upper-
    outlier (band-realization robust to convention). Full writeup at
    ledger § "Curation ledger — Phase 2e k8s, Gemini-generated".
-4. **Pre-measure IDF + body overlap**; add k8s QUERY set to
-   `compute_idf_baseline.py` + dispatch.
-5. **Phase 3b fixtures** at `corpus_v2/{ko,en}/k8s/`.
-6. **Run k8s sensitivity**; add to `measure_sensitivity.py` QUERIES.
-7. **Record at § 14**. Cell readout only.
-8. **Then kafka** (confirmation-only).
+4. ✅ **Pre-measure IDF + body overlap** (DONE 2026-04-18). IDF
+   fairness OK post-Discontinuity 2 workaround (KO mean tokens 6.25
+   / idf_sum 15.66; EN 6.50 / 12.85; both within caching baseline
+   ± 15%). Body overlap: **3 KO flags** (postmortem 0.50, adr 0.50,
+   troubleshooting 1.00) from `kubernetes` body mentions inserted
+   for KO tokenizer fairness; 0 EN flags (Gemini didn't insert `k8s`
+   as body collocation). All 3 KO flagged genres produced concordant
+   correct-direction top-1 — § 12.5 rule satisfied. Details: ledger
+   § "Pre-measurement (IDF + body overlap, 2026-04-18)".
+5. ✅ **Phase 3b fixture conversion** (DONE 2026-04-18). 8 curated
+   batches → `packages/memtomem/tests/fixtures/corpus_v2/{ko,en}/
+   k8s/{adr,runbook,troubleshooting,postmortem}.md`. 32 chunks
+   total. Disclaimer line included. 16 KO chunks received a
+   `kubernetes` mention per Discontinuity 2 (1 per chunk).
+6. ✅ **Run k8s sensitivity** (DONE 2026-04-18). Divergence **0/8**
+   (D1 realized) stable across 4 determinism runs. BM25 top-1 and
+   dense top-1 flip between 7/8 and 8/8 across runs — EN
+   troubleshooting query "k8s likely root cause workaround symptom"
+   alternates concordantly between `postmortem.md` (miss) and
+   `troubleshooting.md` (correct). **Divergence is stable and is
+   the primary measurement**; top-1 flip is measurement noise on a
+   borderline tie-break. First non-deterministic top-1 in v2 series.
+   Details: ledger § "Divergence measurement (2026-04-18, D1
+   realized)" + validation doc § 14.6.
+7. ✅ **Record at § 14** (DONE 2026-04-18). See
+   `b2-v2-phase1-validation.md` § 14 "Phase 2e k8s measurements
+   (D1 realized, Upper-outlier drift)". Joint cell **(Upper-
+   outlier 40.6%, D1 0/8)** reads off pre-registered rule — kafka
+   as confirmation-only; baseline observation (~25-30%) upper-edge
+   exceeded at n=2 event-count; H1/H2/H3 reformulation deferred to
+   kafka per (A)-path. Chunk-level artifact candidate reaches
+   k ≥ 4 confirmation threshold (n=5 topic-strong with no
+   falsifying cases) — working-hypothesis promotion eligibility
+   met; formal promotion at kafka per (A)-path.
+8. **Then kafka** (confirmation-only per § 12.7).
 9. **After topic 6 (k8s)**: implement Phase 3b drift validator rule
    tiers per ledger § "Deferred decisions". Earlier risks biased
    sample.

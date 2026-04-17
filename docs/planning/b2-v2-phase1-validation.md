@@ -816,3 +816,165 @@ Concordance caveats not applicable.
 - Next measurement: **k8s** (clean topic-strong confirmation).
 
 This closes B.2 v2 Phase 2d (observability). Next: Phase 2e k8s.
+
+## 14. Phase 2e k8s measurements (D1 realized, Upper-outlier drift)
+
+Pre-registered joint drift × divergence matrix locked at
+`b2-v2-phase2b-ledger.md` § "K8s pre-registration". Measurement
+reads off cells; no post-hoc redefinition. Routine cadence per
+(A)-path agreement (user-accepted 2026-04-18).
+
+### 14.1 Measurement setup
+
+- Corpus: k8s-only, 32 chunks (4 genres × 2 languages × 4 chunks)
+  at `packages/memtomem/tests/fixtures/corpus_v2/{en,ko}/k8s/`.
+  Primary-label distribution after Gemini generation + 13-event /
+  11-chunk curation: 100% `k8s/*` primary (no primary
+  reclassifications to adjacent topics, matching observability's
+  0% rate and contrasting with security's 19%).
+- Queries: 8 simple queries (4 genres × 2 langs), topic token
+  `kubernetes` (KO) / `k8s` (EN) + genre-anchor vocabulary. The
+  KO/EN topic-token asymmetry is a tokenizer workaround — kiwi
+  drops the alphanumeric `k8s` string; full rationale at
+  `b2-v2-phase2b-ledger.md` § "Discontinuity 2: KO tokenizer
+  workaround at k8s". Query set at
+  `tools/retrieval-eval/measure_sensitivity.py` `QUERIES["k8s"]`.
+- Pre-measurement (IDF + body overlap per § 11.5): IDF fairness
+  OK post-workaround in both languages (KO mean tokens 6.25 /
+  idf_sum 15.66; EN mean tokens 6.50 / idf_sum 12.85; both within
+  caching baseline ± 15%). Body overlap: **3 KO flags (postmortem
+  0.50, adr 0.50, troubleshooting 1.00), 0 EN flags** — KO flags
+  are elevated by the `kubernetes` body mentions inserted for
+  fairness (Discontinuity 2 trade-off); § 12.5 concordance rule
+  applies, and all 3 flagged genres produced concordant
+  correct-direction top-1. Full writeup in
+  `b2-v2-phase2b-ledger.md` § "Pre-measurement (IDF + body
+  overlap, 2026-04-18)".
+- Determinism: 4 consecutive runs with `PYTHONHASHSEED=0
+  OMP_NUM_THREADS=1` produced stable 0/8 divergence but alternated
+  between 7/8 and 8/8 top-1 on the EN troubleshooting query. See
+  § 14.6 below — first non-deterministic top-1 outcome in the v2
+  series (observability was byte-identical).
+- Methodology anchor: identical to postgres / cost_opt / security
+  / observability on tokenizers / `rrf_weights` / divergence
+  definition. The KO topic-token change (`k8s` → `kubernetes`) is
+  scoped to k8s per Discontinuity 2.
+
+### 14.2 Results
+
+| Metric | Measured | Pre-registered drift × divergence |
+|---|---|---|
+| `rrf_weights` divergence top-3 (combined) | **0/8** | D1: 0-1/8 (**realized**), D2: 3-5/8, D3: 6-8/8 |
+| `rrf_weights` divergence top-3 KO | 0/4 | — |
+| `rrf_weights` divergence top-3 EN | 0/4 | — |
+| BM25-only top-1 genre match | **7-8/8** (flip-flop on EN troubleshooting; see § 14.6) | — |
+| Dense-only top-1 genre match | **7-8/8** (same flip-flop; concordant with BM25 within each run) | — |
+| Phase 3a drift (event-count) | **13 / 32 = 40.6%** | Baseline-match 20-32%, Lower-outlier 0-15%, **Upper-outlier 32-45% (realized)**, Extreme 45%+ or 0-5% |
+
+Top-1 flip-flop (BM25 + dense concordant in each run):
+- EN troubleshooting query "k8s likely root cause workaround
+  symptom": runs 2/4 assign top-1 to `troubleshooting.md`
+  (correct), runs 1/3 assign top-1 to `postmortem.md` (concordant
+  miss). Both BM25 and dense produce the same top-1 within each
+  run. See § 14.6 for determinism analysis.
+
+Divergence (0/8) is stable across all 4 runs regardless of top-1
+flip-flop.
+
+### 14.3 Readout against pre-registration
+
+- **D1 realized**: k8s joins topic-strong cluster at 0/8. Cluster
+  now n=5 (postgres + cost_opt + security + observability + k8s).
+- **Upper-outlier drift band realized** at 40.6% (12.5 pp above
+  observability's 28.1%). Falls within pre-registered 32-45%
+  range — pre-registered cell, not a novel failure mode.
+- Joint cell realized: **(Upper-outlier, D1)** — per ledger §
+  "K8s pre-registration" post-k8s decision rules:
+  - kafka as confirmation-only per § 12.7
+  - baseline observation (~25-30%) upper-edge exceeded; true range
+    wider than initial observability-only data point
+  - H1/H2/H3 reformulation at kafka per (A)-path deferral
+- **Chunk-level artifact candidate**: n=5 with no falsifying cases
+  meets k ≥ 4 confirmation threshold per § 11.4.
+  **Working-hypothesis promotion eligibility**: met. Per (A)-path,
+  formal promotion happens at kafka measurement (the next topic,
+  confirmation-only), not retrospectively from k8s.
+
+**No post-hoc reformulation at this data point.** Framework
+retirement / reformulation decision remains deferred to kafka
+completion or Phase 5 per the (A)-path commitment.
+
+### 14.4 Body-overlap flag outcome
+
+3 KO genres flagged at pre-measurement (postmortem 0.50, adr 0.50,
+troubleshooting 1.00) — highest flag count among measured topics,
+caused by Discontinuity 2's `kubernetes` body mentions. Per § 12.5
+concordance rule:
+
+| Genre | Flag ratio | BM25 top-1 | Dense top-1 | Concordant? | Correct? |
+|---|---|---|---|---|---|
+| ko postmortem | 0.50 | postmortem | postmortem | ✓ | ✓ |
+| ko adr | 0.50 | adr | adr | ✓ | ✓ |
+| ko troubleshooting | 1.00 | troubleshooting | troubleshooting | ✓ | ✓ |
+
+All 3 flagged genres produce concordant correct-direction top-1 in
+every run (no flip-flop on these queries). **§ 12.5 rule satisfied
+— measurement remains valid despite flag-elevated overlap**.
+
+### 14.5 Corpus status checkpoint
+
+- Measured topics: 6 (caching + postgres + cost_opt + security +
+  observability + k8s). All six show topic-strong behavior under
+  simple genre-primary queries (divergence 0-0/8; cluster n=5 for
+  topics with shared Gemini methodology).
+- Corpus size: **192 chunks** (6 × 32). Subtopic list frozen at 75
+  (2026-04-17).
+- Topics pending: 9 (kafka + 8 remaining per `b2-v2-design.md`).
+- Next measurement: **kafka** (confirmation-only per § 12.7).
+- Drift-validator rule-tier development unblocked at k ≥ 5
+  topics; k8s ledger patterns (`kubectl logs` ↔
+  `observability/logging`, postmortem-genre ↔
+  `incident_response/postmortem`) are candidates for "forbidden
+  pair" tier.
+
+### 14.6 Determinism note (first non-deterministic top-1 in v2)
+
+4 consecutive `PYTHONHASHSEED=0 OMP_NUM_THREADS=1` runs produced:
+
+| Run | Divergence | BM25 top-1 | Dense top-1 | EN troubleshooting top-1 |
+|---|---|---|---|---|
+| 1 | 0/8 | 7/8 | 7/8 | `postmortem.md` (concordant miss) |
+| 2 | 0/8 | 8/8 | 8/8 | `troubleshooting.md` (correct) |
+| 3 | 0/8 | 7/8 | 7/8 | `postmortem.md` (concordant miss) |
+| 4 | 0/8 | 8/8 | 8/8 | `troubleshooting.md` (correct) |
+
+Observations:
+- **Divergence stable** across all 4 runs (0/8) — the primary
+  measurement per pre-registration.
+- BM25 and dense always concordant within each run → no
+  cross-engine disagreement contributes to divergence regardless
+  of which genre they jointly select.
+- Instability is confined to **a single query** (EN troubleshooting)
+  where genre anchors split between postmortem and troubleshooting:
+  "root" / "cause" are postmortem anchors, "likely" / "workaround"
+  / "symptom" are troubleshooting anchors. Tie-break on close
+  scores appears to alternate across Python process launches
+  despite `PYTHONHASHSEED=0 OMP_NUM_THREADS=1`. Root cause not
+  conclusively isolated (candidate: non-seeded RNG in a deeper
+  indexing / dense-encoding layer).
+
+**Decision**: record both top-1 states (7-8/8) and the divergence
+result (stable 0/8). Divergence is the pre-registered primary
+measurement and is robust; top-1 flip-flop is a measurement-noise
+artifact on one query, not a methodological issue with the
+divergence definition. No rerun / refitting; no pre-reg
+modification.
+
+Observability was byte-identical across 2 runs; k8s is the first
+topic to exhibit top-1 ranking instability. Future topics should
+monitor this — if the flip-flop recurs, the script's determinism
+controls need hardening (e.g., explicit RNG seeding deeper in the
+embedding / indexing pipeline).
+
+This closes B.2 v2 Phase 2e (k8s). Next: Phase 2d kafka
+(confirmation-only per § 12.7).

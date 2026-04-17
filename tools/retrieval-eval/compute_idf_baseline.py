@@ -179,6 +179,25 @@ QUERY_SETS: dict[str, dict[str, list[tuple[str, str]]]] = {
             ("observability likely root cause workaround symptom", "troubleshooting"),
         ],
     },
+    "k8s (simple, canonical)": {
+        # KO uses "kubernetes" instead of "k8s" because kiwi tokenizer
+        # drops alphanumeric abbreviations with digits ("k8s" → nothing
+        # that passes the len >= 2 filter). Fixture bodies include
+        # "Kubernetes" in each KO chunk for body-overlap compatibility.
+        # EN keeps "k8s" (regex tokenizer handles alphanumerics fine).
+        "ko": [
+            ("kubernetes 절차 접속 CONFIG SET 수행", "runbook"),
+            ("kubernetes KST 원인 후속 조치 장애", "postmortem"),
+            ("kubernetes 대신 채택 결정 trade-off 감수", "adr"),
+            ("kubernetes 증상 의심 만약 점검 진단", "troubleshooting"),
+        ],
+        "en": [
+            ("k8s configure run verify inspect command", "runbook"),
+            ("k8s at UTC root cause follow-up", "postmortem"),
+            ("k8s chose over accepted re-evaluate revisit", "adr"),
+            ("k8s likely root cause workaround symptom", "troubleshooting"),
+        ],
+    },
 }
 
 
@@ -346,7 +365,7 @@ def main() -> None:
             if topic == "caching":
                 # caching queries target caching corpus
                 pass
-            elif topic in ("postgres", "cost_optimization", "security", "observability"):
+            elif topic in ("postgres", "cost_optimization", "security", "observability", "k8s"):
                 pass
             else:
                 continue
