@@ -31,7 +31,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-onnx = ["fastembed>=0.4"]
+onnx = ["fastembed>=0.8,<0.9"]
 ollama = ["ollama>=0.4"]
 openai = ["openai>=1.60"]
 korean = ["kiwipiepy>=0.18"]

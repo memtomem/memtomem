@@ -19,8 +19,6 @@ from __future__ import annotations
 
 import pytest
 
-from memtomem.config import Mem2MemConfig
-from memtomem.server.component_factory import close_components, create_components
 from memtomem.tools.memory_writer import append_entry
 
 pytest.importorskip(
@@ -28,49 +26,8 @@ pytest.importorskip(
     reason="fastembed not installed — install with `pip install memtomem[onnx]`",
 )
 
-
-@pytest.fixture
-async def onnx_components(tmp_path, monkeypatch):
-    """Boot a component stack with ONNX bge-m3 embeddings against a tmp DB.
-
-    Uses monkeypatch to bypass ``~/.memtomem/config.json`` loading so the
-    test stays hermetic regardless of the developer's local config.
-    """
-
-    db_path = tmp_path / "golden.db"
-    mem_dir = tmp_path / "memories"
-    mem_dir.mkdir()
-
-    # Drop any developer-set embedding env vars that could override the config
-    # set below. Required because Mem2MemConfig reads from env via pydantic.
-    for var in (
-        "MEMTOMEM_EMBEDDING__PROVIDER",
-        "MEMTOMEM_EMBEDDING__MODEL",
-        "MEMTOMEM_EMBEDDING__DIMENSION",
-        "MEMTOMEM_STORAGE__SQLITE_PATH",
-        "MEMTOMEM_INDEXING__MEMORY_DIRS",
-    ):
-        monkeypatch.delenv(var, raising=False)
-
-    config = Mem2MemConfig()
-    config.storage.sqlite_path = db_path
-    config.indexing.memory_dirs = [mem_dir]
-    config.embedding.provider = "onnx"
-    # fastembed expects the full HF repo ID for models outside the short-name map;
-    # see memtomem.embedding.onnx._resolve_model (raw IDs pass through unchanged).
-    config.embedding.model = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-    config.embedding.dimension = 384
-
-    # Skip user-level config.json merge so tests run hermetically.
-    import memtomem.config as _cfg
-
-    monkeypatch.setattr(_cfg, "load_config_overrides", lambda c: None)
-
-    comp = await create_components(config)
-    try:
-        yield comp, mem_dir
-    finally:
-        await close_components(comp)
+# ``onnx_components`` fixture lives in ``conftest.py`` — shared with
+# ``test_multilingual_regression.py``.
 
 
 class TestOnnxGoldenPath:

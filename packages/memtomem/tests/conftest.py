@@ -97,3 +97,47 @@ def engine(components: Components):
 @pytest.fixture
 def memory_dir(components: Components):
     return Path(components.config.indexing.memory_dirs[0]).expanduser().resolve()
+
+
+@pytest.fixture
+async def onnx_components(tmp_path, monkeypatch):
+    """Component stack with ONNX multilingual MiniLM-L12 against a tmp DB.
+
+    Hermetic — bypasses ``~/.memtomem/config.json`` and any developer-set
+    ``MEMTOMEM_EMBEDDING__*`` / ``MEMTOMEM_STORAGE__*`` env vars.
+
+    Shared between ``test_golden_path.py`` (2-chunk sanity) and
+    ``test_multilingual_regression.py`` (~80-chunk quality floors).  Both files
+    expect the fastembed model to be cached by the ``test-golden-path`` CI job.
+    Determinism env vars (``PYTHONHASHSEED``, ``OMP_NUM_THREADS``) are set at
+    the CI job level; this fixture does not re-set them in-process.
+    """
+    db_path = tmp_path / "golden.db"
+    mem_dir = tmp_path / "memories"
+    mem_dir.mkdir()
+
+    for var in (
+        "MEMTOMEM_EMBEDDING__PROVIDER",
+        "MEMTOMEM_EMBEDDING__MODEL",
+        "MEMTOMEM_EMBEDDING__DIMENSION",
+        "MEMTOMEM_STORAGE__SQLITE_PATH",
+        "MEMTOMEM_INDEXING__MEMORY_DIRS",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    config = Mem2MemConfig()
+    config.storage.sqlite_path = db_path
+    config.indexing.memory_dirs = [mem_dir]
+    config.embedding.provider = "onnx"
+    config.embedding.model = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    config.embedding.dimension = 384
+
+    import memtomem.config as _cfg
+
+    monkeypatch.setattr(_cfg, "load_config_overrides", lambda c: None)
+
+    comp = await create_components(config)
+    try:
+        yield comp, mem_dir
+    finally:
+        await close_components(comp)

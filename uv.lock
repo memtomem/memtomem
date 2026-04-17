@@ -870,7 +870,7 @@ web = [
 requires-dist = [
     { name = "click", specifier = ">=8.1" },
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.115" },
-    { name = "fastembed", marker = "extra == 'onnx'", specifier = ">=0.4" },
+    { name = "fastembed", marker = "extra == 'onnx'", specifier = ">=0.8,<0.9" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "kiwipiepy", marker = "extra == 'korean'", specifier = ">=0.18" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.26.0" },
