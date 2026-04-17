@@ -29,8 +29,9 @@ open-prediction state.
 | 2b | ✅ | postgres × 4 genres × 2 langs = 32 chunks; topic-strong pipeline invariance identified (B-2) |
 | 2c (cost_opt) | ✅ | cost_optimization × 4 genres × 2 langs = 32 chunks; **counter-prediction realized — topic-strong despite topic-weak prediction** (0/8 divergence); drift 0/32 |
 | 2c (security) | ✅ | Gemini-regenerated; 32 chunks with 7 corrections = 21.9% drift (H1 supported, upper edge 10-20%); divergence **0/8** (D1 realized); joint cell (H1, D1) = chunk-level artifact candidate retained with H1 weighted heavily; § 12.7 decision: kafka → observability |
-| **2d (observability)** | **🔄 in progress** (Steps 2-4 DONE 2026-04-17/18: pre-reg + prompts + Gemini run + Phase 3a curation 9 events / 32 = 28.1%, 8 chunks affected; Step 5 IDF/body-overlap pre-measure next) | replaces kafka per § 12.7 Kafka cadence contingency realization; predicted strongest genre-boundary-emergence candidate (runbook = dashboard setup, postmortem = incident narrative, adr = tool selection, troubleshooting = alert fatigue) |
-| 2d kafka / k8s | 📋 | kafka demoted to post-observability + k8s as confirmation-only; k8s retains clean topic-strong confirmation role |
+| 2d (observability) | ✅ | 32 chunks; drift 9 events / 32 = 28.1% (event-count convention adopted at this topic; absent-topic 6 + intra-vocab 2 + missed secondary 1); divergence **0/8** (D1 realized); H1/H2/H3 all rejected (28.1% above every band) — framework retirement/reformulation deferred to kafka or Phase 5 per (A)-path; genre-boundary candidacy falsified (D1 not D2) |
+| **2e (k8s)** | **🔄 next** | clean topic-strong confirmation per post-observability decision rule (ledger § "Post-observability decision rules" 0-2/8 path); expected divergence D1 0-1/8, expected drift under new baseline observation ~25-30% event-count |
+| 2d kafka | 📋 | confirmation-only per § 12.7; runs after k8s |
 | 2e onwards | 📋 | 9 remaining topics × 8 batches each |
 | 3-7 | 📋 | full curation (per-topic drift), query portfolio, calibration, CI wiring, PR |
 
@@ -157,54 +158,68 @@ All Phase 2c steps complete across cost_opt + security:
    Retrospective chunk-count → event-count audit for postgres +
    security Gemini added to Deferred decisions.
 
-5. **Pre-measure IDF + body overlap** (§ 11.5 rule) via
-   `tools/retrieval-eval/compute_idf_baseline.py`. Topic token
-   recommendation: `observability` (canonical simple pattern;
-   ambient English vocabulary so expect higher EN body-overlap
-   flags similar to security). Add observability query set to
-   `QUERY_SETS` and update `main()` topic dispatch.
+5. ✅ **Pre-measure IDF + body overlap** (DONE 2026-04-18). IDF
+   fairness OK both languages (KO tokens 6.50 / idf 12.85, EN
+   tokens 6.50 / idf 12.85, within caching baseline ± 15%). Body
+   overlap: **0 flags** both languages (pre-reg "similar to
+   security" expectation not met — topic token did not collocate
+   in body). Details in ledger § "Pre-measurement (IDF + body
+   overlap, 2026-04-18)".
 
-6. **Phase 3b** convert curated batches to
-   `packages/memtomem/tests/fixtures/corpus_v2/{ko,en}/
-   observability/*.md`.
+6. ✅ **Phase 3b fixture conversion** (DONE 2026-04-18). 8
+   curated batches → `packages/memtomem/tests/fixtures/corpus_v2/
+   {ko,en}/observability/{adr,runbook,troubleshooting,postmortem}
+   .md`. 32 chunks total. Disclaimer line included per corpus_v2
+   convention.
 
-7. **Run observability sensitivity** (add to `measure_sensitivity.py`
-   `QUERIES["observability"]` first):
-   ```bash
-   PYTHONHASHSEED=0 OMP_NUM_THREADS=1 uv run python \
-       tools/retrieval-eval/measure_sensitivity.py --topic observability
-   ```
-   Run twice for byte-identical determinism check.
+7. ✅ **Run observability sensitivity** (DONE 2026-04-18). Byte-
+   identical across 2 consecutive `PYTHONHASHSEED=0
+   OMP_NUM_THREADS=1` runs (timestamps differed, measurement
+   blocks matched). Result: **0/8 divergence** (D1 realized),
+   BM25 top-1 7/8, dense top-1 7/8. KO runbook concordant miss to
+   troubleshooting.md.
 
-8. **Record measurement** in `b2-v2-phase1-validation.md` § 13
-   (new section). Read off the pre-registered H × D cell; no
-   narrative rationalization.
+8. ✅ **Record measurement** at `b2-v2-phase1-validation.md` § 13
+   (DONE 2026-04-18). Cell readout only, no narrative refitting.
 
-9. **Post-observability decision points**:
-   - **0-2/8 divergence**: topic-strong cluster extends to n=4.
-     Chunk-level artifact candidate continues unconfirmed
-     (still k < 4 without falsifying cases). Next: k8s for
-     clean confirmation, then kafka as confirmation-only.
-   - **3-5/8 divergence**: **first D2 realization**. Genre
-     signal emerging — confirm at k8s, reopen structural-vs-
-     artifact discrimination at Phase 5.
-   - **6-8/8 + H2 drift (0-5%)**: chunk-level artifact candidate
-     **falsified**. Reopen design; prompt quality explains
-     invariance better than chunk artifacts.
+9. ✅ **Post-observability decision** applied: 0-2/8 → D1 path →
+   **k8s next** (clean topic-strong confirmation), kafka after
+   (confirmation-only per § 12.7). H1/H2/H3 all rejected at
+   28.1%; framework retirement/reformulation deferred to kafka
+   or Phase 5 per (A)-path (user-accepted 2026-04-18).
 
-10. **Then k8s** (topic-strong clean confirmation) → **kafka**
-    (confirmation-only per § 12.7 demotion).
+## Phase 2e next actions (k8s, routine cadence)
 
-11. **Remaining 8 topics** after observability/k8s/kafka: ci_cd,
+Per (A)-path agreement, k8s follows the established routine without
+additional methodology meta-discussion. Deliverables per step
+identical to observability unless the measurement surfaces a novel
+failure mode.
+
+1. **Pre-register k8s joint H × D matrix** in ledger. Expected cell:
+   D1 (topic-strong confirmation). Drift prediction under new
+   baseline observation: ~25-30% event-count. Explicit "confirmation
+   test" framing — no new hypothesis introduced.
+2. **Run k8s Gemini batches** (8 prompts, topic-specific substitution
+   from `.claude/b2-v2-observability-prompts.md` template; 5 legitimate
+   deltas apply). Verify structural equivalence.
+3. **Phase 3a curate**; log to new ledger section.
+4. **Pre-measure IDF + body overlap**; add k8s QUERY set to
+   `compute_idf_baseline.py` + dispatch.
+5. **Phase 3b fixtures** at `corpus_v2/{ko,en}/k8s/`.
+6. **Run k8s sensitivity**; add to `measure_sensitivity.py` QUERIES.
+7. **Record at § 14**. Cell readout only.
+8. **Then kafka** (confirmation-only).
+9. **After topic 6 (k8s)**: implement Phase 3b drift validator rule
+   tiers per ledger § "Deferred decisions". Earlier risks biased
+   sample.
+10. **Remaining 8 topics** after observability/k8s/kafka: ci_cd,
     auth, networking, ml_ops, data_pipelines, incident_response,
     api_design, + topic 15 per `b2-v2-design.md`.
-
-12. **After topic 5-6** (postgres + cost_opt + security +
-    observability + k8s ± kafka): implement Phase 3b drift
-    validator rule tiers from accumulated ledger. Earlier risks
-    fitting to biased sample.
-
-13. **Phases 4-7** proceed once 15-topic corpus complete.
+11. **Phases 4-7** proceed once 15-topic corpus complete.
+12. **H1/H2/H3 retirement / reformulation decision** at kafka
+    completion or Phase 5 (whichever first). Recorded in ledger §
+    "Curation ledger — Phase 2d observability" "Observation (not
+    pre-registered, tentative)".
 
 ## Key invariants (do not drift from these)
 

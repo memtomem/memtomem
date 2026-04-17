@@ -165,6 +165,20 @@ QUERY_SETS: dict[str, dict[str, list[tuple[str, str]]]] = {
             ("security likely root cause workaround symptom", "troubleshooting"),
         ],
     },
+    "observability (simple, canonical)": {
+        "ko": [
+            ("observability 절차 접속 CONFIG SET 수행", "runbook"),
+            ("observability KST 원인 후속 조치 장애", "postmortem"),
+            ("observability 대신 채택 결정 trade-off 감수", "adr"),
+            ("observability 증상 의심 만약 점검 진단", "troubleshooting"),
+        ],
+        "en": [
+            ("observability configure run verify inspect command", "runbook"),
+            ("observability at UTC root cause follow-up", "postmortem"),
+            ("observability chose over accepted re-evaluate revisit", "adr"),
+            ("observability likely root cause workaround symptom", "troubleshooting"),
+        ],
+    },
 }
 
 
@@ -332,7 +346,7 @@ def main() -> None:
             if topic == "caching":
                 # caching queries target caching corpus
                 pass
-            elif topic in ("postgres", "cost_optimization", "security"):
+            elif topic in ("postgres", "cost_optimization", "security", "observability"):
                 pass
             else:
                 continue

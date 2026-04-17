@@ -917,12 +917,59 @@ data point; formal reformulation of H1/H2/H3 happens at that
 measurement, not earlier. Recording as observation to prevent
 post-hoc drift in future interpretation.
 
-### Divergence measurement
+### Pre-measurement (IDF + body overlap, 2026-04-18)
 
-Pending — Step 7 of handoff Phase 2d next actions. IDF + body overlap
-pre-measurement (Step 5) precedes divergence measurement (Step 7).
-Joint H × D cell reading to be recorded at `b2-v2-phase1-validation.md`
-§ 13.
+Per § 11.5 of the validation doc, query fairness (IDF token count +
+sum) and body overlap were measured via
+`tools/retrieval-eval/compute_idf_baseline.py` before running
+sensitivity at § 13. Topic token: `observability` — canonical simple
+pattern inherited unchanged from postgres / cost_opt / security.
+
+**IDF fairness** — both languages within caching-baseline ± 15%:
+
+| Lang | Mean tokens | Mean idf_sum | Status |
+|---|---|---|---|
+| ko | 6.50 (target 5.7-7.8, -13.3%) | 12.85 (target 12.67-17.14, -9.2%) | OK |
+| en | 6.50 (target 6.4-8.6, -13.3%) | 12.85 (target 12.04-16.28, -9.2%) | OK |
+
+"Weak query" confound excluded (query fairness rule per § "Locked
+decisions from Phase 2b" in handoff).
+
+**Body overlap** — **0 flagged queries** (all 8 genre × lang
+combinations at 0.00 overlap ratio).
+
+| Topic | ko flags | en flags |
+|---|---|---|
+| caching (baseline) | 4/4 | 4/4 |
+| postgres | 1/4 (postmortem 0.50) | 0/4 |
+| cost_optimization | 1/4 (postmortem 0.50) | 1/4 (postmortem 1.00) |
+| security | 1/4 (postmortem 0.50) | 2/4 (postmortem 1.00, adr 1.00) |
+| **observability** | **0/4** | **0/4** |
+
+**Pre-reg expectation mismatch**: observability pre-registration
+§ "Body-overlap pre-measurement expectation" predicted "EN-side flag
+inflation similar to security (possibly higher given frequency of
+'observability' in operations prose)." Actual: 0 flags in both
+languages. Gemini did not insert the topic token `observability` as
+a body collocation (unlike security where "applying the security
+patch" / "security posture" inflated EN flags). This is a benign
+mismatch — cleaner measurement; § 12.5 concordance caveats do not
+apply at observability.
+
+### Divergence measurement (2026-04-18, D1 realized)
+
+Measured: **0/8 divergence** (0/4 KO, 0/4 EN). BM25 top-1 7/8, dense
+top-1 7/8. Concordant miss on KO runbook → `troubleshooting.md`
+(same pattern as cost_opt / security EN runbook misses). Byte-
+identical across 2 consecutive determinism runs.
+
+**Cell readout**: D1 realized; topic-strong cluster extends to n=4
+(postgres + cost_opt + security + observability). H1/H2/H3 all
+rejected at 28.1% drift. Post-observability decision rule (0-2/8
+path) selects k8s as next topic (clean topic-strong confirmation);
+kafka retains confirmation-only role per § 12.7.
+
+Full writeup: `b2-v2-phase1-validation.md` § 13.
 
 ## Methodology discontinuities
 

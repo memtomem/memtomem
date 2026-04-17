@@ -723,3 +723,96 @@ Rationale:
 
 This closes B.2 v2 Phase 2c (postgres + cost_opt + security).
 Next: Phase 2d observability.
+
+## 13. Phase 2d observability measurements (D1 realized, H1/H2/H3 rejected)
+
+Pre-registered joint drift × divergence matrix locked at
+`b2-v2-phase2b-ledger.md` § "Observability pre-registration".
+Measurement reads off cells; no post-hoc redefinition.
+
+### 13.1 Measurement setup
+
+- Corpus: observability-only, 32 chunks (4 genres × 2 languages × 4
+  chunks) at `packages/memtomem/tests/fixtures/corpus_v2/{en,ko}/
+  observability/`. Primary-label distribution after Gemini generation
+  + 9-event / 8-chunk curation: 100% `observability/*` primary (no
+  primary reclassifications to adjacent topics, unlike security's
+  19% rate).
+- Queries: 8 simple queries (4 genres × 2 langs), topic token
+  `observability` + genre-anchor vocabulary. Canonical format
+  identical to postgres / cost_opt / security (§ 11.1 / § 12.1).
+  Query set at `tools/retrieval-eval/measure_sensitivity.py`
+  `QUERIES["observability"]`.
+- Pre-measurement (IDF + body overlap per § 11.5): IDF fairness OK
+  in both languages (KO mean tokens 6.50 / idf_sum 12.85; EN mean
+  tokens 6.50 / idf_sum 12.85; both within caching baseline ± 15%).
+  Body overlap: **0 flags in both languages** — pre-reg expectation
+  of "similar to security" (2 EN flags) not met. Topic token
+  `observability` did not appear as a body-word collocation in
+  Gemini output, unlike security's "applying the security patch" /
+  "security posture" cases. Benign mismatch; § 12.5 concordance
+  caveats do not apply. Full writeup in `b2-v2-phase2b-ledger.md`
+  § "Pre-measurement (IDF + body overlap, 2026-04-18)".
+- Determinism: 2 consecutive runs with `PYTHONHASHSEED=0
+  OMP_NUM_THREADS=1` produced byte-identical measurement tables
+  (stdout warning timestamps differed; measurement blocks matched).
+- Methodology anchor: identical to postgres / cost_opt / security
+  (same tokenizers, `rrf_weights`, divergence definition).
+
+### 13.2 Results
+
+| Metric | Measured | Pre-registered D1/D2/D3 |
+|---|---|---|
+| `rrf_weights` divergence top-3 (combined) | **0/8** | D1: 0-1/8 (**realized**), D2: 3-5/8, D3: 6-8/8 |
+| `rrf_weights` divergence top-3 KO | 0/4 | — |
+| `rrf_weights` divergence top-3 EN | 0/4 | — |
+| BM25-only top-1 genre match | 7/8 (3/4 KO, 4/4 EN) | — |
+| Dense-only top-1 genre match | 7/8 (3/4 KO, 4/4 EN) | — |
+| Phase 3a drift (event-count) | 9 / 32 = 28.1% | H1: 10-20% (rejected above), H2: 0-5% (rejected), H3: 5-10% (rejected) |
+
+Top-1 miss (BM25 + dense concordant):
+- KO runbook query "observability 절차 접속 CONFIG SET 수행" →
+  `troubleshooting.md` for both engines. Same failure mode as
+  cost_opt EN runbook (§ 11.2) and security EN runbook (§ 12.2):
+  simple-query runbook anchors (`절차` / `수행` / `inspect` /
+  `verify`) are not genre-exclusive in practice — troubleshooting
+  chunks contain the same procedural verbs.
+
+Concordant miss, not divergence.
+
+### 13.3 Readout against pre-registration
+
+- **D1 realized**: observability joins topic-strong cluster at 0/8.
+  Cluster now n=4 (postgres + cost_opt + security + observability).
+- **H1 / H2 / H3 all rejected** at 28.1% drift (above every band).
+  None of the pre-registered framework fits observability as
+  defined.
+- Post-observability decision rule (ledger § "Post-observability
+  decision rules") 0-2/8 path: next topic is **k8s** for clean
+  topic-strong confirmation, then **kafka** as confirmation-only per
+  § 12.7.
+
+**No post-hoc reformulation at this data point.** Framework
+retirement or reformulation decision deferred to kafka completion
+or Phase 5 per `b2-v2-phase2b-ledger.md` § "Curation ledger — Phase
+2d observability" "Observation (not pre-registered, tentative)".
+The user-accepted (A)-path keeps rigor without batching additional
+methodology discussion into Phase 2d close.
+
+### 13.4 Body-overlap flag outcome
+
+No genres flagged at pre-measurement (0/8 vs security's 3/8).
+Concordance caveats not applicable.
+
+### 13.5 Corpus status checkpoint
+
+- Measured topics: 5 (caching + postgres + cost_opt + security +
+  observability). All five show topic-strong behavior under simple
+  genre-primary queries (divergence ≤ 0/8).
+- Corpus size: 160 chunks (5 × 32). Subtopic list frozen at 75
+  (2026-04-17).
+- Topics pending: 10 (k8s + kafka + 8 remaining per
+  `b2-v2-design.md`).
+- Next measurement: **k8s** (clean topic-strong confirmation).
+
+This closes B.2 v2 Phase 2d (observability). Next: Phase 2e k8s.

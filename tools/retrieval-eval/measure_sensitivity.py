@@ -75,8 +75,18 @@ QUERIES = {
         ("security chose over accepted re-evaluate revisit", "en", "adr"),
         ("security likely root cause workaround symptom", "en", "troubleshooting"),
     ],
-    # Add new topic query sets here as Phase 2c progresses. Keep the
-    # structure identical to preserve result comparability.
+    "observability": [
+        ("observability 절차 접속 CONFIG SET 수행", "ko", "runbook"),
+        ("observability KST 원인 후속 조치 장애", "ko", "postmortem"),
+        ("observability 대신 채택 결정 trade-off 감수", "ko", "adr"),
+        ("observability 증상 의심 만약 점검 진단", "ko", "troubleshooting"),
+        ("observability configure run verify inspect command", "en", "runbook"),
+        ("observability at UTC root cause follow-up", "en", "postmortem"),
+        ("observability chose over accepted re-evaluate revisit", "en", "adr"),
+        ("observability likely root cause workaround symptom", "en", "troubleshooting"),
+    ],
+    # Add new topic query sets here as Phase 2c / 2d progresses. Keep
+    # the structure identical to preserve result comparability.
 }
 
 # Strengthened queries (proper-noun-rich) — held in reserve. Per
