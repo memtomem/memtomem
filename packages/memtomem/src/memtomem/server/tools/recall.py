@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app
 from memtomem.server.error_handler import tool_handler
-from memtomem.server.formatters import _display_path
+from memtomem.server.formatters import _display_path, _format_recall_structured
 from memtomem.server.helpers import _announce_dim_mismatch_once, _parse_recall_date
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ async def mem_recall(
     source_filter: str | None = None,
     namespace: str | None = None,
     limit: int = 20,
+    output_format: Literal["compact", "structured"] = "compact",
     ctx: CtxType = None,
 ) -> str:
     """Recall memories created within a date range.
@@ -33,6 +35,8 @@ async def mem_recall(
         source_filter: Filter by source file path (substring match, or glob pattern with *, ?, [])
         namespace: Namespace scope — single, comma-separated, or glob (e.g. "project:*")
         limit: Maximum number of chunks to return (default 20)
+        output_format: Output format — "compact" (default, human-readable) or "structured"
+            (JSON for machine parsing, includes trust-UX hints as a "hints" field).
 
     Examples::
 
@@ -42,6 +46,8 @@ async def mem_recall(
     """
     if not 1 <= limit <= 500:
         return f"Error: limit must be between 1 and 500, got {limit}."
+    if output_format not in ("compact", "structured"):
+        return f"Error: invalid output_format '{output_format}'. Supported: compact, structured."
 
     from memtomem.models import NamespaceFilter
 
@@ -93,6 +99,9 @@ async def mem_recall(
     dim_notice = await _announce_dim_mismatch_once(app)
     if dim_notice:
         hints.append(dim_notice)
+
+    if output_format == "structured":
+        return _format_recall_structured(chunks, hints=hints or None)
 
     tail = "\n\n" + "\n".join(f"({h})" for h in hints) if hints else ""
 

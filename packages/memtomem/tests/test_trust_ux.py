@@ -187,6 +187,111 @@ class TestArchiveHint:
         out_bare = _format_structured_results([r])
         assert "hints" not in json.loads(out_bare)
 
+    async def test_recall_structured_emits_hints_field(self, trust_components):
+        """When archive chunks are hidden, structured output must surface the
+        hint list alongside the empty result set — mirroring mem_search."""
+        from memtomem.server.tools.recall import mem_recall
+
+        comp, _ = trust_components
+        visible = make_chunk("a visible note", namespace="default")
+        archived_a = make_chunk("archive one", namespace="archive:old")
+        archived_b = make_chunk("archive two", namespace="archive:old")
+        await comp.storage.upsert_chunks([visible, archived_a, archived_b])
+
+        ctx = _recall_ctx(comp)
+        out = await mem_recall(limit=10, output_format="structured", ctx=ctx)
+        parsed = json.loads(out)
+
+        assert parsed["kind"] == "recall"
+        assert len(parsed["results"]) == 1
+        assert parsed["results"][0]["namespace"] == "default"
+        # Shared-meaning field names matching _format_structured_results.
+        assert set(parsed["results"][0]) == {
+            "chunk_id",
+            "namespace",
+            "source",
+            "hierarchy",
+            "content",
+            "created_at",
+            "tags",
+        }
+        assert parsed["hints"] == [
+            '2 memories hidden in system namespaces (pass namespace="archive:..." to include them).'
+        ]
+
+    async def test_recall_structured_omits_hints_when_empty(self, trust_components):
+        """No archive chunks + no dim mismatch → structured payload has no
+        "hints" key (not an empty array) so clients don't render empty UI."""
+        from memtomem.server.tools.recall import mem_recall
+
+        comp, _ = trust_components
+        visible = make_chunk("only visible note", namespace="default")
+        await comp.storage.upsert_chunks([visible])
+
+        ctx = _recall_ctx(comp)
+        out = await mem_recall(limit=10, output_format="structured", ctx=ctx)
+        parsed = json.loads(out)
+
+        assert parsed["kind"] == "recall"
+        assert len(parsed["results"]) == 1
+        assert "hints" not in parsed
+
+    async def test_recall_structured_content_untruncated(self, trust_components):
+        """Compact recall clips content to 400 chars; structured must not —
+        machine consumers need the whole chunk."""
+        from memtomem.server.tools.recall import mem_recall
+
+        comp, _ = trust_components
+        long_content = "x" * 2000
+        chunk = make_chunk(long_content, namespace="default")
+        await comp.storage.upsert_chunks([chunk])
+
+        ctx = _recall_ctx(comp)
+        out = await mem_recall(limit=10, output_format="structured", ctx=ctx)
+        parsed = json.loads(out)
+
+        assert parsed["results"][0]["content"] == long_content
+
+    async def test_recall_structured_returns_json_on_empty(self, trust_components):
+        """Structured mode must return parseable JSON even on empty results —
+        a machine consumer hitting a zero-hit recall still gets a valid
+        payload (with the archive hint if applicable) rather than text.
+
+        This is an intentional improvement over mem_search, which currently
+        returns text "No results found." even when ``output_format="structured"``.
+        """
+        from memtomem.server.tools.recall import mem_recall
+
+        comp, _ = trust_components
+        archived = make_chunk("only archived", namespace="archive:old")
+        await comp.storage.upsert_chunks([archived])
+
+        ctx = _recall_ctx(comp)
+        # Pin a namespace with no chunks → zero results, but archive still
+        # hidden from the *default* view; since we pinned, no archive hint.
+        out = await mem_recall(
+            namespace="nonexistent", limit=10, output_format="structured", ctx=ctx
+        )
+        parsed = json.loads(out)
+
+        assert parsed["kind"] == "recall"
+        assert parsed["results"] == []
+        assert "hints" not in parsed  # namespace pinned → archive hint suppressed
+
+    async def test_recall_invalid_output_format(self, trust_components):
+        """Invalid output_format must return an error that names the supported
+        values — mem_search accepts 'verbose' but mem_recall intentionally does
+        not, so the message helps users unlearn that asymmetry."""
+        from memtomem.server.tools.recall import mem_recall
+
+        comp, _ = trust_components
+        ctx = _recall_ctx(comp)
+        out = await mem_recall(limit=10, output_format="verbose", ctx=ctx)
+
+        assert out.startswith("Error:")
+        assert "verbose" in out
+        assert "Supported: compact, structured" in out
+
 
 # ---------------------------------------------------------------------------
 # G3 — dim-mismatch hint wiring
