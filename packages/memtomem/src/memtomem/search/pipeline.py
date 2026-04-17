@@ -320,7 +320,7 @@ class SearchPipeline:
             fused = []
         stats.fused_total = len(fused)
 
-        # Stage 3.5: Cross-encoder reranking
+        # Stage 3b: Cross-encoder reranking
         if self._reranker is not None and fused:
             try:
                 fused = await self._reranker.rerank(query, fused, top_k=top_k)
