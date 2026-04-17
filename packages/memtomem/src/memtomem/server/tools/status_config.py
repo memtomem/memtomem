@@ -93,6 +93,22 @@ async def mem_status(
     except Exception:
         logger.debug("Orphan detection failed", exc_info=True)
 
+    # Immutable fields — these cannot be changed via mem_config at runtime.
+    # Surfacing them here so operators are not surprised when a `mm config set`
+    # on one of these paths fails silently.
+    lines.append("")
+    lines.append("Immutable fields (set once at init)")
+    lines.append("------------------------------------")
+    lines.append(f"embedding.provider:  {config.embedding.provider}")
+    lines.append(f"embedding.model:     {config.embedding.model or '(unset)'}")
+    lines.append(f"embedding.dimension: {config.embedding.dimension}")
+    lines.append(f"search.tokenizer:    {config.search.tokenizer}")
+    lines.append(f"storage.backend:     {config.storage.backend}")
+    lines.append(
+        "  -> To change: re-run `mm init` for provider/tokenizer/backend, "
+        "or `mm embedding-reset` to switch embedder (re-index required)."
+    )
+
     mismatch = getattr(app.storage, "embedding_mismatch", None)
     if mismatch is not None:
         cfg = mismatch["configured"]

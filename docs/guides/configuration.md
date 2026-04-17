@@ -113,7 +113,7 @@ without requiring explicit `MEMORY_DIRS` configuration.
 | `MEMTOMEM_RERANK__TOP_K` | `20` | Candidates passed to the reranker (must be > 0) |
 | `MEMTOMEM_RERANK__API_KEY` | _(empty)_ | API key (required for Cohere) |
 
-Reranking runs as Stage 3.5 in the search pipeline — after BM25 + dense fusion, before source/tag filters. If the reranker call fails, the pipeline falls back to the original fused order with a warning.
+Reranking runs as Stage 3b in the search pipeline — after BM25 + dense fusion, before source/tag filters. If the reranker call fails, the pipeline falls back to the original fused order with a warning.
 
 ## Access Frequency Boost
 

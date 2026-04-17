@@ -39,10 +39,13 @@ for `memtomem` and both resolve to `memtomem.cli:cli`.
   `packages/memtomem/src/memtomem/search/pipeline.py` without updating the
   Stage comments in that file.
 - **MCP tools go through the registry.** New tools use `@register` from
-  `server/tool_registry.py` + `@tool_handler` — no direct `@mcp.tool()`. Add
-  imports in `server/__init__.py` and classify the tool into
-  `_CORE_TOOLS` / `_STANDARD_TOOLS` / full; the `mem_do` meta-tool routes
-  non-core actions. Don't change the default mode (`core` = 9 tools).
+  `server/tool_registry.py` + `@tool_handler`. The core-9 tools (`mem_search`,
+  `mem_add`, `mem_index`, `mem_recall`, `mem_status`, `mem_stats`, `mem_list`,
+  `mem_read`, `mem_do`) are registered directly via `@mcp.tool()` by design;
+  everything else MUST use `@register`. Add imports in `server/__init__.py`
+  and classify the tool into `_CORE_TOOLS` / `_STANDARD_TOOLS` / full; the
+  `mem_do` meta-tool routes non-core actions. Don't change the default mode
+  (`core` = 9 tools).
 - **Line length 100**, target `py312` (`tool.ruff`, `tool.mypy` in root
   `pyproject.toml`). `.claude/`, `scripts/`, and `CLAUDE.local.md` are
   gitignored — don't commit anything under them, and don't assume other
