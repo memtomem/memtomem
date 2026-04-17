@@ -971,6 +971,129 @@ kafka retains confirmation-only role per § 12.7.
 
 Full writeup: `b2-v2-phase1-validation.md` § 13.
 
+### K8s pre-registration — drift × divergence (2026-04-18)
+
+Before k8s Gemini run. Routine cadence per (A)-path agreement
+(user-accepted 2026-04-18, see § "Observation (not pre-registered,
+tentative, to be tested at kafka)" above). Structural mirror of
+observability pre-registration; bucket boundaries locked, no post-hoc
+redefinition.
+
+**Framing**: Confirmation test. K8s predicted to confirm (a) topic-
+strong cluster extension to n=5 (D1), and (b) tentative baseline
+drift observation ~25-30% event-count. No new hypothesis introduced.
+H1/H2/H3 ranges **not re-applied here** — retirement / reformulation
+decision deferred to kafka or Phase 5 per (A)-path.
+
+**Subtopic cluster** (`k8s/{scheduling, networking, storage, scaling,
+rollout}`, per `b2-v2-design.md` § "Seed subtopics"): scheduling and
+scaling share cluster-state vocabulary (pending pods, HPA, node
+selectors) but separate on mechanism (placement vs replica count).
+Networking = CNI / Service / Ingress vocabulary. Storage = PV / PVC /
+StorageClass (separate from scheduling's node-local scratch). Rollout =
+deployment-strategy vocabulary (RollingUpdate, Recreate, blue/green),
+adjacent to ci_cd but constrained to k8s primitive surface.
+
+**Genre-activity mapping**:
+- runbook = kubectl / manifest apply / kustomize procedure
+- postmortem = crash-loop / eviction / network-partition incident
+  narrative
+- adr = orchestrator / CNI / runtime trade-offs (Calico vs Cilium,
+  containerd vs CRI-O)
+- troubleshooting = CrashLoopBackOff / OOMKilled / ImagePullBackOff /
+  Pending-scheduling symptom → root-cause
+
+K8s proper-noun density (kubectl, pod, deployment, namespace,
+replicaset, ...) was the **canonical "topic-strong" predicted case**
+under the original Phase 2b hypothesis. cost_opt counter-prediction
+falsified that hypothesis form, but k8s remains predicted topic-strong
+on the original grounds — this measurement extends the cluster to
+n=5.
+
+**Drift prediction** (baseline observation confirmation, event-count):
+
+| Band | Drift range | Interpretation |
+|---|---|---|
+| Baseline-match | 20-32% | Confirms observation (~25-30%); prompt-structure drift stable, cost_opt remains topic-specific outlier |
+| Lower-outlier | 0-15% | k8s joins cost_opt clean-topic band; baseline observation premature at n=1; prompt-quality mechanism revives |
+| Upper-outlier | 32-45% | Drift exceeds observability; baseline upper-edge falsified at n=2; kafka decisive on true range |
+| Extreme | 45%+ or 0-5% | Regime shift; methodology review required before kafka |
+
+**Divergence prediction** (BM25 vs dense top-3 agreement):
+
+| Hypothesis | Divergence range | Interpretation |
+|---|---|---|
+| D1 (topic-strong confirmation, expected) | 0-1/8 | K8s joins topic-strong cluster at n=5. Chunk-level artifact candidate reaches k ≥ 4 confirmation threshold (§ 11.4) if no falsifying cases — working-hypothesis promotion eligible |
+| D2 (genre signal emerges, moderate) | 3-5/8 | Universal topic-strong breaks at n=5 after observability stayed D1; re-examine observability for missed D2 signal; chunk-level artifact candidate reopens |
+| D3 (genre signal dominates, strong) | 6-8/8 | Major pattern break; chunk-level artifact candidate falsified |
+| (D1/D2 boundary: 2/8) | 2/8 | Inconclusive, kafka resolves |
+
+**Joint interpretation matrix** (drift band × divergence):
+
+```
+                    D1                 D2/D3
+              ┌──────────────────┬──────────────────┐
+Baseline-     │ CONFIRMATION     │ genre emerges    │
+match (20-32) │ (n=5 topic-      │ despite baseline │
+              │ strong + baseline│ drift; 2-factor  │
+              │ drift holds)     │ model activates  │
+              │ ← k ≥ 4 reached  │                  │
+              ├──────────────────┼──────────────────┤
+Lower-outlier │ n=5 topic-strong │ rare cell        │
+(0-15)        │ + clean drift    │ (clean drift +   │
+              │ like cost_opt;   │ genre emerges);  │
+              │ baseline         │ unusual, review  │
+              │ premature        │                  │
+              ├──────────────────┼──────────────────┤
+Upper-outlier │ topic-strong +   │ worst case:      │
+(32-45)       │ drift rising;    │ drift rising +   │
+              │ kafka decisive   │ genre emerges —  │
+              │ on upper edge    │ escalate before  │
+              │                  │ kafka            │
+              └──────────────────┴──────────────────┘
+```
+
+Cells of interest:
+- **(Baseline-match, D1)** — primary expected cell. Confirms topic-
+  strong cluster at n=5 + baseline drift observation. Chunk-level
+  artifact candidate reaches k ≥ 4 threshold (§ 11.4) — working-
+  hypothesis promotion eligible.
+- **(any band, D2/D3)** — first genre signal at n=5; major news;
+  reopens Phase 5 confusion matrix design; re-examines observability
+  for missed D2.
+- **(Lower-outlier, any D)** — baseline observation premature; kafka
+  decisive.
+- **(Upper-outlier, any D)** — baseline upper-edge exceeded; kafka
+  decisive on true range.
+- **(Extreme drift, any D)** — methodology review before kafka.
+
+**Post-k8s decision rules** (pre-registered; mirrors handoff Phase 2e
+Step 8):
+
+- **(Baseline-match or Lower-outlier, 0-2/8)** → kafka as
+  confirmation-only per § 12.7. If Baseline-match: promote baseline
+  observation to working hypothesis at kafka or Phase 5. If Lower-
+  outlier: baseline observation unconfirmed; kafka decisive.
+- **(any band, 3-5/8)** → first D2 realization at n=5; halt cadence;
+  Phase 5 2-factor model structure specification before kafka.
+- **(any band, 6-8/8)** → chunk-level artifact candidate falsified;
+  reopen Phase 5 design; escalate before kafka.
+- **(Upper-outlier, 0-2/8)** → continue to kafka; baseline true range
+  wider than (~25-30%); H1/H2/H3 reformulation at kafka.
+- **(Extreme drift, any)** → methodology review (prompt-structure
+  integrity check) before kafka; do not refit narrative.
+
+**Body-overlap pre-measurement expectation**: `k8s` / `kubernetes` /
+`kubectl` are common operations vocabulary. Observability's zero-flag
+outcome (despite similar ambient-vocabulary prediction at security)
+indicates Gemini does not always insert topic-token collocations;
+k8s expected flag count **0-2 per language**; either outcome
+measurement-valid per § 12.5 concordance rule.
+
+**Sunk-cost-bias guardrail**: all six decision paths (3 drift bands ×
+2 divergence bands + extreme-drift escalation) recorded pre-k8s so
+post-result interpretation reads off a cell, not fits a narrative.
+
 ## Methodology discontinuities
 
 This section tracks points where measurement methodology changed
