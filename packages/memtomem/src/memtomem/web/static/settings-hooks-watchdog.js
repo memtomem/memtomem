@@ -26,6 +26,10 @@ async function loadHooksSync() {
 
   try {
     const res = await fetch('/api/settings-sync');
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `Request failed: ${res.status}`);
+    }
     const data = await res.json();
 
     // Status badge
@@ -154,6 +158,10 @@ document.getElementById('hooks-sync-btn')?.addEventListener('click', async () =>
   btnLoading(btn, true);
   try {
     const res = await fetch('/api/settings-sync', {method: 'POST', headers: {'Content-Type': 'application/json'}});
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `Request failed: ${res.status}`);
+    }
     const data = await res.json();
     const warnings = data.results?.flatMap(r => r.warnings || []) || [];
     if (warnings.length) {
