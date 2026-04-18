@@ -366,6 +366,34 @@ class Mem2MemConfig(BaseSettings):
 # via CLI (``mm config set``), Web UI (``PATCH /api/config``), and MCP
 # (``mem_config``).  All three paths import from here.
 
+
+def _validate_exclude_patterns(value: object) -> None:
+    """Reject empty strings, duplicates, and malformed pathspec patterns.
+
+    ``pathspec.GitIgnoreSpec.from_lines`` raises ``GitIgnorePatternError`` on
+    patterns like ``!`` or ``\\`` that would otherwise only surface at indexing
+    time. Run the same parse eagerly so CLI/MCP/web all fail fast with the
+    parser error instead of silently accepting bad input.
+    """
+    import pathspec
+    from pathspec.patterns.gitwildmatch import GitWildMatchPatternError
+
+    if not isinstance(value, list):
+        raise ValueError("exclude_patterns must be a list")
+
+    seen: set[str] = set()
+    for idx, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"exclude_patterns[{idx}]: empty pattern")
+        if item in seen:
+            raise ValueError(f"exclude_patterns[{idx}]: duplicate pattern {item!r}")
+        seen.add(item)
+        try:
+            pathspec.GitIgnoreSpec.from_lines([item.lower()])
+        except GitWildMatchPatternError as exc:
+            raise ValueError(f"exclude_patterns[{idx}]: {exc}") from exc
+
+
 MUTABLE_FIELDS: dict[str, set[str]] = {
     "search": {
         "default_top_k",
@@ -404,7 +432,11 @@ FIELD_CONSTRAINTS: dict[str, dict] = {
     "indexing.target_chunk_tokens": {"type": int, "min": 0, "max": 8192},
     "indexing.chunk_overlap_tokens": {"type": int, "min": 0, "max": 512},
     "indexing.structured_chunk_mode": {"type": str, "allowed": {"original", "recursive"}},
-    "indexing.exclude_patterns": {"type": list, "item_type": str},
+    "indexing.exclude_patterns": {
+        "type": list,
+        "item_type": str,
+        "validator": _validate_exclude_patterns,
+    },
     "embedding.batch_size": {"type": int, "min": 1, "max": 1024},
     "decay.enabled": {"type": bool},
     "decay.half_life_days": {"type": float, "min": 0.1},
@@ -488,6 +520,10 @@ def coerce_and_validate(value: object, constraint: dict | None) -> object:
         raise ValueError(f"must be <= {max_val}")
     if "allowed" in constraint and coerced not in constraint["allowed"]:
         raise ValueError(f"must be one of {constraint['allowed']}")
+
+    validator = constraint.get("validator")
+    if callable(validator):
+        validator(coerced)
 
     return coerced
 

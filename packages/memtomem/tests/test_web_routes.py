@@ -86,6 +86,7 @@ class FakeConfig:
         target_chunk_tokens = 384
         chunk_overlap_tokens = 0
         structured_chunk_mode = "original"
+        exclude_patterns: list[str] = []
 
     class _Decay:
         enabled = False
@@ -190,7 +191,11 @@ def app():
     application.state.embedder = embedder
     application.state.search_pipeline = search_pipeline
     application.state.index_engine = index_engine
-    application.state.config = FakeConfig()
+    cfg = FakeConfig()
+    # _Indexing is a class-level singleton — reset mutable fields so tests that
+    # mutate exclude_patterns don't leak into later tests.
+    cfg.indexing.exclude_patterns = []
+    application.state.config = cfg
     application.state.dedup_scanner = dedup_scanner
 
     return application
@@ -270,6 +275,57 @@ class TestConfig:
         assert "decay" in data
         assert "mmr" in data
         assert "namespace" in data
+        assert data["indexing"]["exclude_patterns"] == []
+
+    async def test_builtin_exclude_patterns(self, client: AsyncClient):
+        resp = await client.get("/api/indexing/builtin-exclude-patterns")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data["secret"], list)
+        assert isinstance(data["noise"], list)
+        assert data["secret"], "secret list should not be empty"
+        # Sample a known built-in secret pattern to detect silent removals.
+        assert any(p.endswith("/id_rsa*") for p in data["secret"])
+
+    async def test_patch_exclude_patterns_accepts_valid(self, app, client: AsyncClient):
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.patch(
+                "/api/config",
+                json={"indexing": {"exclude_patterns": ["**/*.log", "dist/**"]}},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["rejected"] == []
+        assert any(c["field"] == "indexing.exclude_patterns" for c in data["applied"])
+        assert app.state.config.indexing.exclude_patterns == ["**/*.log", "dist/**"]
+
+    async def test_patch_exclude_patterns_rejects_malformed(self, app, client: AsyncClient):
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.patch(
+                "/api/config",
+                json={"indexing": {"exclude_patterns": ["!"]}},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["applied"] == []
+        assert any(
+            "indexing.exclude_patterns" in r and "Invalid git pattern" in r
+            for r in data["rejected"]
+        )
+        # Bad input must not mutate the live config.
+        assert app.state.config.indexing.exclude_patterns == []
+
+    async def test_patch_exclude_patterns_rejects_duplicate(self, app, client: AsyncClient):
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.patch(
+                "/api/config",
+                json={"indexing": {"exclude_patterns": ["**/*.log", "**/*.log"]}},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["applied"] == []
+        assert any("duplicate pattern" in r for r in data["rejected"])
+        assert app.state.config.indexing.exclude_patterns == []
 
 
 # ---------------------------------------------------------------------------

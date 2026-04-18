@@ -41,6 +41,12 @@ class ConfigIndexingOut(BaseModel):
     target_chunk_tokens: int = 0
     chunk_overlap_tokens: int = 0
     structured_chunk_mode: str = "original"
+    exclude_patterns: list[str] = []
+
+
+class BuiltinExcludePatternsResponse(BaseModel):
+    secret: list[str]
+    noise: list[str]
 
 
 class ConfigDecayOut(BaseModel):

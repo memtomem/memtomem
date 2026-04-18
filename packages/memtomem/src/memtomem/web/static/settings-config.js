@@ -582,7 +582,30 @@ const _CONFIG_SELECT_OPTIONS = {
 // Custom widget builders for specific config keys
 const _CONFIG_CUSTOM_WIDGETS = {
   'search.rrf_weights': _buildRRFWeightsWidget,
+  'indexing.exclude_patterns': _buildExcludePatternsWidget,
 };
+
+// Cached {secret, noise} from GET /api/indexing/builtin-exclude-patterns.
+let _BUILTIN_EXCLUDE_PATTERNS = null;
+async function _fetchBuiltinExcludePatterns() {
+  if (_BUILTIN_EXCLUDE_PATTERNS) return _BUILTIN_EXCLUDE_PATTERNS;
+  try {
+    _BUILTIN_EXCLUDE_PATTERNS = await api('GET', '/api/indexing/builtin-exclude-patterns');
+  } catch (e) {
+    console.warn('Failed to load built-in exclude patterns:', e);
+    _BUILTIN_EXCLUDE_PATTERNS = { secret: [], noise: [] };
+  }
+  return _BUILTIN_EXCLUDE_PATTERNS;
+}
+
+// Reject patterns that pathspec GitIgnoreSpec.from_lines will fail on.
+// The authoritative check runs server-side; this is client-side UX only.
+function _validateExcludePatternClient(pattern) {
+  const p = pattern.trim();
+  if (!p) return t('settings.exclude_patterns.err_empty');
+  if (p === '!' || p === '\\') return t('settings.exclude_patterns.err_syntax', { pattern: p });
+  return null;
+}
 
 function _buildRRFWeightsWidget(section, key, val) {
   const wrap = document.createElement('div');
@@ -634,6 +657,135 @@ function _buildRRFWeightsWidget(section, key, val) {
     _markConfigDirty(section);
   });
   wrap.appendChild(hidden);
+
+  return wrap;
+}
+
+function _buildExcludePatternsWidget(section, key, val) {
+  const wrap = document.createElement('div');
+  wrap.className = 'exclude-patterns-widget';
+
+  const userPatterns = Array.isArray(val) ? [...val] : [];
+
+  // Hidden input backing _saveSection. JSON-encoded so comma-containing
+  // patterns don't get split by the default array parser.
+  const hidden = document.createElement('input');
+  hidden.type = 'hidden';
+  hidden.dataset.section = section;
+  hidden.dataset.key = key;
+  hidden.dataset.valType = 'json';
+  const origStr = JSON.stringify(userPatterns);
+  hidden.dataset.original = origStr;
+  hidden.value = origStr;
+
+  const builtinBlock = document.createElement('div');
+  builtinBlock.className = 'exclude-builtin-block';
+  builtinBlock.innerHTML = `
+    <div class="exclude-group-header">
+      <span data-i18n="settings.exclude_patterns.builtin_title">Built-in (read-only)</span>
+      <span class="exclude-group-hint" data-i18n="settings.exclude_patterns.builtin_hint"></span>
+    </div>
+    <div class="exclude-builtin-list" aria-busy="true"></div>
+  `;
+  wrap.appendChild(builtinBlock);
+
+  const userBlock = document.createElement('div');
+  userBlock.className = 'exclude-user-block';
+  userBlock.innerHTML = `
+    <div class="exclude-group-header">
+      <span data-i18n="settings.exclude_patterns.user_title">User patterns</span>
+    </div>
+    <div class="exclude-user-list"></div>
+    <button type="button" class="btn-ghost btn-sm exclude-add-btn">
+      <span data-i18n="settings.exclude_patterns.add">+ Add pattern</span>
+    </button>
+  `;
+  wrap.appendChild(userBlock);
+  wrap.appendChild(hidden);
+
+  const listEl = userBlock.querySelector('.exclude-user-list');
+
+  function _syncHidden() {
+    // Serialize current inputs to JSON; _markConfigDirty fires if changed.
+    const rows = listEl.querySelectorAll('input.exclude-user-input');
+    const patterns = Array.from(rows).map(r => r.value);
+    hidden.value = JSON.stringify(patterns);
+    _markConfigDirty(section);
+  }
+
+  function _validateRow(row) {
+    const input = row.querySelector('input.exclude-user-input');
+    const errEl = row.querySelector('.exclude-row-err');
+    const pattern = input.value.trim();
+
+    let err = _validateExcludePatternClient(input.value);
+    if (!err) {
+      // Duplicate check against other user rows.
+      const others = Array.from(listEl.querySelectorAll('input.exclude-user-input'))
+        .filter(r => r !== input)
+        .map(r => r.value.trim());
+      if (pattern && others.includes(pattern)) {
+        err = t('settings.exclude_patterns.err_duplicate', { pattern });
+      }
+    }
+    errEl.textContent = err || '';
+    input.classList.toggle('exclude-row-invalid', Boolean(err));
+    return !err;
+  }
+
+  function _addRow(initial = '') {
+    const row = document.createElement('div');
+    row.className = 'exclude-user-row';
+    row.innerHTML = `
+      <input type="text" class="exclude-user-input"
+             data-i18n-placeholder="settings.exclude_patterns.placeholder" />
+      <button type="button" class="btn-ghost btn-sm exclude-remove-btn"
+              data-i18n-aria-label="settings.exclude_patterns.remove"
+              title="">−</button>
+      <div class="exclude-row-err"></div>
+    `;
+    listEl.appendChild(row);
+    const input = row.querySelector('input.exclude-user-input');
+    input.value = initial;
+    input.addEventListener('input', () => {
+      _validateRow(row);
+      _syncHidden();
+    });
+    row.querySelector('.exclude-remove-btn').addEventListener('click', () => {
+      row.remove();
+      // Re-validate remaining rows in case removing a dupe cleared errors.
+      listEl.querySelectorAll('.exclude-user-row').forEach(r => _validateRow(r));
+      _syncHidden();
+    });
+    if (typeof I18N !== 'undefined') I18N.applyDOM();
+  }
+
+  userBlock.querySelector('.exclude-add-btn').addEventListener('click', () => {
+    _addRow('');
+  });
+
+  userPatterns.forEach(p => _addRow(p));
+
+  _fetchBuiltinExcludePatterns().then(data => {
+    const builtinList = builtinBlock.querySelector('.exclude-builtin-list');
+    builtinList.removeAttribute('aria-busy');
+    const mkGroup = (labelKey, patterns) => {
+      if (!patterns.length) return '';
+      const rows = patterns.map(p =>
+        `<div class="exclude-builtin-row"><code>${escapeHtml(p)}</code></div>`
+      ).join('');
+      return `<div class="exclude-builtin-subgroup">
+        <div class="exclude-builtin-sublabel" data-i18n="${labelKey}"></div>
+        ${rows}
+      </div>`;
+    };
+    builtinList.innerHTML =
+      mkGroup('settings.exclude_patterns.group_secret', data.secret) +
+      mkGroup('settings.exclude_patterns.group_noise', data.noise);
+    if (typeof I18N !== 'undefined') I18N.applyDOM();
+  });
+
+  if (typeof I18N !== 'undefined') I18N.applyDOM();
 
   return wrap;
 }
@@ -727,6 +879,13 @@ function _markConfigDirty(section) {
 
 async function _saveSection(section) {
   const card = document.querySelector(`.config-card[data-section="${section}"]`);
+  // Exclude-patterns widget owns its own row validation; refuse save if any
+  // row still has a visible error so the user sees the problem inline.
+  const invalidRows = card.querySelectorAll('.exclude-row-invalid');
+  if (invalidRows.length) {
+    showToast(t('settings.exclude_patterns.err_save_blocked'), 'error');
+    return;
+  }
   const inputs = card.querySelectorAll('input[data-section], select[data-section]');
   const patch = {};
 
@@ -735,6 +894,13 @@ async function _saveSection(section) {
     let val;
     if (inp.type === 'checkbox') val = inp.checked;
     else if (inp.type === 'number') val = parseFloat(inp.value);
+    else if (inp.dataset.valType === 'json') {
+      try {
+        val = JSON.parse(inp.value);
+      } catch {
+        val = inp.value;
+      }
+    }
     else if (inp.dataset.valType === 'array') {
       val = inp.value.split(',').map(s => {
         const n = parseFloat(s.trim());
