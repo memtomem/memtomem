@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import click
@@ -358,6 +360,95 @@ def _step_mcp(state: dict) -> None:
 # ── Write config & summary ────────────────────────────────────────────
 
 
+def _flatten_config(d: dict, prefix: str = "") -> dict[str, object]:
+    """Flatten nested dict into `"section.key": value` pairs (one level deep
+    is enough for this codebase's config shape)."""
+    out: dict[str, object] = {}
+    for k, v in d.items():
+        key = f"{prefix}{k}"
+        if isinstance(v, dict):
+            out.update(_flatten_config(v, prefix=f"{key}."))
+        else:
+            out[key] = v
+    return out
+
+
+def _flatten_init_data_keys(init_data: dict) -> set[str]:
+    """Flat `section.key` set for every field the wizard actively wrote this
+    run — used to exclude them from the Preserved summary."""
+    keys: set[str] = set()
+    for section, fields in init_data.items():
+        if isinstance(fields, dict):
+            for k in fields:
+                keys.add(f"{section}.{k}")
+        else:
+            keys.add(section)
+    return keys
+
+
+def _fmt_config_value(v: object) -> str:
+    """Render a config value for the summary — keep bools lowercase so they
+    match how they appear in config.json."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if v is None:
+        return "null"
+    if isinstance(v, str):
+        return v
+    return json.dumps(v, default=str)
+
+
+def _emit_preserved_block(
+    existing_before: dict,
+    written: dict,
+    wizard_touched: set[str],
+) -> None:
+    """Flag values that (a) were already in the previous config, (b) the
+    wizard did not touch this run, and (c) differ from the built-in default.
+
+    Silent preservation is the main way Web UI dumps of the full mutable
+    config (memory-dirs add/remove, section save, etc.) accumulate non-default
+    values the user didn't consciously set. Surfacing them here is the
+    cheapest way to close that loop."""
+    from memtomem.config import Mem2MemConfig
+
+    defaults_flat = _flatten_config(Mem2MemConfig().model_dump(mode="json"))
+    before_flat = _flatten_config(existing_before)
+    written_flat = _flatten_config(written)
+
+    flagged: list[tuple[str, object, object]] = []
+    for key, value in written_flat.items():
+        if key in wizard_touched:
+            continue
+        if key not in before_flat:
+            continue
+        if before_flat[key] != value:
+            continue
+        default_val = defaults_flat.get(key)
+        if default_val == value:
+            continue
+        flagged.append((key, value, default_val))
+
+    if not flagged:
+        return
+
+    click.echo()
+    click.secho(
+        "  Preserved from existing config (wizard didn't ask about these):",
+        fg="yellow",
+    )
+    for key, value, default_val in sorted(flagged):
+        click.secho(
+            f"    [!] {key} = {_fmt_config_value(value)}   "
+            f"(built-in default: {_fmt_config_value(default_val)})",
+            fg="yellow",
+        )
+    click.echo()
+    click.echo("  If any of these are unexpected, edit ~/.memtomem/config.json")
+    click.echo('  and remove the flagged keys (e.g. delete the "mmr" section')
+    click.echo("  to restore mmr.enabled=false).")
+
+
 def _write_config_and_summary(state: dict, base_dir: Path | None = None) -> None:
     """Write config files and show summary (runs after all steps)."""
     if base_dir is None:
@@ -374,13 +465,31 @@ def _write_config_and_summary(state: dict, base_dir: Path | None = None) -> None
     click.secho("Writing configuration...", fg="green")
     config_path = config_dir / "config.json"
 
-    # Read existing config as merge base (preserves post-init user edits)
+    # Read existing config as merge base (preserves post-init user edits).
+    # If the file is unreadable we save a timestamped backup and start fresh —
+    # better than silently wiping what might be salvageable by hand.
     existing: dict = {}
     if config_path.exists():
         try:
             existing = json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            pass
+        except (OSError, json.JSONDecodeError) as exc:
+            backup_path = config_path.with_suffix(f".json.bak-{int(time.time())}")
+            try:
+                shutil.copy2(config_path, backup_path)
+                click.secho(
+                    f"  Note: {config_path.name} was unreadable ({exc.__class__.__name__}); "
+                    f"backed up to {backup_path.name} and starting from empty.",
+                    fg="yellow",
+                )
+            except OSError as backup_exc:
+                click.secho(
+                    f"  Warning: {config_path.name} unreadable and backup failed "
+                    f"({backup_exc}); proceeding with empty base.",
+                    fg="yellow",
+                )
+    # Snapshot for the preserved-values summary below — must happen BEFORE
+    # merge so we can diff pre-merge vs post-write.
+    existing_before = copy.deepcopy(existing)
 
     # Build init-target fields only
     init_data: dict = {
@@ -420,6 +529,16 @@ def _write_config_and_summary(state: dict, base_dir: Path | None = None) -> None
 
     config_path.write_text(json.dumps(existing, indent=2, default=str), encoding="utf-8")
     click.echo(f"  Config: {config_path}")
+
+    # Flag non-default values preserved from the previous config that the
+    # wizard never asked about — e.g. mmr.enabled=true left over from the
+    # Web UI's full-config dump. See docs/config-lifecycle.md (follow-up).
+    wizard_touched_keys = _flatten_init_data_keys(init_data)
+    try:
+        written = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        written = existing  # unreachable in practice; stay safe
+    _emit_preserved_block(existing_before, written, wizard_touched_keys)
 
     # Build MCP server command
     if source_install and source_dir:

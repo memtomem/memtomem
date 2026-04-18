@@ -216,6 +216,159 @@ def test_write_config_and_summary_without_base_dir_falls_back_to_home(
     assert (tmp_path / ".memtomem" / "config.json").exists()
 
 
+class TestPreservedSummary:
+    """`_write_config_and_summary` flags non-default values that the wizard
+    inherited from a previous config but did not ask about this run.
+
+    Primary driver: Web UI's `save_config_overrides` dumps all mutable fields
+    to config.json whenever memory-dirs are changed or a section is saved,
+    silently persisting runtime values (e.g. mmr.enabled) that the user may
+    not have deliberately set. The wizard cannot fix the write path, but it
+    can surface the leftovers on the next `mm init`."""
+
+    def test_fresh_init_no_mmr_section(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fresh init must not create an ``mmr`` section in config.json.
+
+        This is the load-bearing guard: if anyone later wires the wizard to
+        write to ``mmr.*``, this test fails and forces a deliberate update to
+        the preserved-summary logic (since ``wizard_touched_keys`` would then
+        need to include ``mmr.*`` to avoid flagging the user's own choice)."""
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        state = _make_init_state(tmp_path)
+        _write_config_and_summary(state, tmp_path)
+
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        assert "mmr" not in data, (
+            "wizard must not create an mmr section on fresh init — "
+            "if you intentionally added an MMR step, update wizard_touched_keys"
+        )
+
+    def test_preserved_non_default_shown_in_summary(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A pre-existing ``mmr.enabled=true`` (non-default) must surface in
+        the Preserved block with the ``[!]`` marker."""
+        from click import unstyle
+
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        config_dir = tmp_path / ".memtomem"
+        config_dir.mkdir()
+        (config_dir / "config.json").write_text(
+            json.dumps({"mmr": {"enabled": True, "lambda_param": 0.7}}),
+            encoding="utf-8",
+        )
+
+        state = _make_init_state(tmp_path)
+        _write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "Preserved from existing config" in out
+        assert "[!] mmr.enabled = true" in out
+        assert "built-in default: false" in out
+
+    def test_preserved_default_not_shown(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A preserved value equal to the built-in default must NOT be flagged
+        — otherwise the Preserved block becomes noise on every re-run."""
+        from click import unstyle
+
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        config_dir = tmp_path / ".memtomem"
+        config_dir.mkdir()
+        (config_dir / "config.json").write_text(
+            # mmr.enabled=False is the built-in default — should stay silent.
+            json.dumps({"mmr": {"enabled": False, "lambda_param": 0.7}}),
+            encoding="utf-8",
+        )
+
+        state = _make_init_state(tmp_path)
+        _write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "Preserved from existing config" not in out
+        assert "mmr.enabled" not in out
+
+    def test_wizard_choice_overrides_preserved(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A field the wizard actively writes this run (e.g. search.tokenizer)
+        must appear in the normal summary, never in Preserved — even if the
+        previous config had the same key set."""
+        from click import unstyle
+
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        config_dir = tmp_path / ".memtomem"
+        config_dir.mkdir()
+        (config_dir / "config.json").write_text(
+            json.dumps({"search": {"tokenizer": "unicode61"}}),
+            encoding="utf-8",
+        )
+
+        state = _make_init_state(tmp_path)
+        state["tokenizer"] = "kiwipiepy"
+        _write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        # Preserved block, if emitted, must NOT list tokenizer — wizard owns it
+        preserved_idx = out.find("Preserved from existing config")
+        if preserved_idx != -1:
+            preserved_tail = out[preserved_idx:]
+            assert "search.tokenizer" not in preserved_tail
+        # And the normal summary shows the new choice
+        assert "tokenizer=kiwipiepy" in out
+
+    def test_malformed_config_graceful(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A corrupt config.json must not crash the wizard. The bad file gets
+        backed up with a ``.bak-<ts>`` suffix and the run proceeds as if
+        ``existing`` were empty."""
+        from click import unstyle
+
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        config_dir = tmp_path / ".memtomem"
+        config_dir.mkdir()
+        config_path = config_dir / "config.json"
+        config_path.write_text("{this is not json", encoding="utf-8")
+
+        state = _make_init_state(tmp_path)
+        _write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "unreadable" in out
+        # Backup created (suffix .json.bak-<ts>)
+        backups = list(config_dir.glob("config.json.bak-*"))
+        assert len(backups) == 1, f"expected exactly one backup, got {backups}"
+        # New config is valid JSON
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        assert data["embedding"]["provider"] == "none"
+
+
 def test_memory_dirs_env_requires_json_array(monkeypatch: pytest.MonkeyPatch) -> None:
     """Documentation examples of MEMTOMEM_INDEXING__MEMORY_DIRS must be
     encoded as a JSON array string. A bare path crashes pydantic-settings.
