@@ -302,7 +302,7 @@ mm context sync --include=agents
 mm context sync --include=commands
 ```
 
-Sub-agent conversions are lossy for non-Claude targets — Gemini drops `skills` + `isolation`, Codex additionally drops `tools`, `kind`, `temperature`. Slash commands fan out to all three runtimes — Codex keeps `description` / `argument-hint` and the `$ARGUMENTS` placeholder natively, dropping only `allowed-tools` and `model` (Codex custom prompts are upstream-deprecated; prefer a skill for new workflows). memtomem reports every dropped field; add `--strict` to fail if you need 1:1 fidelity. See the [full matrix and diagrams](../user-guide.md#agent-context-management--mm-context) in the user guide.
+Sub-agent conversions are lossy for non-Claude targets — Gemini drops `skills` + `isolation`, Codex additionally drops `tools`, `kind`, `temperature`. Slash commands fan out to all three runtimes — Codex keeps `description` / `argument-hint` and the `$ARGUMENTS` placeholder natively, dropping only `allowed-tools` and `model` (Codex custom prompts are upstream-deprecated; prefer a skill for new workflows). memtomem reports every dropped field; add `--strict` to fail if you need 1:1 fidelity. See the [full matrix and diagrams](../agent-context.md) in the Agent Context Management guide.
 
 ---
 

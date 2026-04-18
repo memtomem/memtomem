@@ -367,7 +367,7 @@ mm context sync --include=commands
 mm context sync --include=skills,agents,commands
 ```
 
-See the [Agent Context Management section of the user guide](user-guide.md#agent-context-management--mm-context) for the full fan-out matrix and field-loss details.
+See the [Agent Context Management guide](agent-context.md) for the full fan-out matrix and field-loss details.
 
 ---
 
@@ -415,8 +415,7 @@ See [LLM Providers](llm-providers.md) for full setup including local servers (LM
 ## Uninstall
 
 To completely remove memtomem, see the
-[Uninstalling memtomem](user-guide.md#uninstalling-memtomem) section of the
-User Guide. The short version:
+[Uninstalling memtomem](uninstall.md) guide. The short version:
 
 ```bash
 # 1. Remove MCP server from your editor config (see table below)
