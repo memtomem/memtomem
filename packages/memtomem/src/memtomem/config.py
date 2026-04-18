@@ -277,9 +277,7 @@ class QueryExpansionConfig(BaseSettings):
 class ImportanceConfig(BaseSettings):
     enabled: bool = False
     max_boost: float = 1.5
-    weights: Annotated[list[float], REPLACE] = Field(
-        default_factory=lambda: [0.3, 0.2, 0.3, 0.2]
-    )
+    weights: Annotated[list[float], REPLACE] = Field(default_factory=lambda: [0.3, 0.2, 0.3, 0.2])
 
     @field_validator("max_boost")
     @classmethod
@@ -649,7 +647,9 @@ def _config_d_path() -> Path:
 
 def _merge_strategy_for(section_cls: type, field_name: str) -> MergeStrategy | None:
     """Return the ``MergeStrategy`` annotated on a field, or None if scalar."""
-    info = section_cls.model_fields.get(field_name) if hasattr(section_cls, "model_fields") else None
+    info = (
+        section_cls.model_fields.get(field_name) if hasattr(section_cls, "model_fields") else None
+    )
     if info is None:
         return None
     for m in info.metadata:
@@ -709,9 +709,7 @@ def load_config_d(config: Mem2MemConfig) -> None:
             section_obj = getattr(config, section_name, None)
             if section_obj is None or not isinstance(updates, dict):
                 if section_obj is None and isinstance(updates, dict):
-                    _log.warning(
-                        "Unknown config section '%s' in %s (ignored)", section_name, path
-                    )
+                    _log.warning("Unknown config section '%s' in %s (ignored)", section_name, path)
                 continue
             section_cls = type(section_obj)
             for key, value in updates.items():

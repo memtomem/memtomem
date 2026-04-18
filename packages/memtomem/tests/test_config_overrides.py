@@ -150,9 +150,7 @@ def test_config_d_append_merges_with_defaults(
         assert str(original) in after
 
 
-def test_config_d_append_dedupes(
-    config_d_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_config_d_append_dedupes(config_d_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Duplicate APPEND entries across fragments collapse to one."""
     _clear_all_memtomem_env(monkeypatch)
     (config_d_dir / "01-a.json").write_text(
@@ -166,9 +164,7 @@ def test_config_d_append_dedupes(
     assert cfg.indexing.exclude_patterns == ["*.tmp", "*.log", "*.bak"]
 
 
-def test_config_d_replace_overwrites(
-    config_d_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_config_d_replace_overwrites(config_d_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """REPLACE list field: last fragment wins, prior list discarded."""
     _clear_all_memtomem_env(monkeypatch)
     (config_d_dir / "01-a.json").write_text(
@@ -182,9 +178,7 @@ def test_config_d_replace_overwrites(
     assert cfg.search.rrf_weights == [0.3, 0.7]
 
 
-def test_config_d_scalar_last_wins(
-    config_d_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_config_d_scalar_last_wins(config_d_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Scalar field: last fragment applied wins."""
     _clear_all_memtomem_env(monkeypatch)
     (config_d_dir / "01-a.json").write_text(
@@ -221,9 +215,7 @@ def test_config_d_unknown_section_warned_but_not_fatal(
 
     _clear_all_memtomem_env(monkeypatch)
     (config_d_dir / "a.json").write_text(
-        json.dumps(
-            {"storage": {"sqlite_path": "/ok.db"}, "nope_not_a_section": {"x": 1}}
-        ),
+        json.dumps({"storage": {"sqlite_path": "/ok.db"}, "nope_not_a_section": {"x": 1}}),
         encoding="utf-8",
     )
     cfg = Mem2MemConfig()
