@@ -85,12 +85,21 @@ set `MEMTOMEM_TOOL_MODE=standard` or `full` (see the
 [Tool Mode Configuration](#tool-mode-configuration) section below)
 you can call them as top-level tools named `mem_<action>` instead.
 
+**You**: "Start a developer session titled 'Bug fix: auth timeout'."
+
+Claude calls:
+
+```python
+mem_do(
+  action="session_start",
+  params={"agent_id": "developer", "title": "Bug fix: auth timeout"},
+)
 ```
-> mem_do(
-    action="session_start",
-    params={"agent_id": "developer", "title": "Bug fix: auth timeout"}
-  )
-→ Session started: a1b2c3d4-...
+
+Response:
+
+```
+Session started: a1b2c3d4-...
 - Title: Bug fix: auth timeout
 - Agent: developer
 - Namespace: default
@@ -100,21 +109,20 @@ The optional `title` parameter gives the session a human-readable name that appe
 
 ### Working Memory During Debug
 
+**You**: "Jot down the bug context: UserService.login() throws NPE when email is null."
+
+Claude calls `mem_do(action="scratch_set", params={"key": "bug_context", "value": "UserService.login() throws NPE when email is null"})` → `Stored: bug_context [session: a1b2c3d4...]`.
+
+**You**: "And a fix idea: add a null check before email.toLowerCase()."
+
+Claude calls `mem_do(action="scratch_set", params={"key": "fix_idea", "value": "Add null check before email.toLowerCase()"})` → `Stored: fix_idea [session: a1b2c3d4...]`.
+
+**You**: "Show me what's in working memory."
+
+Claude calls `mem_do(action="scratch_get")` and returns:
+
 ```
-> mem_do(
-    action="scratch_set",
-    params={"key": "bug_context", "value": "UserService.login() throws NPE when email is null"}
-  )
-→ Stored: bug_context [session: a1b2c3d4...]
-
-> mem_do(
-    action="scratch_set",
-    params={"key": "fix_idea", "value": "Add null check before email.toLowerCase()"}
-  )
-→ Stored: fix_idea [session: a1b2c3d4...]
-
-> mem_do(action="scratch_get")
-→ Working memory: 2 entries
+Working memory: 2 entries
 
   bug_context: UserService.login() throws NPE when email is nul...
   fix_idea: Add null check before email.toLowerCase()...
@@ -122,29 +130,38 @@ The optional `title` parameter gives the session a human-readable name that appe
 
 ### Save Fix as Procedure
 
+**You**: "Save this fix as a reusable procedure named 'NPE Fix Pattern' — trigger: NPE in service layer. Steps: (1) check input params for null, (2) add @NonNull annotation, (3) write a unit test for the null case. Tag with java and debugging."
+
+Claude calls:
+
+```python
+mem_do(
+  action="procedure_save",
+  params={
+    "name": "NPE Fix Pattern",
+    "steps": "1. Check input params for null\n2. Add @NonNull annotation\n3. Write unit test for null case",
+    "trigger": "NPE in service layer",
+    "tags": ["java", "debugging"],
+  },
+)
 ```
-> mem_do(
-    action="procedure_save",
-    params={
-      "name": "NPE Fix Pattern",
-      "steps": "1. Check input params for null\n2. Add @NonNull annotation\n3. Write unit test for null case",
-      "trigger": "NPE in service layer",
-      "tags": ["java", "debugging"]
-    }
-  )
-→ Memory added to ~/.memtomem/memories/procedures/npe-fix-pattern.md
+
+Response:
+
+```
+Memory added to ~/.memtomem/memories/procedures/npe-fix-pattern.md
 - Chunks indexed: 1
 - File: ~/.memtomem/memories/procedures/npe-fix-pattern.md
 ```
 
 ### Promote Working Memory to Long-Term
 
+**You**: "Promote the bug_context scratch entry to long-term as 'Login NPE Root Cause', tags bugfix and java."
+
+Claude calls `mem_do(action="scratch_promote", params={"key": "bug_context", "title": "Login NPE Root Cause", "tags": ["bugfix", "java"]})` and returns:
+
 ```
-> mem_do(
-    action="scratch_promote",
-    params={"key": "bug_context", "title": "Login NPE Root Cause", "tags": ["bugfix", "java"]}
-  )
-→ Promoted 'bug_context' to long-term memory.
+Promoted 'bug_context' to long-term memory.
 Memory added to ~/.memtomem/memories/2026-04-11.md
 - Chunks indexed: 1
 - File: ~/.memtomem/memories/2026-04-11.md
@@ -152,12 +169,12 @@ Memory added to ~/.memtomem/memories/2026-04-11.md
 
 ### Session End
 
+**You**: "Wrap up the session. Summary: fixed login NPE, saved fix procedure."
+
+Claude calls `mem_do(action="session_end", params={"summary": "Fixed login NPE, saved fix procedure"})` and returns:
+
 ```
-> mem_do(
-    action="session_end",
-    params={"summary": "Fixed login NPE, saved fix procedure"}
-  )
-→ Session ended: a1b2c3d4-...
+Session ended: a1b2c3d4-...
 - Events: 4 (query:2, add:2)
 - Summary: Fixed login NPE, saved fix procedure...
 - Working memory cleaned: 1 entries
@@ -165,9 +182,12 @@ Memory added to ~/.memtomem/memories/2026-04-11.md
 
 ### Next Day — Retrieve Procedure
 
+**You**: "Do I have anything saved about null pointer exception fixes?"
+
+Claude calls `mem_search(query="null pointer exception fix", source_filter="procedures")` and returns:
+
 ```
-> mem_search(query="null pointer exception fix", source_filter="procedures")
-→ [1] Procedure: NPE Fix Pattern (score: 0.85)
+[1] Procedure: NPE Fix Pattern (score: 0.85)
   Trigger: NPE in service layer
   Steps: 1. Check input params...
 ```
@@ -195,22 +215,18 @@ sequenceDiagram
 
 ### Register Agents
 
+**You**: "Register a researcher agent ('Research and analysis agent') and a coder agent ('Code implementation agent')."
+
+Claude calls `mem_do(action="agent_register", params={"agent_id": "researcher", "description": "Research and analysis agent"})` and then the same for `coder`. Responses:
+
 ```
-> mem_do(
-    action="agent_register",
-    params={"agent_id": "researcher", "description": "Research and analysis agent"}
-  )
-→ Agent registered: researcher
+Agent registered: researcher
 - Namespace: agent/researcher
 - Shared namespace: shared
 Use namespace='agent/researcher' for agent-specific memories,
 or namespace='shared' for cross-agent knowledge.
 
-> mem_do(
-    action="agent_register",
-    params={"agent_id": "coder", "description": "Code implementation agent"}
-  )
-→ Agent registered: coder
+Agent registered: coder
 - Namespace: agent/coder
 - Shared namespace: shared
 Use namespace='agent/coder' for agent-specific memories,
@@ -219,29 +235,37 @@ or namespace='shared' for cross-agent knowledge.
 
 ### Researcher Saves Findings
 
-`mem_add` is a core tool, so you can call it directly even in `core`
-mode:
+`mem_add` is a core tool, so it is available directly even in `core` mode.
+
+**You** (as the researcher): "Save this under agent/researcher — title 'GraphQL Federation Research', tags graphql and architecture: GraphQL federation allows composing multiple subgraphs. Apollo Gateway handles schema stitching."
+
+Claude calls:
+
+```python
+mem_add(
+  content="GraphQL federation allows composing multiple subgraphs. Apollo Gateway handles schema stitching.",
+  title="GraphQL Federation Research",
+  tags=["graphql", "architecture"],
+  namespace="agent/researcher",
+)
+```
+
+Response:
 
 ```
-> mem_add(
-    content="GraphQL federation allows composing multiple subgraphs. Apollo Gateway handles schema stitching.",
-    title="GraphQL Federation Research",
-    tags=["graphql", "architecture"],
-    namespace="agent/researcher"
-  )
-→ Memory added to ~/.memtomem/memories/2026-04-11.md
+Memory added to ~/.memtomem/memories/2026-04-11.md
 - Chunks indexed: 1
 - File: ~/.memtomem/memories/2026-04-11.md
 ```
 
 ### Share to Team
 
+**You**: "Share that chunk (abc123...) with the shared namespace."
+
+Claude calls `mem_do(action="agent_share", params={"chunk_id": "abc123...", "target": "shared"})` and returns:
+
 ```
-> mem_do(
-    action="agent_share",
-    params={"chunk_id": "abc123...", "target": "shared"}
-  )
-→ Shared to namespace 'shared'.
+Shared to namespace 'shared'.
 Memory added to ~/.memtomem/memories/2026-04-11.md
 - Chunks indexed: 1
 - File: ~/.memtomem/memories/2026-04-11.md
@@ -249,13 +273,13 @@ Memory added to ~/.memtomem/memories/2026-04-11.md
 
 ### Coder Searches Shared + Own Scope
 
+**You** (as the coder): "Search for GraphQL architecture notes across my own namespace and the shared one."
+
+Claude calls `mem_do(action="agent_search", params={"query": "GraphQL architecture", "agent_id": "coder", "include_shared": true})` and returns:
+
 ```
-> mem_do(
-    action="agent_search",
-    params={"query": "GraphQL architecture", "agent_id": "coder", "include_shared": true}
-  )
-→ [1] GraphQL federation allows composing... (shared)
-  [2] Apollo Gateway handles schema... (agent/researcher)
+[1] GraphQL federation allows composing... (shared)
+[2] Apollo Gateway handles schema... (agent/researcher)
 ```
 
 ---
@@ -273,9 +297,12 @@ flowchart LR
 
 ### Health Check
 
+**You**: "Run a memory health check."
+
+Claude calls `mem_do(action="eval")` and returns:
+
 ```
-> mem_do(action="eval")
-→ ## Memory Health Report
+## Memory Health Report
 
 ### Index Stats
 - Total chunks: 384
@@ -297,9 +324,12 @@ flowchart LR
 
 ### Find Consolidation Candidates
 
+**You**: "Show me consolidation candidates (min group size 3)."
+
+Claude calls `mem_do(action="consolidate", params={"min_group_size": 3})` and returns:
+
 ```
-> mem_do(action="consolidate", params={"min_group_size": 3})
-→ Consolidation candidates: 5 groups
+Consolidation candidates: 5 groups
 
 ### Group 0: user-guide.md
   Chunks: 16, ~5800 tokens
@@ -310,15 +340,24 @@ flowchart LR
 
 ### Apply Consolidation (Agent Writes Summary)
 
+**You**: "Consolidate group 0 with this summary: 'User guide covers: quick start (ollama + MCP setup), search/add/index workflows, namespace management, Google Drive multi-device setup, and Web UI dashboard.'"
+
+Claude calls:
+
+```python
+mem_do(
+  action="consolidate_apply",
+  params={
+    "group_id": 0,
+    "summary": "User guide covers: quick start (ollama + MCP setup), search/add/index workflows, namespace management, Google Drive multi-device setup, and Web UI dashboard.",
+  },
+)
 ```
-> mem_do(
-    action="consolidate_apply",
-    params={
-      "group_id": 0,
-      "summary": "User guide covers: quick start (ollama + MCP setup), search/add/index workflows, namespace management, Google Drive multi-device setup, and Web UI dashboard."
-    }
-  )
-→ Consolidation applied for group 0.
+
+Response:
+
+```
+Consolidation applied for group 0.
 Memory added to ~/.memtomem/memories/2026-04-12.md
 - Chunks indexed: 1
 - File: ~/.memtomem/memories/2026-04-12.md
@@ -341,19 +380,29 @@ background consolidation, register an `auto_consolidate` policy instead —
 it produces a deterministic heuristic summary per source file and runs on
 demand through `mem_policy_run`:
 
-```
-> mem_do(
-    action="policy_add",
-    params={
-      "name": "weekly-consolidate",
-      "policy_type": "auto_consolidate",
-      "config": "{\"min_group_size\": 5, \"max_groups\": 10, \"keep_originals\": true}"
-    }
-  )
-→ Policy 'weekly-consolidate' created (type=auto_consolidate, id=1)
+**You**: "Create an `auto_consolidate` policy named 'weekly-consolidate' with min_group_size=5, max_groups=10, keep_originals=true."
 
-> mem_do(action="policy_run", params={"name": "weekly-consolidate", "dry_run": true})
-→ [DRY RUN] Would consolidate 3 groups: meeting-notes.md, daily-2026-04-10.md, project-roadmap.md
+Claude calls:
+
+```python
+mem_do(
+  action="policy_add",
+  params={
+    "name": "weekly-consolidate",
+    "policy_type": "auto_consolidate",
+    "config": "{\"min_group_size\": 5, \"max_groups\": 10, \"keep_originals\": true}",
+  },
+)
+```
+
+Response: `Policy 'weekly-consolidate' created (type=auto_consolidate, id=1)`.
+
+**You**: "Dry-run the weekly-consolidate policy."
+
+Claude calls `mem_do(action="policy_run", params={"name": "weekly-consolidate", "dry_run": true})` and returns:
+
+```
+[DRY RUN] Would consolidate 3 groups: meeting-notes.md, daily-2026-04-10.md, project-roadmap.md
 ```
 
 Key differences between the two paths:
@@ -376,9 +425,12 @@ searchable by default, set `search.system_namespace_prefixes = []`.
 
 ### Reflect on Patterns
 
+**You**: "Reflect on my memory — what patterns and gaps are there?"
+
+Claude calls `mem_do(action="reflect")` and returns:
+
 ```
-> mem_do(action="reflect")
-→ ## Memory Reflection Report
+## Memory Reflection Report
 
 ### Frequently Accessed Topics
   10x — deployment steps
@@ -398,15 +450,24 @@ Use `mem_reflect_save` to record insights derived from this report.
 
 ### Save Insight
 
+**You**: "Save this insight, tag strategy: 'Deployment and architecture decisions are the most frequently accessed topics. Knowledge gaps exist in Kubernetes and Redis areas — consider adding documentation.'"
+
+Claude calls:
+
+```python
+mem_do(
+  action="reflect_save",
+  params={
+    "insight": "Deployment and architecture decisions are the most frequently accessed topics. Knowledge gaps exist in Kubernetes and Redis areas — consider adding documentation.",
+    "tags": ["strategy"],
+  },
+)
 ```
-> mem_do(
-    action="reflect_save",
-    params={
-      "insight": "Deployment and architecture decisions are the most frequently accessed topics. Knowledge gaps exist in Kubernetes and Redis areas — consider adding documentation.",
-      "tags": ["strategy"]
-    }
-  )
-→ Insight saved.
+
+Response:
+
+```
+Insight saved.
 Memory added to ~/.memtomem/memories/reflections.md
 - Chunks indexed: 1
 - File: ~/.memtomem/memories/reflections.md
@@ -420,27 +481,36 @@ Fine-tuning search behavior with per-query weight adjustment.
 
 ### Default Search (Equal BM25 + Dense)
 
+**You**: "Search for deployment automation, top 3 results."
+
+Claude calls `mem_search(query="deployment automation", top_k=3)` and returns:
+
 ```
-> mem_search(query="deployment automation", top_k=3)
-→ [1] score=0.0328 | CI/CD pipeline configuration...
+[1] score=0.0328 | CI/CD pipeline configuration...
 ```
 
 ### Keyword-Heavy Search (BM25 Boosted)
 
 When you need exact keyword matches (e.g., error messages, config keys):
 
+**You**: "Find mentions of `MEMTOMEM_EMBEDDING__DIMENSION` — prefer exact keyword matches."
+
+Claude calls `mem_search(query="MEMTOMEM_EMBEDDING__DIMENSION", bm25_weight=3.0, dense_weight=0.5)` and returns:
+
 ```
-> mem_search(query="MEMTOMEM_EMBEDDING__DIMENSION", bm25_weight=3.0, dense_weight=0.5)
-→ [1] score=0.0984 | Configuration section with exact variable name...
+[1] score=0.0984 | Configuration section with exact variable name...
 ```
 
 ### Semantic-Heavy Search (Dense Boosted)
 
 When you need conceptual matches (e.g., "how does X work"):
 
+**You**: "How does the search pipeline combine results? Prefer semantic matches."
+
+Claude calls `mem_search(query="how does the search pipeline combine results", bm25_weight=0.5, dense_weight=3.0)` and returns:
+
 ```
-> mem_search(query="how does the search pipeline combine results", bm25_weight=0.5, dense_weight=3.0)
-→ [1] score=0.0984 | Reciprocal Rank Fusion merges BM25 and dense...
+[1] score=0.0984 | Reciprocal Rank Fusion merges BM25 and dense...
 ```
 
 ---
@@ -451,17 +521,27 @@ Using built-in templates for consistent knowledge capture.
 
 ### Architecture Decision Record
 
+**You**: "Record an ADR — title 'Use PostgreSQL', status accepted, context 'Need ACID for financial data', decision 'PostgreSQL with pgvector', consequences 'Team training needed'."
+
+Claude calls:
+
+```python
+mem_add(
+  template="adr",
+  content='{"title": "Use PostgreSQL", "status": "accepted", "context": "Need ACID for financial data", "decision": "PostgreSQL with pgvector", "consequences": "Team training needed"}',
+)
 ```
-> mem_add(
-    template="adr",
-    content='{"title": "Use PostgreSQL", "status": "accepted", "context": "Need ACID for financial data", "decision": "PostgreSQL with pgvector", "consequences": "Team training needed"}'
-  )
-→ Memory added to ~/.memtomem/memories/2026-04-11.md
+
+Response:
+
+```
+Memory added to ~/.memtomem/memories/2026-04-11.md
 - Chunks indexed: 1
 - File: ~/.memtomem/memories/2026-04-11.md
 ```
 
 Contents appended to the target file:
+
 ```markdown
 ## ADR: Use PostgreSQL
 **Status**: accepted
@@ -472,12 +552,21 @@ Contents appended to the target file:
 
 ### Meeting Notes
 
+**You**: "Log today's Sprint Planning meeting — attendees Alice, Bob; agenda Q2 roadmap; decision prioritize auth module; action item Bob: JWT by Friday."
+
+Claude calls:
+
+```python
+mem_add(
+  template="meeting",
+  content='{"title": "Sprint Planning", "attendees": "Alice, Bob", "agenda": "Q2 roadmap", "decisions": "Prioritize auth module", "action_items": "Bob: JWT by Friday"}',
+)
 ```
-> mem_add(
-    template="meeting",
-    content='{"title": "Sprint Planning", "attendees": "Alice, Bob", "agenda": "Q2 roadmap", "decisions": "Prioritize auth module", "action_items": "Bob: JWT by Friday"}'
-  )
-→ Memory added to ~/.memtomem/memories/2026-04-11.md
+
+Response:
+
+```
+Memory added to ~/.memtomem/memories/2026-04-11.md
 - Chunks indexed: 1
 - File: ~/.memtomem/memories/2026-04-11.md
 ```
@@ -486,12 +575,21 @@ The `meeting` template auto-fills `date` to today when the field is omitted from
 
 ### Debug Log (Plain Text)
 
+**You**: "Log a debug note: server returned 500 on /api/users after deploying v2.3."
+
+Claude calls:
+
+```python
+mem_add(
+  template="debug",
+  content="Server returned 500 on /api/users after deploying v2.3",
+)
 ```
-> mem_add(
-    template="debug",
-    content="Server returned 500 on /api/users after deploying v2.3"
-  )
-→ Memory added to ~/.memtomem/memories/2026-04-11.md
+
+Response:
+
+```
+Memory added to ~/.memtomem/memories/2026-04-11.md
 - Chunks indexed: 1
 - File: ~/.memtomem/memories/2026-04-11.md
 ```
@@ -514,17 +612,22 @@ When a plain string (not JSON) is passed to a template, memtomem fills the templ
 
 Index external web pages as searchable memory.
 
+**You**: "Fetch and index https://docs.example.com/api/authentication, tags reference and api."
+
+Claude calls `mem_do(action="fetch", params={"url": "https://docs.example.com/api/authentication", "tags": ["reference", "api"]})` and returns:
+
 ```
-> mem_do(
-    action="fetch",
-    params={"url": "https://docs.example.com/api/authentication", "tags": ["reference", "api"]}
-  )
-→ Fetched and indexed: https://docs.example.com/api/authentication
+Fetched and indexed: https://docs.example.com/api/authentication
 - Saved to: ~/.memtomem/memories/_fetched/docs-example-com-api-authentication.md
 - Chunks indexed: 3
+```
 
-> mem_search(query="API authentication bearer token")
-→ [1] score=0.85 | docs-example-com-api-authentication.md
+**You**: "Search for API authentication bearer token."
+
+Claude calls `mem_search(query="API authentication bearer token")` and returns:
+
+```
+[1] score=0.85 | docs-example-com-api-authentication.md
   Use **Bearer tokens** for API authentication...
 ```
 

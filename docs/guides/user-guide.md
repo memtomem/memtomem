@@ -1527,7 +1527,7 @@ SQLite allows only one writer at a time. If the MCP server and Web UI server bot
 
 Running both `memtomem-server` (MCP) and `memtomem-web` simultaneously is supported but has caveats:
 
-- **File watcher overlap**: both servers watch `memory_dirs`. A file created by one server may be re-indexed by the other, causing duplicate chunks. Restart the server that has stale data, or run `mem_index(force=True)` to reconcile.
+- **File watcher overlap**: both servers watch `memory_dirs`. A file created by one server may be re-indexed by the other, causing duplicate chunks. Restart the server that has stale data, or force a full re-index (`mem_index(force=True)`) to reconcile.
 - **Orphaned index entries**: interrupted concurrent writes could previously leave orphaned FTS/vec entries causing `constraint failed` errors on subsequent indexing. This is now handled automatically — `upsert_chunks` defensively cleans orphans before INSERT.
 - **Recommendation**: for typical usage, run only the MCP server. Launch the Web UI on-demand when you need visual browsing.
 
