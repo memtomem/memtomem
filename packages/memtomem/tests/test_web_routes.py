@@ -755,3 +755,41 @@ class TestUnicodePaths:
         # Without normalization the route would 403 here; the streaming
         # response itself is short-circuited by ``_fake_stream``.
         assert resp.status_code == 200, resp.text
+
+    async def test_trigger_index_matches_nfd_memory_dir_with_nfc_query(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        # Reproducer for #238 (4): trigger_index uses Path.is_relative_to
+        # after .resolve() on both sides. .resolve() does not Unicode-
+        # normalize, so an NFD config entry vs an NFC user query yields
+        # differing .parts and the is_relative_to check fails.
+        nfd_dir = tmp_path / self._nfd("내 드라이브")
+        nfd_dir.mkdir()
+        app.state.config.indexing.memory_dirs = [nfd_dir]
+
+        nfc_path = tmp_path / self._nfc("내 드라이브") / "subdir"
+        resp = await client.post("/api/index", json={"path": str(nfc_path)})
+        assert resp.status_code == 200, resp.text
+
+    async def test_promote_scratch_matches_nfd_memory_dir_with_nfc_target(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        # Reproducer for #238 (5): promote_scratch mirrors trigger_index —
+        # is_relative_to between resolved NFD base and resolved NFC target
+        # fails on parts comparison.
+        nfd_dir = tmp_path / self._nfd("내 드라이브")
+        nfd_dir.mkdir()
+        app.state.config.indexing.memory_dirs = [nfd_dir]
+
+        app.state.storage.scratch_get = AsyncMock(
+            return_value={"key": "note", "value": "promote me"}
+        )
+        app.state.storage.scratch_promote = AsyncMock()
+
+        nfc_target = tmp_path / self._nfc("내 드라이브") / "today.md"
+        with patch("memtomem.tools.memory_writer.append_entry"):
+            resp = await client.post(
+                "/api/scratch/note/promote",
+                json={"file": str(nfc_target)},
+            )
+        assert resp.status_code == 200, resp.text

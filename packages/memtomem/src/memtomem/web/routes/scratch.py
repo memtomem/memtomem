@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.web.deps import get_config, get_storage
 from memtomem.web.schemas.scratch import (
     ScratchDeleteResponse,
@@ -73,11 +74,13 @@ async def promote_scratch(
     from memtomem.tools.memory_writer import append_entry
 
     bases = [Path(d).expanduser().resolve() for d in config.indexing.memory_dirs]
+    bases_norm = [Path(norm_path(b)) for b in bases]
     if body.file:
         target = Path(body.file).expanduser().resolve()
         if target.is_symlink():
             raise HTTPException(status_code=403, detail="Symlinked targets are not allowed")
-        if not any(target.is_relative_to(b) for b in bases):
+        target_norm = Path(norm_path(target))
+        if not any(target_norm.is_relative_to(b) for b in bases_norm):
             raise HTTPException(
                 status_code=403, detail="Path is outside configured memory directories"
             )

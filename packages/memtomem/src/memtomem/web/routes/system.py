@@ -478,8 +478,9 @@ async def trigger_index(
     config=Depends(get_config),
 ) -> IndexResponse:
     resolved = Path(req.path).expanduser().resolve()
-    memory_dirs = [Path(d).expanduser().resolve() for d in config.indexing.memory_dirs]
-    if not any(resolved.is_relative_to(d) for d in memory_dirs):
+    resolved_norm = Path(norm_path(resolved))
+    memory_dirs = [Path(norm_path(Path(d).expanduser())) for d in config.indexing.memory_dirs]
+    if not any(resolved_norm.is_relative_to(d) for d in memory_dirs):
         raise HTTPException(status_code=403, detail="Path is outside configured memory directories")
     stats = await index_engine.index_path(
         resolved,
