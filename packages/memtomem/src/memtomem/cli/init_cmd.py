@@ -398,6 +398,143 @@ def _fmt_config_value(v: object) -> str:
     return json.dumps(v, default=str)
 
 
+# Canonical config keys that hold credentials, endpoints, or user-curated
+# data the wizard does not ask about. ``--fresh`` MUST preserve these even
+# when they're non-default and wizard-untouched, otherwise a single
+# `mm init --fresh` would silently wipe API keys, custom endpoints, exclude
+# patterns, namespace rules, etc.
+#
+# Derivation (re-runnable): grep for credential/endpoint/list patterns in
+# ``packages/memtomem/src/memtomem/config.py`` (commit 0e61e7d):
+#   credentials → ``api_key|secret|token|password|bearer|credential``
+#   endpoints   → ``base_url|endpoint|_url|host``
+#   user data   → list/dict fields that aren't pure tuning numbers
+#
+# Maintenance: when adding a new config field that holds credentials,
+# endpoints, or user-curated data the wizard doesn't ask about, add it
+# here. Verify with ``pytest -k fresh_preserves_user_data_keys``.
+_FRESH_PRESERVE_KEYS: frozenset[str] = frozenset(
+    {
+        # Credentials
+        "embedding.api_key",
+        "rerank.api_key",
+        "llm.api_key",
+        "webhook.secret",
+        # Endpoints
+        "embedding.base_url",
+        "llm.base_url",
+        "webhook.url",
+        # User-curated lists / rules (wizard doesn't ask)
+        "indexing.exclude_patterns",
+        "indexing.supported_extensions",
+        "namespace.rules",
+        "search.system_namespace_prefixes",
+        "webhook.events",
+    }
+)
+
+
+def _compute_fresh_drops(
+    existing: dict,
+    wizard_touched: set[str],
+) -> list[tuple[str, object, object]]:
+    """Return ``[(flat_key, current_value, default_value), ...]`` for the
+    keys ``--fresh`` will reset to the built-in default.
+
+    A key is a drop candidate iff ALL hold:
+      - present in ``Mem2MemConfig().model_dump()`` flat-key set — keys
+        outside this canonical shape are user custom extensions and are
+        preserved unconditionally;
+      - NOT in ``wizard_touched`` — those get overwritten by ``init_data``
+        anyway, no need to drop them first;
+      - NOT in :data:`_FRESH_PRESERVE_KEYS` — credentials, endpoints,
+        user-curated data are never auto-dropped;
+      - current value differs from the built-in default — already-default
+        values are no-ops on disk after merge.
+    """
+    from memtomem.config import Mem2MemConfig
+
+    defaults_flat = _flatten_config(Mem2MemConfig().model_dump(mode="json"))
+    existing_flat = _flatten_config(existing)
+    drops: list[tuple[str, object, object]] = []
+    for key, value in existing_flat.items():
+        if key not in defaults_flat:
+            continue
+        if key in wizard_touched:
+            continue
+        if key in _FRESH_PRESERVE_KEYS:
+            continue
+        default_val = defaults_flat[key]
+        if default_val == value:
+            continue
+        drops.append((key, value, default_val))
+    return drops
+
+
+def _drop_flat_keys(existing: dict, drops: list[tuple[str, object, object]]) -> None:
+    """Remove each flat key from the nested ``existing`` dict, then prune
+    parent dicts that become empty."""
+    for flat_key, _, _ in drops:
+        parts = flat_key.split(".")
+        path: list[tuple[dict, str]] = []
+        cur: object = existing
+        for p in parts[:-1]:
+            if not isinstance(cur, dict) or p not in cur:
+                cur = None
+                break
+            path.append((cur, p))
+            cur = cur[p]
+        if isinstance(cur, dict) and parts[-1] in cur:
+            del cur[parts[-1]]
+            for parent, key in reversed(path):
+                if isinstance(parent[key], dict) and not parent[key]:
+                    del parent[key]
+                else:
+                    break
+
+
+def _emit_reset_block(
+    drops: list[tuple[str, object, object]],
+    backup_path: Path | None,
+) -> None:
+    """Print the ``--fresh`` outcome — which keys were reset to default,
+    where the backup lives, and the web-UI restart caveat.
+
+    With zero drops we still print one informational line so the user knows
+    why ``--fresh`` produced no visible change."""
+    if not drops:
+        click.echo()
+        click.secho(
+            "  --fresh: no wizard-untouched leftovers to reset.",
+            fg="cyan",
+        )
+        return
+
+    click.echo()
+    click.secho(
+        "  Reset to default (--fresh dropped wizard-untouched leftovers):",
+        fg="cyan",
+    )
+    for key, value, default_val in sorted(drops):
+        click.secho(
+            f"    [-] {key}: {_fmt_config_value(value)} → "
+            f"{_fmt_config_value(default_val)} (default)",
+            fg="cyan",
+        )
+    if backup_path is not None:
+        click.echo()
+        click.echo(f"  Backup saved to: {backup_path}")
+    click.echo()
+    click.secho(
+        "  [!] If the web UI is running, restart it to pick up the new config.",
+        fg="yellow",
+    )
+    click.secho(
+        "      Otherwise a web save may restore the reset values.",
+        fg="yellow",
+    )
+
+
 def _emit_preserved_block(
     existing_before: dict,
     written: dict,
@@ -449,8 +586,18 @@ def _emit_preserved_block(
     click.echo("  to restore mmr.enabled=false).")
 
 
-def _write_config_and_summary(state: dict, base_dir: Path | None = None) -> None:
-    """Write config files and show summary (runs after all steps)."""
+def _write_config_and_summary(
+    state: dict, base_dir: Path | None = None, fresh: bool = False
+) -> None:
+    """Write config files and show summary (runs after all steps).
+
+    When ``fresh=True``, drop wizard-untouched canonical settings whose
+    value differs from the built-in default before merging the wizard's
+    choices. Credentials, endpoints, and user-curated lists in
+    :data:`_FRESH_PRESERVE_KEYS` are preserved unconditionally; user-added
+    custom keys outside the canonical ``Mem2MemConfig`` shape are also
+    preserved. A timestamped backup is written first iff at least one key
+    is going to be dropped — otherwise the run is a no-op on disk."""
     if base_dir is None:
         base_dir = Path.home()
     config_dir = base_dir / ".memtomem"
@@ -518,6 +665,35 @@ def _write_config_and_summary(state: dict, base_dir: Path | None = None) -> None
             "model": state["rerank_model"],
         }
 
+    # Compute wizard-touched keys upfront — both --fresh drop logic and the
+    # post-write Preserved block need them.
+    wizard_touched_keys = _flatten_init_data_keys(init_data)
+
+    # --fresh: drop wizard-untouched non-default canonical leftovers from
+    # `existing` BEFORE merge so they don't survive the round-trip. Always
+    # back up first, but only if there's at least one drop — otherwise we'd
+    # litter ~/.memtomem/ with redundant `.bak-<ts>` files on every re-run.
+    fresh_drops: list[tuple[str, object, object]] = []
+    fresh_backup_path: Path | None = None
+    if fresh:
+        fresh_drops = _compute_fresh_drops(existing, wizard_touched_keys)
+        if fresh_drops and config_path.exists():
+            fresh_backup_path = config_path.with_suffix(f".json.bak-{int(time.time())}")
+            try:
+                shutil.copy2(config_path, fresh_backup_path)
+            except OSError as exc:
+                # --fresh is destructive; refuse to drop without a recovery
+                # path. The user can re-run without --fresh, or fix the
+                # backup target (disk full / permission) and retry.
+                click.secho(
+                    f"  Error: --fresh requires a successful backup but "
+                    f"copy to {fresh_backup_path} failed ({exc}). "
+                    "Aborting to avoid data loss.",
+                    fg="red",
+                )
+                raise SystemExit(1) from exc
+            _drop_flat_keys(existing, fresh_drops)
+
     # Merge: init fields overwrite, non-init sections/fields preserved
     for section, fields in init_data.items():
         if section not in existing:
@@ -530,15 +706,20 @@ def _write_config_and_summary(state: dict, base_dir: Path | None = None) -> None
     config_path.write_text(json.dumps(existing, indent=2, default=str), encoding="utf-8")
     click.echo(f"  Config: {config_path}")
 
-    # Flag non-default values preserved from the previous config that the
-    # wizard never asked about — e.g. mmr.enabled=true left over from the
-    # Web UI's full-config dump. See docs/config-lifecycle.md (follow-up).
-    wizard_touched_keys = _flatten_init_data_keys(init_data)
-    try:
-        written = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        written = existing  # unreachable in practice; stay safe
-    _emit_preserved_block(existing_before, written, wizard_touched_keys)
+    if fresh:
+        # Reset block replaces Preserved when --fresh was passed; the keys it
+        # would have flagged are exactly what we just dropped (modulo the
+        # preserve list).
+        _emit_reset_block(fresh_drops, fresh_backup_path)
+    else:
+        # Flag non-default values preserved from the previous config that
+        # the wizard never asked about — e.g. mmr.enabled=true left over
+        # from the Web UI's full-config dump.
+        try:
+            written = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            written = existing  # unreachable in practice; stay safe
+        _emit_preserved_block(existing_before, written, wizard_touched_keys)
 
     # Build MCP server command
     if source_install and source_dir:
@@ -668,6 +849,20 @@ _MODEL_DIMS: dict[str, int] = {
 @click.option("--decay", is_flag=True, default=False, help="Enable time-decay")
 @click.option("--api-key", default=None, help="OpenAI API key")
 @click.option("--mcp", "mcp_mode", type=click.Choice(["claude", "json", "skip"]), default=None)
+@click.option(
+    "--fresh",
+    is_flag=True,
+    default=False,
+    help=(
+        "Reset wizard-untouched canonical settings to their built-in defaults. "
+        "Preserves user-added custom keys, credentials (api_key/secret), "
+        "endpoints (base_url/url), and user-curated lists (exclude_patterns, "
+        "namespace.rules, etc). Backs up the previous config.json to "
+        "config.json.bak-<ts> only if at least one key is dropped. For "
+        "fine-grained control, edit ~/.memtomem/config.json directly or use "
+        "the web UI."
+    ),
+)
 def init(
     non_interactive: bool,
     provider: str | None,
@@ -681,6 +876,7 @@ def init(
     decay: bool,
     api_key: str | None,
     mcp_mode: str | None,
+    fresh: bool,
 ) -> None:
     """Set up memtomem with an interactive wizard."""
     click.echo()
@@ -758,4 +954,4 @@ def init(
         ]
         run_steps(steps, state)
 
-    _write_config_and_summary(state)
+    _write_config_and_summary(state, fresh=fresh)

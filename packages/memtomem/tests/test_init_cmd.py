@@ -369,6 +369,348 @@ class TestPreservedSummary:
         assert data["embedding"]["provider"] == "none"
 
 
+class TestFreshFlag:
+    """``mm init --fresh`` drops wizard-untouched canonical leftovers
+    instead of merely flagging them in the Preserved block.
+
+    Phase 2 of the leftover-cleanup work (Phase 1 = surface; Phase 2 =
+    reset). Critical guards:
+      - never wipes user data / credentials (preserve list)
+      - always backs up before dropping anything
+      - idempotent: second run with nothing to drop is a no-op on disk
+      - keys outside the canonical Mem2MemConfig shape are preserved"""
+
+    def test_fresh_drops_preserved_mmr(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Seed ``mmr.enabled=true`` (non-default, wizard-untouched) and run
+        ``--fresh``: the key disappears, the section is pruned, a backup is
+        written, and the Reset block names the change in
+        ``before → after (default)`` form."""
+        from click import unstyle
+
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        config_dir = tmp_path / ".memtomem"
+        config_dir.mkdir()
+        config_path = config_dir / "config.json"
+        # Seed only the non-default key — default-matching siblings (e.g.
+        # lambda_param=0.7) wouldn't be dropped by --fresh anyway, and would
+        # keep the section from being pruned, hiding the assertion below.
+        config_path.write_text(
+            json.dumps({"mmr": {"enabled": True}}),
+            encoding="utf-8",
+        )
+
+        state = _make_init_state(tmp_path)
+        _write_config_and_summary(state, tmp_path, fresh=True)
+
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        # mmr.enabled non-default → dropped; section becomes empty → pruned.
+        assert "mmr" not in data, "mmr section should be pruned after --fresh"
+
+        backups = list(config_dir.glob("config.json.bak-*"))
+        assert len(backups) == 1, f"expected one backup, got {backups}"
+
+        out = unstyle(capsys.readouterr().out)
+        assert "Reset to default" in out
+        assert "[-] mmr.enabled: true → false (default)" in out
+        assert f"Backup saved to: {backups[0]}" in out
+        assert "restart it to pick up the new config" in out
+
+    @pytest.mark.parametrize(
+        "key,value",
+        [
+            # Credentials
+            ("embedding.api_key", "sk-test-xxx"),
+            ("rerank.api_key", "voyage-xxx"),
+            ("llm.api_key", "anthropic-xxx"),
+            ("webhook.secret", "hmac-secret"),
+            # Endpoints
+            ("embedding.base_url", "https://my-openai-proxy/v1"),
+            ("llm.base_url", "http://my-llm:8080"),
+            ("webhook.url", "https://ops.example.com/hook"),
+            # User-curated lists / rules
+            ("indexing.exclude_patterns", ["*.tmp", "node_modules/"]),
+            ("indexing.supported_extensions", [".rst", ".org"]),
+            (
+                "namespace.rules",
+                [{"path_glob": "work/**", "namespace": "work"}],
+            ),
+            ("search.system_namespace_prefixes", ["__system__:"]),
+            ("webhook.events", ["add"]),
+        ],
+    )
+    def test_fresh_preserves_user_data_keys(
+        self,
+        key: str,
+        value: object,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Each key in ``_FRESH_PRESERVE_KEYS`` must survive ``--fresh`` even
+        when it's non-default and wizard-untouched. This is the structural
+        guard tying the parametrize list to the preserve-list constant —
+        adding a new key to one without the other will fail this test."""
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        config_dir = tmp_path / ".memtomem"
+        config_dir.mkdir()
+        config_path = config_dir / "config.json"
+
+        # Seed the single user-data key into a nested config dict.
+        seed: dict = {}
+        cur: dict = seed
+        parts = key.split(".")
+        for p in parts[:-1]:
+            cur = cur.setdefault(p, {})
+        cur[parts[-1]] = value
+        config_path.write_text(json.dumps(seed), encoding="utf-8")
+
+        state = _make_init_state(tmp_path)
+        _write_config_and_summary(state, tmp_path, fresh=True)
+
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        cur2: object = data
+        for p in parts:
+            assert isinstance(cur2, dict) and p in cur2, (
+                f"--fresh wiped preserve-list key {key!r}; preserve list and "
+                "test parametrize have drifted apart"
+            )
+            cur2 = cur2[p]
+        assert cur2 == value, f"value for {key!r} mutated: {cur2!r} != {value!r}"
+
+    def test_fresh_preserves_memory_dirs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``indexing.memory_dirs`` is wizard-touched (the wizard always
+        rewrites it from ``state['memory_dir']``), so ``--fresh`` must NOT
+        list it as a drop candidate. The wizard's overwrite is independent
+        of ``--fresh`` and is not under test here.
+
+        Guard against a future refactor that moves memory_dirs out of
+        ``init_data`` — that would silently make ``--fresh`` a memory-dir
+        wiper, which is the most surprising data-loss path."""
+        from memtomem.cli.init_cmd import (
+            _compute_fresh_drops,
+            _flatten_init_data_keys,
+            _write_config_and_summary,
+        )
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        config_dir = tmp_path / ".memtomem"
+        config_dir.mkdir()
+        config_path = config_dir / "config.json"
+        config_path.write_text(
+            json.dumps({"indexing": {"memory_dirs": ["~/notes", "~/docs"]}}),
+            encoding="utf-8",
+        )
+
+        # Verify _compute_fresh_drops never selects memory_dirs (wizard-touched).
+        state = _make_init_state(tmp_path)
+        init_data_shape = {
+            "embedding": {},
+            "indexing": {"memory_dirs": []},
+            "namespace": {},
+            "search": {},
+            "decay": {},
+            "storage": {},
+        }
+        wizard_touched = _flatten_init_data_keys(init_data_shape)
+        assert "indexing.memory_dirs" in wizard_touched, (
+            "wizard_touched_keys must include indexing.memory_dirs — if it "
+            "doesn't, --fresh would wipe user memory dirs"
+        )
+
+        existing_seed = {"indexing": {"memory_dirs": ["~/notes", "~/docs"]}}
+        drops = _compute_fresh_drops(existing_seed, wizard_touched)
+        assert all(k != "indexing.memory_dirs" for k, _, _ in drops), (
+            "indexing.memory_dirs leaked into --fresh drop set"
+        )
+
+        # End-to-end: --fresh with memory_dirs seed completes without wiping
+        # data (the wizard then overwrites it from state, which is expected).
+        _write_config_and_summary(state, tmp_path, fresh=True)
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        assert "indexing" in data and "memory_dirs" in data["indexing"]
+
+    def test_fresh_keeps_user_custom_keys(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A custom key outside the canonical ``Mem2MemConfig`` shape must
+        survive ``--fresh`` regardless of preserve-list contents — drop logic
+        only considers canonical keys."""
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        config_dir = tmp_path / ".memtomem"
+        config_dir.mkdir()
+        config_path = config_dir / "config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "my_extension": {"foo": 1, "bar": "two"},
+                    "mmr": {"enabled": True},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        state = _make_init_state(tmp_path)
+        _write_config_and_summary(state, tmp_path, fresh=True)
+
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        assert data.get("my_extension") == {"foo": 1, "bar": "two"}
+        # Canonical leftover still gets dropped.
+        assert "mmr" not in data
+
+    def test_fresh_no_op_when_nothing_to_reset(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """If the existing config has no wizard-untouched non-default keys,
+        ``--fresh`` writes no backup and prints the no-leftovers message."""
+        from click import unstyle
+
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        config_dir = tmp_path / ".memtomem"
+        config_dir.mkdir()
+        # Seed only fields the wizard will overwrite — nothing untouched
+        # that differs from default.
+        config_path = config_dir / "config.json"
+        config_path.write_text(
+            json.dumps({"embedding": {"provider": "ollama"}}),
+            encoding="utf-8",
+        )
+
+        state = _make_init_state(tmp_path)
+        _write_config_and_summary(state, tmp_path, fresh=True)
+
+        backups = list(config_dir.glob("config.json.bak-*"))
+        assert backups == [], f"unexpected backup created: {backups}"
+
+        out = unstyle(capsys.readouterr().out)
+        assert "no wizard-untouched leftovers to reset" in out
+        assert "Reset to default" not in out
+
+    def test_fresh_with_non_interactive(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """``--fresh`` is compatible with ``-y`` (non-interactive) — drops
+        proceed without any prompt, the Reset block still prints, and the
+        normal Setup-complete summary is unaffected."""
+        from click import unstyle
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        config_dir = tmp_path / ".memtomem"
+        config_dir.mkdir()
+        config_path = config_dir / "config.json"
+        config_path.write_text(
+            json.dumps({"mmr": {"enabled": True}}),
+            encoding="utf-8",
+        )
+
+        result = CliRunner().invoke(
+            init,
+            ["-y", "--fresh", "--provider", "none", "--memory-dir", str(tmp_path / "mem")],
+        )
+        assert result.exit_code == 0, result.output
+
+        out = unstyle(result.output)
+        assert "Reset to default" in out
+        assert "Setup complete!" in out  # Phase 1 summary still emitted
+
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        assert "mmr" not in data
+
+    def test_fresh_handles_malformed_config(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Malformed ``config.json`` + ``--fresh`` falls through to the
+        existing unreadable-config recovery path (timestamped backup +
+        empty merge base) and emits the no-leftovers Reset message — the
+        post-recovery ``existing`` is empty so nothing is droppable."""
+        from click import unstyle
+
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        config_dir = tmp_path / ".memtomem"
+        config_dir.mkdir()
+        config_path = config_dir / "config.json"
+        config_path.write_text("{not valid json", encoding="utf-8")
+
+        state = _make_init_state(tmp_path)
+        _write_config_and_summary(state, tmp_path, fresh=True)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "unreadable" in out  # malformed-config recovery hit
+        # The unreadable-config path creates exactly one backup (.bak-<ts>);
+        # --fresh's own backup logic skips because no drops were possible.
+        backups = list(config_dir.glob("config.json.bak-*"))
+        assert len(backups) == 1, f"expected one backup, got {backups}"
+        assert "no wizard-untouched leftovers to reset" in out
+
+    def test_fresh_is_idempotent(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Running ``--fresh`` twice in a row: first run drops + backs up,
+        second run is a pure no-op on disk (no second backup, config
+        bit-identical). Guard against accidental backup churn."""
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        # Pin time.time so a same-second double-invoke can't collide on
+        # the .bak-<ts> filename even on fast machines.
+        clock = {"t": 1_700_000_000}
+        monkeypatch.setattr("memtomem.cli.init_cmd.time.time", lambda: clock["t"])
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        config_dir = tmp_path / ".memtomem"
+        config_dir.mkdir()
+        config_path = config_dir / "config.json"
+        config_path.write_text(
+            json.dumps({"mmr": {"enabled": True}, "search": {"rrf_k": 120}}),
+            encoding="utf-8",
+        )
+
+        state = _make_init_state(tmp_path)
+
+        _write_config_and_summary(state, tmp_path, fresh=True)
+        first_pass = config_path.read_text(encoding="utf-8")
+        first_backups = sorted(config_dir.glob("config.json.bak-*"))
+        assert len(first_backups) == 1
+
+        clock["t"] += 1  # second run gets a different ts in case it backs up
+        _write_config_and_summary(state, tmp_path, fresh=True)
+        second_pass = config_path.read_text(encoding="utf-8")
+        second_backups = sorted(config_dir.glob("config.json.bak-*"))
+
+        assert second_pass == first_pass, "second --fresh run mutated config"
+        assert second_backups == first_backups, (
+            "second --fresh run created a backup despite zero drops"
+        )
+
+
 def test_memory_dirs_env_requires_json_array(monkeypatch: pytest.MonkeyPatch) -> None:
     """Documentation examples of MEMTOMEM_INDEXING__MEMORY_DIRS must be
     encoded as a JSON array string. A bare path crashes pydantic-settings.

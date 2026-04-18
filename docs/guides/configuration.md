@@ -49,6 +49,28 @@ top of the default:
 explicit-user-override layer. Use a fragment in `config.d/` if you want
 APPEND semantics.
 
+### Resetting wizard-untouched leftovers (`--fresh`)
+
+Because the Web UI's "Save" buttons dump every mutable field into
+`config.json` (memory-dirs add/remove, section save), runtime values
+the user never deliberately set can pin themselves there permanently
+— a known case is `mmr.enabled=true` showing up after the user toggled
+MMR once in the UI. `mm init` flags such leftovers under a "Preserved"
+block so they don't disappear silently, but it does not remove them.
+
+`mm init --fresh` resets every wizard-untouched canonical key whose
+value differs from the built-in default, then proceeds with the
+normal wizard. Credentials (`api_key`, `secret`), endpoints
+(`base_url`, `webhook.url`), and user-curated lists
+(`indexing.exclude_patterns`, `namespace.rules`, etc.) are preserved
+unconditionally; user-added keys outside the canonical
+`Mem2MemConfig` shape are also preserved. A timestamped backup
+(`config.json.bak-<unix-ts>`) is written before any drop so the
+previous state is recoverable.
+
+If the web UI is running, restart it after `--fresh` so its
+in-memory cache doesn't re-pin the dropped values on the next save.
+
 ## Storage
 
 | Variable | Default | Description |
