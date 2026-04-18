@@ -214,8 +214,36 @@ def _step_embedding(state: dict) -> None:
     click.echo()
 
 
+def _step_reranker(state: dict) -> None:
+    step_header(2, "Reranker (optional)")
+    click.echo("  Cross-encoder reranking sharpens search relevance after BM25+dense fusion.")
+    click.echo("  Runs locally via fastembed ONNX — no API key, no server.")
+    enabled = nav_confirm("  Enable reranker?", default=False)
+    if not enabled:
+        state["rerank_enabled"] = False
+        click.echo()
+        return
+
+    click.echo()
+    click.echo("  Available models:")
+    click.echo("    [1] English (Xenova/ms-marco-MiniLM-L-6-v2) — 80 MB")
+    click.echo("    [2] Multilingual (jinaai/jina-reranker-v2-base-multilingual) — 1.1 GB")
+    click.echo("        Recommended for Korean/Chinese/Japanese/mixed content.")
+    choice = nav_prompt("  Select", type=click.IntRange(1, 2), default=1)
+
+    models = {
+        1: "Xenova/ms-marco-MiniLM-L-6-v2",
+        2: "jinaai/jina-reranker-v2-base-multilingual",
+    }
+    state["rerank_enabled"] = True
+    state["rerank_model"] = models[choice]
+    click.secho(f"  Reranker '{models[choice]}' selected.", fg="green")
+    click.echo("  Model downloads on first search (~/.cache/fastembed/).")
+    click.echo()
+
+
 def _step_memory_dir(state: dict) -> None:
-    step_header(2, "Memory Directory")
+    step_header(3, "Memory Directory")
     click.echo("  Where are the files you want to index?")
     memory_dir = nav_prompt("  Directory", default="~/memories")
     memory_path = Path(memory_dir).expanduser()
@@ -229,7 +257,7 @@ def _step_memory_dir(state: dict) -> None:
 
 
 def _step_storage(state: dict) -> None:
-    step_header(3, "Storage")
+    step_header(4, "Storage")
     config_dir = Path("~/.memtomem").expanduser()
     db_default = str(config_dir / "memtomem.db")
     state["db_path"] = nav_prompt("  SQLite DB path", default=db_default)
@@ -237,7 +265,7 @@ def _step_storage(state: dict) -> None:
 
 
 def _step_namespace(state: dict) -> None:
-    step_header(4, "Namespace")
+    step_header(5, "Namespace")
     click.echo("  Organize memories into scoped groups (work, personal, project).")
     state["enable_auto_ns"] = nav_confirm(
         "  Auto-assign namespace from folder name? (~/docs → 'docs')", default=False
@@ -247,7 +275,7 @@ def _step_namespace(state: dict) -> None:
 
 
 def _step_search(state: dict) -> None:
-    step_header(5, "Search")
+    step_header(6, "Search")
     state["top_k"] = nav_prompt("  Results per search", type=click.INT, default=10)
     state["decay_enabled"] = nav_confirm(
         "  Enable time-decay? (older memories rank lower)", default=False
@@ -256,7 +284,7 @@ def _step_search(state: dict) -> None:
 
 
 def _step_language(state: dict) -> None:
-    step_header(6, "Language")
+    step_header(7, "Language")
     click.echo("  Search tokenizer:")
     click.echo("    [1] Unicode (default — English and most languages)")
     click.echo("    [2] Korean (kiwipiepy — better Korean word splitting)")
@@ -275,7 +303,7 @@ def _step_language(state: dict) -> None:
 
 
 def _step_settings(state: dict) -> None:
-    step_header(7, "Claude Code Hooks")
+    step_header(8, "Claude Code Hooks")
 
     # Skip entirely if Claude Code is not installed
     claude_dir = Path.home() / ".claude"
@@ -318,7 +346,7 @@ def _step_settings(state: dict) -> None:
 
 
 def _step_mcp(state: dict) -> None:
-    step_header(8, "Connect to AI Editor")
+    step_header(9, "Connect to AI Editor")
     click.echo("  How do you want to connect memtomem?")
     click.echo("    [1] Claude Code (run 'claude mcp add' automatically)")
     click.echo("    [2] Generate .mcp.json (for Cursor, Windsurf, etc.)")
@@ -374,6 +402,12 @@ def _write_config_and_summary(state: dict, base_dir: Path | None = None) -> None
         init_data["embedding"]["base_url"] = "http://localhost:11434"
     if state.get("api_key"):
         init_data["embedding"]["api_key"] = state["api_key"]
+    if state.get("rerank_enabled"):
+        init_data["rerank"] = {
+            "enabled": True,
+            "provider": "fastembed",
+            "model": state["rerank_model"],
+        }
 
     # Merge: init fields overwrite, non-init sections/fields preserved
     for section, fields in init_data.items():
@@ -436,6 +470,8 @@ def _write_config_and_summary(state: dict, base_dir: Path | None = None) -> None
         click.echo("  Provider:   none (BM25 keyword search only)")
     else:
         click.echo(f"  Provider:   {state['provider']}/{state['model']} ({state['dimension']}d)")
+    if state.get("rerank_enabled"):
+        click.echo(f"  Reranker:   fastembed/{state['rerank_model']}")
     click.echo(f"  Storage:    {state['db_path']}")
     click.echo(f"  Memory:     {state['memory_dir']}")
     ns_label = "auto" if state["enable_auto_ns"] else "manual"
@@ -578,6 +614,7 @@ def init(
                 "model": _model,
                 "dimension": _dimension,
                 "api_key": api_key or "",
+                "rerank_enabled": False,
                 "memory_dir": _memory_dir,
                 "db_path": db_path or str(Path("~/.memtomem").expanduser() / "memtomem.db"),
                 "enable_auto_ns": auto_ns,
@@ -591,6 +628,7 @@ def init(
     else:
         steps = [
             _step_embedding,
+            _step_reranker,
             _step_memory_dir,
             _step_storage,
             _step_namespace,

@@ -37,7 +37,9 @@ ollama pull nomic-embed-text     # English-primary (768d, 270MB)
 
 The wizard (`mm init`) writes the chosen provider into
 `~/.memtomem/config.json`; for this tutorial you can also leave the
-default and skip ahead.
+default and skip ahead. The wizard also offers an optional **reranker**
+step right after embedding — press Enter to skip, or opt in and pick the
+multilingual model if you work with Korean/Chinese/Japanese content.
 
 ### 1.2 Connect the MCP Server
 
