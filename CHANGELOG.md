@@ -139,7 +139,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   configuration reference (#170 high tier).
 - MCP tool error response contract documented (#167).
 
-## [0.1.10] - UNRELEASED
+## [0.1.10] — 2026-04-19
 
 ### Security
 
