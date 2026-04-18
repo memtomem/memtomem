@@ -113,12 +113,19 @@ class IndexingConfig(BaseSettings):
     )
     max_chunk_tokens: int = 512
     min_chunk_tokens: int = 128
+    # Soft goal for semantic packing: merge adjacent short siblings while
+    # cur < target and combined <= max. Set to 0 to disable Pass 2 packing.
+    target_chunk_tokens: int = 384
     chunk_overlap_tokens: int = 0
     structured_chunk_mode: str = "original"  # "original" or "recursive"
     paragraph_split_threshold: int = 800  # split long prose into paragraphs above this token count
 
     @field_validator(
-        "max_chunk_tokens", "min_chunk_tokens", "chunk_overlap_tokens", "paragraph_split_threshold"
+        "max_chunk_tokens",
+        "min_chunk_tokens",
+        "target_chunk_tokens",
+        "chunk_overlap_tokens",
+        "paragraph_split_threshold",
     )
     @classmethod
     def must_be_non_negative(cls, v: int, info: ValidationInfo) -> int:
@@ -131,6 +138,11 @@ class IndexingConfig(BaseSettings):
         if self.min_chunk_tokens > self.max_chunk_tokens:
             raise ValueError(
                 f"min_chunk_tokens ({self.min_chunk_tokens}) must be "
+                f"<= max_chunk_tokens ({self.max_chunk_tokens})"
+            )
+        if self.target_chunk_tokens > self.max_chunk_tokens:
+            raise ValueError(
+                f"target_chunk_tokens ({self.target_chunk_tokens}) must be "
                 f"<= max_chunk_tokens ({self.max_chunk_tokens})"
             )
         return self
@@ -367,6 +379,7 @@ MUTABLE_FIELDS: dict[str, set[str]] = {
     "indexing": {
         "max_chunk_tokens",
         "min_chunk_tokens",
+        "target_chunk_tokens",
         "chunk_overlap_tokens",
         "structured_chunk_mode",
     },
@@ -386,6 +399,7 @@ FIELD_CONSTRAINTS: dict[str, dict] = {
     "search.tokenizer": {"type": str, "allowed": {"unicode61", "kiwipiepy"}},
     "indexing.max_chunk_tokens": {"type": int, "min": 64, "max": 8192},
     "indexing.min_chunk_tokens": {"type": int, "min": 0, "max": 256},
+    "indexing.target_chunk_tokens": {"type": int, "min": 0, "max": 8192},
     "indexing.chunk_overlap_tokens": {"type": int, "min": 0, "max": 512},
     "indexing.structured_chunk_mode": {"type": str, "allowed": {"original", "recursive"}},
     "embedding.batch_size": {"type": int, "min": 1, "max": 1024},

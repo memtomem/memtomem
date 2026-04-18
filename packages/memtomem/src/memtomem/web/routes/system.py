@@ -144,6 +144,7 @@ def _build_config_response(cfg) -> ConfigResponse:
             supported_extensions=sorted(cfg.indexing.supported_extensions),
             max_chunk_tokens=cfg.indexing.max_chunk_tokens,
             min_chunk_tokens=cfg.indexing.min_chunk_tokens,
+            target_chunk_tokens=cfg.indexing.target_chunk_tokens,
             chunk_overlap_tokens=cfg.indexing.chunk_overlap_tokens,
             structured_chunk_mode=cfg.indexing.structured_chunk_mode,
         ),

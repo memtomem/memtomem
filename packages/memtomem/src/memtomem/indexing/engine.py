@@ -268,6 +268,7 @@ class IndexEngine:
             new_chunks,
             self._config.min_chunk_tokens,
             self._config.max_chunk_tokens,
+            self._config.target_chunk_tokens,
         )
         if self._config.chunk_overlap_tokens > 0:
             new_chunks = _add_overlap(new_chunks, self._config.chunk_overlap_tokens)
@@ -494,14 +495,28 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // ratio)
 
 
-def _can_merge(current: Chunk, nxt: Chunk) -> bool:
+def _is_strict_prefix(shorter: tuple[str, ...], longer: tuple[str, ...]) -> bool:
+    """True when ``shorter`` is a proper prefix of ``longer`` (ancestor→descendant)."""
+    return len(shorter) < len(longer) and longer[: len(shorter)] == shorter
+
+
+def _can_merge(current: Chunk, nxt: Chunk, *, current_is_short: bool = False) -> bool:
     """Check if two chunks can be merged.
 
-    Same-file + same-hierarchy is always allowed.
-    A headingless chunk (empty hierarchy, e.g. frontmatter) can merge into
-    the next chunk, adopting its hierarchy.
-    Sibling headings (same parent, depth >= 2) can merge when short.
-    Top-level headings (depth 1, e.g. mem_add entries) stay independent.
+    Guiding principle: "작을 때 관대, 클 때 엄격" — short chunks relax the
+    hierarchy gate down to "shares a top-level root"; larger chunks still
+    need structural kinship (identical / headingless / sibling / same-path
+    ancestor-descendant).
+
+    Why "shares a top-level root" rather than full hierarchy bypass:
+    distinct top-level entries in the same file (e.g. mem_add writes H2
+    entries like ``## Cache Decision`` / ``## Database Decision``) are
+    semantically independent and must stay separate even when short.
+    Cross-subsection orphans within the same document share the same H1
+    root and therefore still get rescued.
+
+    ``current_is_short=True`` is set by Pass 1 and Pass 3 (tail sweep); Pass 2
+    (greedy packing) uses the strict kinship rules only.
     """
     if current.metadata.source_file != nxt.metadata.source_file:
         return False
@@ -510,25 +525,39 @@ def _can_merge(current: Chunk, nxt: Chunk) -> bool:
     # Allow headingless short chunk to merge forward into the next section
     if not current.metadata.heading_hierarchy:
         return True
-    # Allow sibling heading merge (same parent, depth >= 2)
     ch = current.metadata.heading_hierarchy
     nh = nxt.metadata.heading_hierarchy
+    # Sibling: same direct parent, depth >= 2
     if len(ch) >= 2 and len(nh) >= 2 and ch[:-1] == nh[:-1]:
+        return True
+    # Same-path ancestor-descendant: parent section body next to its own
+    # subsection (e.g. ``## 4`` intro body + ``## 4 > ### X``).
+    if _is_strict_prefix(ch, nh) or _is_strict_prefix(nh, ch):
+        return True
+    # Short-chunk leniency: merge across sub-heading divergence as long as
+    # both chunks live under the same top-level root.
+    if current_is_short and nh and ch[0] == nh[0]:
         return True
     return False
 
 
 def _merged_hierarchy(current: Chunk, nxt: Chunk) -> tuple[str, ...]:
-    """Pick the appropriate heading hierarchy when merging two chunks.
+    """Pick the heading hierarchy for a merged chunk.
 
-    For identical or headingless merges, use the more specific one.
-    For sibling merges, keep only the common parent prefix.
+    - Identical / headingless: use the more specific one.
+    - Otherwise: keep the common prefix; diverging leaves on either side are
+      dropped from the hierarchy and restored inline via
+      ``_build_merged_content``.
+
+    Common-prefix unification (rather than descendant promotion) keeps chained
+    merges honest: once a sibling-merge has already collapsed a hierarchy to
+    its common ancestor, a later ancestor→descendant step could otherwise
+    relabel the merged chunk with just one child's heading.
     """
     ch = current.metadata.heading_hierarchy
     nh = nxt.metadata.heading_hierarchy
     if ch == nh or not ch:
         return nh or ch
-    # Sibling merge: keep common parent headings only
     common: list[str] = []
     for a, b in zip(ch, nh):
         if a == b:
@@ -538,65 +567,130 @@ def _merged_hierarchy(current: Chunk, nxt: Chunk) -> tuple[str, ...]:
     return tuple(common) if common else nh
 
 
+def _prepend_dropped_headings(content: str, dropped: tuple[str, ...]) -> str:
+    """Prefix ``content`` with heading lines that would otherwise be lost.
+
+    Used on sibling merges where the common-prefix resolution drops each
+    chunk's diverging leaf heading(s).
+    """
+    if not dropped:
+        return content
+    header = "\n".join(dropped)
+    return f"{header}\n\n{content}"
+
+
+def _build_merged_content(current: Chunk, nxt: Chunk, merged_hierarchy: tuple[str, ...]) -> str:
+    """Concatenate two chunks' bodies, restoring any headings dropped by
+    hierarchy resolution so retrieval keeps the breadcrumb signal.
+    """
+    ch = current.metadata.heading_hierarchy
+    nh = nxt.metadata.heading_hierarchy
+    dropped_ch = ch[len(merged_hierarchy) :]
+    dropped_nh = nh[len(merged_hierarchy) :]
+    left = _prepend_dropped_headings(current.content, dropped_ch)
+    right = _prepend_dropped_headings(nxt.content, dropped_nh)
+    return f"{left}\n\n{right}"
+
+
+def _merge_pair(current: Chunk, nxt: Chunk) -> Chunk:
+    """Produce a single Chunk by merging ``current`` and ``nxt``."""
+    hierarchy = _merged_hierarchy(current, nxt)
+    content = _build_merged_content(current, nxt, hierarchy)
+    return Chunk(
+        content=content,
+        metadata=ChunkMetadata(
+            source_file=current.metadata.source_file,
+            heading_hierarchy=hierarchy,
+            chunk_type=current.metadata.chunk_type,
+            start_line=current.metadata.start_line,
+            end_line=nxt.metadata.end_line,
+            language=current.metadata.language,
+            tags=tuple(set(current.metadata.tags) | set(nxt.metadata.tags)),
+            namespace=current.metadata.namespace,
+        ),
+    )
+
+
 def _merge_short_chunks(
     chunks: list[Chunk],
     min_tokens: int,
     max_tokens: int = 0,
+    target_tokens: int = 0,
 ) -> list[Chunk]:
-    """Merge consecutive same-source chunks so each is >= min_tokens and < max_tokens.
+    """Merge consecutive same-source chunks into semantically coherent groups.
 
-    Strategy:
-    - Walk forward through chunks.
-    - While the current accumulated chunk is below min_tokens, merge the next
-      chunk — but only if the result stays below max_tokens.
-    - Headingless chunks (e.g. frontmatter) are merged into the following
-      section so they don't become orphan micro-chunks.
-    - If merging would exceed max_tokens, stop and emit what we have.
+    Three passes:
+    - Pass 1 (min enforcement): forward-merge while cur < min_tokens, ignoring
+      the hierarchy gate so orphan micro-chunks (frontmatter, stray short
+      sections) always get absorbed.
+    - Pass 2 (greedy packing): when ``target_tokens`` > 0, keep packing adjacent
+      hierarchy-compatible siblings/descendants while cur < target AND
+      combined <= max. Set ``target_tokens=0`` to disable.
+    - Pass 3 (tail backward sweep): if the final chunk is still < min, try
+      merging it into its predecessor once.
+
+    ``max_tokens`` caps every merge; ``min_tokens <= 0`` skips all passes.
     """
     if min_tokens <= 0 or len(chunks) <= 1:
         return chunks
 
-    # When max_tokens is not set or too small, use a generous default
     if max_tokens <= min_tokens:
         max_tokens = max(min_tokens * 4, 512)
 
-    result: list[Chunk] = []
+    # ---- Pass 1: min enforcement (hierarchy-agnostic) ----
+    pass1: list[Chunk] = []
     i = 0
     while i < len(chunks):
         c = chunks[i]
         cur_tokens = _estimate_tokens(c.content)
-
-        # Accumulate short chunks by merging forward
-        while cur_tokens < min_tokens and i + 1 < len(chunks) and _can_merge(c, chunks[i + 1]):
+        while (
+            cur_tokens < min_tokens
+            and i + 1 < len(chunks)
+            and _can_merge(c, chunks[i + 1], current_is_short=True)
+        ):
             nxt = chunks[i + 1]
-            nxt_tokens = _estimate_tokens(nxt.content)
-            merged_tokens = cur_tokens + nxt_tokens + 1  # +1 for separator
-
-            # Stop merging if result would exceed max_tokens
-            if merged_tokens >= max_tokens:
+            merged_tokens = cur_tokens + _estimate_tokens(nxt.content) + 1
+            if merged_tokens > max_tokens:
                 break
-
-            hierarchy = _merged_hierarchy(c, nxt)
-            merged_content = c.content + "\n\n" + nxt.content
-            c = Chunk(
-                content=merged_content,
-                metadata=ChunkMetadata(
-                    source_file=c.metadata.source_file,
-                    heading_hierarchy=hierarchy,
-                    chunk_type=c.metadata.chunk_type,
-                    start_line=c.metadata.start_line,
-                    end_line=nxt.metadata.end_line,
-                    language=c.metadata.language,
-                    tags=tuple(set(c.metadata.tags) | set(nxt.metadata.tags)),
-                    namespace=c.metadata.namespace,
-                ),
-            )
+            c = _merge_pair(c, nxt)
             cur_tokens = _estimate_tokens(c.content)
             i += 1
-
-        result.append(c)
+        pass1.append(c)
         i += 1
-    return result
+
+    # ---- Pass 2: greedy packing (hierarchy-respecting) ----
+    if target_tokens > min_tokens and len(pass1) > 1:
+        pass2: list[Chunk] = []
+        i = 0
+        while i < len(pass1):
+            c = pass1[i]
+            cur_tokens = _estimate_tokens(c.content)
+            while cur_tokens < target_tokens and i + 1 < len(pass1) and _can_merge(c, pass1[i + 1]):
+                nxt = pass1[i + 1]
+                merged_tokens = cur_tokens + _estimate_tokens(nxt.content) + 1
+                if merged_tokens > max_tokens:
+                    break
+                c = _merge_pair(c, nxt)
+                cur_tokens = _estimate_tokens(c.content)
+                i += 1
+            pass2.append(c)
+            i += 1
+    else:
+        pass2 = pass1
+
+    # ---- Pass 3: tail backward sweep ----
+    if len(pass2) >= 2:
+        last = pass2[-1]
+        last_tokens = _estimate_tokens(last.content)
+        if last_tokens < min_tokens:
+            prev = pass2[-2]
+            prev_tokens = _estimate_tokens(prev.content)
+            combined = prev_tokens + last_tokens + 1
+            if combined <= max_tokens and _can_merge(prev, last, current_is_short=True):
+                pass2[-2] = _merge_pair(prev, last)
+                pass2.pop()
+
+    return pass2
 
 
 def _add_overlap(chunks: list[Chunk], overlap_tokens: int) -> list[Chunk]:

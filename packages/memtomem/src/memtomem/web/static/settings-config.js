@@ -20,6 +20,7 @@ const _CONFIG_LABELS = {
   mmr:       { enabled: 'Enabled', lambda_param: 'Lambda' },
   indexing:  { memory_dirs: 'Memory Dirs', supported_extensions: 'Extensions',
                 max_chunk_tokens: 'Max Chunk Tokens', min_chunk_tokens: 'Min Chunk Tokens',
+                target_chunk_tokens: 'Target Chunk Tokens',
                 chunk_overlap_tokens: 'Chunk Overlap', structured_chunk_mode: 'Structured Chunk Mode' },
   namespace: { default_namespace: 'Default NS', enable_auto_ns: 'Auto NS' },
 };
@@ -783,8 +784,8 @@ async function _saveSection(section) {
 
 // Fields that require reindex or FTS rebuild after change
 const _REINDEX_FIELDS = new Set([
-  'indexing.max_chunk_tokens', 'indexing.min_chunk_tokens', 'indexing.chunk_overlap_tokens',
-  'indexing.structured_chunk_mode',
+  'indexing.max_chunk_tokens', 'indexing.min_chunk_tokens', 'indexing.target_chunk_tokens',
+  'indexing.chunk_overlap_tokens', 'indexing.structured_chunk_mode',
 ]);
 const _FTS_REBUILD_FIELDS = new Set([
   'search.tokenizer',

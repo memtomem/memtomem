@@ -38,6 +38,7 @@ class ConfigIndexingOut(BaseModel):
     supported_extensions: list[str]
     max_chunk_tokens: int
     min_chunk_tokens: int = 0
+    target_chunk_tokens: int = 0
     chunk_overlap_tokens: int = 0
     structured_chunk_mode: str = "original"
 

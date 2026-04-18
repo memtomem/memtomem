@@ -83,6 +83,7 @@ class FakeConfig:
         supported_extensions = frozenset({".md", ".json"})
         max_chunk_tokens = 512
         min_chunk_tokens = 128
+        target_chunk_tokens = 384
         chunk_overlap_tokens = 0
         structured_chunk_mode = "original"
 
