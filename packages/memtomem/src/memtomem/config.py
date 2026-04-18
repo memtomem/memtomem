@@ -2,11 +2,37 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Annotated, Literal, cast
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+@dataclass(frozen=True)
+class MergeStrategy:
+    """Declares how multiple sources contribute to a ``list[*]`` field.
+
+    Read at runtime by the ``config.d/`` fragment loader. Attach to list
+    fields via ``Annotated[list[X], APPEND]`` / ``Annotated[list[X], REPLACE]``
+    so the strategy is co-located with the field definition and enforced by
+    ``test_config_overrides.py`` (every ``list[*]`` field must declare one).
+
+    - ``APPEND`` — each source's values are concatenated, duplicates
+      removed. Use for lists where each element is independent (memory
+      directories, exclude patterns, webhook events).
+    - ``REPLACE`` — the highest-priority source wins; lower-priority
+      lists are discarded. Use for positional tuning knobs where element
+      order or length carries semantic meaning (RRF weights, importance
+      weights).
+    """
+
+    mode: Literal["append", "replace"]
+
+
+APPEND = MergeStrategy("append")
+REPLACE = MergeStrategy("replace")
 
 
 class EmbeddingConfig(BaseSettings):
@@ -47,7 +73,9 @@ class SearchConfig(BaseSettings):
     enable_bm25: bool = True
     enable_dense: bool = True
     tokenizer: str = "unicode61"  # "unicode61" or "kiwipiepy"
-    rrf_weights: list[float] = Field(default_factory=lambda: [1.0, 1.0])  # [BM25, Dense]
+    rrf_weights: Annotated[list[float], REPLACE] = Field(
+        default_factory=lambda: [1.0, 1.0]
+    )  # [BM25, Dense]
     cache_ttl: float = 30.0  # search result cache TTL in seconds
     # Namespaces starting with any of these prefixes are excluded from
     # *default* search (``namespace=None``) but remain retrievable with an
@@ -56,7 +84,9 @@ class SearchConfig(BaseSettings):
     # out of day-to-day results while preserving their audit trail.
     # Set to an empty list to restore the pre-Phase-A.5 behavior where every
     # namespace is searchable by default.
-    system_namespace_prefixes: list[str] = Field(default_factory=lambda: ["archive:"])
+    system_namespace_prefixes: Annotated[list[str], APPEND] = Field(
+        default_factory=lambda: ["archive:"]
+    )
 
     @field_validator("default_top_k", "bm25_candidates", "dense_candidates", "rrf_k")
     @classmethod
@@ -96,7 +126,9 @@ def _default_memory_dirs() -> list[Path]:
 
 
 class IndexingConfig(BaseSettings):
-    memory_dirs: list[Path] = Field(default_factory=lambda: _default_memory_dirs())
+    memory_dirs: Annotated[list[Path], APPEND] = Field(
+        default_factory=lambda: _default_memory_dirs()
+    )
     supported_extensions: frozenset[str] = frozenset(
         {
             ".md",
@@ -119,7 +151,7 @@ class IndexingConfig(BaseSettings):
     chunk_overlap_tokens: int = 0
     structured_chunk_mode: str = "original"  # "original" or "recursive"
     paragraph_split_threshold: int = 800  # split long prose into paragraphs above this token count
-    exclude_patterns: list[str] = Field(default_factory=list)
+    exclude_patterns: Annotated[list[str], APPEND] = Field(default_factory=list)
 
     @field_validator(
         "max_chunk_tokens",
@@ -245,7 +277,7 @@ class QueryExpansionConfig(BaseSettings):
 class ImportanceConfig(BaseSettings):
     enabled: bool = False
     max_boost: float = 1.5
-    weights: list[float] = Field(default_factory=lambda: [0.3, 0.2, 0.3, 0.2])
+    weights: Annotated[list[float], REPLACE] = Field(default_factory=lambda: [0.3, 0.2, 0.3, 0.2])
 
     @field_validator("max_boost")
     @classmethod
@@ -258,7 +290,9 @@ class ImportanceConfig(BaseSettings):
 class WebhookConfig(BaseSettings):
     enabled: bool = False
     url: str = ""
-    events: list[str] = Field(default_factory=lambda: ["add", "delete", "search"])
+    events: Annotated[list[str], APPEND] = Field(
+        default_factory=lambda: ["add", "delete", "search"]
+    )
     secret: str = ""
     timeout_seconds: float = 10.0
 
@@ -540,9 +574,15 @@ def _override_path() -> Path:
 
 
 def load_config_overrides(config: Mem2MemConfig) -> None:
-    """Apply persisted overrides from ~/.memtomem/config.json (if exists)."""
+    """Apply persisted overrides from ~/.memtomem/config.json (if exists).
+
+    Precedence: ``MEMTOMEM_<SECTION>__<FIELD>`` env vars win over
+    ``config.json``. If an env var is set for a field, the corresponding
+    ``config.json`` entry is skipped so the env-bound value remains in effect.
+    """
     import json as _json
     import logging
+    import os
 
     _log = logging.getLogger(__name__)
 
@@ -562,6 +602,16 @@ def load_config_overrides(config: Mem2MemConfig) -> None:
             continue
         for key, value in updates.items():
             if hasattr(section_obj, key):
+                env_var = f"MEMTOMEM_{section_name.upper()}__{key.upper()}"
+                if env_var in os.environ:
+                    _log.debug(
+                        "Skipping %s.%s from %s: %s is set in environment (env wins)",
+                        section_name,
+                        key,
+                        path,
+                        env_var,
+                    )
+                    continue
                 full_key = f"{section_name}.{key}"
                 constraint = FIELD_CONSTRAINTS.get(full_key)
                 if constraint:
@@ -586,6 +636,135 @@ def load_config_overrides(config: Mem2MemConfig) -> None:
                         value,
                         exc,
                     )
+
+
+_CONFIG_D_PATH = Path("~/.memtomem/config.d")
+
+
+def _config_d_path() -> Path:
+    return _CONFIG_D_PATH.expanduser()
+
+
+def _merge_strategy_for(section_cls: type, field_name: str) -> MergeStrategy | None:
+    """Return the ``MergeStrategy`` annotated on a field, or None if scalar."""
+    info = (
+        section_cls.model_fields.get(field_name) if hasattr(section_cls, "model_fields") else None
+    )
+    if info is None:
+        return None
+    for m in info.metadata:
+        if isinstance(m, MergeStrategy):
+            return m
+    return None
+
+
+def _dedup_key(item: object) -> object:
+    """Stable equality key for APPEND dedup; normalises Path to its string form."""
+    if isinstance(item, Path):
+        return str(item)
+    return item
+
+
+def load_config_d(config: Mem2MemConfig) -> None:
+    """Apply fragments from ``~/.memtomem/config.d/*.json`` (if dir exists).
+
+    Intended for integration-installed fragments (``mm init <client>`` drops
+    one file, ``mm uninstall <client>`` removes it). Each fragment is a
+    partial ``Mem2MemConfig`` JSON. Fragments are applied in lexicographic
+    filename order. For each field:
+
+    - If ``MEMTOMEM_<SECTION>__<FIELD>`` env var is set → skip (env wins).
+    - If scalar → last fragment wins.
+    - If ``list[*]`` with ``APPEND`` strategy → values concatenated,
+      duplicates removed (first-seen order preserved).
+    - If ``list[*]`` with ``REPLACE`` strategy → last fragment wins; prior
+      list (incl. defaults) is discarded.
+
+    ``~/.memtomem/config.json`` is a separate layer applied *after* fragments
+    (see ``load_config_overrides``); that file remains a full REPLACE-on-set
+    for every field so the ``mm init`` wizard keeps unambiguous user-override
+    semantics.
+    """
+    import json as _json
+    import logging
+    import os
+
+    _log = logging.getLogger(__name__)
+
+    dir_ = _config_d_path()
+    if not dir_.is_dir():
+        return
+
+    fragments = sorted(p for p in dir_.iterdir() if p.is_file() and p.suffix == ".json")
+    for path in fragments:
+        try:
+            data = _json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, _json.JSONDecodeError) as exc:
+            _log.warning("Failed to read config fragment %s: %s", path, exc)
+            continue
+        if not isinstance(data, dict):
+            _log.warning("Config fragment %s is not a JSON object (ignored)", path)
+            continue
+        for section_name, updates in data.items():
+            section_obj = getattr(config, section_name, None)
+            if section_obj is None or not isinstance(updates, dict):
+                if section_obj is None and isinstance(updates, dict):
+                    _log.warning("Unknown config section '%s' in %s (ignored)", section_name, path)
+                continue
+            section_cls = type(section_obj)
+            for key, value in updates.items():
+                if not hasattr(section_obj, key):
+                    continue
+                env_var = f"MEMTOMEM_{section_name.upper()}__{key.upper()}"
+                if env_var in os.environ:
+                    _log.debug(
+                        "Skipping %s.%s from %s: %s is set (env wins)",
+                        section_name,
+                        key,
+                        path,
+                        env_var,
+                    )
+                    continue
+                strategy = _merge_strategy_for(section_cls, key)
+                if strategy is not None and strategy.mode == "append":
+                    if not isinstance(value, list):
+                        _log.warning(
+                            "Expected list for %s.%s in %s (got %s); skipping",
+                            section_name,
+                            key,
+                            path,
+                            type(value).__name__,
+                        )
+                        continue
+                    current = list(getattr(section_obj, key))
+                    seen = {_dedup_key(x) for x in current}
+                    for item in value:
+                        k = _dedup_key(item)
+                        if k not in seen:
+                            current.append(item)
+                            seen.add(k)
+                    try:
+                        setattr(section_obj, key, current)
+                    except (TypeError, ValueError) as exc:
+                        _log.warning(
+                            "Skipping invalid fragment merge %s.%s from %s: %s",
+                            section_name,
+                            key,
+                            path,
+                            exc,
+                        )
+                else:
+                    try:
+                        setattr(section_obj, key, value)
+                    except (TypeError, ValueError) as exc:
+                        _log.warning(
+                            "Skipping invalid fragment value %s.%s=%r from %s: %s",
+                            section_name,
+                            key,
+                            value,
+                            path,
+                            exc,
+                        )
 
 
 def ensure_auto_discovered_dirs(config: Mem2MemConfig) -> None:

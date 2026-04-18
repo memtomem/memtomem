@@ -12,6 +12,43 @@ export MEMTOMEM_EMBEDDING__API_KEY=sk-...
 
 For interactive setup, run `mm init` instead of editing env vars by hand.
 
+## Precedence and merge behaviour
+
+memtomem resolves each field from up to four sources at startup, in order
+of increasing priority:
+
+1. **Built-in defaults** — the values in `config.py`.
+2. **`~/.memtomem/config.d/*.json`** — drop-in fragments, applied in
+   lexicographic filename order. Intended for integration installers
+   (`mm init <client>` drops one fragment; removing the file reverses
+   the change). For `list[*]` fields, each fragment respects a per-field
+   merge strategy (see below).
+3. **`~/.memtomem/config.json`** — the user-managed override layer that
+   `mm init` writes to. Every key here replaces whatever earlier layers
+   produced for that field (REPLACE semantics across the board).
+4. **`MEMTOMEM_*` environment variables** — highest priority. If an
+   env var is set, the corresponding entries in `config.d/` and
+   `config.json` are skipped.
+
+### List field merge strategies
+
+`list[*]` fields declare either `APPEND` or `REPLACE` in the type
+annotation, and that strategy governs how `config.d/` fragments layer on
+top of the default:
+
+| Field | Strategy | Notes |
+|-------|----------|-------|
+| `indexing.memory_dirs` | APPEND | Each fragment contributes more roots, dedup by path string |
+| `indexing.exclude_patterns` | APPEND | Multiple denylists merge cleanly |
+| `search.system_namespace_prefixes` | APPEND | Integrations can add further hidden namespaces on top of `archive:` |
+| `webhook.events` | APPEND | Fragments can subscribe to additional event types |
+| `search.rrf_weights` | REPLACE | Positional tuning knob — appending would misalign `[BM25, Dense]` slots |
+| `importance.weights` | REPLACE | Same positional constraint |
+
+`config.json` always replaces, regardless of strategy — it's the
+explicit-user-override layer. Use a fragment in `config.d/` if you want
+APPEND semantics.
+
 ## Storage
 
 | Variable | Default | Description |
@@ -140,10 +177,11 @@ AI tool directories to `memory_dirs` when they exist on the machine:
 | `~/.gemini` | Gemini CLI | global `GEMINI.md` |
 | `~/.codex/memories` | Codex CLI | global memories |
 
-Auto-discovered directories are appended after `config.json` overrides, so
-they are always available even if you override `memory_dirs` manually. This
-means `mem_index` and the file watcher accept paths under these directories
-without requiring explicit `MEMORY_DIRS` configuration.
+Auto-discovered directories are appended after `config.d/` and
+`config.json` overrides, so they are always available even if you
+override `memory_dirs` manually. This means `mem_index` and the file
+watcher accept paths under these directories without requiring explicit
+`MEMORY_DIRS` configuration.
 
 > **Tip:** Use `mm ingest claude-memory`, `mm ingest gemini-memory`, or
 > `mm ingest codex-memory` for richer ingestion with per-tool tagging and

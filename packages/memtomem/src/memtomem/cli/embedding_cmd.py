@@ -27,10 +27,11 @@ def embedding_reset(mode: str) -> None:
 
 
 async def _run(mode: str) -> None:
-    from memtomem.config import Mem2MemConfig, load_config_overrides
+    from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
     from memtomem.storage.sqlite_backend import SqliteBackend
 
     cfg = Mem2MemConfig()
+    load_config_d(cfg)
     load_config_overrides(cfg)
 
     storage = SqliteBackend(
