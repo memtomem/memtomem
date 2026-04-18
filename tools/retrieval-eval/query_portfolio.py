@@ -44,16 +44,32 @@ QueryType = Literal[
 Lang = Literal["ko", "en"]
 
 
+Genre = Literal["runbook", "postmortem", "adr", "troubleshooting"]
+
+
 @dataclass(frozen=True)
 class Query:
     text: str
     targets: frozenset[str]
     type: QueryType
     lang: Lang
+    genre: Genre | None = None
+    """Expected genre for genre_primary queries; None for other types.
+
+    Used by `calibrate_portfolio.py` to build the genre confusion matrix
+    (Phase 5e). For topic-primary types (direct / paraphrase / etc.)
+    there is no single expected genre, so this stays None.
+    """
 
 
-def _q(text: str, targets: list[str], type: QueryType, lang: Lang) -> Query:
-    return Query(text=text, targets=frozenset(targets), type=type, lang=lang)
+def _q(
+    text: str,
+    targets: list[str],
+    type: QueryType,
+    lang: Lang,
+    genre: Genre | None = None,
+) -> Query:
+    return Query(text=text, targets=frozenset(targets), type=type, lang=lang, genre=genre)
 
 
 # ---- EN: 50 queries ----
@@ -275,6 +291,7 @@ _EN_GENRE_PRIMARY = [
         ["postgres/indexing", "postgres/connection_pool", "postgres/vacuum"],
         "genre_primary",
         "en",
+        genre="runbook",
     ),
     _q(
         "observability at UTC root cause follow-up",
@@ -286,54 +303,63 @@ _EN_GENRE_PRIMARY = [
         ],
         "genre_primary",
         "en",
+        genre="postmortem",
     ),
     _q(
         "k8s chose over accepted re-evaluate trade-off",
         ["k8s/scaling", "k8s/networking", "k8s/rollout"],
         "genre_primary",
         "en",
+        genre="adr",
     ),
     _q(
         "security likely root cause workaround symptom",
         ["security/vulnerability", "security/secrets", "security/encryption"],
         "genre_primary",
         "en",
+        genre="troubleshooting",
     ),
     _q(
         "caching configure run verify command",
         ["caching/redis", "caching/eviction", "caching/invalidation"],
         "genre_primary",
         "en",
+        genre="runbook",
     ),
     _q(
         "cost chose over accepted trade-off",
         ["cost_optimization/compute", "cost_optimization/storage"],
         "genre_primary",
         "en",
+        genre="adr",
     ),
     _q(
         "postgres at UTC root cause follow-up",
         ["postgres/replication", "postgres/vacuum", "postgres/connection_pool"],
         "genre_primary",
         "en",
+        genre="postmortem",
     ),
     _q(
         "k8s likely root cause workaround symptom",
         ["k8s/scaling", "k8s/networking"],
         "genre_primary",
         "en",
+        genre="troubleshooting",
     ),
     _q(
         "observability configure run verify command",
         ["observability/metrics", "observability/logging"],
         "genre_primary",
         "en",
+        genre="runbook",
     ),
     _q(
         "security chose over accepted trade-off",
         ["security/encryption", "security/access_control", "auth/mtls"],
         "genre_primary",
         "en",
+        genre="adr",
     ),
 ]
 
@@ -370,7 +396,7 @@ _KO_DIRECT = [
         "ko",
     ),
     _q(
-        "cert-manager Let's Encrypt 인증서 자동 갱신",
+        "cert-manager ACME 인증서 자동 갱신",
         ["networking/tls"],
         "direct",
         "ko",
@@ -576,60 +602,70 @@ _KO_GENRE_PRIMARY = [
         ["postgres/indexing", "postgres/connection_pool", "postgres/vacuum"],
         "genre_primary",
         "ko",
+        genre="runbook",
     ),
     _q(
         "observability KST 원인 후속 조치",
         ["observability/metrics", "observability/logging", "observability/tracing"],
         "genre_primary",
         "ko",
+        genre="postmortem",
     ),
     _q(
         "kubernetes 대신 채택 결정 trade-off",
         ["k8s/scaling", "k8s/networking"],
         "genre_primary",
         "ko",
+        genre="adr",
     ),
     _q(
         "security 증상 의심 점검 진단",
         ["security/vulnerability", "security/encryption"],
         "genre_primary",
         "ko",
+        genre="troubleshooting",
     ),
     _q(
         "캐시 절차 설정 수행",
         ["caching/redis", "caching/eviction", "caching/invalidation"],
         "genre_primary",
         "ko",
+        genre="runbook",
     ),
     _q(
         "cost 대신 채택 trade-off",
         ["cost_optimization/compute", "cost_optimization/storage"],
         "genre_primary",
         "ko",
+        genre="adr",
     ),
     _q(
         "postgres KST 원인 후속 조치",
         ["postgres/replication", "postgres/vacuum", "postgres/connection_pool"],
         "genre_primary",
         "ko",
+        genre="postmortem",
     ),
     _q(
         "kubernetes 증상 의심 점검 재현",
         ["k8s/scaling", "k8s/networking"],
         "genre_primary",
         "ko",
+        genre="troubleshooting",
     ),
     _q(
         "observability 절차 설정 수행",
         ["observability/metrics", "observability/logging"],
         "genre_primary",
         "ko",
+        genre="runbook",
     ),
     _q(
         "security 대신 채택 trade-off",
         ["security/encryption", "security/access_control"],
         "genre_primary",
         "ko",
+        genre="adr",
     ),
 ]
 
