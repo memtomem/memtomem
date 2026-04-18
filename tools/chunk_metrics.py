@@ -37,6 +37,11 @@ from memtomem.models import Chunk
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# User-facing docs only. Retrieval-eval fixtures under
+# ``packages/memtomem/tests/fixtures/`` are intentionally composed of short,
+# atomic semantic units (postmortem / incident notes) and would skew orphan
+# ratios as if the chunker were underperforming. Pass them explicitly via
+# ``--paths`` when measuring the eval corpus itself.
 DEFAULT_CORPUS = [
     Path("docs"),
     Path("README.md"),
@@ -46,7 +51,6 @@ DEFAULT_CORPUS = [
     Path("SECURITY.md"),
     Path("CLA.md"),
     Path("packages/memtomem/README.md"),
-    Path("packages/memtomem/tests/fixtures/corpus_v2"),
     Path("examples/notebooks/README.md"),
 ]
 
