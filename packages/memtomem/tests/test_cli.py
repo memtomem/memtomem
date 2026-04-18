@@ -389,12 +389,30 @@ class TestCoerceAndValidate:
 
 
 class TestSaveConfigOverrides:
-    """Verify save→load round-trip for mutable and special fields."""
+    """Verify delta-only save semantics: persisted values equal cfg minus the
+    comparand (defaults + env + config.d/ fragments + env-dependent factories).
+    """
 
-    def test_memory_dirs_survives_save_load(self, tmp_path, monkeypatch):
-        """memory_dirs added via Web UI must survive a save→load cycle."""
+    @pytest.fixture
+    def isolated(self, tmp_path, monkeypatch):
+        """Isolate both config.json and config.d/ to tmp_path.
+
+        Without this, ``_build_comparand`` reads the developer's real
+        ``~/.memtomem/config.d/`` fragments during tests, producing
+        per-machine comparand differences that mask the intended behavior.
+        """
         config_file = tmp_path / "config.json"
+        config_d = tmp_path / "config.d"
+        config_d.mkdir()
         monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+        monkeypatch.setattr("memtomem.config._config_d_path", lambda: config_d)
+        return {"config_file": config_file, "config_d": config_d, "tmp_path": tmp_path}
+
+    # ── Load-path defensive tests (unrelated to delta semantic) ────────
+
+    def test_memory_dirs_survives_save_load(self, isolated):
+        """User-added memory_dirs (distinct from factory) must survive save→load."""
+        tmp_path = isolated["tmp_path"]
 
         cfg = Mem2MemConfig()
         cfg.indexing.memory_dirs = [tmp_path / "a", tmp_path / "b"]
@@ -407,36 +425,25 @@ class TestSaveConfigOverrides:
         assert str(tmp_path / "a") in loaded_dirs
         assert str(tmp_path / "b") in loaded_dirs
 
-    def test_invalid_value_falls_back_to_default(self, tmp_path, monkeypatch):
+    def test_invalid_value_falls_back_to_default(self, isolated):
         """Invalid values in config.json should be skipped with warning, not crash."""
         import json
 
-        config_file = tmp_path / "config.json"
-        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
-
-        config_file.write_text(
-            json.dumps(
-                {
-                    "search": {"default_top_k": -5},  # violates min=1
-                }
-            )
+        isolated["config_file"].write_text(
+            json.dumps({"search": {"default_top_k": -5}})  # violates min=1
         )
 
         cfg = Mem2MemConfig()
         default_top_k = cfg.search.default_top_k
         load_config_overrides(cfg)
 
-        # Invalid value must be rejected; field keeps code default
         assert cfg.search.default_top_k == default_top_k
 
-    def test_invalid_value_does_not_block_valid_ones(self, tmp_path, monkeypatch):
+    def test_invalid_value_does_not_block_valid_ones(self, isolated):
         """One bad field must not prevent other valid fields from loading."""
         import json
 
-        config_file = tmp_path / "config.json"
-        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
-
-        config_file.write_text(
+        isolated["config_file"].write_text(
             json.dumps(
                 {
                     "search": {"default_top_k": -5, "rrf_k": 80},
@@ -448,24 +455,15 @@ class TestSaveConfigOverrides:
         cfg = Mem2MemConfig()
         load_config_overrides(cfg)
 
-        # Valid fields applied, invalid one skipped
         assert cfg.search.rrf_k == 80
         assert cfg.decay.enabled is True
 
-    def test_existing_memory_dirs_not_clobbered(self, tmp_path, monkeypatch):
-        """Saving mutable fields must not destroy pre-existing memory_dirs."""
+    def test_existing_memory_dirs_not_clobbered(self, isolated):
+        """Saving an unrelated mutable field must not erase pinned memory_dirs."""
         import json
 
-        config_file = tmp_path / "config.json"
-        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
-
-        # Simulate mm init having written memory_dirs
-        config_file.write_text(
-            json.dumps(
-                {
-                    "indexing": {"memory_dirs": ["/pre/existing"]},
-                }
-            )
+        isolated["config_file"].write_text(
+            json.dumps({"indexing": {"memory_dirs": ["/pre/existing"]}})
         )
 
         cfg = Mem2MemConfig()
@@ -473,89 +471,231 @@ class TestSaveConfigOverrides:
         cfg.search.default_top_k = 42
         save_config_overrides(cfg)
 
-        data = json.loads(config_file.read_text())
+        data = json.loads(isolated["config_file"].read_text())
         assert "/pre/existing" in [str(p) for p in data["indexing"]["memory_dirs"]]
 
-    def test_default_valued_field_not_persisted(self, tmp_path, monkeypatch):
-        """Fields whose current value equals the class-level default must not
-        be written. Otherwise a Web UI save would pin the default and shadow
-        a ``config.d/`` fragment that sets a different value.
+    # ── Delta semantic (renamed from drop-default) ─────────────────────
+
+    def test_comparand_equal_field_not_persisted(self, isolated):
+        """Fields whose current value equals the comparand (default/env/fragment-
+        derived) must not be written. Prevents default-flush over config.d/
+        fragments — same coverage as pre-Z ``drop-default``, now generalized.
         """
         import json
-
-        config_file = tmp_path / "config.json"
-        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
 
         cfg = Mem2MemConfig()
         # mmr.enabled default is False — simulate a Web UI "save section"
         # that dumps the whole section without the user touching mmr.
         save_config_overrides(cfg)
 
-        data = json.loads(config_file.read_text()) if config_file.exists() else {}
+        data = (
+            json.loads(isolated["config_file"].read_text())
+            if isolated["config_file"].exists()
+            else {}
+        )
         assert "mmr" not in data, (
-            f"default-valued mmr section must not be persisted; got {data.get('mmr')!r}"
+            f"comparand-equal mmr section must not be persisted; got {data.get('mmr')!r}"
         )
 
-    def test_existing_default_entry_pruned_on_save(self, tmp_path, monkeypatch):
-        """An existing leftover entry that matches the current-and-default
-        value must be removed on save, so the key stops shadowing fragments.
-        """
+    def test_existing_comparand_equal_entry_pruned(self, isolated):
+        """An existing leftover entry that now matches the comparand must be
+        removed on the next save, so the key stops shadowing fragments."""
         import json
 
-        config_file = tmp_path / "config.json"
-        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
-
-        # Simulate a prior leak: mmr.enabled=false pinned into config.json.
-        config_file.write_text(json.dumps({"mmr": {"enabled": False}}))
+        isolated["config_file"].write_text(json.dumps({"mmr": {"enabled": False}}))
 
         cfg = Mem2MemConfig()
-        # cfg.mmr.enabled is False (default) and config.json has False too.
-        # Next save should prune the pinned key.
+        # cfg.mmr.enabled is False (matches comparand) → pruned on save.
         save_config_overrides(cfg)
 
-        data = json.loads(config_file.read_text())
+        data = json.loads(isolated["config_file"].read_text())
         assert "mmr" not in data
 
-    def test_non_default_value_still_persists(self, tmp_path, monkeypatch):
-        """Explicit non-default values must still be written."""
+    def test_non_default_value_still_persists(self, isolated):
+        """Explicit values that differ from the comparand must still be written."""
         import json
-
-        config_file = tmp_path / "config.json"
-        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
 
         cfg = Mem2MemConfig()
         cfg.mmr.enabled = True  # default is False
         cfg.search.default_top_k = 42  # default is 10
         save_config_overrides(cfg)
 
-        data = json.loads(config_file.read_text())
+        data = json.loads(isolated["config_file"].read_text())
         assert data["mmr"]["enabled"] is True
         assert data["search"]["default_top_k"] == 42
 
-    def test_memory_dirs_equal_to_default_still_persisted(self, tmp_path, monkeypatch):
-        """memory_dirs is in _EXTRA_PERSIST_FIELDS and exempt from
-        drop-default because its factory auto-discovers AI tool dirs via
-        filesystem checks. "Equal to default" on machine A may not match
-        machine B's default — so we always persist user-curated dir lists.
+    def test_section_with_only_comparand_equal_fields_dropped(self, isolated):
+        """If every mutable key in a section equals the comparand, the whole
+        section is omitted (no orphan ``{}`` entries)."""
+        import json
+
+        isolated["config_file"].write_text(
+            json.dumps({"decay": {"enabled": False, "half_life_days": 30.0}})
+        )
+
+        cfg = Mem2MemConfig()  # all defaults = comparand
+        save_config_overrides(cfg)
+
+        data = json.loads(isolated["config_file"].read_text())
+        assert "decay" not in data
+
+    # ── New tests for Z design ─────────────────────────────────────────
+
+    def test_fragment_value_not_dragged_to_config_json(self, isolated):
+        """Regression guard for fragment drag-in (`project_fragment_dragin_gap.md`).
+
+        Fragment defines ``exclude_patterns``; unrelated field save must not
+        copy the fragment value into config.json. Before Z, save persisted
+        the full effective value, which silently copied fragment contents
+        into the REPLACE layer and froze later fragment edits.
+        """
+        import json
+
+        (isolated["config_d"] / "noise.json").write_text(
+            json.dumps({"indexing": {"exclude_patterns": ["*.tmp", "node_modules/"]}})
+        )
+
+        # Match web/MCP in-process flow: fragments already merged.
+        cfg = Mem2MemConfig()
+        from memtomem.config import load_config_d
+
+        load_config_d(cfg)
+        load_config_overrides(cfg)
+        assert "*.tmp" in cfg.indexing.exclude_patterns  # fragment visible
+
+        cfg.search.default_top_k = 42  # unrelated mutation
+        save_config_overrides(cfg)
+
+        data = json.loads(isolated["config_file"].read_text())
+        assert "exclude_patterns" not in data.get("indexing", {}), (
+            f"fragment exclude_patterns must not drag into config.json; got {data}"
+        )
+
+    def test_env_value_not_dragged(self, isolated, monkeypatch):
+        """Env-sourced values must not copy into config.json on save."""
+        import json
+
+        monkeypatch.setenv("MEMTOMEM_MMR__ENABLED", "true")
+
+        cfg = Mem2MemConfig()  # picks up env at construction
+        assert cfg.mmr.enabled is True
+
+        cfg.search.default_top_k = 42
+        save_config_overrides(cfg)
+
+        data = json.loads(isolated["config_file"].read_text())
+        assert "mmr" not in data, (
+            f"env-sourced mmr.enabled must not drag into config.json; got {data}"
+        )
+
+    def test_memory_dirs_factory_default_not_persisted(self, isolated):
+        """memory_dirs == env-dependent factory output → dropped on save.
+
+        This flips the pre-Z ``_EXTRA_PERSIST_FIELDS`` exemption: the
+        factory output is now included in the comparand, so machine-A
+        save doesn't pin factory-specific paths into config.json for
+        migration to machine-B. Companion of
+        ``test_machine_migration_requires_active_reset`` (this test locks
+        the *drop* direction, the other locks the *active-reset* one).
         """
         import json
 
         from memtomem.config import _default_memory_dirs
 
-        config_file = tmp_path / "config.json"
-        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
-
         cfg = Mem2MemConfig()
-        cfg.indexing.memory_dirs = _default_memory_dirs()
+        cfg.indexing.memory_dirs = _default_memory_dirs()  # matches factory
+        cfg.mmr.enabled = True  # unrelated non-comparand so file is non-empty
         save_config_overrides(cfg)
 
-        data = json.loads(config_file.read_text())
-        assert "memory_dirs" in data["indexing"], (
-            "memory_dirs must be persisted even when equal to default "
-            "(environment-dependent factory, preserve user intent)"
+        data = json.loads(isolated["config_file"].read_text())
+        assert "memory_dirs" not in data.get("indexing", {}), (
+            f"factory-default memory_dirs must be dropped on save under Z; got {data}"
         )
 
-    def test_legacy_repr_string_in_config_handled_gracefully(self, tmp_path, monkeypatch):
+    def test_save_is_idempotent(self, isolated):
+        """Two consecutive saves produce byte-identical output.
+
+        Guards against order-dependency in comparand build (e.g. glob
+        ordering, set iteration) or diff computation.
+        """
+        cfg = Mem2MemConfig()
+        cfg.mmr.enabled = True
+        cfg.search.default_top_k = 42
+
+        save_config_overrides(cfg)
+        first = isolated["config_file"].read_text()
+        save_config_overrides(cfg)
+        second = isolated["config_file"].read_text()
+
+        assert first == second, f"idempotent save broken:\n---\n{first}\n---\n{second}"
+
+    def test_machine_migration_requires_active_reset(self, isolated):
+        """Machine-A config.json with machine-A-only paths carried to
+        machine-C keeps those paths pinned until the user actively resets.
+
+        Z doesn't auto-clean historical leftovers that don't match the
+        local comparand (the REPLACE layer semantics preclude that);
+        docs must tell users to run ``cfg.memory_dirs = _default_memory_dirs()``
+        + save, or (future) ``mm config unset memory_dirs``.
+        """
+        import json
+        from pathlib import Path
+
+        from memtomem.config import _default_memory_dirs
+
+        # Seed a config.json that pins a path not part of the local factory output.
+        machine_a_dirs = [str(Path("~/.memtomem/memories").expanduser()), "/machine-a-only"]
+        isolated["config_file"].write_text(
+            json.dumps({"indexing": {"memory_dirs": machine_a_dirs}})
+        )
+
+        cfg = Mem2MemConfig()
+        load_config_overrides(cfg)
+        cfg.search.default_top_k = 99  # unrelated save
+        save_config_overrides(cfg)
+
+        data = json.loads(isolated["config_file"].read_text())
+        assert "/machine-a-only" in [
+            str(p) for p in data.get("indexing", {}).get("memory_dirs", [])
+        ], "machine-A path must stay pinned on unrelated save (doc: user must reset actively)"
+
+        # Active reset: drops cleanly
+        cfg.indexing.memory_dirs = _default_memory_dirs()
+        save_config_overrides(cfg)
+        data2 = json.loads(isolated["config_file"].read_text())
+        assert "memory_dirs" not in data2.get("indexing", {})
+
+    def test_comparand_build_suppresses_warnings(self, isolated, caplog):
+        """_build_comparand(quiet=True) must not emit WARNING-level logs
+        for malformed fragments. Without this, every save on a machine
+        with any malformed fragment prints the same warning repeatedly."""
+        import logging
+
+        from memtomem.config import _build_comparand
+
+        # Malformed fragment that would normally warn on each load.
+        (isolated["config_d"] / "bad.json").write_text('{"unknown_section": {"foo": 1}}')
+
+        caplog.set_level(logging.WARNING, logger="memtomem.config")
+        _build_comparand(quiet=True)
+        assert not caplog.records, (
+            f"comparand build should not emit warnings; got {[r.message for r in caplog.records]}"
+        )
+
+        # Control: quiet=False still emits (proves the suppression is targeted).
+        from memtomem.config import load_config_d
+
+        caplog.clear()
+        probe = Mem2MemConfig()
+        load_config_d(probe, quiet=False)
+        assert any(
+            "unknown_section" in r.message.lower() or "unknown" in r.message.lower()
+            for r in caplog.records
+        ), f"quiet=False must still emit warnings; got {[r.message for r in caplog.records]}"
+
+    # ── Unchanged — unrelated to delta semantic ────────────────────────
+
+    def test_legacy_repr_string_in_config_handled_gracefully(self, isolated):
         """Pre-fix installations may have serialized ``namespace.rules`` via
         ``default=str`` → raw ``repr()`` strings in config.json. Loading such
         a file on upgrade must not crash: coerce rejects the shape, load path
@@ -564,33 +704,29 @@ class TestSaveConfigOverrides:
         """
         import json
 
-        config_file = tmp_path / "config.json"
-        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
-
         # Case 1: whole value is a repr-ish string (not even JSON).
-        config_file.write_text(
+        isolated["config_file"].write_text(
             json.dumps(
                 {"namespace": {"rules": "<NamespacePolicyRule path_glob='x' namespace='y'>"}}
             )
         )
         cfg = Mem2MemConfig()
         load_config_overrides(cfg)
-        assert cfg.namespace.rules == []  # fell back to default, no crash
+        assert cfg.namespace.rules == []
 
         # Case 2: list of repr strings.
-        config_file.write_text(json.dumps({"namespace": {"rules": ["<legacy repr entry>"]}}))
+        isolated["config_file"].write_text(
+            json.dumps({"namespace": {"rules": ["<legacy repr entry>"]}})
+        )
         cfg = Mem2MemConfig()
         load_config_overrides(cfg)
         assert cfg.namespace.rules == []
 
-    def test_namespace_rules_round_trip(self, tmp_path, monkeypatch):
+    def test_namespace_rules_round_trip(self, isolated):
         """list[NamespacePolicyRule] survives save→load via model_dump/validate."""
         import json
 
         from memtomem.config import NamespacePolicyRule
-
-        config_file = tmp_path / "config.json"
-        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
 
         cfg = Mem2MemConfig()
         cfg.namespace.rules = [
@@ -599,39 +735,16 @@ class TestSaveConfigOverrides:
         ]
         save_config_overrides(cfg)
 
-        # Persisted as list of dicts — not BaseSettings repr().
-        data = json.loads(config_file.read_text())
+        data = json.loads(isolated["config_file"].read_text())
         assert data["namespace"]["rules"] == [
             {"path_glob": "docs/**/*.md", "namespace": "docs"},
             {"path_glob": "work/**/*.md", "namespace": "work"},
         ]
 
-        # load_config_overrides runs coerce_and_validate on each field that
-        # has a FIELD_CONSTRAINTS entry. Because namespace.rules is now
-        # registered, the raw dicts on disk are validated back into
-        # NamespacePolicyRule instances — matching what downstream consumers
-        # (indexing/engine.py) require (attribute access like `rule.path_glob`).
         fresh = Mem2MemConfig()
         load_config_overrides(fresh)
         assert all(isinstance(r, NamespacePolicyRule) for r in fresh.namespace.rules)
         assert fresh.namespace.rules == cfg.namespace.rules
-
-    def test_section_with_only_defaults_dropped_entirely(self, tmp_path, monkeypatch):
-        """If every mutable key in a section equals its default, the whole
-        section is omitted from config.json (no orphan ``{}`` entries)."""
-        import json
-
-        config_file = tmp_path / "config.json"
-        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
-
-        # Prior leak: entire decay section pinned at defaults.
-        config_file.write_text(json.dumps({"decay": {"enabled": False, "half_life_days": 30.0}}))
-
-        cfg = Mem2MemConfig()  # all defaults
-        save_config_overrides(cfg)
-
-        data = json.loads(config_file.read_text())
-        assert "decay" not in data
 
 
 # ── Other subcommands (help text) ───────────────────────────────────────
