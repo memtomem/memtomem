@@ -640,6 +640,135 @@ def load_config_overrides(config: Mem2MemConfig) -> None:
                     )
 
 
+_CONFIG_D_PATH = Path("~/.memtomem/config.d")
+
+
+def _config_d_path() -> Path:
+    return _CONFIG_D_PATH.expanduser()
+
+
+def _merge_strategy_for(section_cls: type, field_name: str) -> MergeStrategy | None:
+    """Return the ``MergeStrategy`` annotated on a field, or None if scalar."""
+    info = section_cls.model_fields.get(field_name) if hasattr(section_cls, "model_fields") else None
+    if info is None:
+        return None
+    for m in info.metadata:
+        if isinstance(m, MergeStrategy):
+            return m
+    return None
+
+
+def _dedup_key(item: object) -> object:
+    """Stable equality key for APPEND dedup; normalises Path to its string form."""
+    if isinstance(item, Path):
+        return str(item)
+    return item
+
+
+def load_config_d(config: Mem2MemConfig) -> None:
+    """Apply fragments from ``~/.memtomem/config.d/*.json`` (if dir exists).
+
+    Intended for integration-installed fragments (``mm init <client>`` drops
+    one file, ``mm uninstall <client>`` removes it). Each fragment is a
+    partial ``Mem2MemConfig`` JSON. Fragments are applied in lexicographic
+    filename order. For each field:
+
+    - If ``MEMTOMEM_<SECTION>__<FIELD>`` env var is set → skip (env wins).
+    - If scalar → last fragment wins.
+    - If ``list[*]`` with ``APPEND`` strategy → values concatenated,
+      duplicates removed (first-seen order preserved).
+    - If ``list[*]`` with ``REPLACE`` strategy → last fragment wins; prior
+      list (incl. defaults) is discarded.
+
+    ``~/.memtomem/config.json`` is a separate layer applied *after* fragments
+    (see ``load_config_overrides``); that file remains a full REPLACE-on-set
+    for every field so the ``mm init`` wizard keeps unambiguous user-override
+    semantics.
+    """
+    import json as _json
+    import logging
+    import os
+
+    _log = logging.getLogger(__name__)
+
+    dir_ = _config_d_path()
+    if not dir_.is_dir():
+        return
+
+    fragments = sorted(p for p in dir_.iterdir() if p.is_file() and p.suffix == ".json")
+    for path in fragments:
+        try:
+            data = _json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, _json.JSONDecodeError) as exc:
+            _log.warning("Failed to read config fragment %s: %s", path, exc)
+            continue
+        if not isinstance(data, dict):
+            _log.warning("Config fragment %s is not a JSON object (ignored)", path)
+            continue
+        for section_name, updates in data.items():
+            section_obj = getattr(config, section_name, None)
+            if section_obj is None or not isinstance(updates, dict):
+                if section_obj is None and isinstance(updates, dict):
+                    _log.warning(
+                        "Unknown config section '%s' in %s (ignored)", section_name, path
+                    )
+                continue
+            section_cls = type(section_obj)
+            for key, value in updates.items():
+                if not hasattr(section_obj, key):
+                    continue
+                env_var = f"MEMTOMEM_{section_name.upper()}__{key.upper()}"
+                if env_var in os.environ:
+                    _log.debug(
+                        "Skipping %s.%s from %s: %s is set (env wins)",
+                        section_name,
+                        key,
+                        path,
+                        env_var,
+                    )
+                    continue
+                strategy = _merge_strategy_for(section_cls, key)
+                if strategy is not None and strategy.mode == "append":
+                    if not isinstance(value, list):
+                        _log.warning(
+                            "Expected list for %s.%s in %s (got %s); skipping",
+                            section_name,
+                            key,
+                            path,
+                            type(value).__name__,
+                        )
+                        continue
+                    current = list(getattr(section_obj, key))
+                    seen = {_dedup_key(x) for x in current}
+                    for item in value:
+                        k = _dedup_key(item)
+                        if k not in seen:
+                            current.append(item)
+                            seen.add(k)
+                    try:
+                        setattr(section_obj, key, current)
+                    except (TypeError, ValueError) as exc:
+                        _log.warning(
+                            "Skipping invalid fragment merge %s.%s from %s: %s",
+                            section_name,
+                            key,
+                            path,
+                            exc,
+                        )
+                else:
+                    try:
+                        setattr(section_obj, key, value)
+                    except (TypeError, ValueError) as exc:
+                        _log.warning(
+                            "Skipping invalid fragment value %s.%s=%r from %s: %s",
+                            section_name,
+                            key,
+                            value,
+                            path,
+                            exc,
+                        )
+
+
 def ensure_auto_discovered_dirs(config: Mem2MemConfig) -> None:
     """Append auto-discovered well-known dirs that aren't already in memory_dirs.
 
