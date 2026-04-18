@@ -722,6 +722,29 @@ class TestSaveConfigOverrides:
         load_config_overrides(cfg)
         assert cfg.namespace.rules == []
 
+    def test_save_creates_parent_directory_if_missing(self, tmp_path, monkeypatch) -> None:
+        """Structural guard for the ``path.parent.mkdir`` removal in
+        ``save_config_overrides``: the helper is now responsible for creating
+        the config directory. Every other ``isolated`` test writes into the
+        already-existing ``tmp_path``, so without this test a future
+        regression (e.g. dropping the helper's ``mkdir`` too) would pass CI.
+        """
+        nested_dir = tmp_path / "brand" / "new" / ".memtomem"
+        config_file = nested_dir / "config.json"
+        config_d = tmp_path / "config.d"
+        config_d.mkdir()
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+        monkeypatch.setattr("memtomem.config._config_d_path", lambda: config_d)
+
+        assert not nested_dir.exists()
+
+        cfg = Mem2MemConfig()
+        cfg.mmr.enabled = True  # force a non-comparand write
+        save_config_overrides(cfg)
+
+        assert config_file.exists()
+        assert nested_dir.is_dir()
+
     def test_save_atomic_on_replace_failure(self, isolated, monkeypatch) -> None:
         """``save_config_overrides`` now writes via ``_atomic_write_json``.
         If ``os.replace`` fails mid-write, the existing ``config.json`` must
