@@ -540,9 +540,15 @@ def _override_path() -> Path:
 
 
 def load_config_overrides(config: Mem2MemConfig) -> None:
-    """Apply persisted overrides from ~/.memtomem/config.json (if exists)."""
+    """Apply persisted overrides from ~/.memtomem/config.json (if exists).
+
+    Precedence: ``MEMTOMEM_<SECTION>__<FIELD>`` env vars win over
+    ``config.json``. If an env var is set for a field, the corresponding
+    ``config.json`` entry is skipped so the env-bound value remains in effect.
+    """
     import json as _json
     import logging
+    import os
 
     _log = logging.getLogger(__name__)
 
@@ -562,6 +568,16 @@ def load_config_overrides(config: Mem2MemConfig) -> None:
             continue
         for key, value in updates.items():
             if hasattr(section_obj, key):
+                env_var = f"MEMTOMEM_{section_name.upper()}__{key.upper()}"
+                if env_var in os.environ:
+                    _log.debug(
+                        "Skipping %s.%s from %s: %s is set in environment (env wins)",
+                        section_name,
+                        key,
+                        path,
+                        env_var,
+                    )
+                    continue
                 full_key = f"{section_name}.{key}"
                 constraint = FIELD_CONSTRAINTS.get(full_key)
                 if constraint:
