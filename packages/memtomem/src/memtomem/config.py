@@ -217,9 +217,62 @@ class AccessConfig(BaseSettings):
         return v
 
 
+_NAMESPACE_MAX_LEN = 128
+_ALLOWED_NS_PLACEHOLDERS: frozenset[str] = frozenset({"parent"})
+
+
+class NamespacePolicyRule(BaseSettings):
+    """Maps files matching a glob pattern to a namespace label.
+
+    ``path_glob`` uses gitignore-style patterns (via ``pathspec.GitIgnoreSpec``).
+    Leading ``~/`` is expanded at load time. Matching is case-insensitive and
+    runs against the absolute resolved file path with any leading ``/``
+    stripped — same semantics as ``IndexingConfig.exclude_patterns``.
+
+    ``namespace`` supports the ``{parent}`` placeholder, which expands to the
+    immediate parent folder name of the matched file. Unknown placeholders are
+    rejected at load time. When ``{parent}`` would expand to an empty string
+    the rule is skipped at runtime and the next rule is tried.
+    """
+
+    path_glob: str
+    namespace: str
+
+    @field_validator("path_glob")
+    @classmethod
+    def _expand_and_validate_glob(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("path_glob must be non-empty")
+        if v == "~" or v.startswith("~/"):
+            v = str(Path(v).expanduser())
+        return v
+
+    @field_validator("namespace")
+    @classmethod
+    def _validate_namespace(cls, v: str) -> str:
+        import string as _string
+
+        v = v.strip()
+        if not v:
+            raise ValueError("namespace must be non-empty")
+        if len(v) > _NAMESPACE_MAX_LEN:
+            raise ValueError(f"namespace must be <= {_NAMESPACE_MAX_LEN} chars, got {len(v)}")
+        for _lit, field_name, _spec, _conv in _string.Formatter().parse(v):
+            if field_name is not None and field_name not in _ALLOWED_NS_PLACEHOLDERS:
+                raise ValueError(
+                    f"unknown placeholder '{{{field_name}}}' in namespace; "
+                    f"supported: {sorted(_ALLOWED_NS_PLACEHOLDERS)}"
+                )
+        if any(ord(c) < 32 for c in v):
+            raise ValueError("namespace must not contain control characters")
+        return v
+
+
 class NamespaceConfig(BaseSettings):
     default_namespace: str = "default"
     enable_auto_ns: bool = False
+    rules: Annotated[list[NamespacePolicyRule], APPEND] = Field(default_factory=list)
 
 
 class RerankConfig(BaseSettings):
@@ -658,10 +711,43 @@ def _merge_strategy_for(section_cls: type, field_name: str) -> MergeStrategy | N
     return None
 
 
+def _list_item_type(section_cls: type, field_name: str) -> type | None:
+    """Return the element type of a ``list[X]`` field, or ``None`` for scalars.
+
+    Used by the fragment loader to coerce raw JSON dicts into ``BaseSettings``
+    instances before APPEND dedup, since ``setattr`` on a non-validating
+    BaseSettings won't re-validate the assigned list.
+    """
+    import typing
+
+    info = (
+        section_cls.model_fields.get(field_name) if hasattr(section_cls, "model_fields") else None
+    )
+    if info is None:
+        return None
+    args = typing.get_args(info.annotation)
+    if not args:
+        return None
+    item = args[0]
+    return item if isinstance(item, type) else None
+
+
 def _dedup_key(item: object) -> object:
-    """Stable equality key for APPEND dedup; normalises Path to its string form."""
+    """Stable equality key for APPEND dedup.
+
+    Normalises Path to its string form and dict/BaseSettings to a recursively
+    sorted tuple form so that ``list[dict]`` and ``list[BaseSettings]`` fields
+    (e.g. ``NamespaceConfig.rules``) can be deduped across a native default
+    list and raw JSON fragment entries.
+    """
     if isinstance(item, Path):
         return str(item)
+    if isinstance(item, BaseSettings):
+        return _dedup_key(item.model_dump(mode="json"))
+    if isinstance(item, dict):
+        return tuple(sorted((k, _dedup_key(v)) for k, v in item.items()))
+    if isinstance(item, list):
+        return tuple(_dedup_key(x) for x in item)
     return item
 
 
@@ -737,8 +823,28 @@ def load_config_d(config: Mem2MemConfig) -> None:
                         )
                         continue
                     current = list(getattr(section_obj, key))
+                    item_type = _list_item_type(section_cls, key)
+                    coerce = (
+                        item_type
+                        if item_type is not None
+                        and isinstance(item_type, type)
+                        and issubclass(item_type, BaseSettings)
+                        else None
+                    )
                     seen = {_dedup_key(x) for x in current}
                     for item in value:
+                        if coerce is not None and isinstance(item, dict):
+                            try:
+                                item = coerce.model_validate(item)
+                            except Exception as exc:
+                                _log.warning(
+                                    "Skipping invalid %s.%s entry in %s: %s",
+                                    section_name,
+                                    key,
+                                    path,
+                                    exc,
+                                )
+                                continue
                         k = _dedup_key(item)
                         if k not in seen:
                             current.append(item)

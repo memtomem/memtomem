@@ -5,8 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import pytest
+from pydantic import ValidationError
 
-from memtomem.config import NamespaceConfig
+from memtomem.config import NamespaceConfig, NamespacePolicyRule
 from memtomem.indexing.engine import (
     IndexEngine,
     _merge_short_chunks,
@@ -348,6 +350,210 @@ class TestResolveNamespace:
         fp = memory_dir / "file.md"
         result = engine._resolve_namespace(fp, None)
         assert result == "work"
+
+
+# ===========================================================================
+# 2b. _resolve_namespace with NamespacePolicyRule
+# ===========================================================================
+
+
+def _install_rules(engine, rules, *, enable_auto_ns=False, default_namespace="default"):
+    """Swap an engine's namespace config + rebuild its pre-compiled rule specs.
+
+    Mirrors the constructor wiring in IndexEngine.__init__ so tests can exercise
+    different rule sets without standing up a fresh component stack.
+    """
+    from memtomem.indexing.engine import _build_exclude_spec
+
+    engine._ns_config = NamespaceConfig(
+        enable_auto_ns=enable_auto_ns,
+        default_namespace=default_namespace,
+        rules=rules,
+    )
+    engine._ns_rule_specs = [(_build_exclude_spec([rule.path_glob]), rule) for rule in rules]
+    engine._warned_empty_parent_rules = set()
+
+
+class TestNamespacePolicyRules:
+    """Tests for IndexEngine._resolve_namespace with rule-based policy."""
+
+    async def test_no_rules_preserves_existing_behavior(self, components, memory_dir):
+        """rules=[] → priority chain behaves exactly like the pre-rules path."""
+        engine = components.index_engine
+        _install_rules(engine, [])
+
+        fp = memory_dir / "notes.md"
+        assert engine._resolve_namespace(fp, None) is None
+        assert engine._resolve_namespace(fp, "explicit") == "explicit"
+
+    async def test_rule_match_returns_namespace(self, components, memory_dir):
+        """A matching rule returns its namespace."""
+        engine = components.index_engine
+        rule_glob = f"{memory_dir.as_posix()}/**"
+        _install_rules(
+            engine,
+            [NamespacePolicyRule(path_glob=rule_glob, namespace="matched")],
+        )
+
+        fp = memory_dir / "sub" / "notes.md"
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        fp.write_text("# Notes")
+
+        assert engine._resolve_namespace(fp, None) == "matched"
+
+    async def test_first_match_wins(self, components, memory_dir):
+        """When multiple rules match, the earliest one wins."""
+        engine = components.index_engine
+        _install_rules(
+            engine,
+            [
+                NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="first"),
+                NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="second"),
+            ],
+        )
+
+        fp = memory_dir / "notes.md"
+        fp.write_text("# Notes")
+
+        assert engine._resolve_namespace(fp, None) == "first"
+
+    async def test_explicit_ns_beats_rules(self, components, memory_dir):
+        """Explicit namespace argument takes priority over any rule match."""
+        engine = components.index_engine
+        _install_rules(
+            engine,
+            [
+                NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled"),
+            ],
+        )
+
+        fp = memory_dir / "notes.md"
+        assert engine._resolve_namespace(fp, "explicit") == "explicit"
+
+    async def test_rules_beat_auto_ns(self, components, memory_dir):
+        """A rule match wins over enable_auto_ns folder derivation."""
+        engine = components.index_engine
+        _install_rules(
+            engine,
+            [
+                NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled"),
+            ],
+            enable_auto_ns=True,
+        )
+
+        sub = memory_dir / "project-x"
+        sub.mkdir()
+        fp = sub / "notes.md"
+        fp.write_text("# Notes")
+
+        # Without rules this would have returned "project-x" (see
+        # TestResolveNamespace.test_auto_ns_folder_based).
+        assert engine._resolve_namespace(fp, None) == "ruled"
+
+    async def test_parent_placeholder_substitution(self, components, memory_dir):
+        """``{parent}`` expands to the matched file's parent folder name."""
+        engine = components.index_engine
+        _install_rules(
+            engine,
+            [
+                NamespacePolicyRule(
+                    path_glob=f"{memory_dir.as_posix()}/**",
+                    namespace="gdrive:{parent}",
+                ),
+            ],
+        )
+
+        sub = memory_dir / "team-alpha"
+        sub.mkdir()
+        fp = sub / "notes.md"
+        fp.write_text("# Notes")
+
+        assert engine._resolve_namespace(fp, None) == "gdrive:team-alpha"
+
+    async def test_home_tilde_in_path_glob_expanded(self):
+        """Leading ``~/`` in path_glob expands at load time."""
+        rule = NamespacePolicyRule(path_glob="~/some/path/**", namespace="home")
+        assert not rule.path_glob.startswith("~"), rule.path_glob
+        assert rule.path_glob.endswith("/some/path/**")
+
+    async def test_parent_placeholder_empty_parent_falls_through(
+        self, components, memory_dir, caplog
+    ):
+        """When ``{parent}`` expands to an empty string the rule is skipped and
+        the next fallback (here: default_namespace) is returned. Also verifies
+        the skip is logged once per rule index.
+        """
+        import logging
+
+        engine = components.index_engine
+        _install_rules(
+            engine,
+            [
+                NamespacePolicyRule(path_glob="**", namespace="prefix:{parent}"),
+            ],
+            default_namespace="fallback",
+        )
+
+        # A path whose parent is "/" — parent.name == "" on POSIX.
+        fp = Path("/root-level.md")
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.indexing.engine"):
+            assert engine._resolve_namespace(fp, None) == "fallback"
+            # Second call on the same rule index must not re-log.
+            assert engine._resolve_namespace(fp, None) == "fallback"
+
+        skip_warnings = [r for r in caplog.records if "parent name empty" in r.getMessage()]
+        assert len(skip_warnings) == 1, [r.getMessage() for r in skip_warnings]
+
+    async def test_case_insensitive_matching(self, components, memory_dir):
+        """Glob matching is case-insensitive — same semantics as exclude_patterns."""
+        engine = components.index_engine
+        _install_rules(
+            engine,
+            [
+                NamespacePolicyRule(
+                    path_glob=f"{memory_dir.as_posix()}/**/.CLAUDE/**",
+                    namespace="claude",
+                ),
+            ],
+        )
+
+        sub = memory_dir / "proj" / ".claude"
+        sub.mkdir(parents=True)
+        fp = sub / "notes.md"
+        fp.write_text("# Notes")
+
+        assert engine._resolve_namespace(fp, None) == "claude"
+
+    async def test_literal_namespace_no_placeholder(self, components, memory_dir):
+        """A namespace template without ``{parent}`` is returned verbatim."""
+        engine = components.index_engine
+        _install_rules(
+            engine,
+            [
+                NamespacePolicyRule(
+                    path_glob=f"{memory_dir.as_posix()}/**",
+                    namespace="literal-label",
+                ),
+            ],
+        )
+
+        fp = memory_dir / "notes.md"
+        fp.write_text("# Notes")
+
+        assert engine._resolve_namespace(fp, None) == "literal-label"
+
+    def test_unknown_placeholder_rejected_at_load(self):
+        """``{unknown}`` in namespace raises a ValidationError at construction."""
+        with pytest.raises(ValidationError) as excinfo:
+            NamespacePolicyRule(path_glob="**", namespace="foo:{unknown}")
+        assert "unknown placeholder" in str(excinfo.value).lower()
+
+    def test_namespace_length_limit_rejected_at_load(self):
+        """A namespace over 128 chars raises a ValidationError."""
+        with pytest.raises(ValidationError) as excinfo:
+            NamespacePolicyRule(path_glob="**", namespace="x" * 129)
+        assert "128" in str(excinfo.value)
 
 
 # ===========================================================================

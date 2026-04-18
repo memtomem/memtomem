@@ -16,7 +16,7 @@ from memtomem.chunking.markdown import MarkdownChunker
 from memtomem.chunking.registry import ChunkerRegistry
 from memtomem.chunking.restructured_text import ReStructuredTextChunker
 from memtomem.chunking.structured import StructuredChunker
-from memtomem.config import IndexingConfig, NamespaceConfig
+from memtomem.config import IndexingConfig, NamespaceConfig, NamespacePolicyRule
 from memtomem.indexing.differ import compute_diff
 from memtomem.models import Chunk, ChunkMetadata, IndexingStats
 
@@ -117,6 +117,10 @@ class IndexEngine:
         self._embedder = embedder
         self._config = config
         self._ns_config = namespace_config or NamespaceConfig()
+        self._ns_rule_specs: list[tuple[pathspec.GitIgnoreSpec, NamespacePolicyRule]] = [
+            (_build_exclude_spec([rule.path_glob]), rule) for rule in self._ns_config.rules
+        ]
+        self._warned_empty_parent_rules: set[int] = set()
         self._registry = registry or ChunkerRegistry(
             [
                 MarkdownChunker(),
@@ -254,12 +258,22 @@ class IndexEngine:
     def _resolve_namespace(self, file_path: Path, explicit_ns: str | None) -> str | None:
         """Determine the namespace for a file.
 
-        Priority: explicit parameter > auto_ns (folder-based) > default_namespace.
-        Returns None only if default_namespace is "default" and auto_ns is off
-        (preserves backward compat — chunks without namespace stay untagged).
+        Priority: explicit parameter > policy rules (first valid match) >
+        auto_ns (folder-based) > default_namespace. Returns None only if
+        default_namespace is "default" and nothing else matched (preserves
+        backward compat — chunks without namespace stay untagged).
         """
         if explicit_ns is not None:
             return explicit_ns
+
+        if self._ns_rule_specs:
+            candidate = file_path.as_posix().lower().lstrip("/")
+            for i, (spec, rule) in enumerate(self._ns_rule_specs):
+                if not spec.match_file(candidate):
+                    continue
+                ns = self._format_namespace(rule.namespace, file_path, rule_index=i)
+                if ns is not None:
+                    return ns
 
         if self._ns_config.enable_auto_ns:
             # Derive namespace from the immediate parent folder name,
@@ -277,6 +291,27 @@ class IndexEngine:
             return default
 
         return None
+
+    def _format_namespace(self, template: str, file_path: Path, *, rule_index: int) -> str | None:
+        """Substitute ``{parent}`` in a rule's namespace template.
+
+        Returns ``None`` when ``{parent}`` is present but the file's parent
+        folder name is empty, so the caller can fall through to the next rule.
+        Logs a warning once per rule index to surface the skip without flooding.
+        """
+        if "{parent}" not in template:
+            return template
+        parent_name = file_path.parent.name
+        if not parent_name:
+            if rule_index not in self._warned_empty_parent_rules:
+                self._warned_empty_parent_rules.add(rule_index)
+                logger.warning(
+                    "namespace rule #%d skipped for %s: parent name empty",
+                    rule_index,
+                    file_path,
+                )
+            return None
+        return template.format(parent=parent_name)
 
     def _is_within_memory_dirs(self, path: Path) -> bool:
         """Check that *path* is within at least one configured memory_dir."""

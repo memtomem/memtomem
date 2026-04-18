@@ -257,6 +257,70 @@ def test_config_d_ignores_non_json_files(
     assert str(cfg.storage.sqlite_path) == "/ok.db"
 
 
+def test_config_d_namespace_rules_appends(
+    config_d_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """APPEND merge: default empty rules + fragment rule → one loaded rule."""
+    _clear_all_memtomem_env(monkeypatch)
+    (config_d_dir / "claude.json").write_text(
+        json.dumps(
+            {
+                "namespace": {
+                    "rules": [
+                        {
+                            "path_glob": "**/.claude/**/memory/**",
+                            "namespace": "claude:memory",
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = Mem2MemConfig()
+    assert cfg.namespace.rules == []
+    load_config_d(cfg)
+    assert len(cfg.namespace.rules) == 1
+    assert cfg.namespace.rules[0].namespace == "claude:memory"
+
+
+def test_config_d_namespace_rules_alphabetical_order(
+    config_d_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fragments concatenate in alphabetical filename order — freeze this
+    contract so users can rely on numeric prefixes (``10-foo.json`` before
+    ``20-bar.json``) for first-match-wins precedence across fragments.
+    """
+    _clear_all_memtomem_env(monkeypatch)
+    (config_d_dir / "20-gdrive.json").write_text(
+        json.dumps(
+            {
+                "namespace": {
+                    "rules": [
+                        {"path_glob": "**/gdrive/**", "namespace": "gdrive"},
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (config_d_dir / "10-claude.json").write_text(
+        json.dumps(
+            {
+                "namespace": {
+                    "rules": [
+                        {"path_glob": "**/claude/**", "namespace": "claude"},
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = Mem2MemConfig()
+    load_config_d(cfg)
+    assert [r.namespace for r in cfg.namespace.rules] == ["claude", "gdrive"]
+
+
 # ---------------------------------------------------------------------------
 # Enforcement: every list[*] field must declare a merge strategy.
 #
