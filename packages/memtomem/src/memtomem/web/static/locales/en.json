@@ -449,5 +449,18 @@
   "confirm.emb_reset_msg": "WARNING: All indexed vectors will be deleted. New config: {provider}/{model} (dim {dimension}). Re-indexing required afterwards.",
   "confirm.emb_reset_btn": "Reset",
   "confirm.ns_delete_title": "Delete Namespace",
-  "confirm.ns_delete_msg": "Delete all chunks in namespace '{name}'? This cannot be undone."
+  "confirm.ns_delete_msg": "Delete all chunks in namespace '{name}'? This cannot be undone.",
+
+  "settings.exclude_patterns.builtin_title": "Built-in (read-only)",
+  "settings.exclude_patterns.builtin_hint": "cannot be disabled",
+  "settings.exclude_patterns.group_secret": "Secret",
+  "settings.exclude_patterns.group_noise": "Noise",
+  "settings.exclude_patterns.user_title": "User patterns",
+  "settings.exclude_patterns.add": "+ Add pattern",
+  "settings.exclude_patterns.remove": "Remove pattern",
+  "settings.exclude_patterns.placeholder": "e.g. **/*.log",
+  "settings.exclude_patterns.err_empty": "Pattern cannot be empty",
+  "settings.exclude_patterns.err_duplicate": "Duplicate pattern: {pattern}",
+  "settings.exclude_patterns.err_syntax": "Invalid pathspec pattern: {pattern}",
+  "settings.exclude_patterns.err_save_blocked": "Fix the highlighted exclude patterns before saving"
 }

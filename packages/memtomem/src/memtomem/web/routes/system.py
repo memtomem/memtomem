@@ -25,6 +25,7 @@ from memtomem.web.deps import (
     get_storage,
 )
 from memtomem.web.schemas.config import (
+    BuiltinExcludePatternsResponse,
     ConfigDecayOut,
     ConfigEmbeddingOut,
     ConfigIndexingOut,
@@ -147,6 +148,7 @@ def _build_config_response(cfg) -> ConfigResponse:
             target_chunk_tokens=cfg.indexing.target_chunk_tokens,
             chunk_overlap_tokens=cfg.indexing.chunk_overlap_tokens,
             structured_chunk_mode=cfg.indexing.structured_chunk_mode,
+            exclude_patterns=list(cfg.indexing.exclude_patterns),
         ),
         decay=ConfigDecayOut(
             enabled=cfg.decay.enabled,
@@ -166,6 +168,20 @@ def _build_config_response(cfg) -> ConfigResponse:
 @router.get("/config", response_model=ConfigResponse)
 async def get_config_endpoint(config=Depends(get_config)) -> ConfigResponse:
     return _build_config_response(config)
+
+
+@router.get(
+    "/indexing/builtin-exclude-patterns",
+    response_model=BuiltinExcludePatternsResponse,
+)
+async def get_builtin_exclude_patterns() -> BuiltinExcludePatternsResponse:
+    """Return the read-only built-in exclude pattern groups."""
+    from memtomem.indexing.engine import _BUILTIN_NOISE_PATTERNS, _BUILTIN_SECRET_PATTERNS
+
+    return BuiltinExcludePatternsResponse(
+        secret=list(_BUILTIN_SECRET_PATTERNS),
+        noise=list(_BUILTIN_NOISE_PATTERNS),
+    )
 
 
 # ---------------------------------------------------------------------------

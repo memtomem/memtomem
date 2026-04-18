@@ -449,5 +449,18 @@
   "confirm.emb_reset_msg": "경고: 모든 인덱싱된 벡터가 삭제됩니다. 새 설정: {provider}/{model} (dim {dimension}). 이후 재인덱싱이 필요합니다.",
   "confirm.emb_reset_btn": "초기화",
   "confirm.ns_delete_title": "네임스페이스 삭제",
-  "confirm.ns_delete_msg": "네임스페이스 '{name}'의 모든 청크를 삭제하시겠습니까? 이 작업은 취소할 수 없습니다."
+  "confirm.ns_delete_msg": "네임스페이스 '{name}'의 모든 청크를 삭제하시겠습니까? 이 작업은 취소할 수 없습니다.",
+
+  "settings.exclude_patterns.builtin_title": "기본 제공 (읽기 전용)",
+  "settings.exclude_patterns.builtin_hint": "비활성화할 수 없습니다",
+  "settings.exclude_patterns.group_secret": "시크릿",
+  "settings.exclude_patterns.group_noise": "노이즈",
+  "settings.exclude_patterns.user_title": "사용자 패턴",
+  "settings.exclude_patterns.add": "+ 패턴 추가",
+  "settings.exclude_patterns.remove": "패턴 제거",
+  "settings.exclude_patterns.placeholder": "예: **/*.log",
+  "settings.exclude_patterns.err_empty": "빈 패턴은 사용할 수 없습니다",
+  "settings.exclude_patterns.err_duplicate": "중복된 패턴: {pattern}",
+  "settings.exclude_patterns.err_syntax": "잘못된 pathspec 패턴: {pattern}",
+  "settings.exclude_patterns.err_save_blocked": "저장하기 전에 표시된 exclude 패턴 오류를 수정하세요"
 }
