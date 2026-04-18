@@ -1,6 +1,8 @@
 # Google Drive Integration (Multi-Device / Team)
 
-memtomem works across devices and teams by sharing files via Google Drive (or Dropbox, OneDrive) while keeping the search index local per device.
+memtomem works across devices and teams by sharing files via any cloud sync client (Google Drive, OneDrive, iCloud Drive, Dropbox, etc.) while keeping the search index local per device.
+
+> **Prerequisite**: install and configure a sync client so that the shared folder appears at a local filesystem path. See [Cloud Sync Client Setup](cloud-sync.md) for per-provider steps (Google Drive for desktop, OneDrive, iCloud Drive) before continuing — examples below use Google Drive but any provider with a verified local path plugs into the same `MEMORY_DIRS` slot.
 
 ## Core Principles
 
@@ -11,6 +13,8 @@ memtomem works across devices and teams by sharing files via Google Drive (or Dr
 | Folder structure | Namespace-based subfolders | `auto_ns` maps subfolder names to namespaces |
 
 Each device builds its own search index by indexing the same shared files. The DB stores absolute paths internally, so each device's index is independent.
+
+> **Streaming / Files-On-Demand caveat**: if your sync client has an on-demand mode (Google Drive Stream, OneDrive Files On-Demand ON, iCloud "Optimize Mac Storage"), pin `memtomem-memories` as always-available-offline — the indexer cannot read cloud-only placeholders. Per-provider pinning steps are in [Cloud Sync Client Setup](cloud-sync.md).
 
 ## Architecture
 
@@ -160,6 +164,7 @@ Bob (Machine B, after sync completes):
 
 ## Next Steps
 
+- [Cloud Sync Client Setup](cloud-sync.md) — Install Google Drive for desktop, OneDrive, or iCloud Drive (the prerequisite above)
 - [User Guide](user-guide.md) — Complete feature walkthrough
 - [Agent Context Management](agent-context.md) — `mm context` for multi-editor setups
 - [Configuration](configuration.md) — All `MEMTOMEM_*` environment variables
