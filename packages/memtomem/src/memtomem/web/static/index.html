@@ -530,33 +530,142 @@
   <!-- ===== SETTINGS HUB ===== -->
   <div id="tab-settings" class="tab-panel" hidden>
     <div class="settings-layout">
-      <div class="settings-nav">
-        <div class="settings-nav-group" data-i18n="settings.nav.system">System</div>
-        <button class="settings-nav-btn active" data-section="config" data-i18n="settings.nav.config">Config</button>
-        <button class="settings-nav-btn" data-section="namespaces" data-i18n="settings.nav.namespaces">Namespaces</button>
-        <button class="settings-nav-btn" data-section="hooks-sync" data-i18n="settings.nav.hooks_sync">Hooks Sync</button>
-        <div class="settings-nav-group" data-i18n="settings.nav.context_gateway">Context Gateway</div>
-        <button class="settings-nav-btn" data-section="ctx-overview" data-i18n="settings.nav.ctx_overview">Overview</button>
-        <button class="settings-nav-btn" data-section="ctx-skills" data-i18n="settings.nav.ctx_skills">Skills</button>
-        <button class="settings-nav-btn" data-section="ctx-commands" data-i18n="settings.nav.ctx_commands">Commands</button>
-        <button class="settings-nav-btn" data-section="ctx-agents" data-i18n="settings.nav.ctx_agents">Agents</button>
-        <div class="settings-nav-group" data-i18n="settings.nav.maintenance">Maintenance</div>
-        <button class="settings-nav-btn" data-section="dedup" data-i18n="settings.nav.dedup">Dedup</button>
-        <button class="settings-nav-btn" data-section="decay" data-i18n="settings.nav.decay">Decay</button>
-        <button class="settings-nav-btn" data-section="reset" data-i18n="settings.nav.reset">Reset</button>
-        <div class="settings-nav-group" data-i18n="settings.nav.data_transfer">Data Transfer</div>
-        <button class="settings-nav-btn" data-section="export" data-i18n="settings.nav.export_import">Export / Import</button>
-        <div class="settings-nav-group" data-i18n="settings.nav.harness">Harness</div>
-        <button class="settings-nav-btn" data-section="harness-sessions" data-i18n="settings.nav.sessions">Sessions</button>
-        <button class="settings-nav-btn" data-section="harness-scratch" data-i18n="settings.nav.working_memory">Working Memory</button>
-        <button class="settings-nav-btn" data-section="harness-procedures" data-i18n="settings.nav.procedures">Procedures</button>
-        <button class="settings-nav-btn" data-section="harness-health" data-i18n="settings.nav.health">Health</button>
-        <button class="settings-nav-btn" data-section="harness-watchdog" data-i18n="settings.nav.watchdog">Watchdog</button>
+      <div class="settings-nav" role="tablist">
+        <button class="settings-nav-group" type="button" data-group="general" aria-expanded="true">
+          <span class="nav-group-caret" aria-hidden="true">▾</span>
+          <span data-i18n="settings.nav.general">General</span>
+        </button>
+        <button class="settings-nav-btn active" data-section="config" data-group="general" role="tab" aria-selected="true">
+          <span class="nav-icon" aria-hidden="true">⚙</span>
+          <span class="nav-labels">
+            <span class="nav-label" data-i18n="settings.nav.config">Config</span>
+            <span class="nav-sub" data-i18n="settings.nav.config_sub">Embedding &amp; DB</span>
+          </span>
+        </button>
+        <button class="settings-nav-btn" data-section="namespaces" data-group="general" role="tab" aria-selected="false">
+          <span class="nav-icon" aria-hidden="true">🗂</span>
+          <span class="nav-labels">
+            <span class="nav-label" data-i18n="settings.nav.namespaces">Namespaces</span>
+            <span class="nav-sub" data-i18n="settings.nav.namespaces_sub">Organize memory</span>
+          </span>
+        </button>
+
+        <button class="settings-nav-group" type="button" data-group="integrations" aria-expanded="true">
+          <span class="nav-group-caret" aria-hidden="true">▾</span>
+          <span data-i18n="settings.nav.integrations">Integrations</span>
+        </button>
+        <button class="settings-nav-btn" data-section="ctx-overview" data-group="integrations" role="tab" aria-selected="false">
+          <span class="nav-icon" aria-hidden="true">🔄</span>
+          <span class="nav-labels">
+            <span class="nav-label" data-i18n="settings.nav.ctx_overview">Artifact Sync</span>
+            <span class="nav-sub" data-i18n="settings.nav.ctx_overview_sub">Skills/Cmd/Agents status</span>
+          </span>
+        </button>
+        <button class="settings-nav-btn" data-section="ctx-skills" data-group="integrations" role="tab" aria-selected="false">
+          <span class="nav-icon" aria-hidden="true">🧩</span>
+          <span class="nav-labels">
+            <span class="nav-label" data-i18n="settings.nav.ctx_skills">Skills</span>
+            <span class="nav-sub" data-i18n="settings.nav.ctx_skills_sub">Skill definitions</span>
+          </span>
+        </button>
+        <button class="settings-nav-btn" data-section="ctx-commands" data-group="integrations" role="tab" aria-selected="false">
+          <span class="nav-icon" aria-hidden="true">⌘</span>
+          <span class="nav-labels">
+            <span class="nav-label" data-i18n="settings.nav.ctx_commands">Commands</span>
+            <span class="nav-sub" data-i18n="settings.nav.ctx_commands_sub">Command definitions</span>
+          </span>
+        </button>
+        <button class="settings-nav-btn" data-section="ctx-agents" data-group="integrations" role="tab" aria-selected="false">
+          <span class="nav-icon" aria-hidden="true">🤖</span>
+          <span class="nav-labels">
+            <span class="nav-label" data-i18n="settings.nav.ctx_agents">Agents</span>
+            <span class="nav-sub" data-i18n="settings.nav.ctx_agents_sub">Agent definitions</span>
+          </span>
+        </button>
+        <button class="settings-nav-btn" data-section="hooks-sync" data-group="integrations" role="tab" aria-selected="false">
+          <span class="nav-icon" aria-hidden="true">📎</span>
+          <span class="nav-labels">
+            <span class="nav-label" data-i18n="settings.nav.hooks_sync">Hook Files</span>
+            <span class="nav-sub" data-i18n="settings.nav.hooks_sync_sub">Settings hooks</span>
+          </span>
+        </button>
+
+        <button class="settings-nav-group" type="button" data-group="runtime" aria-expanded="false">
+          <span class="nav-group-caret" aria-hidden="true">▸</span>
+          <span data-i18n="settings.nav.runtime">Runtime</span>
+        </button>
+        <button class="settings-nav-btn" data-section="harness-sessions" data-group="runtime" role="tab" aria-selected="false">
+          <span class="nav-icon" aria-hidden="true">▷</span>
+          <span class="nav-labels">
+            <span class="nav-label" data-i18n="settings.nav.sessions">Sessions</span>
+            <span class="nav-sub" data-i18n="settings.nav.sessions_sub">Episodic history</span>
+          </span>
+        </button>
+        <button class="settings-nav-btn" data-section="harness-scratch" data-group="runtime" role="tab" aria-selected="false">
+          <span class="nav-icon" aria-hidden="true">✎</span>
+          <span class="nav-labels">
+            <span class="nav-label" data-i18n="settings.nav.working_memory">Working Memory</span>
+            <span class="nav-sub" data-i18n="settings.nav.working_memory_sub">Scratch KV</span>
+          </span>
+        </button>
+        <button class="settings-nav-btn" data-section="harness-procedures" data-group="runtime" role="tab" aria-selected="false">
+          <span class="nav-icon" aria-hidden="true">📜</span>
+          <span class="nav-labels">
+            <span class="nav-label" data-i18n="settings.nav.procedures">Procedures</span>
+            <span class="nav-sub" data-i18n="settings.nav.procedures_sub">Saved recipes</span>
+          </span>
+        </button>
+        <button class="settings-nav-btn" data-section="harness-health" data-group="runtime" role="tab" aria-selected="false">
+          <span class="nav-icon" aria-hidden="true">💓</span>
+          <span class="nav-labels">
+            <span class="nav-label" data-i18n="settings.nav.health">Health Report</span>
+            <span class="nav-sub" data-i18n="settings.nav.health_sub">Status + watchdog</span>
+          </span>
+        </button>
+
+        <button class="settings-nav-group" type="button" data-group="data" aria-expanded="false">
+          <span class="nav-group-caret" aria-hidden="true">▸</span>
+          <span data-i18n="settings.nav.data">Data</span>
+        </button>
+        <button class="settings-nav-btn" data-section="dedup" data-group="data" role="tab" aria-selected="false">
+          <span class="nav-icon" aria-hidden="true">🧹</span>
+          <span class="nav-labels">
+            <span class="nav-label" data-i18n="settings.nav.dedup">Deduplicate</span>
+            <span class="nav-sub" data-i18n="settings.nav.dedup_sub">Remove near-duplicates</span>
+          </span>
+        </button>
+        <button class="settings-nav-btn" data-section="decay" data-group="data" role="tab" aria-selected="false">
+          <span class="nav-icon" aria-hidden="true">⏲</span>
+          <span class="nav-labels">
+            <span class="nav-label" data-i18n="settings.nav.decay">Age-out</span>
+            <span class="nav-sub" data-i18n="settings.nav.decay_sub">Expire old memories</span>
+          </span>
+        </button>
+        <button class="settings-nav-btn" data-section="export" data-group="data" role="tab" aria-selected="false">
+          <span class="nav-icon" aria-hidden="true">⇅</span>
+          <span class="nav-labels">
+            <span class="nav-label" data-i18n="settings.nav.export_import">Export / Import</span>
+            <span class="nav-sub" data-i18n="settings.nav.export_import_sub">JSON bundle I/O</span>
+          </span>
+        </button>
+
+        <div class="settings-nav-group settings-nav-group--danger" data-group="danger">
+          <span class="nav-group-caret" aria-hidden="true">⚠</span>
+          <span data-i18n="settings.nav.danger_zone">Danger Zone</span>
+        </div>
+        <button class="settings-nav-btn settings-nav-btn--danger" data-section="reset" data-group="danger" role="tab" aria-selected="false">
+          <span class="nav-icon" aria-hidden="true">⚠</span>
+          <span class="nav-labels">
+            <span class="nav-label" data-i18n="settings.nav.reset">Reset Database</span>
+            <span class="nav-sub" data-i18n="settings.nav.reset_sub">Delete all data</span>
+          </span>
+        </button>
       </div>
       <div class="settings-content">
 
         <!-- Config section -->
         <div class="settings-section active" id="settings-config">
+          <p class="settings-section-desc" data-i18n="settings.config.desc">Server settings: embedding provider, storage backend, search and indexing parameters.</p>
           <div class="config-layout">
             <div class="config-main">
               <div id="config-loading" class="empty-state"><div class="spinner-panel"></div></div>
@@ -573,6 +682,7 @@
 
         <!-- Namespaces section -->
         <div class="settings-section" id="settings-namespaces">
+          <p class="settings-section-desc" data-i18n="settings.ns.desc">Organize memories by namespace and review chunk counts per group.</p>
           <div class="ns-layout">
             <div id="ns-config-info" class="config-hint" hidden></div>
             <div class="ns-header">
@@ -588,6 +698,7 @@
 
         <!-- Hooks Sync section -->
         <div class="settings-section" id="settings-hooks-sync">
+          <p class="settings-section-desc" data-i18n="settings.hooks.desc">Sync Claude Code hooks from .memtomem/settings.json to the active runtime.</p>
           <div class="hooks-sync-header" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
             <h2 data-i18n="settings.hooks.title">Settings Hooks</h2>
             <button id="hooks-sync-btn" class="btn-primary" data-i18n="settings.hooks.sync_now">Sync Now</button>
@@ -598,6 +709,7 @@
 
         <!-- Context Gateway: Overview -->
         <div class="settings-section" id="settings-ctx-overview">
+          <p class="settings-section-desc" data-i18n="settings.ctx.overview_desc">Status of memtomem skills, commands, and agents across connected runtimes.</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.overview_title">Context Gateway</h2>
             <div>
@@ -610,6 +722,7 @@
 
         <!-- Context Gateway: Skills -->
         <div class="settings-section" id="settings-ctx-skills">
+          <p class="settings-section-desc" data-i18n="settings.ctx.skills_desc">Manage skill definitions and fan them out to runtimes.</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.skills_title">Skills</h2>
             <div>
@@ -625,6 +738,7 @@
 
         <!-- Context Gateway: Commands -->
         <div class="settings-section" id="settings-ctx-commands">
+          <p class="settings-section-desc" data-i18n="settings.ctx.commands_desc">Manage command definitions and fan them out to runtimes.</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.commands_title">Commands</h2>
             <div>
@@ -640,6 +754,7 @@
 
         <!-- Context Gateway: Agents -->
         <div class="settings-section" id="settings-ctx-agents">
+          <p class="settings-section-desc" data-i18n="settings.ctx.agents_desc">Manage agent definitions and fan them out to runtimes.</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.agents_title">Agents</h2>
             <div>
@@ -655,6 +770,7 @@
 
         <!-- Dedup section -->
         <div class="settings-section" id="settings-dedup">
+          <p class="settings-section-desc" data-i18n="settings.dedup.desc">Find near-duplicate chunks by similarity threshold and merge or skip them.</p>
           <div class="dedup-controls">
             <div class="dedup-params">
               <label>
@@ -684,6 +800,7 @@
 
         <!-- Decay section -->
         <div class="settings-section" id="settings-decay">
+          <p class="settings-section-desc" data-i18n="settings.decay.desc">Expire chunks older than a cutoff date, optionally filtered by source path.</p>
           <div id="decay-config-status" class="config-status" hidden></div>
           <div class="decay-controls">
             <div class="decay-params">
@@ -713,6 +830,7 @@
 
         <!-- Reset section -->
         <div class="settings-section" id="settings-reset">
+          <p class="settings-section-desc" data-i18n="settings.reset.desc">Permanently delete all memory data and reinitialize the database. Embedding config is kept.</p>
           <div class="reset-panel">
             <div class="reset-warning">
               <strong data-i18n="settings.reset.warning_title">Danger Zone</strong>
@@ -732,6 +850,7 @@
 
         <!-- Harness: Sessions -->
         <div class="settings-section" id="settings-harness-sessions">
+          <p class="settings-section-desc" data-i18n="settings.sessions.desc">Browse episodic session history and per-session event timelines.</p>
           <div class="harness-header">
             <h2 data-i18n="settings.sessions.title">Episodic Sessions</h2>
             <button id="sessions-refresh-btn" class="btn-ghost" data-i18n="settings.sessions.refresh">Refresh</button>
@@ -750,6 +869,7 @@
 
         <!-- Harness: Working Memory -->
         <div class="settings-section" id="settings-harness-scratch">
+          <p class="settings-section-desc" data-i18n="settings.scratch.desc">Ephemeral key-value scratch pad with optional TTL, promotable to long-term memory.</p>
           <div class="harness-header">
             <h2 data-i18n="settings.scratch.title">Working Memory</h2>
             <button id="scratch-refresh-btn" class="btn-ghost" data-i18n="settings.scratch.refresh">Refresh</button>
@@ -767,6 +887,7 @@
 
         <!-- Harness: Procedures -->
         <div class="settings-section" id="settings-harness-procedures">
+          <p class="settings-section-desc" data-i18n="settings.procedures.desc">Saved procedures (recipes) available for recall.</p>
           <div class="harness-header">
             <h2 data-i18n="settings.procedures.title">Procedures</h2>
             <button id="procedures-refresh-btn" class="btn-ghost" data-i18n="settings.procedures.refresh">Refresh</button>
@@ -778,6 +899,7 @@
 
         <!-- Harness: Health -->
         <div class="settings-section" id="settings-harness-health">
+          <p class="settings-section-desc" data-i18n="settings.health.desc">Memory health report — coverage, dead chunks, session stats. Includes watchdog run.</p>
           <div class="harness-header">
             <h2 data-i18n="settings.health.title">Memory Health</h2>
             <button id="health-refresh-btn" class="btn-ghost" data-i18n="settings.health.refresh">Refresh</button>
@@ -785,25 +907,25 @@
           <div id="health-report" class="harness-health">
             <div class="empty-state">Loading...</div>
           </div>
-        </div>
-
-        <!-- Harness: Watchdog -->
-        <div class="settings-section" id="settings-harness-watchdog">
-          <div class="harness-header">
-            <h2 data-i18n="settings.watchdog.title">Health Watchdog</h2>
-            <div style="display:flex;gap:8px">
-              <button id="watchdog-run-btn" class="btn-primary" data-i18n="settings.watchdog.run_btn">Run Now</button>
-              <button id="watchdog-refresh-btn" class="btn-ghost" data-i18n="settings.watchdog.refresh">Refresh</button>
+          <div class="health-watchdog-block">
+            <div class="harness-header">
+              <h3 data-i18n="settings.health.watchdog_heading">Watchdog</h3>
+              <div style="display:flex;gap:8px">
+                <button id="health-watchdog-run-btn" class="btn-primary" data-i18n="settings.watchdog.run_btn">Run Now</button>
+                <button id="health-watchdog-refresh-btn" class="btn-ghost" data-i18n="settings.watchdog.refresh">Refresh</button>
+              </div>
             </div>
-          </div>
-          <div id="watchdog-status-bar" class="status-msg" style="display:none"></div>
-          <div id="watchdog-report">
-            <div class="empty-state">Loading...</div>
+            <p class="settings-section-desc" data-i18n="settings.health.watchdog_desc">Periodic background checks. Run manually to force an update.</p>
+            <div id="health-watchdog-status-bar" class="status-msg" style="display:none"></div>
+            <div id="health-watchdog-report">
+              <div class="empty-state">Click Run Now to see watchdog status</div>
+            </div>
           </div>
         </div>
 
         <!-- Export/Import section -->
         <div class="settings-section" id="settings-export">
+          <p class="settings-section-desc" data-i18n="settings.export.desc">Export filtered chunks to a JSON bundle or import a bundle to re-index.</p>
           <div class="export-layout">
             <div class="export-card card">
               <h2 data-i18n="settings.export.title">Export</h2>

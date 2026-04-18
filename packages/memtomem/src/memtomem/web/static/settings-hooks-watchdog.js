@@ -176,8 +176,8 @@ document.getElementById('hooks-sync-btn')?.addEventListener('click', async () =>
 });
 
 async function loadWatchdogStatus() {
-  const report = qs('watchdog-report');
-  const bar = qs('watchdog-status-bar');
+  const report = qs('health-watchdog-report');
+  const bar = qs('health-watchdog-status-bar');
   bar.style.display = 'none';
   report.innerHTML = '<div class="empty-state"><div class="spinner-panel"></div></div>';
   try {
@@ -231,8 +231,8 @@ async function runWatchdogNow() {
     showToast(t('toast.watchdog_disabled'), 'error');
     return;
   }
-  const bar = qs('watchdog-status-bar');
-  const btn = qs('watchdog-run-btn');
+  const bar = qs('health-watchdog-status-bar');
+  const btn = qs('health-watchdog-run-btn');
   btn.disabled = true;
   btn.textContent = 'Running...';
   bar.style.display = 'none';
@@ -252,6 +252,6 @@ async function runWatchdogNow() {
   }
 }
 
-qs('watchdog-refresh-btn')?.addEventListener('click', loadWatchdogStatus);
-qs('watchdog-run-btn')?.addEventListener('click', runWatchdogNow);
+qs('health-watchdog-refresh-btn')?.addEventListener('click', loadWatchdogStatus);
+qs('health-watchdog-run-btn')?.addEventListener('click', runWatchdogNow);
 

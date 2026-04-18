@@ -8,7 +8,7 @@ const _HELP_VISIBLE_KEY = 'm2m-help-visible';
 
 // ── Unified global state ──
 const STATE = {
-  lastSettingsSection: 'config',
+  lastSettingsSection: null,
   selectedChunkId: null,
   selectedOriginal: '',
   lastQuery: '',
@@ -314,20 +314,91 @@ function activateTab(tabName) {
   if (tabName === 'index') loadStats();
   if (tabName === 'tags') { STATE.tagsTabStale = false; loadTags(); }
   if (tabName === 'timeline') loadTimeline();
-  if (tabName === 'settings') switchSettingsSection(STATE.lastSettingsSection || 'config');
+  if (tabName === 'settings') {
+    let start = STATE.lastSettingsSection;
+    if (!start) {
+      try { start = localStorage.getItem(LAST_SECTION_KEY); } catch {}
+    }
+    switchSettingsSection(start || 'config');
+  }
   if (['search', 'timeline'].includes(tabName)) loadNamespaceDropdowns();
 }
 
 // Settings Hub section switching
 
+const NAV_COLLAPSE_KEY = 'memtomem_nav_collapsed';
+const LAST_SECTION_KEY = 'memtomem_last_settings';
+const DEFAULT_NAV_COLLAPSED = { general: false, integrations: false, runtime: true, data: true };
+// Deep-link redirects for renamed/removed sections.
+const LEGACY_SECTION_MAP = { 'harness-watchdog': 'harness-health' };
+
+function loadNavCollapseState() {
+  try {
+    const raw = localStorage.getItem(NAV_COLLAPSE_KEY);
+    return { ...DEFAULT_NAV_COLLAPSED, ...(raw ? JSON.parse(raw) : {}) };
+  } catch {
+    return { ...DEFAULT_NAV_COLLAPSED };
+  }
+}
+
+function saveNavCollapseState() {
+  try { localStorage.setItem(NAV_COLLAPSE_KEY, JSON.stringify(STATE.settingsNavCollapsed)); } catch {}
+}
+
+function applyNavCollapseState() {
+  const state = STATE.settingsNavCollapsed || DEFAULT_NAV_COLLAPSED;
+  document.querySelectorAll('.settings-nav-group[data-group]').forEach(groupBtn => {
+    if (groupBtn.classList.contains('settings-nav-group--danger')) return;
+    const groupId = groupBtn.dataset.group;
+    const collapsed = !!state[groupId];
+    groupBtn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    const caret = groupBtn.querySelector('.nav-group-caret');
+    if (caret) caret.textContent = collapsed ? '▸' : '▾';
+  });
+  document.querySelectorAll('.settings-nav-btn[data-group]').forEach(btn => {
+    const groupId = btn.dataset.group;
+    if (groupId === 'danger') return;
+    btn.classList.toggle('collapsed-member', !!state[groupId]);
+  });
+}
+
+function toggleNavGroup(groupId) {
+  if (!STATE.settingsNavCollapsed) STATE.settingsNavCollapsed = loadNavCollapseState();
+  STATE.settingsNavCollapsed[groupId] = !STATE.settingsNavCollapsed[groupId];
+  saveNavCollapseState();
+  applyNavCollapseState();
+}
+
+function ensureActiveGroupExpanded(section) {
+  const btn = document.querySelector(`.settings-nav-btn[data-section="${section}"]`);
+  if (!btn) return;
+  const groupId = btn.dataset.group;
+  if (!groupId || groupId === 'danger') return;
+  if (!STATE.settingsNavCollapsed) STATE.settingsNavCollapsed = loadNavCollapseState();
+  if (STATE.settingsNavCollapsed[groupId]) {
+    STATE.settingsNavCollapsed[groupId] = false;
+    saveNavCollapseState();
+    applyNavCollapseState();
+  }
+}
+
 function switchSettingsSection(sectionName) {
+  sectionName = LEGACY_SECTION_MAP[sectionName] || sectionName;
   STATE.lastSettingsSection = sectionName;
-  document.querySelectorAll('.settings-nav-btn').forEach(b => b.classList.remove('active'));
+  try { localStorage.setItem(LAST_SECTION_KEY, sectionName); } catch {}
+  document.querySelectorAll('.settings-nav-btn').forEach(b => {
+    b.classList.remove('active');
+    b.setAttribute('aria-selected', 'false');
+  });
   document.querySelectorAll('.settings-section').forEach(s => s.classList.remove('active'));
   const btn = document.querySelector(`.settings-nav-btn[data-section="${sectionName}"]`);
   const section = document.getElementById(`settings-${sectionName}`);
-  if (btn) btn.classList.add('active');
+  if (btn) {
+    btn.classList.add('active');
+    btn.setAttribute('aria-selected', 'true');
+  }
   if (section) section.classList.add('active');
+  ensureActiveGroupExpanded(sectionName);
   // Section-specific loads (reuse existing functions)
   if (sectionName === 'config') loadConfig();
   if (sectionName === 'namespaces') loadNamespacesTab();
@@ -337,8 +408,7 @@ function switchSettingsSection(sectionName) {
   if (sectionName === 'harness-sessions') loadHarnessSessions();
   if (sectionName === 'harness-scratch') loadHarnessScratch();
   if (sectionName === 'harness-procedures') loadHarnessProcedures();
-  if (sectionName === 'harness-health') loadHarnessHealth();
-  if (sectionName === 'harness-watchdog') loadWatchdogStatus();
+  if (sectionName === 'harness-health') { loadHarnessHealth(); loadWatchdogStatus(); }
   if (sectionName === 'hooks-sync') loadHooksSync();
   if (sectionName === 'ctx-overview') loadCtxOverview();
   if (sectionName === 'ctx-skills') loadCtxList('skills');
@@ -350,6 +420,16 @@ function switchSettingsSection(sectionName) {
 document.querySelectorAll('.settings-nav-btn').forEach(btn => {
   btn.addEventListener('click', () => switchSettingsSection(btn.dataset.section));
 });
+
+// Settings nav group buttons (expand/collapse)
+document.querySelectorAll('.settings-nav-group[data-group]').forEach(grp => {
+  if (grp.classList.contains('settings-nav-group--danger')) return;
+  grp.addEventListener('click', () => toggleNavGroup(grp.dataset.group));
+});
+
+// Initialize collapse state from localStorage
+STATE.settingsNavCollapsed = loadNavCollapseState();
+applyNavCollapseState();
 
 // Main tab buttons
 document.querySelectorAll('.tab-btn').forEach(btn => {
