@@ -26,6 +26,14 @@ coverage.json
 CLAUDE.local.md
 .claude-plugin/
 
+# Other agent harnesses — context gateway outputs (user-local, derived from
+# CLAUDE.md). Regenerate via `mm context init` + `mm context sync`.
+AGENTS.md
+GEMINI.md
+.cursorrules
+.github/copilot-instructions.md
+.memtomem/
+
 # macOS
 .DS_Store
 
