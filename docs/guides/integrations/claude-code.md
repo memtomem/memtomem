@@ -26,20 +26,45 @@ The most powerful automation pipeline is achieved when combined with Claude Code
 
 ## MCP Server Setup
 
-### Add via Command
+### Pick an installation scope
+
+Claude Code offers three MCP configuration scopes. Pick the one that
+matches how you want to share this server:
+
+| Scope | Storage | Shared with | When to use |
+|-------|---------|-------------|-------------|
+| `local` (default) | `~/.claude.json` → `projects."<cwd>".mcpServers` | Only this project × this user | Personal setup — private paths/tokens, or testing before committing |
+| `project` | `<project-root>/.mcp.json` (committed to git) | Everyone who clones the repo | Team-wide shared server |
+| `user` | `~/.claude.json` → top-level `mcpServers` | This user across every project | General-purpose server not tied to one project |
+
+**Precedence** when the same server name exists in multiple scopes:
+`local` > `project` > `user` > plugins > Claude.ai connectors. Adding a
+`local` entry lets you override a shared `project` server with personal
+credentials without editing the committed file.
+
+**Trust prompt**: `project` servers from `.mcp.json` require
+workspace-trust approval on first use — cloning an unknown repo never
+silently spawns an MCP server.
+
+### Add via command (`local` / `user`)
 
 ```bash
-# PyPI (recommended)
+# User scope — install once, available in every project
 claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
 
-# Source (if running from git clone)
+# Local scope — this project only, not committed (omitting -s is the same)
+claude mcp add memtomem -s local -- uvx --from memtomem memtomem-server
+
+# Source install (running from a git clone)
 # claude mcp add memtomem -s user -- uv run --directory /path/to/memtomem memtomem-server
 ```
 
-### Direct Configuration via `.mcp.json`
+Both `-s local` and `-s user` write to `~/.claude.json` — no need to edit
+that file by hand.
 
-For project-scope registration, create a `.mcp.json` file in the project
-root:
+### Project scope via `.mcp.json`
+
+For a team-shared setup, commit a `.mcp.json` at the project root:
 
 ```json
 {
@@ -57,9 +82,9 @@ root:
 }
 ```
 
-> User-scope settings live in `~/.claude.json` (not a separate `.mcp.json`).
-> Manage those through `claude mcp add` rather than editing the file by
-> hand.
+Teammates see this server after approving the workspace-trust prompt on
+first use. To run against personal credentials without touching the
+shared file, add a `-s local` entry with the same name — local wins.
 
 ---
 

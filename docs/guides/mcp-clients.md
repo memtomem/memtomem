@@ -20,25 +20,41 @@
 
 ## 1. Claude Code
 
-### MCP Server
+### Pick a scope
+
+Claude Code has three install scopes — pick one based on how you want to
+share the server:
+
+| Scope | Flag | Shared with | Storage |
+|-------|------|-------------|---------|
+| local (default) | `-s local` (or omit `-s`) | This project × this user only | `~/.claude.json` → `projects."<cwd>".mcpServers` |
+| project | `-s project` (or commit `.mcp.json`) | Everyone who clones the repo | `<project-root>/.mcp.json` |
+| user | `-s user` | This user across every project | `~/.claude.json` → top-level `mcpServers` |
+
+Precedence is `local > project > user`, so a `local` entry can override
+a shared team `project` server when you need to test with personal
+credentials.
+
+### Add via command (`local` / `user`)
 
 ```bash
-# PyPI (recommended)
+# Local scope (default) — this project only, not committed
+claude mcp add memtomem -- uvx --from memtomem memtomem-server
+
+# User scope — available in every project
 claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
 
 # Source (if running from git clone)
 # claude mcp add memtomem -s user -- uv run --directory /path/to/memtomem memtomem-server
 ```
 
+Both write to `~/.claude.json` — no need to edit that file by hand.
+
 For the full plugin experience (slash commands, automation hooks, memory curator agent), see the [Claude Code integration guide](integrations/claude-code.md).
 
-### Where Claude Code stores MCP config
+### Project scope — commit a `.mcp.json`
 
-Claude Code saves MCP server settings in `~/.claude.json` (user scope) or per-project inside the same file. You don't need to edit this file directly — `claude mcp add` handles it.
-
-### Alternative: Direct Configuration via `.mcp.json`
-
-Or create a `.mcp.json` file in your project root:
+For a team-shared setup, create a `.mcp.json` at the project root:
 
 ```json
 {
@@ -53,6 +69,9 @@ Or create a `.mcp.json` file in your project root:
   }
 }
 ```
+
+Teammates see this server after approving Claude Code's workspace-trust
+prompt on first use.
 
 ### Verify Connection
 
