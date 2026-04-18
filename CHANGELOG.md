@@ -6,19 +6,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 ## [Unreleased]
 
 ### Added
-- **Built-in exclude patterns + `indexing.exclude_patterns` config** (#225):
-  credential files (`oauth_creds.json`, `credentials*`, `id_rsa*`, `*.pem`,
-  `*.key`, `.ssh/**`) and Claude Code subagent metadata
-  (`.claude/**/*.meta.json`) are now excluded from indexing by default.
-  `.aws`, `.ssh`, and `.gnupg` added to the directory denylist. User-defined
-  patterns (`.gitignore` syntax, case-insensitive via `pathspec`) are
-  applied in addition to the built-in denylist; user `!negation` cannot
-  override built-in secret patterns. New CLI `mm purge --matching-excluded`
-  scans storage for already-indexed files matching the current exclude set
-  (dry-run default; pass `--apply` to delete). Existing users with
-  auto-discovered AI tool directories in `memory_dirs` should run
-  `mm purge --matching-excluded` to clean up chunks that predate this
-  change.
 - **FastEmbed reranker provider**: new `rerank.provider="fastembed"` routes
   reranking through `fastembed.rerank.cross_encoder.TextCrossEncoder` —
   local ONNX, no external service, no PyTorch dependency. Reuses the
@@ -97,6 +84,63 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - Webhook config section and `indexing.supported_extensions` added to
   configuration reference (#170 high tier).
 - MCP tool error response contract documented (#167).
+
+## [0.1.10] - UNRELEASED
+
+### Security
+
+- Fix credential-file indexing on filesystem-watch events.
+
+  **Affected versions**: 0.1.0 through 0.1.9.
+
+  In these versions, the fs watcher's per-file re-index path
+  (`IndexEngine.index_file`) did not apply the directory-exclude
+  filter. Any supported-extension file (`.json`, `.yaml`, `.py`, ...)
+  inside an auto-discovered memory directory (`~/.claude/projects`,
+  `~/.gemini`, `~/.codex/memories`) was indexed on each modify event.
+  For users running memtomem alongside Gemini CLI, the ~hourly OAuth
+  token refresh drove continuous re-indexing of `~/.gemini/oauth_creds.json`.
+
+  The fix combines changes across PRs #225 / #226 (built-in denylist +
+  config + cleanup CLI), #252 (entry-point guard), and #251
+  (documentation):
+
+  - **PRs #225 / #226** — built-in credential/secret denylist
+    (`oauth_creds.json`, `credentials*`, `id_rsa*`, `*.pem`, `*.key`,
+    `.ssh/**`, Claude Code subagent metadata
+    `.claude/**/*.meta.json`); directory denylist extended with `.aws`,
+    `.ssh`, `.gnupg`; user-configurable `indexing.exclude_patterns`
+    config field (`.gitignore` syntax, case-insensitive via `pathspec`;
+    user `!negation` cannot override built-in secret patterns); and
+    `mm purge --matching-excluded` cleanup CLI.
+  - **PR #252** — entry-point guard at `IndexEngine.index_file` matching
+    both absolute paths and memory-dir-relative paths.
+  - **PR #251** — documentation of `exclude_patterns`, cloud-sync
+    watcher edge cases, and related configuration surface in
+    `docs/guides/configuration.md` and `docs/guides/google-drive.md`.
+
+  **Upgrade action**: `pip install -U memtomem` to 0.1.10. No config
+  migration required — any existing user `exclude_patterns` stack on
+  top of the built-in denylist.
+
+  **Post-upgrade recommended**:
+  1. Dry-run the cleanup: `mm purge --matching-excluded` (prints what
+     would be deleted).
+  2. Apply it: `mm purge --matching-excluded --apply` to remove
+     pre-existing chunks whose source paths match the denylist.
+  3. Rotate any credentials that may have been indexed during the
+     affected period. Gemini CLI refreshes OAuth tokens on an ~hourly
+     schedule, so any v0.1.x server running alongside Gemini CLI
+     should be treated as having refreshed copies of those tokens in
+     the index. Also review any sensitive content under
+     `~/.claude/projects` (Claude Code session/conversation data) and
+     `~/.codex/memories` that may have been indexed, and handle per
+     your usual data-handling policy.
+
+  **Follow-up tracking** (defense-in-depth concerns surfaced during
+  this work, not required for the security fix):
+  - #260 — auto-discover unconditional override (design RFC)
+  - #261 — post-#252 watcher residual investigation
 
 ## [0.1.9] — 2026-04-13
 
