@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Iterable
 from pathlib import Path
 from uuid import UUID
 from typing import TYPE_CHECKING, TypedDict
+
+import pathspec
 
 from memtomem.chunking.markdown import MarkdownChunker
 from memtomem.chunking.registry import ChunkerRegistry
@@ -24,6 +27,31 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _MAX_INDEX_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
+
+# Built-in exclude patterns. Always applied in addition to user
+# ``IndexingConfig.exclude_patterns``; users cannot disable these. Secret and
+# noise tuples are kept separate for call-site clarity — secrets are a
+# long-lived security invariant, noise evolves with upstream tool layouts.
+_BUILTIN_SECRET_PATTERNS: tuple[str, ...] = (
+    "**/oauth_creds.json",
+    "**/credentials*",
+    "**/id_rsa*",
+    "**/*.pem",
+    "**/*.key",
+    "**/.ssh/**",
+)
+
+_BUILTIN_NOISE_PATTERNS: tuple[str, ...] = ("**/.claude/**/*.meta.json",)
+
+
+def _build_exclude_spec(patterns: Iterable[str]) -> pathspec.GitIgnoreSpec:
+    # pathspec 1.x GitIgnoreSpec has no case-sensitivity flag; lowercase
+    # patterns at build time and lowercase candidate paths at match time for
+    # case-insensitive matching across filesystems.
+    return pathspec.GitIgnoreSpec.from_lines(p.lower() for p in patterns)
+
+
+_BUILTIN_EXCLUDE_SPEC = _build_exclude_spec((*_BUILTIN_SECRET_PATTERNS, *_BUILTIN_NOISE_PATTERNS))
 
 
 class _IndexFileBase(TypedDict):
@@ -450,6 +478,11 @@ class IndexEngine:
             ".eggs",
             ".idea",
             ".vscode",
+            # Directory-level secret stores. Never traverse even if a parent
+            # is added to memory_dirs.
+            ".aws",
+            ".ssh",
+            ".gnupg",
         }
     )
 
@@ -464,6 +497,13 @@ class IndexEngine:
 
     def _discover_files(self, directory: Path, recursive: bool) -> list[Path]:
         supported = self._registry.supported_extensions() & self._config.supported_extensions
+        user_spec = _build_exclude_spec(self._config.exclude_patterns)
+
+        def is_pattern_excluded(rel: Path) -> bool:
+            # Built-in spec is evaluated independently from the user spec —
+            # user negation cannot override built-in exclusions.
+            key = rel.as_posix().lower()
+            return _BUILTIN_EXCLUDE_SPEC.match_file(key) or user_spec.match_file(key)
 
         files: list[Path] = []
         if recursive:
@@ -472,13 +512,18 @@ class IndexEngine:
                     continue
                 if fp.suffix not in supported:
                     continue
-                # Skip excluded directories anywhere in the path
-                if any(self._is_excluded_part(part) for part in fp.relative_to(directory).parts):
+                rel = fp.relative_to(directory)
+                if any(self._is_excluded_part(part) for part in rel.parts):
+                    continue
+                if is_pattern_excluded(rel):
                     continue
                 files.append(fp)
         else:
             for ext in supported:
-                files.extend(directory.glob(f"*{ext}"))
+                for fp in directory.glob(f"*{ext}"):
+                    if is_pattern_excluded(fp.relative_to(directory)):
+                        continue
+                    files.append(fp)
         return sorted(files)
 
 

@@ -28,6 +28,7 @@ dependencies = [
     "httpx>=0.28",
     "watchdog>=6.0",
     "click>=8.1",
+    "pathspec>=0.12",
 ]
 
 [project.optional-dependencies]

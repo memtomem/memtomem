@@ -6,6 +6,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 ## [Unreleased]
 
 ### Added
+- **Built-in exclude patterns + `indexing.exclude_patterns` config** (#225):
+  credential files (`oauth_creds.json`, `credentials*`, `id_rsa*`, `*.pem`,
+  `*.key`, `.ssh/**`) and Claude Code subagent metadata
+  (`.claude/**/*.meta.json`) are now excluded from indexing by default.
+  `.aws`, `.ssh`, and `.gnupg` added to the directory denylist. User-defined
+  patterns (`.gitignore` syntax, case-insensitive via `pathspec`) are
+  applied in addition to the built-in denylist; user `!negation` cannot
+  override built-in secret patterns. New CLI `mm purge --matching-excluded`
+  scans storage for already-indexed files matching the current exclude set
+  (dry-run default; pass `--apply` to delete). Existing users with
+  auto-discovered AI tool directories in `memory_dirs` should run
+  `mm purge --matching-excluded` to clean up chunks that predate this
+  change.
 - **FastEmbed reranker provider**: new `rerank.provider="fastembed"` routes
   reranking through `fastembed.rerank.cross_encoder.TextCrossEncoder` —
   local ONNX, no external service, no PyTorch dependency. Reuses the

@@ -148,6 +148,100 @@ class TestDiscoverFiles:
 
 
 # ===========================================================================
+# 1b. exclude_patterns (built-in denylist + user-configurable patterns)
+# ===========================================================================
+
+
+class TestExcludePatterns:
+    """Tests for built-in _BUILTIN_EXCLUDE_SPEC + user exclude_patterns."""
+
+    async def test_builtin_secret_pattern_blocks_oauth_creds(self, components, memory_dir):
+        """Files matching built-in secret patterns are never indexed."""
+        (memory_dir / "oauth_creds.json").write_text('{"token": "x"}')
+        (memory_dir / "keep.md").write_text("# Keep")
+
+        files = components.index_engine._discover_files(memory_dir, recursive=True)
+        names = {f.name for f in files}
+        assert "keep.md" in names
+        assert "oauth_creds.json" not in names
+
+    async def test_builtin_noise_pattern_blocks_claude_meta(self, components, memory_dir):
+        """Claude Code subagent .meta.json files are treated as noise."""
+        sub = memory_dir / ".claude" / "projects" / "abc" / "subagents"
+        sub.mkdir(parents=True)
+        (sub / "agent-x.meta.json").write_text('{"id": "x"}')
+        (memory_dir / "keep.md").write_text("# Keep")
+
+        files = components.index_engine._discover_files(memory_dir, recursive=True)
+        names = {f.name for f in files}
+        assert "keep.md" in names
+        assert "agent-x.meta.json" not in names
+
+    async def test_user_pattern_excludes_file(self, components, memory_dir):
+        """User exclude_patterns are respected for positive matches."""
+        (memory_dir / "draft.md").write_text("# Draft")
+        (memory_dir / "final.md").write_text("# Final")
+
+        engine = components.index_engine
+        engine._config.exclude_patterns = ["**/draft.md"]
+
+        files = engine._discover_files(memory_dir, recursive=True)
+        names = {f.name for f in files}
+        assert "final.md" in names
+        assert "draft.md" not in names
+
+    async def test_user_negation_restores_file(self, components, memory_dir):
+        """User can negate their own earlier pattern with '!'."""
+        (memory_dir / "draft.md").write_text("# Draft")
+        (memory_dir / "important-draft.md").write_text("# Important")
+
+        engine = components.index_engine
+        engine._config.exclude_patterns = ["**/*draft*.md", "!**/important-draft.md"]
+
+        files = engine._discover_files(memory_dir, recursive=True)
+        names = {f.name for f in files}
+        assert "important-draft.md" in names
+        assert "draft.md" not in names
+
+    async def test_user_negation_cannot_override_builtin_secret(self, components, memory_dir):
+        """SECURITY REGRESSION: user '!' patterns cannot unset built-in secret denylist.
+
+        Built-in and user specs are evaluated independently; a file is excluded
+        if either matches. User negation affects only the user spec.
+        """
+        (memory_dir / "oauth_creds.json").write_text('{"token": "x"}')
+
+        engine = components.index_engine
+        engine._config.exclude_patterns = ["!**/oauth_creds.json"]
+
+        files = engine._discover_files(memory_dir, recursive=True)
+        names = {f.name for f in files}
+        assert "oauth_creds.json" not in names
+
+    async def test_case_insensitive_matching(self, components, memory_dir):
+        """Built-in patterns match regardless of filesystem case."""
+        (memory_dir / "OAuth_Creds.JSON").write_text('{"token": "x"}')
+        (memory_dir / "keep.md").write_text("# Keep")
+
+        files = components.index_engine._discover_files(memory_dir, recursive=True)
+        names = {f.name for f in files}
+        assert "keep.md" in names
+        assert "OAuth_Creds.JSON" not in names
+
+    async def test_aws_directory_excluded(self, components, memory_dir):
+        """Directory-level secret stores (.aws) are never traversed."""
+        aws = memory_dir / ".aws"
+        aws.mkdir()
+        (aws / "config.toml").write_text("[profile]")
+        (memory_dir / "keep.md").write_text("# Keep")
+
+        files = components.index_engine._discover_files(memory_dir, recursive=True)
+        names = {f.name for f in files}
+        assert "keep.md" in names
+        assert "config.toml" not in names
+
+
+# ===========================================================================
 # 2. _resolve_namespace
 # ===========================================================================
 
