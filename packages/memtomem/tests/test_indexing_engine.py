@@ -240,6 +240,56 @@ class TestExcludePatterns:
         assert "keep.md" in names
         assert "config.toml" not in names
 
+    async def test_builtin_blocks_subagent_meta_when_root_is_claude_projects(
+        self, components, memory_dir
+    ):
+        """REGRESSION: when ``~/.claude/projects`` itself is the memory_dir root,
+        the rel path drops the ``.claude/`` token. The built-in noise pattern
+        must still match — either via the ``**/subagents/*.meta.json`` rel form
+        or via the absolute-path key. Previously these files were silently
+        indexed because only the rel path was checked against the
+        ``.claude/``-prefixed pattern.
+        """
+        sub = memory_dir / "abc123-uuid" / "subagents"
+        sub.mkdir(parents=True)
+        (sub / "agent-x.meta.json").write_text('{"agentType": "Explore"}')
+        (memory_dir / "keep.md").write_text("# Keep")
+
+        files = components.index_engine._discover_files(memory_dir, recursive=True)
+        names = {f.name for f in files}
+        assert "keep.md" in names
+        assert "agent-x.meta.json" not in names
+
+    async def test_builtin_blocks_oauth_at_memory_dir_root(self, components, memory_dir):
+        """REGRESSION: a credential file sitting directly at the memory_dir root
+        must still be caught. Previously this depended on pathspec matching
+        ``**/oauth_creds.json`` against a zero-directory rel key (``oauth_creds.json``);
+        the absolute-path key path closes that gap.
+        """
+        (memory_dir / "oauth_creds.json").write_text('{"token": "x"}')
+        (memory_dir / "keep.md").write_text("# Keep")
+
+        files = components.index_engine._discover_files(memory_dir, recursive=True)
+        names = {f.name for f in files}
+        assert "keep.md" in names
+        assert "oauth_creds.json" not in names
+
+    async def test_index_file_entry_point_blocks_excluded(self, components, memory_dir):
+        """REGRESSION: ``index_file`` is the file-watcher entry point and was
+        previously bypassing exclude checks entirely (only ``_discover_files``
+        was guarded). A watcher event for an OAuth credential file would have
+        indexed it. The fix applies the same exclude policy at this entry
+        point — the call returns ``total_files=0`` without touching storage.
+        """
+        creds_path = memory_dir / "oauth_creds.json"
+        creds_path.write_text('{"token": "secret"}')
+
+        stats = await components.index_engine.index_file(creds_path)
+
+        assert stats.total_files == 0
+        assert stats.total_chunks == 0
+        assert stats.indexed_chunks == 0
+
 
 # ===========================================================================
 # 2. _resolve_namespace

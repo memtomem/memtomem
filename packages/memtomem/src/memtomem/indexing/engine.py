@@ -41,7 +41,12 @@ _BUILTIN_SECRET_PATTERNS: tuple[str, ...] = (
     "**/.ssh/**",
 )
 
-_BUILTIN_NOISE_PATTERNS: tuple[str, ...] = ("**/.claude/**/*.meta.json",)
+_BUILTIN_NOISE_PATTERNS: tuple[str, ...] = (
+    "**/.claude/**/*.meta.json",
+    # Same target via root-relative match for when ``~/.claude/projects`` itself
+    # is the auto-discovered memory_dir root and the rel path drops ``.claude/``.
+    "**/subagents/*.meta.json",
+)
 
 
 def _build_exclude_spec(patterns: Iterable[str]) -> pathspec.GitIgnoreSpec:
@@ -52,6 +57,39 @@ def _build_exclude_spec(patterns: Iterable[str]) -> pathspec.GitIgnoreSpec:
 
 
 _BUILTIN_EXCLUDE_SPEC = _build_exclude_spec((*_BUILTIN_SECRET_PATTERNS, *_BUILTIN_NOISE_PATTERNS))
+
+
+def _exclude_match_keys(file_path: Path, memory_dirs: Iterable[str | Path]) -> list[str]:
+    """Build the lowercase path strings to feed an exclude spec.
+
+    Includes the absolute path and one entry per ``memory_dirs`` parent the
+    file lives under (rel-to-root). Either match counts as excluded — this
+    is what prevents a built-in pattern like ``**/.claude/**/*.meta.json``
+    from being silently bypassed when ``~/.claude/projects`` itself is the
+    indexed root, or when ``index_file`` is invoked from the file watcher
+    (which doesn't go through ``_discover_files``).
+    """
+    resolved = file_path.resolve()
+    keys: list[str] = [resolved.as_posix().lower()]
+    for mem_dir in memory_dirs:
+        try:
+            rel = resolved.relative_to(Path(mem_dir).expanduser().resolve())
+        except ValueError:
+            continue
+        keys.append(rel.as_posix().lower())
+    return keys
+
+
+def _path_is_excluded(
+    file_path: Path,
+    memory_dirs: Iterable[str | Path],
+    user_spec: pathspec.GitIgnoreSpec,
+) -> bool:
+    """True if ``file_path`` matches any built-in or user exclude pattern."""
+    for key in _exclude_match_keys(file_path, memory_dirs):
+        if _BUILTIN_EXCLUDE_SPEC.match_file(key) or user_spec.match_file(key):
+            return True
+    return False
 
 
 class _IndexFileBase(TypedDict):
@@ -163,6 +201,21 @@ class IndexEngine:
         namespace: str | None = None,
     ) -> IndexingStats:
         """Index a single file. Convenience wrapper for external callers."""
+        # Apply exclude patterns at the entry point so callers that bypass
+        # ``_discover_files`` (file watcher, direct API consumers) cannot
+        # smuggle credentials or noise into the index.
+        user_spec = _build_exclude_spec(self._config.exclude_patterns)
+        if _path_is_excluded(file_path, self._config.memory_dirs, user_spec):
+            logger.debug("Skipping excluded file %s", file_path)
+            return IndexingStats(
+                total_files=0,
+                total_chunks=0,
+                indexed_chunks=0,
+                skipped_chunks=0,
+                deleted_chunks=0,
+                duration_ms=0.0,
+                new_chunk_ids=(),
+            )
         async with self._index_lock:
             start = time.monotonic()
             result = await self._index_file(file_path.resolve(), force, namespace=namespace)
@@ -499,12 +552,16 @@ class IndexEngine:
     def _discover_files(self, directory: Path, recursive: bool) -> list[Path]:
         supported = self._registry.supported_extensions() & self._config.supported_extensions
         user_spec = _build_exclude_spec(self._config.exclude_patterns)
+        memory_dirs = self._config.memory_dirs
 
-        def is_pattern_excluded(rel: Path) -> bool:
-            # Built-in spec is evaluated independently from the user spec —
-            # user negation cannot override built-in exclusions.
-            key = rel.as_posix().lower()
-            return _BUILTIN_EXCLUDE_SPEC.match_file(key) or user_spec.match_file(key)
+        def is_excluded(fp: Path, rel: Path | None) -> bool:
+            # User negation cannot override built-in exclusions.
+            # ``_path_is_excluded`` checks both the absolute path and the rel
+            # path under each memory_dir, which keeps built-in patterns
+            # (e.g. ``**/.claude/**/*.meta.json``) effective even when
+            # ``directory`` is the auto-discovered ``~/.claude/projects`` root
+            # and the rel path no longer contains ``.claude/``.
+            return _path_is_excluded(fp, memory_dirs, user_spec)
 
         files: list[Path] = []
         if recursive:
@@ -516,13 +573,13 @@ class IndexEngine:
                 rel = fp.relative_to(directory)
                 if any(self._is_excluded_part(part) for part in rel.parts):
                     continue
-                if is_pattern_excluded(rel):
+                if is_excluded(fp, rel):
                     continue
                 files.append(fp)
         else:
             for ext in supported:
                 for fp in directory.glob(f"*{ext}"):
-                    if is_pattern_excluded(fp.relative_to(directory)):
+                    if is_excluded(fp, fp.relative_to(directory)):
                         continue
                     files.append(fp)
         return sorted(files)
