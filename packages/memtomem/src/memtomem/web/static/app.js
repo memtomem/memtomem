@@ -383,14 +383,16 @@ qs('mobile-back-btn').addEventListener('click', () => {
 window.addEventListener('popstate', (e) => {
   if (e.state?.tab) activateTab(e.state.tab);
 });
-// Activate tab from URL hash on initial load (e.g. #sources)
-{
+// Activate tab from URL hash on initial load (e.g. #sources).
+// Deferred until DOMContentLoaded so sibling scripts (settings-config.js, etc.)
+// have parsed — activateTab('settings') calls loadConfig() defined there.
+document.addEventListener('DOMContentLoaded', () => {
   const hash = location.hash.slice(1);
   const validTabs = ['home', 'search', 'sources', 'index', 'tags', 'timeline', 'settings'];
   if (hash && validTabs.includes(hash)) {
     activateTab(hash);
   }
-}
+});
 
 // ---------------------------------------------------------------------------
 // Stats
@@ -2945,7 +2947,9 @@ function _loadSettings() {
   };
 }
 
-(function _applySettings() {
+// Deferred until DOMContentLoaded so sibling scripts (settings-config.js, etc.)
+// have parsed — activateTab('settings') calls loadConfig() defined there.
+document.addEventListener('DOMContentLoaded', () => {
   const s = _loadSettings();
   // top-k default is synced from server config via _syncSearchDefaults()
   // Apply default tab only if no hash deep link is present
@@ -2956,7 +2960,7 @@ function _loadSettings() {
       activateTab(s.defaultTab);
     }
   }
-})();
+});
 
 qs('settings-btn').addEventListener('click', () => {
   const s = _loadSettings();
