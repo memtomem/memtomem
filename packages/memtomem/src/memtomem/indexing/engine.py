@@ -545,20 +545,45 @@ def _is_strict_prefix(shorter: tuple[str, ...], longer: tuple[str, ...]) -> bool
     return len(shorter) < len(longer) and longer[: len(shorter)] == shorter
 
 
+def _heading_level(heading: str) -> int:
+    """Return the markdown heading level (``# X`` → 1, ``## X`` → 2), else 0.
+
+    Non-markdown heading tokens (plain strings like ``"H1"``, ``"Section"``)
+    return 0 so heuristics keyed on level only fire when the chunker really
+    produced a markdown heading.
+    """
+    stripped = heading.lstrip()
+    level = 0
+    for ch in stripped:
+        if ch == "#":
+            level += 1
+        else:
+            break
+    if level == 0 or level > 6:
+        return 0
+    if len(stripped) <= level or stripped[level] != " ":
+        return 0
+    return level
+
+
 def _can_merge(current: Chunk, nxt: Chunk, *, current_is_short: bool = False) -> bool:
     """Check if two chunks can be merged.
 
     Guiding principle: "작을 때 관대, 클 때 엄격" — short chunks relax the
-    hierarchy gate down to "shares a top-level root"; larger chunks still
-    need structural kinship (identical / headingless / sibling / same-path
-    ancestor-descendant).
+    hierarchy gate; larger chunks still need structural kinship
+    (identical / headingless / sibling / same-path ancestor-descendant).
 
-    Why "shares a top-level root" rather than full hierarchy bypass:
-    distinct top-level entries in the same file (e.g. mem_add writes H2
-    entries like ``## Cache Decision`` / ``## Database Decision``) are
-    semantically independent and must stay separate even when short.
-    Cross-subsection orphans within the same document share the same H1
-    root and therefore still get rescued.
+    Short-chunk leniency tiers:
+
+    - **Identical top-level root** (``ch[0] == nh[0]``): cross-subsection
+      orphans rescued while distinct top-level entries (mem_add's
+      ``## Cache Decision`` vs ``## Database Decision``) stay separate.
+    - **Heading inversion** (``cur_level > nxt_level``): a short chunk
+      whose root is a deeper heading level than the next chunk's root is
+      structurally orphaned (the chunker saw ``## X`` before the doc's
+      real ``# Y`` root). Fold forward. Only markdown-style ``#`` headings
+      participate — plain-string hierarchies like ``("H1",)`` keep level 0
+      and so never trigger this, preserving mem_add protection.
 
     ``current_is_short=True`` is set by Pass 1 and Pass 3 (tail sweep); Pass 2
     (greedy packing) uses the strict kinship rules only.
@@ -579,10 +604,15 @@ def _can_merge(current: Chunk, nxt: Chunk, *, current_is_short: bool = False) ->
     # subsection (e.g. ``## 4`` intro body + ``## 4 > ### X``).
     if _is_strict_prefix(ch, nh) or _is_strict_prefix(nh, ch):
         return True
-    # Short-chunk leniency: merge across sub-heading divergence as long as
-    # both chunks live under the same top-level root.
-    if current_is_short and nh and ch[0] == nh[0]:
-        return True
+    if current_is_short and nh:
+        # Tier 1: identical top-level root
+        if ch[0] == nh[0]:
+            return True
+        # Tier 2: heading inversion (current deeper than next's root).
+        cur_level = _heading_level(ch[0])
+        nxt_level = _heading_level(nh[0])
+        if cur_level and nxt_level and cur_level > nxt_level:
+            return True
     return False
 
 
@@ -694,8 +724,15 @@ def _merge_short_chunks(
             and _can_merge(c, chunks[i + 1], current_is_short=True)
         ):
             nxt = chunks[i + 1]
-            merged_tokens = cur_tokens + _estimate_tokens(nxt.content) + 1
-            if merged_tokens > max_tokens:
+            nxt_tokens = _estimate_tokens(nxt.content)
+            merged_tokens = cur_tokens + nxt_tokens + 1
+            # Honor the max_tokens ceiling, except when it was already
+            # breached upstream (the chunker uses a 4 char/token ratio
+            # while Korean-heavy text re-estimates at 2 char/token, so
+            # already-emitted chunks can sit above max). Merging a short
+            # orphan into an over-ceiling neighbour does not meaningfully
+            # worsen the chunk size, and preserves the orphan's context.
+            if merged_tokens > max_tokens and nxt_tokens <= max_tokens:
                 break
             c = _merge_pair(c, nxt)
             cur_tokens = _estimate_tokens(c.content)
@@ -731,7 +768,10 @@ def _merge_short_chunks(
             prev = pass2[-2]
             prev_tokens = _estimate_tokens(prev.content)
             combined = prev_tokens + last_tokens + 1
-            if combined <= max_tokens and _can_merge(prev, last, current_is_short=True):
+            # Broken-ceiling rescue (same rationale as Pass 1): if prev was
+            # already above max, absorbing the tail orphan is fine.
+            within_ceiling = combined <= max_tokens or prev_tokens > max_tokens
+            if within_ceiling and _can_merge(prev, last, current_is_short=True):
                 pass2[-2] = _merge_pair(prev, last)
                 pass2.pop()
 
