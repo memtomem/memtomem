@@ -5,10 +5,10 @@ embedder (no external services required) for both English and Korean text,
 exercising the hybrid search pipeline (BM25 + dense).
 
 Model choice: ``sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2``
-(384-dim, ~220 MB, ~50 languages including Korean).  Chosen over ``bge-m3``
-because fastembed's ``TextEmbedding`` class does not support ``bge-m3`` —
-that model is multi-vector / sparse and lives on other fastembed classes.
-MiniLM-L12 keeps the CI cache small while still covering multilingual text.
+(384-dim, ~220 MB, ~50 languages including Korean).  ``bge-m3`` works via
+``_register_custom_models_if_needed`` in ``embedding/onnx.py`` but its ONNX
+export is ~2.3 GB, so MiniLM-L12 is used here to keep the CI cache small
+while still covering multilingual text.
 
 This test complements ``test_user_workflows.py`` (Ollama-gated) by providing
 a CI-safe equivalent of the add -> search -> recall round trip.  The fastembed

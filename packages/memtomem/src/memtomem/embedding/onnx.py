@@ -28,6 +28,34 @@ def _resolve_model(name: str) -> str:
     return name  # pass through as raw fastembed model ID
 
 
+def _register_custom_models_if_needed() -> None:
+    """Register models that fastembed >=0.4 dropped from its built-in catalog.
+
+    fastembed 0.8.0's ``TextEmbedding`` no longer ships ``BAAI/bge-m3`` (the
+    model type split across dedicated classes none of which currently host
+    it). Re-register it from the official HF ONNX export so existing installs
+    keep working without changing the user-facing model name.
+    """
+    from fastembed import TextEmbedding  # type: ignore[import-untyped]
+    from fastembed.common.model_description import (  # type: ignore[import-untyped]
+        ModelSource,
+        PoolingType,
+    )
+
+    registered = {m.get("model") for m in TextEmbedding.list_supported_models()}
+    if "BAAI/bge-m3" not in registered:
+        TextEmbedding.add_custom_model(
+            model="BAAI/bge-m3",
+            pooling=PoolingType.CLS,
+            normalization=True,
+            sources=ModelSource(hf="BAAI/bge-m3"),
+            dim=1024,
+            model_file="onnx/model.onnx",
+            additional_files=["onnx/model.onnx_data"],
+            size_in_gb=2.3,
+        )
+
+
 class OnnxEmbedder:
     """Embedding provider backed by fastembed (ONNX Runtime).
 
@@ -51,6 +79,7 @@ class OnnxEmbedder:
                 "Install it with: pip install memtomem[onnx]"
             ) from exc
 
+        _register_custom_models_if_needed()
         model_id = _resolve_model(self._config.model)
         logger.info("Loading ONNX embedding model %s …", model_id)
         self._model = TextEmbedding(model_name=model_id)

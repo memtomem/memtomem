@@ -13,6 +13,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   responses.
 
 ### Fixed
+- **ONNX `bge-m3`**: fastembed 0.8.0 dropped `BAAI/bge-m3` from its built-in
+  `TextEmbedding` catalog — re-registered via `add_custom_model` against the
+  official HF ONNX export (1024-dim, CLS pooling, normalized). Existing
+  `mm init` users keep working with no config change.
 - **Async I/O**: 6 blocking file read/write calls in MCP tool handlers
   (`mem_add`, `mem_edit`, `mem_delete`, `mem_context_*`) wrapped with
   `asyncio.to_thread` to prevent event loop starvation.
@@ -41,6 +45,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   tightened (#145).
 - Dead config sections removed (`conflict`, `entity_extraction`,
   `timezone`) — `extra="ignore"` ensures old config files still load.
+- **MiniLM pooling upstream change**: fastembed 0.8.0 switched
+  `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` from CLS to
+  mean pooling. Users who indexed with fastembed <0.5.1 and this model
+  should re-index for consistent dense-search quality; new installs are
+  unaffected.
 - Refactored truncation magic numbers in consolidation engine;
   watcher queue maxsize extracted to constant.
 - CI: ruff lint/format scope extended to `tests/`; notebooks CI job
