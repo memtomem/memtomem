@@ -38,7 +38,8 @@ claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
 
 ### Direct Configuration via `.mcp.json`
 
-Create a `.mcp.json` file in the project root or `~/.claude/`:
+For project-scope registration, create a `.mcp.json` file in the project
+root:
 
 ```json
 {
@@ -55,6 +56,10 @@ Create a `.mcp.json` file in the project root or `~/.claude/`:
   }
 }
 ```
+
+> User-scope settings live in `~/.claude.json` (not a separate `.mcp.json`).
+> Manage those through `claude mcp add` rather than editing the file by
+> hand.
 
 ---
 

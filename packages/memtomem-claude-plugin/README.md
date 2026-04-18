@@ -56,7 +56,12 @@ The plugin uses sensible defaults. Customize via environment variables or the `m
 
 **Tool mode**: Controls how many tools are exposed to the AI agent. `core` (9 tools, default) for minimal context usage -- includes `mem_do` meta-tool to access all other actions via `mem_do(action="...", params={...})`. `standard` (~32 + `mem_do`) for normal use, `full` (73) for everything. Fewer tools = less context tokens, better accuracy.
 
-To set env vars for the MCP server, edit `.mcp.json` in the plugin directory:
+To set env vars for the MCP server, either re-run `claude mcp add` with
+`--env` flags, or add a `.mcp.json` at your project root (project scope).
+User-scope settings live in `~/.claude.json` but should be managed through
+`claude mcp add`, not edited by hand.
+
+Example `.mcp.json` (project scope):
 
 ```json
 {

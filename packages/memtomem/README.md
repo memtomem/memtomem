@@ -46,7 +46,11 @@ If you'd rather skip the CLI install, `uvx` will download and run memtomem on de
 claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
 ```
 
-Or add to `.mcp.json` for Cursor / Windsurf / Claude Desktop:
+Or add the following to your MCP client config file — the path depends on
+the editor: `~/.cursor/mcp.json` (Cursor),
+`~/.codeium/windsurf/mcp_config.json` (Windsurf),
+`~/Library/Application Support/Claude/claude_desktop_config.json`
+(Claude Desktop), or `~/.gemini/settings.json` (Gemini CLI):
 
 ```json
 {

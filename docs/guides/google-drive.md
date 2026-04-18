@@ -55,6 +55,14 @@ For teams, share the `memtomem-memories` folder with members.
 
 Point `MEMORY_DIRS` to the Google Drive sync path. Keep the DB local.
 
+Add the block below to your editor's MCP config file — the path depends on
+the editor. Common locations: `~/.cursor/mcp.json` (Cursor),
+`~/.codeium/windsurf/mcp_config.json` (Windsurf),
+`~/Library/Application Support/Claude/claude_desktop_config.json`
+(Claude Desktop), `~/.gemini/settings.json` (Gemini CLI), or use
+`claude mcp add` for Claude Code. See
+[MCP Client Configuration](mcp-clients.md) for the full list.
+
 **macOS** (Drive syncs to `~/Library/CloudStorage/GoogleDrive-{email}/My Drive/` or `~/Google Drive/My Drive/`):
 
 ```json

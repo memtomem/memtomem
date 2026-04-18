@@ -62,7 +62,7 @@ Restart Cursor, then in chat: "Call mem_stats to check the memtomem connection s
 
 ### Antigravity
 
-Agent panel > `...` > **MCP Servers** > **Manage MCP Servers** > **View raw config**, then add:
+Agent panel > `...` > **MCP Servers** > **Manage MCP Servers** > **View raw config** opens `mcp_config.json`. Add:
 
 ```json
 {

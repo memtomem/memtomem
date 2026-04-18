@@ -45,7 +45,26 @@ multilingual model if you work with Korean/Chinese/Japanese content.
 
 No installation needed — `uvx` handles everything automatically.
 
-Add the following to your editor's MCP configuration file (`.mcp.json`):
+For Claude Code, use the CLI (it edits `~/.claude.json` for you):
+
+```bash
+# PyPI
+claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
+
+# Source (if running from git clone)
+# claude mcp add memtomem -s user -- uv run --directory /path/to/memtomem memtomem-server
+```
+
+For other editors, add the block below to the MCP config file. The path
+depends on the editor:
+
+| Editor | Config file |
+|--------|-------------|
+| Cursor | `~/.cursor/mcp.json` |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` |
+| Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Gemini CLI | `~/.gemini/settings.json` |
+| Antigravity | opens `mcp_config.json` via the GUI (Agent panel → MCP Servers → View raw config) |
 
 ```json
 {
@@ -56,15 +75,6 @@ Add the following to your editor's MCP configuration file (`.mcp.json`):
     }
   }
 }
-```
-
-Or for Claude Code:
-```bash
-# PyPI
-claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
-
-# Source (if running from git clone)
-# claude mcp add memtomem -s user -- uv run --directory /path/to/memtomem memtomem-server
 ```
 
 > **Note**: MCP clients run `memtomem-server` via `uvx`. `memtomem` (the CLI) is for terminal commands only.

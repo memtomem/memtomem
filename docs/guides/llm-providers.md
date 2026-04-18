@@ -85,6 +85,14 @@ Any server implementing `/v1/chat/completions` works:
 
 ### MCP Config Example
 
+Add the following to your editor's MCP config file — e.g.,
+`~/.cursor/mcp.json` (Cursor),
+`~/.codeium/windsurf/mcp_config.json` (Windsurf),
+`~/Library/Application Support/Claude/claude_desktop_config.json`
+(Claude Desktop), or `~/.gemini/settings.json` (Gemini CLI). For Claude
+Code, use `claude mcp add` instead of editing a file. See
+[MCP Client Configuration](mcp-clients.md) for the full list.
+
 ```json
 {
   "mcpServers": {
