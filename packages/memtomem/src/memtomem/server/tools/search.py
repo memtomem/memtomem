@@ -96,6 +96,30 @@ async def mem_search(
         hints.append(dim_notice)
 
     if not results:
+        # Collect the filter/error context that compact/verbose embed in the
+        # empty-result text. For structured mode these are surfaced through
+        # the JSON ``hints`` array so machine consumers get the same notice.
+        empty_hints: list[str] = []
+        if (source_filter or tag_filter) and stats.fused_total > 0:
+            empty_hints.append(
+                f"No results match your filters "
+                f"({stats.fused_total} results found before filtering). "
+                f"Try broader filters or remove source_filter/tag_filter."
+            )
+        if stats.bm25_error and stats.dense_error:
+            empty_hints.append(
+                "Search unavailable: both keyword and semantic search failed. "
+                f"BM25: {stats.bm25_error}; Dense: {stats.dense_error}"
+            )
+        elif stats.bm25_error:
+            empty_hints.append(f"keyword search unavailable: {stats.bm25_error}")
+        elif stats.dense_error:
+            empty_hints.append(f"semantic search unavailable: {stats.dense_error}")
+
+        if effective_format == "structured":
+            all_hints = hints + empty_hints
+            return _format_structured_results([], hints=all_hints or None)
+
         if (source_filter or tag_filter) and stats.fused_total > 0:
             return (
                 f"No results match your filters "

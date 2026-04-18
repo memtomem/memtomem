@@ -257,8 +257,8 @@ class TestArchiveHint:
         a machine consumer hitting a zero-hit recall still gets a valid
         payload (with the archive hint if applicable) rather than text.
 
-        This is an intentional improvement over mem_search, which currently
-        returns text "No results found." even when ``output_format="structured"``.
+        mem_search mirrors this behaviour — see
+        ``test_search_structured_returns_json_on_empty`` in the sibling class.
         """
         from memtomem.server.tools.recall import mem_recall
 
@@ -277,6 +277,56 @@ class TestArchiveHint:
         assert parsed["kind"] == "recall"
         assert parsed["results"] == []
         assert "hints" not in parsed  # namespace pinned → archive hint suppressed
+
+    async def test_search_structured_returns_json_on_empty(self, trust_components):
+        """mem_search with ``output_format="structured"`` must return a parseable
+        JSON payload on empty results — not the plain text "No results found."
+        that compact/verbose return. Regression for issue #210.
+        """
+        from memtomem.server.tools.search import mem_search
+
+        comp, _ = trust_components
+        # Seed one chunk so the FTS index is non-empty; query targets a term
+        # that won't match so results come back empty via the normal path.
+        await comp.storage.upsert_chunks([make_chunk("unrelated note", namespace="default")])
+
+        ctx = _search_ctx(comp)
+        out = await mem_search(query="nonexistent-term-xyz", output_format="structured", ctx=ctx)
+
+        parsed = json.loads(out)  # Must not raise JSONDecodeError.
+        assert parsed["results"] == []
+        # No archive chunks, no dim mismatch, no filter → no hints key.
+        assert "hints" not in parsed
+
+    async def test_search_structured_empty_surfaces_archive_hint(self, trust_components):
+        """When archive chunks exist but none match the query, the structured
+        empty payload must still include the archive-hidden hint so the caller
+        knows there are memories they could reach by pinning a namespace."""
+        from memtomem.server.tools.search import mem_search
+
+        comp, _ = trust_components
+        archived = make_chunk("archived note about pipelines", namespace="archive:old")
+        await comp.storage.upsert_chunks([archived])
+
+        ctx = _search_ctx(comp)
+        out = await mem_search(query="nonexistent-term-xyz", output_format="structured", ctx=ctx)
+
+        parsed = json.loads(out)
+        assert parsed["results"] == []
+        assert any("hidden in system namespaces" in h for h in parsed["hints"])
+
+    async def test_search_compact_empty_unchanged(self, trust_components):
+        """Compact format must still return the plain-text "No results found."
+        message on empty — the structured fix is scoped to structured only."""
+        from memtomem.server.tools.search import mem_search
+
+        comp, _ = trust_components
+        await comp.storage.upsert_chunks([make_chunk("unrelated note", namespace="default")])
+
+        ctx = _search_ctx(comp)
+        out = await mem_search(query="nonexistent-term-xyz", ctx=ctx)
+
+        assert out.startswith("No results found.")
 
     async def test_recall_invalid_output_format(self, trust_components):
         """Invalid output_format must return an error that names the supported
@@ -439,6 +489,27 @@ def _recall_ctx(components):
         config=components.config,
         storage=components.storage,
         current_namespace=None,
+        _dim_mismatch_announced=False,
+        _config_lock=asyncio.Lock(),
+    )
+    return SimpleNamespace(request_context=SimpleNamespace(lifespan_context=app))
+
+
+def _search_ctx(components):
+    """Build an MCP-style ctx wrapping ``trust_components`` for mem_search.
+
+    Adds ``search_pipeline`` (required for the retrieval path) and
+    ``webhook_manager=None`` on top of the recall-compatible stub.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    app = SimpleNamespace(
+        config=components.config,
+        storage=components.storage,
+        search_pipeline=components.search_pipeline,
+        current_namespace=None,
+        webhook_manager=None,
         _dim_mismatch_announced=False,
         _config_lock=asyncio.Lock(),
     )
