@@ -718,3 +718,40 @@ class TestUnicodePaths:
             )
         assert resp.status_code == 200, resp.text
         assert app.state.config.indexing.memory_dirs == [other_dir]
+
+    async def test_index_stream_rejects_sibling_path_with_shared_prefix(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        # Regression for #238: the previous ``str.startswith`` check let a
+        # sibling path with a shared string prefix slip past the memory_dir
+        # gate (e.g. memory_dir ``/foo/bar`` accepted ``/foo/barbaz``).
+        # ``Path.is_relative_to`` compares parts, so the sibling is rejected.
+        bar_dir = tmp_path / "bar"
+        bar_dir.mkdir()
+        barbaz_dir = tmp_path / "barbaz"
+        barbaz_dir.mkdir()
+        app.state.config.indexing.memory_dirs = [bar_dir]
+
+        resp = await client.get("/api/index/stream", params={"path": str(barbaz_dir)})
+        assert resp.status_code == 403, resp.text
+
+    async def test_index_stream_matches_nfd_memory_dir_with_nfc_query(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        # Regression for #238: ``index_stream`` now NFC-normalizes both the
+        # request path and each configured memory_dir before the
+        # ``is_relative_to`` check, so an NFD-stored memory_dir matches an
+        # NFC-typed query (mirrors the macOS/APFS Korean Drive case).
+        nfd_dir = tmp_path / self._nfd("내 드라이브")
+        app.state.config.indexing.memory_dirs = [nfd_dir]
+
+        async def _fake_stream(*args, **kwargs):
+            yield {"type": "complete", "indexed": 0}
+
+        app.state.index_engine.index_path_stream = _fake_stream
+
+        nfc_path = tmp_path / self._nfc("내 드라이브") / "subdir"
+        resp = await client.get("/api/index/stream", params={"path": str(nfc_path)})
+        # Without normalization the route would 403 here; the streaming
+        # response itself is short-circuited by ``_fake_stream``.
+        assert resp.status_code == 200, resp.text

@@ -441,9 +441,10 @@ async def index_stream(
     config=Depends(get_config),
 ) -> StreamingResponse:
     """Stream indexing progress as Server-Sent Events."""
-    resolved = Path(path).resolve()
-    memory_dirs = [Path(d).expanduser().resolve() for d in config.indexing.memory_dirs]
-    if not any(str(resolved).startswith(str(d)) for d in memory_dirs):
+    resolved = Path(path).expanduser().resolve()
+    resolved_norm = Path(norm_path(resolved))
+    memory_dirs = [Path(norm_path(Path(d).expanduser())) for d in config.indexing.memory_dirs]
+    if not any(resolved_norm.is_relative_to(d) for d in memory_dirs):
         raise HTTPException(
             status_code=403,
             detail="Path is outside configured memory_dirs",
