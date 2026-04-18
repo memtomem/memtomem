@@ -986,6 +986,33 @@ def _json_default(obj: object) -> object:
     return str(obj)
 
 
+def _atomic_write_json(path: Path, data: dict) -> None:
+    """Write JSON atomically via tempfile in the same directory + os.replace.
+
+    Prevents partial writes from corrupting config.json when the process
+    dies mid-write or disk fills up. The tempfile lives in ``path.parent``
+    so ``os.replace`` is a same-filesystem rename (atomic on POSIX + Windows).
+
+    Used by ``mm config unset``. Follow-up work will migrate
+    ``save_config_overrides`` and ``cli/init_cmd.py``'s ``--fresh`` write
+    path onto this helper as well.
+    """
+    import json as _json
+    import os
+    import tempfile
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=".config.", suffix=".tmp")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            _json.dump(data, f, indent=2, default=_json_default)
+        os.replace(tmp_path, path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def _build_comparand(*, quiet: bool = True) -> "Mem2MemConfig":
     """Build a fresh config reflecting everything *except* user overrides.
 

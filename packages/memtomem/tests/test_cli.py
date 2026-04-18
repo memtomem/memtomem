@@ -747,6 +747,199 @@ class TestSaveConfigOverrides:
         assert fresh.namespace.rules == cfg.namespace.rules
 
 
+# ── Config unset ────────────────────────────────────────────────────────
+
+
+class TestConfigUnset:
+    """Output matrix + idempotence + atomic write + fragment-reappearance
+    regression coverage for ``mm config unset``.
+    """
+
+    @pytest.fixture
+    def isolated(self, tmp_path, monkeypatch):
+        config_file = tmp_path / "config.json"
+        config_d = tmp_path / "config.d"
+        config_d.mkdir()
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+        monkeypatch.setattr("memtomem.config._config_d_path", lambda: config_d)
+        return {"config_file": config_file, "config_d": config_d, "tmp_path": tmp_path}
+
+    def test_unset_removes_pinned_key(self, isolated, runner: CliRunner) -> None:
+        import json as _json
+
+        isolated["config_file"].write_text(
+            _json.dumps({"mmr": {"enabled": True, "lambda_param": 0.5}})
+        )
+
+        result = runner.invoke(cli, ["config", "unset", "mmr.enabled"])
+        assert result.exit_code == 0, result.output
+        assert "Removed: mmr.enabled" in result.output
+
+        data = _json.loads(isolated["config_file"].read_text())
+        assert "enabled" not in data["mmr"]
+        assert data["mmr"]["lambda_param"] == 0.5
+
+    def test_unset_removes_empty_section(self, isolated, runner: CliRunner) -> None:
+        import json as _json
+
+        isolated["config_file"].write_text(
+            _json.dumps({"mmr": {"enabled": True}, "search": {"default_top_k": 42}})
+        )
+
+        result = runner.invoke(cli, ["config", "unset", "mmr.enabled"])
+        assert result.exit_code == 0, result.output
+
+        data = _json.loads(isolated["config_file"].read_text())
+        assert "mmr" not in data
+        assert data["search"]["default_top_k"] == 42
+
+    def test_unset_deletes_empty_config_file(self, isolated, runner: CliRunner) -> None:
+        import json as _json
+
+        isolated["config_file"].write_text(_json.dumps({"mmr": {"enabled": True}}))
+
+        result = runner.invoke(cli, ["config", "unset", "mmr.enabled"])
+        assert result.exit_code == 0, result.output
+        assert not isolated["config_file"].exists()
+        assert "config.json now empty, file removed." in result.output
+
+    def test_unset_extra_mutation_field_allowed(self, isolated, runner: CliRunner) -> None:
+        """memory_dirs is not in MUTABLE_FIELDS but IS valid for unset."""
+        import json as _json
+
+        isolated["config_file"].write_text(
+            _json.dumps({"indexing": {"memory_dirs": ["/machine-a-only"]}})
+        )
+
+        result = runner.invoke(cli, ["config", "unset", "indexing.memory_dirs"])
+        assert result.exit_code == 0, result.output
+        assert "Removed: indexing.memory_dirs" in result.output
+
+    def test_unset_memory_dirs_emits_domain_warning(self, isolated, runner: CliRunner) -> None:
+        import json as _json
+
+        isolated["config_file"].write_text(
+            _json.dumps({"indexing": {"memory_dirs": ["/machine-a-only"]}})
+        )
+
+        result = runner.invoke(cli, ["config", "unset", "indexing.memory_dirs"])
+        assert result.exit_code == 0, result.output
+        assert "mm memory-dirs list" in result.output
+        assert "mm index" in result.output
+
+    def test_unset_typo_suggests_similar_canonical_key(self, isolated, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["config", "unset", "mmr.enabld"])
+        assert result.exit_code == 1
+        assert "Skipped mmr.enabld" in result.output
+        assert "did you mean 'mmr.enabled'" in result.output
+
+    def test_unset_unknown_key_without_suggestion(self, isolated, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["config", "unset", "completely_unrelated_xyz"])
+        assert result.exit_code == 1
+        assert "Skipped completely_unrelated_xyz" in result.output
+        assert "did you mean" not in result.output
+
+    def test_unset_multiple_keys_best_effort(self, isolated, runner: CliRunner) -> None:
+        import json as _json
+
+        isolated["config_file"].write_text(
+            _json.dumps({"mmr": {"enabled": True}, "search": {"default_top_k": 42}})
+        )
+
+        result = runner.invoke(cli, ["config", "unset", "mmr.enabled", "foo.bar"])
+        assert result.exit_code == 1
+        assert "Removed: mmr.enabled" in result.output
+        assert "Skipped foo.bar" in result.output
+
+        data = _json.loads(isolated["config_file"].read_text())
+        assert "mmr" not in data
+        assert data["search"]["default_top_k"] == 42
+
+    def test_unset_canonical_already_unset_is_idempotent_success(
+        self, isolated, runner: CliRunner
+    ) -> None:
+        """Canonical key not pinned → exit 0 + ``(already at default)``."""
+        # config.json doesn't exist — simulating a fresh install.
+        result = runner.invoke(cli, ["config", "unset", "mmr.enabled"])
+        assert result.exit_code == 0, result.output
+        assert "already at default" in result.output
+        assert not isolated["config_file"].exists()
+
+    def test_unset_on_malformed_config_reports_error(self, isolated, runner: CliRunner) -> None:
+        isolated["config_file"].write_text("{not valid json")
+
+        result = runner.invoke(cli, ["config", "unset", "mmr.enabled"])
+        assert result.exit_code == 1
+        assert "malformed" in result.output.lower()
+        assert "mm init --fresh" in result.output
+
+    def test_unset_fragment_value_reappears(self, isolated, runner: CliRunner) -> None:
+        """End-to-end: fragment mmr.enabled=true shadowed by config.json=false;
+        after unset, fragment layer wins on reload."""
+        import json as _json
+
+        (isolated["config_d"] / "noise.json").write_text(_json.dumps({"mmr": {"enabled": True}}))
+        isolated["config_file"].write_text(_json.dumps({"mmr": {"enabled": False}}))
+
+        # Confirm the shadowing baseline before unset.
+        from memtomem.config import load_config_d
+
+        baseline = Mem2MemConfig()
+        load_config_d(baseline)
+        load_config_overrides(baseline)
+        assert baseline.mmr.enabled is False
+
+        result = runner.invoke(cli, ["config", "unset", "mmr.enabled"])
+        assert result.exit_code == 0, result.output
+
+        fresh = Mem2MemConfig()
+        load_config_d(fresh)
+        load_config_overrides(fresh)
+        assert fresh.mmr.enabled is True
+
+    def test_atomic_write_preserves_original_on_failure(self, tmp_path, monkeypatch):
+        import os as _os
+
+        from memtomem.config import _atomic_write_json
+
+        path = tmp_path / "config.json"
+        original = '{"original": true}'
+        path.write_text(original)
+
+        def fail_replace(*args, **kwargs):
+            raise OSError("simulated replace failure")
+
+        monkeypatch.setattr(_os, "replace", fail_replace)
+
+        with pytest.raises(OSError, match="simulated replace failure"):
+            _atomic_write_json(path, {"new": True})
+
+        assert path.read_text() == original
+        orphans = [
+            p
+            for p in tmp_path.iterdir()
+            if p.name.startswith(".config.") and p.name.endswith(".tmp")
+        ]
+        assert not orphans, f"orphan tmp file(s) left behind: {orphans}"
+
+    def test_atomic_write_cleans_up_tmp_on_success(self, tmp_path) -> None:
+        import json as _json
+
+        from memtomem.config import _atomic_write_json
+
+        path = tmp_path / "config.json"
+        _atomic_write_json(path, {"ok": True})
+
+        assert path.exists()
+        assert _json.loads(path.read_text()) == {"ok": True}
+        orphans = [
+            p
+            for p in tmp_path.iterdir()
+            if p.name.startswith(".config.") and p.name.endswith(".tmp")
+        ]
+        assert not orphans
+
+
 # ── Other subcommands (help text) ───────────────────────────────────────
 
 

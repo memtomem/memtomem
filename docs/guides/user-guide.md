@@ -905,6 +905,7 @@ mm recall --since 2026-03-01           # recall by date
 # Configuration
 mm config show                         # view all settings
 mm config set search.default_top_k 20  # change a setting
+mm config unset mmr.enabled            # drop a pinned override
 mm embedding-reset                     # check/resolve embedding model mismatch
 mm reset                               # delete all data and reinitialize the DB
 mm reset --yes                         # skip confirmation prompt
