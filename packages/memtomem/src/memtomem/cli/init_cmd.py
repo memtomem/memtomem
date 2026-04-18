@@ -703,7 +703,9 @@ def _write_config_and_summary(
         else:
             existing[section] = fields
 
-    config_path.write_text(json.dumps(existing, indent=2, default=str), encoding="utf-8")
+    from memtomem.config import _json_default
+
+    config_path.write_text(json.dumps(existing, indent=2, default=_json_default), encoding="utf-8")
     click.echo(f"  Config: {config_path}")
 
     if fresh:

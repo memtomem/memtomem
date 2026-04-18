@@ -503,7 +503,7 @@ MUTABLE_FIELDS: dict[str, set[str]] = {
     "embedding": {"batch_size"},
     "decay": {"enabled", "half_life_days"},
     "mmr": {"enabled", "lambda_param"},
-    "namespace": {"default_namespace", "enable_auto_ns"},
+    "namespace": {"default_namespace", "enable_auto_ns", "rules"},
 }
 
 FIELD_CONSTRAINTS: dict[str, dict] = {
@@ -532,6 +532,7 @@ FIELD_CONSTRAINTS: dict[str, dict] = {
     "search.rrf_weights": {"type": list, "item_type": float, "length": 2},
     "namespace.default_namespace": {"type": str},
     "namespace.enable_auto_ns": {"type": bool},
+    "namespace.rules": {"type": list, "item_type": NamespacePolicyRule},
 }
 
 
@@ -576,18 +577,55 @@ def coerce_and_validate(value: object, constraint: dict | None) -> object:
     elif expected_type is list:
         item_type = constraint.get("item_type", float)
         expected_len = constraint.get("length")
-        if isinstance(value, str):
-            parts = [s.strip() for s in value.split(",")]
-        elif isinstance(value, (list, tuple)):
-            parts = list(value)
+        # ``list[BaseSettings]`` (e.g. ``namespace.rules``): accept a JSON
+        # string or list of dicts/model instances and validate each entry
+        # via ``model_validate``. Mirrors ``load_config_d``'s APPEND
+        # coercion so mutation paths (PATCH /api/config, mm config set)
+        # stay in sync with the load path.
+        if isinstance(item_type, type) and issubclass(item_type, BaseSettings):
+            if isinstance(value, str):
+                import json as _json
+
+                try:
+                    parsed = _json.loads(value)
+                except _json.JSONDecodeError as exc:
+                    raise ValueError(f"cannot parse JSON: {exc}") from exc
+            else:
+                parsed = value
+            if not isinstance(parsed, list):
+                raise ValueError(
+                    f"cannot convert {type(parsed).__name__} to list[{item_type.__name__}]"
+                )
+            coerced_items: list[object] = []
+            for idx, item in enumerate(parsed):
+                if isinstance(item, item_type):
+                    coerced_items.append(item)
+                elif isinstance(item, dict):
+                    try:
+                        coerced_items.append(item_type.model_validate(item))
+                    except Exception as exc:
+                        raise ValueError(f"item[{idx}]: {exc}") from exc
+                else:
+                    raise ValueError(
+                        f"item[{idx}]: expected dict or {item_type.__name__}, "
+                        f"got {type(item).__name__}"
+                    )
+            coerced = coerced_items
+            if expected_len is not None and len(coerced) != expected_len:
+                raise ValueError(f"expected length {expected_len}, got {len(coerced)}")
         else:
-            raise ValueError(f"cannot convert {type(value).__name__} to list")
-        try:
-            coerced = [item_type(p) for p in parts]
-        except (TypeError, ValueError):
-            raise ValueError(f"cannot convert list items to {item_type.__name__}")
-        if expected_len is not None and len(coerced) != expected_len:
-            raise ValueError(f"expected length {expected_len}, got {len(coerced)}")
+            if isinstance(value, str):
+                parts = [s.strip() for s in value.split(",")]
+            elif isinstance(value, (list, tuple)):
+                parts = list(value)
+            else:
+                raise ValueError(f"cannot convert {type(value).__name__} to list")
+            try:
+                coerced = [item_type(p) for p in parts]
+            except (TypeError, ValueError):
+                raise ValueError(f"cannot convert list items to {item_type.__name__}")
+            if expected_len is not None and len(coerced) != expected_len:
+                raise ValueError(f"expected length {expected_len}, got {len(coerced)}")
     else:
         coerced = cast("bool | int | float | str | list[object]", value)
 
@@ -923,6 +961,22 @@ _EXTRA_PERSIST_FIELDS: dict[str, set[str]] = {
 }
 
 
+def _json_default(obj: object) -> object:
+    """``json.dumps`` fallback for values not natively JSON-serializable.
+
+    ``BaseSettings`` entries in fields like ``namespace.rules`` must be
+    written as dicts (via ``model_dump(mode="json")``) so the load path
+    can re-validate them on startup. ``Path`` gets ``str()``; unknown
+    types fall back to ``str()`` to preserve the original default=str
+    behaviour.
+    """
+    if isinstance(obj, BaseSettings):
+        return obj.model_dump(mode="json")
+    if isinstance(obj, Path):
+        return str(obj)
+    return str(obj)
+
+
 def _field_equals_default(section_obj: object, key: str) -> bool:
     """Return True if ``section_obj.key`` equals the class-level default.
 
@@ -1010,4 +1064,4 @@ def save_config_overrides(
         else:
             existing.pop(section_name, None)
 
-    path.write_text(_json.dumps(existing, indent=2, default=str), encoding="utf-8")
+    path.write_text(_json.dumps(existing, indent=2, default=_json_default), encoding="utf-8")

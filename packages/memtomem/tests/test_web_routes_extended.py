@@ -99,6 +99,7 @@ class FakeConfig:
     class _Namespace:
         default_namespace = "default"
         enable_auto_ns = False
+        rules: list = []
 
     embedding = _Embedding()
     storage = _Storage()
@@ -765,6 +766,45 @@ class TestConfigPatch:
             assert resp.status_code == 200
             data = resp.json()
             assert data["ok"] is True
+
+    async def test_patch_namespace_rules(self, app, client: AsyncClient):
+        """PATCH /api/config accepts list[NamespacePolicyRule] as JSON-compatible dicts."""
+        from memtomem.config import NamespacePolicyRule
+
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.patch(
+                "/api/config",
+                json={
+                    "namespace": {
+                        "rules": [
+                            {"path_glob": "docs/**/*.md", "namespace": "docs"},
+                            {"path_glob": "work/**/*.md", "namespace": "work"},
+                        ]
+                    }
+                },
+            )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert len(data["applied"]) == 1
+        assert data["applied"][0]["field"] == "namespace.rules"
+        # Runtime config actually holds validated model instances.
+        rules = app.state.config.namespace.rules
+        assert len(rules) == 2
+        assert all(isinstance(r, NamespacePolicyRule) for r in rules)
+        assert rules[0].namespace == "docs"
+        assert rules[1].namespace == "work"
+
+    async def test_patch_namespace_rules_validation_error(self, client: AsyncClient):
+        """Invalid rule (empty path_glob) is reported in rejected list, not applied."""
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.patch(
+                "/api/config",
+                json={"namespace": {"rules": [{"path_glob": "", "namespace": "x"}]}},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["applied"]) == 0
+        assert any("namespace.rules" in r for r in data["rejected"])
 
 
 # ---------------------------------------------------------------------------

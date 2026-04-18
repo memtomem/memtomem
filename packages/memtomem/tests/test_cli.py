@@ -191,6 +191,37 @@ class TestConfigCLI:
         assert result.exit_code != 0
         assert "not a mutable field" in result.output
 
+    def test_config_set_namespace_rules_json(self, tmp_path, monkeypatch, runner: CliRunner):
+        """End-to-end: `mm config set namespace.rules '[...]'` persists + reloads."""
+        import json
+
+        from memtomem.config import Mem2MemConfig, load_config_overrides
+
+        config_file = tmp_path / "config.json"
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+
+        payload = '[{"path_glob": "docs/**/*.md", "namespace": "docs"}]'
+        result = runner.invoke(cli, ["config", "set", "namespace.rules", payload])
+        assert result.exit_code == 0, result.output
+
+        data = json.loads(config_file.read_text())
+        assert data["namespace"]["rules"] == [{"path_glob": "docs/**/*.md", "namespace": "docs"}]
+
+        # Round-trip via load path: raw dict survives setattr + model_validate.
+        fresh = Mem2MemConfig()
+        load_config_overrides(fresh)
+        from memtomem.config import NamespacePolicyRule
+
+        rule = NamespacePolicyRule.model_validate(fresh.namespace.rules[0])
+        assert rule.path_glob == "docs/**/*.md"
+        assert rule.namespace == "docs"
+
+    def test_config_set_namespace_rules_rejects_malformed(self, runner: CliRunner) -> None:
+        """Malformed JSON for namespace.rules surfaces as CLI error."""
+        result = runner.invoke(cli, ["config", "set", "namespace.rules", "[not valid json"])
+        assert result.exit_code != 0
+        assert "cannot parse JSON" in result.output
+
 
 # ── Config validation helpers ───────────────────────────────────────────
 
@@ -270,6 +301,80 @@ class TestCoerceAndValidate:
     def test_rrf_weights_has_constraint(self) -> None:
         """search.rrf_weights must be registered in FIELD_CONSTRAINTS."""
         assert "search.rrf_weights" in FIELD_CONSTRAINTS
+
+    # ── list[BaseSettings] coercion (namespace.rules) ──────────────
+
+    def test_namespace_rules_from_json_string(self) -> None:
+        """CLI path: `mm config set namespace.rules '[{...}]'` passes a JSON string."""
+        from memtomem.config import NamespacePolicyRule
+
+        constraint = FIELD_CONSTRAINTS["namespace.rules"]
+        raw = '[{"path_glob": "docs/**/*.md", "namespace": "docs"}]'
+        result = coerce_and_validate(raw, constraint)
+        assert isinstance(result, list) and len(result) == 1
+        assert isinstance(result[0], NamespacePolicyRule)
+        assert result[0].path_glob == "docs/**/*.md"
+        assert result[0].namespace == "docs"
+
+    def test_namespace_rules_from_list_of_dicts_pr253_regression(self) -> None:
+        """Web UI path: PATCH /api/config sends a parsed list of dicts.
+
+        Regression guard for PR #253: before this fix, ``coerce_and_validate``
+        did not handle ``list[BaseSettings]``, so PATCH /api/config and
+        ``mm config set namespace.rules ...`` stored raw dicts in
+        ``cfg.namespace.rules``. That broke ``indexing/engine.py:121`` which
+        accesses ``rule.path_glob`` on each entry — AttributeError on a dict.
+        This test locks in that the mutation path produces model instances.
+        """
+        from memtomem.config import NamespacePolicyRule
+
+        constraint = FIELD_CONSTRAINTS["namespace.rules"]
+        payload = [
+            {"path_glob": "docs/**/*.md", "namespace": "docs"},
+            {"path_glob": "work/**/*.md", "namespace": "work"},
+        ]
+        result = coerce_and_validate(payload, constraint)
+        assert len(result) == 2
+        assert all(isinstance(r, NamespacePolicyRule) for r in result)
+        # Critical: the exact attribute access that was failing pre-PR.
+        assert result[0].path_glob == "docs/**/*.md"
+        assert [r.namespace for r in result] == ["docs", "work"]
+
+    def test_namespace_rules_passthrough_for_model_instances(self) -> None:
+        """Already-validated instances survive coercion unchanged."""
+        from memtomem.config import NamespacePolicyRule
+
+        constraint = FIELD_CONSTRAINTS["namespace.rules"]
+        rule = NamespacePolicyRule(path_glob="x/**", namespace="x")
+        result = coerce_and_validate([rule], constraint)
+        assert result == [rule]
+
+    def test_namespace_rules_empty_list(self) -> None:
+        """Empty list is valid (matches default_factory=list)."""
+        constraint = FIELD_CONSTRAINTS["namespace.rules"]
+        assert coerce_and_validate([], constraint) == []
+        assert coerce_and_validate("[]", constraint) == []
+
+    def test_namespace_rules_rejects_malformed_json(self) -> None:
+        constraint = FIELD_CONSTRAINTS["namespace.rules"]
+        with pytest.raises(ValueError, match="cannot parse JSON"):
+            coerce_and_validate("[not json", constraint)
+
+    def test_namespace_rules_rejects_non_list_json(self) -> None:
+        constraint = FIELD_CONSTRAINTS["namespace.rules"]
+        with pytest.raises(ValueError, match="to list"):
+            coerce_and_validate('{"path_glob": "x", "namespace": "y"}', constraint)
+
+    def test_namespace_rules_rejects_scalar_entry(self) -> None:
+        constraint = FIELD_CONSTRAINTS["namespace.rules"]
+        with pytest.raises(ValueError, match="item\\[0\\]: expected dict"):
+            coerce_and_validate(["just-a-string"], constraint)
+
+    def test_namespace_rules_propagates_model_validation_error(self) -> None:
+        """Pydantic validator errors (e.g. empty path_glob) surface as ValueError."""
+        constraint = FIELD_CONSTRAINTS["namespace.rules"]
+        with pytest.raises(ValueError, match="item\\[0\\]"):
+            coerce_and_validate([{"path_glob": "", "namespace": "x"}], constraint)
 
     def test_field_constraints_are_well_formed(self) -> None:
         """Sanity: every declared constraint has a type and consistent bounds."""
@@ -449,6 +554,67 @@ class TestSaveConfigOverrides:
             "memory_dirs must be persisted even when equal to default "
             "(environment-dependent factory, preserve user intent)"
         )
+
+    def test_legacy_repr_string_in_config_handled_gracefully(self, tmp_path, monkeypatch):
+        """Pre-fix installations may have serialized ``namespace.rules`` via
+        ``default=str`` → raw ``repr()`` strings in config.json. Loading such
+        a file on upgrade must not crash: coerce rejects the shape, load path
+        logs + skips, field falls back to its default. No data loss beyond
+        the already-corrupt entry.
+        """
+        import json
+
+        config_file = tmp_path / "config.json"
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+
+        # Case 1: whole value is a repr-ish string (not even JSON).
+        config_file.write_text(
+            json.dumps(
+                {"namespace": {"rules": "<NamespacePolicyRule path_glob='x' namespace='y'>"}}
+            )
+        )
+        cfg = Mem2MemConfig()
+        load_config_overrides(cfg)
+        assert cfg.namespace.rules == []  # fell back to default, no crash
+
+        # Case 2: list of repr strings.
+        config_file.write_text(json.dumps({"namespace": {"rules": ["<legacy repr entry>"]}}))
+        cfg = Mem2MemConfig()
+        load_config_overrides(cfg)
+        assert cfg.namespace.rules == []
+
+    def test_namespace_rules_round_trip(self, tmp_path, monkeypatch):
+        """list[NamespacePolicyRule] survives save→load via model_dump/validate."""
+        import json
+
+        from memtomem.config import NamespacePolicyRule
+
+        config_file = tmp_path / "config.json"
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+
+        cfg = Mem2MemConfig()
+        cfg.namespace.rules = [
+            NamespacePolicyRule(path_glob="docs/**/*.md", namespace="docs"),
+            NamespacePolicyRule(path_glob="work/**/*.md", namespace="work"),
+        ]
+        save_config_overrides(cfg)
+
+        # Persisted as list of dicts — not BaseSettings repr().
+        data = json.loads(config_file.read_text())
+        assert data["namespace"]["rules"] == [
+            {"path_glob": "docs/**/*.md", "namespace": "docs"},
+            {"path_glob": "work/**/*.md", "namespace": "work"},
+        ]
+
+        # load_config_overrides runs coerce_and_validate on each field that
+        # has a FIELD_CONSTRAINTS entry. Because namespace.rules is now
+        # registered, the raw dicts on disk are validated back into
+        # NamespacePolicyRule instances — matching what downstream consumers
+        # (indexing/engine.py) require (attribute access like `rule.path_glob`).
+        fresh = Mem2MemConfig()
+        load_config_overrides(fresh)
+        assert all(isinstance(r, NamespacePolicyRule) for r in fresh.namespace.rules)
+        assert fresh.namespace.rules == cfg.namespace.rules
 
     def test_section_with_only_defaults_dropped_entirely(self, tmp_path, monkeypatch):
         """If every mutable key in a section equals its default, the whole
