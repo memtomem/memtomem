@@ -7,7 +7,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from memtomem.web.deps import get_storage
+from memtomem.web.deps import get_storage, require_indexed_source
 from memtomem.web.schemas.core import DeleteResponse
 from memtomem.web.schemas.sources import ChunkSizeBucket, SourceOut, SourcesResponse
 
@@ -63,14 +63,7 @@ async def delete_source(
     storage=Depends(get_storage),
 ) -> DeleteResponse:
     indexed_sources = await storage.get_all_source_files()
-    request_path = Path(path).resolve()
-    indexed_resolved = {p.resolve() for p in indexed_sources}
-
-    if request_path not in indexed_resolved:
-        raise HTTPException(
-            status_code=403,
-            detail="Path is not an indexed source file.",
-        )
+    request_path = require_indexed_source(path, indexed_sources)
 
     deleted = await storage.delete_by_source(request_path)
     return DeleteResponse(deleted=deleted)
@@ -83,11 +76,7 @@ async def source_content(
 ):
     """Return the raw text content of an indexed source file (max 1 MB)."""
     indexed_sources = await storage.get_all_source_files()
-    request_path = Path(path).resolve()
-    indexed_resolved = {p.resolve() for p in indexed_sources}
-
-    if request_path not in indexed_resolved:
-        raise HTTPException(status_code=403, detail="Path is not an indexed source file.")
+    request_path = require_indexed_source(path, indexed_sources)
 
     if not request_path.exists():
         raise HTTPException(status_code=404, detail="Source file not found on disk.")

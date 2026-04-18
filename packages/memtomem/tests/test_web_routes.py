@@ -7,6 +7,7 @@ full component initialization (embedding provider, SQLite, etc.).
 
 from __future__ import annotations
 
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -604,3 +605,73 @@ class TestLocaleEndpoints:
         resp = await client.get("/i18n.js")
         assert resp.status_code == 200
         assert "i18n" in resp.text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Unicode path normalization (#235)
+# ---------------------------------------------------------------------------
+
+
+class TestUnicodePaths:
+    """Regression for #235: NFD on-disk vs NFC user-input path mismatch.
+
+    macOS APFS may store non-ASCII directory names (e.g. Google Drive's
+    Korean "내 드라이브" / "My Drive" localization) in NFD form while users
+    type the corresponding NFC form. Without Unicode normalization in
+    ``norm_path``, the equality check in the sources/chunks web routes
+    fails with 403 even when both strings refer to the same file.
+    """
+
+    @staticmethod
+    def _nfd(s: str) -> str:
+        return unicodedata.normalize("NFD", s)
+
+    @staticmethod
+    def _nfc(s: str) -> str:
+        return unicodedata.normalize("NFC", s)
+
+    def test_korean_nfd_nfc_byte_strings_differ(self):
+        # Guard: "내 드라이브" must decompose differently under NFC/NFD,
+        # otherwise the tests below don't actually exercise the bug.
+        assert self._nfd("내 드라이브") != self._nfc("내 드라이브")
+
+    async def test_delete_source_matches_nfd_indexed_with_nfc_query(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        nfd_path = tmp_path / self._nfd("내 드라이브") / "file.md"
+        app.state.storage.get_all_source_files.return_value = [nfd_path]
+
+        nfc_query = str(tmp_path / self._nfc("내 드라이브") / "file.md")
+        resp = await client.delete("/api/sources", params={"path": nfc_query})
+        assert resp.status_code == 200, resp.text
+
+    async def test_source_content_matches_nfd_indexed_with_nfc_query(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        # Create the on-disk file under the NFC name so ``Path.exists()``
+        # passes on Linux CI (ext4 has no normalization-insensitive lookup).
+        # The storage mock still reports the file under its NFD-encoded
+        # path — mirroring the macOS/APFS case where ``realpath`` hands back
+        # the stored NFD form while the user typed NFC.
+        nfc_dir = tmp_path / self._nfc("내 드라이브")
+        nfc_dir.mkdir()
+        real_file = nfc_dir / "file.md"
+        real_file.write_text("hello from NFC")
+
+        nfd_path = tmp_path / self._nfd("내 드라이브") / "file.md"
+        app.state.storage.get_all_source_files.return_value = [nfd_path]
+
+        resp = await client.get("/api/sources/content", params={"path": str(real_file)})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["content"] == "hello from NFC"
+
+    async def test_list_chunks_matches_nfd_indexed_with_nfc_query(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        nfd_path = tmp_path / self._nfd("내 드라이브") / "file.md"
+        app.state.storage.get_all_source_files.return_value = [nfd_path]
+
+        nfc_query = str(tmp_path / self._nfc("내 드라이브") / "file.md")
+        resp = await client.get("/api/chunks", params={"source": nfc_query})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["total"] == 1

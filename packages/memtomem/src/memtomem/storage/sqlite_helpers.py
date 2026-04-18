@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import struct
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,11 +22,20 @@ def deserialize_f32(data: bytes) -> list[float]:
 
 
 def norm_path(p: Path) -> str:
-    """Normalize path to a canonical string (resolves symlinks like /tmp -> /private/tmp on macOS)."""
+    """Normalize path to a canonical string.
+
+    Resolves symlinks (``/tmp`` → ``/private/tmp`` on macOS) and applies
+    Unicode NFC normalization so NFD (typically produced by macOS/APFS) and
+    NFC (typed by users or emitted by some cloud clients) forms of the same
+    path compare equal. Without NFC here, non-ASCII paths such as
+    ``~/Library/CloudStorage/GoogleDrive-.../내 드라이브/...`` can fail the
+    equality check used by the web routes (see issue #235).
+    """
     try:
-        return str(p.resolve())
+        resolved = str(p.resolve())
     except OSError:
-        return str(p)
+        resolved = str(p)
+    return unicodedata.normalize("NFC", resolved)
 
 
 def placeholders(n: int) -> str:

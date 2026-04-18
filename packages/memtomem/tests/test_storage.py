@@ -1,9 +1,13 @@
 """Tests for storage backend operations."""
 
-import pytest
+import unicodedata
+from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from helpers import make_chunk as _make_chunk
+from memtomem.storage.sqlite_helpers import norm_path
 
 
 class TestChunkCRUD:
@@ -103,3 +107,33 @@ class TestRelations:
         removed = await storage.delete_relation(c1.id, c2.id)
         assert removed is True
         assert len(await storage.get_related(c1.id)) == 0
+
+
+class TestNormPathUnicode:
+    """Regression for #235: ``norm_path`` must collapse NFD and NFC into one form."""
+
+    def test_nfd_and_nfc_korean_paths_compare_equal(self, tmp_path):
+        nfd_path = tmp_path / unicodedata.normalize("NFD", "내 드라이브") / "file.md"
+        nfc_path = tmp_path / unicodedata.normalize("NFC", "내 드라이브") / "file.md"
+        # Sanity: the raw Path strings differ before normalization, so the
+        # equality below actually depends on the NFC step inside norm_path.
+        assert str(nfd_path) != str(nfc_path)
+        assert norm_path(nfd_path) == norm_path(nfc_path)
+
+    def test_norm_path_output_is_nfc(self, tmp_path):
+        nfd_path = tmp_path / unicodedata.normalize("NFD", "내 드라이브") / "file.md"
+        result = norm_path(nfd_path)
+        assert result == unicodedata.normalize("NFC", result)
+
+    def test_norm_path_osError_fallback_still_normalizes(self, monkeypatch):
+        # If ``Path.resolve`` raises, ``norm_path`` falls back to the input
+        # string — it must still NFC-normalize that fallback.
+        nfd = unicodedata.normalize("NFD", "/tmp/내 드라이브/file.md")
+
+        def _boom(self, strict=False):
+            raise OSError("boom")
+
+        monkeypatch.setattr(Path, "resolve", _boom)
+
+        out = norm_path(Path(nfd))
+        assert out == unicodedata.normalize("NFC", nfd)

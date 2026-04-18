@@ -5,12 +5,10 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
-from pathlib import Path
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from memtomem.tools.memory_writer import remove_lines, replace_lines
-from memtomem.web.deps import get_embedder, get_index_engine, get_storage
+from memtomem.web.deps import get_embedder, get_index_engine, get_storage, require_indexed_source
 from memtomem.web.schemas.core import (
     ChunkOut,
     DeleteResponse,
@@ -32,11 +30,8 @@ async def list_chunks(
     limit: int = Query(50, ge=1, le=500),
     storage=Depends(get_storage),
 ) -> ChunksListResponse:
-    request_path = Path(source).resolve()
     indexed_sources = await storage.get_all_source_files()
-    indexed_resolved = {p.resolve() for p in indexed_sources}
-    if request_path not in indexed_resolved:
-        raise HTTPException(status_code=403, detail="Path is not an indexed source file.")
+    request_path = require_indexed_source(source, indexed_sources)
     chunks = await storage.list_chunks_by_source(request_path, limit=limit)
     out = [chunk_to_out(c) for c in chunks]
     return ChunksListResponse(chunks=out, total=len(out))
