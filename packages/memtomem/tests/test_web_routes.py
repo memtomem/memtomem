@@ -608,18 +608,21 @@ class TestLocaleEndpoints:
 
 
 # ---------------------------------------------------------------------------
-# Unicode path normalization (#235)
+# Unicode path normalization (#235, #238)
 # ---------------------------------------------------------------------------
 
 
 class TestUnicodePaths:
-    """Regression for #235: NFD on-disk vs NFC user-input path mismatch.
+    """Regression for #235 and #238: NFD on-disk vs NFC user-input path mismatch.
 
-    macOS APFS may store non-ASCII directory names (e.g. Google Drive's
-    Korean "내 드라이브" / "My Drive" localization) in NFD form while users
-    type the corresponding NFC form. Without Unicode normalization in
-    ``norm_path``, the equality check in the sources/chunks web routes
-    fails with 403 even when both strings refer to the same file.
+    Non-ASCII directory names (e.g. Google Drive's Korean "내 드라이브" /
+    "My Drive" localization) can surface on disk in decomposed (NFD) form
+    while users type the composed (NFC) form. Without Unicode normalization
+    in ``norm_path``, equality checks in the web routes fail even when both
+    strings refer to the same path:
+
+    - #235 (sources/chunks routes) — raw ``.resolve()`` 403 mismatch.
+    - #238 (memory-dirs routes) — ``in`` / ``!=`` dedup/remove mismatch.
     """
 
     @staticmethod
@@ -675,3 +678,43 @@ class TestUnicodePaths:
         resp = await client.get("/api/chunks", params={"source": nfc_query})
         assert resp.status_code == 200, resp.text
         assert resp.json()["total"] == 1
+
+    async def test_add_memory_dir_deduplicates_nfd_and_nfc(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        # Config already holds the directory under an NFD-encoded path
+        # (representative of macOS/APFS paths returned by ``realpath`` when the
+        # dirent is stored decomposed). The user POSTs the same directory in
+        # NFC form; without NFC normalization the route would treat it as new
+        # and append a duplicate entry (#238).
+        nfd_dir = tmp_path / self._nfd("내 드라이브")
+        app.state.config.indexing.memory_dirs = [nfd_dir]
+
+        nfc_dir = tmp_path / self._nfc("내 드라이브")
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/add",
+                json={"path": str(nfc_dir)},
+            )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["message"] == "Already in memory_dirs"
+        assert len(app.state.config.indexing.memory_dirs) == 1
+
+    async def test_remove_memory_dir_matches_nfd_and_nfc(self, app, client: AsyncClient, tmp_path):
+        # Config has the target dir in NFD form plus a second entry (the
+        # route refuses to remove the last remaining memory_dir). The user
+        # POSTs the NFC form — without NFC normalization the filter keeps
+        # the NFD entry and the route returns 404 "Directory not in
+        # memory_dirs" (#238).
+        nfd_dir = tmp_path / self._nfd("내 드라이브")
+        other_dir = tmp_path / "other"
+        app.state.config.indexing.memory_dirs = [nfd_dir, other_dir]
+
+        nfc_dir = tmp_path / self._nfc("내 드라이브")
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/remove",
+                json={"path": str(nfc_dir)},
+            )
+        assert resp.status_code == 200, resp.text
+        assert app.state.config.indexing.memory_dirs == [other_dir]

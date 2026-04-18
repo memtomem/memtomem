@@ -16,6 +16,7 @@ from memtomem.config import (
     coerce_and_validate,
     save_config_overrides,
 )
+from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.tools.memory_writer import append_entry
 from memtomem.web.deps import (
     get_config,
@@ -282,7 +283,7 @@ async def add_memory_dir(request: Request, config=Depends(get_config)):
         resolved.mkdir(parents=True, exist_ok=True)
 
     current = [Path(p).expanduser().resolve() for p in config.indexing.memory_dirs]
-    if resolved in current:
+    if norm_path(resolved) in {norm_path(p) for p in current}:
         return {
             "ok": True,
             "message": "Already in memory_dirs",
@@ -307,8 +308,9 @@ async def remove_memory_dir(request: Request, config=Depends(get_config)):
         raise HTTPException(status_code=400, detail="path is required")
 
     resolved = Path(dir_path).expanduser().resolve()
+    resolved_norm = norm_path(resolved)
     new_dirs = [
-        p for p in config.indexing.memory_dirs if Path(p).expanduser().resolve() != resolved
+        p for p in config.indexing.memory_dirs if norm_path(Path(p).expanduser()) != resolved_norm
     ]
     if len(new_dirs) == len(config.indexing.memory_dirs):
         raise HTTPException(status_code=404, detail="Directory not in memory_dirs")
