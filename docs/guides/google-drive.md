@@ -130,7 +130,12 @@ mem_search(query="GraphQL decision", namespace="team")
 mem_index(path="~/Google Drive/My Drive/memtomem-memories")
 ```
 
-> **Note**: The file watcher may miss changes from cloud sync. Use explicit `mem_index` calls for reliability.
+> **Note**: Cloud-sync mounts (Google Drive Stream, OneDrive Files-On-Demand
+> ON, iCloud Optimize Storage) generally do not emit fs watcher events on
+> macOS/Linux, so the watcher will not auto-pick-up sync-delivered changes
+> at all — even on initial scan. Pin the folder offline (per
+> [Cloud Sync Client Setup](cloud-sync.md)) for native fs events, or run
+> `mem_index` manually after each sync to refresh.
 
 ## Step 5: Team workflow example
 

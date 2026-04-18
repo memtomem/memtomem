@@ -165,6 +165,40 @@ When enabled, search results include surrounding chunks from the same source fil
 | `MEMTOMEM_INDEXING__CHUNK_OVERLAP_TOKENS` | `0` | Token overlap between adjacent chunks |
 | `MEMTOMEM_INDEXING__STRUCTURED_CHUNK_MODE` | `original` | JSON/YAML/TOML chunking: `original` or `recursive` |
 | `MEMTOMEM_INDEXING__PARAGRAPH_SPLIT_THRESHOLD` | `800` | Split long prose into paragraphs above this token count (must be ≥ 0) |
+| `MEMTOMEM_INDEXING__EXCLUDE_PATTERNS` | `[]` | Pathspec (gitignore-style) globs for files the indexer should skip |
+
+### Exclude patterns
+
+`indexing.exclude_patterns` is a `list[str]` of pathspec/gitignore-style
+globs evaluated against each file's path **relative to its `memory_dirs`
+root**. Built-in denylists for credentials and noise (`oauth_creds.json`,
+`*.pem`, `**/.ssh/**`, etc.) are always applied on top — user patterns can
+extend them but cannot override them.
+
+```jsonc
+// ~/.memtomem/config.d/noise.json — APPEND semantics, layers on defaults
+{
+  "indexing": {
+    "exclude_patterns": [
+      "**/subagents/**",         // Claude Code subagent metadata
+      "**/antigravity-browser-profile/**",
+      "**/.gemini/**/*.json"     // .gemini auto-discover noise
+    ]
+  }
+}
+```
+
+> **Caveats:**
+> - **Not retroactive.** Adding a pattern only stops *future* indexing. Files
+>   already in the index stay until you remove them with
+>   `mem_do(action="delete", params={"source_file": "<path>"})`. Force re-index
+>   alone (`mem_index force=true`) does not prune.
+> - **Match against root-relative paths.** Patterns are evaluated against
+>   `path.relative_to(memory_dir)`, so `**/*.json` works, but a pattern that
+>   assumes a specific parent (e.g. `**/.claude/**/*.json`) may miss matches
+>   when `~/.claude/projects` itself is the auto-discovered memory_dir root.
+>   When in doubt, add both root-relative (`oauth_creds.json`) and `**/X`
+>   (`**/oauth_creds.json`) forms.
 
 ### Auto-discovered memory directories
 
@@ -187,6 +221,21 @@ watcher accept paths under these directories without requiring explicit
 > `mm ingest codex-memory` for richer ingestion with per-tool tagging and
 > namespace assignment. Auto-discovery only removes the path restriction —
 > it does not apply tool-specific tags or namespaces.
+
+> **Watch out for noise under auto-discovered roots.** `~/.claude/projects`
+> sweeps in subagent metadata (`*/subagents/*.meta.json`) and `~/.gemini`
+> sweeps in browser profile + OAuth artifacts. The built-in denylist covers
+> common credentials but does not filter Claude subagent metadata or
+> browser-profile JSON — add a `config.d/` fragment with the
+> [`exclude_patterns`](#exclude-patterns) rules above so those don't bloat
+> your index.
+
+> **Cloud-sync mounts** (Google Drive Stream, OneDrive Files-On-Demand ON,
+> iCloud Optimize Storage) generally do **not** emit fs watcher events to
+> macOS/Linux, so the indexer will not auto-pick-up new files placed there
+> by the sync client. Either pin the folder offline (per
+> [Cloud Sync Client Setup](cloud-sync.md)) or trigger `mem_index` manually
+> after files appear.
 
 ## Rerank (Cross-Encoder)
 
@@ -250,12 +299,42 @@ The composite score (0–1) maps to a boost of `[1.0, max_boost]`. Runs as Stage
 | `MEMTOMEM_MMR__ENABLED` | `false` | Enable result diversification |
 | `MEMTOMEM_MMR__LAMBDA_PARAM` | `0.7` | `0.0` = max diversity, `1.0` = pure relevance |
 
+> **When to enable.** Indexes that mix overview + detail files for the same
+> topic (e.g. a `MEMORY.md` index plus the underlying `feedback_*.md` files
+> it summarizes) tend to surface near-duplicate hits in the top results.
+> Turning MMR on with the default `LAMBDA_PARAM=0.7` favors relevance but
+> drops obvious duplicates, with negligible cost. memtomem does not dedup
+> at index time — see also `mem_dedup_scan` / `mem_dedup_merge`
+> ([User Guide](user-guide.md)) for a manual pass on accumulated overlap.
+
 ## Namespace
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEMTOMEM_NAMESPACE__DEFAULT_NAMESPACE` | `default` | Default namespace for new chunks |
 | `MEMTOMEM_NAMESPACE__ENABLE_AUTO_NS` | `false` | Auto-derive namespace from folder name |
+
+`enable_auto_ns=true` uses the file's **immediate parent folder name** as
+the namespace, except for files sitting directly in a `memory_dirs` root
+(those fall back to `default_namespace`). This works well for shallow
+folder trees like `memtomem-memories/team/X.md` → `team`, but produces
+low-signal namespaces (`subagents`, `<UUID>`) when applied blindly under
+auto-discovered roots like `~/.claude/projects`.
+
+> **Recommendation.** Filter noise via `exclude_patterns` *before* enabling
+> `auto_ns`, otherwise opaque parent-folder names (like a Claude Code
+> session UUID) end up as namespaces.
+
+For richer ingestion, prefer the explicit `namespace` argument on
+`mem_index` to encode source/tool/content in the namespace itself —
+colon-prefix labels group well in the Web UI Sources view:
+
+```
+mem_index(path="~/Library/CloudStorage/.../memtomem-memories/team",
+          namespace="gdrive:team")
+mem_index(path="~/.claude/projects/<...>/memory",
+          namespace="claude:memory")
+```
 
 ## Policy
 
