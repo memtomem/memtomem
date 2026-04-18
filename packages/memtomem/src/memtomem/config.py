@@ -1067,7 +1067,6 @@ def save_config_overrides(
     comparand = _build_comparand(quiet=True)
 
     path = _override_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
 
     existing: dict = {}
     if path.exists():
@@ -1106,4 +1105,4 @@ def save_config_overrides(
         else:
             existing.pop(section_name, None)
 
-    path.write_text(_json.dumps(existing, indent=2, default=_json_default), encoding="utf-8")
+    _atomic_write_json(path, existing)

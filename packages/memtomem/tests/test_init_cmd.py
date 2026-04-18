@@ -710,6 +710,48 @@ class TestFreshFlag:
             "second --fresh run created a backup despite zero drops"
         )
 
+    def test_fresh_atomic_write_failure_keeps_backup_and_original(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``--fresh`` now writes via ``_atomic_write_json``. If the atomic
+        ``os.replace`` fails mid-write, both the pre-fresh ``config.json``
+        and the backup must stay intact, and no ``.config.*.tmp`` orphan
+        should linger in ``~/.memtomem/``. This is the failure-mode
+        complement to ``test_fresh_drops_preserved_mmr``: the happy path is
+        already covered there.
+        """
+        import os as _os
+
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        config_dir = tmp_path / ".memtomem"
+        config_dir.mkdir()
+        config_path = config_dir / "config.json"
+        original = json.dumps({"mmr": {"enabled": True}})
+        config_path.write_text(original, encoding="utf-8")
+
+        def fail_replace(*args, **kwargs):
+            raise OSError("simulated replace failure")
+
+        monkeypatch.setattr(_os, "replace", fail_replace)
+
+        state = _make_init_state(tmp_path)
+        with pytest.raises(OSError, match="simulated replace failure"):
+            _write_config_and_summary(state, tmp_path, fresh=True)
+
+        assert config_path.read_text(encoding="utf-8") == original
+        backups = list(config_dir.glob("config.json.bak-*"))
+        assert len(backups) == 1, f"expected backup to survive, got {backups}"
+        orphans = [
+            p
+            for p in config_dir.iterdir()
+            if p.name.startswith(".config.") and p.name.endswith(".tmp")
+        ]
+        assert not orphans, f"orphan tmp file(s) after failed atomic write: {orphans}"
+
 
 def test_memory_dirs_env_requires_json_array(monkeypatch: pytest.MonkeyPatch) -> None:
     """Documentation examples of MEMTOMEM_INDEXING__MEMORY_DIRS must be

@@ -722,6 +722,37 @@ class TestSaveConfigOverrides:
         load_config_overrides(cfg)
         assert cfg.namespace.rules == []
 
+    def test_save_atomic_on_replace_failure(self, isolated, monkeypatch) -> None:
+        """``save_config_overrides`` now writes via ``_atomic_write_json``.
+        If ``os.replace`` fails mid-write, the existing ``config.json`` must
+        stay byte-identical and no ``.config.*.tmp`` orphan should linger.
+        Failure-mode complement to the happy-path coverage above.
+        """
+        import json as _json
+        import os as _os
+
+        original = _json.dumps({"mmr": {"enabled": True}}, indent=2)
+        isolated["config_file"].write_text(original, encoding="utf-8")
+
+        def fail_replace(*args, **kwargs):
+            raise OSError("simulated replace failure")
+
+        monkeypatch.setattr(_os, "replace", fail_replace)
+
+        cfg = Mem2MemConfig()
+        cfg.search.default_top_k = 42  # force a non-comparand field to trigger a write
+
+        with pytest.raises(OSError, match="simulated replace failure"):
+            save_config_overrides(cfg)
+
+        assert isolated["config_file"].read_text(encoding="utf-8") == original
+        orphans = [
+            p
+            for p in isolated["tmp_path"].iterdir()
+            if p.name.startswith(".config.") and p.name.endswith(".tmp")
+        ]
+        assert not orphans, f"orphan tmp file(s) after failed atomic write: {orphans}"
+
     def test_namespace_rules_round_trip(self, isolated):
         """list[NamespacePolicyRule] survives save→load via model_dump/validate."""
         import json
