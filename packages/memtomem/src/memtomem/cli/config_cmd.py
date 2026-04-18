@@ -23,9 +23,10 @@ def config() -> None:
 @click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
 def config_show(fmt: str) -> None:
     """Show current configuration (API keys masked)."""
-    from memtomem.config import Mem2MemConfig, load_config_overrides
+    from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
 
     cfg = Mem2MemConfig()
+    load_config_d(cfg)
     load_config_overrides(cfg)
     data = cfg.model_dump()
 
