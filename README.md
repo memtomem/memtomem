@@ -113,8 +113,11 @@ See [MCP Client Setup](docs/guides/mcp-clients.md) for Cursor / Windsurf / Claud
 | [LLM Providers](docs/guides/llm-providers.md) | Ollama, OpenAI, Anthropic, and compatible endpoints |
 | [MCP Client Setup](docs/guides/mcp-clients.md) | Editor-specific configuration |
 | [Agent Memory Guide](docs/guides/agent-memory-guide.md) | Sessions, working memory, procedures |
+| [Agent Context Management](docs/guides/agent-context.md) | `mm context` CLI, multi-editor artifact fan-out, settings hooks merge |
+| [Google Drive Integration](docs/guides/google-drive.md) | Multi-device and team workflows |
 | [Web UI](docs/guides/web-ui.md) | Visual dashboard |
 | [Hooks](docs/guides/hooks.md) | Claude Code hooks for auto-indexing |
+| [Uninstalling memtomem](docs/guides/uninstall.md) | Clean removal steps |
 
 ---
 

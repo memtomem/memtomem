@@ -87,21 +87,7 @@ export MEMTOMEM_EMBEDDING__DIMENSION=3072
 
 ## Switching Models on an Existing Index
 
-If you switch the embedding model after indexing files, the existing vectors won't match the new model's vector space. Use `mm embedding-reset` to detect and resolve the mismatch:
-
-```bash
-mm embedding-reset                  # Show current vs configured model
-mm embedding-reset --mode apply-current   # Drop old vectors, prepare for re-index
-mm index ~/notes                    # Re-embed with the new model
-```
-
-Or non-destructively, point the runtime back at the model that was used to build the index:
-
-```bash
-mm embedding-reset --mode revert-to-stored
-```
-
-The same operation is available as the `mem_embedding_reset` MCP tool.
+If you switch the embedding model after indexing, run `mm embedding-reset` to detect and resolve the dimension mismatch. See [`configuration.md#reset-flow`](configuration.md#reset-flow) for the full two-mode flow (`apply-current` vs `revert-to-stored`), the `mem_status` warning schema, and the equivalent `mem_embedding_reset` MCP tool.
 
 ## Troubleshooting
 
@@ -112,7 +98,4 @@ The same operation is available as the `mem_embedding_reset` MCP tool.
 
 ## Tuning Throughput
 
-| Variable | Default | When to change |
-|----------|---------|----------------|
-| `MEMTOMEM_EMBEDDING__BATCH_SIZE` | `64` | Lower for memory-constrained Ollama setups; higher for cloud APIs |
-| `MEMTOMEM_EMBEDDING__MAX_CONCURRENT_BATCHES` | `4` | Lower if you're hitting rate limits; higher to saturate fast endpoints |
+See [`configuration.md#embedding`](configuration.md#embedding) for `MEMTOMEM_EMBEDDING__BATCH_SIZE` and `MEMTOMEM_EMBEDDING__MAX_CONCURRENT_BATCHES`. Lower batch size for memory-constrained Ollama setups; raise concurrency to saturate fast cloud endpoints.

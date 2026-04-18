@@ -165,7 +165,7 @@ mm context sync --include=commands
 
 For slash commands memtomem parses Claude-flavoured Markdown (`$ARGUMENTS` placeholder) and emits Gemini TOML with the `prompt` + `description` fields and the `{{args}}` placeholder. Claude-only fields (`argument-hint`, `allowed-tools`, `model`) are dropped with a warning. Round-trip Gemini TOML → canonical Markdown is lossless because the TOML schema only has two fields.
 
-See the [full matrix](../user-guide.md#agent-context-management--mm-context) in the user guide.
+See the [full matrix](../agent-context.md) in the Agent Context Management guide.
 
 ---
 
