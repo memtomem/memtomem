@@ -47,6 +47,7 @@ This removes:
 |------|----------|
 | `memtomem.db` (+ `-wal`, `-journal`) | SQLite database (chunks, embeddings, sessions, history) |
 | `config.json` | Persisted configuration overrides |
+| `config.d/*.json` | Integration-installed drop-in fragments (if present) |
 | `memories/` | User-created memories from `mem_add` |
 | `uploads/` | Files uploaded via the Web UI |
 | `.current_session` | Active session marker |
