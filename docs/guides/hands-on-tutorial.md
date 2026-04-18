@@ -77,13 +77,12 @@ claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
 
 ### 1.3 First Tool Call
 
-Call `mem_status` from your MCP client to check the system status.
+Ask your agent to check the memtomem status.
 
-```
-> mem_status
-```
+**You**: "What's the status of my memtomem?"
 
-Example response:
+Claude calls `mem_status()` and returns:
+
 ```
 memtomem Status
 ==============
@@ -160,13 +159,12 @@ Conditional filtering: `[x for x in range(20) if x % 3 == 0]`
 
 ### 2.2 Indexing
 
-Index the notes you wrote into memtomem.
+Ask the agent to index the notes you just wrote.
 
-```
-> mem_index path="~/my-notes"
-```
+**You**: "Index my markdown notes in ~/my-notes"
 
-Example response:
+Claude calls `mem_index(path="~/my-notes")` and returns:
+
 ```
 Indexed 3 files (9 chunks created, 0 updated, 0 deleted)
   python-basics.md: 3 chunks
@@ -178,11 +176,10 @@ memtomem recognizes the markdown heading (`##`) structure and splits content int
 
 ### 2.3 Search
 
-```
-> mem_search query="list comprehensions"
-```
+**You**: "Search my notes for list comprehensions"
 
-Example response:
+Claude calls `mem_search(query="list comprehensions")` and returns:
+
 ```
 Found 3 results:
 
@@ -205,9 +202,9 @@ Interpreting results:
 
 `mem_recall` retrieves memories by date range and source filters (no search query needed).
 
-```
-> mem_recall source_filter="git-workflow.md"
-```
+**You**: "Show me everything from my git-workflow notes"
+
+Claude calls `mem_recall(source_filter="git-workflow.md")` and returns the matching chunks.
 
 ---
 
@@ -217,11 +214,10 @@ Interpreting results:
 
 You can add memories directly with `mem_add` without creating files manually.
 
-```
-> mem_add content="Python 3.12 introduced the type statement (PEP 695). You can declare type aliases like `type Vector = list[float]`." tags="python,typing"
-```
+**You**: "Remember this: Python 3.12 introduced the type statement (PEP 695). You can declare type aliases like `type Vector = list[float]`. Tag it with python and typing."
 
-Example response:
+Claude calls `mem_add(content="Python 3.12 introduced the type statement (PEP 695). You can declare type aliases like \`type Vector = list[float]\`.", tags=["python", "typing"])` and returns:
+
 ```
 Memory added to ~/.memtomem/memories/2026-04-11.md
 - Chunks indexed: 1
@@ -232,14 +228,21 @@ Memory added to ~/.memtomem/memories/2026-04-11.md
 
 ### 3.2 Adding Multiple Notes at Once
 
-`batch_add` is a non-core action, so in the default tool mode you call
-it through `mem_do`:
+`batch_add` is a non-core action, so in the default tool mode it is
+routed through `mem_do`.
 
-```
-> mem_do action="batch_add" params={"entries": [
+**You**: "Save two python web notes — FastAPI: a framework that adds Pydantic validation on top of Starlette. uvicorn: an ASGI server; use --reload for auto-restart during development."
+
+Claude calls:
+
+```python
+mem_do(
+  action="batch_add",
+  params={"entries": [
     {"key": "FastAPI", "value": "FastAPI is a framework that adds Pydantic validation on top of Starlette", "tags": ["python", "web"]},
-    {"key": "uvicorn", "value": "uvicorn is an ASGI server. Use the --reload option for auto-restart during development", "tags": ["python", "web"]}
-  ]}
+    {"key": "uvicorn", "value": "uvicorn is an ASGI server. Use the --reload option for auto-restart during development", "tags": ["python", "web"]},
+  ]},
+)
 ```
 
 Each entry takes `key` (title), `value` (content), and optional `tags`.
@@ -249,16 +252,24 @@ indexed in a single pass.
 ### 3.3 Editing an Existing Chunk
 
 Use the chunk ID from search results to edit the content. Like
-`batch_add`, `edit` is a non-core action and is called through `mem_do`:
+`batch_add`, `edit` is a non-core action routed through `mem_do`.
 
-```
-> mem_search query="docker compose"
-```
+**You**: "Find the docker compose note."
 
-After finding the chunk ID (e.g., `abc123`) in the results:
+Claude calls `mem_search(query="docker compose")` and shows the matching chunks with their IDs.
 
-```
-> mem_do action="edit" params={"chunk_id": "abc123", "new_content": "docker compose up -d: Run a multi-container app in the background. Since v2, use docker compose (with a space) instead of docker-compose (with a hyphen)."}
+**You** (after spotting chunk `abc123`): "Update that chunk — note that since v2 it's `docker compose` with a space, not `docker-compose` with a hyphen."
+
+Claude calls:
+
+```python
+mem_do(
+  action="edit",
+  params={
+    "chunk_id": "abc123",
+    "new_content": "docker compose up -d: Run a multi-container app in the background. Since v2, use docker compose (with a space) instead of docker-compose (with a hyphen).",
+  },
+)
 ```
 
 Under the hood `edit` rewrites the corresponding line range in the
@@ -268,9 +279,9 @@ indexing fails.
 
 ### 3.4 Deleting Unnecessary Chunks
 
-```
-> mem_do action="delete" params={"chunk_id": "abc123"}
-```
+**You**: "Delete chunk abc123."
+
+Claude calls `mem_do(action="delete", params={"chunk_id": "abc123"})`.
 
 `delete` can also remove every chunk from a given source file or
 namespace — pass `{"source_file": "~/my-notes/old.md"}` or
@@ -281,11 +292,10 @@ namespace variants only touch the index, not the files on disk.
 
 ### 3.5 Checking Status
 
-```
-> mem_stats
-```
+**You**: "How many memories do I have?"
 
-Example response:
+Claude calls `mem_stats()` and returns:
+
 ```
 Memory index statistics:
 - Total chunks: 12
@@ -296,14 +306,12 @@ Memory index statistics:
 ### 3.6 Editing Files Directly and Re-Indexing
 
 When you edit a markdown file outside memtomem (in your editor, from
-a git pull, whatever), re-run `mem_index` on the same path to let
-memtomem catch up:
+a git pull, whatever), re-index the same path so memtomem catches up.
 
-```
-> mem_index path="~/my-notes"
-```
+**You**: "Re-index my notes folder."
 
-Example response after editing one section in `git-workflow.md`:
+Claude calls `mem_index(path="~/my-notes")` and returns (after editing one section in `git-workflow.md`):
+
 ```
 Indexing complete:
 - Files scanned: 3
@@ -327,24 +335,22 @@ How to read the stats:
   hash-based.
 
 If you swap the embedding model (e.g., `nomic-embed-text` → `bge-m3`)
-and need every chunk re-embedded from scratch, pass `force=true`:
+and need every chunk re-embedded from scratch, ask for a forced re-index.
 
-```
-> mem_index path="~/my-notes" force=true
-```
+**You**: "Force a full re-index of my notes folder."
 
-Every chunk will show up in `Indexed` regardless of hash match.
+Claude calls `mem_index(path="~/my-notes", force=true)`, and every chunk shows up in `Indexed` regardless of hash match.
 
 ### 3.7 Cleaning Up After Deleted Files
 
 If you delete a markdown file from disk, `mem_index` will *not* notice
 the deletion — it only walks files that currently exist, so the old
 chunks stay in the database as "orphans". `mem_status` detects this
-automatically and tells you to clean up:
+automatically and tells you to clean up.
 
-```
-> mem_status
-```
+**You**: "Check the memtomem status."
+
+Claude calls `mem_status()` and returns:
 
 ```
 memtomem Status
@@ -362,23 +368,22 @@ Total chunks:  11
 Source files:  4 (1 orphaned — run mem_cleanup_orphans)
 ```
 
-Call `orphans` through `mem_do` (dry-run first, then apply):
+Call `orphans` through `mem_do` — dry-run first, then apply.
 
-```
-> mem_do action="orphans" params={"dry_run": true}
-```
+**You**: "Preview the orphan cleanup (dry run)."
 
-Example response:
+Claude calls `mem_do(action="orphans", params={"dry_run": true})` and returns:
+
 ```
 Orphaned files: 1 (dry-run, no deletions)
 - ~/my-notes/docker-notes.md
 ```
 
-Once you're happy with the list, run it for real:
+Once you're happy with the list, ask the agent to run it for real.
 
-```
-> mem_do action="orphans" params={"dry_run": false}
-```
+**You**: "Looks good — go ahead and clean them up."
+
+Claude calls `mem_do(action="orphans", params={"dry_run": false})` and returns:
 
 ```
 Cleanup complete:
