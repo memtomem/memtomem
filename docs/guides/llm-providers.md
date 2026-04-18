@@ -115,17 +115,7 @@ All features gracefully degrade: if LLM is enabled but a call fails, the heurist
 
 ## Configuration Reference
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MEMTOMEM_LLM__ENABLED` | `false` | Enable LLM provider |
-| `MEMTOMEM_LLM__PROVIDER` | `ollama` | `ollama`, `openai`, or `anthropic` |
-| `MEMTOMEM_LLM__MODEL` | _(empty)_ | Model name (empty = provider default) |
-| `MEMTOMEM_LLM__BASE_URL` | `http://localhost:11434` | API endpoint URL |
-| `MEMTOMEM_LLM__API_KEY` | _(empty)_ | API key (required for OpenAI/Anthropic/OpenRouter) |
-| `MEMTOMEM_LLM__MAX_TOKENS` | `1024` | Maximum response tokens |
-| `MEMTOMEM_LLM__TIMEOUT` | `60.0` | Request timeout in seconds |
-
-Provider defaults when `MODEL` is empty: ollama → `gemma4:e2b`, openai → `gpt-4.1-mini`, anthropic → `claude-haiku-4-5-20251001`.
+See [`configuration.md#llm`](configuration.md#llm) for the complete `MEMTOMEM_LLM__*` environment variable reference. Provider defaults when `MODEL` is empty: ollama → `gemma4:e2b`, openai → `gpt-4.1-mini`, anthropic → `claude-haiku-4-5-20251001`.
 
 ## Troubleshooting
 
