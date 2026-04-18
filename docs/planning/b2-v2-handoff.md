@@ -1,17 +1,23 @@
-# B.2 v2 — Phase 2d observability handoff for next session
+# B.2 v2 — Phase 3b closed, corpus scope narrowed to 6 topics, Phase 4 next
 
-**If you are a new Claude session picking this up**: read this file
-first, then `b2-v2-design.md`, `b2-v2-phase1-validation.md`
-(§§ 8-12 for Phase 2a-c measurements — § 11 is cost_opt
-counter-prediction, § 12 is security (H1, D1) realization +
-kafka → observability decision), `b2-v2-phase2b-ledger.md`
-(curation patterns + 3 boundary-case principles + formal
-definitions + security pre-registration + Methodology
-Discontinuity 1 [security generator transition] + Gemini-
-regenerated security curation ledger + Kafka cadence contingency
-with realized decision), and `b2-v2-query-portfolio.md` in that
-order. That gives full methodology context + the current
-open-prediction state.
+**If you are a new Claude session picking this up**: corpus building
+is paused at 6 topics (caching + postgres + cost_opt + security +
+observability + k8s, 192 chunks total) per user decision 2026-04-18.
+The chunk-level artifact candidate hypothesis hit its k ≥ 4
+confirmation threshold at k8s; further topics would be
+confirmation-only. Phase 3b drift validator is implemented
+(`tools/retrieval-eval/drift_validator.py` + 23 tests, commit
+`eb25fd4`). **Next work = Phase 4 query portfolio across 6 topics**;
+remaining 9 topics are deferred, not cancelled (trigger conditions
+for resumption live in `b2-v2-design.md` § "Scope narrowed to 6
+topics").
+
+Reading order for full methodology context: this file first, then
+`b2-v2-design.md` (incl. new § "Scope narrowed to 6 topics"),
+`b2-v2-phase1-validation.md` (§§ 8-14 for Phase 2a-e measurements),
+`b2-v2-phase2b-ledger.md` (curation patterns, formal definitions,
+all topic pre-registrations, drift validator rules), and
+`b2-v2-query-portfolio.md`.
 
 ## Branch state
 
@@ -32,9 +38,10 @@ open-prediction state.
 | 2d (observability) | ✅ | 32 chunks; drift 9 events / 32 = 28.1% (event-count convention adopted at this topic; absent-topic 6 + intra-vocab 2 + missed secondary 1); divergence **0/8** (D1 realized); H1/H2/H3 all rejected (28.1% above every band) — framework retirement/reformulation deferred to kafka or Phase 5 per (A)-path; genre-boundary candidacy falsified (D1 not D2) |
 | 2e (k8s) | ✅ | 32 chunks; drift 13 events / 32 = 40.6% event-count (**Upper-outlier 32-45% realized**, 12.5 pp above observability's 28.1%); divergence **0/8** (D1 realized, cluster n=5 — chunk-level artifact k ≥ 4 threshold met, working-hypothesis promotion eligible); two systematic Gemini patterns (kubectl-logs / postmortem-genre conflations); Discontinuity 2 (KO tokenizer workaround, `k8s` → `kubernetes`); first non-deterministic top-1 in v2 (divergence stable) |
 | 2d (kafka) | 🚫 skipped (user 2026-04-18) | originally confirmation-only per § 12.7; skipped per user — n=5 cluster already confirmed at k8s (k ≥ 4 threshold met), additional confirmation ROI low; H1/H2/H3 reformulation deferred to Phase 5 instead of kafka |
-| **next** | **📋** | **user selection next session**: Phase 3b drift validator rule tiers (2 forbidden-pair candidates ready) OR next topic (ci_cd / auth / networking / ml_ops / data_pipelines / incident_response / api_design / + 15th per `b2-v2-design.md`) |
-| 2e onwards | 📋 | 9 remaining topics × 8 batches each |
-| 3-7 | 📋 | full curation (per-topic drift), query portfolio, calibration, CI wiring, PR |
+| 3b | ✅ | drift validator (`tools/retrieval-eval/drift_validator.py`) + 23 tests; 2 forbidden + 3 manual-review rules derived from 6-topic ledger; current corpus passes with zero violations |
+| **scope narrowed** | **2026-04-18** | **corpus paused at 6 topics** per user; chunk-level artifact candidate k ≥ 4 threshold already met, further topics confirmation-only at diminishing ROI. Remaining 9 topics deferred (not cancelled — trigger conditions in `b2-v2-design.md` § "Scope narrowed to 6 topics") |
+| **next** | **📋** | Phase 4 query portfolio (100 queries × 2 langs across 6 topics) |
+| 3-7 | 📋 | query portfolio, calibration (incl. H1/H2/H3 retirement at Phase 5), sensitivity check, CI wiring, PR |
 
 ## Current state summary (2026-04-17, Phase 2c complete)
 
@@ -273,16 +280,35 @@ failure mode.
    / reformulation decision moves from "kafka completion" to "Phase
    5" (updated commitment — items 9 and 12 below updated
    accordingly).
-9. **After topic 6 (k8s)**: implement Phase 3b drift validator rule
-   tiers per ledger § "Deferred decisions". Earlier risks biased
-   sample.
-10. **Remaining 8 topics** after observability/k8s/kafka: ci_cd,
-    auth, networking, ml_ops, data_pipelines, incident_response,
-    api_design, + topic 15 per `b2-v2-design.md`.
-11. **Phases 4-7** proceed once 15-topic corpus complete.
+9. ✅ **Phase 3b drift validator** (DONE 2026-04-18, commit
+   `eb25fd4`). `tools/retrieval-eval/drift_validator.py` + 23 tests
+   at `packages/memtomem/tests/test_drift_validator.py`. Two tiers
+   locked against the 6-topic ledger (forbidden: closed-vocab +
+   `genre-postmortem-vs-ir-postmortem-subtopic`; manual-review:
+   `kubectl-logs-diagnostic-vs-observability-logging`,
+   `security-access-control-primary-with-rbac-body`,
+   `security-encryption-primary-with-transport-body` with
+   networking/tls+auth/mtls suppression). Greenlist deferred until
+   a false-positive case appears. Current corpus passes zero
+   violations. See ledger § "Deferred decisions" for rule details
+   and design doc § "Drift validator" for the updated spec.
+10. 📋 **Scope narrowed to 6 topics** (2026-04-18, user decision).
+    Corpus paused at caching + postgres + cost_opt + security +
+    observability + k8s (192 chunks). Remaining 9 topics (`ci_cd`,
+    `auth`, `networking`, `ml_ops`, `data_pipelines`,
+    `incident_response`, `api_design`, `kafka`, `search`) deferred
+    as regression-test expansion candidates, not cancelled. Trigger
+    conditions for resumption in `b2-v2-design.md` § "Scope narrowed
+    to 6 topics". Phase 4-7 proceed on the 6-topic corpus.
+11. 📋 **Phase 4 next**: query portfolio (100 queries per language)
+    across 6 topics × 4 genres = 24 base queries, expanded by
+    paraphrase / difficulty variants. Genre-primary axis required.
+    KO primary, EN parity.
 12. **H1/H2/H3 retirement / reformulation decision** at **Phase 5**
     (kafka skipped per user 2026-04-18 — decision venue moved from
-    "kafka completion or Phase 5" to "Phase 5" only). Recorded in
+    "kafka completion or Phase 5" to "Phase 5" only). Evidence base:
+    observability 28.1% + k8s 40.6% both rejected all three bands;
+    no additional topic measurement required to decide. Recorded in
     ledger § "Curation ledger — Phase 2d observability" "Observation
     (not pre-registered, tentative)" + § "Observation update" under
     Phase 2e k8s curation ledger.

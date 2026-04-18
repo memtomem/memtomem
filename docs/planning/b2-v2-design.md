@@ -86,6 +86,44 @@ language → 180-240 chunks per language, 360-480 total.
 Topic-level vocabulary is closed. New topics are not added during
 corpus generation.
 
+### Scope narrowed to 6 topics (2026-04-18)
+
+Corpus expansion paused at **n=6 topics** (caching, postgres,
+cost_optimization, security, observability, k8s — 192 chunks total,
+96 per language). Rationale: the chunk-level artifact candidate
+hypothesis reached the k ≥ 4 confirmation threshold (§ 11.4 of
+`b2-v2-phase1-validation.md`) at k8s with n=5 topic-strong cluster
+and no falsifying cases. Further topic additions would be
+confirmation-only at diminishing ROI. Corpus-building effort
+exceeded the budget for this phase.
+
+**Remaining 9 topics** (`ci_cd`, `auth`, `kafka`, `search`,
+`networking`, `ml_ops`, `data_pipelines`, `incident_response`,
+`api_design`) are **deferred, not cancelled**. They can be added
+later as regression-test corpus expansion without any methodology
+change — the 15-topic freeze, closed vocabulary, and Gemini prompt
+template remain valid. Trigger conditions for resumption:
+
+- Phase 5 calibration reveals a blind spot that new topics could
+  resolve
+- A new pipeline feature needs topic coverage that the 6 topics
+  do not exercise
+- Post-release regression gap points at an untested topic
+
+**Phase 4-7 run on the 6-topic corpus**. Downstream consequences:
+- Query portfolio (Phase 4): 100 queries still achievable across
+  6 topics × 4 genres × 2 langs; topical diversity reduced from
+  ~15 to 6.
+- Calibration (Phase 5): per-topic thresholds computed from 6
+  measurements instead of 15; statistical power lower, still
+  publishable.
+- H1/H2/H3 retirement / reformulation (Phase 5): decision uses
+  existing evidence (observability 28.1% + k8s 40.6% both rejected
+  all three bands); no additional topic required.
+- Genre-pair confusion matrix (Phase 5): 4 × 4 × 2 = 32 cells
+  from 6-topic corpus, same structure.
+- CI wiring (Phase 6): unaffected.
+
 ### Genres (frozen upfront)
 
 | Genre | Style constraint |
