@@ -905,9 +905,39 @@ def _auto_discovered_memory_dirs() -> list[Path]:
 # Fields persisted by ``save_config_overrides`` but NOT settable via the
 # generic ``mm config set`` / ``mem_config`` path.  Managed through dedicated
 # endpoints (e.g. Web UI ``/memory-dirs/*``).
+#
+# These fields are also EXEMPT from the drop-equal-to-default rule in
+# ``save_config_overrides``. Criterion for inclusion: the field's
+# ``default_factory`` is environment-dependent — it reads filesystem,
+# network, hostname, or other runtime state, so "equal to default" on
+# machine A does not imply the same on machine B. Dropping such a field
+# on save would silently lose user-curated data across environments.
+#
+# Current members:
+# - ``indexing.memory_dirs`` — ``_default_memory_dirs()`` auto-discovers
+#   AI tool dirs via ``is_dir()`` fs checks.
+#
+# When adding a field whose default reads runtime state, add it here.
 _EXTRA_PERSIST_FIELDS: dict[str, set[str]] = {
     "indexing": {"memory_dirs"},
 }
+
+
+def _field_equals_default(section_obj: object, key: str) -> bool:
+    """Return True if ``section_obj.key`` equals the class-level default.
+
+    Default-valued fields are dropped from ``config.json`` on save so that
+    runtime toggles (e.g. a Web UI checkbox left at its default) don't pin
+    the default over ``config.d/`` fragments that set a different value.
+    """
+    model_fields = getattr(type(section_obj), "model_fields", None)
+    if not model_fields or key not in model_fields:
+        return False
+    try:
+        default = model_fields[key].get_default(call_default_factory=True)
+    except Exception:  # pragma: no cover - defensive; pydantic shouldn't raise
+        return False
+    return getattr(section_obj, key, None) == default
 
 
 def save_config_overrides(
@@ -919,17 +949,25 @@ def save_config_overrides(
     Uses **read-merge-write** so that keys not in *mutable_fields* (e.g.
     init-only settings like ``embedding.provider`` or ``storage.sqlite_path``)
     are preserved across saves.
+
+    Runtime-mutable fields (``MUTABLE_FIELDS``) whose current value equals
+    the class-level default are dropped (and pruned from any existing
+    entry). This prevents silent pins — e.g. a Web UI section save where
+    an unchecked default-False toggle would otherwise write
+    ``mmr.enabled=false`` and permanently shadow a ``config.d/`` fragment
+    that sets it True.
+
+    ``_EXTRA_PERSIST_FIELDS`` (currently ``indexing.memory_dirs``) are
+    exempt from drop-default. Their default factories are
+    environment-dependent (auto-discovered AI tool dirs), so "equal to
+    default" is not a stable signal across machines. Treat them as
+    user-curated data and always persist when present.
     """
     import json as _json
     import logging
 
     _log = logging.getLogger(__name__)
-    base = mutable_fields or MUTABLE_FIELDS
-    # Merge extra-persist fields so they are always written alongside mutables.
-    effective: dict[str, set[str]] = {}
-    for section in {*base, *_EXTRA_PERSIST_FIELDS}:
-        effective[section] = base.get(section, set()) | _EXTRA_PERSIST_FIELDS.get(section, set())
-    mutable_fields = effective
+    base_fields: dict[str, set[str]] = mutable_fields or MUTABLE_FIELDS
 
     path = _override_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -942,19 +980,34 @@ def save_config_overrides(
         except (OSError, _json.JSONDecodeError) as exc:
             _log.warning("Cannot read existing config at %s: %s — overwriting", path, exc)
 
-    # ── Merge mutable fields into existing data ──
-    for section_name, fields in mutable_fields.items():
+    # ── Merge fields into existing data ──
+    # drop_default applies only to runtime-mutable fields; extra-persist
+    # fields (memory_dirs) are always persisted when non-None.
+    sections = {*base_fields, *_EXTRA_PERSIST_FIELDS}
+    for section_name in sections:
         section_obj = getattr(config, section_name, None)
         if section_obj is None:
             continue
+        drop_default_keys = base_fields.get(section_name, set())
+        always_persist_keys = _EXTRA_PERSIST_FIELDS.get(section_name, set())
+
         section_data: dict[str, object] = existing.get(section_name, {})
         if not isinstance(section_data, dict):
             section_data = {}
-        for key in fields:
+
+        for key in drop_default_keys | always_persist_keys:
             val = getattr(section_obj, key, None)
-            if val is not None:
-                section_data[key] = val
+            if val is None:
+                section_data.pop(key, None)
+                continue
+            if key in drop_default_keys and _field_equals_default(section_obj, key):
+                section_data.pop(key, None)
+                continue
+            section_data[key] = val
+
         if section_data:
             existing[section_name] = section_data
+        else:
+            existing.pop(section_name, None)
 
     path.write_text(_json.dumps(existing, indent=2, default=str), encoding="utf-8")

@@ -371,6 +371,102 @@ class TestSaveConfigOverrides:
         data = json.loads(config_file.read_text())
         assert "/pre/existing" in [str(p) for p in data["indexing"]["memory_dirs"]]
 
+    def test_default_valued_field_not_persisted(self, tmp_path, monkeypatch):
+        """Fields whose current value equals the class-level default must not
+        be written. Otherwise a Web UI save would pin the default and shadow
+        a ``config.d/`` fragment that sets a different value.
+        """
+        import json
+
+        config_file = tmp_path / "config.json"
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+
+        cfg = Mem2MemConfig()
+        # mmr.enabled default is False — simulate a Web UI "save section"
+        # that dumps the whole section without the user touching mmr.
+        save_config_overrides(cfg)
+
+        data = json.loads(config_file.read_text()) if config_file.exists() else {}
+        assert "mmr" not in data, (
+            f"default-valued mmr section must not be persisted; got {data.get('mmr')!r}"
+        )
+
+    def test_existing_default_entry_pruned_on_save(self, tmp_path, monkeypatch):
+        """An existing leftover entry that matches the current-and-default
+        value must be removed on save, so the key stops shadowing fragments.
+        """
+        import json
+
+        config_file = tmp_path / "config.json"
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+
+        # Simulate a prior leak: mmr.enabled=false pinned into config.json.
+        config_file.write_text(json.dumps({"mmr": {"enabled": False}}))
+
+        cfg = Mem2MemConfig()
+        # cfg.mmr.enabled is False (default) and config.json has False too.
+        # Next save should prune the pinned key.
+        save_config_overrides(cfg)
+
+        data = json.loads(config_file.read_text())
+        assert "mmr" not in data
+
+    def test_non_default_value_still_persists(self, tmp_path, monkeypatch):
+        """Explicit non-default values must still be written."""
+        import json
+
+        config_file = tmp_path / "config.json"
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+
+        cfg = Mem2MemConfig()
+        cfg.mmr.enabled = True  # default is False
+        cfg.search.default_top_k = 42  # default is 10
+        save_config_overrides(cfg)
+
+        data = json.loads(config_file.read_text())
+        assert data["mmr"]["enabled"] is True
+        assert data["search"]["default_top_k"] == 42
+
+    def test_memory_dirs_equal_to_default_still_persisted(self, tmp_path, monkeypatch):
+        """memory_dirs is in _EXTRA_PERSIST_FIELDS and exempt from
+        drop-default because its factory auto-discovers AI tool dirs via
+        filesystem checks. "Equal to default" on machine A may not match
+        machine B's default — so we always persist user-curated dir lists.
+        """
+        import json
+
+        from memtomem.config import _default_memory_dirs
+
+        config_file = tmp_path / "config.json"
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+
+        cfg = Mem2MemConfig()
+        cfg.indexing.memory_dirs = _default_memory_dirs()
+        save_config_overrides(cfg)
+
+        data = json.loads(config_file.read_text())
+        assert "memory_dirs" in data["indexing"], (
+            "memory_dirs must be persisted even when equal to default "
+            "(environment-dependent factory, preserve user intent)"
+        )
+
+    def test_section_with_only_defaults_dropped_entirely(self, tmp_path, monkeypatch):
+        """If every mutable key in a section equals its default, the whole
+        section is omitted from config.json (no orphan ``{}`` entries)."""
+        import json
+
+        config_file = tmp_path / "config.json"
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+
+        # Prior leak: entire decay section pinned at defaults.
+        config_file.write_text(json.dumps({"decay": {"enabled": False, "half_life_days": 30.0}}))
+
+        cfg = Mem2MemConfig()  # all defaults
+        save_config_overrides(cfg)
+
+        data = json.loads(config_file.read_text())
+        assert "decay" not in data
+
 
 # ── Other subcommands (help text) ───────────────────────────────────────
 
