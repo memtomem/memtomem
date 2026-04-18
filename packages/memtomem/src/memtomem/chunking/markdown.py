@@ -11,6 +11,10 @@ from memtomem.models import Chunk, ChunkMetadata, ChunkType
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 _FRONT_MATTER_RE = re.compile(r"^---\n(.*?)\n---\n?", re.DOTALL)
 _WIKILINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]")
+# Code fence opener/closer: up to 3 leading spaces, then ``` or ~~~ (length is
+# the matched run). Language tag after opener is allowed; closer must be the
+# same character and at least as long (CommonMark §4.5).
+_FENCE_OPEN_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
 
 
 _TOKEN_CHAR_RATIO = 4  # rough chars-per-token estimate (English-oriented)
@@ -19,6 +23,105 @@ _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 # Used as a soft split boundary when paragraph splitting did not produce enough
 # granularity — common in FAQ, changelog, and structured-note formats.
 _BOLD_LABEL_RE = re.compile(r"^[ \t]*\*\*[^*\n]+\*\*", re.MULTILINE)
+
+
+def _fence_line_set(text: str) -> frozenset[int]:
+    """Return 1-indexed line numbers that sit *inside* a code fence (exclusive of
+    the opener/closer lines themselves — those are marker lines that should not
+    carry interior content like heading-looking strings).
+
+    Opener and closer lines are also included so that a ``# heading``-shaped
+    fence-marker metadata row is never treated as a true markdown heading.
+
+    Handles unclosed fences at EOF by treating the rest of the file as fenced.
+    """
+    lines = text.splitlines()
+    inside: set[int] = set()
+    i = 0
+    while i < len(lines):
+        m = _FENCE_OPEN_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        run = m.group(1)
+        fence_char = run[0]
+        min_len = len(run)
+        start = i
+        j = i + 1
+        while j < len(lines):
+            m2 = _FENCE_OPEN_RE.match(lines[j])
+            if m2:
+                run2 = m2.group(1)
+                if run2[0] == fence_char and len(run2) >= min_len and not m2.group(2).strip():
+                    break
+            j += 1
+        end = j if j < len(lines) else len(lines) - 1
+        for k in range(start, end + 1):
+            inside.add(k + 1)  # 1-indexed
+        i = end + 1
+    return frozenset(inside)
+
+
+def _split_paragraphs_fence_aware(text: str) -> list[str]:
+    """Split *text* on blank lines, but keep each code fence as one atomic block.
+
+    Equivalent to ``text.split("\\n\\n")`` when no fences are present. When a
+    fence spans blank lines (e.g. code with empty lines inside), the entire
+    fenced region — opener through closer — is emitted as a single part so the
+    downstream merger cannot cut a code block in half.
+
+    Unclosed fences at EOF absorb the rest of the text, matching the protective
+    convention used by ``_fence_line_set``.
+    """
+    lines = text.splitlines(keepends=True)
+    parts: list[str] = []
+    buf: list[str] = []
+    i = 0
+    while i < len(lines):
+        m = _FENCE_OPEN_RE.match(lines[i].rstrip("\n"))
+        if m:
+            # Flush current paragraph before the fence.
+            if buf:
+                joined = "".join(buf).strip("\n")
+                if joined:
+                    parts.append(joined)
+                buf = []
+            run = m.group(1)
+            fence_char = run[0]
+            min_len = len(run)
+            start = i
+            j = i + 1
+            while j < len(lines):
+                m2 = _FENCE_OPEN_RE.match(lines[j].rstrip("\n"))
+                if (
+                    m2
+                    and m2.group(1)[0] == fence_char
+                    and len(m2.group(1)) >= min_len
+                    and not m2.group(2).strip()
+                ):
+                    break
+                j += 1
+            end = j if j < len(lines) else len(lines) - 1
+            fence_text = "".join(lines[start : end + 1]).rstrip("\n")
+            if fence_text:
+                parts.append(fence_text)
+            i = end + 1
+            continue
+        if lines[i].strip() == "":
+            if buf:
+                joined = "".join(buf).strip("\n")
+                if joined:
+                    parts.append(joined)
+                buf = []
+            i += 1
+            continue
+        buf.append(lines[i])
+        i += 1
+    if buf:
+        joined = "".join(buf).strip("\n")
+        if joined:
+            parts.append(joined)
+    return parts if parts else [text]
 
 
 def _split_on_bold_labels(text: str) -> list[str]:
@@ -165,10 +268,12 @@ class MarkdownChunker:
         overlap_chars = self._overlap_tokens * _TOKEN_CHAR_RATIO
         base_line = section["start_line"]
 
-        # Try paragraph-level splitting first
+        # Try paragraph-level splitting first. Fence-aware so code blocks
+        # (including ones with blank lines inside) stay atomic — otherwise the
+        # size-based merger below could slice a ``` block mid-code.
         est_tokens = len(text) // _TOKEN_CHAR_RATIO
         if est_tokens >= self._para_threshold:
-            parts = text.split("\n\n")
+            parts = _split_paragraphs_fence_aware(text)
         else:
             parts = [text]
 
@@ -181,8 +286,14 @@ class MarkdownChunker:
             if len(bold_parts) > 1:
                 parts = bold_parts
 
-        # Last resort: split by sentences
-        if len(parts) == 1 and len(parts[0]) > max_chars:
+        # Last resort: split by sentences. Skipped entirely when the whole
+        # section is inside one fenced block — sentence splitting a code
+        # block would mangle it. The block is accepted as oversize instead.
+        if (
+            len(parts) == 1
+            and len(parts[0]) > max_chars
+            and not _FENCE_OPEN_RE.match(parts[0].lstrip("\n").splitlines()[0] if parts[0] else "")
+        ):
             parts = _SENTENCE_RE.split(text)
 
         # Merge small parts into chunks respecting max_chars
@@ -238,13 +349,14 @@ class MarkdownChunker:
 
     def _split_by_headings(self, content: str) -> list[dict]:
         lines = content.splitlines()
+        fence_lines = _fence_line_set(content)
         sections: list[dict] = []
         current_hierarchy: list[str] = []
         current_lines: list[str] = []
         current_start = 1
 
         for i, line in enumerate(lines, 1):
-            match = _HEADING_RE.match(line)
+            match = _HEADING_RE.match(line) if i not in fence_lines else None
             if match:
                 # Flush previous section
                 if current_lines:
