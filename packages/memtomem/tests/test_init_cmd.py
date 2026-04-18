@@ -61,6 +61,7 @@ def _make_init_state(tmp_path: Path) -> dict:
         "top_k": 10,
         "tokenizer": "unicode61",
         "decay_enabled": False,
+        "rerank_enabled": False,
         # Non-config keys required by _write_config_and_summary
         "mcp_choice": 3,  # skip MCP setup
         "settings_hooks": False,
@@ -130,6 +131,68 @@ class TestInitConfigMerge:
         data = json.loads(config_path.read_text(encoding="utf-8"))
         assert data["embedding"]["provider"] == "none"
         assert data["search"]["default_top_k"] == 10
+
+
+class TestRerankerStep:
+    """`_step_reranker` writes an optional `rerank` section into config.json."""
+
+    def test_rerank_disabled_writes_no_section(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the user skips the reranker step, config.json must not gain a
+        `rerank` section (so defaults remain in effect and re-init doesn't
+        resurrect a stale enabled flag)."""
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        state = _make_init_state(tmp_path)
+        _write_config_and_summary(state, tmp_path)
+
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        assert "rerank" not in data
+
+    def test_rerank_enabled_writes_multilingual_model(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Enabling reranker with multilingual model writes provider=fastembed
+        and the jina multilingual model ID."""
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        state = _make_init_state(tmp_path)
+        state["rerank_enabled"] = True
+        state["rerank_model"] = "jinaai/jina-reranker-v2-base-multilingual"
+        _write_config_and_summary(state, tmp_path)
+
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        assert data["rerank"] == {
+            "enabled": True,
+            "provider": "fastembed",
+            "model": "jinaai/jina-reranker-v2-base-multilingual",
+        }
+
+    def test_rerank_disabled_preserves_existing_rerank_fields(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Re-running init with reranker disabled must not clobber a rerank
+        section the user added manually (e.g. custom top_k)."""
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        config_dir = tmp_path / ".memtomem"
+        config_dir.mkdir()
+        config_path = config_dir / "config.json"
+        config_path.write_text(
+            json.dumps({"rerank": {"enabled": True, "top_k": 50}}),
+            encoding="utf-8",
+        )
+
+        state = _make_init_state(tmp_path)
+        _write_config_and_summary(state, tmp_path)
+
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        assert data["rerank"]["enabled"] is True
+        assert data["rerank"]["top_k"] == 50
 
 
 def test_write_config_and_summary_without_base_dir_falls_back_to_home(

@@ -1,7 +1,7 @@
 # MCP Client Configuration Guide
 
 **Audience**: Users who want to connect memtomem to a specific AI editor
-**Prerequisite**: [Getting Started](getting-started.md) complete (embedding path picked — BM25 default, or ONNX / Ollama / OpenAI via the wizard)
+**Prerequisite**: [Getting Started](getting-started.md) complete (embedding path picked — BM25 default, or ONNX / Ollama / OpenAI via the wizard; optional cross-encoder reranker)
 **Estimated Time**: ~5 minutes
 
 > **Which editor should I use?**

@@ -46,7 +46,7 @@ uv tool install memtomem             # or: pipx install memtomem
 ### 2. Setup
 
 ```bash
-mm init                               # 8-step wizard (or: mm init -y for CI)
+mm init                               # 9-step wizard (or: mm init -y for CI)
 ```
 
 The wizard picks your embedding provider, points at the folder you want indexed, and registers memtomem with your AI editor. The default is **keyword-only** (BM25, no external dependencies) — you can also pick ONNX (local, no server), Ollama (local server), or OpenAI (cloud). See [Embeddings](docs/guides/embeddings.md) for details.

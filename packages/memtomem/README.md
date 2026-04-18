@@ -15,8 +15,8 @@ Markdown-first long-term memory infrastructure for AI agents. Hybrid keyword + s
 # 1. Install memtomem (requires Python 3.12+)
 uv tool install memtomem        # or: pipx install memtomem
 
-# 2. Run the 8-step setup wizard
-#    (picks embedding provider, memory folder, MCP editor)
+# 2. Run the 9-step setup wizard
+#    (picks embedding provider, optional reranker, memory folder, MCP editor)
 mm init    # on PATH after `uv tool install` — no `uv run` needed
 ```
 
