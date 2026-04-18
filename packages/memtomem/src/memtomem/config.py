@@ -789,7 +789,7 @@ def _dedup_key(item: object) -> object:
     return item
 
 
-def load_config_d(config: Mem2MemConfig) -> None:
+def load_config_d(config: Mem2MemConfig, *, quiet: bool = False) -> None:
     """Apply fragments from ``~/.memtomem/config.d/*.json`` (if dir exists).
 
     Intended for integration-installed fragments (``mm init <client>`` drops
@@ -808,12 +808,23 @@ def load_config_d(config: Mem2MemConfig) -> None:
     (see ``load_config_overrides``); that file remains a full REPLACE-on-set
     for every field so the ``mm init`` wizard keeps unambiguous user-override
     semantics.
+
+    ``quiet=True`` suppresses *warning* output only — used by
+    ``_build_comparand`` which calls this on every save and would
+    otherwise repeat "malformed fragment" / "unknown section" messages
+    for every PATCH. Exceptions that represent real errors still raise
+    (pydantic validation etc. are already caught + logged here, not
+    raised, so this toggle is purely about log noise).
     """
     import json as _json
     import logging
     import os
 
     _log = logging.getLogger(__name__)
+
+    def _warn(msg: str, *args: object) -> None:
+        if not quiet:
+            _log.warning(msg, *args)
 
     dir_ = _config_d_path()
     if not dir_.is_dir():
@@ -824,16 +835,16 @@ def load_config_d(config: Mem2MemConfig) -> None:
         try:
             data = _json.loads(path.read_text(encoding="utf-8"))
         except (OSError, _json.JSONDecodeError) as exc:
-            _log.warning("Failed to read config fragment %s: %s", path, exc)
+            _warn("Failed to read config fragment %s: %s", path, exc)
             continue
         if not isinstance(data, dict):
-            _log.warning("Config fragment %s is not a JSON object (ignored)", path)
+            _warn("Config fragment %s is not a JSON object (ignored)", path)
             continue
         for section_name, updates in data.items():
             section_obj = getattr(config, section_name, None)
             if section_obj is None or not isinstance(updates, dict):
                 if section_obj is None and isinstance(updates, dict):
-                    _log.warning("Unknown config section '%s' in %s (ignored)", section_name, path)
+                    _warn("Unknown config section '%s' in %s (ignored)", section_name, path)
                 continue
             section_cls = type(section_obj)
             for key, value in updates.items():
@@ -852,7 +863,7 @@ def load_config_d(config: Mem2MemConfig) -> None:
                 strategy = _merge_strategy_for(section_cls, key)
                 if strategy is not None and strategy.mode == "append":
                     if not isinstance(value, list):
-                        _log.warning(
+                        _warn(
                             "Expected list for %s.%s in %s (got %s); skipping",
                             section_name,
                             key,
@@ -875,7 +886,7 @@ def load_config_d(config: Mem2MemConfig) -> None:
                             try:
                                 item = coerce.model_validate(item)
                             except Exception as exc:
-                                _log.warning(
+                                _warn(
                                     "Skipping invalid %s.%s entry in %s: %s",
                                     section_name,
                                     key,
@@ -890,7 +901,7 @@ def load_config_d(config: Mem2MemConfig) -> None:
                     try:
                         setattr(section_obj, key, current)
                     except (TypeError, ValueError) as exc:
-                        _log.warning(
+                        _warn(
                             "Skipping invalid fragment merge %s.%s from %s: %s",
                             section_name,
                             key,
@@ -901,7 +912,7 @@ def load_config_d(config: Mem2MemConfig) -> None:
                     try:
                         setattr(section_obj, key, value)
                     except (TypeError, ValueError) as exc:
-                        _log.warning(
+                        _warn(
                             "Skipping invalid fragment value %s.%s=%r from %s: %s",
                             section_name,
                             key,
@@ -940,23 +951,21 @@ def _auto_discovered_memory_dirs() -> list[Path]:
     return [p.expanduser() for p in candidates if p.expanduser().is_dir()]
 
 
-# Fields persisted by ``save_config_overrides`` but NOT settable via the
-# generic ``mm config set`` / ``mem_config`` path.  Managed through dedicated
-# endpoints (e.g. Web UI ``/memory-dirs/*``).
+# Fields that ``save_config_overrides`` persists but ``MUTABLE_FIELDS`` does
+# not expose to generic mutation paths (``mm config set``,
+# ``PATCH /api/config``). Managed by dedicated endpoints (e.g.
+# ``/memory-dirs/add|remove`` for ``memory_dirs``) because their updates
+# carry validation, indexing triggers, or filesystem side-effects that
+# generic mutation would bypass.
 #
-# These fields are also EXEMPT from the drop-equal-to-default rule in
-# ``save_config_overrides``. Criterion for inclusion: the field's
-# ``default_factory`` is environment-dependent — it reads filesystem,
-# network, hostname, or other runtime state, so "equal to default" on
-# machine A does not imply the same on machine B. Dropping such a field
-# on save would silently lose user-curated data across environments.
-#
-# Current members:
-# - ``indexing.memory_dirs`` — ``_default_memory_dirs()`` auto-discovers
-#   AI tool dirs via ``is_dir()`` fs checks.
-#
-# When adding a field whose default reads runtime state, add it here.
-_EXTRA_PERSIST_FIELDS: dict[str, set[str]] = {
+# Pre-Z history: this set was named ``_EXTRA_PERSIST_FIELDS`` and had
+# "always-persist" semantics to protect env-dependent factory defaults
+# from being dropped on save (see
+# ``feedback_env_dependent_factory_equality.md``). Z (delta-vs-comparand
+# via ``_build_comparand``) removed that need because the comparand itself
+# incorporates factory output. The set was renamed to reflect its remaining
+# role — marking the mutation/save asymmetry — rather than deleted.
+_EXTRA_MUTATION_FIELDS: dict[str, set[str]] = {
     "indexing": {"memory_dirs"},
 }
 
@@ -977,56 +986,62 @@ def _json_default(obj: object) -> object:
     return str(obj)
 
 
-def _field_equals_default(section_obj: object, key: str) -> bool:
-    """Return True if ``section_obj.key`` equals the class-level default.
+def _build_comparand(*, quiet: bool = True) -> "Mem2MemConfig":
+    """Build a fresh config reflecting everything *except* user overrides.
 
-    Default-valued fields are dropped from ``config.json`` on save so that
-    runtime toggles (e.g. a Web UI checkbox left at its default) don't pin
-    the default over ``config.d/`` fragments that set a different value.
+    Comparand = built-in defaults + ``MEMTOMEM_*`` env vars + ``config.d/``
+    fragments + env-dependent factory output (``memory_dirs`` etc.).
+    ``save_config_overrides`` persists only fields where the live config
+    differs from this comparand — closing fragment/env/factory drag-in at
+    the source (see ``project_fragment_dragin_gap.md``).
+
+    ``Mem2MemConfig()`` construction reads env automatically via pydantic-
+    settings and runs field ``default_factory`` callables, so env + factory
+    values land without extra work. ``load_config_d`` then merges fragments
+    on top, respecting per-field merge strategies.
+
+    Safe to call concurrently: only reads env/filesystem, no mutation.
+    Factory functions (e.g. ``_default_memory_dirs``) must remain pure.
     """
-    model_fields = getattr(type(section_obj), "model_fields", None)
-    if not model_fields or key not in model_fields:
-        return False
-    try:
-        default = model_fields[key].get_default(call_default_factory=True)
-    except Exception:  # pragma: no cover - defensive; pydantic shouldn't raise
-        return False
-    return getattr(section_obj, key, None) == default
+    comparand = Mem2MemConfig()
+    load_config_d(comparand, quiet=quiet)
+    return comparand
 
 
 def save_config_overrides(
     config: Mem2MemConfig,
     mutable_fields: dict[str, set[str]] | None = None,
 ) -> None:
-    """Persist mutable fields to ~/.memtomem/config.json.
+    """Persist user-set overrides to ~/.memtomem/config.json.
 
-    Uses **read-merge-write** so that keys not in *mutable_fields* (e.g.
-    init-only settings like ``embedding.provider`` or ``storage.sqlite_path``)
-    are preserved across saves.
+    **Delta-only write**: compare *config* to a freshly built comparand
+    (defaults + env + fragments + env-dependent factories). Only fields
+    that differ are written; fields that match the comparand are dropped
+    from the output (and any matching existing entry is pruned).
 
-    Runtime-mutable fields (``MUTABLE_FIELDS``) whose current value equals
-    the class-level default are dropped (and pruned from any existing
-    entry). This prevents silent pins — e.g. a Web UI section save where
-    an unchecked default-False toggle would otherwise write
-    ``mmr.enabled=false`` and permanently shadow a ``config.d/`` fragment
-    that sets it True.
+    This closes three silent-persistence patterns in one mechanism:
 
-    ``_EXTRA_PERSIST_FIELDS`` (currently ``indexing.memory_dirs``) are
-    exempt from drop-default. Their default factories are
-    environment-dependent (auto-discovered AI tool dirs), so "equal to
-    default" is not a stable signal across machines. Treat them as
-    user-curated data and always persist when present.
+    - default-equal fields (PR #256 drop-default) — comparand contains
+      the default value for fields not set by env/fragment.
+    - env-sourced values (e.g. ``MEMTOMEM_MMR__ENABLED=true`` no longer
+      drag-pins into ``config.json``).
+    - fragment-sourced values (e.g. ``config.d/noise.json`` contents
+      don't copy into ``config.json`` when an unrelated field is saved;
+      the fragment stays the source of truth).
+
+    Uses **read-merge-write** so non-mutable keys (init-only settings like
+    ``embedding.provider``, ``storage.sqlite_path``) carry across saves.
     """
     import json as _json
     import logging
 
     _log = logging.getLogger(__name__)
     base_fields: dict[str, set[str]] = mutable_fields or MUTABLE_FIELDS
+    comparand = _build_comparand(quiet=True)
 
     path = _override_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # ── Read existing config (merge base) ──
     existing: dict = {}
     if path.exists():
         try:
@@ -1034,30 +1049,30 @@ def save_config_overrides(
         except (OSError, _json.JSONDecodeError) as exc:
             _log.warning("Cannot read existing config at %s: %s — overwriting", path, exc)
 
-    # ── Merge fields into existing data ──
-    # drop_default applies only to runtime-mutable fields; extra-persist
-    # fields (memory_dirs) are always persisted when non-None.
-    sections = {*base_fields, *_EXTRA_PERSIST_FIELDS}
+    # Union with dedicated-endpoint fields (memory_dirs). No exemption —
+    # env-dependent factory output is already part of the comparand, so
+    # "current == factory" still drops cleanly.
+    sections = {*base_fields, *_EXTRA_MUTATION_FIELDS}
     for section_name in sections:
-        section_obj = getattr(config, section_name, None)
-        if section_obj is None:
+        live_section = getattr(config, section_name, None)
+        comp_section = getattr(comparand, section_name, None)
+        if live_section is None or comp_section is None:
             continue
-        drop_default_keys = base_fields.get(section_name, set())
-        always_persist_keys = _EXTRA_PERSIST_FIELDS.get(section_name, set())
+        keys = base_fields.get(section_name, set()) | _EXTRA_MUTATION_FIELDS.get(
+            section_name, set()
+        )
 
         section_data: dict[str, object] = existing.get(section_name, {})
         if not isinstance(section_data, dict):
             section_data = {}
 
-        for key in drop_default_keys | always_persist_keys:
-            val = getattr(section_obj, key, None)
-            if val is None:
+        for key in keys:
+            live_val = getattr(live_section, key, None)
+            comp_val = getattr(comp_section, key, None)
+            if live_val is None or live_val == comp_val:
                 section_data.pop(key, None)
-                continue
-            if key in drop_default_keys and _field_equals_default(section_obj, key):
-                section_data.pop(key, None)
-                continue
-            section_data[key] = val
+            else:
+                section_data[key] = live_val
 
         if section_data:
             existing[section_name] = section_data

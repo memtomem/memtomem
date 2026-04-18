@@ -49,14 +49,45 @@ top of the default:
 explicit-user-override layer. Use a fragment in `config.d/` if you want
 APPEND semantics.
 
-### Resetting wizard-untouched leftovers (`--fresh`)
+### Delta-only save semantics
 
-Because the Web UI's "Save" buttons dump every mutable field into
-`config.json` (memory-dirs add/remove, section save), runtime values
-the user never deliberately set can pin themselves there permanently
-— a known case is `mmr.enabled=true` showing up after the user toggled
-MMR once in the UI. `mm init` flags such leftovers under a "Preserved"
-block so they don't disappear silently, but it does not remove them.
+`config.json` stores only values that differ from the merged lower
+layers (defaults + env vars + `config.d/` fragments). When you save
+through any path — `mm config set`, `PATCH /api/config`, the Web UI's
+section "Save" buttons, or `memory-dirs/add|remove` — memtomem
+computes the difference against a freshly built comparand and writes
+only the delta. Three kinds of silent leftovers this prevents:
+
+- **Default leftovers.** Toggling "MMR enabled" on and back off in
+  the Web UI no longer pins `mmr.enabled=false` into `config.json`
+  (where it would shadow a `config.d/` fragment that set it True).
+- **Environment leftovers.** Running once with `MEMTOMEM_MMR__ENABLED=true`
+  and saving does not bake the env value into `config.json`; the
+  moment the env var is unset, the field reverts correctly.
+- **Fragment leftovers.** Saving an unrelated field does not copy
+  `config.d/` fragment values into `config.json`. Fragment edits stay
+  the source of truth and take effect on the next load.
+
+On-disk leftovers from older versions are cleaned up automatically on
+the next save, provided the stale value now matches the comparand.
+
+### Moving `config.json` between machines
+
+`indexing.memory_dirs` participates in delta-only save, so on the
+machine where it was set the file typically omits it. When copying an
+existing `config.json` to a new machine, any `indexing.memory_dirs`
+entry carries over as-is and is **not** auto-replaced by the new
+machine's auto-discovered paths. Reset it explicitly when migrating:
+
+```bash
+# Option 1: remove the indexing section and let auto-discovery run
+#          (edit ~/.memtomem/config.json by hand)
+
+# Option 2: re-run the wizard with --fresh
+mm init --fresh
+```
+
+### Resetting wizard-untouched leftovers (`--fresh`)
 
 `mm init --fresh` resets every wizard-untouched canonical key whose
 value differs from the built-in default, then proceeds with the
