@@ -26,6 +26,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   (replaces the old always-open default).
 - Numeric validation errors now include the offending value in MCP tool
   responses.
+- **Namespace policy rules** (#253): new `NamespacePolicyRule` config list
+  provides path-glob → namespace mappings, so users can auto-tag files at
+  index time instead of passing `namespace=` on every `mem_index` call.
+  Resolution order: explicit param → rules (first match) → `enable_auto_ns`
+  → `default_namespace`. Uses `pathspec.GitIgnoreSpec` patterns
+  (case-insensitive, same syntax as `indexing.exclude_patterns`) with a
+  `{parent}` placeholder that expands to the matched file's immediate
+  parent folder name. Contributes via `config.d/*.json` (APPEND merge).
+  Default `[]` — existing users see no behavior change until they opt in.
+  See `docs/guides/configuration.md`.
+- **Wizard "Preserved" summary** (#254): `mm init` now lists non-default
+  keys inherited from a previous config that the wizard didn't write this
+  run, using a built-in-default diff (not a bool heuristic, so non-bool
+  leftovers like `search.rrf_k=120` surface too). Malformed `config.json`
+  is backed up to `config.json.bak-<unix-ts>` instead of silently
+  overwritten. Transparency-only — write behavior unchanged.
+- **`mm init --fresh`** (#255): opt-in flag that drops wizard-untouched
+  canonical config keys whose values differ from built-in defaults, then
+  runs the normal wizard. Complements PR #254's surfacing with bulk
+  cleanup. Default behavior unchanged.
+- **`mm config unset <key>`** (#259): targeted removal of a single
+  override. Distinct from `mm init --fresh` (single-key vs bulk; no backup
+  vs backup; idempotent scripting vs interactive wizard). Useful for stale
+  cross-machine paths in `memory_dirs` or a single field shadowing a
+  `config.d/` fragment.
 
 ### Fixed
 - **ONNX `bge-m3`**: fastembed 0.8.0 dropped `BAAI/bge-m3` from its built-in
@@ -48,6 +73,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   missing optional deps (#142).
 - File handle leak on `flock` failure; stale `--include` help text;
   `response.ok` checks in `context-gateway.js` (#77).
+- **Namespace rules via mutation path** (#257): `coerce_and_validate` now
+  handles `list[BaseSettings]`, so `PATCH /api/config`, `mm config set
+  namespace.rules '[...]'`, and the init wizard correctly coerce dict
+  entries into `NamespacePolicyRule` instances. Previously the load path
+  correctly coerced dict entries but the mutation path silently passed
+  raw dicts through; downstream `rule.path_glob` access then raised
+  `AttributeError`.
+- **Fragment / env drag-in on save** (#258): in-process save paths (Web UI
+  `PATCH /api/config`, `/memory-dirs/*`, MCP `mem_config`) now persist
+  only fields whose values differ from a fresh comparand built from
+  defaults + env + `config.d/` fragments. Previously, PATCH-ing one field
+  silently copied fragment and env values into `config.json`'s REPLACE
+  layer, freezing subsequent fragment edits. Extends #256's class-level
+  default drop by broadening the comparand to include fragments and env.
+- **Atomic config.json writes everywhere** (#262): `save_config_overrides`
+  (every `mm config set` / Web UI PATCH / MCP `mem_config` /
+  `/memory-dirs/add|remove`) and `_write_config_and_summary` (normal `init`
+  + `init --fresh`) now use `_atomic_write_json` (tempfile + `os.replace`,
+  tmp cleanup on failure). Prevents mid-write failure from corrupting
+  `config.json` — the `--fresh` path's `shutil.copy2` backup + direct
+  write could previously leave a half-written file next to a valid `.bak`
+  on partial failure.
 
 ### Changed
 - **Single-source version** via `importlib.metadata` + Python 3.13
@@ -79,6 +126,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   watcher queue maxsize extracted to constant.
 - CI: ruff lint/format scope extended to `tests/`; notebooks CI job
   and branch protection added.
+- **Silent-leftover prevention on save** (#256): every mutable-field save
+  path (`mm config set`, `PATCH /api/config?persist=true`,
+  `POST /api/config/save`, `/memory-dirs/add|remove`, `mem_config` MCP)
+  now drops fields whose values equal the class-level default and prunes
+  matching historical leftovers on next save. Stops Web UI section-saves
+  from pinning default-False `mmr.enabled` into `config.json` and
+  permanently shadowing `config.d/` fragments.
 
 ### Docs
 - Webhook config section and `indexing.supported_extensions` added to
