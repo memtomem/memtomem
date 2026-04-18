@@ -321,6 +321,44 @@ def test_config_d_namespace_rules_alphabetical_order(
     assert [r.namespace for r in cfg.namespace.rules] == ["claude", "gdrive"]
 
 
+def test_config_d_namespace_rules_dedup_after_home_expansion(
+    config_d_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Freeze the dedup semantics for NamespacePolicyRule: two fragments that
+    declare the same rule once with a leading ``~/`` and once with the expanded
+    absolute path must collapse to a single rule.
+
+    ``_dedup_key`` hashes ``BaseSettings.model_dump(mode="json")`` — i.e. the
+    *post-validator* field values. Since ``path_glob`` expands ``~/`` in its
+    validator, both forms share an identity after coercion, so they dedupe.
+    This test pins that contract: a future refactor that moved expansion out
+    of the validator (or the dedup key off ``model_dump``) would start
+    producing two rules and fail here.
+    """
+    _clear_all_memtomem_env(monkeypatch)
+    abs_form = str(Path("~/some/memtomem-test/**").expanduser())
+    (config_d_dir / "10-home.json").write_text(
+        json.dumps(
+            {
+                "namespace": {
+                    "rules": [
+                        {"path_glob": "~/some/memtomem-test/**", "namespace": "x"},
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (config_d_dir / "20-abs.json").write_text(
+        json.dumps({"namespace": {"rules": [{"path_glob": abs_form, "namespace": "x"}]}}),
+        encoding="utf-8",
+    )
+    cfg = Mem2MemConfig()
+    load_config_d(cfg)
+    assert len(cfg.namespace.rules) == 1, [r.path_glob for r in cfg.namespace.rules]
+    assert cfg.namespace.rules[0].path_glob == abs_form
+
+
 # ---------------------------------------------------------------------------
 # Enforcement: every list[*] field must declare a merge strategy.
 #
