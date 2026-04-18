@@ -63,7 +63,7 @@ Call the mem_status tool
 
 ---
 
-# MCP Client Configuration Guide > ## 1. Claude Code > ### Configure Directly with `.mcp.json` > ## 2. Cursor
+## 2. Cursor
 
 Create or edit the `~/.cursor/mcp.json` file:
 
