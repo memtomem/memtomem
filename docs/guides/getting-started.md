@@ -282,6 +282,7 @@ mm add "some note"         # add a memory
 mm recall --since 2026-04  # recall by date
 mm config show             # view settings
 mm config set key value    # change a setting
+mm config unset key        # drop a pinned override (e.g., mmr.enabled)
 mm embedding-reset         # check/resolve embedding model mismatch
 mm reset                   # delete all data and reinitialize the DB
 mm context detect          # find agent config files

@@ -80,12 +80,34 @@ entry carries over as-is and is **not** auto-replaced by the new
 machine's auto-discovered paths. Reset it explicitly when migrating:
 
 ```bash
-# Option 1: remove the indexing section and let auto-discovery run
-#          (edit ~/.memtomem/config.json by hand)
+# Option 1: targeted removal of the carried-over entry
+mm config unset indexing.memory_dirs
 
 # Option 2: re-run the wizard with --fresh
 mm init --fresh
+
+# Option 3: remove the indexing section by hand
+#          (edit ~/.memtomem/config.json)
 ```
+
+### Removing individual overrides (`mm config unset`)
+
+`mm config unset <key>` drops a single pinned entry from
+`~/.memtomem/config.json`. Each key is `section.field` form and the
+command is idempotent — running it on a key that isn't pinned exits 0
+with an `(already at default)` note so scripts can re-run safely.
+Unknown keys exit 1 with a typo suggestion when one is nearby. When
+every override is removed the config file itself is deleted.
+
+```bash
+mm config unset mmr.enabled                    # drop one key
+mm config unset mmr.enabled search.default_top_k  # best-effort multi-key
+```
+
+Because `config.json` is delta-only (see above), the underlying
+`config.d/` fragment or built-in default immediately takes effect on
+the next load. For a wholesale reset of wizard-untouched keys, prefer
+`mm init --fresh`.
 
 ### Resetting wizard-untouched leftovers (`--fresh`)
 
