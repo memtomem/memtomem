@@ -14,6 +14,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `Xenova/ms-marco-MiniLM-L-6-v2`,
   `jinaai/jina-reranker-v2-base-multilingual`) plus custom ONNX exports
   via `TextCrossEncoder.add_custom_model()`.
+- **Chunking semantic pack**: new `indexing.target_chunk_tokens` (default
+  384) drives a greedy Pass 2 that packs short hierarchy-compatible
+  siblings/ancestor-descendants up to the target, plus a Pass 3 tail
+  backward sweep for final-chunk orphans. Short orphans in Pass 1 are now
+  rescued across sub-heading divergence as long as they share a top-level
+  root (mem_add entries with distinct roots still stay separate). Set
+  `target_chunk_tokens=0` to restore the pre-PR merge behaviour.
 - **ReStructuredText chunker**: `.rst` section-header-aware splitting.
 - **Web UI `--open` flag**: opt-in browser launch with configurable timeout
   (replaces the old always-open default).

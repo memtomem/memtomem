@@ -155,13 +155,18 @@ class TestFTS5HyphenQuoting:
 
 
 class TestHeadingMerge:
-    def test_different_headings_not_merged(self):
-        """Two short sections with different headings should stay separate."""
+    def test_long_different_headings_not_merged_by_packing(self):
+        """Long sections with different headings stay separate under Pass 2.
+
+        With target_tokens set, greedy packing would pull them together, but
+        the hierarchy gate only relaxes for chunks below min_tokens. This
+        guards against blurred retrieval context across unrelated sections.
+        """
         from memtomem.indexing.engine import _merge_short_chunks
         from memtomem.models import Chunk, ChunkMetadata, ChunkType
 
         c1 = Chunk(
-            content="Short entry one.",
+            content="Entry A body " * 60,  # ~200 tokens
             metadata=ChunkMetadata(
                 source_file=Path("/test.md"),
                 heading_hierarchy=("## Entry A",),
@@ -171,7 +176,7 @@ class TestHeadingMerge:
             ),
         )
         c2 = Chunk(
-            content="Short entry two.",
+            content="Entry B body " * 60,  # ~200 tokens
             metadata=ChunkMetadata(
                 source_file=Path("/test.md"),
                 heading_hierarchy=("## Entry B",),
@@ -180,8 +185,8 @@ class TestHeadingMerge:
                 end_line=6,
             ),
         )
-        result = _merge_short_chunks([c1, c2], min_tokens=128, max_tokens=512)
-        assert len(result) == 2, "Chunks with different headings should not merge"
+        result = _merge_short_chunks([c1, c2], min_tokens=128, max_tokens=512, target_tokens=384)
+        assert len(result) == 2, "Long chunks across headings must stay separate"
 
     def test_same_heading_can_merge(self):
         from memtomem.indexing.engine import _merge_short_chunks

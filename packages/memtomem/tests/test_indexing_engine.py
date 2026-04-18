@@ -263,13 +263,30 @@ class TestMergeShortChunks:
         assert "short" in result[0].content
         assert "also short" in result[0].content
 
-    def test_no_merge_different_headings(self):
-        """Chunks from different headings should NOT merge (BUG-3 fix)."""
+    def test_distinct_root_short_chunks_stay_separate(self):
+        """Short chunks under distinct top-level roots (e.g. mem_add entries
+        ``## Cache Decision`` vs ``## Database Decision``) must not merge,
+        even when both are below min_tokens.
+        """
         c1 = _make_chunk_with("section one", heading=("H1",))
         c2 = _make_chunk_with("section two", heading=("H2",))
 
         result = _merge_short_chunks([c1, c2], min_tokens=50, max_tokens=2000)
         assert len(result) == 2
+
+    def test_short_cross_subsection_same_root_merges(self):
+        """Short orphan in a subsection merges with the next subsection
+        when both share the same top-level root (rescues audit-doc-style
+        cross-``##`` micro-chunks).
+        """
+        summary = _make_chunk_with("short summary", heading=("# Root", "## Summary"))
+        first = _make_chunk_with(
+            "section body " * 40,
+            heading=("# Root", "## 1. Findings", "### Critical Files"),
+        )
+
+        result = _merge_short_chunks([summary, first], min_tokens=128, max_tokens=2000)
+        assert len(result) == 1
 
     def test_no_merge_different_sources(self):
         """Chunks from different source files should NOT merge."""
@@ -356,11 +373,15 @@ class TestMergeShortChunks:
         result = _merge_short_chunks([big], min_tokens=50, max_tokens=2000)
         assert len(result) == 1
 
-    def test_two_different_headings_still_separate(self):
-        """Two chunks with different (non-empty) headings should NOT merge."""
-        c1 = _make_chunk_with("section one", heading=("## A",))
-        c2 = _make_chunk_with("section two", heading=("## B",))
-        result = _merge_short_chunks([c1, c2], min_tokens=50, max_tokens=2000)
+    def test_long_different_headings_stay_separate(self):
+        """Long chunks (above min) with different headings stay separate.
+
+        Pass 2 greedy packing respects the hierarchy gate — cross-heading
+        merges are only allowed while a chunk is below min_tokens.
+        """
+        c1 = _make_chunk_with("x" * 600, heading=("## A",))  # ~200 tokens
+        c2 = _make_chunk_with("y" * 600, heading=("## B",))  # ~200 tokens
+        result = _merge_short_chunks([c1, c2], min_tokens=128, max_tokens=512, target_tokens=384)
         assert len(result) == 2
 
     def test_headingless_respects_max_tokens(self):
