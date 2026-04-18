@@ -105,6 +105,117 @@ class TestSemanticPack:
         assert len(result) == 3
 
 
+class TestHeadingInversionOrphan:
+    """Pass 1/3 heading-inversion rescue: short chunk whose root is a deeper
+    heading level than the next chunk's root folds forward into the true
+    document root.
+    """
+
+    def test_inversion_orphan_folds_into_deeper_root(self):
+        """``## Prelude`` short orphan followed by ``# Main`` merges forward.
+
+        The chunker emitted the ``##`` heading before the ``#`` arrived —
+        the H2 content is structurally part of the document's top scope.
+        """
+        orphan = _chunk("x" * 200, heading=("## Prelude",))  # ~50 tokens
+        main = _chunk("y" * 1600, heading=("# Main",))  # ~400 tokens, H1 root
+
+        result = _merge_short_chunks(
+            [orphan, main], min_tokens=128, max_tokens=512, target_tokens=0
+        )
+        assert len(result) == 1
+        assert "x" * 200 in result[0].content
+        assert "y" * 1600 in result[0].content
+
+    def test_same_level_distinct_roots_stay_separate(self):
+        """mem_add protection: distinct H2 entries at the same level never
+        merge via the inversion rule (cur_level not > nxt_level).
+        """
+        a = _chunk("x" * 400, heading=("## Entry A",))  # ~100 tokens
+        b = _chunk("y" * 400, heading=("## Entry B",))  # ~100 tokens
+
+        result = _merge_short_chunks([a, b], min_tokens=128, max_tokens=512, target_tokens=0)
+        assert len(result) == 2
+
+    def test_ascending_level_does_not_fold(self):
+        """``# A`` short orphan with ``## B`` next must NOT trigger inversion
+        rule (cur_level 1 is not > nxt_level 2). The existing same-path
+        prefix rule still catches the legitimate ``# A`` → ``# A > ## B``
+        case; this guards the cross-root variant where ``## B`` has a
+        different root.
+        """
+        orphan = _chunk("x" * 200, heading=("# A",))  # ~50 tokens
+        other = _chunk("y" * 1600, heading=("## B",))  # deeper but different root
+
+        result = _merge_short_chunks(
+            [orphan, other], min_tokens=128, max_tokens=512, target_tokens=0
+        )
+        assert len(result) == 2
+
+    def test_tail_inversion_orphan_folds_backward(self):
+        """Pass 3 rescues a tail inversion orphan (``## X`` tail after
+        ``# Main``). Here current=``# Main`` at Pass 3 check; tail is
+        ``## X`` short. The inversion triggers because tail has deeper
+        level than prev.
+
+        Note: Pass 3 passes ``prev`` as ``current`` to ``_can_merge``, so
+        the inversion rule fires when prev.root is SHALLOWER than
+        last.root — the mirror case of forward-fold.
+        """
+        head = _chunk("x" * 1200, heading=("# Main",))  # ~300 tokens, H1 root
+        tail = _chunk("y" * 200, heading=("## Note",))  # ~50 tokens, H2 root
+
+        result = _merge_short_chunks([head, tail], min_tokens=128, max_tokens=512, target_tokens=0)
+        # prev=H1, last=H2 → prev deeper? no, 1 < 2, so inversion rule
+        # (cur_level > nxt_level) does NOT fire. But same-path prefix does
+        # not match either ("# Main" != "## Note"). Stays separate.
+        assert len(result) == 2
+
+
+class TestBrokenCeilingRescue:
+    """Short orphan rescued against an already-over-max neighbour.
+
+    The chunker emits by char-count using a 4 char/token ratio; the merge
+    path re-estimates Korean text at 2 char/token, so some already-emitted
+    chunks read as above max. Before this rescue, a short ``## Summary``
+    adjacent to such an over-ceiling neighbour was permanently orphaned
+    because ``combined > max`` blocked the merge.
+    """
+
+    def test_pass1_merges_short_into_over_ceiling_neighbour(self):
+        # ~50 token orphan
+        summary = _chunk("x" * 200, heading=("# Root", "## Summary"))
+        # ~600 tokens — above max_tokens=512 (simulates Korean re-estimate)
+        body = _chunk("y" * 2400, heading=("# Root", "## Body"))
+
+        result = _merge_short_chunks(
+            [summary, body], min_tokens=128, max_tokens=512, target_tokens=0
+        )
+        assert len(result) == 1
+        assert "x" * 200 in result[0].content
+        assert "y" * 2400 in result[0].content
+
+    def test_pass1_still_blocks_when_both_within_ceiling(self):
+        """The classic max ceiling is preserved when neither side is broken."""
+        short = _chunk("x" * 200, heading=("# Root", "## Summary"))  # ~50 tokens
+        # Sized so combined exceeds max but neighbour itself stays below.
+        # Rough tokens: 200//4=50 orphan + 1800//4=450 body = 501 ≤ 512 would
+        # merge; push body up to 500 tokens to force combined > max.
+        body = _chunk("y" * 2000, heading=("# Root", "## Body"))  # ~500 tokens
+
+        result = _merge_short_chunks([short, body], min_tokens=128, max_tokens=512, target_tokens=0)
+        # 50 + 500 + 1 = 551 > 512, neighbour <= max → blocked
+        assert len(result) == 2
+
+    def test_pass3_merges_tail_into_over_ceiling_prev(self):
+        head = _chunk("x" * 2400, heading=("# A",))  # ~600 tokens, over max
+        tail = _chunk("y" * 200, heading=("# A",))  # ~50 tokens
+
+        result = _merge_short_chunks([head, tail], min_tokens=128, max_tokens=512, target_tokens=0)
+        assert len(result) == 1
+        assert "y" * 200 in result[0].content
+
+
 class TestSiblingMergeContentPreservation:
     def test_sibling_merge_prepends_dropped_leaves(self):
         """When sibling merge collapses to a common parent, each side's

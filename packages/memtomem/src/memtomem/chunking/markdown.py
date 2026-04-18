@@ -15,6 +15,35 @@ _WIKILINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]")
 
 _TOKEN_CHAR_RATIO = 4  # rough chars-per-token estimate (English-oriented)
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
+# Line starting with a bold label (``**Label:**``, ``**Q:**``, ``**Added:**`` etc.).
+# Used as a soft split boundary when paragraph splitting did not produce enough
+# granularity — common in FAQ, changelog, and structured-note formats.
+_BOLD_LABEL_RE = re.compile(r"^[ \t]*\*\*[^*\n]+\*\*", re.MULTILINE)
+
+
+def _split_on_bold_labels(text: str) -> list[str]:
+    """Split *text* before each bold-label line, returning a list of parts.
+
+    Returns ``[text]`` unchanged when fewer than two bold-label boundaries
+    are present, so single-label docs (e.g. one ``**Note:**`` in a prose
+    section) stay intact.
+    """
+    positions = [m.start() for m in _BOLD_LABEL_RE.finditer(text)]
+    if len(positions) < 2:
+        return [text]
+    parts: list[str] = []
+    prev = 0
+    for pos in positions:
+        if pos <= prev:
+            continue
+        segment = text[prev:pos].rstrip()
+        if segment:
+            parts.append(segment)
+        prev = pos
+    tail = text[prev:].rstrip()
+    if tail:
+        parts.append(tail)
+    return parts or [text]
 
 
 class MarkdownChunker:
@@ -143,7 +172,16 @@ class MarkdownChunker:
         else:
             parts = [text]
 
-        # If paragraph splitting didn't help enough, split by sentences
+        # Bold-label soft boundary: ``**Label:**``-prefixed lines mark
+        # pseudo-headings (FAQ, changelog entries, structured notes).
+        # Try this before falling through to sentence split so the
+        # natural structure survives.
+        if len(parts) == 1 and len(parts[0]) > max_chars:
+            bold_parts = _split_on_bold_labels(text)
+            if len(bold_parts) > 1:
+                parts = bold_parts
+
+        # Last resort: split by sentences
         if len(parts) == 1 and len(parts[0]) > max_chars:
             parts = _SENTENCE_RE.split(text)
 
