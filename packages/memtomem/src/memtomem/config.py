@@ -178,9 +178,33 @@ class NamespaceConfig(BaseSettings):
 
 
 class RerankConfig(BaseSettings):
+    """Cross-encoder reranker settings (Stage 3b in the search pipeline).
+
+    Default is a lightweight English fastembed cross-encoder (~80 MB ONNX,
+    local, no external service). For Korean/Chinese/Japanese/other
+    non-English content set
+    ``model="jinaai/jina-reranker-v2-base-multilingual"`` (1.1 GB) — the
+    English default noticeably degrades non-English reranking quality.
+
+    Provider-specific model IDs:
+
+    - ``fastembed``: fastembed catalog ID. Supported built-ins include
+      ``Xenova/ms-marco-MiniLM-L-6-v2`` (EN, 80 MB),
+      ``jinaai/jina-reranker-v2-base-multilingual`` (multilingual, 1.1 GB),
+      ``jinaai/jina-reranker-v1-tiny-en`` (EN, 8K context). Custom ONNX
+      exports can be registered via
+      ``TextCrossEncoder.add_custom_model()`` before the server starts.
+    - ``cohere``: Cohere Rerank API model (e.g. ``rerank-english-v3.0``,
+      ``rerank-multilingual-v3.0``). Requires ``api_key``.
+    - ``local``: sentence-transformers ``CrossEncoder`` model name (e.g.
+      ``cross-encoder/ms-marco-MiniLM-L-6-v2``). Requires
+      ``sentence-transformers`` to be installed separately; the
+      ``fastembed`` provider is usually preferable.
+    """
+
     enabled: bool = False
-    provider: str = "cohere"  # "cohere" | "local"
-    model: str = "rerank-english-v3.0"
+    provider: str = "fastembed"  # "cohere" | "local" | "fastembed"
+    model: str = "Xenova/ms-marco-MiniLM-L-6-v2"
     top_k: int = 20  # candidates to pass to reranker
     api_key: str = ""
 

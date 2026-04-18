@@ -6,6 +6,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 ## [Unreleased]
 
 ### Added
+- **FastEmbed reranker provider**: new `rerank.provider="fastembed"` routes
+  reranking through `fastembed.rerank.cross_encoder.TextCrossEncoder` —
+  local ONNX, no external service, no PyTorch dependency. Reuses the
+  existing `memtomem[onnx]` extra so enabling reranking adds no new
+  packages. Supports the built-in fastembed catalog (e.g.
+  `Xenova/ms-marco-MiniLM-L-6-v2`,
+  `jinaai/jina-reranker-v2-base-multilingual`) plus custom ONNX exports
+  via `TextCrossEncoder.add_custom_model()`.
 - **ReStructuredText chunker**: `.rst` section-header-aware splitting.
 - **Web UI `--open` flag**: opt-in browser launch with configurable timeout
   (replaces the old always-open default).
@@ -50,6 +58,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   mean pooling. Users who indexed with fastembed <0.5.1 and this model
   should re-index for consistent dense-search quality; new installs are
   unaffected.
+- **Reranker default**: `rerank.provider` now defaults to `fastembed`
+  (local ONNX, ~80 MB download on first use) instead of `cohere`
+  (external API); `rerank.model` default is now
+  `Xenova/ms-marco-MiniLM-L-6-v2`. Installs that had
+  `rerank.enabled=true` with the implicit `cohere` default must now set
+  `provider: "cohere"` (and `api_key`) explicitly to keep prior behavior.
+  `rerank.enabled=false` installs (the shipped default) are unaffected.
+  Non-English content should set
+  `model="jinaai/jina-reranker-v2-base-multilingual"` — the English
+  default degrades non-English quality.
 - Refactored truncation magic numbers in consolidation engine;
   watcher queue maxsize extracted to constant.
 - CI: ruff lint/format scope extended to `tests/`; notebooks CI job

@@ -155,12 +155,20 @@ without requiring explicit `MEMORY_DIRS` configuration.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEMTOMEM_RERANK__ENABLED` | `false` | Enable cross-encoder reranking after fusion |
-| `MEMTOMEM_RERANK__PROVIDER` | `cohere` | `cohere` (cloud) or `local` |
-| `MEMTOMEM_RERANK__MODEL` | `rerank-english-v3.0` | Reranker model name |
+| `MEMTOMEM_RERANK__PROVIDER` | `fastembed` | `fastembed` (local ONNX), `cohere` (cloud), or `local` (sentence-transformers) |
+| `MEMTOMEM_RERANK__MODEL` | `Xenova/ms-marco-MiniLM-L-6-v2` | Reranker model name (provider-specific — see below) |
 | `MEMTOMEM_RERANK__TOP_K` | `20` | Candidates passed to the reranker (must be > 0) |
 | `MEMTOMEM_RERANK__API_KEY` | _(empty)_ | API key (required for Cohere) |
 
-Reranking runs as Stage 3b in the search pipeline — after BM25 + dense fusion, before source/tag filters. If the reranker call fails, the pipeline falls back to the original fused order with a warning.
+Reranking runs as Stage 3b in the search pipeline — after BM25 + dense fusion, before source/tag filters. If reranking fails with a runtime error the pipeline falls back to the original fused order with a warning; configuration errors (unsupported model name, missing fastembed install) surface directly so the misconfiguration is visible.
+
+### Provider-specific models
+
+- **`fastembed`** (default): local ONNX via the `memtomem[onnx]` extra — no external service, no PyTorch. Built-in catalog includes `Xenova/ms-marco-MiniLM-L-6-v2` (EN, ~80 MB), `jinaai/jina-reranker-v2-base-multilingual` (multilingual, ~1.1 GB), `jinaai/jina-reranker-v1-tiny-en` (EN, 8K context). Custom ONNX exports must be registered via `TextCrossEncoder.add_custom_model()` before the server starts.
+- **`cohere`**: Cohere Rerank API (`rerank-english-v3.0`, `rerank-multilingual-v3.0`). Requires `MEMTOMEM_RERANK__API_KEY`.
+- **`local`**: sentence-transformers `CrossEncoder` (e.g. `cross-encoder/ms-marco-MiniLM-L-6-v2`). Requires `sentence-transformers` to be installed separately — the `fastembed` provider is usually preferable.
+
+> **Multilingual content:** the default `Xenova/ms-marco-MiniLM-L-6-v2` is English-only. For Korean, Chinese, Japanese, or other non-English content set `MEMTOMEM_RERANK__MODEL=jinaai/jina-reranker-v2-base-multilingual` — the English default noticeably degrades non-English reranking quality.
 
 ## Access Frequency Boost
 

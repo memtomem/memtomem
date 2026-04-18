@@ -26,4 +26,11 @@ def create_reranker(config: RerankConfig) -> Reranker | None:
 
         return LocalReranker(config)
 
-    raise ValueError(f"Unknown reranker provider: {config.provider!r}. Supported: cohere, local")
+    if provider == "fastembed":
+        from memtomem.search.reranker.fastembed import FastEmbedReranker
+
+        return FastEmbedReranker(config)
+
+    raise ValueError(
+        f"Unknown reranker provider: {config.provider!r}. Supported: cohere, local, fastembed"
+    )
