@@ -263,3 +263,38 @@ def test_config_d_ignores_non_json_files(
     cfg = Mem2MemConfig()
     load_config_d(cfg)
     assert str(cfg.storage.sqlite_path) == "/ok.db"
+
+
+# ---------------------------------------------------------------------------
+# Enforcement: every list[*] field must declare a merge strategy.
+#
+# Guards against future contributors adding a ``list[X]`` field to a config
+# section without picking APPEND vs REPLACE. Without this test, the fragment
+# loader would silently fall through to the REPLACE branch for unannotated
+# list fields, letting a fragment clobber a positional list by accident.
+# ---------------------------------------------------------------------------
+
+
+def test_every_list_field_declares_merge_strategy() -> None:
+    """Fails loudly if a new ``list[*]`` field in any ``Mem2MemConfig`` section
+    is missing a ``MergeStrategy`` annotation.
+    """
+    from typing import get_origin
+
+    from memtomem.config import MergeStrategy
+
+    missing: list[str] = []
+    for section_name, section_field in Mem2MemConfig.model_fields.items():
+        sec_cls = section_field.annotation
+        if not (isinstance(sec_cls, type) and hasattr(sec_cls, "model_fields")):
+            continue
+        for field_name, info in sec_cls.model_fields.items():
+            if get_origin(info.annotation) is list:
+                has_strategy = any(isinstance(m, MergeStrategy) for m in info.metadata)
+                if not has_strategy:
+                    missing.append(f"{section_name}.{field_name}")
+    assert not missing, (
+        "These list[*] fields lack a MergeStrategy annotation — wrap the "
+        "type in Annotated[list[X], APPEND] or Annotated[list[X], REPLACE] "
+        "in config.py:\n  - " + "\n  - ".join(missing)
+    )
