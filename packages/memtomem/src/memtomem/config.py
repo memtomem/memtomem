@@ -2,11 +2,37 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Annotated, Literal, cast
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+@dataclass(frozen=True)
+class MergeStrategy:
+    """Declares how multiple sources contribute to a ``list[*]`` field.
+
+    Read at runtime by the ``config.d/`` fragment loader. Attach to list
+    fields via ``Annotated[list[X], APPEND]`` / ``Annotated[list[X], REPLACE]``
+    so the strategy is co-located with the field definition and enforced by
+    ``test_config_overrides.py`` (every ``list[*]`` field must declare one).
+
+    - ``APPEND`` — each source's values are concatenated, duplicates
+      removed. Use for lists where each element is independent (memory
+      directories, exclude patterns, webhook events).
+    - ``REPLACE`` — the highest-priority source wins; lower-priority
+      lists are discarded. Use for positional tuning knobs where element
+      order or length carries semantic meaning (RRF weights, importance
+      weights).
+    """
+
+    mode: Literal["append", "replace"]
+
+
+APPEND = MergeStrategy("append")
+REPLACE = MergeStrategy("replace")
 
 
 class EmbeddingConfig(BaseSettings):
@@ -47,7 +73,9 @@ class SearchConfig(BaseSettings):
     enable_bm25: bool = True
     enable_dense: bool = True
     tokenizer: str = "unicode61"  # "unicode61" or "kiwipiepy"
-    rrf_weights: list[float] = Field(default_factory=lambda: [1.0, 1.0])  # [BM25, Dense]
+    rrf_weights: Annotated[list[float], REPLACE] = Field(
+        default_factory=lambda: [1.0, 1.0]
+    )  # [BM25, Dense]
     cache_ttl: float = 30.0  # search result cache TTL in seconds
     # Namespaces starting with any of these prefixes are excluded from
     # *default* search (``namespace=None``) but remain retrievable with an
@@ -56,7 +84,9 @@ class SearchConfig(BaseSettings):
     # out of day-to-day results while preserving their audit trail.
     # Set to an empty list to restore the pre-Phase-A.5 behavior where every
     # namespace is searchable by default.
-    system_namespace_prefixes: list[str] = Field(default_factory=lambda: ["archive:"])
+    system_namespace_prefixes: Annotated[list[str], APPEND] = Field(
+        default_factory=lambda: ["archive:"]
+    )
 
     @field_validator("default_top_k", "bm25_candidates", "dense_candidates", "rrf_k")
     @classmethod
@@ -96,7 +126,9 @@ def _default_memory_dirs() -> list[Path]:
 
 
 class IndexingConfig(BaseSettings):
-    memory_dirs: list[Path] = Field(default_factory=lambda: _default_memory_dirs())
+    memory_dirs: Annotated[list[Path], APPEND] = Field(
+        default_factory=lambda: _default_memory_dirs()
+    )
     supported_extensions: frozenset[str] = frozenset(
         {
             ".md",
@@ -119,7 +151,7 @@ class IndexingConfig(BaseSettings):
     chunk_overlap_tokens: int = 0
     structured_chunk_mode: str = "original"  # "original" or "recursive"
     paragraph_split_threshold: int = 800  # split long prose into paragraphs above this token count
-    exclude_patterns: list[str] = Field(default_factory=list)
+    exclude_patterns: Annotated[list[str], APPEND] = Field(default_factory=list)
 
     @field_validator(
         "max_chunk_tokens",
@@ -245,7 +277,9 @@ class QueryExpansionConfig(BaseSettings):
 class ImportanceConfig(BaseSettings):
     enabled: bool = False
     max_boost: float = 1.5
-    weights: list[float] = Field(default_factory=lambda: [0.3, 0.2, 0.3, 0.2])
+    weights: Annotated[list[float], REPLACE] = Field(
+        default_factory=lambda: [0.3, 0.2, 0.3, 0.2]
+    )
 
     @field_validator("max_boost")
     @classmethod
@@ -258,7 +292,9 @@ class ImportanceConfig(BaseSettings):
 class WebhookConfig(BaseSettings):
     enabled: bool = False
     url: str = ""
-    events: list[str] = Field(default_factory=lambda: ["add", "delete", "search"])
+    events: Annotated[list[str], APPEND] = Field(
+        default_factory=lambda: ["add", "delete", "search"]
+    )
     secret: str = ""
     timeout_seconds: float = 10.0
 
