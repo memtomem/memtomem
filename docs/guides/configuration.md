@@ -49,6 +49,28 @@ top of the default:
 explicit-user-override layer. Use a fragment in `config.d/` if you want
 APPEND semantics.
 
+### External edits while the Web UI is running
+
+The Web UI server re-reads `config.json` and `config.d/*.json` on every
+`GET /api/config` and at the top of every config-writing endpoint
+(`PATCH /api/config`, `POST /api/config/save`, `POST /api/memory-dirs/add`,
+`POST /api/memory-dirs/remove`). This means:
+
+- `mm config set ...` or a manual editor save while the server is running
+  becomes visible on the next UI interaction (or when the tab regains
+  focus), without a restart.
+- A subsequent UI save merges against the *current* disk state rather
+  than overwriting the external change with a stale in-memory copy.
+- If `config.json` is truncated or otherwise invalid when the server
+  tries to reload it, the Web UI keeps the last-known-good in-memory
+  config, surfaces a red banner on the Config tab, and refuses to save
+  (HTTP 409) until the file is fixed. Run `mm init --fresh` or edit
+  the file by hand to recover.
+
+Change detection is a cheap `os.stat` on `config.json` plus every
+fragment in `config.d/`, so GET latency is effectively unchanged. No
+filesystem watchdog is involved.
+
 ### Delta-only save semantics
 
 `config.json` stores only values that differ from the merged lower

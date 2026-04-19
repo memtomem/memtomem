@@ -199,6 +199,16 @@ def app():
     application.state.config = cfg
     application.state.dedup_scanner = dedup_scanner
 
+    # Pin the hot-reload signature to the current on-disk state so these
+    # FakeConfig-based tests don't get their state.config swapped out for a
+    # real Mem2MemConfig built from ``~/.memtomem``. Dedicated hot-reload
+    # tests live in tests/test_web_hot_reload.py where reload behavior is
+    # exercised against a real tmp HOME.
+    from memtomem.web import hot_reload as _hot_reload
+
+    application.state.config_signature = _hot_reload.current_signature()
+    application.state.last_reload_error = None
+
     return application
 
 

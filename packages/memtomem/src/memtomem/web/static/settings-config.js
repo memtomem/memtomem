@@ -35,6 +35,40 @@ const _READONLY_FIELDS = {
 
 // STATE.serverConfig now in STATE
 
+// Response fields that live alongside config sections but describe the
+// hot-reload state rather than user-editable config. Kept out of the
+// section iteration below so they don't render as empty cards.
+const _CONFIG_META_FIELDS = new Set(['config_mtime_ns', 'config_reload_error']);
+
+// Last-seen ``config_mtime_ns`` — used to detect when disk changed between
+// visibility changes (e.g., user ran ``mm config set`` in a terminal while
+// the browser tab was hidden) and render the "Config file changed
+// externally" banner.
+let _lastConfigMtimeNs = null;
+
+function _renderReloadBanner(data) {
+  const el = qs('config-reload-banner');
+  if (!el) return;
+  const err = data.config_reload_error;
+  if (err) {
+    el.textContent = 'Config file invalid on disk: ' + err +
+      ' — fix it (or run `mm init --fresh`) before saving from the UI.';
+    el.className = 'config-reload-banner err';
+    show(el);
+    return;
+  }
+  const mtime = data.config_mtime_ns;
+  if (_lastConfigMtimeNs !== null && mtime !== _lastConfigMtimeNs && mtime > 0) {
+    el.textContent = 'Config file changed externally — reloaded from disk.';
+    el.className = 'config-reload-banner info';
+    show(el);
+    setTimeout(() => hide(el), 5000);
+  } else {
+    hide(el);
+  }
+  if (typeof mtime === 'number') _lastConfigMtimeNs = mtime;
+}
+
 async function fetchServerConfig() {
   try {
     STATE.serverConfig = await api('GET', '/api/config');
@@ -256,8 +290,10 @@ async function loadConfig() {
   try {
     STATE.serverConfig = await api('GET', '/api/config');
     contentEl.innerHTML = '';
+    _renderReloadBanner(STATE.serverConfig);
 
     Object.entries(STATE.serverConfig).forEach(([section, values]) => {
+      if (_CONFIG_META_FIELDS.has(section)) return;
       const isReadonly = _READONLY_SECTIONS.has(section);
       const card = document.createElement('div');
       card.className = 'config-card card';
@@ -318,8 +354,10 @@ async function loadConfig() {
       contentEl.appendChild(card);
     });
 
-    // Show first section guide by default
-    const firstSection = Object.keys(STATE.serverConfig)[0];
+    // Show first section guide by default (skip meta fields).
+    const firstSection = Object.keys(STATE.serverConfig).find(
+      (k) => !_CONFIG_META_FIELDS.has(k),
+    );
     if (firstSection) _showConfigGuide(firstSection);
 
     hide(loadingEl);
@@ -1046,4 +1084,15 @@ qs('imp-file').addEventListener('change', () => {
 qs('imp-btn').addEventListener('click', () => runImport());
 
 fetchServerConfig();
+
+// Re-fetch on tab visibility gain so CLI edits made while the tab was
+// hidden (e.g., ``mm config set mmr.enabled true`` in a terminal) become
+// visible on next focus without a manual reload. Only triggers when the
+// Config tab is the active settings section.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  const configSection = qs('settings-config');
+  if (!configSection || !configSection.classList.contains('active')) return;
+  fetchServerConfig();
+});
 
