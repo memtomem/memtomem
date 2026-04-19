@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal, cast
@@ -941,7 +942,35 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False) -> None:
                         )
 
 
-PROVIDER_DIR_CATEGORIES: tuple[str, ...] = ("claude-memory", "claude-plans", "codex")
+# Single source of truth for provider-dir classification. Each row ties a
+# category name to the regex that recognises paths in that category. The
+# Web UI's ``/api/memory-dirs/status`` response carries the resulting
+# ``category`` field so the client does not maintain a parallel regex.
+_PROVIDER_CATEGORY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("claude-memory", re.compile(r"/\.claude/projects/[^/]+/memory/?$")),
+    ("claude-plans", re.compile(r"/\.claude/plans/?$")),
+    ("codex", re.compile(r"/\.codex/memories/?$")),
+)
+
+# Derived from ``_PROVIDER_CATEGORY_PATTERNS`` — do NOT edit independently.
+# Add a new pattern row above and this tuple picks it up automatically.
+PROVIDER_DIR_CATEGORIES: tuple[str, ...] = tuple(cat for cat, _ in _PROVIDER_CATEGORY_PATTERNS)
+
+
+def categorize_memory_dir(path: str | Path) -> str:
+    """Return the category string for a ``memory_dir`` path.
+
+    Returns one of ``PROVIDER_DIR_CATEGORIES`` or ``"user"`` for anything
+    that doesn't match a known provider layout. Classification only —
+    does not check existence or validity. Uses forward-slash regex, so
+    on Windows a backslash-normalised path will fall through to
+    ``"user"`` until a future path-sep-agnostic pass lands.
+    """
+    s = str(path).rstrip("/")
+    for cat, pat in _PROVIDER_CATEGORY_PATTERNS:
+        if pat.search(s):
+            return cat
+    return "user"
 
 
 def _detect_provider_dirs() -> dict[str, list[Path]]:
@@ -949,7 +978,9 @@ def _detect_provider_dirs() -> dict[str, list[Path]]:
 
     Each category maps to zero or more existing directories. Empty
     categories are still present as ``[]`` so callers can render
-    "(none found)" deterministically.
+    "(none found)" deterministically. Discovered paths are classified
+    via :func:`categorize_memory_dir` so discovery and classification
+    stay locked to the same pattern table.
 
     Categories (verified against official docs):
 
@@ -966,15 +997,13 @@ def _detect_provider_dirs() -> dict[str, list[Path]]:
     file ``~/.gemini/GEMINI.md`` (doesn't fit the directory abstraction)
     and the parent directory contains secrets like ``oauth_creds.json``.
     Use ``mm ingest gemini-memory`` for one-shot Gemini import instead.
-
-    .. warning::
-       The Web UI mirrors this categorization client-side in
-       ``web/static/sources-memory-dirs.js`` (``_categorizeMemoryDir``).
-       Keep the two in sync when adding a new category — consolidation
-       into a server-returned field on ``GET /api/memory-dirs/status``
-       is tracked in https://github.com/memtomem/memtomem/issues/299.
     """
     grouped: dict[str, list[Path]] = {cat: [] for cat in PROVIDER_DIR_CATEGORIES}
+
+    def _bucket(p: Path) -> None:
+        cat = categorize_memory_dir(p)
+        if cat in grouped:
+            grouped[cat].append(p)
 
     claude_projects = Path("~/.claude/projects").expanduser()
     if claude_projects.is_dir():
@@ -983,15 +1012,15 @@ def _detect_provider_dirs() -> dict[str, list[Path]]:
                 continue
             mem = project / "memory"
             if mem.is_dir() and any(mem.glob("*.md")):
-                grouped["claude-memory"].append(mem)
+                _bucket(mem)
 
     plans = Path("~/.claude/plans").expanduser()
     if plans.is_dir():
-        grouped["claude-plans"].append(plans)
+        _bucket(plans)
 
     codex = Path("~/.codex/memories").expanduser()
     if codex.is_dir():
-        grouped["codex"].append(codex)
+        _bucket(codex)
 
     return grouped
 
