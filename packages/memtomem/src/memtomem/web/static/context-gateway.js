@@ -130,7 +130,7 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     showToast(t('settings.ctx.sync_success', 'Sync completed'));
     loadCtxOverview();
   } catch (err) {
-    showToast('Sync failed: ' + err.message, 'error');
+    showToast(t('toast.sync_failed', { error: err.message }), 'error');
   } finally { btnLoading(btn, false); }
 });
 
@@ -140,7 +140,7 @@ document.getElementById('ctx-detect-btn')?.addEventListener('click', async () =>
   btnLoading(btn, true);
   try {
     await loadCtxOverview();
-    showToast('Detection complete');
+    showToast(t('toast.detection_complete'));
   } finally { btnLoading(btn, false); }
 });
 
@@ -301,7 +301,7 @@ async function loadCtxDetail(type, name) {
         }
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
-          showToast(err.detail || 'Save failed', 'error');
+          showToast(err.detail || t('toast.request_failed'), 'error');
           return;
         }
         const result = await r.json();
@@ -311,7 +311,7 @@ async function loadCtxDetail(type, name) {
           loadCtxDetail(type, name);
         }
       } catch (err) {
-        showToast('Save failed: ' + err.message, 'error');
+        showToast(t('toast.save_failed', { error: err.message }), 'error');
       } finally { btnLoading(btn, false); }
     });
 
@@ -333,7 +333,7 @@ async function loadCtxDetail(type, name) {
         const r = await fetch(`/api/context/${type}/${encodeURIComponent(name)}?cascade=false`, { method: 'DELETE' });
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
-          showToast(err.detail || 'Delete failed', 'error');
+          showToast(err.detail || t('toast.request_failed'), 'error');
           return;
         }
         const result = await r.json();
@@ -343,7 +343,7 @@ async function loadCtxDetail(type, name) {
           loadCtxList(type);
         }
       } catch (err) {
-        showToast('Delete failed: ' + err.message, 'error');
+        showToast(t('toast.delete_failed', { error: err.message }), 'error');
       }
     });
 
@@ -402,7 +402,7 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
       const r = await fetch(`/api/context/${type}/sync`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
-        showToast(err.detail || 'Sync failed', 'error');
+        showToast(err.detail || t('toast.request_failed'), 'error');
         return;
       }
       const data = await r.json();
@@ -414,7 +414,7 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
       }
       loadCtxList(type);
     } catch (err) {
-      showToast('Sync failed: ' + err.message, 'error');
+      showToast(t('toast.sync_failed', { error: err.message }), 'error');
     } finally { btnLoading(btn, false); }
   });
 });
@@ -437,7 +437,7 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
-        showToast(err.detail || 'Import failed', 'error');
+        showToast(err.detail || t('toast.request_failed'), 'error');
         return;
       }
       const data = await r.json();
@@ -453,7 +453,7 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
       }
       loadCtxList(type);
     } catch (err) {
-      showToast('Import failed: ' + err.message, 'error');
+      showToast(t('toast.import_failed', { error: err.message }), 'error');
     } finally { btnLoading(btn, false); }
   });
 });
@@ -482,7 +482,7 @@ document.querySelectorAll('.ctx-create-btn').forEach(btn => {
     form.querySelector('.ctx-create-submit').addEventListener('click', async () => {
       const nameInput = form.querySelector('.ctx-create-name').value.trim();
       const content = form.querySelector('.ctx-create-content').value;
-      if (!nameInput) { showToast('Name is required', 'error'); return; }
+      if (!nameInput) { showToast(t('toast.name_required'), 'error'); return; }
       const submitBtn = form.querySelector('.ctx-create-submit');
       btnLoading(submitBtn, true);
       try {
@@ -493,14 +493,14 @@ document.querySelectorAll('.ctx-create-btn').forEach(btn => {
         });
         if (!r.ok) {
           const err = await r.json();
-          showToast(err.detail || 'Create failed', 'error');
+          showToast(err.detail || t('toast.request_failed'), 'error');
           return;
         }
         showToast(t('settings.ctx.create_success', '"{name}" created').replace('{name}', nameInput));
         form.remove();
         loadCtxList(type);
       } catch (err) {
-        showToast('Create failed: ' + err.message, 'error');
+        showToast(t('toast.create_failed', { error: err.message }), 'error');
       } finally { btnLoading(submitBtn, false); }
     });
 

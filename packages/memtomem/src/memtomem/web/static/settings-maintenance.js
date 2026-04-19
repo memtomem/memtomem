@@ -112,11 +112,19 @@ function renderDedupCandidates(candidates, threshold) {
     `;
 
     row.querySelector('.keep-a-btn').addEventListener('click', async () => {
-      const ok = await showConfirm({ title: 'Merge Duplicate', message: 'Keep A and delete B.', confirmText: 'Merge' });
+      const ok = await showConfirm({
+        title: t('confirm.merge_dupe_title'),
+        message: t('confirm.merge_dupe_keep_a_msg'),
+        confirmText: t('common.merge'),
+      });
       if (ok) doMerge(row, c.chunk_a.id, [c.chunk_b.id]);
     });
     row.querySelector('.keep-b-btn').addEventListener('click', async () => {
-      const ok = await showConfirm({ title: 'Merge Duplicate', message: 'Keep B and delete A.', confirmText: 'Merge' });
+      const ok = await showConfirm({
+        title: t('confirm.merge_dupe_title'),
+        message: t('confirm.merge_dupe_keep_b_msg'),
+        confirmText: t('common.merge'),
+      });
       if (ok) doMerge(row, c.chunk_b.id, [c.chunk_a.id]);
     });
     row.querySelector('.skip-btn').addEventListener('click', () => row.remove());
@@ -192,7 +200,11 @@ async function runDecayScan() {
 }
 
 async function runDecayExpire() {
-  const ok = await showConfirm({ title: 'Expire Chunks', message: 'Permanently delete expired chunks. This action cannot be undone.', confirmText: 'Expire' });
+  const ok = await showConfirm({
+    title: t('confirm.expire_title'),
+    message: t('confirm.expire_msg'),
+    confirmText: t('common.expire'),
+  });
   if (!ok) return;
   const maxAge = parseFloat(qs('decay-max-age').value) || 90;
   const srcFilter = qs('decay-source-filter').value.trim() || null;
@@ -209,7 +221,7 @@ async function runDecayExpire() {
     qs('decay-r-expired').textContent = data.expired_chunks;
     qs('decay-r-deleted').textContent = data.deleted_chunks;
     show(qs('decay-result'));
-    showToast(`${data.deleted_chunks} chunks expired and deleted.`, 'success');
+    showToast(t('toast.expired_count', { count: data.deleted_chunks }), 'success');
     // Bug #6: clear search results since we don't know which chunks were deleted
     if (data.deleted_chunks > 0) {
       STATE.lastResults = [];
@@ -297,7 +309,7 @@ async function runImport() {
     qs('imp-skipped').textContent  = data.skipped_chunks;
     qs('imp-failed').textContent   = data.failed_chunks;
     show(qs('imp-result'));
-    showToast(`${data.imported_chunks} chunks imported.`, 'success');
+    showToast(t('toast.imported_count', { count: data.imported_chunks }), 'success');
     _markDataStale();
     loadSourceFilter();
     loadStats();

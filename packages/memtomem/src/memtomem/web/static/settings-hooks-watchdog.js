@@ -113,9 +113,9 @@ async function loadHooksSync() {
         const matcher = card.dataset.matcher || '';
         const label = matcher ? `${event}:${matcher}` : event;
         const ok = await showConfirm({
-          title: 'Replace hook rule',
-          message: `Replace your "${label}" rule with memtomem's version?`,
-          confirmText: 'Replace',
+          title: t('confirm.hooks_replace_title'),
+          message: t('confirm.hooks_replace_msg', { label }),
+          confirmText: t('common.replace'),
         });
         if (!ok) return;
         btnLoading(btn, true);
@@ -127,7 +127,7 @@ async function loadHooksSync() {
           });
           if (!r.ok) {
             const err = await r.json().catch(() => ({}));
-            showToast(err.detail || 'Request failed', 'error');
+            showToast(err.detail || t('toast.request_failed'), 'error');
             return;
           }
           const result = await r.json();
@@ -135,7 +135,7 @@ async function loadHooksSync() {
             showToast(result.reason);
             loadHooksSync();
           } else {
-            showToast(result.reason || 'Unexpected response', 'error');
+            showToast(result.reason || t('toast.unexpected_response'), 'error');
           }
         } finally { btnLoading(btn, false); }
       });
@@ -150,9 +150,9 @@ async function loadHooksSync() {
 document.getElementById('hooks-sync-btn')?.addEventListener('click', async () => {
   const btn = document.getElementById('hooks-sync-btn');
   const ok = await showConfirm({
-    title: 'Sync settings',
-    message: 'Merge .memtomem/settings.json hooks into ~/.claude/settings.json?',
-    confirmText: 'Sync',
+    title: t('confirm.hooks_sync_title'),
+    message: t('confirm.hooks_sync_msg'),
+    confirmText: t('common.sync'),
   });
   if (!ok) return;
   btnLoading(btn, true);
@@ -165,13 +165,13 @@ document.getElementById('hooks-sync-btn')?.addEventListener('click', async () =>
     const data = await res.json();
     const warnings = data.results?.flatMap(r => r.warnings || []) || [];
     if (warnings.length) {
-      showToast(`Synced with ${warnings.length} warning(s)`, 'warning');
+      showToast(t('toast.hooks_warnings', { count: warnings.length }), 'warning');
     } else {
       showToast(t('settings.hooks.sync_success', 'Sync completed'));
     }
     loadHooksSync();
   } catch (err) {
-    showToast('Sync failed: ' + err.message, 'error');
+    showToast(t('toast.sync_failed', { error: err.message }), 'error');
   } finally { btnLoading(btn, false); }
 });
 

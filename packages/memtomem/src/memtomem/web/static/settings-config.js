@@ -1119,10 +1119,10 @@ async function _saveSection(section) {
     const resp = await api('PATCH', '/api/config?persist=true', { [section]: patch });
 
     if (resp.rejected?.length) {
-      showToast(`Some fields rejected: ${resp.rejected.join(', ')}`, 'error');
+      showToast(t('toast.fields_rejected', { fields: resp.rejected.join(', ') }), 'error');
     }
     if (resp.applied?.length) {
-      showToast(`${resp.applied.length} settings updated`, 'success');
+      showToast(t('toast.settings_updated_count', { count: resp.applied.length }), 'success');
       resp.applied.forEach(c => {
         const [sec, key] = c.field.split('.');
         // Use dataset-based lookup (covers both regular inputs and the
@@ -1216,10 +1216,10 @@ function _showReindexWarning(applied) {
       try {
         const res = await api('POST', '/api/reindex?force=true', undefined, { timeout: 300_000 });
         if (res.errors && res.errors.length) {
-          showToast(`Re-index completed with ${res.errors.length} error(s): ${res.errors[0]}`, 'error');
+          showToast(t('toast.reindex_partial', { count: res.errors.length, first: res.errors[0] }), 'error');
         } else {
           const total = (res.results || []).reduce((s, r) => s + (r.indexed_chunks || 0), 0);
-          showToast(`Re-index complete — ${total} chunks indexed`, 'success');
+          showToast(t('toast.reindex_complete', { count: total }), 'success');
         }
         btn.textContent = 'Done';
         btn.disabled = true;
