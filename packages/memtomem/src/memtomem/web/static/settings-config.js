@@ -288,7 +288,17 @@ async function loadConfig() {
   show(loadingEl); hide(contentEl);
 
   try {
-    STATE.serverConfig = await api('GET', '/api/config');
+    // Fetch live config + comparand defaults in parallel. ``/config/defaults``
+    // returns the value each field would revert to if the user cleared their
+    // ``config.json`` override (defaults + env + fragments), powering the per-
+    // field ↺ button below. Missing it is non-fatal — reset buttons simply
+    // stay disabled.
+    const [live, defaults] = await Promise.all([
+      api('GET', '/api/config'),
+      api('GET', '/api/config/defaults').catch(() => null),
+    ]);
+    STATE.serverConfig = live;
+    STATE.serverDefaults = defaults;
     contentEl.innerHTML = '';
     _renderReloadBanner(STATE.serverConfig);
 
@@ -345,6 +355,18 @@ async function loadConfig() {
           td.appendChild(_buildConfigInput(section, key, val));
         }
         tr.appendChild(td);
+
+        // Reset-to-default button (↺): pre-fills the field with the comparand
+        // value so the user sees the new value before pressing Save. Skipped
+        // for read-only rows and when the comparand fetch failed.
+        const resetTd = document.createElement('td');
+        resetTd.className = 'config-reset';
+        if (!fieldReadonly && STATE.serverDefaults) {
+          const btn = _buildResetButton(section, key);
+          if (btn) resetTd.appendChild(btn);
+        }
+        tr.appendChild(resetTd);
+
         table.appendChild(tr);
       });
 
@@ -696,7 +718,22 @@ function _buildRRFWeightsWidget(section, key, val) {
   });
   wrap.appendChild(hidden);
 
+  // Reset-to-default hook for the ↺ button (comparandVal = [bm25W, denseW]).
+  // Projects the weights back onto the 0..100 slider, updates the display
+  // and the ``_saveSection``-backing hidden input.
+  hidden._reset = (comparandVal) => _resetRRFWeights(comparandVal, slider, hidden, updateDisplay);
+
   return wrap;
+}
+
+function _resetRRFWeights(comparandVal, slider, hidden, updateDisplay) {
+  const bW = Array.isArray(comparandVal) ? Number(comparandVal[0]) : 1.0;
+  const dW = Array.isArray(comparandVal) ? Number(comparandVal[1]) : 1.0;
+  const total = bW + dW || 2;
+  const pct = Math.round((dW / total) * 100);
+  slider.value = String(pct);
+  updateDisplay(pct);
+  hidden.value = `${bW}, ${dW}`;
 }
 
 function _buildExcludePatternsWidget(section, key, val) {
@@ -804,6 +841,11 @@ function _buildExcludePatternsWidget(section, key, val) {
 
   userPatterns.forEach(p => _addRow(p));
 
+  // Reset-to-default hook for the ↺ button (comparandVal = string[] of user
+  // patterns — typically ``[]`` for a fresh install). Clears all rows and
+  // rebuilds from the comparand so validation + sync state stay consistent.
+  hidden._reset = (comparandVal) => _resetExcludePatterns(comparandVal, listEl, _addRow, _syncHidden);
+
   _fetchBuiltinExcludePatterns().then(data => {
     const builtinList = builtinBlock.querySelector('.exclude-builtin-list');
     builtinList.removeAttribute('aria-busy');
@@ -826,6 +868,13 @@ function _buildExcludePatternsWidget(section, key, val) {
   if (typeof I18N !== 'undefined') I18N.applyDOM();
 
   return wrap;
+}
+
+function _resetExcludePatterns(comparandVal, listEl, addRow, syncHidden) {
+  while (listEl.firstChild) listEl.removeChild(listEl.firstChild);
+  const patterns = Array.isArray(comparandVal) ? comparandVal : [];
+  patterns.forEach(p => addRow(p));
+  syncHidden();
 }
 
 function _buildConfigInput(section, key, val) {
@@ -913,6 +962,114 @@ function _buildConfigInput(section, key, val) {
 function _markConfigDirty(section) {
   const btn = document.querySelector(`.config-save-btn[data-section="${section}"]`);
   if (btn) btn.disabled = false;
+  // Keep each row's ↺ button in sync with the live value: disabled when
+  // the current value already matches the comparand (nothing to reset).
+  _refreshResetButtons(section);
+}
+
+// ── Reset-to-default (↺) ──────────────────────────────────────────────────
+//
+// Each editable row gets a ↺ button that pre-fills the field with the
+// comparand value (``GET /api/config/defaults`` — defaults + env +
+// ``config.d/`` fragments). The user still has to press Save; after save,
+// ``save_config_overrides`` drops the entry because it now equals the
+// comparand, so env/fragment values continue to flow through.
+//
+// Deliberately *not* an auto-PATCH: same-section dirty edits stay safe, and
+// the user previews the value before committing.
+
+function _resolveComparand(section, key) {
+  const defaults = STATE.serverDefaults;
+  if (!defaults) return undefined;
+  const sec = defaults[section];
+  if (!sec || typeof sec !== 'object') return undefined;
+  return sec[key];
+}
+
+function _valuesEqual(a, b) {
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+  return a === b;
+}
+
+function _currentInputValue(input) {
+  if (!input) return undefined;
+  if (input.type === 'checkbox') return input.checked;
+  if (input.type === 'number') return parseFloat(input.value);
+  if (input.dataset.valType === 'json') {
+    try { return JSON.parse(input.value); } catch { return input.value; }
+  }
+  if (input.dataset.valType === 'array') {
+    return input.value.split(',').map(s => {
+      const n = parseFloat(s.trim());
+      return isNaN(n) ? s.trim() : n;
+    });
+  }
+  return input.value;
+}
+
+function _buildResetButton(section, key) {
+  const comparand = _resolveComparand(section, key);
+  if (comparand === undefined) return null;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn-ghost btn-sm config-reset-btn';
+  btn.dataset.section = section;
+  btn.dataset.key = key;
+  btn.textContent = '↺';
+  btn.setAttribute('aria-label', t('settings.reset.aria_label'));
+  btn.title = t('settings.reset.title');
+  btn.addEventListener('click', () => _resetField(section, key));
+  // Initial disabled state: computed after the input is in the DOM.
+  queueMicrotask(() => _updateResetButton(btn));
+  return btn;
+}
+
+function _findFieldInput(section, key) {
+  const card = document.querySelector(`.config-card[data-section="${section}"]`);
+  if (!card) return null;
+  return card.querySelector(
+    `input[data-section="${section}"][data-key="${key}"],` +
+    `select[data-section="${section}"][data-key="${key}"]`
+  );
+}
+
+function _updateResetButton(btn) {
+  const section = btn.dataset.section;
+  const key = btn.dataset.key;
+  const comparand = _resolveComparand(section, key);
+  if (comparand === undefined) { btn.disabled = true; return; }
+  const input = _findFieldInput(section, key);
+  if (!input) { btn.disabled = true; return; }
+  btn.disabled = _valuesEqual(_currentInputValue(input), comparand);
+}
+
+function _refreshResetButtons(section) {
+  const card = document.querySelector(`.config-card[data-section="${section}"]`);
+  if (!card) return;
+  card.querySelectorAll('.config-reset-btn').forEach(_updateResetButton);
+}
+
+function _resetField(section, key) {
+  const comparand = _resolveComparand(section, key);
+  if (comparand === undefined) return;
+  const input = _findFieldInput(section, key);
+  if (!input) return;
+
+  // Custom widgets opt in by attaching ``_reset`` to their hidden input.
+  if (typeof input._reset === 'function') {
+    input._reset(comparand);
+  } else if (input.type === 'checkbox') {
+    input.checked = Boolean(comparand);
+  } else if (Array.isArray(comparand) && input.dataset.valType === 'array') {
+    input.value = comparand.join(', ');
+  } else {
+    input.value = String(comparand);
+  }
+  _markConfigDirty(section);
 }
 
 async function _saveSection(section) {
@@ -968,7 +1125,12 @@ async function _saveSection(section) {
       showToast(`${resp.applied.length} settings updated`, 'success');
       resp.applied.forEach(c => {
         const [sec, key] = c.field.split('.');
-        const inp = document.getElementById(`cfg-${sec}-${key}`);
+        // Use dataset-based lookup (covers both regular inputs and the
+        // hidden inputs of custom widgets, which don't set ``id``). Falling
+        // back to ``getElementById`` here would leave custom-widget
+        // ``dataset.original`` stale across saves — the next ↺+Save cycle
+        // would see current === original and silently skip the patch.
+        const inp = _findFieldInput(sec, key);
         if (inp) inp.dataset.original = inp.type === 'checkbox' ? String(inp.checked) : inp.value;
       });
       // Re-sync all UI from updated config

@@ -397,7 +397,7 @@ class TestSaveConfigOverrides:
     def isolated(self, tmp_path, monkeypatch):
         """Isolate both config.json and config.d/ to tmp_path.
 
-        Without this, ``_build_comparand`` reads the developer's real
+        Without this, ``build_comparand`` reads the developer's real
         ``~/.memtomem/config.d/`` fragments during tests, producing
         per-machine comparand differences that mask the intended behavior.
         """
@@ -666,18 +666,18 @@ class TestSaveConfigOverrides:
         assert "memory_dirs" not in data2.get("indexing", {})
 
     def test_comparand_build_suppresses_warnings(self, isolated, caplog):
-        """_build_comparand(quiet=True) must not emit WARNING-level logs
+        """build_comparand(quiet=True) must not emit WARNING-level logs
         for malformed fragments. Without this, every save on a machine
         with any malformed fragment prints the same warning repeatedly."""
         import logging
 
-        from memtomem.config import _build_comparand
+        from memtomem.config import build_comparand
 
         # Malformed fragment that would normally warn on each load.
         (isolated["config_d"] / "bad.json").write_text('{"unknown_section": {"foo": 1}}')
 
         caplog.set_level(logging.WARNING, logger="memtomem.config")
-        _build_comparand(quiet=True)
+        build_comparand(quiet=True)
         assert not caplog.records, (
             f"comparand build should not emit warnings; got {[r.message for r in caplog.records]}"
         )

@@ -298,6 +298,61 @@ class TestConfig:
         # Sample a known built-in secret pattern to detect silent removals.
         assert any(p.endswith("/id_rsa*") for p in data["secret"])
 
+    async def test_config_defaults_returns_comparand(self, client: AsyncClient):
+        """GET /api/config/defaults returns the comparand config shape.
+
+        The endpoint must pull from ``build_comparand`` (defaults + env +
+        fragments), not ``app.state.config`` — otherwise the Web UI reset
+        button would "reset" to the pinned value, i.e. do nothing.
+        """
+        from memtomem.config import Mem2MemConfig
+
+        # Construct a comparand with a non-default value so we can tell it
+        # apart from app.state.config (which has FakeConfig mmr.enabled=False).
+        fake_comparand = Mem2MemConfig()
+        fake_comparand.mmr.enabled = True
+        fake_comparand.search.default_top_k = 25
+
+        with patch("memtomem.web.routes.system.build_comparand", return_value=fake_comparand):
+            resp = await client.get("/api/config/defaults")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        # Shape matches ConfigResponse (same as GET /api/config).
+        assert set(data.keys()) >= {
+            "embedding",
+            "storage",
+            "search",
+            "indexing",
+            "decay",
+            "mmr",
+            "namespace",
+        }
+        # Comparand values come through, not app.state.config values.
+        assert data["mmr"]["enabled"] is True
+        assert data["search"]["default_top_k"] == 25
+
+    async def test_config_defaults_independent_of_live_config(self, app, client: AsyncClient):
+        """Live config mutations must not leak into /config/defaults.
+
+        Regression guard: if the endpoint ever accidentally reads
+        ``app.state.config``, this test fails because the fake comparand
+        would report the mutated value.
+        """
+        from memtomem.config import Mem2MemConfig
+
+        fake_comparand = Mem2MemConfig()
+        fake_comparand.search.default_top_k = 7
+
+        # Mutate live config to a distinct value.
+        app.state.config.search.default_top_k = 999
+
+        with patch("memtomem.web.routes.system.build_comparand", return_value=fake_comparand):
+            resp = await client.get("/api/config/defaults")
+
+        assert resp.status_code == 200
+        assert resp.json()["search"]["default_top_k"] == 7
+
     async def test_patch_exclude_patterns_accepts_valid(self, app, client: AsyncClient):
         with patch("memtomem.web.routes.system.save_config_overrides"):
             resp = await client.patch(

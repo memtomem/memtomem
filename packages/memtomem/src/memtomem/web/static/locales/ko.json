@@ -493,5 +493,7 @@
   "settings.exclude_patterns.err_empty": "빈 패턴은 사용할 수 없습니다",
   "settings.exclude_patterns.err_duplicate": "중복된 패턴: {pattern}",
   "settings.exclude_patterns.err_syntax": "잘못된 pathspec 패턴: {pattern}",
-  "settings.exclude_patterns.err_save_blocked": "저장하기 전에 표시된 exclude 패턴 오류를 수정하세요"
+  "settings.exclude_patterns.err_save_blocked": "저장하기 전에 표시된 exclude 패턴 오류를 수정하세요",
+  "settings.reset.aria_label": "기본값으로 되돌리기",
+  "settings.reset.title": "기본값으로 되돌리기 (미리보기 — Save 를 눌러야 적용됨)"
 }

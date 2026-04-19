@@ -810,7 +810,7 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False) -> None:
     semantics.
 
     ``quiet=True`` suppresses *warning* output only — used by
-    ``_build_comparand`` which calls this on every save and would
+    ``build_comparand`` which calls this on every save and would
     otherwise repeat "malformed fragment" / "unknown section" messages
     for every PATCH. Exceptions that represent real errors still raise
     (pydantic validation etc. are already caught + logged here, not
@@ -962,7 +962,7 @@ def _auto_discovered_memory_dirs() -> list[Path]:
 # "always-persist" semantics to protect env-dependent factory defaults
 # from being dropped on save (see
 # ``feedback_env_dependent_factory_equality.md``). Z (delta-vs-comparand
-# via ``_build_comparand``) removed that need because the comparand itself
+# via ``build_comparand``) removed that need because the comparand itself
 # incorporates factory output. The set was renamed to reflect its remaining
 # role — marking the mutation/save asymmetry — rather than deleted.
 _EXTRA_MUTATION_FIELDS: dict[str, set[str]] = {
@@ -1013,14 +1013,23 @@ def _atomic_write_json(path: Path, data: dict) -> None:
         raise
 
 
-def _build_comparand(*, quiet: bool = True) -> "Mem2MemConfig":
+def build_comparand(*, quiet: bool = True) -> "Mem2MemConfig":
     """Build a fresh config reflecting everything *except* user overrides.
 
     Comparand = built-in defaults + ``MEMTOMEM_*`` env vars + ``config.d/``
-    fragments + env-dependent factory output (``memory_dirs`` etc.).
-    ``save_config_overrides`` persists only fields where the live config
-    differs from this comparand — closing fragment/env/factory drag-in at
-    the source (see ``project_fragment_dragin_gap.md``).
+    fragments + env-dependent factory output (``memory_dirs`` etc.). This is
+    **not** "pristine code default" — it represents the value that would
+    apply to a field if ``~/.memtomem/config.json`` did not pin it.
+
+    Two consumers:
+
+    - ``save_config_overrides`` persists only fields where the live config
+      differs from this comparand — closing fragment/env/factory drag-in at
+      the source (see ``project_fragment_dragin_gap.md``).
+    - ``GET /api/config/defaults`` (Web UI reset-to-default button) returns
+      these values so the UI can pre-fill a field with "what applies if this
+      override didn't exist." After Save, ``save_config_overrides`` drops
+      the matching entry so env/fragment values continue to flow through.
 
     ``Mem2MemConfig()`` construction reads env automatically via pydantic-
     settings and runs field ``default_factory`` callables, so env + factory
@@ -1064,7 +1073,7 @@ def save_config_overrides(
 
     _log = logging.getLogger(__name__)
     base_fields: dict[str, set[str]] = mutable_fields or MUTABLE_FIELDS
-    comparand = _build_comparand(quiet=True)
+    comparand = build_comparand(quiet=True)
 
     path = _override_path()
 

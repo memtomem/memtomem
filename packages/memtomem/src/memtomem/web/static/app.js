@@ -33,6 +33,7 @@ const STATE = {
   tagsView: 'cloud',
   tagsSortBy: 'count-desc',
   serverConfig: null,
+  serverDefaults: null,
   lastRetrievalStats: null,
   groupMode: false,
   cmdPaletteOpen: false,

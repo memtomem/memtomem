@@ -493,5 +493,7 @@
   "settings.exclude_patterns.err_empty": "Pattern cannot be empty",
   "settings.exclude_patterns.err_duplicate": "Duplicate pattern: {pattern}",
   "settings.exclude_patterns.err_syntax": "Invalid pathspec pattern: {pattern}",
-  "settings.exclude_patterns.err_save_blocked": "Fix the highlighted exclude patterns before saving"
+  "settings.exclude_patterns.err_save_blocked": "Fix the highlighted exclude patterns before saving",
+  "settings.reset.aria_label": "Reset to default",
+  "settings.reset.title": "Reset to default (preview; press Save to apply)"
 }

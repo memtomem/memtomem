@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from memtomem.config import (
     FIELD_CONSTRAINTS,
     MUTABLE_FIELDS,
+    build_comparand,
     coerce_and_validate,
     save_config_overrides,
 )
@@ -219,6 +220,23 @@ async def get_config_endpoint(request: Request) -> ConfigResponse:
         mtime_ns=_hot_reload.get_config_mtime_ns(),
         reload_error=err.message if err is not None else None,
     )
+
+
+@router.get("/config/defaults", response_model=ConfigResponse)
+async def get_config_defaults() -> ConfigResponse:
+    """Return the comparand config (defaults + env + ``config.d/`` fragments).
+
+    Powers the Web UI per-field reset-to-default button: the client fetches
+    these values to pre-fill a field when the user clicks ↺. Note that this
+    is not "pristine code default" — if ``MEMTOMEM_MMR__ENABLED=true`` is in
+    the environment, the comparand reflects ``true``, so ↺ shows what the
+    field would revert to if ``~/.memtomem/config.json`` didn't pin it.
+    After the user clicks Save, ``save_config_overrides`` drops the entry
+    (now equal to comparand) and env/fragment values continue to flow.
+
+    Read-only; no reload interaction needed.
+    """
+    return _build_config_response(build_comparand(quiet=True))
 
 
 @router.get(
