@@ -34,11 +34,16 @@ async def _run(mode: str) -> None:
     load_config_d(cfg)
     load_config_overrides(cfg)
 
+    # Relaxed mode: this CLI is explicitly the recovery tool for the
+    # dim=0 / real-provider mismatch that ``create_tables`` fails-fast on.
+    # Without ``strict_dim_check=False`` the user could not run
+    # ``embedding-reset`` to fix the state the gate is flagging.
     storage = SqliteBackend(
         cfg.storage,
         dimension=cfg.embedding.dimension,
         embedding_provider=cfg.embedding.provider,
         embedding_model=cfg.embedding.model,
+        strict_dim_check=False,
     )
     await storage.initialize()
 

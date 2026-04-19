@@ -6,6 +6,7 @@ import logging
 import re
 import sqlite3
 
+from memtomem.errors import EmbeddingDimensionMismatchError
 from memtomem.storage.sqlite_meta import MetaManager
 
 logger = logging.getLogger(__name__)
@@ -17,8 +18,16 @@ def create_tables(
     dimension: int,
     embedding_provider: str,
     embedding_model: str,
+    *,
+    strict_dim_check: bool = True,
 ) -> tuple[int, tuple[int, int] | None, tuple[str, str, str, str] | None]:
     """Create all required tables and return effective (dimension, dim_mismatch, model_mismatch).
+
+    When ``strict_dim_check`` is True (default), a contradictory state —
+    effective ``dimension == 0`` with a non-``none`` configured provider —
+    raises :class:`EmbeddingDimensionMismatchError`. Recovery tooling
+    (``mm embedding-reset``) passes ``strict_dim_check=False`` so it can
+    observe the broken state and reset it.
 
     Returns:
         A 3-tuple of ``(effective_dimension, dim_mismatch_or_None, model_mismatch_or_None)``.
@@ -165,6 +174,30 @@ def create_tables(
             meta.set_meta("embedding_provider", embedding_provider)
         if embedding_model:
             meta.set_meta("embedding_model", embedding_model)
+
+    # ---- dim=0 / real-provider mismatch -- fail fast at startup ---------
+    # Catches the legacy NoopEmbedder → real-provider switch: stored
+    # dimension is 0 (so ``chunks_vec`` was never created) but the runtime
+    # embedder is configured to produce real vectors. Without this gate,
+    # startup succeeds and every subsequent ``upsert_chunks`` crashes with
+    # ``no such table: chunks_vec``. See issue #298.
+    if dimension == 0 and (embedding_provider or "").lower() not in ("", "none"):
+        if strict_dim_check:
+            raise EmbeddingDimensionMismatchError(
+                f"DB embedding_dimension=0 but configured provider is "
+                f"'{embedding_provider}'. This usually means the DB was "
+                f"initialized with provider=none (NoopEmbedder) and the "
+                f"config was later switched to a real provider without "
+                f"resetting. Run 'mm embedding-reset --mode apply-current' "
+                f"(CLI) or mem_embedding_reset (MCP) to recreate chunks_vec "
+                f"with the configured dimension."
+            )
+        logger.warning(
+            "DB embedding_dimension=0 but configured provider is '%s' — "
+            "continuing in recovery mode (strict_dim_check=False). "
+            "Run 'mm embedding-reset --mode apply-current' to fix.",
+            embedding_provider,
+        )
 
     if dimension > 0:
         db.execute(f"""
