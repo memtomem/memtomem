@@ -265,7 +265,7 @@ async function renameNamespace(oldName) {
   if (!newName || newName === oldName) return;
   try {
     await api('POST', `/api/namespaces/${encodeURIComponent(oldName)}/rename`, { new_name: newName });
-    showToast(`Renamed '${oldName}' → '${newName}'`, 'success');
+    showToast(t('toast.ns_renamed', { oldName, newName }), 'success');
     STATE.lastResults.forEach(r => { if (r.chunk.namespace === oldName) r.chunk.namespace = newName; });
     if (STATE.lastResults.length) renderResults(STATE.lastResults);
     loadNamespacesTab();
@@ -322,7 +322,7 @@ qs('save-star-btn').addEventListener('click', () => {
     _setSavedQueries(list);
     qs('save-star-btn').textContent = '★';
     qs('save-star-btn').classList.add('starred');
-    showToast(`Saved: "${name}"`, 'success');
+    showToast(t('toast.query_saved', { name }), 'success');
   }
   _renderSavedSelect();
   _renderSavedBar();

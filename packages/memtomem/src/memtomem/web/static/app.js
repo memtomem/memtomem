@@ -241,7 +241,7 @@ function showToast(message, type = 'success') {
 }
 
 // ── A3: Confirm Dialog ──
-function showConfirm({ title, message = '', confirmText = 'Confirm' }) {
+function showConfirm({ title, message = '', confirmText = t('common.confirm') }) {
   return new Promise(resolve => {
     const modal = qs('confirm-modal');
     qs('confirm-title').textContent = title;
@@ -1431,9 +1431,9 @@ qs('d-delete-btn').addEventListener('click', async () => {
   const src = r ? r.chunk.source_file.split('/').pop() : '';
   const lines = r ? `lines ${r.chunk.start_line}–${r.chunk.end_line}` : '';
   const ok = await showConfirm({
-    title: 'Delete Chunk',
-    message: `This will permanently remove ${lines} from the source file "${src}" and delete the chunk from the index. This cannot be undone.`,
-    confirmText: 'Delete',
+    title: t('confirm.chunk_delete_title'),
+    message: t('confirm.chunk_delete_msg', { lines, source: src }),
+    confirmText: t('common.delete'),
   });
   if (!ok) return;
   try {
@@ -1618,9 +1618,9 @@ qs('bulk-delete-btn').addEventListener('click', async () => {
   const ids = [...STATE.selectedIds];
   if (!ids.length) return;
   const ok = await showConfirm({
-    title: `Delete ${ids.length} Chunk${ids.length > 1 ? 's' : ''}`,
-    message: `${ids.length} chunk${ids.length > 1 ? 's' : ''} will be permanently removed from source files and deleted from the index. This cannot be undone.`,
-    confirmText: 'Delete',
+    title: t('confirm.bulk_delete_title', { count: ids.length }),
+    message: t('confirm.bulk_delete_msg', { count: ids.length }),
+    confirmText: t('common.delete'),
   });
   if (!ok) return;
   const btn = qs('bulk-delete-btn');
@@ -1632,8 +1632,8 @@ qs('bulk-delete-btn').addEventListener('click', async () => {
   }
   btnLoading(btn, false);
   const msg = failed
-    ? `${deleted} deleted, ${failed} failed`
-    : `${deleted} chunk${deleted > 1 ? 's' : ''} deleted`;
+    ? t('toast.bulk_delete_partial', { deleted, failed })
+    : t('toast.bulk_delete_ok', { count: deleted });
   showToast(msg, failed ? 'error' : 'success');
   STATE.selectedIds.clear();
   updateBulkToolbar(0);
@@ -1891,9 +1891,9 @@ function renderSourceTree(sources) {
       item.querySelector('.remove-btn').addEventListener('click', async (e) => {
         e.stopPropagation();
         const ok = await showConfirm({
-          title: 'Delete Source',
-          message: `Delete all chunks for:\n${s.path}`,
-          confirmText: 'Delete',
+          title: t('confirm.source_delete_title'),
+          message: t('confirm.source_delete_msg', { path: s.path }),
+          confirmText: t('common.delete'),
         });
         if (!ok) return;
         try {
@@ -2031,9 +2031,9 @@ async function browseSource(path, limit = 100) {
         card.querySelector('.card-delete-btn').addEventListener('click', async e => {
           e.stopPropagation();
           const ok = await showConfirm({
-            title: 'Delete Chunk',
-            message: `Delete this chunk (lines ${c.start_line}–${c.end_line})`,
-            confirmText: 'Delete',
+            title: t('confirm.chunk_delete_title'),
+            message: t('confirm.chunk_delete_simple_msg', { start: c.start_line, end: c.end_line }),
+            confirmText: t('common.delete'),
           });
           if (!ok) return;
           try {
@@ -2202,7 +2202,7 @@ qs('index-btn').addEventListener('click', async () => {
 
   try {
     const data = await api('POST', '/api/index', { path, recursive, force, namespace });
-    showToast(`Indexed ${data.indexed_chunks} chunks`, 'success');
+    showToast(t('toast.indexed_count', { count: data.indexed_chunks }), 'success');
     qs('r-files').textContent    = data.total_files;
     qs('r-chunks').textContent   = data.total_chunks;
     qs('r-indexed').textContent  = data.indexed_chunks;
@@ -2242,7 +2242,7 @@ qs('add-btn').addEventListener('click', async () => {
   try {
     const data = await api('POST', '/api/add', { content, title, tags, file, namespace });
     const n = data.indexed_chunks;
-    showToast(`Saved — ${n} chunks indexed`, 'success');
+    showToast(t('toast.saved_n_indexed', { count: n }), 'success');
     qs('add-content').value = '';
     _markDataStale();
     loadStats();
@@ -2345,7 +2345,7 @@ qs('add-btn').addEventListener('click', async () => {
         }
         result.appendChild(row);
       });
-      showToast(`Upload complete — ${data.total_indexed} chunks indexed`, 'success');
+      showToast(t('toast.upload_complete', { count: data.total_indexed }), 'success');
       selectedFiles = [];
       renderFileList();
       _markDataStale();
@@ -2556,7 +2556,7 @@ async function runAutoTag() {
     qs('at-skipped').textContent = data.skipped_chunks;
     show(qs('autotag-result'));
     const label = dryRun ? '(dry run) ' : '';
-    showToast(`${label}${data.tagged_chunks} chunks tagged`, 'success');
+    showToast(t('toast.tagged_count', { label, count: data.tagged_chunks }), 'success');
     if (!dryRun) { loadTags(); loadStats(); _markDataStale(); }
   } catch (err) {
     showToast(t('toast.autotag_failed', { error: err.message }), 'error');
@@ -2629,7 +2629,7 @@ async function runIndexStream() {
       qs('r-deleted').textContent = event.deleted_chunks;
       qs('r-duration').textContent = event.duration_ms.toFixed(0) + ' ms';
       show(resultEl);
-      showToast(`Stream indexing complete — ${event.total_files} files`, 'success');
+      showToast(t('toast.stream_complete', { count: event.total_files }), 'success');
       _markDataStale();
       loadStats();
       loadNamespaceDropdowns();
@@ -3396,7 +3396,7 @@ qs('save-query-btn').addEventListener('click', () => {
   _setSavedQueries(list);
   _renderSavedSelect();
   _renderSavedBar();
-  showToast(`Saved: "${name}"`, 'success');
+  showToast(t('toast.query_saved', { name }), 'success');
 });
 
 qs('saved-queries-select').addEventListener('change', () => {
@@ -3420,7 +3420,7 @@ qs('delete-query-btn').addEventListener('click', () => {
   _setSavedQueries(list);
   _renderSavedSelect();
   _renderSavedBar();
-  showToast(`Deleted: "${name}"`, 'info');
+  showToast(t('toast.query_deleted', { name }), 'info');
 });
 
 _renderSavedSelect();
@@ -3456,7 +3456,7 @@ function _renderSavedBar() {
       _setSavedQueries(list);
       _renderSavedBar();
       _renderSavedSelect();
-      showToast(`Removed: "${name}"`, 'info');
+      showToast(t('toast.query_removed', { name }), 'info');
     });
   });
   show(bar);
@@ -3544,7 +3544,7 @@ function downloadResults(items, format) {
   a.download = `memtomem-export-${Date.now()}.${ext}`;
   a.click();
   URL.revokeObjectURL(a.href);
-  showToast(`Exported ${items.length} chunk${items.length !== 1 ? 's' : ''} as ${ext.toUpperCase()}`, 'success');
+  showToast(t('toast.exported_count', { count: items.length, ext: ext.toUpperCase() }), 'success');
 }
 
 qs('bulk-export-btn').addEventListener('click', () => {
@@ -3662,7 +3662,7 @@ qs('group-toggle').addEventListener('click', () => {
     if (!files.length) { showToast(t('toast.file_filter'), 'error'); return; }
     const fd = new FormData();
     files.forEach(f => fd.append('files', f));
-    showToast(`Indexing ${files.length} file${files.length > 1 ? 's' : ''}…`, 'info');
+    showToast(t('toast.indexing_files', { count: files.length }), 'info');
     try {
       const res = await fetch('/api/upload', { method: 'POST', body: fd });
       if (!res.ok) {
@@ -3671,7 +3671,7 @@ qs('group-toggle').addEventListener('click', () => {
       }
       const data = await res.json();
       const chunks = (data.results || []).reduce((s, r) => s + (r.indexed_chunks || 0), 0);
-      showToast(`Indexed ${files.length} file${files.length > 1 ? 's' : ''} → ${chunks} chunks`, 'success');
+      showToast(t('toast.indexed_files_chunks', { files: files.length, chunks }), 'success');
       _markDataStale();
       loadSourceFilter();
       loadStats();
