@@ -118,11 +118,14 @@ class SearchConfig(BaseSettings):
 
 
 def _default_memory_dirs() -> list[Path]:
-    """Build default memory_dirs, auto-discovering well-known AI tool directories."""
-    dirs: list[Path] = [Path("~/.memtomem/memories")]
-    for d in _auto_discovered_memory_dirs():
-        dirs.append(d)
-    return dirs
+    """Build default memory_dirs.
+
+    Only the single canonical user dir ``~/.memtomem/memories`` is returned
+    here; auto-discovery of well-known AI tool directories is applied
+    separately by :func:`ensure_auto_discovered_dirs` so that the
+    ``indexing.auto_discover`` flag has a single gate point.
+    """
+    return [Path("~/.memtomem/memories")]
 
 
 class IndexingConfig(BaseSettings):
@@ -152,6 +155,7 @@ class IndexingConfig(BaseSettings):
     structured_chunk_mode: str = "original"  # "original" or "recursive"
     paragraph_split_threshold: int = 800  # split long prose into paragraphs above this token count
     exclude_patterns: Annotated[list[str], APPEND] = Field(default_factory=list)
+    auto_discover: bool = True
 
     @field_validator(
         "max_chunk_tokens",
@@ -499,6 +503,7 @@ MUTABLE_FIELDS: dict[str, set[str]] = {
         "chunk_overlap_tokens",
         "structured_chunk_mode",
         "exclude_patterns",
+        "auto_discover",
     },
     "embedding": {"batch_size"},
     "decay": {"enabled", "half_life_days"},
@@ -524,6 +529,7 @@ FIELD_CONSTRAINTS: dict[str, dict] = {
         "item_type": str,
         "validator": _validate_exclude_patterns,
     },
+    "indexing.auto_discover": {"type": bool},
     "embedding.batch_size": {"type": int, "min": 1, "max": 1024},
     "decay.enabled": {"type": bool},
     "decay.half_life_days": {"type": float, "min": 0.1},
@@ -927,7 +933,13 @@ def ensure_auto_discovered_dirs(config: Mem2MemConfig) -> None:
 
     Call *after* ``load_config_overrides`` so that user overrides don't
     suppress auto-discovery of AI tool directories like ``~/.claude/projects``.
+
+    Users can opt out entirely by setting ``indexing.auto_discover = false`` in
+    ``config.json`` or exporting ``MEMTOMEM_INDEXING__AUTO_DISCOVER=false``.
+    When disabled, the caller's explicit ``memory_dirs`` list is left untouched.
     """
+    if not config.indexing.auto_discover:
+        return
     existing = {Path(d).expanduser().resolve() for d in config.indexing.memory_dirs}
     for d in _auto_discovered_memory_dirs():
         resolved = d.expanduser().resolve()
