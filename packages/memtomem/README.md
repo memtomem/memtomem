@@ -1,5 +1,7 @@
 # memtomem
 
+> 🚧 **Alpha** — APIs, defaults, and on-disk config surfaces may still change between `0.1.x` releases. Feedback and issue reports are especially welcome at [github.com/memtomem/memtomem/issues](https://github.com/memtomem/memtomem/issues).
+
 Markdown-first long-term memory infrastructure for AI agents. Hybrid keyword + semantic search across your notes, docs, and code via the Model Context Protocol.
 
 **Core philosophy**: `.md` files are the source of truth and the vector database is a derived cache. Manage memories as plain text files — memtomem makes them instantly searchable.
