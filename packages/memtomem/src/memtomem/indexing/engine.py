@@ -205,9 +205,10 @@ class IndexEngine:
         namespace: str | None = None,
     ) -> IndexingStats:
         """Index a single file. Convenience wrapper for external callers."""
-        # Apply exclude patterns at the entry point so callers that bypass
-        # ``_discover_files`` (file watcher, direct API consumers) cannot
-        # smuggle credentials or noise into the index.
+        # Defense-in-depth: the primary guard lives at the top of
+        # ``_index_file`` (covers every caller — watcher, stream endpoint,
+        # CLI, MCP tools). This public-entry check is kept so the call
+        # returns early with zeroed stats without entering the lock.
         user_spec = _build_exclude_spec(self._config.exclude_patterns)
         if _path_is_excluded(file_path, self._config.memory_dirs, user_spec):
             logger.debug("Skipping excluded file %s", file_path)
@@ -337,6 +338,18 @@ class IndexEngine:
         # Return shape: total/indexed/skipped/deleted (ints), errors (list[str]),
         # new_chunk_ids (list[UUID]). Early zero-result paths may omit
         # new_chunk_ids — consumers must tolerate missing keys.
+
+        # Primary exclude guard — every caller (index_file, _index_path_inner
+        # after _discover_files, index_path_stream single-file branch) funnels
+        # through here, so a single check closes all entry points including
+        # ones added later. ``_discover_files`` still filters upstream for
+        # directory walks, but this guard ensures single-file callers like
+        # ``index_path_stream(file)`` cannot smuggle credentials or noise.
+        user_spec = _build_exclude_spec(self._config.exclude_patterns)
+        if _path_is_excluded(file_path, self._config.memory_dirs, user_spec):
+            logger.debug("Skipping excluded file %s", file_path)
+            return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
+
         try:
             file_size = file_path.stat().st_size
         except OSError:

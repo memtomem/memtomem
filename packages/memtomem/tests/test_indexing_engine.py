@@ -292,6 +292,64 @@ class TestExcludePatterns:
         assert stats.total_chunks == 0
         assert stats.indexed_chunks == 0
 
+    async def test_index_path_stream_single_file_blocks_excluded(self, components, memory_dir):
+        """REGRESSION: ``index_path_stream`` has a single-file branch
+        (``if path.is_file(): files = [path]``) that skips ``_discover_files``
+        and calls guard-free ``_index_file`` directly. Exposed via the Web UI
+        ``GET /api/index/stream?path=...`` endpoint. The primary guard at
+        ``_index_file`` closes this entry point; a chunker spy proves the
+        guard fires *before* parsing so ``stored==0`` alone is not relied on
+        (NoopEmbedder's sqlite-vec insert can roll back and mask a bypass).
+        """
+        creds_path = memory_dir / "oauth_creds.json"
+        creds_path.write_text('{"token": "secret"}')
+
+        engine = components.index_engine
+        chunker_calls: list[Path] = []
+        orig = engine._registry.chunk_file
+
+        def spy(fp: Path, content: str):
+            chunker_calls.append(fp)
+            return orig(fp, content)
+
+        engine._registry.chunk_file = spy  # type: ignore[method-assign]
+        try:
+            events = [ev async for ev in engine.index_path_stream(creds_path, recursive=False)]
+        finally:
+            engine._registry.chunk_file = orig  # type: ignore[method-assign]
+
+        assert all("oauth_creds" not in str(c) for c in chunker_calls)
+        complete = next(e for e in events if e.get("type") == "complete")
+        assert complete["indexed_chunks"] == 0
+        assert complete["total_chunks"] == 0
+
+    async def test_index_path_stream_dir_still_filters_excluded(self, components, memory_dir):
+        """REGRESSION: the directory-walk path of ``index_path_stream``
+        still funnels filtered files through ``_index_file``. Ensure
+        legitimate files are indexed while the excluded sibling is skipped.
+        """
+        (memory_dir / "oauth_creds.json").write_text('{"token": "x"}')
+        (memory_dir / "notes.md").write_text("# Keep\n\nContent to index.")
+
+        engine = components.index_engine
+        chunker_calls: list[str] = []
+        orig = engine._registry.chunk_file
+
+        def spy(fp: Path, content: str):
+            chunker_calls.append(fp.name)
+            return orig(fp, content)
+
+        engine._registry.chunk_file = spy  # type: ignore[method-assign]
+        try:
+            events = [ev async for ev in engine.index_path_stream(memory_dir, recursive=True)]
+        finally:
+            engine._registry.chunk_file = orig  # type: ignore[method-assign]
+
+        assert "oauth_creds.json" not in chunker_calls
+        assert "notes.md" in chunker_calls
+        complete = next(e for e in events if e.get("type") == "complete")
+        assert complete["indexed_chunks"] >= 1
+
 
 # ===========================================================================
 # 2. _resolve_namespace
