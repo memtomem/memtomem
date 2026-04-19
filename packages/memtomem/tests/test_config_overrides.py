@@ -36,12 +36,30 @@ def config_d_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _clear_all_memtomem_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Strip any ambient MEMTOMEM_* so the test env is fully deterministic."""
+    """Strip ambient MEMTOMEM_* and stub provider-dir discovery to ``[]`` so
+    the test env is fully deterministic.
+
+    Stubbing ``_canonical_provider_dirs`` here (rather than autouse) prevents
+    the auto_discover migration triggered by ``load_config_overrides`` from
+    pulling in the dev machine's real ``~/.claude/projects/*/memory/`` etc.,
+    which would otherwise pollute unrelated ``memory_dirs`` assertions.
+
+    Migration tests that need a controlled fake list call
+    ``monkeypatch.setattr(_cfg, "_canonical_provider_dirs", ...)`` AFTER
+    invoking this helper — last-write-wins on monkeypatch means their
+    explicit fake takes effect during the actual test logic.
+
+    Detection tests (those exercising ``_detect_provider_dirs`` /
+    ``_canonical_provider_dirs`` directly to validate scope and category
+    structure) deliberately do NOT call this helper, so they hit the real
+    implementation against an isolated ``HOME`` they set themselves.
+    """
     import os
 
     for name in list(os.environ):
         if name.startswith("MEMTOMEM_"):
             monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(_cfg, "_canonical_provider_dirs", lambda: [])
 
 
 def test_config_json_applies_when_no_env(
@@ -395,66 +413,198 @@ def test_every_list_field_declares_merge_strategy() -> None:
 
 
 # ---------------------------------------------------------------------------
-# indexing.auto_discover opt-out (issue #260 Option 0)
+# indexing.auto_discover migration (legacy → explicit memory_dirs)
 #
-# Regression guards for the boolean flag that lets users disable auto-discovery
-# of well-known AI tool directories (`~/.claude/projects`, `~/.gemini`,
-# `~/.codex/memories`). Default is True (preserves legacy behavior); False
-# short-circuits ``ensure_auto_discovered_dirs`` to a no-op so the caller's
-# explicit ``memory_dirs`` list is the complete list.
+# Pre-Z, ``auto_discover=True`` was a runtime flag that silently appended
+# provider home dirs on every startup. Post-Z it's a one-shot migration
+# trigger: ``load_config_overrides`` calls ``_migrate_auto_discover_once``,
+# which converts legacy installs to explicit ``memory_dirs`` entries and
+# flips the flag to False. Brand-new installs (no ``config.json``) skip
+# migration so the wizard opt-in remains the only way provider dirs land
+# in ``memory_dirs``.
 # ---------------------------------------------------------------------------
 
 
-def test_auto_discover_default_true_appends_dirs(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_migration_noop_when_auto_discover_false(
+    override_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Explicit auto_discover=False in config.json → migration skipped."""
+    _clear_all_memtomem_env(monkeypatch)
     fake = tmp_path / "fake-tool"
     fake.mkdir()
-    monkeypatch.setattr(_cfg, "_auto_discovered_memory_dirs", lambda: [fake])
+    monkeypatch.setattr(_cfg, "_canonical_provider_dirs", lambda: [fake])
+    override_path.write_text(
+        json.dumps({"indexing": {"auto_discover": False}}), encoding="utf-8"
+    )
+
     cfg = Mem2MemConfig()
-    assert cfg.indexing.auto_discover is True
-    _cfg.ensure_auto_discovered_dirs(cfg)
+    load_config_overrides(cfg)
+
+    resolved = {Path(p).expanduser().resolve() for p in cfg.indexing.memory_dirs}
+    assert fake.resolve() not in resolved
+
+
+def test_migration_noop_when_no_config_json(
+    override_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Brand-new install (no config.json) skips migration even with
+    auto_discover defaulting to True. Provider dirs stay opt-in via the
+    wizard.
+    """
+    _clear_all_memtomem_env(monkeypatch)
+    fake = tmp_path / "fake-tool"
+    fake.mkdir()
+    monkeypatch.setattr(_cfg, "_canonical_provider_dirs", lambda: [fake])
+    # override_path fixture sets the path but does NOT write the file
+
+    cfg = Mem2MemConfig()
+    load_config_overrides(cfg)  # config.json doesn't exist
+
+    resolved = {Path(p).expanduser().resolve() for p in cfg.indexing.memory_dirs}
+    assert fake.resolve() not in resolved
+    assert cfg.indexing.auto_discover is True  # not flipped — migration skipped
+
+
+def test_migration_appends_dirs_and_flips_flag(
+    override_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Legacy install (config.json present + auto_discover defaults True)
+    migrates: discovered dirs append to memory_dirs and flag flips to False.
+    """
+    _clear_all_memtomem_env(monkeypatch)
+    fake = tmp_path / "fake-tool"
+    fake.mkdir()
+    monkeypatch.setattr(_cfg, "_canonical_provider_dirs", lambda: [fake])
+    override_path.write_text("{}", encoding="utf-8")
+
+    cfg = Mem2MemConfig()
+    load_config_overrides(cfg)
+
     resolved = {Path(p).expanduser().resolve() for p in cfg.indexing.memory_dirs}
     assert fake.resolve() in resolved
+    assert cfg.indexing.auto_discover is False
 
 
-def test_auto_discover_false_is_noop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_migration_persists_to_config_json(
+    override_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Migration writes both new memory_dirs entries and the False flag to disk."""
+    _clear_all_memtomem_env(monkeypatch)
     fake = tmp_path / "fake-tool"
     fake.mkdir()
-    monkeypatch.setattr(_cfg, "_auto_discovered_memory_dirs", lambda: [fake])
+    monkeypatch.setattr(_cfg, "_canonical_provider_dirs", lambda: [fake])
+    override_path.write_text("{}", encoding="utf-8")
+
     cfg = Mem2MemConfig()
-    cfg.indexing.auto_discover = False
-    before = [str(p) for p in cfg.indexing.memory_dirs]
-    _cfg.ensure_auto_discovered_dirs(cfg)
-    after = [str(p) for p in cfg.indexing.memory_dirs]
-    assert before == after
-    assert str(fake) not in after
+    load_config_overrides(cfg)
+
+    persisted = json.loads(override_path.read_text(encoding="utf-8"))
+    assert persisted["indexing"]["auto_discover"] is False
+    assert str(fake) in persisted["indexing"]["memory_dirs"]
 
 
-def test_auto_discover_env_var_disables(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_migration_idempotent(
+    override_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Second load_config_overrides after migration is a no-op (flag is False)."""
+    _clear_all_memtomem_env(monkeypatch)
+    fake = tmp_path / "fake-tool"
+    fake.mkdir()
+    monkeypatch.setattr(_cfg, "_canonical_provider_dirs", lambda: [fake])
+    override_path.write_text("{}", encoding="utf-8")
+
+    cfg1 = Mem2MemConfig()
+    load_config_overrides(cfg1)
+    first_dirs = sorted(str(p) for p in cfg1.indexing.memory_dirs)
+
+    cfg2 = Mem2MemConfig()
+    load_config_overrides(cfg2)
+    second_dirs = sorted(str(p) for p in cfg2.indexing.memory_dirs)
+
+    assert first_dirs == second_dirs
+
+
+def test_migration_env_var_false_skips(
+    override_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """MEMTOMEM_INDEXING__AUTO_DISCOVER=false short-circuits migration even
+    when a config.json exists (env wins over the default True)."""
     _clear_all_memtomem_env(monkeypatch)
     monkeypatch.setenv("MEMTOMEM_INDEXING__AUTO_DISCOVER", "false")
     fake = tmp_path / "fake-tool"
     fake.mkdir()
-    monkeypatch.setattr(_cfg, "_auto_discovered_memory_dirs", lambda: [fake])
-    cfg = Mem2MemConfig()
-    assert cfg.indexing.auto_discover is False
-    _cfg.ensure_auto_discovered_dirs(cfg)
-    resolved = {Path(p).expanduser().resolve() for p in cfg.indexing.memory_dirs}
-    assert fake.resolve() not in resolved
+    monkeypatch.setattr(_cfg, "_canonical_provider_dirs", lambda: [fake])
+    override_path.write_text("{}", encoding="utf-8")
 
-
-def test_auto_discover_config_json_disables(
-    override_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _clear_all_memtomem_env(monkeypatch)
-    override_path.write_text(json.dumps({"indexing": {"auto_discover": False}}), encoding="utf-8")
-    fake = tmp_path / "fake-tool"
-    fake.mkdir()
-    monkeypatch.setattr(_cfg, "_auto_discovered_memory_dirs", lambda: [fake])
     cfg = Mem2MemConfig()
     load_config_overrides(cfg)
-    assert cfg.indexing.auto_discover is False
-    _cfg.ensure_auto_discovered_dirs(cfg)
+
     resolved = {Path(p).expanduser().resolve() for p in cfg.indexing.memory_dirs}
     assert fake.resolve() not in resolved
+    assert cfg.indexing.auto_discover is False
+
+
+# ---------------------------------------------------------------------------
+# _detect_provider_dirs / _canonical_provider_dirs scope (narrowed per
+# official provider docs).
+# ---------------------------------------------------------------------------
+
+
+def test_detect_provider_dirs_categories_are_fixed() -> None:
+    """The wizard step iterates these categories — no surprise additions."""
+    grouped = _cfg._detect_provider_dirs()
+    assert set(grouped) == {"claude-memory", "claude-plans", "codex"}
+
+
+def test_detect_provider_dirs_excludes_gemini(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Gemini (~/.gemini/) is intentionally out of scope — its memory is a
+    single GEMINI.md file (doesn't fit the directory abstraction) and the
+    parent dir contains oauth credentials. ``mm ingest gemini-memory``
+    remains the supported path for Gemini users."""
+    home = tmp_path / "home"
+    (home / ".gemini").mkdir(parents=True)
+    (home / ".gemini" / "GEMINI.md").write_text("# memory", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+
+    grouped = _cfg._detect_provider_dirs()
+    assert "gemini" not in grouped
+    flat = _cfg._canonical_provider_dirs()
+    assert all("gemini" not in str(d) for d in flat)
+
+
+def test_detect_provider_dirs_filters_empty_claude_memory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Per-project ``memory/`` subdirs without any *.md files are skipped
+    so empty session scaffolding doesn't get added to memory_dirs."""
+    home = tmp_path / "home"
+    proj_with = home / ".claude" / "projects" / "p1" / "memory"
+    proj_without = home / ".claude" / "projects" / "p2" / "memory"
+    proj_with.mkdir(parents=True)
+    (proj_with / "MEMORY.md").write_text("# index", encoding="utf-8")
+    proj_without.mkdir(parents=True)  # empty memory dir
+    monkeypatch.setenv("HOME", str(home))
+
+    grouped = _cfg._detect_provider_dirs()
+    paths = {str(p) for p in grouped["claude-memory"]}
+    assert str(proj_with) in paths
+    assert str(proj_without) not in paths
+
+
+def test_detect_provider_dirs_finds_claude_plans_and_codex(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``~/.claude/plans/`` and ``~/.codex/memories/`` land in their
+    respective categories when present on disk."""
+    home = tmp_path / "home"
+    plans = home / ".claude" / "plans"
+    codex = home / ".codex" / "memories"
+    plans.mkdir(parents=True)
+    codex.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+
+    grouped = _cfg._detect_provider_dirs()
+    assert grouped["claude-plans"] == [plans]
+    assert grouped["codex"] == [codex]

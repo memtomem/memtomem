@@ -42,7 +42,7 @@ For full setup, OpenAI configuration, and troubleshooting, see the [Getting Star
 <details>
 <summary><b>Prefer no install? (uvx direct, MCP only)</b></summary>
 
-If you'd rather skip the CLI install, `uvx` will download and run memtomem on demand. `~/.memtomem/memories` is always indexed, and well-known AI tool directories (`~/.claude/projects`, `~/.gemini`, `~/.codex/memories`) are auto-discovered when they exist. Set `MEMTOMEM_INDEXING__MEMORY_DIRS` to add custom paths.
+If you'd rather skip the CLI install, `uvx` will download and run memtomem on demand. `~/.memtomem/memories` is always indexed; for AI tool memory folders (Claude Code per-project memory, Claude plans, Codex memories), run `mm init` once and pick the surfaces you want indexed — nothing is added silently. Set `MEMTOMEM_INDEXING__MEMORY_DIRS` to add custom paths.
 
 ```bash
 claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
