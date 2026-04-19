@@ -122,7 +122,10 @@ function _buildMemoryDirsPanel(initialDirs) {
   }
 
   async function handleReindexGroup(category, btn) {
-    const targets = dirs.filter(d => _categorizeMemoryDir(d) === category);
+    const targets = dirs.filter(d => {
+      const st = statusByPath[d];
+      return ((st && st.category) || 'user') === category;
+    });
     if (!targets.length) return;
     if (btn) btnLoading(btn, true);
     try {
