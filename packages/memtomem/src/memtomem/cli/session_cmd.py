@@ -27,7 +27,7 @@ def _state_file() -> Path:
 def _read_current_session() -> str | None:
     """Read the active session ID from the state file, or None."""
     try:
-        text = _state_file().read_text().strip()
+        text = _state_file().read_text(encoding="utf-8").strip()
         return text if text else None
     except FileNotFoundError:
         return None
@@ -35,7 +35,7 @@ def _read_current_session() -> str | None:
 
 def _write_current_session(session_id: str) -> None:
     _state_dir().mkdir(parents=True, exist_ok=True)
-    _state_file().write_text(session_id + "\n")
+    _state_file().write_text(session_id + "\n", encoding="utf-8")
 
 
 def _clear_current_session() -> None:
