@@ -395,17 +395,23 @@ class TestSaveConfigOverrides:
 
     @pytest.fixture
     def isolated(self, tmp_path, monkeypatch):
-        """Isolate both config.json and config.d/ to tmp_path.
+        """Isolate config.json, config.d/, and auto-discovery from the dev machine.
 
         Without this, ``build_comparand`` reads the developer's real
         ``~/.memtomem/config.d/`` fragments during tests, producing
         per-machine comparand differences that mask the intended behavior.
+        Auto-discovery is stubbed to ``[]`` so tests that exercise
+        ``memory_dirs`` delta semantics behave identically whether the dev
+        machine happens to have ``~/.claude/projects`` etc. Individual tests
+        can re-monkeypatch ``_auto_discovered_memory_dirs`` to exercise the
+        auto-discover path explicitly.
         """
         config_file = tmp_path / "config.json"
         config_d = tmp_path / "config.d"
         config_d.mkdir()
         monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
         monkeypatch.setattr("memtomem.config._config_d_path", lambda: config_d)
+        monkeypatch.setattr("memtomem.config._auto_discovered_memory_dirs", lambda: [])
         return {"config_file": config_file, "config_d": config_d, "tmp_path": tmp_path}
 
     # ── Load-path defensive tests (unrelated to delta semantic) ────────
@@ -610,6 +616,45 @@ class TestSaveConfigOverrides:
         data = json.loads(isolated["config_file"].read_text())
         assert "memory_dirs" not in data.get("indexing", {}), (
             f"factory-default memory_dirs must be dropped on save under Z; got {data}"
+        )
+
+    def test_auto_discovered_dirs_do_not_drag_into_config_json(
+        self, isolated, monkeypatch, tmp_path
+    ):
+        """Regression guard for the drag-in introduced by PR #282.
+
+        After PR #282 consolidated auto-discovery into
+        ``ensure_auto_discovered_dirs`` (removed from ``_default_memory_dirs``),
+        the comparand built by ``build_comparand`` contained only
+        ``~/.memtomem/memories`` while the runtime config contained the
+        auto-discovered well-known dirs on top. Unrelated saves pinned
+        those paths into ``config.json``, which meant a later
+        ``auto_discover = false`` still indexed them.
+
+        Fix: ``build_comparand`` must call ``ensure_auto_discovered_dirs``
+        on the comparand so the delta computation sees an apples-to-apples
+        runtime-vs-default comparison.
+        """
+        import json
+        from pathlib import Path
+
+        from memtomem import config as _cfg
+        from memtomem.config import ensure_auto_discovered_dirs
+
+        fake = tmp_path / "fake-auto-tool"
+        fake.mkdir()
+        monkeypatch.setattr(_cfg, "_auto_discovered_memory_dirs", lambda: [fake])
+
+        cfg = Mem2MemConfig()
+        ensure_auto_discovered_dirs(cfg)  # simulates startup in create_components
+        assert fake.resolve() in {Path(p).expanduser().resolve() for p in cfg.indexing.memory_dirs}
+
+        cfg.mmr.enabled = True  # unrelated change to trigger a non-empty save
+        save_config_overrides(cfg)
+
+        data = json.loads(isolated["config_file"].read_text())
+        assert "memory_dirs" not in data.get("indexing", {}), (
+            f"auto-discovered dirs must drop on unrelated save; got {data}"
         )
 
     def test_save_is_idempotent(self, isolated):
