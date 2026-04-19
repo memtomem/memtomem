@@ -753,6 +753,84 @@ class TestFreshFlag:
         assert not orphans, f"orphan tmp file(s) after failed atomic write: {orphans}"
 
 
+class TestMcpPasteHints:
+    """The wizard's MCP step writes a Claude-Code-scoped ``.mcp.json`` and must
+    surface what the user still has to do for Cursor / Windsurf / Claude
+    Desktop / Gemini CLI (none of which auto-load the project file).
+
+    Regression for #246: earlier wording implied ``.mcp.json`` is the config
+    file for those editors, which it isn't — each has its own canonical path."""
+
+    def test_choice_2_emits_per_editor_paste_hints(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from click import unstyle
+
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+
+        state = _make_init_state(tmp_path)
+        state["mcp_choice"] = 2
+        _write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "MCP config: wrote ./.mcp.json" in out
+        assert "Cursor" in out and "~/.cursor/mcp.json" in out
+        assert "Windsurf" in out and "~/.codeium/windsurf/mcp_config.json" in out
+        assert "Claude Desktop" in out
+        assert "Library/Application Support/Claude/claude_desktop_config.json" in out
+        assert "Gemini CLI" in out and "~/.gemini/settings.json" in out
+        assert "Claude Code picks up ./.mcp.json in this project automatically" in out
+
+    def test_choice_3_skip_emits_no_hints(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Skipping MCP setup must not print paste hints — there's no file
+        yet for the user to paste."""
+        from click import unstyle
+
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        state = _make_init_state(tmp_path)  # mcp_choice = 3 by default
+        _write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "MCP config:" not in out
+        assert "~/.cursor/mcp.json" not in out
+
+    def test_step_mcp_menu_does_not_imply_autoload(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The ``[2]`` menu line must scope ``.mcp.json`` to Claude Code and
+        frame other editors as "copy into". The old "(for Cursor, Windsurf,
+        etc.)" wording implied auto-compat and is explicitly ruled out."""
+        from click import unstyle
+
+        from memtomem.cli.init_cmd import _step_mcp
+
+        # Stub the interactive prompt so the menu renders without stdin.
+        monkeypatch.setattr("memtomem.cli.init_cmd.nav_prompt", lambda *a, **kw: 3)
+
+        state: dict = {}
+        _step_mcp(state)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "(for Cursor, Windsurf, etc.)" not in out, "old auto-compat wording leaked back in"
+        assert "Claude Code project scope" in out
+        assert "copy into your editor's config file" in out
+
+
 def test_memory_dirs_env_requires_json_array(monkeypatch: pytest.MonkeyPatch) -> None:
     """Documentation examples of MEMTOMEM_INDEXING__MEMORY_DIRS must be
     encoded as a JSON array string. A bare path crashes pydantic-settings.
