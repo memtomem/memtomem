@@ -92,6 +92,27 @@ class TestParseCanonicalAgent:
         with pytest.raises(AgentParseError):
             parse_canonical_agent(p)
 
+    @pytest.mark.parametrize(
+        "hostile_name",
+        [
+            "../../evil",
+            "../escape",
+            "a/b",
+            "a\\b",
+            ".",
+            "..",
+            "-x",
+            "A" * 65,
+            "name with space",
+        ],
+    )
+    def test_rejects_hostile_name_in_frontmatter(self, tmp_path, hostile_name):
+        """#276: ``name:`` frontmatter must not land us outside the target dir."""
+        p = tmp_path / "hostile.md"
+        p.write_text(f"---\nname: {hostile_name}\ndescription: x\n---\n\nbody\n")
+        with pytest.raises(AgentParseError, match="invalid agent name"):
+            parse_canonical_agent(p)
+
     def test_block_list_syntax(self, tmp_path):
         p = tmp_path / "blocky.md"
         p.write_text(
@@ -289,6 +310,26 @@ class TestExtractAgentsToCanonical:
         (codex_home / ".codex/agents/helper.toml").write_text('name = "helper"\n')
         result = extract_agents_to_canonical(tmp_path)
         assert result.imported == []
+
+    def test_skips_hostile_runtime_filename(self, tmp_path):
+        """#276: a runtime directory containing ``-x.md`` (leading dash) round-trips
+        into a canonical filename that validate_name rejects, so we skip rather
+        than produce a canonical file we'd refuse to read back."""
+        claude_dir = tmp_path / ".claude/agents"
+        claude_dir.mkdir(parents=True)
+        # File name with leading dash — unusual but filesystem-legal.
+        (claude_dir / "-bad.md").write_text(SAMPLE_MINIMAL_AGENT)
+        (claude_dir / "ok.md").write_text(SAMPLE_MINIMAL_AGENT)
+
+        result = extract_agents_to_canonical(tmp_path)
+
+        # Only "ok" imported; "-bad" skipped with invalid-name reason.
+        imported_names = sorted(p.stem for p in result.imported)
+        assert imported_names == ["ok"]
+        skipped_names = sorted(name for name, _ in result.skipped)
+        assert "-bad" in skipped_names
+        reason = dict(result.skipped)["-bad"]
+        assert "invalid name" in reason
 
 
 class TestDiffAgents:
