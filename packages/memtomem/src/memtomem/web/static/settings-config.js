@@ -18,7 +18,7 @@ const _CONFIG_LABELS = {
                 tokenizer: 'Tokenizer', rrf_weights: 'RRF Weights (BM25, Dense)' },
   decay:     { enabled: 'Enabled', half_life_days: 'Half-life (days)' },
   mmr:       { enabled: 'Enabled', lambda_param: 'Lambda' },
-  indexing:  { memory_dirs: 'Memory Dirs', supported_extensions: 'Extensions',
+  indexing:  { supported_extensions: 'Extensions',
                 max_chunk_tokens: 'Max Chunk Tokens', min_chunk_tokens: 'Min Chunk Tokens',
                 target_chunk_tokens: 'Target Chunk Tokens',
                 chunk_overlap_tokens: 'Chunk Overlap', structured_chunk_mode: 'Structured Chunk Mode' },
@@ -36,7 +36,12 @@ const _READONLY_FIELDS = {
 // Fields that use a custom widget which persists each change immediately
 // (not through the section-level Save button). The reset-to-default ↺ button
 // is a no-op for these, so suppress it to avoid a confusing disabled icon.
-const _NO_RESET_FIELDS = {
+const _NO_RESET_FIELDS = {};
+
+// Fields that the server config includes but the Config tab skips rendering
+// for — either because they are managed elsewhere in the UI (like the
+// Sources tab taking over ``memory_dirs``) or have no meaningful scalar form.
+const _HIDDEN_CONFIG_FIELDS = {
   indexing: new Set(['memory_dirs']),
 };
 
@@ -345,7 +350,9 @@ async function loadConfig() {
       const labels = _CONFIG_LABELS[section] || {};
       const readonlyFields = _READONLY_FIELDS[section] || new Set();
 
+      const hiddenFields = _HIDDEN_CONFIG_FIELDS[section] || new Set();
       Object.entries(values).forEach(([key, val]) => {
+        if (hiddenFields.has(key)) return;
         const fieldReadonly = isReadonly || readonlyFields.has(key);
         const label = labels[key] || key;
         const tr = document.createElement('tr');
@@ -380,6 +387,24 @@ async function loadConfig() {
       });
 
       card.appendChild(table);
+      if (section === 'indexing') {
+        const note = document.createElement('div');
+        note.className = 'config-breadcrumb';
+        const txt = document.createElement('span');
+        txt.textContent = t('settings.memory_dirs.moved_notice');
+        note.appendChild(txt);
+        note.appendChild(document.createTextNode(' '));
+        const link = document.createElement('a');
+        link.href = '#sources';
+        link.className = 'config-breadcrumb-link';
+        link.textContent = t('settings.memory_dirs.moved_notice_action');
+        link.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          activateTab('sources');
+        });
+        note.appendChild(link);
+        card.appendChild(note);
+      }
       card.addEventListener('mouseenter', () => _showConfigGuide(section));
       card.addEventListener('focusin', () => _showConfigGuide(section));
       contentEl.appendChild(card);
@@ -652,30 +677,7 @@ const _CONFIG_SELECT_OPTIONS = {
 const _CONFIG_CUSTOM_WIDGETS = {
   'search.rrf_weights': _buildRRFWeightsWidget,
   'indexing.exclude_patterns': _buildExcludePatternsWidget,
-  'indexing.memory_dirs': _buildMemoryDirsWidget,
 };
-
-// Categorize an absolute memory_dir path. Mirrors ``_detect_provider_dirs``
-// in config.py so the UI groups match the wizard's opt-in categories.
-function _categorizeMemoryDir(p) {
-  const s = String(p).replace(/\/+$/, '');
-  if (/\/\.claude\/projects\/[^/]+\/memory$/.test(s)) return 'claude-memory';
-  if (/\/\.claude\/plans$/.test(s)) return 'claude-plans';
-  if (/\/\.codex\/memories$/.test(s)) return 'codex';
-  return 'user';
-}
-
-const _MEMORY_DIR_CATEGORY_ORDER = ['user', 'claude-memory', 'claude-plans', 'codex'];
-const _MEMORY_DIR_CATEGORY_LABEL_KEY = {
-  'user': 'settings.memory_dirs.category.user',
-  'claude-memory': 'settings.memory_dirs.category.claude_memory',
-  'claude-plans': 'settings.memory_dirs.category.claude_plans',
-  'codex': 'settings.memory_dirs.category.codex',
-};
-// Categories that start collapsed. User is open by default because it's
-// usually short; Claude projects can have 20+ entries from the one-shot
-// ``auto_discover`` migration, so it's closed to keep the card short.
-const _MEMORY_DIR_CATEGORY_COLLAPSED = new Set(['claude-memory', 'claude-plans', 'codex']);
 
 // Cached {secret, noise} from GET /api/indexing/builtin-exclude-patterns.
 let _BUILTIN_EXCLUDE_PATTERNS = null;
@@ -907,327 +909,6 @@ function _resetExcludePatterns(comparandVal, listEl, addRow, syncHidden) {
   const patterns = Array.isArray(comparandVal) ? comparandVal : [];
   patterns.forEach(p => addRow(p));
   syncHidden();
-}
-
-function _buildMemoryDirsWidget(section, key, val) {
-  // memory_dirs uses a different editing model than the rest of the config
-  // card: each add/remove/reindex hits the server immediately (POST
-  // /api/memory-dirs/add, /remove, /reindex, /index). That's because these
-  // actions carry side effects beyond a config value (watcher schedule,
-  // DB chunk state) that need to land atomically on the server.
-  //
-  // Consequence: the widget intentionally returns NO input with
-  // ``data-section``/``data-key`` set, so it sits outside the per-section
-  // Save dirty/reset flow. ``_NO_RESET_FIELDS`` suppresses the reset button
-  // for the same reason.
-  //
-  // The widget also fetches ``GET /api/memory-dirs/status`` to display
-  // per-dir "(N chunks)" / "(not indexed)" badges so users can see which
-  // dirs still need a manual reindex. Indexing is pull-based — startup
-  // never walks memory_dirs, because 25+ provider dirs × thousands of .md
-  // files × ONNX embedding made the "log in and wait 2 minutes" UX
-  // unacceptable.
-  const wrap = document.createElement('div');
-  wrap.className = 'memory-dirs-widget';
-
-  let dirs = Array.isArray(val) ? [...val] : [];
-  // Keyed by the original (unresolved) path string the server returns in
-  // ``status.dirs[].path`` — matches what we display so lookups are O(1).
-  let statusByPath = {};
-  let statusLoaded = false;
-
-  function _apiErrorText(err) {
-    return (err && err.message) ? err.message : String(err);
-  }
-
-  async function fetchStatus() {
-    try {
-      const resp = await api('GET', '/api/memory-dirs/status');
-      const next = {};
-      for (const entry of (resp && resp.dirs) || []) {
-        if (entry && typeof entry.path === 'string') next[entry.path] = entry;
-      }
-      statusByPath = next;
-      statusLoaded = true;
-    } catch (err) {
-      // Non-fatal: badges stay hidden. Don't toast — status is ancillary.
-      console.warn('memory-dirs/status fetch failed:', err);
-      statusByPath = {};
-      statusLoaded = true;
-    }
-    render();
-  }
-
-  function refreshDirs(newDirs) {
-    if (Array.isArray(newDirs)) dirs = [...newDirs];
-    if (STATE.serverConfig?.indexing) {
-      STATE.serverConfig.indexing.memory_dirs = [...dirs];
-    }
-    render();
-    // Status is derived from the new dirs list — re-fetch so newly added
-    // (empty) dirs get a "(not indexed)" badge and removed dirs drop out.
-    fetchStatus();
-  }
-
-  async function handleAdd(path) {
-    const trimmed = path.trim();
-    if (!trimmed) return;
-    try {
-      const resp = await api('POST', '/api/memory-dirs/add', { path: trimmed });
-      if (resp && Array.isArray(resp.memory_dirs)) {
-        refreshDirs(resp.memory_dirs);
-      }
-      showToast(t('toast.memory_dir.added', { path: trimmed }), 'success');
-    } catch (err) {
-      showToast(t('toast.memory_dir.add_failed', { error: _apiErrorText(err) }), 'error');
-    }
-  }
-
-  async function handleRemove(path) {
-    const ok = await showConfirm({
-      title: t('confirm.memory_dir_remove_title'),
-      message: t('confirm.memory_dir_remove_msg', { path }),
-    });
-    if (!ok) return;
-    try {
-      const resp = await api('POST', '/api/memory-dirs/remove', { path });
-      if (resp && Array.isArray(resp.memory_dirs)) {
-        refreshDirs(resp.memory_dirs);
-      }
-      showToast(t('toast.memory_dir.removed', { path }), 'success');
-    } catch (err) {
-      showToast(t('toast.memory_dir.remove_failed', { error: _apiErrorText(err) }), 'error');
-    }
-  }
-
-  async function handleReindexOne(path, btn) {
-    if (btn) btnLoading(btn, true);
-    showToast(t('toast.memory_dir.reindex_started', { path }), 'info');
-    try {
-      const resp = await api(
-        'POST', '/api/index',
-        { path, recursive: true, force: false },
-        { timeout: 300_000 },
-      );
-      const count = (resp && resp.indexed_chunks) || 0;
-      showToast(
-        t('toast.memory_dir.reindex_done', { path, count }),
-        (resp && resp.errors && resp.errors.length) ? 'error' : 'success',
-      );
-      if (typeof _markDataStale === 'function') _markDataStale();
-      if (typeof loadStats === 'function') loadStats();
-    } catch (err) {
-      showToast(t('toast.memory_dir.reindex_failed', { error: _apiErrorText(err) }), 'error');
-    } finally {
-      if (btn) btnLoading(btn, false);
-      fetchStatus();
-    }
-  }
-
-  async function handleReindexGroup(category, btn) {
-    const targets = dirs.filter(d => _categorizeMemoryDir(d) === category);
-    if (!targets.length) return;
-    if (btn) btnLoading(btn, true);
-    try {
-      for (const path of targets) {
-        await handleReindexOne(path, null);
-      }
-    } finally {
-      if (btn) btnLoading(btn, false);
-    }
-  }
-
-  async function handleReindexAll(btn) {
-    if (btn) btnLoading(btn, true);
-    try {
-      const resp = await api('POST', '/api/reindex', undefined, { timeout: 300_000 });
-      if (resp.errors && resp.errors.length) {
-        showToast(
-          t('toast.reindex_partial', { count: resp.errors.length, first: resp.errors[0] }),
-          'error',
-        );
-      } else {
-        const total = (resp.results || []).reduce((s, r) => s + (r.indexed_chunks || 0), 0);
-        showToast(t('toast.reindex_complete', { count: total }), 'success');
-      }
-      if (typeof _markDataStale === 'function') _markDataStale();
-      if (typeof loadStats === 'function') loadStats();
-    } catch (err) {
-      showToast(t('toast.reindex_failed', { error: _apiErrorText(err) }), 'error');
-    } finally {
-      if (btn) btnLoading(btn, false);
-      fetchStatus();
-    }
-  }
-
-  function render() {
-    wrap.innerHTML = '';
-
-    // Top action bar: Reindex-all button.
-    const actions = document.createElement('div');
-    actions.className = 'memory-dirs-actions';
-    const reindexAllBtn = document.createElement('button');
-    reindexAllBtn.type = 'button';
-    reindexAllBtn.className = 'btn btn-sm btn-ghost';
-    reindexAllBtn.textContent = t('settings.memory_dirs.reindex_all');
-    reindexAllBtn.addEventListener('click', () => handleReindexAll(reindexAllBtn));
-    actions.appendChild(reindexAllBtn);
-    wrap.appendChild(actions);
-
-    // Group by category.
-    const byCategory = { 'user': [], 'claude-memory': [], 'claude-plans': [], 'codex': [] };
-    for (const d of dirs) {
-      const cat = _categorizeMemoryDir(d);
-      byCategory[cat].push(d);
-    }
-
-    for (const cat of _MEMORY_DIR_CATEGORY_ORDER) {
-      const entries = byCategory[cat];
-      if (!entries.length) continue;
-
-      const group = document.createElement('details');
-      group.className = 'memory-dirs-group';
-      group.dataset.category = cat;
-      if (!_MEMORY_DIR_CATEGORY_COLLAPSED.has(cat)) group.open = true;
-
-      // Group-level aggregate from status (if loaded).
-      let groupChunks = 0;
-      let groupFiles = 0;
-      let groupHasStatus = false;
-      for (const path of entries) {
-        const st = statusByPath[path];
-        if (st) {
-          groupHasStatus = true;
-          groupChunks += st.chunk_count || 0;
-          groupFiles += st.source_file_count || 0;
-        }
-      }
-
-      const summary = document.createElement('summary');
-      summary.className = 'memory-dirs-summary';
-      const label = document.createElement('span');
-      label.className = 'memory-dirs-summary-label';
-      label.textContent = `${t(_MEMORY_DIR_CATEGORY_LABEL_KEY[cat])} (${entries.length})`;
-      summary.appendChild(label);
-
-      if (statusLoaded && groupHasStatus) {
-        const groupBadge = document.createElement('span');
-        groupBadge.className = 'memory-dirs-status memory-dirs-status-group';
-        if (groupChunks === 0) groupBadge.classList.add('empty');
-        groupBadge.textContent = t(
-          'settings.memory_dirs.status_group',
-          { files: groupFiles, chunks: groupChunks },
-        );
-        summary.appendChild(groupBadge);
-      }
-
-      const groupReindex = document.createElement('button');
-      groupReindex.type = 'button';
-      groupReindex.className = 'btn btn-xs btn-ghost memory-dirs-group-reindex';
-      groupReindex.textContent = '↻';
-      groupReindex.title = t('settings.memory_dirs.reindex_group');
-      groupReindex.addEventListener('click', (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        handleReindexGroup(cat, groupReindex);
-      });
-      summary.appendChild(groupReindex);
-      group.appendChild(summary);
-
-      const list = document.createElement('ul');
-      list.className = 'memory-dirs-list';
-      if (cat === 'claude-memory') list.classList.add('memory-dirs-list-scroll');
-
-      for (const path of entries) {
-        const item = document.createElement('li');
-        item.className = 'memory-dirs-item';
-
-        const st = statusByPath[path];
-        if (statusLoaded && st) {
-          if (st.chunk_count === 0) item.classList.add('memory-dirs-item-empty');
-          if (st.exists === false) item.classList.add('memory-dirs-item-missing');
-        }
-
-        const pathSpan = document.createElement('span');
-        pathSpan.className = 'memory-dirs-path';
-        pathSpan.textContent = path;
-        pathSpan.title = path;
-        item.appendChild(pathSpan);
-
-        // Per-dir status badge. Rendered only once the fetch resolves so
-        // the initial paint doesn't flash "(not indexed)" for every row.
-        if (statusLoaded && st) {
-          const badge = document.createElement('span');
-          badge.className = 'memory-dirs-status';
-          if (st.exists === false) {
-            badge.classList.add('missing');
-            badge.textContent = t('settings.memory_dirs.status_missing');
-          } else if ((st.chunk_count || 0) === 0) {
-            badge.classList.add('empty');
-            badge.textContent = t('settings.memory_dirs.status_empty');
-          } else {
-            badge.textContent = t(
-              'settings.memory_dirs.status_chunks',
-              { count: st.chunk_count },
-            );
-          }
-          item.appendChild(badge);
-        }
-
-        const reindexBtn = document.createElement('button');
-        reindexBtn.type = 'button';
-        reindexBtn.className = 'btn btn-xs btn-ghost memory-dirs-reindex-btn';
-        reindexBtn.textContent = '↻';
-        reindexBtn.title = t('settings.memory_dirs.reindex_title');
-        reindexBtn.addEventListener('click', () => handleReindexOne(path, reindexBtn));
-        item.appendChild(reindexBtn);
-
-        const removeBtn = document.createElement('button');
-        removeBtn.type = 'button';
-        removeBtn.className = 'btn btn-xs btn-ghost memory-dirs-remove-btn';
-        removeBtn.textContent = '✕';
-        removeBtn.title = t('settings.memory_dirs.delete_title');
-        removeBtn.setAttribute('aria-label', t('settings.memory_dirs.delete_title'));
-        // Disable removing the last dir (server also enforces 400).
-        if (dirs.length <= 1) removeBtn.disabled = true;
-        removeBtn.addEventListener('click', () => handleRemove(path));
-        item.appendChild(removeBtn);
-
-        list.appendChild(item);
-      }
-      group.appendChild(list);
-      wrap.appendChild(group);
-    }
-
-    // Add-input row.
-    const addRow = document.createElement('div');
-    addRow.className = 'memory-dirs-add';
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.className = 'memory-dirs-add-input';
-    input.placeholder = t('settings.memory_dirs.add_placeholder');
-    const addBtn = document.createElement('button');
-    addBtn.type = 'button';
-    addBtn.className = 'btn btn-sm';
-    addBtn.textContent = t('settings.memory_dirs.add_btn');
-    addBtn.addEventListener('click', async () => {
-      const val = input.value;
-      input.value = '';
-      await handleAdd(val);
-    });
-    input.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter') { ev.preventDefault(); addBtn.click(); }
-    });
-    addRow.appendChild(input);
-    addRow.appendChild(addBtn);
-    wrap.appendChild(addRow);
-  }
-
-  render();
-  // Pull status asynchronously and re-render when it arrives. First paint
-  // shows the dir list immediately; badges appear when the fetch resolves.
-  fetchStatus();
-  return wrap;
 }
 
 function _buildConfigInput(section, key, val) {

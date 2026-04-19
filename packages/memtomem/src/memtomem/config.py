@@ -966,6 +966,13 @@ def _detect_provider_dirs() -> dict[str, list[Path]]:
     file ``~/.gemini/GEMINI.md`` (doesn't fit the directory abstraction)
     and the parent directory contains secrets like ``oauth_creds.json``.
     Use ``mm ingest gemini-memory`` for one-shot Gemini import instead.
+
+    .. warning::
+       The Web UI mirrors this categorization client-side in
+       ``web/static/sources-memory-dirs.js`` (``_categorizeMemoryDir``).
+       Keep the two in sync when adding a new category — consolidation
+       into a server-returned field on ``GET /api/memory-dirs/status``
+       is tracked in https://github.com/memtomem/memtomem/issues/299.
     """
     grouped: dict[str, list[Path]] = {cat: [] for cat in PROVIDER_DIR_CATEGORIES}
 

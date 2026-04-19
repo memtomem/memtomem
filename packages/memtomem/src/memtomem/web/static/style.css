@@ -975,8 +975,20 @@ button:active { opacity: 0.7; }
 .exclude-row-invalid { border-color: #b91c1c !important; }
 .exclude-remove-btn { min-width: 28px; padding: 2px 8px; }
 .exclude-add-btn { align-self: flex-start; font-size: 0.78rem; }
+.memory-dirs-panel { padding: 12px 16px; margin-bottom: 12px; }
+.memory-dirs-panel:empty { display: none; }
 .memory-dirs-widget { display: flex; flex-direction: column; gap: 8px; }
+.memory-dirs-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.memory-dirs-title { margin: 0; font-size: 0.95rem; }
 .memory-dirs-actions { display: flex; justify-content: flex-end; }
+.config-breadcrumb {
+  padding: 8px 16px; font-size: 0.82rem; color: var(--muted);
+  border-top: 1px solid var(--border);
+}
+.config-breadcrumb-link { color: var(--accent); text-decoration: none; }
+.config-breadcrumb-link:hover { text-decoration: underline; }
 .memory-dirs-group { border: 1px solid var(--border); border-radius: 4px; background: var(--bg); }
 .memory-dirs-summary {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;

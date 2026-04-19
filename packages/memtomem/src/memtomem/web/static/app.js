@@ -63,6 +63,15 @@ const STATE = {
     window.addEventListener('langchange', () => {
       if (typeof I18N !== 'undefined') I18N.applyDOM();
     });
+    // Activate tab from URL hash now that i18n has loaded — tabs that
+    // render JS-built UI (like the Sources tab's Memory Dirs panel) call
+    // ``t()`` at build time, so they must run after the locale cache is
+    // populated to avoid raw-key flashes.
+    const hash = location.hash.slice(1);
+    const validTabs = ['home', 'search', 'sources', 'index', 'tags', 'timeline', 'settings'];
+    if (hash && validTabs.includes(hash)) {
+      activateTab(hash);
+    }
   });
 })();
 
@@ -311,7 +320,11 @@ function activateTab(tabName) {
 
   // Tab-specific loads
   if (tabName === 'home') { STATE.homeStale = false; loadDashboard(); renderPinnedSection(); }
-  if (tabName === 'sources') { STATE.sourcesBrowserStale = false; loadSources(); }
+  if (tabName === 'sources') {
+    STATE.sourcesBrowserStale = false;
+    if (typeof renderMemoryDirsPanel === 'function') renderMemoryDirsPanel();
+    loadSources();
+  }
   if (tabName === 'index') loadStats();
   if (tabName === 'tags') { STATE.tagsTabStale = false; loadTags(); }
   if (tabName === 'timeline') loadTimeline();
@@ -464,16 +477,9 @@ qs('mobile-back-btn').addEventListener('click', () => {
 window.addEventListener('popstate', (e) => {
   if (e.state?.tab) activateTab(e.state.tab);
 });
-// Activate tab from URL hash on initial load (e.g. #sources).
-// Deferred until DOMContentLoaded so sibling scripts (settings-config.js, etc.)
-// have parsed — activateTab('settings') calls loadConfig() defined there.
-document.addEventListener('DOMContentLoaded', () => {
-  const hash = location.hash.slice(1);
-  const validTabs = ['home', 'search', 'sources', 'index', 'tags', 'timeline', 'settings'];
-  if (hash && validTabs.includes(hash)) {
-    activateTab(hash);
-  }
-});
+// Note: initial hash-based activateTab dispatch moved into the i18n init
+// handler above so ``t()``-backed JS widgets (Sources tab's Memory Dirs
+// panel) render with translated strings instead of raw keys.
 
 // ---------------------------------------------------------------------------
 // Stats
