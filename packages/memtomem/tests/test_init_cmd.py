@@ -960,6 +960,117 @@ class TestProviderDirsStep:
         assert data["indexing"]["auto_discover"] is False
 
 
+class TestCategorizeMemoryDir:
+    """Per-path classifier that powers both wizard grouping and the Web
+    UI's ``category`` field on ``GET /api/memory-dirs/status``."""
+
+    def test_claude_memory_per_project(self) -> None:
+        from memtomem.config import categorize_memory_dir
+
+        assert (
+            categorize_memory_dir("/home/alice/.claude/projects/my-proj/memory")
+            == "claude-memory"
+        )
+
+    def test_claude_plans(self) -> None:
+        from memtomem.config import categorize_memory_dir
+
+        assert categorize_memory_dir("/home/alice/.claude/plans") == "claude-plans"
+
+    def test_codex_memories(self) -> None:
+        from memtomem.config import categorize_memory_dir
+
+        assert categorize_memory_dir("/home/alice/.codex/memories") == "codex"
+
+    def test_trailing_slash_normalisation(self) -> None:
+        from memtomem.config import categorize_memory_dir
+
+        # Trailing slash(es) should not change the category.
+        assert categorize_memory_dir("/u/.codex/memories/") == "codex"
+        assert categorize_memory_dir("/u/.codex/memories///") == "codex"
+        assert categorize_memory_dir("/u/.claude/plans/") == "claude-plans"
+
+    def test_user_fallback(self) -> None:
+        from memtomem.config import categorize_memory_dir
+
+        assert categorize_memory_dir("/home/alice/notes") == "user"
+        assert categorize_memory_dir("/srv/shared/memory") == "user"
+
+    def test_lookalike_paths_do_not_match(self) -> None:
+        """Paths that mention ``claude``/``codex`` but aren't the canonical
+        provider layout must stay in ``user`` — classification is anchored
+        at the end of the path, not a substring match."""
+        from memtomem.config import categorize_memory_dir
+
+        # Looks like a provider path but isn't — user took a backup/copy.
+        assert categorize_memory_dir("/archive/.codex/memories-backup") == "user"
+        # No leading dot — not the real ``.claude`` dir.
+        assert categorize_memory_dir("/work/claude/plans/foo") == "user"
+        # Extra suffix past the canonical name.
+        assert categorize_memory_dir("/u/.claude/plans/2024") == "user"
+
+    def test_pathlib_input(self, tmp_path: Path) -> None:
+        """Accepts ``Path`` as well as ``str`` — the indexing stats call
+        passes whatever is in the config list through verbatim."""
+        from memtomem.config import categorize_memory_dir
+
+        p = Path("/u/.codex/memories")
+        assert categorize_memory_dir(p) == "codex"
+        assert categorize_memory_dir(tmp_path) == "user"
+
+    def test_provider_categories_tuple_is_derived(self) -> None:
+        """Belt-and-suspenders: the exported category tuple is built from
+        the same pattern table, so adding a row can't silently diverge."""
+        from memtomem.config import (
+            PROVIDER_DIR_CATEGORIES,
+            _PROVIDER_CATEGORY_PATTERNS,
+        )
+
+        assert PROVIDER_DIR_CATEGORIES == tuple(
+            cat for cat, _ in _PROVIDER_CATEGORY_PATTERNS
+        )
+
+
+class TestDetectProviderDirsRoundtrip:
+    """Drift guard: every path ``_detect_provider_dirs`` returns must
+    classify back to the same category via ``categorize_memory_dir``.
+
+    Without this, the "single source of truth" claim of issue #299 is
+    only enforced by code review — exactly the pattern called out in
+    ``feedback_silent_policy_enforcement_gap.md``.
+    """
+
+    def test_roundtrip_over_all_categories(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.config import _detect_provider_dirs, categorize_memory_dir
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        # Populate one entry per category so every branch of detection
+        # fires and every resulting Path goes through the classifier.
+        proj_mem = tmp_path / ".claude" / "projects" / "demo" / "memory"
+        proj_mem.mkdir(parents=True)
+        (proj_mem / "note.md").write_text("x", encoding="utf-8")
+        plans = tmp_path / ".claude" / "plans"
+        plans.mkdir(parents=True)
+        codex = tmp_path / ".codex" / "memories"
+        codex.mkdir(parents=True)
+
+        grouped = _detect_provider_dirs()
+
+        seen_any = False
+        for expected_cat, paths in grouped.items():
+            for p in paths:
+                seen_any = True
+                assert categorize_memory_dir(p) == expected_cat, (
+                    f"_detect_provider_dirs bucketed {p!r} as {expected_cat!r} "
+                    f"but categorize_memory_dir classifies it as "
+                    f"{categorize_memory_dir(p)!r}"
+                )
+        assert seen_any, "fixture should produce at least one discovered dir"
+
+
 class TestIncludeProviderFlag:
     """Non-interactive ``--include-provider`` wires categories into
     ``indexing.memory_dirs`` without prompting."""

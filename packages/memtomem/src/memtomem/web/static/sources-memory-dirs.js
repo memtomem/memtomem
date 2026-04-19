@@ -10,19 +10,11 @@
  * Depends on globals from app.js (api, showToast, showConfirm, t, qs,
  * STATE, btnLoading, loadStats). Loaded AFTER app.js.
  *
- * Categorization mirrors ``_detect_provider_dirs`` in ``config.py``;
- * keep the two in sync when adding a new provider category.
- * Consolidation into a server-returned field is tracked in
- * https://github.com/memtomem/memtomem/issues/299.
+ * Classification is now server-owned: each entry on
+ * ``GET /api/memory-dirs/status`` carries a ``category`` field produced
+ * by ``categorize_memory_dir`` in ``config.py``. The constants below are
+ * presentation-only (group order, i18n label keys, default-collapse set).
  */
-
-function _categorizeMemoryDir(p) {
-  const s = String(p).replace(/\/+$/, '');
-  if (/\/\.claude\/projects\/[^/]+\/memory$/.test(s)) return 'claude-memory';
-  if (/\/\.claude\/plans$/.test(s)) return 'claude-plans';
-  if (/\/\.codex\/memories$/.test(s)) return 'codex';
-  return 'user';
-}
 
 const _MEMORY_DIR_CATEGORY_ORDER = ['user', 'claude-memory', 'claude-plans', 'codex'];
 const _MEMORY_DIR_CATEGORY_LABEL_KEY = {
@@ -253,7 +245,13 @@ function _buildMemoryDirsPanel(initialDirs) {
 
     const byCategory = { 'user': [], 'claude-memory': [], 'claude-plans': [], 'codex': [] };
     for (const d of dirs) {
-      const cat = _categorizeMemoryDir(d);
+      // Server classifies via ``categorize_memory_dir`` and returns the
+      // result on ``/api/memory-dirs/status``. Before that fetch resolves
+      // (first paint / transient error) we fall back to ``user`` so the
+      // group layout renders without crashing; the next render settles
+      // each entry into its proper group.
+      const st = statusByPath[d];
+      const cat = (st && byCategory[st.category]) ? st.category : 'user';
       byCategory[cat].push(d);
     }
 

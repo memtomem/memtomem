@@ -1259,6 +1259,30 @@ class TestMemoryDirStats:
         assert result[0]["exists"] is True
         assert result[0]["chunk_count"] == 0
         assert result[0]["source_file_count"] == 0
+        # ``category`` is always present so the Web UI never has to guess
+        # whether the server supplied it.
+        assert result[0]["category"] == "user"
+
+    async def test_category_reflects_provider_layout(self, tmp_path):
+        """A mix of provider-shaped and user paths produces the right
+        ``category`` on each entry — the Web UI consumes this verbatim
+        instead of running its own regex."""
+        from memtomem.indexing.engine import memory_dir_stats
+
+        user = tmp_path / "notes"
+        codex = tmp_path / ".codex" / "memories"
+        plans = tmp_path / ".claude" / "plans"
+        claude_mem = tmp_path / ".claude" / "projects" / "demo" / "memory"
+        for d in (user, codex, plans, claude_mem):
+            d.mkdir(parents=True)
+
+        storage = _FakeStorageForStats([])
+        result = await memory_dir_stats(storage, [user, codex, plans, claude_mem])
+        by_path = {r["path"]: r["category"] for r in result}
+        assert by_path[str(user)] == "user"
+        assert by_path[str(codex)] == "codex"
+        assert by_path[str(plans)] == "claude-plans"
+        assert by_path[str(claude_mem)] == "claude-memory"
 
     async def test_dir_with_indexed_files_is_aggregated(self, tmp_path):
         from memtomem.indexing.engine import memory_dir_stats
