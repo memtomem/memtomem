@@ -16,7 +16,10 @@ const I18N = (() => {
 
   async function _load(lang) {
     if (_cache[lang]) return;
-    const resp = await fetch(`/locales/${lang}.json`);
+    // Bypass browser cache — locale JSON has no versioning in the URL,
+    // and a stale cached file after a key rename / addition makes ``t()``
+    // fall through to the raw-key fallback for the new keys.
+    const resp = await fetch(`/locales/${lang}.json`, { cache: 'no-store' });
     if (!resp.ok) { console.warn(`[i18n] failed to load ${lang}`); return; }
     _cache[lang] = await resp.json();
   }
