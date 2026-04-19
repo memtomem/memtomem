@@ -192,17 +192,19 @@ def _safe_load_json(path: Path) -> dict | object:
         return _MALFORMED
 
 
-def _read_with_mtime(path: Path) -> tuple[dict | None | object, float]:
-    """Read JSON + capture mtime for concurrent-write guard.
+def _read_with_mtime(path: Path) -> tuple[dict | None | object, int]:
+    """Read JSON + capture mtime in nanoseconds for concurrent-write guard.
 
-    Returns ``(None, 0.0)`` when *path* does not exist and
-    ``(_MALFORMED, mtime)`` when the file is not valid JSON.
+    Returns ``(None, 0)`` when *path* does not exist and
+    ``(_MALFORMED, mtime_ns)`` when the file is not valid JSON. Nanosecond
+    precision matches :mod:`memtomem.web.hot_reload` and detects
+    sub-second writes that ``st_mtime`` (float seconds) misses.
     """
     if not path.is_file():
-        return None, 0.0
-    mtime = path.stat().st_mtime
+        return None, 0
+    mtime_ns = path.stat().st_mtime_ns
     data = _safe_load_json(path)
-    return data, mtime
+    return data, mtime_ns
 
 
 def _write_json(path: Path, data: dict) -> None:
@@ -247,8 +249,8 @@ def generate_all_settings(
 
         target_path = gen.target_file(project_root)
 
-        # Step 1: read existing + capture mtime
-        existing_raw, existing_mtime = _read_with_mtime(target_path)
+        # Step 1: read existing + capture mtime (ns)
+        existing_raw, existing_mtime_ns = _read_with_mtime(target_path)
         if existing_raw is _MALFORMED:
             results[name] = SettingsSyncResult(
                 status="error",
@@ -263,7 +265,7 @@ def generate_all_settings(
         merged, warnings = gen.merge(existing, contributions)
 
         # Step 3: mtime check (concurrent-write guard)
-        if target_path.is_file() and target_path.stat().st_mtime != existing_mtime:
+        if target_path.is_file() and target_path.stat().st_mtime_ns != existing_mtime_ns:
             results[name] = SettingsSyncResult(
                 status="aborted",
                 reason=f"{target_path} was modified by another "

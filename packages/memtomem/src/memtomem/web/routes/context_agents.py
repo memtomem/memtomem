@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -21,6 +22,7 @@ from memtomem.context.agents import (
     parse_canonical_agent,
 )
 from memtomem.web.deps import get_project_root
+from memtomem.web.routes._locks import _gateway_lock
 
 logger = logging.getLogger(__name__)
 
@@ -191,11 +193,16 @@ async def create_agent(
     agent_path = _validate_name(body.name, project_root)
     if agent_path is None:
         raise ValueError(f"Invalid agent name: {body.name}")
-    if agent_path.exists():
-        raise ValueError(f"Agent '{body.name}' already exists")
 
-    agent_path.parent.mkdir(parents=True, exist_ok=True)
-    agent_path.write_text(body.content, encoding="utf-8")
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                if agent_path.exists():
+                    raise ValueError(f"Agent '{body.name}' already exists")
+                agent_path.parent.mkdir(parents=True, exist_ok=True)
+                agent_path.write_text(body.content, encoding="utf-8")
+    except TimeoutError:
+        raise HTTPException(503, "Agent create timed out — another sync may be in progress")
     return {"name": body.name, "canonical_path": str(agent_path.relative_to(project_root))}
 
 
@@ -322,7 +329,12 @@ async def sync_agents(
     project_root: Path = Depends(get_project_root),
 ) -> dict:
     on_drop = body.on_drop if body else "warn"
-    result = generate_all_agents(project_root, on_drop=on_drop)
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                result = generate_all_agents(project_root, on_drop=on_drop)
+    except TimeoutError:
+        raise HTTPException(503, "Agents sync timed out — another sync may be in progress")
 
     def _safe_rel(p: Path) -> str:
         try:
@@ -352,7 +364,12 @@ async def import_agents(
     project_root: Path = Depends(get_project_root),
 ) -> dict:
     overwrite = body.overwrite if body else False
-    result = extract_agents_to_canonical(project_root, overwrite=overwrite)
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                result = extract_agents_to_canonical(project_root, overwrite=overwrite)
+    except TimeoutError:
+        raise HTTPException(503, "Agents import timed out — another sync may be in progress")
     return {
         "imported": [
             {"name": p.stem, "canonical_path": str(p.relative_to(project_root))}
