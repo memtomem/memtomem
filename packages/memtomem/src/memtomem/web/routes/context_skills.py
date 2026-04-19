@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -20,6 +21,7 @@ from memtomem.context.skills import (
     list_canonical_skills,
 )
 from memtomem.web.deps import get_project_root
+from memtomem.web.routes._locks import _gateway_lock
 
 logger = logging.getLogger(__name__)
 
@@ -134,12 +136,17 @@ async def create_skill(
     skill_dir = _validate_name(body.name, project_root)
     if skill_dir is None:
         raise ValueError(f"Invalid skill name: {body.name}")
-    if skill_dir.exists():
-        raise ValueError(f"Skill '{body.name}' already exists")
 
-    skill_dir.mkdir(parents=True)
-    manifest = skill_dir / SKILL_MANIFEST
-    manifest.write_text(body.content, encoding="utf-8")
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                if skill_dir.exists():
+                    raise ValueError(f"Skill '{body.name}' already exists")
+                skill_dir.mkdir(parents=True)
+                manifest = skill_dir / SKILL_MANIFEST
+                manifest.write_text(body.content, encoding="utf-8")
+    except TimeoutError:
+        raise HTTPException(503, "Skill create timed out — another sync may be in progress")
     return {"name": body.name, "canonical_path": str(skill_dir.relative_to(project_root))}
 
 
@@ -274,7 +281,12 @@ async def sync_skills(
     project_root: Path = Depends(get_project_root),
 ) -> dict:
     """Fan out canonical skills to all runtimes."""
-    result = generate_all_skills(project_root)
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                result = generate_all_skills(project_root)
+    except TimeoutError:
+        raise HTTPException(503, "Skills sync timed out — another sync may be in progress")
     return {
         "generated": [
             {"runtime": rt, "path": str(p.relative_to(project_root))} for rt, p in result.generated
@@ -297,7 +309,12 @@ async def import_skills(
 ) -> dict:
     """Import runtime skills into canonical .memtomem/skills/."""
     overwrite = body.overwrite if body else False
-    result = extract_skills_to_canonical(project_root, overwrite=overwrite)
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                result = extract_skills_to_canonical(project_root, overwrite=overwrite)
+    except TimeoutError:
+        raise HTTPException(503, "Skills import timed out — another sync may be in progress")
     return {
         "imported": [
             {"name": p.name, "canonical_path": str(p.relative_to(project_root))}

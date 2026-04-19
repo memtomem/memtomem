@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from memtomem.context.settings import (
     generate_all_settings,
 )
 from memtomem.web.deps import get_project_root
+from memtomem.web.routes._locks import _gateway_lock
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +149,12 @@ async def apply_settings_sync(
     project_root: Path = Depends(get_project_root),
 ) -> dict:
     """Run the full settings merge (generate_all_settings)."""
-    results = generate_all_settings(project_root)
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                results = generate_all_settings(project_root)
+    except TimeoutError:
+        raise HTTPException(503, "Settings sync timed out — another sync may be in progress")
     out: list[dict] = []
     for name, r in results.items():
         out.append(
@@ -183,55 +190,66 @@ async def resolve_conflict(
     canonical_path = project_root / CANONICAL_SETTINGS_FILE
     target_path = _claude_target()
 
-    # Read canonical rule
-    if not canonical_path.is_file():
-        raise HTTPException(404, detail="Canonical source does not exist")
-    canonical = _safe_load_json(canonical_path)
-    if not isinstance(canonical, dict):
-        raise HTTPException(422, detail="Canonical source is not valid JSON")
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                # Read canonical rule
+                if not canonical_path.is_file():
+                    raise HTTPException(404, detail="Canonical source does not exist")
+                canonical = _safe_load_json(canonical_path)
+                if not isinstance(canonical, dict):
+                    raise HTTPException(422, detail="Canonical source is not valid JSON")
 
-    proposed = None
-    canonical_hooks: dict = canonical.get("hooks", {})
-    for rule in canonical_hooks.get(body.event, []):
-        if isinstance(rule, dict) and rule.get("matcher", "") == body.matcher:
-            proposed = rule
-            break
-    if proposed is None:
-        raise HTTPException(404, detail=f"Rule '{label}' not in canonical source")
+                proposed = None
+                canonical_hooks: dict = canonical.get("hooks", {})
+                for rule in canonical_hooks.get(body.event, []):
+                    if isinstance(rule, dict) and rule.get("matcher", "") == body.matcher:
+                        proposed = rule
+                        break
+                if proposed is None:
+                    raise HTTPException(404, detail=f"Rule '{label}' not in canonical source")
 
-    # Read target + mtime guard
-    if not target_path.is_file():
-        raise HTTPException(404, detail="Target settings file does not exist")
+                # Read target + mtime guard. ``st_mtime_ns`` matches
+                # ``hot_reload.py`` precision and detects sub-second writes
+                # that ``st_mtime`` (float seconds) misses.
+                if not target_path.is_file():
+                    raise HTTPException(404, detail="Target settings file does not exist")
 
-    mtime = target_path.stat().st_mtime
-    target = _safe_load_json(target_path)
-    if not isinstance(target, dict):
-        raise HTTPException(422, detail="Target settings is not valid JSON")
+                mtime_ns = target_path.stat().st_mtime_ns
+                target = _safe_load_json(target_path)
+                if not isinstance(target, dict):
+                    raise HTTPException(422, detail="Target settings is not valid JSON")
 
-    # Replace the rule in-place
-    target_hooks: dict = target.get("hooks", {})
-    if not isinstance(target_hooks, dict):
-        raise HTTPException(422, detail="Target hooks is not a record")
+                # Replace the rule in-place
+                target_hooks: dict = target.get("hooks", {})
+                if not isinstance(target_hooks, dict):
+                    raise HTTPException(422, detail="Target hooks is not a record")
 
-    rules = target_hooks.get(body.event, [])
-    replaced = False
-    for i, rule in enumerate(rules):
-        if isinstance(rule, dict) and rule.get("matcher", "") == body.matcher:
-            rules[i] = proposed
-            replaced = True
-            break
+                rules = target_hooks.get(body.event, [])
+                replaced = False
+                for i, rule in enumerate(rules):
+                    if isinstance(rule, dict) and rule.get("matcher", "") == body.matcher:
+                        rules[i] = proposed
+                        replaced = True
+                        break
 
-    if not replaced:
-        raise HTTPException(404, detail=f"Rule '{label}' not found in target")
+                if not replaced:
+                    raise HTTPException(404, detail=f"Rule '{label}' not found in target")
 
-    # mtime check before write
-    if target_path.stat().st_mtime != mtime:
-        return {
-            "status": "aborted",
-            "reason": "Target file was modified by another process. Retry.",
-        }
+                # mtime check before write — protects against cross-process
+                # writers (CLI, manual edit) that the in-process lock can't see.
+                if target_path.stat().st_mtime_ns != mtime_ns:
+                    return {
+                        "status": "aborted",
+                        "reason": "Target file was modified by another process. Retry.",
+                    }
 
-    target_hooks[body.event] = rules
-    target["hooks"] = target_hooks
-    _write_json(target_path, target)
-    return {"status": "ok", "reason": f"Rule '{label}' replaced with memtomem's version"}
+                target_hooks[body.event] = rules
+                target["hooks"] = target_hooks
+                _write_json(target_path, target)
+                return {
+                    "status": "ok",
+                    "reason": f"Rule '{label}' replaced with memtomem's version",
+                }
+    except TimeoutError:
+        raise HTTPException(503, "Resolve timed out — another sync may be in progress")

@@ -27,6 +27,7 @@ from memtomem.web.deps import (
     get_search_pipeline,
     get_storage,
 )
+from memtomem.web.routes._locks import _config_lock
 from memtomem.web.schemas.config import (
     BuiltinExcludePatternsResponse,
     ConfigDecayOut,
@@ -57,12 +58,6 @@ from memtomem.web.schemas.sources import StatsResponse
 logger = logging.getLogger(__name__)
 
 _LOCALHOST_ADDRS = {"127.0.0.1", "::1", "localhost"}
-# Guards every write path that touches ``~/.memtomem/config.json`` and/or
-# mutates ``app.state.config``. Before #258+#259 this was PATCH-only
-# (``_config_patch_lock``); hot-reload extends it to /config/save,
-# /memory-dirs/add, and /memory-dirs/remove so a concurrent disk edit + UI
-# save can't interleave.
-_config_lock = _asyncio.Lock()
 
 
 def _check_reload_block(request: Request) -> None:

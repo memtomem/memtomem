@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -20,6 +21,7 @@ from memtomem.context.commands import (
     parse_canonical_command,
 )
 from memtomem.web.deps import get_project_root
+from memtomem.web.routes._locks import _gateway_lock
 
 logger = logging.getLogger(__name__)
 
@@ -172,11 +174,16 @@ async def create_command(
     cmd_path = _validate_name(body.name, project_root)
     if cmd_path is None:
         raise ValueError(f"Invalid command name: {body.name}")
-    if cmd_path.exists():
-        raise ValueError(f"Command '{body.name}' already exists")
 
-    cmd_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd_path.write_text(body.content, encoding="utf-8")
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                if cmd_path.exists():
+                    raise ValueError(f"Command '{body.name}' already exists")
+                cmd_path.parent.mkdir(parents=True, exist_ok=True)
+                cmd_path.write_text(body.content, encoding="utf-8")
+    except TimeoutError:
+        raise HTTPException(503, "Command create timed out — another sync may be in progress")
     return {"name": body.name, "canonical_path": str(cmd_path.relative_to(project_root))}
 
 
@@ -305,7 +312,12 @@ async def sync_commands(
     project_root: Path = Depends(get_project_root),
 ) -> dict:
     on_drop = body.on_drop if body else "warn"
-    result = generate_all_commands(project_root, on_drop=on_drop)
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                result = generate_all_commands(project_root, on_drop=on_drop)
+    except TimeoutError:
+        raise HTTPException(503, "Commands sync timed out — another sync may be in progress")
     return {
         "generated": [
             {"runtime": rt, "path": str(p.relative_to(project_root))}
@@ -345,7 +357,12 @@ async def import_commands(
     project_root: Path = Depends(get_project_root),
 ) -> dict:
     overwrite = body.overwrite if body else False
-    result = extract_commands_to_canonical(project_root, overwrite=overwrite)
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                result = extract_commands_to_canonical(project_root, overwrite=overwrite)
+    except TimeoutError:
+        raise HTTPException(503, "Commands import timed out — another sync may be in progress")
     return {
         "imported": [
             {"name": p.stem, "canonical_path": str(p.relative_to(project_root))}
