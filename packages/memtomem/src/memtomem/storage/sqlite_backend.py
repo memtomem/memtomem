@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -41,6 +42,24 @@ from memtomem.storage.sqlite_schema import create_tables
 logger = logging.getLogger(__name__)
 
 __all__ = ["SqliteBackend", "validate_namespace"]
+
+
+# Batch size for streaming rebuild_fts — bounds peak memory regardless of
+# corpus size (issue #278). 1000 rows × typical chunk width stays well under
+# a megabyte while keeping round-trip overhead negligible.
+_REBUILD_FTS_BATCH_SIZE = 1000
+
+
+def _rebuild_fts_retrieval(content: str, hierarchy_json: str) -> str:
+    """Prefix ``content`` with its heading hierarchy for FTS indexing."""
+    if hierarchy_json:
+        try:
+            h = json.loads(hierarchy_json)
+            if h:
+                return " > ".join(h) + "\n\n" + content
+        except (ValueError, TypeError):
+            pass
+    return content
 
 
 class SqliteBackend(
@@ -570,33 +589,56 @@ class SqliteBackend(
         """Rebuild the FTS5 index from chunks table using current tokenizer.
 
         Returns the number of rows rebuilt.
+
+        Runs the heavy I/O in a worker thread via :func:`asyncio.to_thread`
+        so the event loop stays responsive during the rebuild, and streams
+        rows in batches of ``_REBUILD_FTS_BATCH_SIZE`` so memory stays bounded
+        even for corpora with hundreds of thousands of chunks (issue #278).
+        The worker opens its own writer connection against the same SQLite
+        file; WAL + SQLite's file-level lock serialise it against writes on
+        the main connection, so the rebuild is atomic and independent of any
+        transaction the main connection may hold.
         """
-        db = self._db
-        assert db is not None
-        db.execute("DELETE FROM chunks_fts")
-        rows = db.execute(
-            "SELECT rowid, content, source_file, heading_hierarchy FROM chunks"
-        ).fetchall()
-        if rows:
+        assert self._db is not None
+        db_path = str(Path(self._config.sqlite_path).expanduser())
 
-            def _retrieval(content: str, hierarchy_json: str) -> str:
-                if hierarchy_json:
-                    import json as _json
+        def _run() -> int:
+            conn = sqlite3.connect(db_path, timeout=10)
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("DELETE FROM chunks_fts")
+                cursor = conn.execute(
+                    "SELECT rowid, content, source_file, heading_hierarchy FROM chunks"
+                )
+                total = 0
+                try:
+                    while True:
+                        batch = cursor.fetchmany(_REBUILD_FTS_BATCH_SIZE)
+                        if not batch:
+                            break
+                        conn.executemany(
+                            "INSERT INTO chunks_fts(rowid, content, source_file) VALUES (?,?,?)",
+                            [
+                                (
+                                    r[0],
+                                    _fts.tokenize_for_fts(_rebuild_fts_retrieval(r[1], r[3])),
+                                    r[2],
+                                )
+                                for r in batch
+                            ],
+                        )
+                        total += len(batch)
+                finally:
+                    cursor.close()
+                conn.commit()
+                return total
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
 
-                    try:
-                        h = _json.loads(hierarchy_json)
-                        if h:
-                            return " > ".join(h) + "\n\n" + content
-                    except (ValueError, TypeError):
-                        pass
-                return content
-
-            db.executemany(
-                "INSERT INTO chunks_fts(rowid, content, source_file) VALUES (?,?,?)",
-                [(r[0], _fts.tokenize_for_fts(_retrieval(r[1], r[3])), r[2]) for r in rows],
-            )
-        db.commit()
-        return len(rows)
+        return await asyncio.to_thread(_run)
 
     async def get_embeddings_for_chunks(self, chunk_ids: list[str]) -> dict[str, list[float]]:
         """Fetch embeddings for a list of chunk IDs. Returns {id: embedding}."""

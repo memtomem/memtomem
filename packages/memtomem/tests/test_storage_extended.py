@@ -137,6 +137,32 @@ class TestStorageExtended:
         count = await storage.rebuild_fts()
         assert count == 4
 
+    async def test_rebuild_fts_streams_across_batch_boundary(
+        self, components, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Corpora larger than ``_REBUILD_FTS_BATCH_SIZE`` rebuild correctly
+        (regression guard for the streaming implementation, issue #278).
+
+        Shrinks the batch size so we can cross the boundary with a small
+        corpus without slowing the test down.
+        """
+        from memtomem.storage import sqlite_backend
+
+        monkeypatch.setattr(sqlite_backend, "_REBUILD_FTS_BATCH_SIZE", 3)
+
+        storage = components.storage
+        chunks = [
+            make_chunk(content=f"streamed giraffe {i}", source=f"batch{i}.md") for i in range(10)
+        ]
+        await storage.upsert_chunks(chunks)
+
+        count = await storage.rebuild_fts()
+        assert count == 10
+
+        # Searchability must hold across the batch boundary.
+        results = await storage.bm25_search("giraffe", top_k=10)
+        assert len(results) >= 1
+
     # ---- get_chunk_hashes ----------------------------------------------------
 
     async def test_get_chunk_hashes_returns_mapping(self, components):

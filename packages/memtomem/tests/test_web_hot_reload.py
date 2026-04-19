@@ -706,6 +706,147 @@ class TestApplyRuntimeConfigChanges:
         search_pipeline.invalidate_cache.assert_called_once()
 
 
+class TestScheduleFtsRebuildCoalescing:
+    """Singleton + coalescing for back-to-back tokenizer changes (issue #278).
+
+    These tests exercise ``_schedule_fts_rebuild`` directly so we can gate
+    the "in flight" window with an ``asyncio.Event``; using the public
+    ``apply_runtime_config_changes`` would still reach the same code path
+    but leaves less room to pin timing.
+    """
+
+    def _make_app(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(state=SimpleNamespace())
+
+    async def test_back_to_back_calls_coalesce_into_one_pending(self):
+        """Calls that land while a rebuild is in flight collapse into a single
+        follow-up rebuild using the most recent tokenizer (not one per call).
+        """
+        gate = asyncio.Event()
+        call_tokenizers: list[str] = []
+
+        async def _slow_rebuild():
+            # Snapshot "who ran" by reading the task-local state via the
+            # follow-up tokenizer the scheduler passes into _run_one. We
+            # can't intercept the argument directly (closure), so we use the
+            # number of calls as a proxy and assert pending transitions.
+            call_tokenizers.append("running")
+            await gate.wait()
+            return 0
+
+        storage = AsyncMock()
+        storage.rebuild_fts = _slow_rebuild
+
+        app = self._make_app()
+
+        # First call → starts a real task (gated).
+        _hot_reload._schedule_fts_rebuild(storage, "unicode61", app=app)
+        await asyncio.sleep(0)  # let task start + enter wait()
+
+        first_task = app.state.fts_rebuild_task
+        assert first_task is not None
+        assert not first_task.done()
+
+        # Second call lands while first is in flight → should coalesce.
+        _hot_reload._schedule_fts_rebuild(storage, "kiwipiepy", app=app)
+        assert app.state.fts_rebuild_task is first_task, "must not replace in-flight task"
+        assert app.state.fts_rebuild_pending == "kiwipiepy"
+
+        # Third call also coalesces — overwriting pending with the latest.
+        _hot_reload._schedule_fts_rebuild(storage, "unicode61", app=app)
+        assert app.state.fts_rebuild_task is first_task
+        assert app.state.fts_rebuild_pending == "unicode61"
+
+        # Release the gate — the first rebuild completes, then the coalesced
+        # follow-up runs once, then the loop exits.
+        gate.set()
+        await asyncio.wait_for(first_task, timeout=1.0)
+
+        # Exactly two rebuild passes: the original + one coalesced.
+        assert len(call_tokenizers) == 2, call_tokenizers
+        assert app.state.fts_rebuild_pending is None
+
+    async def test_rebuilds_do_not_run_in_parallel(self):
+        """Even with many rapid calls, rebuild intervals never overlap."""
+        intervals: list[tuple[float, float]] = []
+
+        async def _rebuild():
+            start = asyncio.get_event_loop().time()
+            # Tiny sleep to make overlap detectable if it were to happen.
+            await asyncio.sleep(0.02)
+            intervals.append((start, asyncio.get_event_loop().time()))
+            return 0
+
+        storage = AsyncMock()
+        storage.rebuild_fts = _rebuild
+
+        app = self._make_app()
+
+        for tok in ("a", "b", "c", "d"):
+            _hot_reload._schedule_fts_rebuild(storage, tok, app=app)
+            await asyncio.sleep(0)
+
+        # Wait for the running task chain to complete.
+        task = app.state.fts_rebuild_task
+        assert task is not None
+        await asyncio.wait_for(task, timeout=2.0)
+
+        # No overlap: each interval ends before the next begins.
+        intervals.sort()
+        for (s1, e1), (s2, _e2) in zip(intervals, intervals[1:]):
+            assert e1 <= s2, f"overlap: {(s1, e1)} vs {(s2, _e2)}"
+        # At most 2 rebuilds: the first + one coalesced follow-up covering
+        # everything queued after it (not one per call).
+        assert len(intervals) <= 2
+
+    async def test_finished_task_allows_new_rebuild(self):
+        """After the prior rebuild task is done, a new call starts a fresh one."""
+        count = 0
+
+        async def _rebuild():
+            nonlocal count
+            count += 1
+            return 0
+
+        storage = AsyncMock()
+        storage.rebuild_fts = _rebuild
+
+        app = self._make_app()
+
+        _hot_reload._schedule_fts_rebuild(storage, "a", app=app)
+        await asyncio.wait_for(app.state.fts_rebuild_task, timeout=1.0)
+        assert count == 1
+        first_task = app.state.fts_rebuild_task
+
+        _hot_reload._schedule_fts_rebuild(storage, "b", app=app)
+        await asyncio.wait_for(app.state.fts_rebuild_task, timeout=1.0)
+        assert count == 2
+        assert app.state.fts_rebuild_task is not first_task
+
+    async def test_legacy_call_without_app_preserves_fire_and_forget(self):
+        """Callers that don't pass ``app`` still get the old non-tracked behavior."""
+        calls = []
+
+        async def _rebuild():
+            calls.append(1)
+            return 0
+
+        storage = AsyncMock()
+        storage.rebuild_fts = _rebuild
+
+        _hot_reload._schedule_fts_rebuild(storage, "x")
+        _hot_reload._schedule_fts_rebuild(storage, "y")
+        # Let both scheduled tasks run.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        # Without coalescing both run — acceptable as legacy behavior.
+        assert len(calls) == 2
+
+
 # ---------------------------------------------------------------------------
 # Mutex guard: the lock rename must keep the public name stable for other
 # call sites that may import it. Regression guard against silent drift.

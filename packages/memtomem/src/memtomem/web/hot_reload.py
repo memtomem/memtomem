@@ -262,7 +262,7 @@ def reload_if_stale(
 
     if old_cfg is not None and (storage is not None or search_pipeline is not None):
         apply_runtime_config_changes(
-            old_cfg, new_cfg, storage=storage, search_pipeline=search_pipeline
+            old_cfg, new_cfg, storage=storage, search_pipeline=search_pipeline, app=app
         )
 
     logger.info("Hot-reloaded config from %s", _override_path())
@@ -280,6 +280,7 @@ def apply_runtime_config_changes(
     *,
     storage: SqliteBackend | None = None,
     search_pipeline: SearchPipeline | None = None,
+    app: FastAPI | None = None,
 ) -> None:
     """Propagate runtime-mutable config changes to live components.
 
@@ -291,6 +292,12 @@ def apply_runtime_config_changes(
     ``storage`` / ``search_pipeline`` (rare), in which case the matching
     fanout step is skipped. This keeps the helper usable in unit tests and
     from non-web callers.
+
+    ``app`` is optional: when provided, the FTS rebuild is tracked on
+    ``app.state.fts_rebuild_task`` so back-to-back tokenizer changes coalesce
+    (issue #278) instead of spawning overlapping rebuilds. When omitted, the
+    rebuild is fire-and-forget without coalescing — preserved for non-web
+    callers and legacy unit tests.
     """
     try:
         tokenizer_changed = old_cfg.search.tokenizer != new_cfg.search.tokenizer
@@ -301,32 +308,68 @@ def apply_runtime_config_changes(
         from memtomem.storage.fts_tokenizer import set_tokenizer
 
         set_tokenizer(new_cfg.search.tokenizer)
-        _schedule_fts_rebuild(storage, new_cfg.search.tokenizer)
+        _schedule_fts_rebuild(storage, new_cfg.search.tokenizer, app=app)
 
     if search_pipeline is not None:
         search_pipeline.invalidate_cache()
 
 
-def _schedule_fts_rebuild(storage: SqliteBackend, tokenizer: str) -> None:
+def _schedule_fts_rebuild(
+    storage: SqliteBackend,
+    tokenizer: str,
+    *,
+    app: FastAPI | None = None,
+) -> None:
     """Kick off ``storage.rebuild_fts()`` as a background task if possible.
 
     When called from an async request handler the rebuild runs on the current
     loop; when called from a sync context without a running loop, it falls
     back to ``asyncio.run`` so non-web callers (tests, future CLIs) still
     work.
+
+    When ``app`` is provided, enforces a per-app singleton: at most one
+    rebuild task runs at a time (tracked on ``app.state.fts_rebuild_task``).
+    Any tokenizer change that lands while a rebuild is in flight stores the
+    tokenizer on ``app.state.fts_rebuild_pending`` — the running task picks
+    it up and runs one follow-up rebuild once the current pass completes.
+    Rapid back-to-back changes therefore collapse to at most two sequential
+    rebuilds (issue #278).
     """
     import asyncio
 
-    async def _runner() -> None:
+    async def _run_one(target: str) -> None:
         try:
             count = await storage.rebuild_fts()
-            logger.info("FTS index rebuilt with tokenizer=%s (%d chunks)", tokenizer, count)
+            logger.info("FTS index rebuilt with tokenizer=%s (%d chunks)", target, count)
         except Exception:
             logger.warning("FTS rebuild after tokenizer change failed", exc_info=True)
 
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        asyncio.run(_runner())
+        asyncio.run(_run_one(tokenizer))
         return
-    loop.create_task(_runner())
+
+    if app is None:
+        loop.create_task(_run_one(tokenizer))
+        return
+
+    in_flight = getattr(app.state, "fts_rebuild_task", None)
+    if in_flight is not None and not in_flight.done():
+        app.state.fts_rebuild_pending = tokenizer
+        logger.info("FTS rebuild already in flight, coalescing tokenizer=%s as pending", tokenizer)
+        return
+
+    async def _run_with_coalesce() -> None:
+        current = tokenizer
+        while True:
+            await _run_one(current)
+            pending = getattr(app.state, "fts_rebuild_pending", None)
+            if pending is None:
+                return
+            app.state.fts_rebuild_pending = None
+            current = pending
+            logger.info("FTS rebuild coalesce: running with pending tokenizer=%s", current)
+
+    app.state.fts_rebuild_pending = None
+    app.state.fts_rebuild_task = loop.create_task(_run_with_coalesce())
