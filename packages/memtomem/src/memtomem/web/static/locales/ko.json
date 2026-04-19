@@ -543,5 +543,25 @@
   "settings.exclude_patterns.err_syntax": "잘못된 pathspec 패턴: {pattern}",
   "settings.exclude_patterns.err_save_blocked": "저장하기 전에 표시된 exclude 패턴 오류를 수정하세요",
   "settings.reset.aria_label": "기본값으로 되돌리기",
-  "settings.reset.title": "기본값으로 되돌리기 (미리보기 — Save 를 눌러야 적용됨)"
+  "settings.reset.title": "기본값으로 되돌리기 (미리보기 — Save 를 눌러야 적용됨)",
+
+  "settings.memory_dirs.category.user": "사용자",
+  "settings.memory_dirs.category.claude_memory": "Claude 프로젝트",
+  "settings.memory_dirs.category.claude_plans": "Claude plans",
+  "settings.memory_dirs.category.codex": "Codex",
+  "settings.memory_dirs.add_placeholder": "/절대/경로/디렉터리",
+  "settings.memory_dirs.add_btn": "+ 추가",
+  "settings.memory_dirs.reindex_all": "↻ 전체 재인덱스",
+  "settings.memory_dirs.reindex_group": "이 그룹 재인덱스",
+  "settings.memory_dirs.reindex_title": "이 디렉터리만 재인덱스",
+  "settings.memory_dirs.delete_title": "memory_dirs 에서 제거",
+  "confirm.memory_dir_remove_title": "memory 디렉터리를 제거할까요?",
+  "confirm.memory_dir_remove_msg": "{path} 를 memory_dirs 에서 제거할까요? 이미 저장된 청크는 별도로 지우지 않으면 그대로 남습니다.",
+  "toast.memory_dir.added": "{path} 추가됨",
+  "toast.memory_dir.removed": "{path} 제거됨",
+  "toast.memory_dir.add_failed": "추가 실패: {error}",
+  "toast.memory_dir.remove_failed": "제거 실패: {error}",
+  "toast.memory_dir.reindex_started": "{path} 재인덱싱 중…",
+  "toast.memory_dir.reindex_done": "{path} 재인덱스 완료 — 청크 {count}개",
+  "toast.memory_dir.reindex_failed": "재인덱스 실패: {error}"
 }

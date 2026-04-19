@@ -92,6 +92,38 @@ def _path_is_excluded(
     return False
 
 
+async def dirs_needing_initial_scan(
+    storage: "StorageBackend",
+    memory_dirs: Iterable[str | Path],
+) -> list[Path]:
+    """Return ``memory_dirs`` that have no indexed files under them.
+
+    The file watcher only reacts to change events, so dirs added to config
+    (``mm init`` wizard step, ``auto_discover`` migration, or the web
+    ``POST /api/memory-dirs`` endpoint) but never indexed would stay invisible
+    to search until the user ran a manual ``mem_index``. Startup uses this
+    helper to decide which dirs need a one-shot scan.
+
+    A dir counts as "already indexed" if any row in ``chunks.source_file``
+    has its normalised path as a prefix. Missing dirs on disk are skipped.
+    """
+    from memtomem.storage.sqlite_helpers import norm_path
+
+    indexed = await storage.get_all_source_files()
+    indexed_norm = {norm_path(p) for p in indexed}
+
+    needing: list[Path] = []
+    for d in memory_dirs:
+        dir_path = Path(d).expanduser()
+        if not dir_path.exists():
+            continue
+        dir_norm = norm_path(dir_path)
+        prefix = dir_norm if dir_norm.endswith("/") else dir_norm + "/"
+        if not any(fp.startswith(prefix) for fp in indexed_norm):
+            needing.append(dir_path)
+    return needing
+
+
 class _IndexFileBase(TypedDict):
     total: int
     indexed: int

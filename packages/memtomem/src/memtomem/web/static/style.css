@@ -975,6 +975,27 @@ button:active { opacity: 0.7; }
 .exclude-row-invalid { border-color: #b91c1c !important; }
 .exclude-remove-btn { min-width: 28px; padding: 2px 8px; }
 .exclude-add-btn { align-self: flex-start; font-size: 0.78rem; }
+.memory-dirs-widget { display: flex; flex-direction: column; gap: 8px; }
+.memory-dirs-actions { display: flex; justify-content: flex-end; }
+.memory-dirs-group { border: 1px solid var(--border); border-radius: 4px; background: var(--bg); }
+.memory-dirs-summary {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 6px 10px; cursor: pointer; font-size: 0.82rem; user-select: none;
+}
+.memory-dirs-summary-label { color: var(--text); }
+.memory-dirs-group-reindex { min-width: 28px; padding: 1px 6px; font-size: 0.78rem; }
+.memory-dirs-list { list-style: none; margin: 0; padding: 0 10px 8px 10px; display: flex; flex-direction: column; gap: 2px; }
+.memory-dirs-list-scroll { max-height: 220px; overflow-y: auto; }
+.memory-dirs-item {
+  display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center;
+  padding: 2px 4px;
+}
+.memory-dirs-path { font-family: var(--mono); font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.memory-dirs-reindex-btn, .memory-dirs-remove-btn { min-width: 26px; padding: 1px 6px; font-size: 0.78rem; }
+.memory-dirs-remove-btn:disabled { opacity: 0.3; cursor: default; }
+.memory-dirs-add { display: grid; grid-template-columns: 1fr auto; gap: 6px; margin-top: 4px; }
+.memory-dirs-add-input { font-family: var(--mono); font-size: 0.82rem; }
+
 .config-reindex-warn {
   background: #fef3c7; border: 1px solid #f59e0b; border-radius: var(--radius);
   padding: 12px 16px; margin-bottom: 16px; display: flex; flex-direction: column; gap: 10px;

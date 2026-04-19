@@ -30,7 +30,14 @@ const _READONLY_SECTIONS = new Set(['embedding', 'storage']);
 
 // Individual read-only fields within editable sections
 const _READONLY_FIELDS = {
-  indexing: new Set(['memory_dirs', 'supported_extensions']),
+  indexing: new Set(['supported_extensions']),
+};
+
+// Fields that use a custom widget which persists each change immediately
+// (not through the section-level Save button). The reset-to-default ↺ button
+// is a no-op for these, so suppress it to avoid a confusing disabled icon.
+const _NO_RESET_FIELDS = {
+  indexing: new Set(['memory_dirs']),
 };
 
 // STATE.serverConfig now in STATE
@@ -358,10 +365,12 @@ async function loadConfig() {
 
         // Reset-to-default button (↺): pre-fills the field with the comparand
         // value so the user sees the new value before pressing Save. Skipped
-        // for read-only rows and when the comparand fetch failed.
+        // for read-only rows, fields in ``_NO_RESET_FIELDS`` (custom widgets
+        // that persist per-action), and when the comparand fetch failed.
         const resetTd = document.createElement('td');
         resetTd.className = 'config-reset';
-        if (!fieldReadonly && STATE.serverDefaults) {
+        const noReset = (_NO_RESET_FIELDS[section] || new Set()).has(key);
+        if (!fieldReadonly && !noReset && STATE.serverDefaults) {
           const btn = _buildResetButton(section, key);
           if (btn) resetTd.appendChild(btn);
         }
@@ -479,7 +488,7 @@ const _CONFIG_GUIDES = {
     title: 'Indexing',
     desc: 'Controls how files are discovered, chunked, and stored as searchable units.',
     items: [
-      { label: 'Memory Dirs', text: 'Directories that can be indexed. Only files under these paths are allowed. Manage via API or env var.' },
+      { label: 'Memory Dirs', text: 'Directories that can be indexed. Add or remove entries inline; grouped by origin (user-chosen, Claude projects, Claude plans, Codex). Each change persists immediately.' },
       { label: 'Extensions', text: 'File types recognized for chunking: .md, .py, .js, .ts, .tsx, .jsx, .json, .yaml, .yml, .toml.' },
       { label: 'Max Chunk Tokens', text: 'Upper bound for chunk size. Long sections are split to stay under this limit.' },
       { label: 'Min Chunk Tokens', text: 'Short chunks below this threshold are merged with their neighbor. 0 = no merging.' },
@@ -496,12 +505,12 @@ const _CONFIG_GUIDES = {
       title: 'Indexing Settings',
       restart: false,
       steps: [
+        'Memory Dirs: use the inline [+ Add] / [✕] / [↻] controls; each change hits the server immediately',
         'Chunk token settings: edit here + Save (immediate, no restart)',
         'After changing chunk settings, re-index to apply to existing data',
-        'Memory Dirs: POST /api/memory-dirs/add with {"path": "/your/dir"}',
         'Or set env: MEMTOMEM_INDEXING__MEMORY_DIRS=\'["/path1","/path2"]\'',
       ],
-      warn: 'Memory Dirs and Extensions are read-only in UI. Use API or env vars. Chunk setting changes require re-index to take effect on existing data.',
+      warn: 'Extensions are read-only in UI. Chunk setting changes require re-index to take effect on existing data.',
     },
   },
   decay: {
@@ -643,7 +652,30 @@ const _CONFIG_SELECT_OPTIONS = {
 const _CONFIG_CUSTOM_WIDGETS = {
   'search.rrf_weights': _buildRRFWeightsWidget,
   'indexing.exclude_patterns': _buildExcludePatternsWidget,
+  'indexing.memory_dirs': _buildMemoryDirsWidget,
 };
+
+// Categorize an absolute memory_dir path. Mirrors ``_detect_provider_dirs``
+// in config.py so the UI groups match the wizard's opt-in categories.
+function _categorizeMemoryDir(p) {
+  const s = String(p).replace(/\/+$/, '');
+  if (/\/\.claude\/projects\/[^/]+\/memory$/.test(s)) return 'claude-memory';
+  if (/\/\.claude\/plans$/.test(s)) return 'claude-plans';
+  if (/\/\.codex\/memories$/.test(s)) return 'codex';
+  return 'user';
+}
+
+const _MEMORY_DIR_CATEGORY_ORDER = ['user', 'claude-memory', 'claude-plans', 'codex'];
+const _MEMORY_DIR_CATEGORY_LABEL_KEY = {
+  'user': 'settings.memory_dirs.category.user',
+  'claude-memory': 'settings.memory_dirs.category.claude_memory',
+  'claude-plans': 'settings.memory_dirs.category.claude_plans',
+  'codex': 'settings.memory_dirs.category.codex',
+};
+// Categories that start collapsed. User is open by default because it's
+// usually short; Claude projects can have 20+ entries from the one-shot
+// ``auto_discover`` migration, so it's closed to keep the card short.
+const _MEMORY_DIR_CATEGORY_COLLAPSED = new Set(['claude-memory', 'claude-plans', 'codex']);
 
 // Cached {secret, noise} from GET /api/indexing/builtin-exclude-patterns.
 let _BUILTIN_EXCLUDE_PATTERNS = null;
@@ -875,6 +907,240 @@ function _resetExcludePatterns(comparandVal, listEl, addRow, syncHidden) {
   const patterns = Array.isArray(comparandVal) ? comparandVal : [];
   patterns.forEach(p => addRow(p));
   syncHidden();
+}
+
+function _buildMemoryDirsWidget(section, key, val) {
+  // memory_dirs uses a different editing model than the rest of the config
+  // card: each add/remove/reindex hits the server immediately (POST
+  // /api/memory-dirs/add, /remove, /reindex, /index). That's because these
+  // actions carry side effects beyond a config value (watcher schedule,
+  // DB chunk state) that need to land atomically on the server.
+  //
+  // Consequence: the widget intentionally returns NO input with
+  // ``data-section``/``data-key`` set, so it sits outside the per-section
+  // Save dirty/reset flow. ``_NO_RESET_FIELDS`` suppresses the reset button
+  // for the same reason.
+  const wrap = document.createElement('div');
+  wrap.className = 'memory-dirs-widget';
+
+  let dirs = Array.isArray(val) ? [...val] : [];
+
+  function _apiErrorText(err) {
+    return (err && err.message) ? err.message : String(err);
+  }
+
+  function refreshDirs(newDirs) {
+    if (Array.isArray(newDirs)) dirs = [...newDirs];
+    if (STATE.serverConfig?.indexing) {
+      STATE.serverConfig.indexing.memory_dirs = [...dirs];
+    }
+    render();
+  }
+
+  async function handleAdd(path) {
+    const trimmed = path.trim();
+    if (!trimmed) return;
+    try {
+      const resp = await api('POST', '/api/memory-dirs/add', { path: trimmed });
+      if (resp && Array.isArray(resp.memory_dirs)) {
+        refreshDirs(resp.memory_dirs);
+      }
+      showToast(t('toast.memory_dir.added', { path: trimmed }), 'success');
+    } catch (err) {
+      showToast(t('toast.memory_dir.add_failed', { error: _apiErrorText(err) }), 'error');
+    }
+  }
+
+  async function handleRemove(path) {
+    const ok = await showConfirm({
+      title: t('confirm.memory_dir_remove_title'),
+      message: t('confirm.memory_dir_remove_msg', { path }),
+    });
+    if (!ok) return;
+    try {
+      const resp = await api('POST', '/api/memory-dirs/remove', { path });
+      if (resp && Array.isArray(resp.memory_dirs)) {
+        refreshDirs(resp.memory_dirs);
+      }
+      showToast(t('toast.memory_dir.removed', { path }), 'success');
+    } catch (err) {
+      showToast(t('toast.memory_dir.remove_failed', { error: _apiErrorText(err) }), 'error');
+    }
+  }
+
+  async function handleReindexOne(path, btn) {
+    if (btn) btnLoading(btn, true);
+    showToast(t('toast.memory_dir.reindex_started', { path }), 'info');
+    try {
+      const resp = await api(
+        'POST', '/api/index',
+        { path, recursive: true, force: false },
+        { timeout: 300_000 },
+      );
+      const count = (resp && resp.indexed_chunks) || 0;
+      showToast(
+        t('toast.memory_dir.reindex_done', { path, count }),
+        (resp && resp.errors && resp.errors.length) ? 'error' : 'success',
+      );
+      if (typeof _markDataStale === 'function') _markDataStale();
+      if (typeof loadStats === 'function') loadStats();
+    } catch (err) {
+      showToast(t('toast.memory_dir.reindex_failed', { error: _apiErrorText(err) }), 'error');
+    } finally {
+      if (btn) btnLoading(btn, false);
+    }
+  }
+
+  async function handleReindexGroup(category, btn) {
+    const targets = dirs.filter(d => _categorizeMemoryDir(d) === category);
+    if (!targets.length) return;
+    if (btn) btnLoading(btn, true);
+    try {
+      for (const path of targets) {
+        await handleReindexOne(path, null);
+      }
+    } finally {
+      if (btn) btnLoading(btn, false);
+    }
+  }
+
+  async function handleReindexAll(btn) {
+    if (btn) btnLoading(btn, true);
+    try {
+      const resp = await api('POST', '/api/reindex', undefined, { timeout: 300_000 });
+      if (resp.errors && resp.errors.length) {
+        showToast(
+          t('toast.reindex_partial', { count: resp.errors.length, first: resp.errors[0] }),
+          'error',
+        );
+      } else {
+        const total = (resp.results || []).reduce((s, r) => s + (r.indexed_chunks || 0), 0);
+        showToast(t('toast.reindex_complete', { count: total }), 'success');
+      }
+      if (typeof _markDataStale === 'function') _markDataStale();
+      if (typeof loadStats === 'function') loadStats();
+    } catch (err) {
+      showToast(t('toast.reindex_failed', { error: _apiErrorText(err) }), 'error');
+    } finally {
+      if (btn) btnLoading(btn, false);
+    }
+  }
+
+  function render() {
+    wrap.innerHTML = '';
+
+    // Top action bar: Reindex-all button.
+    const actions = document.createElement('div');
+    actions.className = 'memory-dirs-actions';
+    const reindexAllBtn = document.createElement('button');
+    reindexAllBtn.type = 'button';
+    reindexAllBtn.className = 'btn btn-sm btn-ghost';
+    reindexAllBtn.textContent = t('settings.memory_dirs.reindex_all');
+    reindexAllBtn.addEventListener('click', () => handleReindexAll(reindexAllBtn));
+    actions.appendChild(reindexAllBtn);
+    wrap.appendChild(actions);
+
+    // Group by category.
+    const byCategory = { 'user': [], 'claude-memory': [], 'claude-plans': [], 'codex': [] };
+    for (const d of dirs) {
+      const cat = _categorizeMemoryDir(d);
+      byCategory[cat].push(d);
+    }
+
+    for (const cat of _MEMORY_DIR_CATEGORY_ORDER) {
+      const entries = byCategory[cat];
+      if (!entries.length) continue;
+
+      const group = document.createElement('details');
+      group.className = 'memory-dirs-group';
+      group.dataset.category = cat;
+      if (!_MEMORY_DIR_CATEGORY_COLLAPSED.has(cat)) group.open = true;
+
+      const summary = document.createElement('summary');
+      summary.className = 'memory-dirs-summary';
+      const label = document.createElement('span');
+      label.className = 'memory-dirs-summary-label';
+      label.textContent = `${t(_MEMORY_DIR_CATEGORY_LABEL_KEY[cat])} (${entries.length})`;
+      summary.appendChild(label);
+
+      const groupReindex = document.createElement('button');
+      groupReindex.type = 'button';
+      groupReindex.className = 'btn btn-xs btn-ghost memory-dirs-group-reindex';
+      groupReindex.textContent = '↻';
+      groupReindex.title = t('settings.memory_dirs.reindex_group');
+      groupReindex.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        handleReindexGroup(cat, groupReindex);
+      });
+      summary.appendChild(groupReindex);
+      group.appendChild(summary);
+
+      const list = document.createElement('ul');
+      list.className = 'memory-dirs-list';
+      if (cat === 'claude-memory') list.classList.add('memory-dirs-list-scroll');
+
+      for (const path of entries) {
+        const item = document.createElement('li');
+        item.className = 'memory-dirs-item';
+
+        const pathSpan = document.createElement('span');
+        pathSpan.className = 'memory-dirs-path';
+        pathSpan.textContent = path;
+        pathSpan.title = path;
+        item.appendChild(pathSpan);
+
+        const reindexBtn = document.createElement('button');
+        reindexBtn.type = 'button';
+        reindexBtn.className = 'btn btn-xs btn-ghost memory-dirs-reindex-btn';
+        reindexBtn.textContent = '↻';
+        reindexBtn.title = t('settings.memory_dirs.reindex_title');
+        reindexBtn.addEventListener('click', () => handleReindexOne(path, reindexBtn));
+        item.appendChild(reindexBtn);
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'btn btn-xs btn-ghost memory-dirs-remove-btn';
+        removeBtn.textContent = '✕';
+        removeBtn.title = t('settings.memory_dirs.delete_title');
+        removeBtn.setAttribute('aria-label', t('settings.memory_dirs.delete_title'));
+        // Disable removing the last dir (server also enforces 400).
+        if (dirs.length <= 1) removeBtn.disabled = true;
+        removeBtn.addEventListener('click', () => handleRemove(path));
+        item.appendChild(removeBtn);
+
+        list.appendChild(item);
+      }
+      group.appendChild(list);
+      wrap.appendChild(group);
+    }
+
+    // Add-input row.
+    const addRow = document.createElement('div');
+    addRow.className = 'memory-dirs-add';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'memory-dirs-add-input';
+    input.placeholder = t('settings.memory_dirs.add_placeholder');
+    const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.className = 'btn btn-sm';
+    addBtn.textContent = t('settings.memory_dirs.add_btn');
+    addBtn.addEventListener('click', async () => {
+      const val = input.value;
+      input.value = '';
+      await handleAdd(val);
+    });
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') { ev.preventDefault(); addBtn.click(); }
+    });
+    addRow.appendChild(input);
+    addRow.appendChild(addBtn);
+    wrap.appendChild(addRow);
+  }
+
+  render();
+  return wrap;
 }
 
 function _buildConfigInput(section, key, val) {

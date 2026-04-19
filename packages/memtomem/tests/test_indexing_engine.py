@@ -1198,3 +1198,94 @@ class TestFileWatcher:
             debounce_ms=2000,
         )
         assert watcher._debounce_s == 2.0
+
+
+# ===========================================================================
+# 11. dirs_needing_initial_scan — gating for startup auto-index
+# ===========================================================================
+
+
+class _FakeStorageForScan:
+    """Minimal storage stub — only ``get_all_source_files`` is exercised by
+    ``dirs_needing_initial_scan``. Keeps the test free of embedding/storage
+    setup while still pinning the helper's filter semantics."""
+
+    def __init__(self, source_files: set[Path]) -> None:
+        self._files = set(source_files)
+
+    async def get_all_source_files(self) -> set[Path]:
+        return self._files
+
+
+class TestDirsNeedingInitialScan:
+    """``dirs_needing_initial_scan`` decides which ``memory_dirs`` still need
+    a one-shot index at startup. The file watcher only reacts to change
+    events, so dirs added to config (wizard or migration) but never scanned
+    would stay invisible without this gate."""
+
+    async def test_empty_input_returns_empty(self, tmp_path):
+        from memtomem.indexing.engine import dirs_needing_initial_scan
+
+        storage = _FakeStorageForScan(set())
+        assert await dirs_needing_initial_scan(storage, []) == []
+
+    async def test_missing_dir_is_skipped(self, tmp_path):
+        from memtomem.indexing.engine import dirs_needing_initial_scan
+
+        storage = _FakeStorageForScan(set())
+        nonexistent = tmp_path / "does-not-exist"
+        result = await dirs_needing_initial_scan(storage, [nonexistent])
+        assert result == []
+
+    async def test_empty_dir_is_returned(self, tmp_path):
+        from memtomem.indexing.engine import dirs_needing_initial_scan
+
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        storage = _FakeStorageForScan(set())
+        result = await dirs_needing_initial_scan(storage, [empty_dir])
+        assert len(result) == 1
+        assert Path(result[0]).resolve() == empty_dir.resolve()
+
+    async def test_dir_with_indexed_file_is_skipped(self, tmp_path):
+        from memtomem.indexing.engine import dirs_needing_initial_scan
+
+        indexed_dir = tmp_path / "indexed"
+        indexed_dir.mkdir()
+        file_in_dir = indexed_dir / "note.md"
+        file_in_dir.write_text("# Content")
+
+        storage = _FakeStorageForScan({file_in_dir})
+        result = await dirs_needing_initial_scan(storage, [indexed_dir])
+        assert result == []
+
+    async def test_mixed_returns_only_unindexed(self, tmp_path):
+        from memtomem.indexing.engine import dirs_needing_initial_scan
+
+        indexed_dir = tmp_path / "indexed"
+        indexed_dir.mkdir()
+        unindexed_dir = tmp_path / "unindexed"
+        unindexed_dir.mkdir()
+
+        indexed_file = indexed_dir / "note.md"
+        indexed_file.write_text("# x")
+
+        storage = _FakeStorageForScan({indexed_file})
+        result = await dirs_needing_initial_scan(storage, [indexed_dir, unindexed_dir])
+        assert len(result) == 1
+        assert Path(result[0]).resolve() == unindexed_dir.resolve()
+
+    async def test_nested_indexed_file_counts_parent_dir_as_indexed(self, tmp_path):
+        """A file anywhere under the dir (including nested subdirs) means the
+        dir already has content, so no startup scan is needed."""
+        from memtomem.indexing.engine import dirs_needing_initial_scan
+
+        parent = tmp_path / "parent"
+        nested = parent / "sub" / "deep"
+        nested.mkdir(parents=True)
+        deep_file = nested / "note.md"
+        deep_file.write_text("# deep")
+
+        storage = _FakeStorageForScan({deep_file})
+        result = await dirs_needing_initial_scan(storage, [parent])
+        assert result == []
