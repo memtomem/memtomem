@@ -159,13 +159,26 @@ def _coerce_list(value: Any) -> list[str]:
     return [str(value).strip()] if str(value).strip() else []
 
 
+_KNOWN_AGENT_KEYS = frozenset(
+    {"name", "description", "tools", "model", "skills", "isolation", "kind", "temperature"}
+)
+
+
 def parse_canonical_agent(path: Path) -> SubAgent:
     """Parse a canonical agent file into a :class:`SubAgent`."""
     content = path.read_text(encoding="utf-8")
+    # Normalize CRLF → LF so ``_FRONT_MATTER_RE`` (which anchors on ``\n``) matches
+    # files authored on Windows or by editors that emit CRLF.
+    content = content.replace("\r\n", "\n")
     m = _FRONT_MATTER_RE.match(content)
     if not m:
         raise AgentParseError(f"missing YAML frontmatter: {path}")
     frontmatter = _parse_flat_yaml(m.group(1))
+
+    unknown = sorted(set(frontmatter) - _KNOWN_AGENT_KEYS)
+    if unknown:
+        logger.warning("unknown frontmatter keys %s in %s (ignored)", unknown, path)
+
     body = content[m.end() :].lstrip("\n").rstrip() + "\n"
 
     name = frontmatter.get("name") or path.stem
@@ -254,8 +267,62 @@ def _subagent_to_gemini_md(agent: SubAgent) -> tuple[str, list[str]]:
 
 
 def _toml_escape_basic_string(s: str) -> str:
-    # TOML basic strings: " delimited, \\, \", control chars need escaping.
-    return s.replace("\\", "\\\\").replace('"', '\\"')
+    """Escape ``s`` for a TOML basic (single-line, ``"``-delimited) string.
+
+    TOML basic strings require ``\\b \\t \\n \\f \\r \\" \\\\`` for those
+    characters and ``\\uXXXX`` for any other C0 control or DEL. Leaving raw
+    control chars produces TOML that ``tomllib.loads`` rejects.
+    """
+    out: list[str] = []
+    for ch in s:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\b":
+            out.append("\\b")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\f":
+            out.append("\\f")
+        elif ch == "\r":
+            out.append("\\r")
+        else:
+            code = ord(ch)
+            if code < 0x20 or code == 0x7F:
+                out.append(f"\\u{code:04x}")
+            else:
+                out.append(ch)
+    return "".join(out)
+
+
+def _toml_escape_multiline_string(s: str) -> str:
+    """Escape ``s`` for a TOML multi-line basic (``\"\"\"``-delimited) string.
+
+    Literal newlines and tabs are permitted; ``\\r`` and other C0 controls
+    still need escaping, and any stray ``\"\"\"`` must be broken up.
+    """
+    out: list[str] = []
+    for ch in s:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == "\n" or ch == "\t":
+            out.append(ch)
+        elif ch == "\b":
+            out.append("\\b")
+        elif ch == "\f":
+            out.append("\\f")
+        elif ch == "\r":
+            out.append("\\r")
+        else:
+            code = ord(ch)
+            if code < 0x20 or code == 0x7F:
+                out.append(f"\\u{code:04x}")
+            else:
+                out.append(ch)
+    return "".join(out).replace('"""', '""\\"')
 
 
 def _toml_scalar(value: Any) -> str:
@@ -265,10 +332,7 @@ def _toml_scalar(value: Any) -> str:
         return str(value)
     if isinstance(value, str):
         if "\n" in value:
-            # Triple-quoted multi-line basic string. Any stray \"\"\" is
-            # escaped by breaking one of the quotes.
-            escaped = value.replace("\\", "\\\\").replace('"""', '""\\"')
-            return f'"""\n{escaped}"""'
+            return f'"""\n{_toml_escape_multiline_string(value)}"""'
         return f'"{_toml_escape_basic_string(value)}"'
     raise TypeError(f"unsupported TOML scalar: {type(value).__name__}")
 

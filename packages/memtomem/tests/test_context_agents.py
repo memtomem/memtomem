@@ -10,6 +10,8 @@ from memtomem.context.agents import (
     CANONICAL_AGENT_ROOT,
     AgentParseError,
     StrictDropError,
+    _toml_escape_basic_string,
+    _toml_escape_multiline_string,
     diff_agents,
     extract_agents_to_canonical,
     generate_all_agents,
@@ -444,3 +446,165 @@ class TestRoundtrip:
         reparsed = parse_canonical_agent(tmp_path / CANONICAL_AGENT_ROOT / "helper.md")
         assert reparsed.name == "helper"
         assert "Help with things." in reparsed.body
+
+
+class TestCrlfParsing:
+    """#279: frontmatter regex anchors on ``\\n`` — CRLF files must still parse."""
+
+    def test_crlf_frontmatter_parses(self, tmp_path):
+        p = tmp_path / "crlf.md"
+        p.write_bytes(SAMPLE_FULL_AGENT.replace("\n", "\r\n").encode("utf-8"))
+        agent = parse_canonical_agent(p)
+        assert agent.name == "code-reviewer"
+        assert agent.tools == ["Read", "Grep", "Glob"]
+        assert agent.model == "sonnet"
+        # Body is LF-normalized after parse; no raw \r should leak through.
+        assert "\r" not in agent.body
+
+    def test_crlf_roundtrip_is_idempotent(self, tmp_path):
+        """Canonical (CRLF on disk) → runtime → canonical must be byte-stable."""
+        p = tmp_path / CANONICAL_AGENT_ROOT / "helper.md"
+        p.parent.mkdir(parents=True)
+        p.write_bytes(SAMPLE_MINIMAL_AGENT.replace("\n", "\r\n").encode("utf-8"))
+
+        generate_all_agents(tmp_path, runtimes=["claude_agents"])
+        rendered_first = (tmp_path / ".claude/agents/helper.md").read_bytes()
+
+        # Re-parse the canonical (still CRLF on disk) and regenerate.
+        generate_all_agents(tmp_path, runtimes=["claude_agents"])
+        rendered_second = (tmp_path / ".claude/agents/helper.md").read_bytes()
+
+        assert rendered_first == rendered_second
+        # And the rendered runtime file uses LF, not CRLF.
+        assert b"\r\n" not in rendered_first
+
+
+class TestUnknownFrontmatterKeys:
+    def test_unknown_key_warns_with_path(self, tmp_path, caplog):
+        body = (
+            "---\n"
+            "name: odd\n"
+            "description: has a future key\n"
+            "future_field: value\n"
+            "another_unknown: [a, b]\n"
+            "---\n\n"
+            "body\n"
+        )
+        p = tmp_path / "odd.md"
+        p.write_text(body)
+        with caplog.at_level("WARNING"):
+            agent = parse_canonical_agent(p)
+        # Known fields still parse; unknowns are dropped (not stored on SubAgent).
+        assert agent.name == "odd"
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("unknown frontmatter keys" in m for m in messages)
+        assert any(str(p) in m for m in messages)
+        # Alphabetized for stable output.
+        assert any("another_unknown" in m and "future_field" in m for m in messages)
+
+    def test_known_keys_do_not_warn(self, tmp_path, caplog):
+        _make_canonical_agent(tmp_path, "full", SAMPLE_FULL_AGENT)
+        with caplog.at_level("WARNING"):
+            parse_canonical_agent(tmp_path / CANONICAL_AGENT_ROOT / "full.md")
+        assert not any("unknown frontmatter" in r.getMessage() for r in caplog.records)
+
+
+class TestCodexTomlControlChars:
+    """#279: Codex TOML must parse back under ``tomllib.loads`` even when the
+    canonical body contains raw C0 control characters."""
+
+    def test_body_with_c0_controls_parses(self, tmp_path, codex_home):
+        """Bodies routed into a multiline TOML string must escape C0 controls
+        that the TOML spec still requires escaping even inside triple quotes
+        (sub-0x20 chars aside from ``\\n``/``\\t``). ``\\r`` is pre-normalized
+        by ``Path.read_text`` (universal newlines), so it can't reach here on
+        the read path — it's exercised directly in :class:`TestTomlEscape`."""
+        body = (
+            "---\n"
+            "name: odd-body\n"
+            "description: has control chars\n"
+            "---\n\n"
+            "line with NUL: \x00 and ESC: \x1b and BS: \x08\n"
+        )
+        p = tmp_path / CANONICAL_AGENT_ROOT / "odd-body.md"
+        p.parent.mkdir(parents=True)
+        p.write_text(body)
+
+        generate_all_agents(tmp_path, runtimes=["codex_agents"])
+        toml_path = codex_home / ".codex/agents/odd-body.toml"
+        parsed = tomllib.loads(toml_path.read_text())
+        # Control chars survive the round-trip through tomllib.
+        assert "\x00" in parsed["developer_instructions"]
+        assert "\x1b" in parsed["developer_instructions"]
+        assert "\x08" in parsed["developer_instructions"]
+
+    def test_multiline_body_with_triple_quote_is_escaped(self, tmp_path, codex_home):
+        body = (
+            "---\n"
+            "name: triple\n"
+            "description: body contains triple quote\n"
+            '---\n\nHere is a stray triple: """ inside text\nSecond line.\n'
+        )
+        p = tmp_path / CANONICAL_AGENT_ROOT / "triple.md"
+        p.parent.mkdir(parents=True)
+        p.write_text(body)
+
+        generate_all_agents(tmp_path, runtimes=["codex_agents"])
+        toml_path = codex_home / ".codex/agents/triple.toml"
+        parsed = tomllib.loads(toml_path.read_text())
+        assert '"""' in parsed["developer_instructions"]
+
+
+class TestTomlEscape:
+    """Direct unit tests for the TOML escape helpers — documents which chars
+    get which escape form so future edits don't silently narrow the set."""
+
+    def test_basic_string_named_escapes(self):
+        s = 'back\\slash, quote", bs\b, tab\t, lf\n, ff\f, cr\r'
+        escaped = _toml_escape_basic_string(s)
+        assert "\\\\" in escaped
+        assert '\\"' in escaped
+        assert "\\b" in escaped
+        assert "\\t" in escaped
+        assert "\\n" in escaped
+        assert "\\f" in escaped
+        assert "\\r" in escaped
+        # Round-trips through tomllib.
+        parsed = tomllib.loads(f'v = "{escaped}"')
+        assert parsed["v"] == s
+
+    def test_basic_string_other_c0_uses_uxxxx(self):
+        s = "nul\x00, soh\x01, esc\x1b, del\x7f"
+        escaped = _toml_escape_basic_string(s)
+        assert "\\u0000" in escaped
+        assert "\\u0001" in escaped
+        assert "\\u001b" in escaped
+        assert "\\u007f" in escaped
+        parsed = tomllib.loads(f'v = "{escaped}"')
+        assert parsed["v"] == s
+
+    def test_multiline_keeps_newline_and_tab_literal(self):
+        s = "line1\nline2\twith tab"
+        escaped = _toml_escape_multiline_string(s)
+        # Newline/tab stay literal in triple-quoted form.
+        assert "\n" in escaped
+        assert "\t" in escaped
+        assert "\\n" not in escaped
+        assert "\\t" not in escaped
+
+    def test_multiline_still_escapes_cr_and_c0(self):
+        s = "cr\r middle nul\x00 end\x1b"
+        escaped = _toml_escape_multiline_string(s)
+        assert "\\r" in escaped
+        assert "\\u0000" in escaped
+        assert "\\u001b" in escaped
+        parsed = tomllib.loads(f'v = """\n{escaped}"""')
+        assert parsed["v"] == s
+
+    def test_multiline_breaks_triple_quote(self):
+        s = 'prefix """ suffix'
+        escaped = _toml_escape_multiline_string(s)
+        # Raw ``"""`` would close the string — must be broken.
+        assert '"""' not in escaped
+        parsed = tomllib.loads(f'v = """\n{escaped}"""')
+        assert '"""' in parsed["v"]
