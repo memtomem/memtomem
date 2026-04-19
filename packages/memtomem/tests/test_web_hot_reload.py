@@ -115,9 +115,7 @@ async def client(app):
 # ---------------------------------------------------------------------------
 
 
-async def test_get_config_picks_up_external_disk_edit(
-    home: Path, app, client: AsyncClient
-):
+async def test_get_config_picks_up_external_disk_edit(home: Path, app, client: AsyncClient):
     _write_config(home, {"mmr": {"enabled": False}})
     # Re-sync signature now that we wrote the initial file.
     app.state.config = _hot_reload._build_fresh_config()
@@ -166,9 +164,7 @@ async def test_patch_preserves_external_edit(home: Path, app, client: AsyncClien
 # ---------------------------------------------------------------------------
 
 
-async def test_save_endpoint_reloads_before_write(
-    home: Path, app, client: AsyncClient
-):
+async def test_save_endpoint_reloads_before_write(home: Path, app, client: AsyncClient):
     _write_config(home, {"mmr": {"enabled": False}})
     app.state.config = _hot_reload._build_fresh_config()
     app.state.config_signature = _hot_reload.current_signature()
@@ -279,16 +275,12 @@ async def test_invalid_json_surfaces_error_but_keeps_stale_config(
     assert resp.status_code == 200
     data = resp.json()
     assert data["config_reload_error"] is not None
-    assert "JSONDecodeError" in data["config_reload_error"] or "JSON" in data[
-        "config_reload_error"
-    ]
+    assert "JSONDecodeError" in data["config_reload_error"] or "JSON" in data["config_reload_error"]
     # Stale mmr.enabled=False is preserved.
     assert data["mmr"]["enabled"] is False
 
 
-async def test_patch_refused_while_disk_is_broken(
-    home: Path, app, client: AsyncClient
-):
+async def test_patch_refused_while_disk_is_broken(home: Path, app, client: AsyncClient):
     _write_config(home, {"mmr": {"enabled": False}})
     app.state.config = _hot_reload._build_fresh_config()
     app.state.config_signature = _hot_reload.current_signature()
@@ -300,9 +292,7 @@ async def test_patch_refused_while_disk_is_broken(
     # Prime the error via a GET first.
     await client.get("/api/config")
 
-    resp = await client.patch(
-        "/api/config", json={"search": {"default_top_k": 5}}
-    )
+    resp = await client.patch("/api/config", json={"search": {"default_top_k": 5}})
     assert resp.status_code == 409, resp.text
     assert "invalid" in resp.json()["detail"].lower()
 
@@ -338,9 +328,7 @@ async def test_reload_error_clears_after_fix(home: Path, app, client: AsyncClien
 # ---------------------------------------------------------------------------
 
 
-async def test_tokenizer_change_via_reload_triggers_fanout(
-    home: Path, app, client: AsyncClient
-):
+async def test_tokenizer_change_via_reload_triggers_fanout(home: Path, app, client: AsyncClient):
     _write_config(home, {"search": {"tokenizer": "unicode61"}})
     app.state.config = _hot_reload._build_fresh_config()
     app.state.config_signature = _hot_reload.current_signature()
@@ -366,9 +354,7 @@ async def test_tokenizer_change_via_reload_triggers_fanout(
 # ---------------------------------------------------------------------------
 
 
-async def test_concurrent_patch_and_disk_edit_are_serialised(
-    home: Path, app, client: AsyncClient
-):
+async def test_concurrent_patch_and_disk_edit_are_serialised(home: Path, app, client: AsyncClient):
     _write_config(home, {"mmr": {"enabled": False}, "search": {"default_top_k": 10}})
     app.state.config = _hot_reload._build_fresh_config()
     app.state.config_signature = _hot_reload.current_signature()
@@ -407,9 +393,7 @@ async def test_concurrent_patch_and_disk_edit_are_serialised(
     # mmr:true+top_k:10 → persisted 99+mmr:true, or (b) disk_edit ran after
     # PATCH persisted 99 and clobbered it back to 10+mmr:true).
     # The invariant is just that the final GET reflects current disk.
-    assert final["search"]["default_top_k"] == on_disk.get("search", {}).get(
-        "default_top_k", -1
-    )
+    assert final["search"]["default_top_k"] == on_disk.get("search", {}).get("default_top_k", -1)
 
 
 # ---------------------------------------------------------------------------
@@ -484,9 +468,7 @@ class TestApplyRuntimeConfigChanges:
 
         import memtomem.storage.fts_tokenizer as fts_tok
 
-        monkeypatch.setattr(
-            fts_tok, "set_tokenizer", lambda t: set_tokenizer_calls.append(t)
-        )
+        monkeypatch.setattr(fts_tok, "set_tokenizer", lambda t: set_tokenizer_calls.append(t))
 
         old = MagicMock()
         old.search.tokenizer = "unicode61"
