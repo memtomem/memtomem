@@ -983,6 +983,12 @@ button:active { opacity: 0.7; }
   padding: 0;
   margin-bottom: 14px;
   overflow: hidden;
+  /* Sources tab is a flex column (``#tab-sources`` is the flex parent);
+     its sibling ``.sources-layout`` demands ``height: 100%`` which,
+     combined with the default ``flex-shrink: 1``, crushes this panel
+     down to 2px at desktop viewports. Pin the shrink factor so the
+     panel always claims its content height. */
+  flex-shrink: 0;
 }
 .memory-dirs-panel:empty { display: none; }
 .memory-dirs-widget { display: flex; flex-direction: column; }
@@ -1066,9 +1072,7 @@ button:active { opacity: 0.7; }
 .memory-dirs-group-reindex {
   font-size: 0.76rem;
   padding: 2px 10px;
-  opacity: 0.65;
 }
-.memory-dirs-summary:hover .memory-dirs-group-reindex { opacity: 1; }
 
 .memory-dirs-list {
   list-style: none;
@@ -1116,15 +1120,17 @@ button:active { opacity: 0.7; }
 .memory-dirs-reindex-btn, .memory-dirs-remove-btn {
   font-size: 0.74rem;
   padding: 2px 10px;
-  opacity: 0.45;
-  transition: opacity 0.1s ease;
+  color: var(--muted);
+  transition: color 0.1s ease, background 0.1s ease;
 }
 .memory-dirs-item:hover .memory-dirs-reindex-btn,
 .memory-dirs-item:hover .memory-dirs-remove-btn {
-  opacity: 1;
+  color: var(--text);
 }
-.memory-dirs-remove-btn:disabled { opacity: 0.15; cursor: default; }
+.memory-dirs-remove-btn:disabled { opacity: 0.3; cursor: default; }
 .memory-dirs-remove-btn:not(:disabled):hover { color: #b91c1c; }
+.memory-dirs-group-reindex { color: var(--muted); }
+.memory-dirs-summary:hover .memory-dirs-group-reindex { color: var(--text); }
 
 /* Config tab → Sources tab breadcrumb (Indexing card footer) */
 .config-breadcrumb {
