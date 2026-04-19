@@ -1,115 +1,13 @@
 # memtomem — Claude Code Plugin
 
-Markdown-first semantic memory for AI agents. This plugin adds hybrid BM25 + dense search across your markdown files directly in Claude Code.
+Claude Code plugin that exposes the memtomem long-term memory MCP server
+inside Claude Code (hybrid BM25 + dense search across markdown memories,
+slash commands, automation hooks).
 
-## Features
+Detailed setup, configuration, hook recipes, and feature reference live in
+the private `memtomem/memtomem-docs` repo
+(`packages-archived/claude-plugin.md`).
 
-- **74 MCP tools** — search, add, edit, delete, index, recall, browse, tags, cross-ref, fetch, namespace, dedup, decay, export/import, reset (configurable via tool mode: core/standard/full)
-- **5 slash commands** — `/memtomem:search`, `/memtomem:remember`, `/memtomem:index`, `/memtomem:status`, `/memtomem:setup`
-- **Automation hooks** — auto-search on prompt submit, auto-reindex on file edits
-- **Memory curator agent** — deduplicate, tag, and clean up stale entries
-
-## Installation
-
-### MCP Server Setup
-
-```bash
-# PyPI (recommended)
-claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
-
-# Source (if running from git clone)
-# claude mcp add memtomem -s user -- uv run --directory /path/to/memtomem memtomem-server
-```
-
-### Local Plugin Development
-
-```bash
-claude --plugin-dir ./packages/memtomem-claude-plugin
-```
-
-## Quick Start
-
-After installation, run `/memtomem:setup` to:
-
-1. Verify embedding provider (Ollama by default)
-2. Index your memory directory
-3. Test search
-4. Optionally activate automation hooks
-
-## Prerequisites
-
-- **Embedding provider**: [Ollama](https://ollama.ai) with `nomic-embed-text` (default), or OpenAI/Voyage API key
-- **Python 3.12+**: Required for the MCP server
-- **memtomem package**: The MCP server runs via `uvx --from memtomem memtomem-server` (PyPI) or `uv run --directory /path/to/memtomem memtomem-server` (source)
-
-## Configuration
-
-The plugin uses sensible defaults. Customize via environment variables or the `mem_config` tool:
-
-| Setting | Default | Env Var |
-|---------|---------|---------|
-| Tool mode | `core` | `MEMTOMEM_TOOL_MODE` (`core`/`standard`/`full`) |
-| Memory directory | `~/.memtomem/memories` | `MEMTOMEM_INDEXING__MEMORY_DIRS` |
-| Embedding provider | `ollama` | `MEMTOMEM_EMBEDDING__PROVIDER` |
-| Embedding model | `nomic-embed-text` | `MEMTOMEM_EMBEDDING__MODEL` |
-| Database path | `~/.memtomem/memtomem.db` | `MEMTOMEM_STORAGE__SQLITE_PATH` |
-
-**Tool mode**: Controls how many tools are exposed to the AI agent. `core` (9 tools, default) for minimal context usage -- includes `mem_do` meta-tool to access all other actions via `mem_do(action="...", params={...})`. `standard` (~32 + `mem_do`) for normal use, `full` (73) for everything. Fewer tools = less context tokens, better accuracy.
-
-To set env vars for the MCP server, either re-run `claude mcp add` with
-`--env` flags, or add a `.mcp.json` at your project root (project scope).
-User-scope settings live in `~/.claude.json` but should be managed through
-`claude mcp add`, not edited by hand.
-
-Example `.mcp.json` (project scope):
-
-```json
-{
-  "mcpServers": {
-    "memtomem": {
-      "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"],
-      "env": {
-        "MEMTOMEM_EMBEDDING__PROVIDER": "openai",
-        "MEMTOMEM_EMBEDDING__API_KEY": "sk-..."
-      }
-    }
-  }
-}
-```
-
-## Hooks (Optional)
-
-The plugin includes automation hooks that require the CLI in PATH:
-
-```bash
-# PyPI
-uv tool install memtomem
-# or: pipx install memtomem
-
-# Source (if running from git clone)
-# uv run mm ...
-```
-
-| Hook | Trigger | Action |
-|------|---------|--------|
-| `UserPromptSubmit` | Prompts >20 chars | Auto-search related memories |
-| `PostToolUse` | After `Write` (new files) | Auto-index new files |
-
-Without CLI installed, hooks fail silently — MCP tools work normally.
-
-> **Note**: Short prompts are skipped to avoid noise. Edit/MultiEdit are excluded — edited files are already indexed. If using the [memtomem-stm](https://github.com/memtomem/memtomem-stm) proxy (separate package), hooks are redundant. See [hooks guide](../../docs/guides/hooks.md) for details.
-
-## Slash Commands
-
-| Command | Description |
-|---------|-------------|
-| `/memtomem:search [query]` | Search memories with semantic search |
-| `/memtomem:remember [content]` | Save a new memory entry |
-| `/memtomem:index [path]` | Index or re-index files |
-| `/memtomem:status` | Show status and statistics |
-| `/memtomem:setup` | Guided initial setup |
-
-## License
-
-Apache-2.0 — same as the [memtomem](https://github.com/memtomem/memtomem) project.
+For end-user installation see the public
+[memtomem README](https://github.com/memtomem/memtomem) and
+[`docs/guides/integrations/claude-code.md`](https://github.com/memtomem/memtomem/blob/main/docs/guides/integrations/claude-code.md).
