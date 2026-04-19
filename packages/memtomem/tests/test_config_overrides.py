@@ -433,9 +433,7 @@ def test_migration_noop_when_auto_discover_false(
     fake = tmp_path / "fake-tool"
     fake.mkdir()
     monkeypatch.setattr(_cfg, "_canonical_provider_dirs", lambda: [fake])
-    override_path.write_text(
-        json.dumps({"indexing": {"auto_discover": False}}), encoding="utf-8"
-    )
+    override_path.write_text(json.dumps({"indexing": {"auto_discover": False}}), encoding="utf-8")
 
     cfg = Mem2MemConfig()
     load_config_overrides(cfg)
@@ -483,6 +481,41 @@ def test_migration_appends_dirs_and_flips_flag(
     resolved = {Path(p).expanduser().resolve() for p in cfg.indexing.memory_dirs}
     assert fake.resolve() in resolved
     assert cfg.indexing.auto_discover is False
+
+
+def test_migration_preserves_existing_user_memory_dirs(
+    override_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The most common legacy install has user-set ``memory_dirs`` *and*
+    ``auto_discover`` defaulted True. Migration must preserve the explicit
+    user entries alongside the newly-discovered provider dirs — dropping
+    them would silently shrink the indexed corpus on first post-upgrade
+    startup. Directly guards the ``_persist_auto_discover_migration``
+    invariant flagged in its docstring.
+    """
+    _clear_all_memtomem_env(monkeypatch)
+    user_dir = tmp_path / "user-explicit"
+    user_dir.mkdir()
+    fake_provider = tmp_path / "fake-provider"
+    fake_provider.mkdir()
+    monkeypatch.setattr(_cfg, "_canonical_provider_dirs", lambda: [fake_provider])
+    override_path.write_text(
+        json.dumps({"indexing": {"memory_dirs": [str(user_dir)]}}), encoding="utf-8"
+    )
+
+    cfg = Mem2MemConfig()
+    load_config_overrides(cfg)
+
+    resolved = {Path(p).expanduser().resolve() for p in cfg.indexing.memory_dirs}
+    assert user_dir.resolve() in resolved, "user-set memory_dirs dropped by migration"
+    assert fake_provider.resolve() in resolved, "provider dir not appended"
+    assert cfg.indexing.auto_discover is False
+
+    persisted = json.loads(override_path.read_text(encoding="utf-8"))
+    persisted_dirs = set(persisted["indexing"]["memory_dirs"])
+    assert str(user_dir) in persisted_dirs
+    assert str(fake_provider) in persisted_dirs
+    assert persisted["indexing"]["auto_discover"] is False
 
 
 def test_migration_persists_to_config_json(

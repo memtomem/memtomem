@@ -1004,8 +1004,8 @@ def _migrate_auto_discover_once(config: Mem2MemConfig) -> None:
     """One-shot migration from legacy ``indexing.auto_discover`` to explicit
     ``memory_dirs`` entries.
 
-    Pre-Z behaviour ran :func:`ensure_auto_discovered_dirs` on every startup
-    to silently append three provider home dirs (``~/.claude/projects``,
+    Releases 0.1.11 and earlier ran ``ensure_auto_discovered_dirs`` on every
+    startup to silently append three provider home dirs (``~/.claude/projects``,
     ``~/.gemini``, ``~/.codex/memories``) whenever the flag was True. That
     was both too wide (transcripts + secrets) and too quiet (no opt-in
     surface). The replacement is a wizard step in ``mm init`` that picks

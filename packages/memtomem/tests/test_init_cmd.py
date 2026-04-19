@@ -994,9 +994,7 @@ class TestIncludeProviderFlag:
         )
         assert result.exit_code == 0, result.output
 
-        data = json.loads(
-            (tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8")
-        )
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
         assert str(codex) in data["indexing"]["memory_dirs"]
 
     def test_flag_silently_skips_unavailable_categories(
@@ -1027,9 +1025,7 @@ class TestIncludeProviderFlag:
             ],
         )
         assert result.exit_code == 0, result.output
-        data = json.loads(
-            (tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8")
-        )
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
         # Only the user's primary memory_dir survives; no fake codex path.
         assert data["indexing"]["memory_dirs"] == [str(tmp_path / "memories")]
 
@@ -1063,9 +1059,7 @@ class TestIncludeProviderFlag:
             ],
         )
         assert result.exit_code == 0, result.output
-        data = json.loads(
-            (tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8")
-        )
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
         assert str(codex) not in data["indexing"]["memory_dirs"]
 
 
