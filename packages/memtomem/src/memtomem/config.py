@@ -1053,6 +1053,12 @@ def build_comparand(*, quiet: bool = True) -> "Mem2MemConfig":
     """
     comparand = Mem2MemConfig()
     load_config_d(comparand, quiet=quiet)
+    # Auto-discovery is an env-dependent "factory" in spirit: it depends on
+    # the local filesystem, not on user choice. Running it here keeps the
+    # comparand apples-to-apples with the runtime config built by
+    # ``create_components`` so auto-discovered paths don't drag into
+    # ``config.json`` on unrelated saves.
+    ensure_auto_discovered_dirs(comparand)
     return comparand
 
 
