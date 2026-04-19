@@ -105,18 +105,11 @@ See [MCP Client Setup](docs/guides/mcp-clients.md) for Cursor / Windsurf / Claud
 | Guide | Description |
 |-------|-------------|
 | [Getting Started](docs/guides/getting-started.md) | Install, setup wizard, first use |
-| [Hands-On Tutorial](docs/guides/hands-on-tutorial.md) | Follow-along with example files |
-| [Interactive Notebooks](examples/notebooks/) | Jupyter notebooks for the Python API — hello, indexing, sessions, tuning, LangGraph |
-| [User Guide](docs/guides/user-guide.md) | Complete feature walkthrough |
+| [Reference](docs/guides/reference.md) | Complete feature reference for all tools and patterns |
 | [Configuration](docs/guides/configuration.md) | All `MEMTOMEM_*` environment variables |
 | [Embeddings](docs/guides/embeddings.md) | ONNX, Ollama, and OpenAI embedding providers |
 | [LLM Providers](docs/guides/llm-providers.md) | Ollama, OpenAI, Anthropic, and compatible endpoints |
 | [MCP Client Setup](docs/guides/mcp-clients.md) | Editor-specific configuration |
-| [Agent Memory Guide](docs/guides/agent-memory-guide.md) | Sessions, working memory, procedures |
-| [Agent Context Management](docs/guides/agent-context.md) | `mm context` CLI, multi-editor artifact fan-out, settings hooks merge |
-| [Google Drive Integration](docs/guides/google-drive.md) | Multi-device and team workflows |
-| [Web UI](docs/guides/web-ui.md) | Visual dashboard |
-| [Hooks](docs/guides/hooks.md) | Claude Code hooks for auto-indexing |
 | [Uninstalling memtomem](docs/guides/uninstall.md) | Clean removal steps |
 
 ---

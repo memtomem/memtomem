@@ -181,5 +181,5 @@ Yes. It works on Windows as long as the `memtomem-server` command can be execute
 
 ## Next Steps
 
-- [User Guide](../user-guide.md) — Complete feature walkthrough
-- [Practical Use Cases](../use-cases.md) — Agent workflow scenarios
+- [Reference](../reference.md) — Complete feature reference
+- [Configuration](../configuration.md) — All `MEMTOMEM_*` environment variables
