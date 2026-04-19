@@ -987,10 +987,19 @@ button:active { opacity: 0.7; }
 .memory-dirs-list { list-style: none; margin: 0; padding: 0 10px 8px 10px; display: flex; flex-direction: column; gap: 2px; }
 .memory-dirs-list-scroll { max-height: 220px; overflow-y: auto; }
 .memory-dirs-item {
-  display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center;
+  display: grid; grid-template-columns: 1fr auto auto auto; gap: 6px; align-items: center;
   padding: 2px 4px;
 }
+.memory-dirs-item-empty .memory-dirs-path { color: var(--muted); }
+.memory-dirs-item-missing .memory-dirs-path { color: var(--muted); text-decoration: line-through; }
 .memory-dirs-path { font-family: var(--mono); font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.memory-dirs-status {
+  font-size: 0.7rem; color: var(--muted); font-family: var(--mono);
+  padding: 0 6px; white-space: nowrap;
+}
+.memory-dirs-status.empty { color: #b91c1c; }
+.memory-dirs-status.missing { color: #b91c1c; font-style: italic; }
+.memory-dirs-status-group { margin-left: auto; margin-right: 6px; }
 .memory-dirs-reindex-btn, .memory-dirs-remove-btn { min-width: 26px; padding: 1px 6px; font-size: 0.78rem; }
 .memory-dirs-remove-btn:disabled { opacity: 0.3; cursor: default; }
 .memory-dirs-add { display: grid; grid-template-columns: 1fr auto; gap: 6px; margin-top: 4px; }

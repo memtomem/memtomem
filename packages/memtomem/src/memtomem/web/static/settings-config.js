@@ -920,13 +920,42 @@ function _buildMemoryDirsWidget(section, key, val) {
   // ``data-section``/``data-key`` set, so it sits outside the per-section
   // Save dirty/reset flow. ``_NO_RESET_FIELDS`` suppresses the reset button
   // for the same reason.
+  //
+  // The widget also fetches ``GET /api/memory-dirs/status`` to display
+  // per-dir "(N chunks)" / "(not indexed)" badges so users can see which
+  // dirs still need a manual reindex. Indexing is pull-based — startup
+  // never walks memory_dirs, because 25+ provider dirs × thousands of .md
+  // files × ONNX embedding made the "log in and wait 2 minutes" UX
+  // unacceptable.
   const wrap = document.createElement('div');
   wrap.className = 'memory-dirs-widget';
 
   let dirs = Array.isArray(val) ? [...val] : [];
+  // Keyed by the original (unresolved) path string the server returns in
+  // ``status.dirs[].path`` — matches what we display so lookups are O(1).
+  let statusByPath = {};
+  let statusLoaded = false;
 
   function _apiErrorText(err) {
     return (err && err.message) ? err.message : String(err);
+  }
+
+  async function fetchStatus() {
+    try {
+      const resp = await api('GET', '/api/memory-dirs/status');
+      const next = {};
+      for (const entry of (resp && resp.dirs) || []) {
+        if (entry && typeof entry.path === 'string') next[entry.path] = entry;
+      }
+      statusByPath = next;
+      statusLoaded = true;
+    } catch (err) {
+      // Non-fatal: badges stay hidden. Don't toast — status is ancillary.
+      console.warn('memory-dirs/status fetch failed:', err);
+      statusByPath = {};
+      statusLoaded = true;
+    }
+    render();
   }
 
   function refreshDirs(newDirs) {
@@ -935,6 +964,9 @@ function _buildMemoryDirsWidget(section, key, val) {
       STATE.serverConfig.indexing.memory_dirs = [...dirs];
     }
     render();
+    // Status is derived from the new dirs list — re-fetch so newly added
+    // (empty) dirs get a "(not indexed)" badge and removed dirs drop out.
+    fetchStatus();
   }
 
   async function handleAdd(path) {
@@ -988,6 +1020,7 @@ function _buildMemoryDirsWidget(section, key, val) {
       showToast(t('toast.memory_dir.reindex_failed', { error: _apiErrorText(err) }), 'error');
     } finally {
       if (btn) btnLoading(btn, false);
+      fetchStatus();
     }
   }
 
@@ -1023,6 +1056,7 @@ function _buildMemoryDirsWidget(section, key, val) {
       showToast(t('toast.reindex_failed', { error: _apiErrorText(err) }), 'error');
     } finally {
       if (btn) btnLoading(btn, false);
+      fetchStatus();
     }
   }
 
@@ -1056,12 +1090,36 @@ function _buildMemoryDirsWidget(section, key, val) {
       group.dataset.category = cat;
       if (!_MEMORY_DIR_CATEGORY_COLLAPSED.has(cat)) group.open = true;
 
+      // Group-level aggregate from status (if loaded).
+      let groupChunks = 0;
+      let groupFiles = 0;
+      let groupHasStatus = false;
+      for (const path of entries) {
+        const st = statusByPath[path];
+        if (st) {
+          groupHasStatus = true;
+          groupChunks += st.chunk_count || 0;
+          groupFiles += st.source_file_count || 0;
+        }
+      }
+
       const summary = document.createElement('summary');
       summary.className = 'memory-dirs-summary';
       const label = document.createElement('span');
       label.className = 'memory-dirs-summary-label';
       label.textContent = `${t(_MEMORY_DIR_CATEGORY_LABEL_KEY[cat])} (${entries.length})`;
       summary.appendChild(label);
+
+      if (statusLoaded && groupHasStatus) {
+        const groupBadge = document.createElement('span');
+        groupBadge.className = 'memory-dirs-status memory-dirs-status-group';
+        if (groupChunks === 0) groupBadge.classList.add('empty');
+        groupBadge.textContent = t(
+          'settings.memory_dirs.status_group',
+          { files: groupFiles, chunks: groupChunks },
+        );
+        summary.appendChild(groupBadge);
+      }
 
       const groupReindex = document.createElement('button');
       groupReindex.type = 'button';
@@ -1084,11 +1142,37 @@ function _buildMemoryDirsWidget(section, key, val) {
         const item = document.createElement('li');
         item.className = 'memory-dirs-item';
 
+        const st = statusByPath[path];
+        if (statusLoaded && st) {
+          if (st.chunk_count === 0) item.classList.add('memory-dirs-item-empty');
+          if (st.exists === false) item.classList.add('memory-dirs-item-missing');
+        }
+
         const pathSpan = document.createElement('span');
         pathSpan.className = 'memory-dirs-path';
         pathSpan.textContent = path;
         pathSpan.title = path;
         item.appendChild(pathSpan);
+
+        // Per-dir status badge. Rendered only once the fetch resolves so
+        // the initial paint doesn't flash "(not indexed)" for every row.
+        if (statusLoaded && st) {
+          const badge = document.createElement('span');
+          badge.className = 'memory-dirs-status';
+          if (st.exists === false) {
+            badge.classList.add('missing');
+            badge.textContent = t('settings.memory_dirs.status_missing');
+          } else if ((st.chunk_count || 0) === 0) {
+            badge.classList.add('empty');
+            badge.textContent = t('settings.memory_dirs.status_empty');
+          } else {
+            badge.textContent = t(
+              'settings.memory_dirs.status_chunks',
+              { count: st.chunk_count },
+            );
+          }
+          item.appendChild(badge);
+        }
 
         const reindexBtn = document.createElement('button');
         reindexBtn.type = 'button';
@@ -1140,6 +1224,9 @@ function _buildMemoryDirsWidget(section, key, val) {
   }
 
   render();
+  // Pull status asynchronously and re-render when it arrives. First paint
+  // shows the dir list immediately; badges appear when the fetch resolves.
+  fetchStatus();
   return wrap;
 }
 

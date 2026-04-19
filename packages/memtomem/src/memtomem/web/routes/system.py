@@ -459,6 +459,23 @@ async def remove_memory_dir(
         raise HTTPException(503, "memory-dirs/remove timed out — another update may be in progress")
 
 
+@router.get("/memory-dirs/status")
+async def memory_dirs_status(
+    config=Depends(get_config),
+    storage=Depends(get_storage),
+):
+    """Per-dir index status for the web widget.
+
+    Drives the "(N chunks)" / "(not indexed)" badges — users pick which
+    dirs need a manual reindex instead of paying a blind startup scan
+    cost across every provider memory dir.
+    """
+    from memtomem.indexing.engine import memory_dir_stats
+
+    stats = await memory_dir_stats(storage, config.indexing.memory_dirs)
+    return {"dirs": stats}
+
+
 @router.post("/reindex")
 async def reindex_all(
     force: bool = False,

@@ -2,28 +2,20 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import logging.config
 import os
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
 
 from mcp.server.fastmcp import FastMCP
 
 from memtomem.config import Mem2MemConfig
-from memtomem.indexing.engine import dirs_needing_initial_scan
 from memtomem.indexing.watcher import FileWatcher
 from memtomem.search.dedup import DedupScanner
 from memtomem.server.component_factory import Components, close_components, create_components
 from memtomem.server.context import AppContext
-
-if TYPE_CHECKING:
-    from memtomem.config import IndexingConfig
-    from memtomem.indexing.engine import IndexEngine
-    from memtomem.storage.base import StorageBackend
 
 logger = logging.getLogger(__name__)
 
@@ -99,48 +91,6 @@ async def _shutdown(watcher: FileWatcher, comp: Components) -> None:
             logger.warning("Shutdown step '%s' failed", label, exc_info=True)
 
 
-async def _initial_scan_missing_dirs(
-    engine: IndexEngine,
-    storage: StorageBackend,
-    cfg_indexing: IndexingConfig,
-) -> None:
-    """Index any ``memory_dirs`` that have no chunks yet.
-
-    Runs once at startup as a background task. The ``FileWatcher`` only
-    reacts to change events, so pre-existing files in a newly added
-    ``memory_dir`` (e.g., added by the ``mm init`` wizard or the deprecated
-    ``auto_discover`` migration) would otherwise never make it into the
-    index. This helper closes that gap without forcing a full re-scan on
-    every startup — dirs that already contain indexed files are skipped.
-    """
-    try:
-        needing = await dirs_needing_initial_scan(storage, cfg_indexing.memory_dirs)
-    except Exception:
-        logger.warning("Initial-scan gating check failed; skipping", exc_info=True)
-        return
-
-    if not needing:
-        return
-
-    logger.info("Initial scan: indexing %d memory_dir(s) with no prior chunks", len(needing))
-    for d in needing:
-        try:
-            await engine.index_path(d, recursive=True)
-            logger.info("Initial scan complete for %s", d)
-        except Exception:
-            logger.warning("Initial scan failed for %s", d, exc_info=True)
-
-
-async def _cancel_task(task: asyncio.Task[None] | None) -> None:
-    if task is None or task.done():
-        return
-    task.cancel()
-    try:
-        await task
-    except (asyncio.CancelledError, Exception):
-        pass
-
-
 # ---------------------------------------------------------------------------
 # Main lifespan
 # ---------------------------------------------------------------------------
@@ -156,11 +106,6 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
 
     watcher = FileWatcher(comp.index_engine, config.indexing)
     await watcher.start()
-
-    initial_scan_task: asyncio.Task[None] | None = asyncio.create_task(
-        _initial_scan_missing_dirs(comp.index_engine, comp.storage, config.indexing),
-        name="memtomem-initial-scan",
-    )
 
     dedup_scanner = DedupScanner(storage=comp.storage, embedder=comp.embedder)
 
@@ -211,7 +156,6 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
     try:
         yield ctx
     finally:
-        await _cancel_task(initial_scan_task)
         if watchdog:
             try:
                 await watchdog.stop()

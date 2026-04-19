@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -176,26 +175,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     for d in comp.config.indexing.memory_dirs:
         Path(d).expanduser().resolve().mkdir(parents=True, exist_ok=True)
 
-    # One-shot background scan of memory_dirs that have no chunks yet. Closes
-    # the gap where a dir was added to config (``mm init`` wizard step, or the
-    # one-shot ``auto_discover`` migration) but its existing files never made
-    # it into the index — the watcher only reacts to change events.
-    from memtomem.server.lifespan import _initial_scan_missing_dirs
-
-    initial_scan_task: asyncio.Task[None] | None = asyncio.create_task(
-        _initial_scan_missing_dirs(comp.index_engine, comp.storage, comp.config.indexing),
-        name="memtomem-web-initial-scan",
-    )
-
     try:
         yield
     finally:
-        if initial_scan_task is not None and not initial_scan_task.done():
-            initial_scan_task.cancel()
-            try:
-                await initial_scan_task
-            except (asyncio.CancelledError, Exception):
-                pass
         await close_components(comp)
 
 
