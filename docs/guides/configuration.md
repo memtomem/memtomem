@@ -337,9 +337,8 @@ You can also toggle this per-field from the Web UI or via
 > **Cloud-sync mounts** (Google Drive Stream, OneDrive Files-On-Demand ON,
 > iCloud Optimize Storage) generally do **not** emit fs watcher events to
 > macOS/Linux, so the indexer will not auto-pick-up new files placed there
-> by the sync client. Either pin the folder offline (per
-> [Cloud Sync Client Setup](cloud-sync.md)) or trigger `mem_index` manually
-> after files appear.
+> by the sync client. Either pin the folder offline in your cloud client's
+> settings or trigger `mem_index` manually after files appear.
 
 ## Rerank (Cross-Encoder)
 
@@ -409,7 +408,7 @@ The composite score (0–1) maps to a boost of `[1.0, max_boost]`. Runs as Stage
 > Turning MMR on with the default `LAMBDA_PARAM=0.7` favors relevance but
 > drops obvious duplicates, with negligible cost. memtomem does not dedup
 > at index time — see also `mem_dedup_scan` / `mem_dedup_merge`
-> ([User Guide](user-guide.md)) for a manual pass on accumulated overlap.
+> ([Reference](reference.md)) for a manual pass on accumulated overlap.
 
 ## Namespace
 

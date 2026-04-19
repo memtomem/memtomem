@@ -174,7 +174,7 @@ Create or edit the `~/.gemini/settings.json` file:
 }
 ```
 
-Restart Gemini CLI after configuration. See the [Gemini CLI integration guide](integrations/gemini-cli.md) for advanced setup.
+Restart Gemini CLI after configuration.
 
 ---
 
@@ -363,5 +363,4 @@ mm index ~/notes                            # re-index
 ## Next Steps
 
 - [Getting Started](getting-started.md) — Setup wizard and first use
-- [Hands-On Tutorial](hands-on-tutorial.md) — Step-by-step walkthrough
-- [User Guide](user-guide.md) — Complete feature reference
+- [Reference](reference.md) — Complete feature reference

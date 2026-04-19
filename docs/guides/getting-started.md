@@ -368,7 +368,7 @@ mm context sync --include=commands
 mm context sync --include=skills,agents,commands
 ```
 
-See the [Agent Context Management guide](agent-context.md) for the full fan-out matrix and field-loss details.
+Run `mm context --help` for the full fan-out matrix across editors (Claude Code, Cursor, Gemini CLI, OpenAI Codex, GitHub Copilot) and per-runtime field-drop details.
 
 ---
 
@@ -394,7 +394,7 @@ For a visual dashboard with search, tags, sessions, and health monitoring:
 mm web                     # opens http://localhost:8080
 ```
 
-See [Web UI Guide](web-ui.md) for details.
+Tabs cover search, sources, indexing, tags, timeline, and a "More" tab with config, namespaces, dedup/decay, export/import, and the harness (sessions, working memory, procedures, health).
 
 ---
 
@@ -430,8 +430,8 @@ rm -rf ~/.memtomem
 
 ## Next steps
 
-- [Hands-On Tutorial](hands-on-tutorial.md) — follow-along with example files
-- [User Guide](user-guide.md) — complete feature walkthrough
-- [Agent Memory Guide](agent-memory-guide.md) — sessions, working memory, procedures
+- [Reference](reference.md) — complete feature reference for all tools and patterns
+- [Configuration](configuration.md) — all `MEMTOMEM_*` environment variables
+- [Embeddings](embeddings.md) — ONNX, Ollama, OpenAI providers
 - [LLM Providers](llm-providers.md) — Ollama, OpenAI, and compatible endpoints
 - [MCP Client Setup](mcp-clients.md) — editor-specific configuration

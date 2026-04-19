@@ -1,9 +1,9 @@
-# memtomem User Guide
+# memtomem Reference
 
 **Audience**: Users who have completed the [Getting Started](getting-started.md) guide
 **Prerequisites**: memtomem installed, MCP server connected to your AI editor
 
-> **New to memtomem?** Start with [Getting Started](getting-started.md) first, then the [Hands-On Tutorial](hands-on-tutorial.md). This guide is a complete reference for all features.
+> **New to memtomem?** Start with [Getting Started](getting-started.md) first. This guide is a complete reference for all features.
 
 ---
 
@@ -862,29 +862,7 @@ memtomem-web                  # http://localhost:8080
 memtomem-web --port 3000      # custom port
 ```
 
-| Tab | Features |
-|-----|----------|
-| **Home** | Stats (chunks, sources, namespaces, sessions, working memory), charts, recent sources |
-| **Search** | Full search with filters, detail panel, source preview, chunk editing |
-| **Sources** | Browse indexed files, view chunks, delete sources |
-| **Index** | Trigger indexing, upload files, add memories |
-| **Tags** | Tag cloud, auto-tagging, tag-based browsing |
-| **Timeline** | Chronological view of all chunks |
-| **More** | Config, namespaces, dedup, decay, export/import, **harness** (sessions, working memory, procedures, health) |
-
-See [Web UI Guide](web-ui.md) for full details.
-
----
-
-## Google Drive Integration (Multi-Device / Team)
-
-memtomem works across devices and teams by sharing markdown files via Google Drive, Dropbox, or OneDrive while keeping the search index local per device. See [`google-drive.md`](google-drive.md) for the full setup, namespace mapping, team workflow, and limitations.
-
----
-
-## Agent Context Management — `mm context`
-
-If you use multiple AI editors (Claude Code, Cursor, Gemini CLI, OpenAI Codex, GitHub Copilot), `mm context` keeps project memory (`CLAUDE.md`, `.cursorrules`, `GEMINI.md`, `AGENTS.md`, `.github/copilot-instructions.md`), skills, sub-agents, and slash commands in sync from a single canonical source under `.memtomem/`. See [`agent-context.md`](agent-context.md) for the full fan-out matrix (including the Claude Code settings-hooks merge formerly described here as "Settings Hooks Integration (Phase D)"), the `--include=skills,agents,commands,settings` flag, the `--strict` mode, and per-runtime field-drop reference.
+The dashboard exposes search, sources, indexing, tags, timeline, and a "More" tab covering config, namespaces, dedup/decay, export/import, and the harness (sessions, working memory, procedures, health).
 
 ---
 
@@ -1035,12 +1013,6 @@ For setup, CLI usage, compression strategies, surfacing configuration, and the f
 
 ---
 
-## Settings Hooks Integration (Phase D)
-
-memtomem can manage Claude Code hooks via a canonical `.memtomem/settings.json` file; `mm context generate/sync/diff --include=settings` merges them into `~/.claude/settings.json` additively. See [`agent-context.md#settings-hooks-integration-phase-d`](agent-context.md#settings-hooks-integration-phase-d) for merge rules, caveats, and the matching `mem_context_*(include="settings")` MCP calls.
-
----
-
 ## Uninstalling memtomem
 
 See [`uninstall.md`](uninstall.md) for the five-step removal flow: detach the MCP server from each editor, uninstall the Python package, delete `~/.memtomem/`, clean up project-scoped `.memtomem/` and generated rule files, and optionally prune memtomem hooks from `~/.claude/settings.json`.
@@ -1049,11 +1021,9 @@ See [`uninstall.md`](uninstall.md) for the five-step removal flow: detach the MC
 
 ## Next Steps
 
-- [Hands-On Tutorial](hands-on-tutorial.md) — Step-by-step with example files
-- [Agent Memory Guide](agent-memory-guide.md) — Sessions, working memory, procedures, multi-agent, reflection
-- [Web UI Guide](web-ui.md) — Dashboard, harness tabs, health report
-- [LangGraph Integration](integrations/langgraph.md) — Python adapter for LangGraph/LangChain
-- [Practical Use Cases](use-cases.md) — Agent workflow scenarios
-- [Claude Code Hooks](hooks.md) — Automate memory with hooks
+- [Configuration](configuration.md) — All `MEMTOMEM_*` environment variables
+- [Embeddings](embeddings.md) — ONNX, Ollama, OpenAI providers
+- [LLM Providers](llm-providers.md) — Optional LLM features (auto-tag, entity extraction, ask)
+- [MCP Client Setup](mcp-clients.md) — Editor-specific configuration
 - [memtomem-stm](https://github.com/memtomem/memtomem-stm) — Proactive surfacing, compression, caching (separate package)
 - [Full Tool Reference](../../packages/memtomem/README.md) — All 74 tools with parameters

@@ -181,5 +181,5 @@ They serve different purposes. Cursor's indexing is for code autocompletion, whi
 
 ## Next Steps
 
-- [User Guide](../user-guide.md) — Complete feature walkthrough
-- [Practical Use Cases](../use-cases.md) — Agent workflow scenarios
+- [Reference](../reference.md) — Complete feature reference
+- [Configuration](../configuration.md) — All `MEMTOMEM_*` environment variables

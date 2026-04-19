@@ -194,7 +194,7 @@ User submits prompt (>20 chars)
 - **Short prompt guard**: Prompts under 20 characters are skipped to avoid noise from "yes", "ok", etc.
 - **Input sanitization**: `printf '%s'` + `head -c 500` prevent shell injection and cap query length.
 - **Error logging**: `2>>/tmp/mm-hook.log` preserves errors for debugging. Avoid `2>/dev/null` which hides real failures.
-- **Stop hook = session close**: Use `mm session end --auto` in the Stop hook to close the active session with a structured summary (see [hooks.md](../hooks.md)). Don't use a Stop hook to call `mm add` with raw timestamps — those pollute search.
+- **Stop hook = session close**: Use `mm session end --auto` in the Stop hook to close the active session with a structured summary. Don't use a Stop hook to call `mm add` with raw timestamps — those pollute search.
 - **Write only**: `Edit` is excluded from PostToolUse — edited files are already indexed, so re-indexing on every edit is redundant.
 - **STM proxy overlap**: If using [memtomem-stm](https://github.com/memtomem/memtomem-stm) (separate package), hooks are redundant — the proxy already handles surfacing and indexing.
 
@@ -332,11 +332,11 @@ mm context sync --include=agents
 mm context sync --include=commands
 ```
 
-Sub-agent conversions are lossy for non-Claude targets — Gemini drops `skills` + `isolation`, Codex additionally drops `tools`, `kind`, `temperature`. Slash commands fan out to all three runtimes — Codex keeps `description` / `argument-hint` and the `$ARGUMENTS` placeholder natively, dropping only `allowed-tools` and `model` (Codex custom prompts are upstream-deprecated; prefer a skill for new workflows). memtomem reports every dropped field; add `--strict` to fail if you need 1:1 fidelity. See the [full matrix and diagrams](../agent-context.md) in the Agent Context Management guide.
+Sub-agent conversions are lossy for non-Claude targets — Gemini drops `skills` + `isolation`, Codex additionally drops `tools`, `kind`, `temperature`. Slash commands fan out to all three runtimes — Codex keeps `description` / `argument-hint` and the `$ARGUMENTS` placeholder natively, dropping only `allowed-tools` and `model` (Codex custom prompts are upstream-deprecated; prefer a skill for new workflows). memtomem reports every dropped field; add `--strict` to fail if you need 1:1 fidelity. Run `mm context --help` for the full per-runtime field-drop matrix.
 
 ---
 
 ## Next Steps
 
-- [User Guide](../user-guide.md) — Complete feature walkthrough
-- [Practical Use Cases](../use-cases.md) — Agent workflow scenarios
+- [Reference](../reference.md) — Complete feature reference
+- [Configuration](../configuration.md) — All `MEMTOMEM_*` environment variables

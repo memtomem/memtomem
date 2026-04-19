@@ -86,14 +86,10 @@ Full documentation lives in the [memtomem GitHub repo](https://github.com/memtom
 | Guide | Topic |
 |-------|-------|
 | [Getting Started](https://github.com/memtomem/memtomem/blob/main/docs/guides/getting-started.md) | **Start here** — install, setup wizard, first use |
-| [Hands-On Tutorial](https://github.com/memtomem/memtomem/blob/main/docs/guides/hands-on-tutorial.md) | Follow-along with example files |
-| [User Guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/user-guide.md) | Complete feature walkthrough — all tools and patterns |
+| [Reference](https://github.com/memtomem/memtomem/blob/main/docs/guides/reference.md) | Complete feature reference — all tools and patterns |
 | [Configuration](https://github.com/memtomem/memtomem/blob/main/docs/guides/configuration.md) | All `MEMTOMEM_*` environment variables |
 | [Embeddings](https://github.com/memtomem/memtomem/blob/main/docs/guides/embeddings.md) | ONNX, Ollama, and OpenAI providers, model dimensions, switching models |
 | [MCP Client Setup](https://github.com/memtomem/memtomem/blob/main/docs/guides/mcp-clients.md) | Editor-specific configuration |
-| [Agent Memory Guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/agent-memory-guide.md) | Sessions, working memory, procedures, multi-agent |
-| [Web UI Guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/web-ui.md) | Visual dashboard reference |
-| [Hooks](https://github.com/memtomem/memtomem/blob/main/docs/guides/hooks.md) | Claude Code hooks for automatic indexing and search |
 | [memtomem-stm](https://github.com/memtomem/memtomem-stm) | Optional STM proxy for proactive memory surfacing (separate package) |
 
 ## License

@@ -73,5 +73,5 @@ whose commands reference `memtomem` or `mm`.
 
 ## Next Steps
 
-- [User Guide](user-guide.md) — Complete feature walkthrough
+- [Reference](reference.md) — Complete feature reference
 - [Getting Started](getting-started.md) — Reinstall if you change your mind
