@@ -236,8 +236,14 @@ def reload_if_stale(
             ),
         )
         # Update the signature we've seen so we don't re-try on every hit;
-        # we only retry once disk mtime changes again.
-        _set_last_signature(app, sig)
+        # we only retry once disk mtime changes again. Mirror of the
+        # success-path CAS (#269 / issue #273): if a writer's
+        # commit_writer_signature landed while _build_fresh_config was
+        # failing, don't revert their bump — their view is strictly fresher
+        # than the one we just failed to rebuild, and their signature will
+        # satisfy the stale check on the next read.
+        if _get_last_signature(app) == last:
+            _set_last_signature(app, sig)
         return False
 
     # Compare-and-swap: while we were in _build_fresh_config (file I/O, can
