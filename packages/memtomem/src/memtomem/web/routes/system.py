@@ -321,10 +321,9 @@ async def patch_config(
 
                 if persist:
                     save_config_overrides(config)
-                    # Our own write bumps mtime — update the signature so the
-                    # next GET doesn't trigger a spurious reload for our own
-                    # change.
-                    _hot_reload._set_last_signature(request.app, _hot_reload.current_signature())
+                    # Self-write mtime bump — otherwise the next GET sees
+                    # our own edit as "external" and reloads spuriously.
+                    _hot_reload.commit_writer_signature(request.app)
     except TimeoutError:
         raise HTTPException(503, "Config update timed out — another update may be in progress")
 
@@ -346,7 +345,7 @@ async def save_config(
                 )
                 _check_reload_block(request)
                 save_config_overrides(request.app.state.config)
-                _hot_reload._set_last_signature(request.app, _hot_reload.current_signature())
+                _hot_reload.commit_writer_signature(request.app)
     except TimeoutError:
         raise HTTPException(503, "Config save timed out — another update may be in progress")
     return {"ok": True, "message": "Config saved to ~/.memtomem/config.json"}
@@ -387,7 +386,7 @@ async def add_memory_dir(
 
                 config.indexing.memory_dirs.append(resolved)
                 save_config_overrides(config)
-                _hot_reload._set_last_signature(request.app, _hot_reload.current_signature())
+                _hot_reload.commit_writer_signature(request.app)
                 return {
                     "ok": True,
                     "message": f"Added {resolved}",
@@ -435,7 +434,7 @@ async def remove_memory_dir(
 
                 config.indexing.memory_dirs = new_dirs
                 save_config_overrides(config)
-                _hot_reload._set_last_signature(request.app, _hot_reload.current_signature())
+                _hot_reload.commit_writer_signature(request.app)
                 return {
                     "ok": True,
                     "message": f"Removed {resolved}",

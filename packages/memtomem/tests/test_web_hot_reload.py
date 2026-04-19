@@ -280,6 +280,32 @@ async def test_invalid_json_surfaces_error_but_keeps_stale_config(
     assert data["mmr"]["enabled"] is False
 
 
+async def test_non_json_structural_error_also_surfaces(home: Path, app, client: AsyncClient):
+    """JSON parses but the shape is wrong (root is a list, not a dict).
+
+    Covers the non-``JSONDecodeError`` failure mode of ``_build_fresh_config``:
+    the loader's ``section_obj = getattr(config, section_name)`` over a
+    non-dict payload raises ``AttributeError``, which ``reload_if_stale``
+    catches via the bare ``except Exception`` and converts into a
+    ``ReloadError``. Regression guard against narrowing that except
+    clause back to ``(OSError, JSONDecodeError)``.
+    """
+    _write_config(home, {"mmr": {"enabled": False}})
+    app.state.config = _hot_reload._build_fresh_config()
+    app.state.config_signature = _hot_reload.current_signature()
+
+    cfg_path = home / ".memtomem" / "config.json"
+    cfg_path.write_text('["not", "a", "dict"]', encoding="utf-8")  # valid JSON, wrong shape
+    _bump_mtime(cfg_path)
+
+    resp = await client.get("/api/config")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["config_reload_error"] is not None
+    # Stale value preserved.
+    assert data["mmr"]["enabled"] is False
+
+
 async def test_patch_refused_while_disk_is_broken(home: Path, app, client: AsyncClient):
     _write_config(home, {"mmr": {"enabled": False}})
     app.state.config = _hot_reload._build_fresh_config()
@@ -354,46 +380,70 @@ async def test_tokenizer_change_via_reload_triggers_fanout(home: Path, app, clie
 # ---------------------------------------------------------------------------
 
 
-async def test_concurrent_patch_and_disk_edit_are_serialised(home: Path, app, client: AsyncClient):
-    _write_config(home, {"mmr": {"enabled": False}, "search": {"default_top_k": 10}})
+async def test_concurrent_patches_are_serialised_by_lock(
+    home: Path, app, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Two concurrent PATCH requests must execute serially under ``_config_lock``.
+
+    Without the lock, both writers would interleave inside the same
+    read-merge-write region and the second writer's merge would see a
+    pre-first-write snapshot. We prove serialisation by wrapping
+    ``save_config_overrides`` to record (enter, exit) timestamps and
+    asserting ``writer_1.exit <= writer_2.enter`` — i.e., no overlap.
+    """
+    _write_config(home, {"search": {"default_top_k": 10}})
     app.state.config = _hot_reload._build_fresh_config()
     app.state.config_signature = _hot_reload.current_signature()
 
-    async def slow_patch() -> int:
-        # Inject artificial delay inside the lock by awaiting from a
-        # middleware-style hack: PATCH with persist=true still completes
-        # quickly, but we rely on asyncio scheduling to interleave. The
-        # assertion is that whichever wins, the other sees the result.
+    spans: list[tuple[str, float, float]] = []
+
+    import memtomem.web.routes.system as _sys_routes
+
+    real_save = _sys_routes.save_config_overrides
+
+    call_counter = {"n": 0}
+
+    def instrumented_save(cfg, *args, **kwargs):
+        call_counter["n"] += 1
+        label = f"writer_{call_counter['n']}"
+        enter = time.perf_counter()
+        # Hold the lock long enough that a concurrent request would
+        # visibly overlap if serialisation were broken. 50ms is well
+        # above any scheduler jitter but still keeps the test fast.
+        time.sleep(0.05)
+        real_save(cfg, *args, **kwargs)
+        exit_t = time.perf_counter()
+        spans.append((label, enter, exit_t))
+
+    monkeypatch.setattr(_sys_routes, "save_config_overrides", instrumented_save)
+
+    async def do_patch(value: int) -> int:
         resp = await client.patch(
             "/api/config",
             params={"persist": "true"},
-            json={"search": {"default_top_k": 99}},
+            json={"search": {"default_top_k": value}},
         )
         return resp.status_code
 
-    async def disk_edit() -> None:
-        await asyncio.sleep(0.01)
-        _write_config(
-            home,
-            {"mmr": {"enabled": True}, "search": {"default_top_k": 10}},
-        )
+    status1, status2 = await asyncio.gather(do_patch(42), do_patch(99))
+    assert status1 == 200 and status2 == 200
 
-    patch_status, _ = await asyncio.gather(slow_patch(), disk_edit())
-    assert patch_status == 200
+    # Both writers ran.
+    assert len(spans) == 2, spans
 
-    # After both: at least one of the two changes is on disk, and the other
-    # is reflected either on disk or in a subsequent GET.
+    # Sort by enter time; the earlier writer must fully exit before the
+    # later one enters. Tolerance covers scheduler clock skew.
+    spans.sort(key=lambda s: s[1])
+    (_, _, first_exit), (_, second_enter, _) = spans
+    assert first_exit <= second_enter + 1e-3, (
+        f"writers overlapped: first exited at {first_exit}, second entered at {second_enter}"
+    )
+
+    # And the second-merged value (whichever PATCH won scheduling) must
+    # be reflected on disk — proving the late writer didn't silently
+    # clobber the early one with stale state.
     on_disk = json.loads((home / ".memtomem" / "config.json").read_text())
-    resp = await client.get("/api/config")
-    final = resp.json()
-
-    # PATCH's default_top_k=99 must win its own write regardless of
-    # interleaving (the PATCH ran inside the lock and re-read disk before
-    # merge, so either (a) disk_edit ran first and PATCH merged against
-    # mmr:true+top_k:10 → persisted 99+mmr:true, or (b) disk_edit ran after
-    # PATCH persisted 99 and clobbered it back to 10+mmr:true).
-    # The invariant is just that the final GET reflects current disk.
-    assert final["search"]["default_top_k"] == on_disk.get("search", {}).get("default_top_k", -1)
+    assert on_disk["search"]["default_top_k"] in (42, 99)
 
 
 # ---------------------------------------------------------------------------

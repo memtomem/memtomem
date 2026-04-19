@@ -134,6 +134,21 @@ def _set_last_signature(app: FastAPI, sig: Signature) -> None:
     app.state.config_signature = sig
 
 
+def commit_writer_signature(app: FastAPI) -> None:
+    """Record the current on-disk signature after a successful write.
+
+    Call this from any request handler that just invoked
+    :func:`memtomem.config.save_config_overrides` inside ``_config_lock``.
+    Without it, the next ``GET /api/config`` would see our own write as an
+    "external change" and trigger a spurious reload from the same file we
+    just wrote. The bump is cheap (one ``os.stat`` per fragment).
+
+    This is the public alternative to the internal ``_set_last_signature``
+    for the narrow "writer finalising its own change" use case.
+    """
+    _set_last_signature(app, current_signature())
+
+
 # ---------------------------------------------------------------------------
 # Reload
 # ---------------------------------------------------------------------------
@@ -188,13 +203,19 @@ def reload_if_stale(
     Note: FTS rebuild is fire-and-forget scheduled on the running event loop
     when invoked from an async context, so sync GET callers aren't blocked.
     Callers in a lock-free read context should still see the Settings swap
-    immediately; the rebuild catches up out-of-band.
+    immediately; the rebuild catches up out-of-band. The rebuild runs
+    concurrently with any writer inside ``_config_lock``: it touches the
+    FTS5 virtual table, not the ``config.json`` file, so there is no file-
+    level race with ``save_config_overrides``.
     """
     sig = current_signature()
     last = _get_last_signature(app)
     if last == sig:
-        # Signature matches; if a prior error was tied to a now-gone mtime,
-        # clear it defensively (matches the "retry once" spec).
+        # Signature matches; if a prior error was tied to a different
+        # on-disk mtime than what we see now, clear it — the user either
+        # fixed the file (mtime bumped forward) or the file vanished
+        # (mtime == -1). If both signature matches AND at_mtime_ns still
+        # equals current mtime, the error is still live, leave it.
         err = get_reload_error(app)
         if err is not None and err.at_mtime_ns != get_config_mtime_ns():
             _set_reload_error(app, None)
