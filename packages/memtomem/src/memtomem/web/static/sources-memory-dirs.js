@@ -165,18 +165,49 @@ function _buildMemoryDirsPanel(initialDirs) {
     }
   }
 
+  let _addOpen = false;
   function render() {
     wrap.innerHTML = '';
 
+    // Single-row header: title · total summary · [+ Add] [↻ Reindex all]
     const header = document.createElement('div');
     header.className = 'memory-dirs-header';
+
+    const titleGroup = document.createElement('div');
+    titleGroup.className = 'memory-dirs-header-title';
     const title = document.createElement('h3');
     title.className = 'memory-dirs-title';
     title.textContent = t('sources.memory_dirs.title');
-    header.appendChild(title);
+    titleGroup.appendChild(title);
+
+    // Inline total count: "1 dir" / "29 dirs" — keeps the user oriented
+    // when every group is collapsed.
+    const totalCount = document.createElement('span');
+    totalCount.className = 'memory-dirs-total';
+    totalCount.textContent = t(
+      dirs.length === 1 ? 'sources.memory_dirs.total_one' : 'sources.memory_dirs.total_many',
+      { count: dirs.length },
+    );
+    titleGroup.appendChild(totalCount);
+    header.appendChild(titleGroup);
 
     const actions = document.createElement('div');
     actions.className = 'memory-dirs-actions';
+
+    const addToggleBtn = document.createElement('button');
+    addToggleBtn.type = 'button';
+    addToggleBtn.className = 'btn btn-sm btn-ghost memory-dirs-add-toggle';
+    addToggleBtn.textContent = t('sources.memory_dirs.add_btn');
+    addToggleBtn.addEventListener('click', () => {
+      _addOpen = !_addOpen;
+      render();
+      if (_addOpen) {
+        const nextInput = wrap.querySelector('.memory-dirs-add-input');
+        if (nextInput) nextInput.focus();
+      }
+    });
+    actions.appendChild(addToggleBtn);
+
     const reindexAllBtn = document.createElement('button');
     reindexAllBtn.type = 'button';
     reindexAllBtn.className = 'btn btn-sm btn-ghost';
@@ -185,6 +216,40 @@ function _buildMemoryDirsPanel(initialDirs) {
     actions.appendChild(reindexAllBtn);
     header.appendChild(actions);
     wrap.appendChild(header);
+
+    // Inline add-path form, toggled via the "+ Add" header button.
+    if (_addOpen) {
+      const addRow = document.createElement('div');
+      addRow.className = 'memory-dirs-add';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'memory-dirs-add-input';
+      input.placeholder = t('sources.memory_dirs.add_placeholder');
+      const submit = document.createElement('button');
+      submit.type = 'button';
+      submit.className = 'btn btn-sm btn-primary';
+      submit.textContent = t('sources.memory_dirs.add_submit');
+      submit.addEventListener('click', async () => {
+        const val = input.value;
+        input.value = '';
+        await handleAdd(val);
+        _addOpen = false;
+        render();
+      });
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.className = 'btn btn-sm btn-ghost';
+      cancel.textContent = t('sources.memory_dirs.add_cancel');
+      cancel.addEventListener('click', () => { _addOpen = false; render(); });
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') { ev.preventDefault(); submit.click(); }
+        else if (ev.key === 'Escape') { ev.preventDefault(); cancel.click(); }
+      });
+      addRow.appendChild(input);
+      addRow.appendChild(submit);
+      addRow.appendChild(cancel);
+      wrap.appendChild(addRow);
+    }
 
     const byCategory = { 'user': [], 'claude-memory': [], 'claude-plans': [], 'codex': [] };
     for (const d of dirs) {
@@ -215,14 +280,20 @@ function _buildMemoryDirsPanel(initialDirs) {
 
       const summary = document.createElement('summary');
       summary.className = 'memory-dirs-summary';
+
       const label = document.createElement('span');
       label.className = 'memory-dirs-summary-label';
-      label.textContent = `${t(_MEMORY_DIR_CATEGORY_LABEL_KEY[cat])} (${entries.length})`;
+      label.textContent = t(_MEMORY_DIR_CATEGORY_LABEL_KEY[cat]);
       summary.appendChild(label);
+
+      const count = document.createElement('span');
+      count.className = 'memory-dirs-summary-count';
+      count.textContent = String(entries.length);
+      summary.appendChild(count);
 
       if (statusLoaded && groupHasStatus) {
         const groupBadge = document.createElement('span');
-        groupBadge.className = 'memory-dirs-status memory-dirs-status-group';
+        groupBadge.className = 'memory-dirs-status-group';
         if (groupChunks === 0) groupBadge.classList.add('empty');
         groupBadge.textContent = t(
           'sources.memory_dirs.status_group',
@@ -234,7 +305,7 @@ function _buildMemoryDirsPanel(initialDirs) {
       const groupReindex = document.createElement('button');
       groupReindex.type = 'button';
       groupReindex.className = 'btn btn-xs btn-ghost memory-dirs-group-reindex';
-      groupReindex.textContent = '↻';
+      groupReindex.textContent = t('sources.memory_dirs.action_reindex_group');
       groupReindex.title = t('sources.memory_dirs.reindex_group');
       groupReindex.addEventListener('click', (ev) => {
         ev.preventDefault();
@@ -280,12 +351,17 @@ function _buildMemoryDirsPanel(initialDirs) {
             );
           }
           item.appendChild(badge);
+        } else {
+          // Placeholder so the action buttons line up before status loads.
+          const ph = document.createElement('span');
+          ph.className = 'memory-dirs-status placeholder';
+          item.appendChild(ph);
         }
 
         const reindexBtn = document.createElement('button');
         reindexBtn.type = 'button';
         reindexBtn.className = 'btn btn-xs btn-ghost memory-dirs-reindex-btn';
-        reindexBtn.textContent = '↻';
+        reindexBtn.textContent = t('sources.memory_dirs.action_index');
         reindexBtn.title = t('sources.memory_dirs.reindex_title');
         reindexBtn.addEventListener('click', () => handleReindexOne(path, reindexBtn));
         item.appendChild(reindexBtn);
@@ -293,7 +369,7 @@ function _buildMemoryDirsPanel(initialDirs) {
         const removeBtn = document.createElement('button');
         removeBtn.type = 'button';
         removeBtn.className = 'btn btn-xs btn-ghost memory-dirs-remove-btn';
-        removeBtn.textContent = '✕';
+        removeBtn.textContent = t('sources.memory_dirs.action_delete');
         removeBtn.title = t('sources.memory_dirs.delete_title');
         removeBtn.setAttribute('aria-label', t('sources.memory_dirs.delete_title'));
         if (dirs.length <= 1) removeBtn.disabled = true;
@@ -305,28 +381,6 @@ function _buildMemoryDirsPanel(initialDirs) {
       group.appendChild(list);
       wrap.appendChild(group);
     }
-
-    const addRow = document.createElement('div');
-    addRow.className = 'memory-dirs-add';
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.className = 'memory-dirs-add-input';
-    input.placeholder = t('sources.memory_dirs.add_placeholder');
-    const addBtn = document.createElement('button');
-    addBtn.type = 'button';
-    addBtn.className = 'btn btn-sm';
-    addBtn.textContent = t('sources.memory_dirs.add_btn');
-    addBtn.addEventListener('click', async () => {
-      const val = input.value;
-      input.value = '';
-      await handleAdd(val);
-    });
-    input.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter') { ev.preventDefault(); addBtn.click(); }
-    });
-    addRow.appendChild(input);
-    addRow.appendChild(addBtn);
-    wrap.appendChild(addRow);
   }
 
   render();
