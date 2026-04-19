@@ -351,25 +351,51 @@ class IndexEngine:
         return None
 
     def _format_namespace(self, template: str, file_path: Path, *, rule_index: int) -> str | None:
-        """Substitute ``{parent}`` in a rule's namespace template.
+        """Substitute ``{parent}`` and ``{ancestor:N}`` in a namespace template.
 
-        Returns ``None`` when ``{parent}`` is present but the file's parent
-        folder name is empty, so the caller can fall through to the next rule.
-        Logs a warning once per rule index to surface the skip without flooding.
+        ``{parent}`` resolves to the file's immediate parent folder name;
+        ``{ancestor:N}`` resolves to the folder ``N`` levels above the
+        immediate parent (``N=0`` is equivalent to ``{parent}``). Returns
+        ``None`` when a placeholder would expand to an empty string (root
+        of filesystem) or ``N`` exceeds the available ancestors, so the
+        caller can fall through to the next rule. Logs once per rule index
+        to surface skips without flooding.
         """
-        if "{parent}" not in template:
-            return template
-        parent_name = file_path.parent.name
-        if not parent_name:
-            if rule_index not in self._warned_empty_parent_rules:
-                self._warned_empty_parent_rules.add(rule_index)
-                logger.warning(
-                    "namespace rule #%d skipped for %s: parent name empty",
-                    rule_index,
-                    file_path,
-                )
-            return None
-        return template.format(parent=parent_name)
+        import string as _string
+
+        parts: list[str] = []
+        for literal, field_name, spec, _conv in _string.Formatter().parse(template):
+            parts.append(literal)
+            if field_name is None:
+                continue
+            if field_name == "parent":
+                name = file_path.parent.name
+                reason = "parent name empty"
+                index = 0
+            elif field_name == "ancestor":
+                # Config validator already enforced spec is a non-negative int.
+                index = int(spec) if spec else 0
+                try:
+                    name = file_path.parents[index].name
+                except IndexError:
+                    name = ""
+                reason = f"ancestor:{index} out of range"
+            else:
+                # Unknown placeholder — validator rejects these at load time,
+                # so this branch is defensive only.
+                return None
+            if not name:
+                if rule_index not in self._warned_empty_parent_rules:
+                    self._warned_empty_parent_rules.add(rule_index)
+                    logger.warning(
+                        "namespace rule #%d skipped for %s: %s",
+                        rule_index,
+                        file_path,
+                        reason,
+                    )
+                return None
+            parts.append(name)
+        return "".join(parts)
 
     def _is_within_memory_dirs(self, path: Path) -> bool:
         """Check that *path* is within at least one configured memory_dir."""

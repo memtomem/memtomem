@@ -231,7 +231,7 @@ class AccessConfig(BaseSettings):
 
 
 _NAMESPACE_MAX_LEN = 128
-_ALLOWED_NS_PLACEHOLDERS: frozenset[str] = frozenset({"parent"})
+_ALLOWED_NS_PLACEHOLDERS: frozenset[str] = frozenset({"parent", "ancestor"})
 
 
 class NamespacePolicyRule(BaseSettings):
@@ -242,10 +242,21 @@ class NamespacePolicyRule(BaseSettings):
     runs against the absolute resolved file path with any leading ``/``
     stripped — same semantics as ``IndexingConfig.exclude_patterns``.
 
-    ``namespace`` supports the ``{parent}`` placeholder, which expands to the
-    immediate parent folder name of the matched file. Unknown placeholders are
-    rejected at load time. When ``{parent}`` would expand to an empty string
-    the rule is skipped at runtime and the next rule is tried.
+    ``namespace`` supports two placeholders, both resolved against the matched
+    file's path:
+
+    - ``{parent}`` — the immediate parent folder name (equivalent to
+      ``{ancestor:0}``).
+    - ``{ancestor:N}`` — the folder name ``N`` levels above the immediate
+      parent. ``N=0`` is the immediate parent; ``N=1`` is the grandparent,
+      and so on. This lets rules for well-known memory_dir layouts (e.g.,
+      ``~/.claude/projects/*/memory/**``) pick out the project id rather
+      than the generic ``memory`` basename — see issue #296.
+
+    Unknown placeholders, non-integer or negative ``ancestor`` specs are
+    rejected at load time. If a placeholder would expand to an empty string
+    (e.g., root of filesystem) or ``N`` exceeds the available ancestors, the
+    rule is skipped at runtime and the next rule is tried.
     """
 
     path_glob: str
@@ -271,12 +282,27 @@ class NamespacePolicyRule(BaseSettings):
             raise ValueError("namespace must be non-empty")
         if len(v) > _NAMESPACE_MAX_LEN:
             raise ValueError(f"namespace must be <= {_NAMESPACE_MAX_LEN} chars, got {len(v)}")
-        for _lit, field_name, _spec, _conv in _string.Formatter().parse(v):
-            if field_name is not None and field_name not in _ALLOWED_NS_PLACEHOLDERS:
+        for _lit, field_name, spec, _conv in _string.Formatter().parse(v):
+            if field_name is None:
+                continue
+            if field_name not in _ALLOWED_NS_PLACEHOLDERS:
                 raise ValueError(
                     f"unknown placeholder '{{{field_name}}}' in namespace; "
                     f"supported: {sorted(_ALLOWED_NS_PLACEHOLDERS)}"
                 )
+            if field_name == "parent" and spec:
+                raise ValueError("{parent} does not accept a format spec; use {ancestor:N}")
+            if field_name == "ancestor":
+                if not spec:
+                    raise ValueError("{ancestor} requires an integer index, e.g. {ancestor:1}")
+                try:
+                    n = int(spec)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"{{ancestor:{spec}}} index must be a non-negative integer"
+                    ) from exc
+                if n < 0:
+                    raise ValueError(f"{{ancestor:{spec}}} index must be non-negative")
         if any(ord(c) < 32 for c in v):
             raise ValueError("namespace must not contain control characters")
         return v
