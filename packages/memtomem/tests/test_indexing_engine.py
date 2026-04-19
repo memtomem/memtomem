@@ -613,6 +613,126 @@ class TestNamespacePolicyRules:
             NamespacePolicyRule(path_glob="**", namespace="x" * 129)
         assert "128" in str(excinfo.value)
 
+    # ---- {ancestor:N} placeholder (issue #296) -----------------------------
+
+    async def test_ancestor_placeholder_grandparent(self, components, memory_dir):
+        """``{ancestor:1}`` picks the folder above the immediate parent —
+        the canonical #296 shape (``.../<project-id>/memory/<file>``)."""
+        engine = components.index_engine
+        _install_rules(
+            engine,
+            [
+                NamespacePolicyRule(
+                    path_glob=f"{memory_dir.as_posix()}/**",
+                    namespace="claude:{ancestor:1}",
+                ),
+            ],
+        )
+
+        proj = memory_dir / "FOO" / "memory"
+        proj.mkdir(parents=True)
+        fp = proj / "notes.md"
+        fp.write_text("# Notes")
+
+        assert engine._resolve_namespace(fp, None) == "claude:FOO"
+
+    async def test_ancestor_zero_equals_parent(self, components, memory_dir):
+        """``{ancestor:0}`` is equivalent to ``{parent}`` — the immediate
+        parent folder name. Codified so the two placeholders stay in sync."""
+        engine = components.index_engine
+        _install_rules(
+            engine,
+            [
+                NamespacePolicyRule(
+                    path_glob=f"{memory_dir.as_posix()}/**",
+                    namespace="a0:{ancestor:0}",
+                ),
+            ],
+        )
+
+        sub = memory_dir / "team-alpha"
+        sub.mkdir()
+        fp = sub / "notes.md"
+        fp.write_text("# Notes")
+
+        assert engine._resolve_namespace(fp, None) == "a0:team-alpha"
+
+    async def test_ancestor_out_of_range_falls_through(self, components, memory_dir, caplog):
+        """An out-of-range ``{ancestor:N}`` skips the rule and falls through,
+        logging once per rule index (same shape as the empty-parent skip)."""
+        import logging
+
+        engine = components.index_engine
+        _install_rules(
+            engine,
+            [
+                NamespacePolicyRule(
+                    path_glob=f"{memory_dir.as_posix()}/**",
+                    namespace="deep:{ancestor:99}",
+                ),
+            ],
+            default_namespace="fallback",
+        )
+
+        fp = memory_dir / "notes.md"
+        fp.write_text("# Notes")
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.indexing.engine"):
+            assert engine._resolve_namespace(fp, None) == "fallback"
+            # Second call on the same rule index must not re-log.
+            assert engine._resolve_namespace(fp, None) == "fallback"
+
+        skip_warnings = [r for r in caplog.records if "ancestor:99" in r.getMessage()]
+        assert len(skip_warnings) == 1, [r.getMessage() for r in skip_warnings]
+
+    async def test_ancestor_combined_with_literal(self, components, memory_dir):
+        """Ancestor placeholder composes with literal prefixes/suffixes like
+        ``{parent}`` does — template parsing is position-preserving."""
+        engine = components.index_engine
+        _install_rules(
+            engine,
+            [
+                NamespacePolicyRule(
+                    path_glob=f"{memory_dir.as_posix()}/**",
+                    namespace="{ancestor:1}/sub",
+                ),
+            ],
+        )
+
+        proj = memory_dir / "BAR" / "memory"
+        proj.mkdir(parents=True)
+        fp = proj / "notes.md"
+        fp.write_text("# Notes")
+
+        assert engine._resolve_namespace(fp, None) == "BAR/sub"
+
+    def test_ancestor_without_index_rejected_at_load(self):
+        """Bare ``{ancestor}`` without an integer spec is a configuration
+        error — the caller must say which level."""
+        with pytest.raises(ValidationError) as excinfo:
+            NamespacePolicyRule(path_glob="**", namespace="bad:{ancestor}")
+        assert "requires an integer index" in str(excinfo.value)
+
+    def test_ancestor_non_integer_spec_rejected_at_load(self):
+        """``{ancestor:abc}`` is rejected — spec must parse as int."""
+        with pytest.raises(ValidationError) as excinfo:
+            NamespacePolicyRule(path_glob="**", namespace="bad:{ancestor:abc}")
+        assert "non-negative integer" in str(excinfo.value)
+
+    def test_ancestor_negative_index_rejected_at_load(self):
+        """Negative indices would wrap into ``parents[-1]`` (filesystem
+        root) — reject explicitly instead of silently doing the wrong thing."""
+        with pytest.raises(ValidationError) as excinfo:
+            NamespacePolicyRule(path_glob="**", namespace="bad:{ancestor:-1}")
+        assert "non-negative" in str(excinfo.value)
+
+    def test_parent_with_format_spec_rejected_at_load(self):
+        """``{parent:N}`` is ambiguous — force users to switch to the
+        ``{ancestor:N}`` spelling rather than silently padding/truncating."""
+        with pytest.raises(ValidationError) as excinfo:
+            NamespacePolicyRule(path_glob="**", namespace="bad:{parent:1}")
+        assert "ancestor" in str(excinfo.value).lower()
+
 
 # ===========================================================================
 # 3. _apply_namespace
