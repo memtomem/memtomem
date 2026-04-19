@@ -30,10 +30,10 @@ SAMPLE_SCRIPT = "#!/usr/bin/env bash\necho hi\n"
 def _make_canonical_skill(project_root, name, body=SAMPLE_SKILL_MD, with_scripts=False):
     skill = project_root / CANONICAL_SKILL_ROOT / name
     skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text(body)
+    (skill / "SKILL.md").write_text(body, encoding="utf-8")
     if with_scripts:
         (skill / "scripts").mkdir()
-        (skill / "scripts" / "run.sh").write_text(SAMPLE_SCRIPT)
+        (skill / "scripts" / "run.sh").write_text(SAMPLE_SCRIPT, encoding="utf-8")
     return skill
 
 
@@ -62,24 +62,24 @@ class TestCopySkill:
     def test_copies_manifest_only(self, tmp_path):
         src = tmp_path / "src"
         src.mkdir()
-        (src / "SKILL.md").write_text(SAMPLE_SKILL_MD)
+        (src / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
         dst = tmp_path / "dst"
         copy_skill(src, dst)
-        assert (dst / "SKILL.md").read_text() == SAMPLE_SKILL_MD
+        assert (dst / "SKILL.md").read_text(encoding="utf-8") == SAMPLE_SKILL_MD
 
     def test_copies_subdirectories(self, tmp_path):
         src = tmp_path / "src"
         src.mkdir()
-        (src / "SKILL.md").write_text(SAMPLE_SKILL_MD)
+        (src / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
         (src / "scripts").mkdir()
-        (src / "scripts" / "run.sh").write_text(SAMPLE_SCRIPT)
+        (src / "scripts" / "run.sh").write_text(SAMPLE_SCRIPT, encoding="utf-8")
         (src / "references").mkdir()
-        (src / "references" / "note.md").write_text("note")
+        (src / "references" / "note.md").write_text("note", encoding="utf-8")
         dst = tmp_path / "dst"
         copy_skill(src, dst)
-        assert (dst / "SKILL.md").read_text() == SAMPLE_SKILL_MD
-        assert (dst / "scripts" / "run.sh").read_text() == SAMPLE_SCRIPT
-        assert (dst / "references" / "note.md").read_text() == "note"
+        assert (dst / "SKILL.md").read_text(encoding="utf-8") == SAMPLE_SKILL_MD
+        assert (dst / "scripts" / "run.sh").read_text(encoding="utf-8") == SAMPLE_SCRIPT
+        assert (dst / "references" / "note.md").read_text(encoding="utf-8") == "note"
 
     def test_missing_manifest_raises(self, tmp_path):
         src = tmp_path / "src"
@@ -91,28 +91,28 @@ class TestCopySkill:
     def test_refuses_to_overwrite_non_skill_dir(self, tmp_path):
         src = tmp_path / "src"
         src.mkdir()
-        (src / "SKILL.md").write_text(SAMPLE_SKILL_MD)
+        (src / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
 
         dst = tmp_path / "dst"
         dst.mkdir()
-        (dst / "unrelated.txt").write_text("do not delete")
+        (dst / "unrelated.txt").write_text("do not delete", encoding="utf-8")
 
         with pytest.raises(IsADirectoryError):
             copy_skill(src, dst)
-        assert (dst / "unrelated.txt").read_text() == "do not delete"
+        assert (dst / "unrelated.txt").read_text(encoding="utf-8") == "do not delete"
 
     def test_replaces_existing_skill_dir(self, tmp_path):
         src = tmp_path / "src"
         src.mkdir()
-        (src / "SKILL.md").write_text("new content")
+        (src / "SKILL.md").write_text("new content", encoding="utf-8")
 
         dst = tmp_path / "dst"
         dst.mkdir()
-        (dst / "SKILL.md").write_text("old content")
-        (dst / "stale.md").write_text("leftover")
+        (dst / "SKILL.md").write_text("old content", encoding="utf-8")
+        (dst / "stale.md").write_text("leftover", encoding="utf-8")
 
         copy_skill(src, dst)
-        assert (dst / "SKILL.md").read_text() == "new content"
+        assert (dst / "SKILL.md").read_text(encoding="utf-8") == "new content"
         # removed files propagate (stale files disappear)
         assert not (dst / "stale.md").exists()
 
@@ -156,7 +156,7 @@ class TestDetectSkillDirs:
     def test_detects_claude_skills(self, tmp_path):
         skill = tmp_path / ".claude/skills/a"
         skill.mkdir(parents=True)
-        (skill / "SKILL.md").write_text(SAMPLE_SKILL_MD)
+        (skill / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
         found = detect_skill_dirs(tmp_path)
         assert len(found) == 1
         assert found[0].agent == "claude_skills"
@@ -166,7 +166,7 @@ class TestDetectSkillDirs:
     def test_detects_gemini_skills(self, tmp_path):
         skill = tmp_path / ".gemini/skills/b"
         skill.mkdir(parents=True)
-        (skill / "SKILL.md").write_text(SAMPLE_SKILL_MD)
+        (skill / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
         found = detect_skill_dirs(tmp_path)
         assert len(found) == 1
         assert found[0].agent == "gemini_skills"
@@ -175,7 +175,7 @@ class TestDetectSkillDirs:
         # .agents/skills/ is Codex CLI's primary project-scope path.
         skill = tmp_path / ".agents/skills/c"
         skill.mkdir(parents=True)
-        (skill / "SKILL.md").write_text(SAMPLE_SKILL_MD)
+        (skill / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
         found = detect_skill_dirs(tmp_path)
         assert len(found) == 1
         assert found[0].agent == "codex_skills"
@@ -193,7 +193,7 @@ class TestExtractSkills:
     def test_imports_from_claude(self, tmp_path):
         skill = tmp_path / ".claude/skills/code-review"
         skill.mkdir(parents=True)
-        (skill / "SKILL.md").write_text(SAMPLE_SKILL_MD)
+        (skill / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
         result = extract_skills_to_canonical(tmp_path)
         assert len(result.imported) == 1
         assert (tmp_path / CANONICAL_SKILL_ROOT / "code-review/SKILL.md").exists()
@@ -203,7 +203,7 @@ class TestExtractSkills:
         for runtime_dir in (".claude/skills", ".gemini/skills"):
             skill = tmp_path / runtime_dir / "shared"
             skill.mkdir(parents=True)
-            (skill / "SKILL.md").write_text(SAMPLE_SKILL_MD)
+            (skill / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
         result = extract_skills_to_canonical(tmp_path)
         assert len(result.imported) == 1
         assert len(result.skipped) == 1
@@ -213,30 +213,30 @@ class TestExtractSkills:
     def test_does_not_overwrite_without_flag(self, tmp_path):
         src = tmp_path / ".claude/skills/existing"
         src.mkdir(parents=True)
-        (src / "SKILL.md").write_text("new")
+        (src / "SKILL.md").write_text("new", encoding="utf-8")
 
         canonical = tmp_path / CANONICAL_SKILL_ROOT / "existing"
         canonical.mkdir(parents=True)
-        (canonical / "SKILL.md").write_text("old")
+        (canonical / "SKILL.md").write_text("old", encoding="utf-8")
 
         result = extract_skills_to_canonical(tmp_path)
         assert result.imported == []
         assert len(result.skipped) == 1
         assert "canonical exists" in result.skipped[0][1]
-        assert (canonical / "SKILL.md").read_text() == "old"
+        assert (canonical / "SKILL.md").read_text(encoding="utf-8") == "old"
 
     def test_overwrite_flag(self, tmp_path):
         src = tmp_path / ".claude/skills/existing"
         src.mkdir(parents=True)
-        (src / "SKILL.md").write_text("new")
+        (src / "SKILL.md").write_text("new", encoding="utf-8")
 
         canonical = tmp_path / CANONICAL_SKILL_ROOT / "existing"
         canonical.mkdir(parents=True)
-        (canonical / "SKILL.md").write_text("old")
+        (canonical / "SKILL.md").write_text("old", encoding="utf-8")
 
         result = extract_skills_to_canonical(tmp_path, overwrite=True)
         assert len(result.imported) == 1
-        assert (canonical / "SKILL.md").read_text() == "new"
+        assert (canonical / "SKILL.md").read_text(encoding="utf-8") == "new"
 
 
 class TestDiffSkills:
@@ -253,7 +253,7 @@ class TestDiffSkills:
     def test_out_of_sync(self, tmp_path):
         _make_canonical_skill(tmp_path, "a")
         generate_all_skills(tmp_path)
-        (tmp_path / ".claude/skills/a/SKILL.md").write_text("mutated")
+        (tmp_path / ".claude/skills/a/SKILL.md").write_text("mutated", encoding="utf-8")
         rows = diff_skills(tmp_path)
         status_by_runtime = {runtime: status for runtime, _, status in rows}
         assert status_by_runtime["claude_skills"] == "out of sync"
@@ -268,7 +268,7 @@ class TestDiffSkills:
     def test_missing_canonical(self, tmp_path):
         skill = tmp_path / ".claude/skills/runtime-only"
         skill.mkdir(parents=True)
-        (skill / "SKILL.md").write_text(SAMPLE_SKILL_MD)
+        (skill / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
         rows = diff_skills(tmp_path)
         assert any(status == "missing canonical" for _, _, status in rows)
 
@@ -283,7 +283,9 @@ class TestRoundtrip:
         result = extract_skills_to_canonical(tmp_path)
         assert len(result.imported) == 1
 
-        md = (tmp_path / CANONICAL_SKILL_ROOT / "code-review/SKILL.md").read_text()
+        md = (tmp_path / CANONICAL_SKILL_ROOT / "code-review/SKILL.md").read_text(encoding="utf-8")
         assert md == SAMPLE_SKILL_MD
-        script = (tmp_path / CANONICAL_SKILL_ROOT / "code-review/scripts/run.sh").read_text()
+        script = (tmp_path / CANONICAL_SKILL_ROOT / "code-review/scripts/run.sh").read_text(
+            encoding="utf-8"
+        )
         assert script == SAMPLE_SCRIPT

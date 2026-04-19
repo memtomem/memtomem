@@ -566,7 +566,7 @@ class TestExportImport:
         await export_chunks(storage, output_path=output_path)
 
         assert output_path.exists()
-        data = json.loads(output_path.read_text())
+        data = json.loads(output_path.read_text(encoding="utf-8"))
         assert data["total_chunks"] == 1
         assert data["chunks"][0]["content"] == "file export test"
 
@@ -637,7 +637,7 @@ class TestCleanupOrphans:
         """Chunks whose source_file does not exist on disk are orphans."""
         # Create a real file and a chunk pointing to it
         real_file = memory_dir / "real.md"
-        real_file.write_text("# Real content")
+        real_file.write_text("# Real content", encoding="utf-8")
 
         real_chunk = make_chunk(
             content="real content",

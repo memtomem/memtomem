@@ -58,7 +58,7 @@ def _make_canonical_agent(project_root, name, body=SAMPLE_FULL_AGENT):
     root = project_root / CANONICAL_AGENT_ROOT
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"{name}.md"
-    path.write_text(body)
+    path.write_text(body, encoding="utf-8")
     return path
 
 
@@ -90,7 +90,7 @@ class TestParseCanonicalAgent:
 
     def test_missing_frontmatter_raises(self, tmp_path):
         p = tmp_path / "bad.md"
-        p.write_text("no frontmatter at all")
+        p.write_text("no frontmatter at all", encoding="utf-8")
         with pytest.raises(AgentParseError):
             parse_canonical_agent(p)
 
@@ -125,7 +125,8 @@ class TestParseCanonicalAgent:
             "  - Read\n"
             "  - Grep\n"
             "---\n\n"
-            "body\n"
+            "body\n",
+            encoding="utf-8",
         )
         agent = parse_canonical_agent(p)
         assert agent.tools == ["Read", "Grep"]
@@ -146,7 +147,7 @@ class TestClaudeRendering:
     def test_passes_through_all_fields(self, tmp_path):
         _make_canonical_agent(tmp_path, "full", SAMPLE_FULL_AGENT)
         generate_all_agents(tmp_path, runtimes=["claude_agents"])
-        out = (tmp_path / ".claude/agents/code-reviewer.md").read_text()
+        out = (tmp_path / ".claude/agents/code-reviewer.md").read_text(encoding="utf-8")
         assert "name: code-reviewer" in out
         assert "tools: [Read, Grep, Glob]" in out
         assert "model: sonnet" in out
@@ -168,7 +169,7 @@ class TestGeminiRendering:
     def test_passes_through_gemini_fields(self, tmp_path):
         _make_canonical_agent(tmp_path, "full", SAMPLE_FULL_AGENT)
         generate_all_agents(tmp_path, runtimes=["gemini_agents"])
-        out = (tmp_path / ".gemini/agents/code-reviewer.md").read_text()
+        out = (tmp_path / ".gemini/agents/code-reviewer.md").read_text(encoding="utf-8")
         assert "kind: reviewer" in out
         assert "temperature: 0.2" in out
         assert "tools: [Read, Grep, Glob]" in out
@@ -190,7 +191,7 @@ class TestCodexRendering:
         generate_all_agents(tmp_path, runtimes=["codex_agents"])
         toml_path = codex_home / ".codex/agents/code-reviewer.toml"
         assert toml_path.is_file()
-        parsed = tomllib.loads(toml_path.read_text())
+        parsed = tomllib.loads(toml_path.read_text(encoding="utf-8"))
         assert parsed["name"] == "code-reviewer"
         assert "quality" in parsed["description"]
         assert "meticulous" in parsed["developer_instructions"]
@@ -211,7 +212,7 @@ class TestCodexRendering:
         result = generate_all_agents(tmp_path, runtimes=["codex_agents"])
         assert result.dropped == []
         toml_path = codex_home / ".codex/agents/helper.toml"
-        parsed = tomllib.loads(toml_path.read_text())
+        parsed = tomllib.loads(toml_path.read_text(encoding="utf-8"))
         assert parsed["name"] == "helper"
         assert parsed["description"] == "Generic helper"
 
@@ -219,7 +220,7 @@ class TestCodexRendering:
         _make_canonical_agent(tmp_path, "helper", SAMPLE_MINIMAL_AGENT)
         generate_all_agents(tmp_path, runtimes=["codex_agents"])
         toml_path = codex_home / ".codex/agents/helper.toml"
-        parsed = tomllib.loads(toml_path.read_text())
+        parsed = tomllib.loads(toml_path.read_text(encoding="utf-8"))
         assert "Help with things." in parsed["developer_instructions"]
 
 
@@ -268,7 +269,7 @@ class TestExtractAgentsToCanonical:
     def test_imports_claude_agent(self, tmp_path):
         claude_dir = tmp_path / ".claude/agents"
         claude_dir.mkdir(parents=True)
-        (claude_dir / "helper.md").write_text(SAMPLE_MINIMAL_AGENT)
+        (claude_dir / "helper.md").write_text(SAMPLE_MINIMAL_AGENT, encoding="utf-8")
         result = extract_agents_to_canonical(tmp_path)
         assert len(result.imported) == 1
         assert (tmp_path / CANONICAL_AGENT_ROOT / "helper.md").is_file()
@@ -278,7 +279,7 @@ class TestExtractAgentsToCanonical:
         for runtime in (".claude/agents", ".gemini/agents"):
             d = tmp_path / runtime
             d.mkdir(parents=True)
-            (d / "helper.md").write_text(SAMPLE_MINIMAL_AGENT)
+            (d / "helper.md").write_text(SAMPLE_MINIMAL_AGENT, encoding="utf-8")
         result = extract_agents_to_canonical(tmp_path)
         assert len(result.imported) == 1
         # Gemini copy was skipped because Claude already imported it.
@@ -290,26 +291,26 @@ class TestExtractAgentsToCanonical:
         claude_dir = tmp_path / ".claude/agents"
         claude_dir.mkdir(parents=True)
         new_content = SAMPLE_MINIMAL_AGENT.replace("Generic helper", "UPDATED")
-        (claude_dir / "helper.md").write_text(new_content)
+        (claude_dir / "helper.md").write_text(new_content, encoding="utf-8")
 
         canonical = tmp_path / CANONICAL_AGENT_ROOT / "helper.md"
         canonical.parent.mkdir(parents=True)
-        canonical.write_text("old")
+        canonical.write_text("old", encoding="utf-8")
 
         result = extract_agents_to_canonical(tmp_path)
         assert result.imported == []
         assert len(result.skipped) == 1
         assert "canonical exists" in result.skipped[0][1]
-        assert canonical.read_text() == "old"
+        assert canonical.read_text(encoding="utf-8") == "old"
 
         result = extract_agents_to_canonical(tmp_path, overwrite=True)
         assert len(result.imported) == 1
-        assert "UPDATED" in canonical.read_text()
+        assert "UPDATED" in canonical.read_text(encoding="utf-8")
 
     def test_ignores_codex_toml(self, tmp_path, codex_home):
         # Even when a Codex TOML exists, extract does not try to import it.
         (codex_home / ".codex/agents").mkdir(parents=True)
-        (codex_home / ".codex/agents/helper.toml").write_text('name = "helper"\n')
+        (codex_home / ".codex/agents/helper.toml").write_text('name = "helper"\n', encoding="utf-8")
         result = extract_agents_to_canonical(tmp_path)
         assert result.imported == []
 
@@ -353,7 +354,7 @@ class TestDiffAgents:
     def test_out_of_sync(self, tmp_path, codex_home):
         _make_canonical_agent(tmp_path, "helper", SAMPLE_MINIMAL_AGENT)
         generate_all_agents(tmp_path)
-        (tmp_path / ".claude/agents/helper.md").write_text("mutated")
+        (tmp_path / ".claude/agents/helper.md").write_text("mutated", encoding="utf-8")
         rows = diff_agents(tmp_path)
         status_by_runtime = {r: s for r, _, s in rows}
         assert status_by_runtime["claude_agents"] == "out of sync"
@@ -363,7 +364,7 @@ class TestDiffAgents:
     def test_missing_canonical(self, tmp_path, codex_home):
         claude_dir = tmp_path / ".claude/agents"
         claude_dir.mkdir(parents=True)
-        (claude_dir / "runtime-only.md").write_text(SAMPLE_MINIMAL_AGENT)
+        (claude_dir / "runtime-only.md").write_text(SAMPLE_MINIMAL_AGENT, encoding="utf-8")
         rows = diff_agents(tmp_path)
         assert any(status == "missing canonical" for _, _, status in rows)
 
@@ -375,7 +376,7 @@ class TestDetectAgentDirs:
     def test_detects_claude(self, tmp_path):
         d = tmp_path / ".claude/agents"
         d.mkdir(parents=True)
-        (d / "reviewer.md").write_text(SAMPLE_FULL_AGENT)
+        (d / "reviewer.md").write_text(SAMPLE_FULL_AGENT, encoding="utf-8")
         found = detect_agent_dirs(tmp_path)
         assert len(found) == 1
         assert found[0].agent == "claude_agents"
@@ -385,13 +386,13 @@ class TestDetectAgentDirs:
     def test_detects_gemini(self, tmp_path):
         d = tmp_path / ".gemini/agents"
         d.mkdir(parents=True)
-        (d / "tester.md").write_text(SAMPLE_MINIMAL_AGENT)
+        (d / "tester.md").write_text(SAMPLE_MINIMAL_AGENT, encoding="utf-8")
         found = detect_agent_dirs(tmp_path)
         assert found[0].agent == "gemini_agents"
 
     def test_codex_user_scope_not_in_project_detect(self, tmp_path, codex_home):
         (codex_home / ".codex/agents").mkdir(parents=True)
-        (codex_home / ".codex/agents/helper.toml").write_text('name = "helper"\n')
+        (codex_home / ".codex/agents/helper.toml").write_text('name = "helper"\n', encoding="utf-8")
         found = detect_agent_dirs(tmp_path)
         assert found == []
 

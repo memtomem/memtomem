@@ -97,10 +97,11 @@ class TestResearcherIndexing:
     async def test_directory_indexing(self, components, memory_dir):
         """Index a directory with multiple files, all become searchable."""
         (memory_dir / "paper1.md").write_text(
-            "# Scaling Laws\n\nChinchilla showed compute-optimal training."
+            "# Scaling Laws\n\nChinchilla showed compute-optimal training.", encoding="utf-8"
         )
         (memory_dir / "paper2.md").write_text(
-            "# RAG Patterns\n\nRetrieval-Augmented Generation improves factuality."
+            "# RAG Patterns\n\nRetrieval-Augmented Generation improves factuality.",
+            encoding="utf-8",
         )
 
         stats = await components.index_engine.index_path(memory_dir, recursive=True)
@@ -112,8 +113,12 @@ class TestResearcherIndexing:
 
     async def test_namespace_search(self, components, memory_dir):
         """Namespace isolates search results."""
-        (memory_dir / "work.md").write_text("# Work\n\nDeployment pipeline config.")
-        (memory_dir / "personal.md").write_text("# Personal\n\nGrocery list for Saturday.")
+        (memory_dir / "work.md").write_text(
+            "# Work\n\nDeployment pipeline config.", encoding="utf-8"
+        )
+        (memory_dir / "personal.md").write_text(
+            "# Personal\n\nGrocery list for Saturday.", encoding="utf-8"
+        )
 
         await components.index_engine.index_path(memory_dir, recursive=True)
 
@@ -129,8 +134,12 @@ class TestResearcherIndexing:
 
     async def test_source_filter(self, components, memory_dir):
         """source_filter restricts results to matching files."""
-        (memory_dir / "notes.md").write_text("# Notes\n\nImportant project notes here.")
-        (memory_dir / "archive.md").write_text("# Archive\n\nOld project notes archived.")
+        (memory_dir / "notes.md").write_text(
+            "# Notes\n\nImportant project notes here.", encoding="utf-8"
+        )
+        (memory_dir / "archive.md").write_text(
+            "# Archive\n\nOld project notes archived.", encoding="utf-8"
+        )
         await components.index_engine.index_path(memory_dir, recursive=True)
 
         results, _ = await components.search_pipeline.search(
@@ -180,7 +189,7 @@ class TestMultilingualSearch:
     async def test_same_language_search(self, components, memory_dir):
         """Korean query finds Korean content."""
         f = memory_dir / "kr.md"
-        f.write_text("## 모니터링\n\n쿠버네티스 클러스터 모니터링 설정 완료.")
+        f.write_text("## 모니터링\n\n쿠버네티스 클러스터 모니터링 설정 완료.", encoding="utf-8")
         await components.index_engine.index_file(f)
 
         results, _ = await components.search_pipeline.search("쿠버네티스 모니터링", top_k=3)
@@ -189,7 +198,9 @@ class TestMultilingualSearch:
     async def test_english_finds_english(self, components, memory_dir):
         """English query finds English content."""
         f = memory_dir / "en.md"
-        f.write_text("## Monitoring\n\nKubernetes cluster monitoring setup complete.")
+        f.write_text(
+            "## Monitoring\n\nKubernetes cluster monitoring setup complete.", encoding="utf-8"
+        )
         await components.index_engine.index_file(f)
 
         results, _ = await components.search_pipeline.search("kubernetes monitoring", top_k=3)
@@ -205,7 +216,9 @@ class TestPowerUserFeatures:
     async def test_frontmatter_tags_extracted(self, components, memory_dir):
         """YAML frontmatter tags are automatically applied to chunks."""
         f = memory_dir / "frontmatter.md"
-        f.write_text("---\ntags: [api, backend]\n---\n\n## API Design\n\nREST vs GraphQL.")
+        f.write_text(
+            "---\ntags: [api, backend]\n---\n\n## API Design\n\nREST vs GraphQL.", encoding="utf-8"
+        )
         await components.index_engine.index_file(f)
 
         chunks = await components.storage.list_chunks_by_source(f)
@@ -216,7 +229,10 @@ class TestPowerUserFeatures:
     async def test_wikilinks_resolved(self, components, memory_dir):
         """Obsidian wikilinks are cleaned from indexed content."""
         f = memory_dir / "obsidian.md"
-        f.write_text("## Notes\n\nSee [[other-page]] and [[link|display text]] for details.")
+        f.write_text(
+            "## Notes\n\nSee [[other-page]] and [[link|display text]] for details.",
+            encoding="utf-8",
+        )
         await components.index_engine.index_file(f)
 
         chunks = await components.storage.list_chunks_by_source(f)
@@ -227,7 +243,7 @@ class TestPowerUserFeatures:
     async def test_force_reindex(self, components, memory_dir):
         """force=True re-indexes unchanged files."""
         f = memory_dir / "stable.md"
-        f.write_text("## Stable\n\nThis content does not change.")
+        f.write_text("## Stable\n\nThis content does not change.", encoding="utf-8")
         stats1 = await components.index_engine.index_file(f)
         assert stats1.indexed_chunks >= 1
 
@@ -244,8 +260,8 @@ class TestPowerUserFeatures:
         """Identical content in two files produces separate indexed chunks."""
         f1 = memory_dir / "dup1.md"
         f2 = memory_dir / "dup2.md"
-        f1.write_text("## Config\n\nRedis connection pool size set to 20.")
-        f2.write_text("## Config\n\nRedis connection pool size set to 20.")
+        f1.write_text("## Config\n\nRedis connection pool size set to 20.", encoding="utf-8")
+        f2.write_text("## Config\n\nRedis connection pool size set to 20.", encoding="utf-8")
         await components.index_engine.index_file(f1)
         await components.index_engine.index_file(f2)
 
@@ -267,7 +283,8 @@ class TestMigrationObsidian:
         f = memory_dir / "vault-note.md"
         f.write_text(
             "---\ntitle: API Redesign\nstatus: in-progress\ntags: [project, api]\n---\n\n"
-            "## Overview\n\nMigrating from REST to GraphQL."
+            "## Overview\n\nMigrating from REST to GraphQL.",
+            encoding="utf-8",
         )
         await components.index_engine.index_file(f)
 
@@ -285,7 +302,8 @@ class TestMigrationObsidian:
         f.write_text(
             "## Section A\n\nContent for section A with enough text.\n\n"
             "## Section B\n\nContent for section B with enough text.\n\n"
-            "## Section C\n\nContent for section C with enough text."
+            "## Section C\n\nContent for section C with enough text.",
+            encoding="utf-8",
         )
         await components.index_engine.index_file(f)
 
@@ -299,7 +317,8 @@ class TestMigrationObsidian:
         f = memory_dir / "mixed.md"
         f.write_text(
             "## 프로젝트 개요\n\n이 프로젝트는 GraphQL API를 구축합니다.\n\n"
-            "## Technical Stack\n\nUsing Apollo Server with TypeScript."
+            "## Technical Stack\n\nUsing Apollo Server with TypeScript.",
+            encoding="utf-8",
         )
         await components.index_engine.index_file(f)
 

@@ -33,7 +33,8 @@ class TestContextWindowE2E:
             "## Monitoring\n\n"
             "Prometheus + Grafana stack. Alerting via PagerDuty.\n\n"
             "## Deployment\n\n"
-            "Kubernetes on AWS EKS. Helm charts for all services.\n"
+            "Kubernetes on AWS EKS. Helm charts for all services.\n",
+            encoding="utf-8",
         )
         stats = await components.index_engine.index_file(doc)
         assert stats.indexed_chunks >= 3
@@ -59,7 +60,9 @@ class TestContextWindowE2E:
     async def test_context_window_zero_no_context(self, components, memory_dir):
         """context_window=0 (or omitted) returns no context."""
         doc = memory_dir / "simple.md"
-        doc.write_text("## Title\n\nSome content here.\n\n## Other\n\nMore content.")
+        doc.write_text(
+            "## Title\n\nSome content here.\n\n## Other\n\nMore content.", encoding="utf-8"
+        )
         await components.index_engine.index_file(doc)
 
         results, _ = await components.search_pipeline.search("content", top_k=3)
@@ -74,7 +77,8 @@ class TestContextWindowE2E:
             "## Section B\n\nBravo content unique.\n\n"
             "## Section C\n\nCharlie content unique.\n\n"
             "## Section D\n\nDelta content unique.\n\n"
-            "## Section E\n\nEcho content unique.\n"
+            "## Section E\n\nEcho content unique.\n",
+            encoding="utf-8",
         )
         stats = await components.index_engine.index_file(doc)
         assert stats.indexed_chunks >= 4
@@ -110,7 +114,8 @@ class TestMemExpandE2E:
             "## Prerequisites\n\nPython 3.12 and uv required.\n\n"
             "## Installation\n\npip install memtomem or uv pip install.\n\n"
             "## Configuration\n\nSet MEMTOMEM_ env vars.\n\n"
-            "## Usage\n\nRun mm search to find memories.\n"
+            "## Usage\n\nRun mm search to find memories.\n",
+            encoding="utf-8",
         )
         await components.index_engine.index_file(doc)
 
@@ -155,7 +160,8 @@ class TestCrossLanguageE2E:
             "## 캐싱 전략\n\n"
             "Redis 캐시 레이어 도입. LRU 정책 적용.\n\n"
             "## API 설계\n\n"
-            "RESTful API with FastAPI. OpenAPI 자동 문서화.\n"
+            "RESTful API with FastAPI. OpenAPI 자동 문서화.\n",
+            encoding="utf-8",
         )
         await components.index_engine.index_file(doc)
 
@@ -177,7 +183,8 @@ class TestCrossLanguageE2E:
             "## 기술 스택\n\n"
             "Python 3.12, FastAPI, SQLite with FTS5.\n\n"
             "## Architecture\n\n"
-            "Monorepo with uv workspace. Two packages.\n"
+            "Monorepo with uv workspace. Two packages.\n",
+            encoding="utf-8",
         )
         await components.index_engine.index_file(doc)
 
@@ -197,7 +204,8 @@ class TestFullPipelineE2E:
 
         doc = memory_dir / "format_test.md"
         doc.write_text(
-            "## Intro\n\nWelcome.\n\n## Core\n\nMain content here.\n\n## Conclusion\n\nSummary.\n"
+            "## Intro\n\nWelcome.\n\n## Core\n\nMain content here.\n\n## Conclusion\n\nSummary.\n",
+            encoding="utf-8",
         )
         await components.index_engine.index_file(doc)
 
@@ -221,7 +229,7 @@ class TestFullPipelineE2E:
         from memtomem.server.formatters import _format_single_result
 
         doc = memory_dir / "no_ctx.md"
-        doc.write_text("## Test\n\nSome searchable content.")
+        doc.write_text("## Test\n\nSome searchable content.", encoding="utf-8")
         await components.index_engine.index_file(doc)
 
         results, _ = await components.search_pipeline.search("searchable", top_k=1)
@@ -234,7 +242,7 @@ class TestFullPipelineE2E:
     async def test_incremental_reindex_preserves_search(self, components, memory_dir):
         """Adding content to a file → re-index → new content searchable."""
         doc = memory_dir / "evolving.md"
-        doc.write_text("## V1\n\nInitial content about authentication.")
+        doc.write_text("## V1\n\nInitial content about authentication.", encoding="utf-8")
         await components.index_engine.index_file(doc)
 
         results1, _ = await components.search_pipeline.search("authentication", top_k=3)
@@ -243,7 +251,8 @@ class TestFullPipelineE2E:
         # Add new section
         doc.write_text(
             "## V1\n\nInitial content about authentication.\n\n"
-            "## V2\n\nAdded OAuth2 with PKCE flow."
+            "## V2\n\nAdded OAuth2 with PKCE flow.",
+            encoding="utf-8",
         )
         await components.index_engine.index_file(doc)
 

@@ -102,7 +102,7 @@ class TestClaudeSettingsMergeSemantic:
             "env": {"FOO": "bar"},
             "mcpServers": {"example": {"command": "echo"}},
         }
-        target.write_text(json.dumps(existing, indent=4) + "\n")
+        target.write_text(json.dumps(existing, indent=4) + "\n", encoding="utf-8")
 
         _make_canonical_settings(tmp_path, {"hooks": {}})
         results = generate_all_settings(tmp_path)
@@ -121,7 +121,7 @@ class TestClaudeSettingsMergeAdditive:
     def test_appends_without_touching_user_rules(self, claude_home, tmp_path):
         target = claude_home / ".claude" / "settings.json"
         user_rule = _rule("", "say done")
-        target.write_text(json.dumps({"hooks": {"Stop": [user_rule]}}) + "\n")
+        target.write_text(json.dumps({"hooks": {"Stop": [user_rule]}}) + "\n", encoding="utf-8")
 
         mm_rule = _rule("Write", "mm index")
         _make_canonical_settings(tmp_path, {"hooks": {"PostToolUse": [mm_rule]}})
@@ -137,7 +137,9 @@ class TestClaudeSettingsMergeAdditive:
         """Multiple rules under the same event with different matchers."""
         target = claude_home / ".claude" / "settings.json"
         user_rule = _rule("Bash", "echo user")
-        target.write_text(json.dumps({"hooks": {"PostToolUse": [user_rule]}}) + "\n")
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [user_rule]}}) + "\n", encoding="utf-8"
+        )
 
         mm_rule = _rule("Write", "mm index")
         _make_canonical_settings(tmp_path, {"hooks": {"PostToolUse": [mm_rule]}})
@@ -157,7 +159,9 @@ class TestClaudeSettingsMergeConflict:
     def test_user_rule_wins_on_matcher_collision(self, claude_home, tmp_path):
         target = claude_home / ".claude" / "settings.json"
         user_rule = _rule("Write", "echo custom")
-        target.write_text(json.dumps({"hooks": {"PostToolUse": [user_rule]}}) + "\n")
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [user_rule]}}) + "\n", encoding="utf-8"
+        )
 
         mm_rule = _rule("Write", "mm index")
         _make_canonical_settings(tmp_path, {"hooks": {"PostToolUse": [mm_rule]}})
@@ -175,7 +179,7 @@ class TestClaudeSettingsMergeConflict:
         """If the user's rule is byte-identical, no warning is emitted."""
         rule = _rule("Write", "mm index")
         target = claude_home / ".claude" / "settings.json"
-        target.write_text(json.dumps({"hooks": {"PostToolUse": [rule]}}) + "\n")
+        target.write_text(json.dumps({"hooks": {"PostToolUse": [rule]}}) + "\n", encoding="utf-8")
 
         _make_canonical_settings(tmp_path, {"hooks": {"PostToolUse": [rule]}})
         results = generate_all_settings(tmp_path)
@@ -188,7 +192,9 @@ class TestClaudeSettingsMergeWarningContent:
 
     def test_warning_includes_required_parts(self, claude_home, tmp_path):
         target = claude_home / ".claude" / "settings.json"
-        target.write_text(json.dumps({"hooks": {"PostToolUse": [_rule("Write", "old")]}}) + "\n")
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [_rule("Write", "old")]}}) + "\n", encoding="utf-8"
+        )
 
         _make_canonical_settings(
             tmp_path,
@@ -220,7 +226,7 @@ class TestClaudeSettingsMergeMalformed:
         assert "not valid JSON" in r.reason
 
         # File should NOT have been modified
-        assert target.read_text() == '{"hooks":{'
+        assert target.read_text(encoding="utf-8") == '{"hooks":{'
 
     def test_malformed_canonical_returns_error(self, claude_home, tmp_path):
         _make_canonical_settings(tmp_path, "{bad json")
@@ -235,7 +241,7 @@ class TestClaudeSettingsMergeConcurrent:
 
     def test_aborts_on_mtime_change(self, claude_home, tmp_path):
         target = claude_home / ".claude" / "settings.json"
-        target.write_text(json.dumps({"hooks": {}}) + "\n")
+        target.write_text(json.dumps({"hooks": {}}) + "\n", encoding="utf-8")
 
         _make_canonical_settings(
             tmp_path,
@@ -249,7 +255,9 @@ class TestClaudeSettingsMergeConcurrent:
         def patched_read_with_mtime(path):
             result = orig_read_with_mtime(path)
             if path == target:
-                target.write_text(json.dumps({"hooks": {}, "_bumped": True}) + "\n")
+                target.write_text(
+                    json.dumps({"hooks": {}, "_bumped": True}) + "\n", encoding="utf-8"
+                )
             return result
 
         import unittest.mock
@@ -334,7 +342,7 @@ class TestClaudeSettingsDryRun:
     def test_reports_in_sync(self, claude_home, tmp_path):
         target = claude_home / ".claude" / "settings.json"
         content = {"hooks": {"PostToolUse": [_rule("Write")]}}
-        target.write_text(json.dumps(content, indent=2) + "\n")
+        target.write_text(json.dumps(content, indent=2) + "\n", encoding="utf-8")
 
         _make_canonical_settings(tmp_path, content)
         results = diff_settings(tmp_path)
@@ -342,7 +350,7 @@ class TestClaudeSettingsDryRun:
 
     def test_reports_out_of_sync(self, claude_home, tmp_path):
         target = claude_home / ".claude" / "settings.json"
-        target.write_text(json.dumps({"hooks": {}}) + "\n")
+        target.write_text(json.dumps({"hooks": {}}) + "\n", encoding="utf-8")
 
         _make_canonical_settings(tmp_path, {"hooks": {"PostToolUse": [_rule("Write")]}})
         results = diff_settings(tmp_path)
@@ -352,11 +360,11 @@ class TestClaudeSettingsDryRun:
         """diff must never modify the target file."""
         target = claude_home / ".claude" / "settings.json"
         original = json.dumps({"hooks": {}}) + "\n"
-        target.write_text(original)
+        target.write_text(original, encoding="utf-8")
 
         _make_canonical_settings(tmp_path, {"hooks": {"PostToolUse": [_rule("Write")]}})
         diff_settings(tmp_path)
-        assert target.read_text() == original
+        assert target.read_text(encoding="utf-8") == original
 
 
 # ── CLI integration ─────────────────────────────────────────────────
@@ -385,7 +393,7 @@ class TestClaudeSettingsCliInclude:
         # Verify the file was actually written
         target = claude_home / ".claude" / "settings.json"
         assert target.is_file()
-        written = json.loads(target.read_text())
+        written = json.loads(target.read_text(encoding="utf-8"))
         assert "PostToolUse" in written.get("hooks", {})
 
     def test_include_settings_validation(self):

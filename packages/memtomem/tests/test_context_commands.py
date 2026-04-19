@@ -43,7 +43,7 @@ def _make_canonical_command(project_root, name, body=SAMPLE_FULL_COMMAND):
     root = project_root / CANONICAL_COMMAND_ROOT
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"{name}.md"
-    path.write_text(body)
+    path.write_text(body, encoding="utf-8")
     return path
 
 
@@ -70,7 +70,7 @@ class TestParseCanonicalCommand:
 
     def test_tolerates_missing_frontmatter(self, tmp_path):
         p = tmp_path / "bare.md"
-        p.write_text("Just a bare prompt with $ARGUMENTS.")
+        p.write_text("Just a bare prompt with $ARGUMENTS.", encoding="utf-8")
         cmd = parse_canonical_command(p)
         assert cmd.name == "bare"
         assert cmd.description == ""
@@ -112,7 +112,7 @@ class TestClaudeCommandRendering:
     def test_passes_through_all_fields(self, tmp_path):
         _make_canonical_command(tmp_path, "review", SAMPLE_FULL_COMMAND)
         generate_all_commands(tmp_path, runtimes=["claude_commands"])
-        out = (tmp_path / ".claude/commands/review.md").read_text()
+        out = (tmp_path / ".claude/commands/review.md").read_text(encoding="utf-8")
         assert "description: Review a file for issues" in out
         assert "argument-hint: [file-path]" in out
         assert "allowed-tools: [Read, Grep]" in out
@@ -128,9 +128,9 @@ class TestClaudeCommandRendering:
         body = "Just the prompt with $ARGUMENTS.\n"
         p = tmp_path / CANONICAL_COMMAND_ROOT / "bare.md"
         p.parent.mkdir(parents=True)
-        p.write_text(body)  # no frontmatter at all
+        p.write_text(body, encoding="utf-8")  # no frontmatter at all
         generate_all_commands(tmp_path, runtimes=["claude_commands"])
-        out = (tmp_path / ".claude/commands/bare.md").read_text()
+        out = (tmp_path / ".claude/commands/bare.md").read_text(encoding="utf-8")
         assert out.startswith("Just the prompt")
         assert "---" not in out
 
@@ -141,7 +141,7 @@ class TestGeminiCommandRendering:
         generate_all_commands(tmp_path, runtimes=["gemini_commands"])
         toml_path = tmp_path / ".gemini/commands/review.toml"
         assert toml_path.is_file()
-        parsed = tomllib.loads(toml_path.read_text())
+        parsed = tomllib.loads(toml_path.read_text(encoding="utf-8"))
         assert parsed["description"] == "Review a file for issues"
         assert "prompt" in parsed
         assert "Review the file at {{args}}" in parsed["prompt"]
@@ -149,7 +149,9 @@ class TestGeminiCommandRendering:
     def test_rewrites_arguments_placeholder(self, tmp_path):
         _make_canonical_command(tmp_path, "review", SAMPLE_FULL_COMMAND)
         generate_all_commands(tmp_path, runtimes=["gemini_commands"])
-        parsed = tomllib.loads((tmp_path / ".gemini/commands/review.toml").read_text())
+        parsed = tomllib.loads(
+            (tmp_path / ".gemini/commands/review.toml").read_text(encoding="utf-8")
+        )
         assert "$ARGUMENTS" not in parsed["prompt"]
         assert "{{args}}" in parsed["prompt"]
 
@@ -208,7 +210,7 @@ class TestExtractCommandsToCanonical:
     def test_imports_claude_command(self, tmp_path):
         d = tmp_path / ".claude/commands"
         d.mkdir(parents=True)
-        (d / "review.md").write_text(SAMPLE_FULL_COMMAND)
+        (d / "review.md").write_text(SAMPLE_FULL_COMMAND, encoding="utf-8")
         result = extract_commands_to_canonical(tmp_path)
         assert len(result.imported) == 1
         assert (tmp_path / CANONICAL_COMMAND_ROOT / "review.md").is_file()
@@ -218,11 +220,12 @@ class TestExtractCommandsToCanonical:
         d = tmp_path / ".gemini/commands"
         d.mkdir(parents=True)
         (d / "review.toml").write_text(
-            'description = "Review a file"\nprompt = "Review {{args}} and report issues."\n'
+            'description = "Review a file"\nprompt = "Review {{args}} and report issues."\n',
+            encoding="utf-8",
         )
         result = extract_commands_to_canonical(tmp_path)
         assert len(result.imported) == 1
-        canonical = (tmp_path / CANONICAL_COMMAND_ROOT / "review.md").read_text()
+        canonical = (tmp_path / CANONICAL_COMMAND_ROOT / "review.md").read_text(encoding="utf-8")
         assert "description: Review a file" in canonical
         # {{args}} rewritten back to $ARGUMENTS
         assert "$ARGUMENTS" in canonical
@@ -235,10 +238,10 @@ class TestExtractCommandsToCanonical:
         ):
             d = tmp_path / runtime
             d.mkdir(parents=True)
-            (d / filename).write_text(content)
+            (d / filename).write_text(content, encoding="utf-8")
         result = extract_commands_to_canonical(tmp_path)
         assert len(result.imported) == 1
-        canonical = (tmp_path / CANONICAL_COMMAND_ROOT / "shared.md").read_text()
+        canonical = (tmp_path / CANONICAL_COMMAND_ROOT / "shared.md").read_text(encoding="utf-8")
         assert "Simple prompt" in canonical  # claude version won
         # Gemini copy was skipped.
         assert len(result.skipped) == 1
@@ -249,21 +252,21 @@ class TestExtractCommandsToCanonical:
         d = tmp_path / ".claude/commands"
         d.mkdir(parents=True)
         new = SAMPLE_MINIMAL_COMMAND.replace("Simple prompt", "UPDATED")
-        (d / "hi.md").write_text(new)
+        (d / "hi.md").write_text(new, encoding="utf-8")
 
         canonical = tmp_path / CANONICAL_COMMAND_ROOT / "hi.md"
         canonical.parent.mkdir(parents=True)
-        canonical.write_text("old")
+        canonical.write_text("old", encoding="utf-8")
 
         result = extract_commands_to_canonical(tmp_path)
         assert result.imported == []
         assert len(result.skipped) == 1
         assert "canonical exists" in result.skipped[0][1]
-        assert canonical.read_text() == "old"
+        assert canonical.read_text(encoding="utf-8") == "old"
 
         result = extract_commands_to_canonical(tmp_path, overwrite=True)
         assert len(result.imported) == 1
-        assert "UPDATED" in canonical.read_text()
+        assert "UPDATED" in canonical.read_text(encoding="utf-8")
 
     def test_skips_hostile_runtime_filename(self, tmp_path):
         """#276: runtime filenames are interpolated into canonical paths."""
@@ -298,7 +301,7 @@ class TestDiffCommands:
     def test_out_of_sync(self, tmp_path):
         _make_canonical_command(tmp_path, "hi", SAMPLE_MINIMAL_COMMAND)
         generate_all_commands(tmp_path)
-        (tmp_path / ".claude/commands/hi.md").write_text("mutated")
+        (tmp_path / ".claude/commands/hi.md").write_text("mutated", encoding="utf-8")
         rows = diff_commands(tmp_path)
         status_by_runtime = {r: s for r, _, s in rows}
         assert status_by_runtime["claude_commands"] == "out of sync"
@@ -307,7 +310,7 @@ class TestDiffCommands:
     def test_missing_canonical(self, tmp_path):
         d = tmp_path / ".claude/commands"
         d.mkdir(parents=True)
-        (d / "runtime-only.md").write_text(SAMPLE_MINIMAL_COMMAND)
+        (d / "runtime-only.md").write_text(SAMPLE_MINIMAL_COMMAND, encoding="utf-8")
         rows = diff_commands(tmp_path)
         assert any(status == "missing canonical" for _, _, status in rows)
 
@@ -319,7 +322,7 @@ class TestDetectCommandDirs:
     def test_detects_claude(self, tmp_path):
         d = tmp_path / ".claude/commands"
         d.mkdir(parents=True)
-        (d / "review.md").write_text(SAMPLE_MINIMAL_COMMAND)
+        (d / "review.md").write_text(SAMPLE_MINIMAL_COMMAND, encoding="utf-8")
         found = detect_command_dirs(tmp_path)
         assert len(found) == 1
         assert found[0].agent == "claude_commands"
@@ -328,7 +331,7 @@ class TestDetectCommandDirs:
     def test_detects_gemini_toml(self, tmp_path):
         d = tmp_path / ".gemini/commands"
         d.mkdir(parents=True)
-        (d / "review.toml").write_text('prompt = "hi"\n')
+        (d / "review.toml").write_text('prompt = "hi"\n', encoding="utf-8")
         found = detect_command_dirs(tmp_path)
         assert len(found) == 1
         assert found[0].agent == "gemini_commands"
@@ -338,7 +341,7 @@ class TestDetectCommandDirs:
         # .md inside .gemini/commands is NOT a Gemini command — skip it.
         d = tmp_path / ".gemini/commands"
         d.mkdir(parents=True)
-        (d / "stray.md").write_text("not a toml command")
+        (d / "stray.md").write_text("not a toml command", encoding="utf-8")
         found = detect_command_dirs(tmp_path)
         assert found == []
 
@@ -392,7 +395,7 @@ class TestRoundtrip:
         shutil.rmtree(tmp_path / CANONICAL_COMMAND_ROOT)
         result = extract_commands_to_canonical(tmp_path)
         assert len(result.imported) == 1
-        canonical = (tmp_path / CANONICAL_COMMAND_ROOT / "hi.md").read_text()
+        canonical = (tmp_path / CANONICAL_COMMAND_ROOT / "hi.md").read_text(encoding="utf-8")
         assert "description: Simple prompt" in canonical
         assert "$ARGUMENTS" in canonical
         assert "{{args}}" not in canonical

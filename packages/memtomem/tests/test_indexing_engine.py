@@ -49,10 +49,10 @@ class TestDiscoverFiles:
 
     async def test_finds_supported_extensions(self, components, memory_dir):
         """Should discover .md, .json, .py files but not .txt."""
-        (memory_dir / "notes.md").write_text("# Notes")
-        (memory_dir / "data.json").write_text('{"key": "val"}')
-        (memory_dir / "script.py").write_text("print('hello')")
-        (memory_dir / "readme.txt").write_text("ignored")
+        (memory_dir / "notes.md").write_text("# Notes", encoding="utf-8")
+        (memory_dir / "data.json").write_text('{"key": "val"}', encoding="utf-8")
+        (memory_dir / "script.py").write_text("print('hello')", encoding="utf-8")
+        (memory_dir / "readme.txt").write_text("ignored", encoding="utf-8")
 
         engine = components.index_engine
         files = engine._discover_files(memory_dir, recursive=True)
@@ -67,8 +67,8 @@ class TestDiscoverFiles:
         """Recursive mode should find files in subdirectories."""
         sub = memory_dir / "sub" / "deep"
         sub.mkdir(parents=True)
-        (sub / "nested.md").write_text("# Nested")
-        (memory_dir / "top.md").write_text("# Top")
+        (sub / "nested.md").write_text("# Nested", encoding="utf-8")
+        (memory_dir / "top.md").write_text("# Top", encoding="utf-8")
 
         engine = components.index_engine
         files = engine._discover_files(memory_dir, recursive=True)
@@ -81,8 +81,8 @@ class TestDiscoverFiles:
         """Non-recursive mode should only find top-level files."""
         sub = memory_dir / "subdir"
         sub.mkdir()
-        (sub / "deep.md").write_text("# Deep")
-        (memory_dir / "surface.md").write_text("# Surface")
+        (sub / "deep.md").write_text("# Deep", encoding="utf-8")
+        (memory_dir / "surface.md").write_text("# Surface", encoding="utf-8")
 
         engine = components.index_engine
         files = engine._discover_files(memory_dir, recursive=False)
@@ -95,17 +95,17 @@ class TestDiscoverFiles:
         """Should skip .git/ and node_modules/ directories."""
         git_dir = memory_dir / ".git"
         git_dir.mkdir()
-        (git_dir / "config.md").write_text("# Git config")
+        (git_dir / "config.md").write_text("# Git config", encoding="utf-8")
 
         nm_dir = memory_dir / "node_modules"
         nm_dir.mkdir()
-        (nm_dir / "package.json").write_text('{"name": "pkg"}')
+        (nm_dir / "package.json").write_text('{"name": "pkg"}', encoding="utf-8")
 
         pycache = memory_dir / "__pycache__"
         pycache.mkdir()
-        (pycache / "cached.py").write_text("# cached")
+        (pycache / "cached.py").write_text("# cached", encoding="utf-8")
 
-        (memory_dir / "real.md").write_text("# Real")
+        (memory_dir / "real.md").write_text("# Real", encoding="utf-8")
 
         engine = components.index_engine
         files = engine._discover_files(memory_dir, recursive=True)
@@ -120,8 +120,8 @@ class TestDiscoverFiles:
         """Directories ending with .egg-info should be excluded."""
         egg = memory_dir / "mypackage.egg-info"
         egg.mkdir()
-        (egg / "PKG-INFO.md").write_text("# Info")
-        (memory_dir / "keep.md").write_text("# Keep")
+        (egg / "PKG-INFO.md").write_text("# Info", encoding="utf-8")
+        (memory_dir / "keep.md").write_text("# Keep", encoding="utf-8")
 
         engine = components.index_engine
         files = engine._discover_files(memory_dir, recursive=True)
@@ -132,9 +132,9 @@ class TestDiscoverFiles:
 
     async def test_returns_sorted_paths(self, components, memory_dir):
         """Discovered files should be sorted by path."""
-        (memory_dir / "b.md").write_text("B")
-        (memory_dir / "a.md").write_text("A")
-        (memory_dir / "c.md").write_text("C")
+        (memory_dir / "b.md").write_text("B", encoding="utf-8")
+        (memory_dir / "a.md").write_text("A", encoding="utf-8")
+        (memory_dir / "c.md").write_text("C", encoding="utf-8")
 
         engine = components.index_engine
         files = engine._discover_files(memory_dir, recursive=True)
@@ -374,7 +374,7 @@ class TestResolveNamespace:
         sub = memory_dir / "project-x"
         sub.mkdir()
         fp = sub / "notes.md"
-        fp.write_text("# Notes")
+        fp.write_text("# Notes", encoding="utf-8")
 
         result = engine._resolve_namespace(fp, None)
         assert result == "project-x"
@@ -385,7 +385,7 @@ class TestResolveNamespace:
         engine._ns_config = NamespaceConfig(enable_auto_ns=True)
 
         fp = memory_dir / "notes.md"
-        fp.write_text("# Notes")
+        fp.write_text("# Notes", encoding="utf-8")
 
         result = engine._resolve_namespace(fp, None)
         # Should fall back to default, not use memory_dir folder name
@@ -916,7 +916,7 @@ class TestIndexFile:
             "# Section A\n\nContent for section A.\n\n# Section B\n\nContent for section B.\n"
         )
         md_path = memory_dir / "test_doc.md"
-        md_path.write_text(md_content)
+        md_path.write_text(md_content, encoding="utf-8")
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
@@ -935,7 +935,7 @@ class TestIndexFile:
     async def test_unchanged_file_skips_reembedding(self, components, memory_dir):
         """Re-indexing an unchanged file should skip embedding."""
         md_path = memory_dir / "stable.md"
-        md_path.write_text("# Title\n\nStable content here.\n")
+        md_path.write_text("# Title\n\nStable content here.\n", encoding="utf-8")
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
@@ -960,7 +960,7 @@ class TestIndexFile:
     async def test_force_reindex_reembeds(self, components, memory_dir):
         """force=True should re-embed even unchanged content."""
         md_path = memory_dir / "forced.md"
-        md_path.write_text("# Force\n\nForce reindex content.\n")
+        md_path.write_text("# Force\n\nForce reindex content.\n", encoding="utf-8")
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
@@ -979,7 +979,7 @@ class TestIndexFile:
     async def test_unsupported_extension_ignored(self, components, memory_dir):
         """Files with unsupported extensions should return zero chunks."""
         txt_path = memory_dir / "readme.txt"
-        txt_path.write_text("Plain text content")
+        txt_path.write_text("Plain text content", encoding="utf-8")
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
@@ -1009,7 +1009,7 @@ class TestIndexFile:
     async def test_namespace_applied_to_indexed_chunks(self, components, memory_dir):
         """Explicit namespace should be applied to stored chunks."""
         md_path = memory_dir / "ns_test.md"
-        md_path.write_text("# NS Test\n\nNamespaced content.\n")
+        md_path.write_text("# NS Test\n\nNamespaced content.\n", encoding="utf-8")
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
@@ -1035,9 +1035,11 @@ class TestIndexPath:
 
     async def test_index_multiple_files(self, components, memory_dir):
         """Indexing a directory should process all supported files."""
-        (memory_dir / "file1.md").write_text("# File 1\n\nContent one.\n")
-        (memory_dir / "file2.md").write_text("# File 2\n\nContent two.\n")
-        (memory_dir / "file3.json").write_text('{"key": "value", "nested": {"a": 1}}')
+        (memory_dir / "file1.md").write_text("# File 1\n\nContent one.\n", encoding="utf-8")
+        (memory_dir / "file2.md").write_text("# File 2\n\nContent two.\n", encoding="utf-8")
+        (memory_dir / "file3.json").write_text(
+            '{"key": "value", "nested": {"a": 1}}', encoding="utf-8"
+        )
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
@@ -1068,7 +1070,7 @@ class TestIndexPath:
 
     async def test_index_path_stats_correct(self, components, memory_dir):
         """Stats should accurately reflect total files and chunks."""
-        (memory_dir / "only.md").write_text("# Only\n\nSingle file.\n")
+        (memory_dir / "only.md").write_text("# Only\n\nSingle file.\n", encoding="utf-8")
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
@@ -1095,7 +1097,7 @@ class TestIncrementalIndexing:
     async def test_modify_adds_new_chunks(self, components, memory_dir):
         """Modifying a file should re-embed only new/changed chunks."""
         md_path = memory_dir / "evolving.md"
-        md_path.write_text("# Section 1\n\nOriginal content.\n")
+        md_path.write_text("# Section 1\n\nOriginal content.\n", encoding="utf-8")
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
@@ -1110,7 +1112,8 @@ class TestIncrementalIndexing:
 
         # Modify the file — add a new section
         md_path.write_text(
-            "# Section 1\n\nOriginal content.\n\n# Section 2\n\nBrand new section.\n"
+            "# Section 1\n\nOriginal content.\n\n# Section 2\n\nBrand new section.\n",
+            encoding="utf-8",
         )
 
         stats2 = await components.index_engine.index_file(md_path)
@@ -1122,7 +1125,7 @@ class TestIncrementalIndexing:
     async def test_delete_section_removes_chunks(self, components, memory_dir):
         """Removing a section should delete its chunks."""
         md_path = memory_dir / "shrinking.md"
-        md_path.write_text("# Keep\n\nKeep this.\n\n# Remove\n\nRemove this.\n")
+        md_path.write_text("# Keep\n\nKeep this.\n\n# Remove\n\nRemove this.\n", encoding="utf-8")
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
@@ -1135,7 +1138,7 @@ class TestIncrementalIndexing:
         hashes_before = await components.storage.get_chunk_hashes(md_path)
 
         # Remove the second section
-        md_path.write_text("# Keep\n\nKeep this.\n")
+        md_path.write_text("# Keep\n\nKeep this.\n", encoding="utf-8")
         stats = await components.index_engine.index_file(md_path)
 
         hashes_after = await components.storage.get_chunk_hashes(md_path)
@@ -1146,7 +1149,7 @@ class TestIncrementalIndexing:
     async def test_empty_file_clears_chunks(self, components, memory_dir):
         """Overwriting a file with empty content should delete all its chunks."""
         md_path = memory_dir / "clearme.md"
-        md_path.write_text("# Content\n\nSome data.\n")
+        md_path.write_text("# Content\n\nSome data.\n", encoding="utf-8")
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
@@ -1160,7 +1163,7 @@ class TestIncrementalIndexing:
         assert len(hashes) > 0
 
         # Clear the file
-        md_path.write_text("")
+        md_path.write_text("", encoding="utf-8")
         await components.index_engine.index_file(md_path)
 
         hashes_after = await components.storage.get_chunk_hashes(md_path)

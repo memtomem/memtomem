@@ -364,7 +364,7 @@ class TestMemoryCRUD:
         append_entry(target, "Hello, world!", title="Greeting")
 
         assert target.exists()
-        text = target.read_text()
+        text = target.read_text(encoding="utf-8")
         assert "## Greeting" in text
         assert "Hello, world!" in text
 
@@ -372,7 +372,7 @@ class TestMemoryCRUD:
         target = memory_dir / "tagged.md"
         append_entry(target, "Tagged content", title="Tagged", tags=["python", "tips"])
 
-        text = target.read_text()
+        text = target.read_text(encoding="utf-8")
         assert "tags:" in text
         assert "python" in text
 
@@ -380,7 +380,7 @@ class TestMemoryCRUD:
         target = memory_dir / "auto.md"
         append_entry(target, "No explicit title given")
 
-        text = target.read_text()
+        text = target.read_text(encoding="utf-8")
         # Auto-generated title uses "Entry <timestamp>"
         assert "## Entry" in text
 
@@ -389,7 +389,7 @@ class TestMemoryCRUD:
         append_entry(target, "First entry", title="First")
         append_entry(target, "Second entry", title="Second")
 
-        text = target.read_text()
+        text = target.read_text(encoding="utf-8")
         assert "## First" in text
         assert "## Second" in text
         assert "First entry" in text
@@ -400,7 +400,7 @@ class TestMemoryCRUD:
         target = memory_dir / "heading.md"
         append_entry(target, "## Custom heading\n\nBody text")
 
-        text = target.read_text()
+        text = target.read_text(encoding="utf-8")
         assert text.count("## Custom heading") == 1
 
     async def test_upsert_then_delete_by_chunk_id(self, storage):
@@ -451,7 +451,7 @@ class TestMemoryCRUD:
         for title, content in entries:
             append_entry(target, content, title=title)
 
-        text = target.read_text()
+        text = target.read_text(encoding="utf-8")
         assert text.count("## Fact") == 3
         assert "The sky is blue" in text
         assert "Water is wet" in text

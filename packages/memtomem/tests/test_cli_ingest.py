@@ -38,9 +38,9 @@ from memtomem.cli.ingest_cmd import (
 
 class TestDiscoverFiles:
     def test_returns_sorted_markdown_files(self, tmp_path):
-        (tmp_path / "project_b.md").write_text("b")
-        (tmp_path / "feedback_a.md").write_text("a")
-        (tmp_path / "user_c.md").write_text("c")
+        (tmp_path / "project_b.md").write_text("b", encoding="utf-8")
+        (tmp_path / "feedback_a.md").write_text("a", encoding="utf-8")
+        (tmp_path / "user_c.md").write_text("c", encoding="utf-8")
 
         files = _discover_files(tmp_path)
         assert [f.name for f in files] == [
@@ -51,30 +51,30 @@ class TestDiscoverFiles:
 
     def test_excludes_memory_md_and_readme(self, tmp_path):
         """MEMORY.md and README.md are indexes / docs, not memory content."""
-        (tmp_path / "feedback_a.md").write_text("keep")
-        (tmp_path / "MEMORY.md").write_text("- [a](feedback_a.md)")
-        (tmp_path / "README.md").write_text("# how to read")
+        (tmp_path / "feedback_a.md").write_text("keep", encoding="utf-8")
+        (tmp_path / "MEMORY.md").write_text("- [a](feedback_a.md)", encoding="utf-8")
+        (tmp_path / "README.md").write_text("# how to read", encoding="utf-8")
 
         files = _discover_files(tmp_path)
         names = [f.name for f in files]
         assert names == ["feedback_a.md"]
 
     def test_excludes_hidden_and_non_markdown(self, tmp_path):
-        (tmp_path / "project_a.md").write_text("keep")
-        (tmp_path / ".DS_Store").write_text("mac")
-        (tmp_path / ".hidden.md").write_text("hidden")
-        (tmp_path / "notes.txt").write_text("wrong ext")
-        (tmp_path / "script.py").write_text("code")
+        (tmp_path / "project_a.md").write_text("keep", encoding="utf-8")
+        (tmp_path / ".DS_Store").write_text("mac", encoding="utf-8")
+        (tmp_path / ".hidden.md").write_text("hidden", encoding="utf-8")
+        (tmp_path / "notes.txt").write_text("wrong ext", encoding="utf-8")
+        (tmp_path / "script.py").write_text("code", encoding="utf-8")
 
         files = _discover_files(tmp_path)
         assert [f.name for f in files] == ["project_a.md"]
 
     def test_non_recursive(self, tmp_path):
         """Claude memory dirs are flat — don't walk subdirectories."""
-        (tmp_path / "project_a.md").write_text("top")
+        (tmp_path / "project_a.md").write_text("top", encoding="utf-8")
         sub = tmp_path / "subdir"
         sub.mkdir()
-        (sub / "project_b.md").write_text("nested")
+        (sub / "project_b.md").write_text("nested", encoding="utf-8")
 
         files = _discover_files(tmp_path)
         assert [f.name for f in files] == ["project_a.md"]
@@ -156,7 +156,7 @@ class TestDiscoverClaudeSlugDirs:
         for slug in ("-Users-me-Work-alpha", "-Users-me-Work-beta"):
             mem = tmp_path / slug / "memory"
             mem.mkdir(parents=True)
-            (mem / "project_x.md").write_text("x")
+            (mem / "project_x.md").write_text("x", encoding="utf-8")
 
         dirs = _discover_claude_slug_dirs(tmp_path)
         assert len(dirs) == 2
@@ -168,11 +168,11 @@ class TestDiscoverClaudeSlugDirs:
         """Slug directories without a memory/ child are ignored."""
         good = tmp_path / "has-memory" / "memory"
         good.mkdir(parents=True)
-        (good / "note.md").write_text("ok")
+        (good / "note.md").write_text("ok", encoding="utf-8")
 
         bad = tmp_path / "no-memory"
         bad.mkdir()
-        (bad / "stray.md").write_text("stray")
+        (bad / "stray.md").write_text("stray", encoding="utf-8")
 
         dirs = _discover_claude_slug_dirs(tmp_path)
         assert len(dirs) == 1
@@ -181,7 +181,7 @@ class TestDiscoverClaudeSlugDirs:
     def test_skips_hidden_dirs(self, tmp_path):
         hidden = tmp_path / ".hidden" / "memory"
         hidden.mkdir(parents=True)
-        (hidden / "secret.md").write_text("hidden")
+        (hidden / "secret.md").write_text("hidden", encoding="utf-8")
 
         assert _discover_claude_slug_dirs(tmp_path) == []
 
@@ -197,7 +197,7 @@ class TestDiscoverClaudeSlugDirs:
 
     def test_file_not_dir(self, tmp_path):
         f = tmp_path / "not-a-dir.txt"
-        f.write_text("file")
+        f.write_text("file", encoding="utf-8")
         assert _discover_claude_slug_dirs(f) == []
 
 
@@ -222,15 +222,17 @@ class TestIngestFilesWithComponents:
 
         (slug_dir / "feedback_a.md").write_text(
             "# Feedback A\n\nAlways use bge-m3 for Korean text embeddings "
-            "because the vocabulary coverage is wider than bge-small.\n"
+            "because the vocabulary coverage is wider than bge-small.\n",
+            encoding="utf-8",
         )
         (slug_dir / "project_b.md").write_text(
             "# Project B\n\nPhase B adds a claude-memory ingestion path "
-            "that treats the source directory as a read-only snapshot.\n"
+            "that treats the source directory as a read-only snapshot.\n",
+            encoding="utf-8",
         )
         # MEMORY.md must be ignored even though it lives in the same dir.
         (slug_dir / "MEMORY.md").write_text(
-            "- [Feedback A](feedback_a.md)\n- [Project B](project_b.md)\n"
+            "- [Feedback A](feedback_a.md)\n- [Project B](project_b.md)\n", encoding="utf-8"
         )
         return slug_dir
 
@@ -326,7 +328,8 @@ class TestIngestFilesWithComponents:
         edited.write_text(
             "# Feedback A\n\nRevised guidance: prefer bge-m3 for multilingual "
             "corpora — the Korean coverage is measurably better than bge-small, "
-            "and the English quality is comparable.\n"
+            "and the English quality is comparable.\n",
+            encoding="utf-8",
         )
 
         summary = await _ingest_files_with_components(
@@ -348,27 +351,27 @@ class TestIngestFilesWithComponents:
 class TestGeminiDiscoverFiles:
     def test_file_path_returns_single_element(self, tmp_path):
         md = tmp_path / "GEMINI.md"
-        md.write_text("## Gemini Added Memories\n\n- fact one\n")
+        md.write_text("## Gemini Added Memories\n\n- fact one\n", encoding="utf-8")
         assert _gemini_discover_files(md) == [md]
 
     def test_directory_finds_gemini_md(self, tmp_path):
         md = tmp_path / "GEMINI.md"
-        md.write_text("memories")
+        md.write_text("memories", encoding="utf-8")
         files = _gemini_discover_files(tmp_path)
         assert files == [md]
 
     def test_directory_without_gemini_md_returns_empty(self, tmp_path):
-        (tmp_path / "other.md").write_text("not gemini")
+        (tmp_path / "other.md").write_text("not gemini", encoding="utf-8")
         assert _gemini_discover_files(tmp_path) == []
 
     def test_non_md_file_returns_empty(self, tmp_path):
         txt = tmp_path / "GEMINI.txt"
-        txt.write_text("wrong extension")
+        txt.write_text("wrong extension", encoding="utf-8")
         assert _gemini_discover_files(txt) == []
 
     def test_empty_file_still_discovered(self, tmp_path):
         md = tmp_path / "GEMINI.md"
-        md.write_text("")
+        md.write_text("", encoding="utf-8")
         assert _gemini_discover_files(md) == [md]
 
 
@@ -377,14 +380,14 @@ class TestGeminiDeriveSlug:
         gemini_dir = tmp_path / ".gemini"
         gemini_dir.mkdir()
         md = gemini_dir / "GEMINI.md"
-        md.write_text("")
+        md.write_text("", encoding="utf-8")
         assert _gemini_derive_slug(md) == "global"
 
     def test_project_root(self, tmp_path):
         project = tmp_path / "my-cool-project"
         project.mkdir()
         md = project / "GEMINI.md"
-        md.write_text("")
+        md.write_text("", encoding="utf-8")
         assert _gemini_derive_slug(md) == "my-cool-project"
 
     def test_root_path_defaults(self):
@@ -416,29 +419,29 @@ class TestGeminiTagsForFile:
 
 class TestCodexDiscoverFiles:
     def test_returns_sorted_md_files(self, tmp_path):
-        (tmp_path / "note_b.md").write_text("b")
-        (tmp_path / "fact_a.md").write_text("a")
+        (tmp_path / "note_b.md").write_text("b", encoding="utf-8")
+        (tmp_path / "fact_a.md").write_text("a", encoding="utf-8")
         files = _codex_discover_files(tmp_path)
         assert [f.name for f in files] == ["fact_a.md", "note_b.md"]
 
     def test_excludes_readme(self, tmp_path):
-        (tmp_path / "fact.md").write_text("keep")
-        (tmp_path / "README.md").write_text("docs")
+        (tmp_path / "fact.md").write_text("keep", encoding="utf-8")
+        (tmp_path / "README.md").write_text("docs", encoding="utf-8")
         files = _codex_discover_files(tmp_path)
         assert [f.name for f in files] == ["fact.md"]
 
     def test_excludes_hidden_and_non_markdown(self, tmp_path):
-        (tmp_path / "fact.md").write_text("keep")
-        (tmp_path / ".hidden.md").write_text("skip")
-        (tmp_path / "data.json").write_text("{}")
+        (tmp_path / "fact.md").write_text("keep", encoding="utf-8")
+        (tmp_path / ".hidden.md").write_text("skip", encoding="utf-8")
+        (tmp_path / "data.json").write_text("{}", encoding="utf-8")
         files = _codex_discover_files(tmp_path)
         assert [f.name for f in files] == ["fact.md"]
 
     def test_non_recursive(self, tmp_path):
-        (tmp_path / "fact.md").write_text("top")
+        (tmp_path / "fact.md").write_text("top", encoding="utf-8")
         sub = tmp_path / "sub"
         sub.mkdir()
-        (sub / "nested.md").write_text("nested")
+        (sub / "nested.md").write_text("nested", encoding="utf-8")
         files = _codex_discover_files(tmp_path)
         assert [f.name for f in files] == ["fact.md"]
 
@@ -499,7 +502,8 @@ class TestGeminiIngestIntegration:
             "## Gemini Added Memories\n\n"
             "- User prefers Korean for discussion but English for code.\n"
             "- The project uses uv for dependency management.\n"
-            "- Always run ruff check before committing.\n"
+            "- Always run ruff check before committing.\n",
+            encoding="utf-8",
         )
 
         files = _gemini_discover_files(md)
@@ -524,7 +528,7 @@ class TestGeminiIngestIntegration:
         project = tmp_path / "demo"
         project.mkdir()
         md = project / "GEMINI.md"
-        md.write_text("## Memories\n\n- Fact alpha\n- Fact beta\n")
+        md.write_text("## Memories\n\n- Fact alpha\n- Fact beta\n", encoding="utf-8")
 
         files = _gemini_discover_files(md)
         ns = "gemini-memory:demo"
@@ -550,12 +554,12 @@ class TestCodexIngestIntegration:
         mem_dir = tmp_path / "codex_memories"
         mem_dir.mkdir()
         (mem_dir / "fact_a.md").write_text(
-            "# Workspace preference\n\nAlways use workspace-write sandbox mode.\n"
+            "# Workspace preference\n\nAlways use workspace-write sandbox mode.\n", encoding="utf-8"
         )
         (mem_dir / "fact_b.md").write_text(
-            "# Git convention\n\nCommit messages should start with a verb.\n"
+            "# Git convention\n\nCommit messages should start with a verb.\n", encoding="utf-8"
         )
-        (mem_dir / "README.md").write_text("# Index\nDo not index this.\n")
+        (mem_dir / "README.md").write_text("# Index\nDo not index this.\n", encoding="utf-8")
 
         files = _codex_discover_files(mem_dir)
         assert {f.name for f in files} == {"fact_a.md", "fact_b.md"}
@@ -579,7 +583,7 @@ class TestCodexIngestIntegration:
     async def test_rerun_skips_unchanged(self, components, tmp_path):
         mem_dir = tmp_path / "codex_memories"
         mem_dir.mkdir()
-        (mem_dir / "fact.md").write_text("# Fact\n\nSome important fact.\n")
+        (mem_dir / "fact.md").write_text("# Fact\n\nSome important fact.\n", encoding="utf-8")
 
         files = _codex_discover_files(mem_dir)
         ns = "codex-memory:global"
@@ -611,10 +615,12 @@ class TestMultiSlugIngestIntegration:
             mem = projects / slug / "memory"
             mem.mkdir(parents=True)
             (mem / "feedback_x.md").write_text(
-                f"# Feedback\n\nAlways lint before commit in {slug}.\n"
+                f"# Feedback\n\nAlways lint before commit in {slug}.\n", encoding="utf-8"
             )
-            (mem / "project_y.md").write_text(f"# Project\n\nPhase 1 for {slug} is complete.\n")
-            (mem / "MEMORY.md").write_text("- [x](feedback_x.md)\n")
+            (mem / "project_y.md").write_text(
+                f"# Project\n\nPhase 1 for {slug} is complete.\n", encoding="utf-8"
+            )
+            (mem / "MEMORY.md").write_text("- [x](feedback_x.md)\n", encoding="utf-8")
         return projects
 
     async def test_multi_slug_indexes_all_slugs(self, components, tmp_path):

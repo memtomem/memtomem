@@ -331,7 +331,7 @@ class TestContentHash:
 
     def test_file_hash(self, tmp_path):
         p = tmp_path / "sample.txt"
-        p.write_text("hello world")
+        p.write_text("hello world", encoding="utf-8")
         h = file_hash(str(p))
         assert len(h) == 64
 

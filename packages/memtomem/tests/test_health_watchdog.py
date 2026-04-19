@@ -159,7 +159,7 @@ class TestDiagnosticChecks:
 
         app, _db = mock_app
         existing = tmp_path / "note.md"
-        existing.write_text("hello")
+        existing.write_text("hello", encoding="utf-8")
         app.storage.get_all_source_files = AsyncMock(return_value={existing})
         snap = await check_orphan_count(app)
         assert snap.status == "ok"

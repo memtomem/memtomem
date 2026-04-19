@@ -143,7 +143,7 @@ class TestReadSkill:
         _make_skill(tmp_path, "rich")
         scripts_dir = tmp_path / ".memtomem" / "skills" / "rich" / "scripts"
         scripts_dir.mkdir()
-        (scripts_dir / "run.sh").write_text("#!/bin/bash\necho hello\n")
+        (scripts_dir / "run.sh").write_text("#!/bin/bash\necho hello\n", encoding="utf-8")
         r = await client.get("/api/context/skills/rich")
         data = r.json()
         paths = [f["path"] for f in data["files"]]
@@ -206,7 +206,9 @@ class TestUpdateSkill:
         assert r.status_code == 200
         assert r.json()["name"] == "upd"
         # Verify content changed
-        content = (tmp_path / ".memtomem" / "skills" / "upd" / SKILL_MANIFEST).read_text()
+        content = (tmp_path / ".memtomem" / "skills" / "upd" / SKILL_MANIFEST).read_text(
+            encoding="utf-8"
+        )
         assert "Updated" in content
 
     @pytest.mark.anyio

@@ -102,7 +102,7 @@ class TestImportNotion:
         assert "My Page.md" in names
         assert "Child.md" in names
         # Content should have import metadata
-        content = imported[0].read_text()
+        content = imported[0].read_text(encoding="utf-8")
         assert "imported_from: notion" in content
 
     @pytest.mark.asyncio
@@ -149,7 +149,7 @@ class TestImportObsidian:
         imported = await import_obsidian(vault, output)
 
         assert len(imported) == 2  # .obsidian skipped
-        content = (output / "Daily Note.md").read_text()
+        content = (output / "Daily Note.md").read_text(encoding="utf-8")
         assert "imported_from: obsidian" in content
         assert "[[Project Plan]]" not in content  # converted
         assert "[Project Plan]" in content

@@ -513,13 +513,13 @@ class TestSettingsSync:
 
         canonical = tmp_path / ".memtomem" / "settings.json"
         canonical.parent.mkdir()
-        canonical.write_text(json.dumps(hooks))
+        canonical.write_text(json.dumps(hooks), encoding="utf-8")
 
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text() if target.is_file() else None
+        backup = target.read_text(encoding="utf-8") if target.is_file() else None
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(json.dumps(hooks))
+            target.write_text(json.dumps(hooks), encoding="utf-8")
             app.state.project_root = tmp_path
 
             resp = await client.get("/api/settings-sync")
@@ -530,7 +530,7 @@ class TestSettingsSync:
             assert data["hooks"]["synced"][0]["matcher"] == "Write"
         finally:
             if backup is not None:
-                target.write_text(backup)
+                target.write_text(backup, encoding="utf-8")
             elif target.is_file():
                 target.unlink()
 
@@ -541,12 +541,16 @@ class TestSettingsSync:
 
         canonical = tmp_path / ".memtomem" / "settings.json"
         canonical.parent.mkdir()
-        canonical.write_text(json.dumps({"hooks": {"PostToolUse": [canonical_rule]}}))
+        canonical.write_text(
+            json.dumps({"hooks": {"PostToolUse": [canonical_rule]}}), encoding="utf-8"
+        )
 
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text() if target.is_file() else None
+        backup = target.read_text(encoding="utf-8") if target.is_file() else None
         try:
-            target.write_text(json.dumps({"hooks": {"PostToolUse": [target_rule]}}))
+            target.write_text(
+                json.dumps({"hooks": {"PostToolUse": [target_rule]}}), encoding="utf-8"
+            )
             app.state.project_root = tmp_path
 
             resp = await client.get("/api/settings-sync")
@@ -560,7 +564,7 @@ class TestSettingsSync:
             assert c["proposed"]["hooks"][0]["command"] == "echo new"
         finally:
             if backup is not None:
-                target.write_text(backup)
+                target.write_text(backup, encoding="utf-8")
             elif target.is_file():
                 target.unlink()
 
@@ -570,12 +574,12 @@ class TestSettingsSync:
 
         canonical = tmp_path / ".memtomem" / "settings.json"
         canonical.parent.mkdir()
-        canonical.write_text(json.dumps({"hooks": {"PostToolUse": [rule]}}))
+        canonical.write_text(json.dumps({"hooks": {"PostToolUse": [rule]}}), encoding="utf-8")
 
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text() if target.is_file() else None
+        backup = target.read_text(encoding="utf-8") if target.is_file() else None
         try:
-            target.write_text(json.dumps({"hooks": {}}))
+            target.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
             app.state.project_root = tmp_path
 
             resp = await client.get("/api/settings-sync")
@@ -585,7 +589,7 @@ class TestSettingsSync:
             assert data["hooks"]["pending"][0]["event"] == "PostToolUse"
         finally:
             if backup is not None:
-                target.write_text(backup)
+                target.write_text(backup, encoding="utf-8")
             elif target.is_file():
                 target.unlink()
 
@@ -596,12 +600,16 @@ class TestSettingsSync:
 
         canonical = tmp_path / ".memtomem" / "settings.json"
         canonical.parent.mkdir()
-        canonical.write_text(json.dumps({"hooks": {"PostToolUse": [canonical_rule]}}))
+        canonical.write_text(
+            json.dumps({"hooks": {"PostToolUse": [canonical_rule]}}), encoding="utf-8"
+        )
 
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text() if target.is_file() else None
+        backup = target.read_text(encoding="utf-8") if target.is_file() else None
         try:
-            target.write_text(json.dumps({"hooks": {"PostToolUse": [target_rule]}}))
+            target.write_text(
+                json.dumps({"hooks": {"PostToolUse": [target_rule]}}), encoding="utf-8"
+            )
             app.state.project_root = tmp_path
 
             resp = await client.post(
@@ -611,11 +619,11 @@ class TestSettingsSync:
             data = resp.json()
             assert data["status"] == "ok"
 
-            updated = json.loads(target.read_text())
+            updated = json.loads(target.read_text(encoding="utf-8"))
             assert updated["hooks"]["PostToolUse"][0]["hooks"][0]["command"] == "echo new"
         finally:
             if backup is not None:
-                target.write_text(backup)
+                target.write_text(backup, encoding="utf-8")
             elif target.is_file():
                 target.unlink()
 
@@ -644,13 +652,13 @@ class TestSettingsSync:
         """POST /resolve for non-existent rule returns HTTP 404."""
         canonical = tmp_path / ".memtomem" / "settings.json"
         canonical.parent.mkdir()
-        canonical.write_text(json.dumps({"hooks": {}}))
+        canonical.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
 
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text() if target.is_file() else None
+        backup = target.read_text(encoding="utf-8") if target.is_file() else None
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(json.dumps({"hooks": {}}))
+            target.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
             app.state.project_root = tmp_path
 
             resp = await client.post(
@@ -661,7 +669,7 @@ class TestSettingsSync:
             assert "not in canonical source" in resp.json()["detail"]
         finally:
             if backup is not None:
-                target.write_text(backup)
+                target.write_text(backup, encoding="utf-8")
             elif target.is_file():
                 target.unlink()
 
@@ -678,7 +686,7 @@ class TestSettingsSync:
         """POST /api/context/settings/sync runs the settings merge."""
         canonical = tmp_path / ".memtomem" / "settings.json"
         canonical.parent.mkdir()
-        canonical.write_text(json.dumps({"hooks": {}}))
+        canonical.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
         app.state.project_root = tmp_path
 
         resp = await client.post(
@@ -695,12 +703,16 @@ class TestSettingsSync:
 
         canonical = tmp_path / ".memtomem" / "settings.json"
         canonical.parent.mkdir()
-        canonical.write_text(json.dumps({"hooks": {"PostToolUse": [canonical_rule]}}))
+        canonical.write_text(
+            json.dumps({"hooks": {"PostToolUse": [canonical_rule]}}), encoding="utf-8"
+        )
 
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text() if target.is_file() else None
+        backup = target.read_text(encoding="utf-8") if target.is_file() else None
         try:
-            target.write_text(json.dumps({"hooks": {"PostToolUse": [target_rule]}}))
+            target.write_text(
+                json.dumps({"hooks": {"PostToolUse": [target_rule]}}), encoding="utf-8"
+            )
             app.state.project_root = tmp_path
 
             resp = await client.post(
@@ -710,11 +722,11 @@ class TestSettingsSync:
             data = resp.json()
             assert data["status"] == "ok"
 
-            updated = json.loads(target.read_text())
+            updated = json.loads(target.read_text(encoding="utf-8"))
             assert updated["hooks"]["PostToolUse"][0]["hooks"][0]["command"] == "echo v2"
         finally:
             if backup is not None:
-                target.write_text(backup)
+                target.write_text(backup, encoding="utf-8")
             elif target.is_file():
                 target.unlink()
 
