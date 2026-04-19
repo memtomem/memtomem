@@ -439,21 +439,8 @@ class TestSaveConfigOverrides:
         """Invalid values in config.json should be skipped with warning, not crash."""
         import json
 
-<<<<<<< HEAD
         isolated["config_file"].write_text(
             json.dumps({"search": {"default_top_k": -5}})  # violates min=1
-=======
-        config_file = tmp_path / "config.json"
-        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
-
-        config_file.write_text(
-            json.dumps(
-                {
-                    "search": {"default_top_k": -5},  # violates min=1
-                }
-            ),
-            encoding="utf-8",
->>>>>>> b33e7df (fix: improve Windows compatibility)
         )
 
         cfg = Mem2MemConfig()
@@ -731,16 +718,8 @@ class TestSaveConfigOverrides:
         # Case 1: whole value is a repr-ish string (not even JSON).
         isolated["config_file"].write_text(
             json.dumps(
-<<<<<<< HEAD
                 {"namespace": {"rules": "<NamespacePolicyRule path_glob='x' namespace='y'>"}}
             )
-=======
-                {
-                    "indexing": {"memory_dirs": ["/pre/existing"]},
-                }
-            ),
-            encoding="utf-8",
->>>>>>> b33e7df (fix: improve Windows compatibility)
         )
         cfg = Mem2MemConfig()
         load_config_overrides(cfg)
@@ -774,7 +753,6 @@ class TestSaveConfigOverrides:
         cfg.mmr.enabled = True  # force a non-comparand write
         save_config_overrides(cfg)
 
-<<<<<<< HEAD
         assert config_file.exists()
         assert nested_dir.is_dir()
 
@@ -1025,10 +1003,6 @@ class TestConfigUnset:
             if p.name.startswith(".config.") and p.name.endswith(".tmp")
         ]
         assert not orphans
-=======
-        data = json.loads(config_file.read_text(encoding="utf-8"))
-        assert "/pre/existing" in [str(p) for p in data["indexing"]["memory_dirs"]]
->>>>>>> b33e7df (fix: improve Windows compatibility)
 
 
 # ── Other subcommands (help text) ───────────────────────────────────────
