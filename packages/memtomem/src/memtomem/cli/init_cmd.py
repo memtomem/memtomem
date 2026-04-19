@@ -351,10 +351,28 @@ def _step_mcp(state: dict) -> None:
     step_header(9, "Connect to AI Editor")
     click.echo("  How do you want to connect memtomem?")
     click.echo("    [1] Claude Code (run 'claude mcp add' automatically)")
-    click.echo("    [2] Generate .mcp.json (for Cursor, Windsurf, etc.)")
+    click.echo("    [2] Generate .mcp.json here (Claude Code project scope;")
+    click.echo("        copy into your editor's config file for Cursor / Windsurf / others)")
     click.echo("    [3] Skip — I'll configure it manually")
     state["mcp_choice"] = nav_prompt("  Select", type=click.IntRange(1, 3), default=1)
     click.echo()
+
+
+def _emit_mcp_paste_hints() -> None:
+    """Print per-editor paste targets for the generated ``.mcp.json``.
+
+    Claude Code auto-loads a project-root ``.mcp.json``; other editors do not
+    and expect their own config file. Shown after every path that writes the
+    file so users know the generated JSON is a template, not a drop-in config
+    for Cursor/Windsurf/Claude Desktop/Gemini CLI."""
+    click.echo("    Cursor          → paste into ~/.cursor/mcp.json")
+    click.echo("    Windsurf        → paste into ~/.codeium/windsurf/mcp_config.json")
+    click.echo(
+        "    Claude Desktop  → paste into "
+        "~/Library/Application Support/Claude/claude_desktop_config.json"
+    )
+    click.echo("    Gemini CLI      → paste into ~/.gemini/settings.json")
+    click.echo("  (Claude Code picks up ./.mcp.json in this project automatically.)")
 
 
 # ── Write config & summary ────────────────────────────────────────────
@@ -755,14 +773,17 @@ def _write_config_and_summary(
             else:
                 click.echo("  Claude Code: 'claude' not found. Use .mcp.json instead.")
                 _write_mcp_json(server_cmd, server_args, mcp_env)
-                click.echo("  MCP config: .mcp.json")
+                click.echo("  MCP config: wrote ./.mcp.json")
+                _emit_mcp_paste_hints()
         except (FileNotFoundError, subprocess.TimeoutExpired):
             click.echo("  Claude Code: 'claude' not found. Use .mcp.json instead.")
             _write_mcp_json(server_cmd, server_args, mcp_env)
-            click.echo("  MCP config: .mcp.json")
+            click.echo("  MCP config: wrote ./.mcp.json")
+            _emit_mcp_paste_hints()
     elif mcp_choice == 2:
         _write_mcp_json(server_cmd, server_args, mcp_env)
-        click.echo("  MCP config: .mcp.json")
+        click.echo("  MCP config: wrote ./.mcp.json")
+        _emit_mcp_paste_hints()
 
     # Summary
     click.echo()
