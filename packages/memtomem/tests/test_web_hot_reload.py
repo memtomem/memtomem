@@ -15,6 +15,8 @@ Covers (numbering matches ``project_web_hot_reload_bridge.md`` test plan):
 6. after fix → GET clears the error
 7. tokenizer change via reload triggers fanout (FTS rebuild + cache invalidate)
 8. concurrent PATCH + disk edit: lock serialisation
+9. V2 (issue #268): GET's lock-free reload yields to a concurrent writer's
+   signature bump via compare-and-swap
 """
 
 from __future__ import annotations
@@ -444,6 +446,79 @@ async def test_concurrent_patches_are_serialised_by_lock(
     # clobber the early one with stale state.
     on_disk = json.loads((home / ".memtomem" / "config.json").read_text())
     assert on_disk["search"]["default_top_k"] in (42, 99)
+
+
+# ---------------------------------------------------------------------------
+# Test 9 — V2: GET's lock-free reload must not overwrite a writer's bump
+# ---------------------------------------------------------------------------
+
+
+def test_reload_if_stale_cas_yields_to_concurrent_writer_bump(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Issue #268: the lock-free reader path had a race where its trailing
+    ``app.state.config = new_cfg; _set_last_signature(sig)`` could overwrite
+    a writer's commit that landed while ``_build_fresh_config`` was running.
+    The writer's view is at least as fresh, so we yield.
+
+    Proof: hook ``_build_fresh_config`` so that *between* its call and its
+    return, a simulated writer updates ``app.state.config_signature``.
+    Without CAS, ``reload_if_stale`` would then assign the reader-side
+    cfg + reset the signature to the older ``sig`` it observed at entry,
+    clobbering the writer's bump. With CAS, it detects the advance and
+    returns ``False`` with no state mutation.
+
+    Direct unit-level construction (no HTTP / no asyncio) keeps the race
+    window deterministic: the writer "lands" exactly where the reader
+    would race it, regardless of scheduler quirks.
+    """
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    _write_config(home, {"mmr": {"enabled": False}, "search": {"default_top_k": 10}})
+
+    # Baseline reader-visible state.
+    app.state.config = _hot_reload._build_fresh_config()
+    app.state.config_signature = _hot_reload.current_signature()
+    app.state.last_reload_error = None
+
+    sig_before = app.state.config_signature
+    cfg_before = app.state.config
+
+    # External disk edit bumps current_signature() past sig_before. This
+    # is what triggers reload_if_stale to enter its rebuild branch at all.
+    _write_config(home, {"mmr": {"enabled": True}, "search": {"default_top_k": 10}})
+
+    # Simulate "a writer committed inside _config_lock while we were
+    # inside _build_fresh_config" by mutating app.state.config_signature
+    # from *within* the wrapped build call. When reload_if_stale returns
+    # from this call, it will find _get_last_signature(app) != last and
+    # must bail out without swapping.
+    real_build = _hot_reload._build_fresh_config
+    writer_sig = None
+
+    def build_and_interleave_writer():
+        nonlocal writer_sig
+        # Do one more disk touch so commit_writer_signature picks up a
+        # signature strictly newer than anything the reader saw.
+        _write_config(home, {"mmr": {"enabled": True}, "search": {"default_top_k": 99}})
+        _hot_reload.commit_writer_signature(app)
+        writer_sig = app.state.config_signature
+        return real_build()
+
+    monkeypatch.setattr(_hot_reload, "_build_fresh_config", build_and_interleave_writer)
+
+    swapped = _hot_reload.reload_if_stale(app)
+
+    # CAS must have fired: no swap happened.
+    assert swapped is False
+    assert app.state.config_signature == writer_sig, (
+        "writer's signature was overwritten by the reader's tail"
+    )
+    assert app.state.config is cfg_before, "writer's config view was clobbered"
+    # And of course the writer's signature must differ from what the
+    # reader saw at entry — otherwise there was no race to defend against.
+    assert writer_sig != sig_before
 
 
 # ---------------------------------------------------------------------------

@@ -240,6 +240,15 @@ def reload_if_stale(
         _set_last_signature(app, sig)
         return False
 
+    # Compare-and-swap: while we were in _build_fresh_config (file I/O, can
+    # take milliseconds), a writer inside _config_lock may have already
+    # committed a fresh reload + signature bump via commit_writer_signature.
+    # That view is at least as fresh as ours; discard our rebuild so we
+    # don't revert the writer's signature and force a spurious next-GET
+    # reload. Race eliminated per issue #268.
+    if _get_last_signature(app) != last:
+        return False
+
     old_cfg = getattr(app.state, "config", None)
     app.state.config = new_cfg
     _set_last_signature(app, sig)
