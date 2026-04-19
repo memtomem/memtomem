@@ -392,3 +392,69 @@ def test_every_list_field_declares_merge_strategy() -> None:
         "type in Annotated[list[X], APPEND] or Annotated[list[X], REPLACE] "
         "in config.py:\n  - " + "\n  - ".join(missing)
     )
+
+
+# ---------------------------------------------------------------------------
+# indexing.auto_discover opt-out (issue #260 Option 0)
+#
+# Regression guards for the boolean flag that lets users disable auto-discovery
+# of well-known AI tool directories (`~/.claude/projects`, `~/.gemini`,
+# `~/.codex/memories`). Default is True (preserves legacy behavior); False
+# short-circuits ``ensure_auto_discovered_dirs`` to a no-op so the caller's
+# explicit ``memory_dirs`` list is the complete list.
+# ---------------------------------------------------------------------------
+
+
+def test_auto_discover_default_true_appends_dirs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = tmp_path / "fake-tool"
+    fake.mkdir()
+    monkeypatch.setattr(_cfg, "_auto_discovered_memory_dirs", lambda: [fake])
+    cfg = Mem2MemConfig()
+    assert cfg.indexing.auto_discover is True
+    _cfg.ensure_auto_discovered_dirs(cfg)
+    resolved = {Path(p).expanduser().resolve() for p in cfg.indexing.memory_dirs}
+    assert fake.resolve() in resolved
+
+
+def test_auto_discover_false_is_noop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    fake = tmp_path / "fake-tool"
+    fake.mkdir()
+    monkeypatch.setattr(_cfg, "_auto_discovered_memory_dirs", lambda: [fake])
+    cfg = Mem2MemConfig()
+    cfg.indexing.auto_discover = False
+    before = [str(p) for p in cfg.indexing.memory_dirs]
+    _cfg.ensure_auto_discovered_dirs(cfg)
+    after = [str(p) for p in cfg.indexing.memory_dirs]
+    assert before == after
+    assert str(fake) not in after
+
+
+def test_auto_discover_env_var_disables(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _clear_all_memtomem_env(monkeypatch)
+    monkeypatch.setenv("MEMTOMEM_INDEXING__AUTO_DISCOVER", "false")
+    fake = tmp_path / "fake-tool"
+    fake.mkdir()
+    monkeypatch.setattr(_cfg, "_auto_discovered_memory_dirs", lambda: [fake])
+    cfg = Mem2MemConfig()
+    assert cfg.indexing.auto_discover is False
+    _cfg.ensure_auto_discovered_dirs(cfg)
+    resolved = {Path(p).expanduser().resolve() for p in cfg.indexing.memory_dirs}
+    assert fake.resolve() not in resolved
+
+
+def test_auto_discover_config_json_disables(
+    override_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _clear_all_memtomem_env(monkeypatch)
+    override_path.write_text(json.dumps({"indexing": {"auto_discover": False}}), encoding="utf-8")
+    fake = tmp_path / "fake-tool"
+    fake.mkdir()
+    monkeypatch.setattr(_cfg, "_auto_discovered_memory_dirs", lambda: [fake])
+    cfg = Mem2MemConfig()
+    load_config_overrides(cfg)
+    assert cfg.indexing.auto_discover is False
+    _cfg.ensure_auto_discovered_dirs(cfg)
+    resolved = {Path(p).expanduser().resolve() for p in cfg.indexing.memory_dirs}
+    assert fake.resolve() not in resolved

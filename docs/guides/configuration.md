@@ -314,6 +314,13 @@ override `memory_dirs` manually. This means `mem_index` and the file
 watcher accept paths under these directories without requiring explicit
 `MEMORY_DIRS` configuration.
 
+To opt out of auto-discovery entirely, set `indexing.auto_discover = false`
+in `config.json` or export `MEMTOMEM_INDEXING__AUTO_DISCOVER=false`. When
+disabled, only the `memory_dirs` you configure explicitly are indexed — the
+three well-known directories above are ignored even if they exist on disk.
+You can also toggle this per-field from the Web UI or via
+`mm config set indexing.auto_discover false`.
+
 > **Tip:** Use `mm ingest claude-memory`, `mm ingest gemini-memory`, or
 > `mm ingest codex-memory` for richer ingestion with per-tool tagging and
 > namespace assignment. Auto-discovery only removes the path restriction —
