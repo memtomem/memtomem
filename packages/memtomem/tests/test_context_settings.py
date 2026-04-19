@@ -262,6 +262,47 @@ class TestClaudeSettingsMergeConcurrent:
         assert "modified by another process" in r.reason
 
 
+class TestClaudeSettingsAtomicWrite:
+    """_write_json is atomic — a crash between open() and replace() leaves the
+    pre-existing settings.json untouched instead of producing a truncated file
+    that reloads as 'no hooks configured' (issue #275)."""
+
+    def test_crash_mid_replace_preserves_old_settings(self, claude_home, tmp_path, monkeypatch):
+        target = claude_home / ".claude" / "settings.json"
+        original = {"hooks": {"PostToolUse": [_rule("Write", "echo original")]}}
+        target.write_text(json.dumps(original, indent=2) + "\n", encoding="utf-8")
+
+        _make_canonical_settings(
+            tmp_path,
+            {"hooks": {"PostToolUse": [_rule("Edit", "echo new")]}},
+        )
+
+        def _boom(*_args, **_kwargs):
+            raise OSError("simulated crash mid-replace")
+
+        monkeypatch.setattr("memtomem.context._atomic.os.replace", _boom)
+
+        with pytest.raises(OSError, match="simulated crash"):
+            generate_all_settings(tmp_path)
+
+        # Old file survives, no .tmp sibling leaked.
+        assert json.loads(target.read_text(encoding="utf-8")) == original
+        siblings = [p for p in target.parent.iterdir() if p.name.startswith(".settings.json.")]
+        assert siblings == []
+
+    def test_mode_is_0o600(self, claude_home, tmp_path):
+        import stat as _stat
+
+        _make_canonical_settings(
+            tmp_path,
+            {"hooks": {"PostToolUse": [_rule("Edit", "echo")]}},
+        )
+        generate_all_settings(tmp_path)
+
+        target = claude_home / ".claude" / "settings.json"
+        assert _stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
 class TestClaudeSettingsNoClaudeCodeInstalled:
     """``~/.claude/`` does not exist → skip, never create it."""
 

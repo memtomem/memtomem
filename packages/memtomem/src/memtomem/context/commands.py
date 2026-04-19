@@ -38,6 +38,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
+from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context.agents import (
     _FRONT_MATTER_RE,
     _parse_flat_yaml,
@@ -76,12 +78,20 @@ def parse_canonical_command(path: Path) -> SlashCommand:
         # Commands without frontmatter are tolerated — treat the whole file
         # as the prompt body with a filename-derived name.
         body = content.lstrip("\n").rstrip() + "\n"
-        return SlashCommand(name=path.stem, description="", body=body)
+        try:
+            stem = validate_name(path.stem, kind="command name")
+        except InvalidNameError as exc:
+            raise CommandParseError(f"{exc} (source: {path})") from exc
+        return SlashCommand(name=stem, description="", body=body)
 
     frontmatter = _parse_flat_yaml(m.group(1))
     body = content[m.end() :].lstrip("\n").rstrip() + "\n"
 
     name = str(frontmatter.get("name") or path.stem)
+    try:
+        name = validate_name(name, kind="command name")
+    except InvalidNameError as exc:
+        raise CommandParseError(f"{exc} (source: {path})") from exc
     description = str(frontmatter.get("description") or "")
     argument_hint_raw = frontmatter.get("argument-hint") or frontmatter.get("argument_hint")
     allowed_tools_raw = frontmatter.get("allowed-tools") or frontmatter.get("allowed_tools")
@@ -308,8 +318,7 @@ def generate_all_commands(
                 if effective_drop == "warn":
                     logger.warning("%s dropped %s from '%s'", target, dropped_fields, cmd.name)
             out_path = gen.target_file(project_root, cmd.name)
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(content, encoding="utf-8")
+            atomic_write_text(out_path, content)
             generated.append((target, out_path))
             if dropped_fields:
                 dropped.append((target, cmd.name, dropped_fields))
@@ -366,6 +375,12 @@ def extract_commands_to_canonical(
     if claude_dir.is_dir():
         for md_file in sorted(claude_dir.glob("*.md")):
             cmd_name = md_file.stem
+            try:
+                validate_name(cmd_name, kind="command name")
+            except InvalidNameError as exc:
+                skipped.append((cmd_name, f"invalid name: {exc}"))
+                logger.warning("skip %r from .claude/commands: invalid name", cmd_name)
+                continue
             if cmd_name in seen:
                 reason = f"already imported from {seen[cmd_name]}"
                 skipped.append((cmd_name, reason))
@@ -378,8 +393,7 @@ def extract_commands_to_canonical(
                 logger.warning("skip %s from .claude/commands: %s", cmd_name, reason)
                 seen[cmd_name] = ".claude/commands"
                 continue
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_bytes(md_file.read_bytes())
+            atomic_write_bytes(dst, md_file.read_bytes())
             imported.append(dst)
             seen[cmd_name] = ".claude/commands"
 
@@ -388,6 +402,12 @@ def extract_commands_to_canonical(
     if gemini_dir.is_dir():
         for toml_file in sorted(gemini_dir.glob("*.toml")):
             cmd_name = toml_file.stem
+            try:
+                validate_name(cmd_name, kind="command name")
+            except InvalidNameError as exc:
+                skipped.append((cmd_name, f"invalid name: {exc}"))
+                logger.warning("skip %r from .gemini/commands: invalid name", cmd_name)
+                continue
             if cmd_name in seen:
                 reason = f"already imported from {seen[cmd_name]}"
                 skipped.append((cmd_name, reason))
@@ -406,8 +426,7 @@ def extract_commands_to_canonical(
                 skipped.append((cmd_name, "TOML parse error"))
                 logger.warning("skip %s from .gemini/commands: TOML parse error", cmd_name)
                 continue
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_text(canonical_content, encoding="utf-8")
+            atomic_write_text(dst, canonical_content)
             imported.append(dst)
             seen[cmd_name] = ".gemini/commands"
 

@@ -24,6 +24,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+from memtomem.context._atomic import atomic_write_bytes
+from memtomem.context._names import InvalidNameError, validate_name
+
 logger = logging.getLogger(__name__)
 
 CANONICAL_SKILL_ROOT = ".memtomem/skills"
@@ -99,6 +102,9 @@ def list_canonical_skills(project_root: Path) -> list[Path]:
     A sub-directory only counts as a skill if it contains ``SKILL.md``. This
     mirrors Gemini CLI's discovery rule and lets users drop auxiliary folders
     next to real skills without them being mistaken for skills.
+
+    Skill directory names are validated; entries that fail
+    :func:`memtomem.context._names.validate_name` are skipped with a warning.
     """
     root = canonical_skills_root(project_root)
     if not root.is_dir():
@@ -106,6 +112,11 @@ def list_canonical_skills(project_root: Path) -> list[Path]:
     skills: list[Path] = []
     for entry in sorted(root.iterdir()):
         if entry.is_dir() and (entry / SKILL_MANIFEST).is_file():
+            try:
+                validate_name(entry.name, kind="skill name")
+            except InvalidNameError as exc:
+                logger.warning("skip canonical skill %r: invalid name (%s)", entry.name, exc)
+                continue
             skills.append(entry)
     return skills
 
@@ -121,6 +132,11 @@ def copy_skill(src: Path, dst: Path) -> None:
     that removed files on the source side propagate. If ``dst`` exists but
     does NOT look like a skill directory, the copy aborts with ``IsADirectoryError``
     to avoid clobbering something the user put there by hand.
+
+    Individual files are written atomically via
+    :func:`memtomem.context._atomic.atomic_write_bytes` so a crash mid-copy
+    leaves each file either fully-written or absent, never truncated.
+    Directory-level atomicity (the rmtree+mkdir window) is out of scope here.
     """
     manifest = src / SKILL_MANIFEST
     if not manifest.is_file():
@@ -138,11 +154,18 @@ def copy_skill(src: Path, dst: Path) -> None:
         shutil.rmtree(dst)
 
     dst.mkdir(parents=True)
+    _copy_tree_atomic(src, dst)
+
+
+def _copy_tree_atomic(src: Path, dst: Path) -> None:
+    """Recursively mirror *src* → *dst*, each file via atomic_write_bytes."""
+    dst.mkdir(parents=True, exist_ok=True)
     for entry in src.iterdir():
+        target = dst / entry.name
         if entry.is_file():
-            shutil.copy2(entry, dst / entry.name)
+            atomic_write_bytes(target, entry.read_bytes())
         elif entry.is_dir():
-            shutil.copytree(entry, dst / entry.name)
+            _copy_tree_atomic(entry, target)
 
 
 # ── Fan-out: canonical → runtimes ─────────────────────────────────────
@@ -222,6 +245,16 @@ def extract_skills_to_canonical(
     for detected in detect_skill_dirs(project_root):
         skill_name = detected.path.name
         runtime_label = detected.agent  # e.g. "claude_skills"
+        try:
+            validate_name(skill_name, kind="skill name")
+        except InvalidNameError as exc:
+            skipped.append((skill_name, f"invalid name: {exc}"))
+            logger.warning(
+                "skip %r from %s: invalid name",
+                skill_name,
+                runtime_label,
+            )
+            continue
         if skill_name in seen:
             reason = f"already imported from {seen[skill_name]}"
             skipped.append((skill_name, reason))

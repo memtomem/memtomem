@@ -8,6 +8,7 @@ import pytest
 from memtomem.context.commands import (
     CANONICAL_COMMAND_ROOT,
     COMMAND_GENERATORS,
+    CommandParseError,
     CommandSyncResult,
     StrictDropError,
     diff_commands,
@@ -74,6 +75,26 @@ class TestParseCanonicalCommand:
         assert cmd.name == "bare"
         assert cmd.description == ""
         assert "Just a bare prompt" in cmd.body
+
+    @pytest.mark.parametrize(
+        "hostile_name",
+        [
+            "../../evil",
+            "a/b",
+            "a\\b",
+            ".",
+            "..",
+            "-x",
+            "A" * 65,
+            "name with space",
+        ],
+    )
+    def test_rejects_hostile_name_in_frontmatter(self, tmp_path, hostile_name):
+        """#276: ``name:`` frontmatter is interpolated into the output path."""
+        p = tmp_path / "hostile.md"
+        p.write_text(f"---\nname: {hostile_name}\ndescription: x\n---\n\nbody\n")
+        with pytest.raises(CommandParseError, match="invalid command name"):
+            parse_canonical_command(p)
 
 
 class TestListCanonicalCommands:
@@ -243,6 +264,19 @@ class TestExtractCommandsToCanonical:
         result = extract_commands_to_canonical(tmp_path, overwrite=True)
         assert len(result.imported) == 1
         assert "UPDATED" in canonical.read_text()
+
+    def test_skips_hostile_runtime_filename(self, tmp_path):
+        """#276: runtime filenames are interpolated into canonical paths."""
+        d = tmp_path / ".claude/commands"
+        d.mkdir(parents=True)
+        (d / "-bad.md").write_text(SAMPLE_MINIMAL_COMMAND)
+        (d / "ok.md").write_text(SAMPLE_MINIMAL_COMMAND)
+
+        result = extract_commands_to_canonical(tmp_path)
+        imported_names = sorted(p.stem for p in result.imported)
+        assert imported_names == ["ok"]
+        skipped_names = sorted(name for name, _ in result.skipped)
+        assert "-bad" in skipped_names
 
 
 class TestDiffCommands:

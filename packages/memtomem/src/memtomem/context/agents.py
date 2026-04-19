@@ -32,6 +32,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
+from memtomem.context._names import InvalidNameError, validate_name
+
 logger = logging.getLogger(__name__)
 
 CANONICAL_AGENT_ROOT = ".memtomem/agents"
@@ -166,9 +169,13 @@ def parse_canonical_agent(path: Path) -> SubAgent:
     body = content[m.end() :].lstrip("\n").rstrip() + "\n"
 
     name = frontmatter.get("name") or path.stem
+    try:
+        name = validate_name(str(name), kind="agent name")
+    except InvalidNameError as exc:
+        raise AgentParseError(f"{exc} (source: {path})") from exc
     description = frontmatter.get("description") or ""
     return SubAgent(
-        name=str(name),
+        name=name,
         description=str(description),
         body=body,
         tools=_coerce_list(frontmatter.get("tools")),
@@ -434,8 +441,7 @@ def generate_all_agents(
                 if effective_drop == "warn":
                     logger.warning("%s dropped %s from '%s'", target, dropped_fields, agent.name)
             out_path = gen.target_file(project_root, agent.name)
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(content, encoding="utf-8")
+            atomic_write_text(out_path, content)
             generated.append((target, out_path))
             if dropped_fields:
                 dropped.append((target, agent.name, dropped_fields))
@@ -473,6 +479,16 @@ def extract_agents_to_canonical(
         runtime_label = runtime_dir.relative_to(project_root).as_posix()
         for md_file in sorted(runtime_dir.glob("*.md")):
             agent_name = md_file.stem
+            try:
+                validate_name(agent_name, kind="agent name")
+            except InvalidNameError as exc:
+                skipped.append((agent_name, f"invalid name: {exc}"))
+                logger.warning(
+                    "skip %r from %s: invalid name",
+                    agent_name,
+                    runtime_label,
+                )
+                continue
             if agent_name in seen:
                 reason = f"already imported from {seen[agent_name]}"
                 skipped.append((agent_name, reason))
@@ -485,8 +501,7 @@ def extract_agents_to_canonical(
                 logger.warning("skip %s from %s: %s", agent_name, runtime_label, reason)
                 seen[agent_name] = runtime_label
                 continue
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_bytes(md_file.read_bytes())
+            atomic_write_bytes(dst, md_file.read_bytes())
             imported.append(dst)
             seen[agent_name] = runtime_label
 

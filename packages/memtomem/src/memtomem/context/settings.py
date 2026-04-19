@@ -42,6 +42,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+from memtomem.context._atomic import atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 CANONICAL_SETTINGS_FILE = ".memtomem/settings.json"
@@ -204,12 +206,9 @@ def _read_with_mtime(path: Path) -> tuple[dict | None | object, float]:
 
 
 def _write_json(path: Path, data: dict) -> None:
-    """Write *data* as formatted JSON with trailing newline."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(data, indent=2, sort_keys=False, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    """Write *data* as formatted JSON with trailing newline (atomic)."""
+    payload = json.dumps(data, indent=2, sort_keys=False, ensure_ascii=False) + "\n"
+    atomic_write_text(path, payload, mode=0o600)
 
 
 # ── Fan-out: canonical → runtimes ───────────────────────────────────
