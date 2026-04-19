@@ -872,7 +872,7 @@ The dashboard exposes search, sources, indexing, tags, timeline, and a "More" ta
 
 ```bash
 # Setup
-mm init                                # 8-step interactive wizard (b: back, q: quit)
+mm init                                # 9-step interactive wizard (b: back, q: quit)
 
 # Core (daily use)
 mm search "deployment"                 # hybrid search (keywords + meaning)

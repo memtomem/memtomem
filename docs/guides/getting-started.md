@@ -275,7 +275,7 @@ mm recall --since 2026-04-01
 All commands support `-h` and `--help`. Interactive wizards support `b` (back) and `q` (quit).
 
 ```bash
-mm init                    # 8-step setup wizard
+mm init                    # 9-step setup wizard
 mm search "query"          # hybrid search
 mm index ~/notes           # index files
 mm add "some note"         # add a memory
