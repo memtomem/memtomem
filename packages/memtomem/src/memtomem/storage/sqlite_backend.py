@@ -77,11 +77,18 @@ class SqliteBackend(
         dimension: int = 768,
         embedding_provider: str = "",
         embedding_model: str = "",
+        *,
+        strict_dim_check: bool = True,
     ) -> None:
         self._config = config
         self._dimension = dimension
         self._embedding_provider = embedding_provider
         self._embedding_model = embedding_model
+        # Relaxed mode is used by recovery tooling (``mm embedding-reset``)
+        # to observe and fix a dim=0 / real-provider mismatch; production
+        # entry points keep the default strict behavior so startup fails
+        # fast with a remediation message. See issue #298.
+        self._strict_dim_check = strict_dim_check
         self._db: sqlite3.Connection | None = None
         self._dim_mismatch: tuple[int, int] | None = None  # (stored, configured)
         self._model_mismatch: tuple[str, str, str, str] | None = (
@@ -141,6 +148,7 @@ class SqliteBackend(
                 self._dimension,
                 self._embedding_provider,
                 self._embedding_model,
+                strict_dim_check=self._strict_dim_check,
             )
         except Exception:
             await self.close()
