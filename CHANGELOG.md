@@ -5,6 +5,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.11] — 2026-04-19
+
+memtomem remains in **alpha**. APIs, defaults, and on-disk config surfaces
+may still shift between 0.1.x releases — external feedback and issue
+reports are especially welcome at
+[github.com/memtomem/memtomem/issues](https://github.com/memtomem/memtomem/issues).
+
 ### Added
 - **FastEmbed reranker provider**: new `rerank.provider="fastembed"` routes
   reranking through `fastembed.rerank.cross_encoder.TextCrossEncoder` —
@@ -51,18 +58,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   vs backup; idempotent scripting vs interactive wizard). Useful for stale
   cross-machine paths in `memory_dirs` or a single field shadowing a
   `config.d/` fragment.
+- **Web UI per-field reset-to-default (↺) button** (#272): every Config
+  field in the Web UI now has a ↺ action that restores the built-in
+  default in place. Schema and choice metadata served via new
+  `GET /api/config/defaults` + `/api/config/schema`; the frontend reads
+  both and overlays a per-field reset affordance.
+- **Web UI i18n coverage** (#281): remaining `showConfirm`/`showToast`
+  dialog strings now route through `t()`, completing the Korean UI
+  translation (closes #29).
+- **`indexing.auto_discover` flag** (#282): opt-out of auto-discovery
+  of `~/.claude/projects`, `~/.gemini`, `~/.codex/memories` from
+  `memory_dirs`. Defaults to `True` — no behavior change for existing
+  users. Use `mm config set indexing.auto_discover false` to pin
+  `memory_dirs` to the explicit list in `config.json` + `config.d/*.json`.
 
 ### Fixed
-- **Web UI config hot-reload**: `~/.memtomem/config.json` and `config.d/*.json`
-  are re-read on every `GET /api/config` and at the top of every config-
-  writing endpoint (`PATCH /api/config`, `POST /api/config/save`,
+- **Web UI config hot-reload** (#267, #269, #274):
+  `~/.memtomem/config.json` and `config.d/*.json` are re-read on every
+  `GET /api/config` and at the top of every config-writing endpoint
+  (`PATCH /api/config`, `POST /api/config/save`,
   `POST /api/memory-dirs/add|remove`). Previously, external edits
   (`mm config set`, manual editor) were invisible to the running server
   and got silently clobbered on the next UI save. The writer lock was
   extended from PATCH to all four write handlers (closing a pre-existing
   gap). If `config.json` becomes invalid on disk, the UI keeps the last
   known-good config, surfaces `config_reload_error` in the response, and
-  refuses writes with HTTP 409 until the file is fixed.
+  refuses writes with HTTP 409 until the file is fixed. Follow-up #269
+  closes a GET-path signature overwrite race under concurrent requests;
+  #274 mirrors the CAS guard onto the `reload_if_stale` error branch.
 - **ONNX `bge-m3`**: fastembed 0.8.0 dropped `BAAI/bge-m3` from its built-in
   `TextEmbedding` catalog — re-registered via `add_custom_model` against the
   official HF ONNX export (1024-dim, CLS pooling, normalized). Existing
@@ -105,6 +128,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `config.json` — the `--fresh` path's `shutil.copy2` backup + direct
   write could previously leave a half-written file next to a valid `.bak`
   on partial failure.
+- **Indexing exclude guard coverage** (#271): moved the entry-point
+  exclude guard from `index_file` into the innermost common seam
+  `_index_file`, so sibling public entry `index_path_stream(single_file)`
+  is also covered. Follow-up to the 0.1.10 security fix (#252).
+- **Wizard `.mcp.json` scope clarification** (#280): wizard output now
+  prints per-editor scope hints (Claude Code user vs project `.mcp.json`,
+  Cursor global vs project) so users don't paste the same block in both
+  scopes.
+- **Context atomic writes + name validation** (#283): all 6 context
+  fan-out sites (profile/skill/prompt read-modify-write paths) now use a
+  shared `atomic_write_{bytes,text}` helper (`0o600` default, `fsync` +
+  `os.replace`). Profile/skill/prompt names are validated through
+  `validate_name` at parse + extract, rejecting `..`, path separators,
+  control characters, and names longer than 64 bytes.
+- **Context CRLF tolerance + TOML escape** (#285): CRLF line endings are
+  now accepted everywhere, unknown keys warn instead of failing the
+  whole parse, and full TOML-style escape sequences (`\n`, `\t`, `\"`,
+  `\\`, `\uXXXX`) are honored in string values.
+- **Context-gateway write serialization** (#286): dedicated `asyncio`
+  lock prevents interleaved writes when multiple endpoints (context
+  gateway, skill editor, profile editor) mutate the same file in quick
+  succession.
+- **Auto-discover regression in `build_comparand`** (#284):
+  `ensure_auto_discovered_dirs` now also runs during the comparand
+  build, so an unrelated save doesn't drag auto-discovered directories
+  into `config.json`'s REPLACE layer. Post-merge follow-up to #282.
+- **FTS rebuild singleton + thread offload** (#287): Web UI FTS rebuild
+  now coalesces concurrent rebuild triggers into a singleton task and
+  runs on `asyncio.to_thread` with a dedicated writer connection, so
+  large indexes don't stall the event loop or serialize redundant
+  rebuilds.
 
 ### Changed
 - **Single-source version** via `importlib.metadata` + Python 3.13
@@ -148,6 +202,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - Webhook config section and `indexing.supported_extensions` added to
   configuration reference (#170 high tier).
 - MCP tool error response contract documented (#167).
+- **Beginner-surface restructure** (#288): move WIP / internal /
+  power-user-only docs into a private `memtomem/memtomem-docs` repo.
+  The public surface is now intentionally small:
+  `README.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `CLA.md`,
+  `SECURITY.md`, `docs/adr/`, `docs/guides/` (4 intro + 4 power-user
+  guides), and `packages/memtomem/README.md` (PyPI page).
+- **Notebooks slim** (#289): public `examples/notebooks/` now contains
+  `01_hello_memory.ipynb` (5-minute Python-API quick-start) only.
+  Notebooks 02–08 (filters, agent patterns, search tuning, LangGraph,
+  lifecycle, embedding providers, LLM features) were moved to the same
+  private `memtomem-docs` repo as internal reference material.
 
 ## [0.1.10] — 2026-04-19
 
