@@ -522,6 +522,77 @@ def test_reload_if_stale_cas_yields_to_concurrent_writer_bump(
 
 
 # ---------------------------------------------------------------------------
+# Test 10 — V2 error-branch mirror CAS (issue #273)
+# ---------------------------------------------------------------------------
+
+
+def test_reload_if_stale_error_branch_cas_yields_to_concurrent_writer_bump(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Issue #273: the lock-free reader's *error* branch had the same
+    structural race as the success branch (#268 / #269). If
+    ``_build_fresh_config`` raises after a writer landed its
+    ``commit_writer_signature`` bump, the pre-fix code would overwrite the
+    writer's signature with the older ``sig`` observed at entry, forcing a
+    spurious re-reload on the next GET from identical disk state.
+
+    Proof: hook ``_build_fresh_config`` so that *between* its call and its
+    raise, a simulated writer updates ``app.state.config_signature``.
+    Without CAS, the error branch would assign the reader-side ``sig``,
+    clobbering the writer's bump. With CAS, it detects the advance and
+    returns ``False`` leaving writer_sig intact.
+
+    Direct unit-level construction (no HTTP / no asyncio) keeps the race
+    window deterministic — same rationale as Test 9.
+    """
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    _write_config(home, {"mmr": {"enabled": False}, "search": {"default_top_k": 10}})
+
+    # Baseline reader-visible state.
+    app.state.config = _hot_reload._build_fresh_config()
+    app.state.config_signature = _hot_reload.current_signature()
+    app.state.last_reload_error = None
+
+    sig_before = app.state.config_signature
+
+    # External disk edit bumps current_signature() past sig_before so
+    # reload_if_stale enters the rebuild branch.
+    _write_config(home, {"mmr": {"enabled": True}, "search": {"default_top_k": 10}})
+
+    # Simulate "writer committed inside _config_lock while we were inside
+    # _build_fresh_config" — then raise so we land in the error branch.
+    writer_sig: _hot_reload.Signature | None = None
+
+    def build_and_interleave_writer_then_raise() -> Any:
+        nonlocal writer_sig
+        _write_config(home, {"mmr": {"enabled": True}, "search": {"default_top_k": 99}})
+        _hot_reload.commit_writer_signature(app)
+        writer_sig = app.state.config_signature
+        raise ValueError("simulated build failure")
+
+    monkeypatch.setattr(_hot_reload, "_build_fresh_config", build_and_interleave_writer_then_raise)
+
+    swapped = _hot_reload.reload_if_stale(app)
+
+    # Error branch fires but CAS guard leaves writer's signature intact.
+    assert swapped is False
+    assert app.state.config_signature == writer_sig, (
+        "writer's signature was overwritten by the reader's error-branch tail"
+    )
+    # The reader legitimately hit a build failure, so the banner is set.
+    # It will self-clear on the next GET once disk mtime differs from
+    # err.at_mtime_ns (see the signature-match branch of reload_if_stale).
+    err = _hot_reload.get_reload_error(app)
+    assert err is not None
+    assert "simulated build failure" in err.message
+    # And the writer's signature must differ from what the reader observed
+    # at entry — otherwise there was no race to defend against.
+    assert writer_sig != sig_before
+
+
+# ---------------------------------------------------------------------------
 # Unit tests for the helper itself
 # ---------------------------------------------------------------------------
 
