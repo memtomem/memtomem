@@ -5,6 +5,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.12] — 2026-04-19
+
+memtomem remains in **alpha**. APIs, defaults, and on-disk config surfaces
+may still shift between 0.1.x releases — external feedback and issue
+reports are especially welcome at
+[github.com/memtomem/memtomem/issues](https://github.com/memtomem/memtomem/issues).
+
 ### Changed
 - **Provider memory directories are now opt-in via `mm init`.** The wizard
   has a new "Provider memory folders" step (Step 4 of 10) that detects
