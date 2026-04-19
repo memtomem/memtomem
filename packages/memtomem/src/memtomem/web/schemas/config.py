@@ -72,6 +72,11 @@ class ConfigResponse(BaseModel):
     decay: ConfigDecayOut
     mmr: ConfigMMROut
     namespace: ConfigNamespaceOut
+    # Hot-reload surface: FE uses ``config_mtime_ns`` to detect external
+    # edits on visibilitychange and ``config_reload_error`` to render a
+    # banner when disk state is invalid (see web/hot_reload.py).
+    config_mtime_ns: int = -1
+    config_reload_error: str | None = None
 
 
 class ConfigPatchRequest(BaseModel):

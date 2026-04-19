@@ -53,6 +53,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `config.d/` fragment.
 
 ### Fixed
+- **Web UI config hot-reload**: `~/.memtomem/config.json` and `config.d/*.json`
+  are re-read on every `GET /api/config` and at the top of every config-
+  writing endpoint (`PATCH /api/config`, `POST /api/config/save`,
+  `POST /api/memory-dirs/add|remove`). Previously, external edits
+  (`mm config set`, manual editor) were invisible to the running server
+  and got silently clobbered on the next UI save. The writer lock was
+  extended from PATCH to all four write handlers (closing a pre-existing
+  gap). If `config.json` becomes invalid on disk, the UI keeps the last
+  known-good config, surfaces `config_reload_error` in the response, and
+  refuses writes with HTTP 409 until the file is fixed.
 - **ONNX `bge-m3`**: fastembed 0.8.0 dropped `BAAI/bge-m3` from its built-in
   `TextEmbedding` catalog — re-registered via `add_custom_model` against the
   official HF ONNX export (1024-dim, CLS pooling, normalized). Existing

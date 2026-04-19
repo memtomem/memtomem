@@ -18,6 +18,7 @@ from memtomem.config import (
 )
 from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.tools.memory_writer import append_entry
+from memtomem.web import hot_reload as _hot_reload
 from memtomem.web.deps import (
     get_config,
     get_embedder,
@@ -55,7 +56,33 @@ from memtomem.web.schemas.sources import StatsResponse
 logger = logging.getLogger(__name__)
 
 _LOCALHOST_ADDRS = {"127.0.0.1", "::1", "localhost"}
-_config_patch_lock = _asyncio.Lock()
+# Guards every write path that touches ``~/.memtomem/config.json`` and/or
+# mutates ``app.state.config``. Before #258+#259 this was PATCH-only
+# (``_config_patch_lock``); hot-reload extends it to /config/save,
+# /memory-dirs/add, and /memory-dirs/remove so a concurrent disk edit + UI
+# save can't interleave.
+_config_lock = _asyncio.Lock()
+
+
+def _check_reload_block(request: Request) -> None:
+    """Reject writes while a reload error is live for the current disk state.
+
+    Writing would call :func:`save_config_overrides`, overwriting the broken
+    disk file and destroying any recovery trail. User must fix disk first
+    (``mm init --fresh`` or manual edit).
+    """
+    err = _hot_reload.get_reload_error(request.app)
+    if err is None:
+        return
+    if err.at_mtime_ns != _hot_reload.get_config_mtime_ns():
+        # Disk was fixed since the error was recorded; let the next reload
+        # attempt clear it.
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=f"Config file invalid on disk: {err.message}. "
+        "Fix it (or run `mm init --fresh`) before saving from the UI.",
+    )
 
 
 def _require_localhost(request: Request) -> None:
@@ -115,7 +142,9 @@ async def embed_text(request: Request, embedder=Depends(get_embedder)):
         raise HTTPException(status_code=500, detail="Embedding failed") from exc
 
 
-def _build_config_response(cfg) -> ConfigResponse:
+def _build_config_response(
+    cfg, *, mtime_ns: int = -1, reload_error: str | None = None
+) -> ConfigResponse:
     """Build ConfigResponse from a Mem2MemConfig instance."""
     return ConfigResponse(
         embedding=ConfigEmbeddingOut(
@@ -163,12 +192,33 @@ def _build_config_response(cfg) -> ConfigResponse:
             default_namespace=cfg.namespace.default_namespace,
             enable_auto_ns=cfg.namespace.enable_auto_ns,
         ),
+        config_mtime_ns=mtime_ns,
+        config_reload_error=reload_error,
     )
 
 
 @router.get("/config", response_model=ConfigResponse)
-async def get_config_endpoint(config=Depends(get_config)) -> ConfigResponse:
-    return _build_config_response(config)
+async def get_config_endpoint(request: Request) -> ConfigResponse:
+    # Read-through reload is opportunistic and lock-free: if a write is in
+    # flight, the writer will serve the fresh view on its own return. This
+    # keeps the common GET path cheap while still catching CLI-side edits.
+    app = request.app
+    try:
+        _hot_reload.reload_if_stale(
+            app,
+            storage=getattr(app.state, "storage", None),
+            search_pipeline=getattr(app.state, "search_pipeline", None),
+        )
+    except Exception:
+        logger.warning("reload_if_stale raised unexpectedly during GET /config", exc_info=True)
+
+    cfg = app.state.config
+    err = _hot_reload.get_reload_error(app)
+    return _build_config_response(
+        cfg,
+        mtime_ns=_hot_reload.get_config_mtime_ns(),
+        reload_error=err.message if err is not None else None,
+    )
 
 
 @router.get(
@@ -197,18 +247,28 @@ async def get_builtin_exclude_patterns() -> BuiltinExcludePatternsResponse:
 @router.patch("/config", response_model=ConfigPatchResponse)
 async def patch_config(
     req: ConfigPatchRequest,
+    request: Request,
     persist: bool = False,
-    config=Depends(get_config),
     storage=Depends(get_storage),
     search_pipeline=Depends(get_search_pipeline),
 ):
     """Update mutable runtime configuration fields."""
     applied: list[ConfigPatchChange] = []
     rejected: list[str] = []
+    tokenizer_changed = False
 
     try:
         async with _asyncio.timeout(60):
-            async with _config_patch_lock:
+            async with _config_lock:
+                # Re-read from disk before merging so a concurrent CLI edit
+                # is preserved. If disk is broken, refuse rather than
+                # overwrite it.
+                _hot_reload.reload_if_stale(
+                    request.app, storage=storage, search_pipeline=search_pipeline
+                )
+                _check_reload_block(request)
+                config = request.app.state.config
+
                 for section_name, updates in req.model_dump(exclude_none=True).items():
                     allowed = MUTABLE_FIELDS.get(section_name, set())
                     section_obj = getattr(config, section_name, None)
@@ -231,6 +291,8 @@ async def patch_config(
 
                         old_val = getattr(section_obj, key)
                         setattr(section_obj, key, coerced)
+                        if full_key == "search.tokenizer" and old_val != coerced:
+                            tokenizer_changed = True
                         applied.append(
                             ConfigPatchChange(
                                 field=full_key,
@@ -239,8 +301,11 @@ async def patch_config(
                             )
                         )
 
-                # Re-initialize tokenizer if changed — auto-rebuild FTS index
-                if any(c.field == "search.tokenizer" for c in applied):
+                # Runtime fanout: tokenizer FTS rebuild + cache invalidation.
+                # Shared with the reload path via
+                # ``apply_runtime_config_changes`` so a disk-triggered change
+                # fires the same side-effects as an in-process PATCH.
+                if tokenizer_changed:
                     from memtomem.storage.fts_tokenizer import set_tokenizer
 
                     set_tokenizer(config.search.tokenizer)
@@ -251,12 +316,14 @@ async def patch_config(
                         count,
                     )
 
-                # Invalidate search cache so config changes take effect immediately
                 if applied:
                     search_pipeline.invalidate_cache()
 
                 if persist:
                     save_config_overrides(config)
+                    # Self-write mtime bump — otherwise the next GET sees
+                    # our own edit as "external" and reloads spuriously.
+                    _hot_reload.commit_writer_signature(request.app)
     except TimeoutError:
         raise HTTPException(503, "Config update timed out — another update may be in progress")
 
@@ -264,14 +331,32 @@ async def patch_config(
 
 
 @router.post("/config/save")
-async def save_config(config=Depends(get_config)):
+async def save_config(
+    request: Request,
+    storage=Depends(get_storage),
+    search_pipeline=Depends(get_search_pipeline),
+):
     """Persist current mutable config to ~/.memtomem/config.json."""
-    save_config_overrides(config)
+    try:
+        async with _asyncio.timeout(60):
+            async with _config_lock:
+                _hot_reload.reload_if_stale(
+                    request.app, storage=storage, search_pipeline=search_pipeline
+                )
+                _check_reload_block(request)
+                save_config_overrides(request.app.state.config)
+                _hot_reload.commit_writer_signature(request.app)
+    except TimeoutError:
+        raise HTTPException(503, "Config save timed out — another update may be in progress")
     return {"ok": True, "message": "Config saved to ~/.memtomem/config.json"}
 
 
 @router.post("/memory-dirs/add")
-async def add_memory_dir(request: Request, config=Depends(get_config)):
+async def add_memory_dir(
+    request: Request,
+    storage=Depends(get_storage),
+    search_pipeline=Depends(get_search_pipeline),
+):
     """Add a directory to memory_dirs watch list."""
     body = await request.json()
     dir_path = body.get("path", "").strip()
@@ -282,25 +367,43 @@ async def add_memory_dir(request: Request, config=Depends(get_config)):
     if not resolved.is_dir():
         resolved.mkdir(parents=True, exist_ok=True)
 
-    current = [Path(p).expanduser().resolve() for p in config.indexing.memory_dirs]
-    if norm_path(resolved) in {norm_path(p) for p in current}:
-        return {
-            "ok": True,
-            "message": "Already in memory_dirs",
-            "memory_dirs": [str(p) for p in current],
-        }
+    try:
+        async with _asyncio.timeout(60):
+            async with _config_lock:
+                _hot_reload.reload_if_stale(
+                    request.app, storage=storage, search_pipeline=search_pipeline
+                )
+                _check_reload_block(request)
+                config = request.app.state.config
 
-    config.indexing.memory_dirs.append(resolved)
-    save_config_overrides(config)
-    return {
-        "ok": True,
-        "message": f"Added {resolved}",
-        "memory_dirs": [str(Path(p).expanduser().resolve()) for p in config.indexing.memory_dirs],
-    }
+                current = [Path(p).expanduser().resolve() for p in config.indexing.memory_dirs]
+                if norm_path(resolved) in {norm_path(p) for p in current}:
+                    return {
+                        "ok": True,
+                        "message": "Already in memory_dirs",
+                        "memory_dirs": [str(p) for p in current],
+                    }
+
+                config.indexing.memory_dirs.append(resolved)
+                save_config_overrides(config)
+                _hot_reload.commit_writer_signature(request.app)
+                return {
+                    "ok": True,
+                    "message": f"Added {resolved}",
+                    "memory_dirs": [
+                        str(Path(p).expanduser().resolve()) for p in config.indexing.memory_dirs
+                    ],
+                }
+    except TimeoutError:
+        raise HTTPException(503, "memory-dirs/add timed out — another update may be in progress")
 
 
 @router.post("/memory-dirs/remove")
-async def remove_memory_dir(request: Request, config=Depends(get_config)):
+async def remove_memory_dir(
+    request: Request,
+    storage=Depends(get_storage),
+    search_pipeline=Depends(get_search_pipeline),
+):
     """Remove a directory from memory_dirs watch list."""
     body = await request.json()
     dir_path = body.get("path", "").strip()
@@ -309,21 +412,38 @@ async def remove_memory_dir(request: Request, config=Depends(get_config)):
 
     resolved = Path(dir_path).expanduser().resolve()
     resolved_norm = norm_path(resolved)
-    new_dirs = [
-        p for p in config.indexing.memory_dirs if norm_path(Path(p).expanduser()) != resolved_norm
-    ]
-    if len(new_dirs) == len(config.indexing.memory_dirs):
-        raise HTTPException(status_code=404, detail="Directory not in memory_dirs")
-    if len(new_dirs) == 0:
-        raise HTTPException(status_code=400, detail="Cannot remove last memory_dir")
 
-    config.indexing.memory_dirs = new_dirs
-    save_config_overrides(config)
-    return {
-        "ok": True,
-        "message": f"Removed {resolved}",
-        "memory_dirs": [str(Path(p).expanduser().resolve()) for p in config.indexing.memory_dirs],
-    }
+    try:
+        async with _asyncio.timeout(60):
+            async with _config_lock:
+                _hot_reload.reload_if_stale(
+                    request.app, storage=storage, search_pipeline=search_pipeline
+                )
+                _check_reload_block(request)
+                config = request.app.state.config
+
+                new_dirs = [
+                    p
+                    for p in config.indexing.memory_dirs
+                    if norm_path(Path(p).expanduser()) != resolved_norm
+                ]
+                if len(new_dirs) == len(config.indexing.memory_dirs):
+                    raise HTTPException(status_code=404, detail="Directory not in memory_dirs")
+                if len(new_dirs) == 0:
+                    raise HTTPException(status_code=400, detail="Cannot remove last memory_dir")
+
+                config.indexing.memory_dirs = new_dirs
+                save_config_overrides(config)
+                _hot_reload.commit_writer_signature(request.app)
+                return {
+                    "ok": True,
+                    "message": f"Removed {resolved}",
+                    "memory_dirs": [
+                        str(Path(p).expanduser().resolve()) for p in config.indexing.memory_dirs
+                    ],
+                }
+    except TimeoutError:
+        raise HTTPException(503, "memory-dirs/remove timed out — another update may be in progress")
 
 
 @router.post("/reindex")

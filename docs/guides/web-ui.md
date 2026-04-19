@@ -51,7 +51,11 @@ The home tab shows a real-time overview:
 The settings hub is organized into groups:
 
 ### System
-- **Config**: View and edit all configuration sections (embedding, storage, indexing, search, decay)
+- **Config**: View and edit all configuration sections (embedding, storage, indexing, search, decay).
+  Picks up external edits (`mm config set`, manual editor saves) on the next
+  interaction — no restart needed. If `config.json` becomes invalid on disk,
+  the Config tab shows a banner and saves are disabled until the file is
+  fixed. See [configuration → external edits](configuration.md#external-edits-while-the-web-ui-is-running).
 - **Namespaces**: List, edit metadata, rename, delete namespaces
 
 ### Maintenance
