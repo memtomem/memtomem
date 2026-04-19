@@ -362,7 +362,14 @@ function _buildMemoryDirsPanel(initialDirs) {
         const reindexBtn = document.createElement('button');
         reindexBtn.type = 'button';
         reindexBtn.className = 'btn btn-xs btn-ghost memory-dirs-reindex-btn';
-        reindexBtn.textContent = t('sources.memory_dirs.action_index');
+        // Label tracks state: "Index" before first index / when missing or
+        // empty, "Reindex" once chunks exist. Tooltip stays generic since
+        // the action is a reindex in both cases (force:false, recursive).
+        const hasChunks =
+          statusLoaded && st && st.exists !== false && (st.chunk_count || 0) > 0;
+        reindexBtn.textContent = t(
+          hasChunks ? 'sources.memory_dirs.action_reindex' : 'sources.memory_dirs.action_index',
+        );
         reindexBtn.title = t('sources.memory_dirs.reindex_title');
         reindexBtn.addEventListener('click', () => handleReindexOne(path, reindexBtn));
         item.appendChild(reindexBtn);

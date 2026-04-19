@@ -561,6 +561,7 @@
   "sources.memory_dirs.reindex_title": "Reindex this directory",
   "sources.memory_dirs.delete_title": "Remove from memory_dirs",
   "sources.memory_dirs.action_index": "Index",
+  "sources.memory_dirs.action_reindex": "Reindex",
   "sources.memory_dirs.action_delete": "Delete",
   "sources.memory_dirs.action_reindex_group": "Reindex",
   "sources.memory_dirs.status_empty": "not indexed",

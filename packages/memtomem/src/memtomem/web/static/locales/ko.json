@@ -561,6 +561,7 @@
   "sources.memory_dirs.reindex_title": "이 디렉터리만 재인덱스",
   "sources.memory_dirs.delete_title": "memory_dirs 에서 제거",
   "sources.memory_dirs.action_index": "인덱스",
+  "sources.memory_dirs.action_reindex": "재인덱스",
   "sources.memory_dirs.action_delete": "삭제",
   "sources.memory_dirs.action_reindex_group": "재인덱스",
   "sources.memory_dirs.status_empty": "인덱싱 안 됨",
