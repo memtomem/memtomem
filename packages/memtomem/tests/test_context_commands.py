@@ -396,3 +396,20 @@ class TestRoundtrip:
         assert "description: Simple prompt" in canonical
         assert "$ARGUMENTS" in canonical
         assert "{{args}}" not in canonical
+
+
+class TestCrlfParsing:
+    """#279: command parser shares agents.py's frontmatter regex — CRLF files
+    must parse the same way they do on LF systems."""
+
+    def test_crlf_frontmatter_parses(self, tmp_path):
+        p = tmp_path / CANONICAL_COMMAND_ROOT / "crlf.md"
+        p.parent.mkdir(parents=True)
+        p.write_bytes(SAMPLE_FULL_COMMAND.replace("\n", "\r\n").encode("utf-8"))
+        cmd = parse_canonical_command(p)
+        assert cmd.name == "crlf"
+        assert cmd.description == "Review a file for issues"
+        assert cmd.argument_hint == "[file-path]"
+        assert cmd.allowed_tools == ["Read", "Grep"]
+        assert "$ARGUMENTS" in cmd.body
+        assert "\r" not in cmd.body

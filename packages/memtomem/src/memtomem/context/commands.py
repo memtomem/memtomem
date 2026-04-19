@@ -73,6 +73,10 @@ class CommandParseError(ValueError):
 def parse_canonical_command(path: Path) -> SlashCommand:
     """Parse a canonical command file into a :class:`SlashCommand`."""
     content = path.read_text(encoding="utf-8")
+    # Share agents.py's CRLF normalization — the shared ``_FRONT_MATTER_RE``
+    # anchors on ``\n`` only, so a CRLF file would otherwise parse as "no
+    # frontmatter" and silently fall through to the filename-based default.
+    content = content.replace("\r\n", "\n")
     m = _FRONT_MATTER_RE.match(content)
     if m is None:
         # Commands without frontmatter are tolerated — treat the whole file
