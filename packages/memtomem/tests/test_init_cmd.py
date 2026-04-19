@@ -968,8 +968,7 @@ class TestCategorizeMemoryDir:
         from memtomem.config import categorize_memory_dir
 
         assert (
-            categorize_memory_dir("/home/alice/.claude/projects/my-proj/memory")
-            == "claude-memory"
+            categorize_memory_dir("/home/alice/.claude/projects/my-proj/memory") == "claude-memory"
         )
 
     def test_claude_plans(self) -> None:
@@ -1026,9 +1025,7 @@ class TestCategorizeMemoryDir:
             _PROVIDER_CATEGORY_PATTERNS,
         )
 
-        assert PROVIDER_DIR_CATEGORIES == tuple(
-            cat for cat, _ in _PROVIDER_CATEGORY_PATTERNS
-        )
+        assert PROVIDER_DIR_CATEGORIES == tuple(cat for cat, _ in _PROVIDER_CATEGORY_PATTERNS)
 
 
 class TestDetectProviderDirsRoundtrip:
