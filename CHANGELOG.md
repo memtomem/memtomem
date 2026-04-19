@@ -5,6 +5,44 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed
+- **Provider memory directories are now opt-in via `mm init`.** The wizard
+  has a new "Provider memory folders" step (Step 4 of 10) that detects
+  Claude Code per-project memory (`~/.claude/projects/<project>/memory/`),
+  Claude plans (`~/.claude/plans/`), and Codex memories
+  (`~/.codex/memories/`) and lets you accept each category. Accepted paths
+  land in `indexing.memory_dirs` directly, replacing the previous silent
+  runtime auto-discovery. Non-interactive mode supports the new repeatable
+  `--include-provider {claude-memory,claude-plans,codex}` flag.
+- **Auto-discovery scope narrowed** to canonical memory surfaces per each
+  provider's official documentation:
+  - Claude Code: only the `*/memory/` subdirectories with at least one
+    `.md` file (previously the entire `~/.claude/projects/` tree
+    including session JSONL transcripts and `staging/`).
+  - Codex: `~/.codex/memories/` (unchanged).
+- **Gemini CLI removed from auto-discovery.** Its memory is the single file
+  `~/.gemini/GEMINI.md` (incompatible with the directory-based
+  `memory_dirs` abstraction), and the parent dir contains secrets like
+  `oauth_creds.json`. Use `mm ingest gemini-memory` for one-shot manual
+  import — that command is unchanged.
+
+### Deprecated
+- `indexing.auto_discover` is now a one-shot migration trigger only, not a
+  runtime auto-discovery flag. Existing installs with the legacy default
+  (`true`) get migrated transparently on the next CLI/server startup —
+  canonical provider dirs that exist on the machine are appended to
+  `indexing.memory_dirs` and the flag flips to `false`. The field will be
+  removed in a future release.
+
+### Migration notes
+- After upgrading, run `mm index --rebuild` to clean up index entries left
+  over from the previous wider scan (session transcripts, staging dirs,
+  Gemini configs). The migration narrows `memory_dirs` but doesn't
+  retroactively prune already-indexed content.
+- New Claude Code projects created after running `mm init` are not
+  auto-indexed — re-run `mm init` or use
+  `mm config set indexing.memory_dirs` to add them when needed.
+
 ## [0.1.11] — 2026-04-19
 
 memtomem remains in **alpha**. APIs, defaults, and on-disk config surfaces

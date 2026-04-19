@@ -831,6 +831,238 @@ class TestMcpPasteHints:
         assert "copy into your editor's config file" in out
 
 
+class TestProviderDirsStep:
+    """Step 4 — opt-in indexing of provider memory folders.
+
+    Replaces the legacy ``ensure_auto_discovered_dirs`` runtime path. The
+    step is wizard-driven (per-category nav_confirm), and a non-interactive
+    counterpart is exposed via ``--include-provider``.
+    """
+
+    def test_step_skips_when_no_provider_dirs_detected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Detection returns all-empty → step records [] without prompting."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+        # Failing nav_confirm guarantees the test breaks if a prompt fires.
+        monkeypatch.setattr(
+            init_cmd,
+            "nav_confirm",
+            lambda *a, **kw: pytest.fail("nav_confirm called when no dirs detected"),
+        )
+
+        state: dict = {}
+        init_cmd._step_provider_dirs(state)
+        assert state["provider_dirs"] == []
+
+    def test_step_appends_only_accepted_categories(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """User says yes to Claude memory and Codex, no to plans → only the
+        accepted categories land in state["provider_dirs"]."""
+        from memtomem.cli import init_cmd
+
+        claude_mem = tmp_path / "claude-mem"
+        plans = tmp_path / "plans"
+        codex = tmp_path / "codex"
+        for p in (claude_mem, plans, codex):
+            p.mkdir()
+
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {
+                "claude-memory": [claude_mem],
+                "claude-plans": [plans],
+                "codex": [codex],
+            },
+        )
+        # Order of prompts in _step_provider_dirs: claude-memory, claude-plans, codex
+        answers = iter([True, False, True])
+        monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: next(answers))
+
+        state: dict = {}
+        init_cmd._step_provider_dirs(state)
+        assert state["provider_dirs"] == [str(claude_mem), str(codex)]
+
+    def test_step_skips_categories_with_no_dirs(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Categories with no detected dirs do NOT get a prompt — only the
+        present categories show up. Counts from the answers iterator are a
+        load-bearing guard against an extra prompt sneaking in."""
+        from memtomem.cli import init_cmd
+
+        plans = tmp_path / "plans"
+        plans.mkdir()
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [plans], "codex": []},
+        )
+        answers = iter([True])  # exactly one prompt expected (plans only)
+        monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: next(answers))
+
+        state: dict = {}
+        init_cmd._step_provider_dirs(state)
+        assert state["provider_dirs"] == [str(plans)]
+        with pytest.raises(StopIteration):
+            next(answers)  # no extra prompts fired
+
+    def test_step_includes_multiple_claude_memory_projects(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A single 'yes' to Claude memory adds every detected per-project dir,
+        not just the first — grouping the prompt avoids per-project noise."""
+        from memtomem.cli import init_cmd
+
+        p1 = tmp_path / "p1" / "memory"
+        p2 = tmp_path / "p2" / "memory"
+        for p in (p1, p2):
+            p.mkdir(parents=True)
+            (p / "MEMORY.md").write_text("# index", encoding="utf-8")
+
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [p1, p2], "claude-plans": [], "codex": []},
+        )
+        monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: True)
+
+        state: dict = {}
+        init_cmd._step_provider_dirs(state)
+        assert state["provider_dirs"] == [str(p1), str(p2)]
+
+    def test_write_merges_provider_dirs_into_memory_dirs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``_write_config_and_summary`` concatenates ``state["memory_dir"]``
+        with ``state["provider_dirs"]`` (deduped) when persisting
+        ``indexing.memory_dirs``. Also pins ``auto_discover: false`` so a
+        fresh wizard run on a legacy install doesn't keep migrating."""
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        provider_dir = tmp_path / "claude-mem"
+        provider_dir.mkdir()
+
+        state = _make_init_state(tmp_path)
+        state["provider_dirs"] = [str(provider_dir)]
+        _write_config_and_summary(state, tmp_path)
+
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        dirs = data["indexing"]["memory_dirs"]
+        assert state["memory_dir"] in dirs
+        assert str(provider_dir) in dirs
+        assert dirs.count(state["memory_dir"]) == 1  # no duplicates
+        assert data["indexing"]["auto_discover"] is False
+
+
+class TestIncludeProviderFlag:
+    """Non-interactive ``--include-provider`` wires categories into
+    ``indexing.memory_dirs`` without prompting."""
+
+    def test_flag_resolves_categories_to_dirs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        codex = tmp_path / "codex"
+        codex.mkdir()
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": [codex]},
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            init,
+            [
+                "--non-interactive",
+                "--memory-dir",
+                str(tmp_path / "memories"),
+                "--include-provider",
+                "codex",
+                "--mcp",
+                "skip",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        assert str(codex) in data["indexing"]["memory_dirs"]
+
+    def test_flag_silently_skips_unavailable_categories(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Asking for a category with no detected dirs is a no-op, not an error."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            init,
+            [
+                "--non-interactive",
+                "--memory-dir",
+                str(tmp_path / "memories"),
+                "--include-provider",
+                "codex",
+                "--mcp",
+                "skip",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        # Only the user's primary memory_dir survives; no fake codex path.
+        assert data["indexing"]["memory_dirs"] == [str(tmp_path / "memories")]
+
+    def test_no_flag_writes_no_provider_dirs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without ``--include-provider``, non-interactive mode adds zero
+        provider dirs even if the dev machine has them."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        # Pretend a Codex dir exists; the test asserts it's NOT pulled in.
+        codex = tmp_path / "codex"
+        codex.mkdir()
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": [codex]},
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            init,
+            [
+                "--non-interactive",
+                "--memory-dir",
+                str(tmp_path / "memories"),
+                "--mcp",
+                "skip",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        assert str(codex) not in data["indexing"]["memory_dirs"]
+
+
 def test_memory_dirs_env_requires_json_array(monkeypatch: pytest.MonkeyPatch) -> None:
     """Documentation examples of MEMTOMEM_INDEXING__MEMORY_DIRS must be
     encoded as a JSON array string. A bare path crashes pydantic-settings.

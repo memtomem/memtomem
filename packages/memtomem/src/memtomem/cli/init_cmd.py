@@ -258,8 +258,67 @@ def _step_memory_dir(state: dict) -> None:
     click.echo()
 
 
+def _step_provider_dirs(state: dict) -> None:
+    """Opt-in indexing of provider memory folders detected on this machine.
+
+    Replaces the legacy silent ``ensure_auto_discovered_dirs`` runtime path.
+    Per-category prompts (Claude Code memory, Claude plans, Codex memories)
+    let the user pick exactly which surfaces to make searchable. Categories
+    with zero detected directories are skipped silently — the step is a
+    no-op on machines without any of these tools installed.
+    """
+    step_header(4, "Provider Memory Folders")
+    from memtomem.config import _detect_provider_dirs
+
+    grouped = _detect_provider_dirs()
+    available = {cat: dirs for cat, dirs in grouped.items() if dirs}
+
+    if not available:
+        click.echo("  No AI tool memory folders detected on this machine.")
+        click.echo("  (Skipping — re-run `mm init` after installing Claude Code or Codex CLI.)")
+        state["provider_dirs"] = []
+        click.echo()
+        return
+
+    click.echo("  Make memory from other AI tools searchable through memtomem?")
+    click.echo("  Each option is opt-in; declined folders stay out of search.")
+    click.echo()
+
+    selected: list[Path] = []
+
+    if "claude-memory" in available:
+        n = len(available["claude-memory"])
+        suffix = "project" if n == 1 else "projects"
+        if nav_confirm(
+            f"  Claude Code per-project memory ({n} {suffix} with .md content)?",
+            default=False,
+        ):
+            selected.extend(available["claude-memory"])
+
+    if "claude-plans" in available:
+        if nav_confirm(
+            "  Claude Code plans (~/.claude/plans/)?",
+            default=False,
+        ):
+            selected.extend(available["claude-plans"])
+
+    if "codex" in available:
+        if nav_confirm(
+            "  Codex CLI memories (~/.codex/memories/)?",
+            default=False,
+        ):
+            selected.extend(available["codex"])
+
+    state["provider_dirs"] = [str(p) for p in selected]
+    if selected:
+        click.secho(f"  Added {len(selected)} provider folder(s) to memory_dirs.", fg="green")
+        click.echo("  New Claude Code projects created later won't be auto-indexed —")
+        click.echo("  re-run `mm init` or use `mm config set indexing.memory_dirs` to add them.")
+    click.echo()
+
+
 def _step_storage(state: dict) -> None:
-    step_header(4, "Storage")
+    step_header(5, "Storage")
     config_dir = Path("~/.memtomem").expanduser()
     db_default = str(config_dir / "memtomem.db")
     state["db_path"] = nav_prompt("  SQLite DB path", default=db_default)
@@ -267,7 +326,7 @@ def _step_storage(state: dict) -> None:
 
 
 def _step_namespace(state: dict) -> None:
-    step_header(5, "Namespace")
+    step_header(6, "Namespace")
     click.echo("  Organize memories into scoped groups (work, personal, project).")
     state["enable_auto_ns"] = nav_confirm(
         "  Auto-assign namespace from folder name? (~/docs → 'docs')", default=False
@@ -277,7 +336,7 @@ def _step_namespace(state: dict) -> None:
 
 
 def _step_search(state: dict) -> None:
-    step_header(6, "Search")
+    step_header(7, "Search")
     state["top_k"] = nav_prompt("  Results per search", type=click.INT, default=10)
     state["decay_enabled"] = nav_confirm(
         "  Enable time-decay? (older memories rank lower)", default=False
@@ -286,7 +345,7 @@ def _step_search(state: dict) -> None:
 
 
 def _step_language(state: dict) -> None:
-    step_header(7, "Language")
+    step_header(8, "Language")
     click.echo("  Search tokenizer:")
     click.echo("    [1] Unicode (default — English and most languages)")
     click.echo("    [2] Korean (kiwipiepy — better Korean word splitting)")
@@ -305,7 +364,7 @@ def _step_language(state: dict) -> None:
 
 
 def _step_settings(state: dict) -> None:
-    step_header(8, "Claude Code Hooks")
+    step_header(9, "Claude Code Hooks")
 
     # Skip entirely if Claude Code is not installed
     claude_dir = Path.home() / ".claude"
@@ -348,7 +407,7 @@ def _step_settings(state: dict) -> None:
 
 
 def _step_mcp(state: dict) -> None:
-    step_header(9, "Connect to AI Editor")
+    step_header(10, "Connect to AI Editor")
     click.echo("  How do you want to connect memtomem?")
     click.echo("    [1] Claude Code (run 'claude mcp add' automatically)")
     click.echo("    [2] Generate .mcp.json here (Claude Code project scope;")
@@ -656,7 +715,20 @@ def _write_config_and_summary(
     # merge so we can diff pre-merge vs post-write.
     existing_before = copy.deepcopy(existing)
 
-    # Build init-target fields only
+    # Build init-target fields only. ``memory_dirs`` combines the user's
+    # primary directory with any provider folders accepted in Step 4
+    # (Claude memory, Claude plans, Codex memories), deduped while
+    # preserving order so the primary dir always lists first.
+    provider_dirs = state.get("provider_dirs", []) or []
+    combined_dirs: list[str] = []
+    seen: set[str] = set()
+    for entry in [state["memory_dir"], *provider_dirs]:
+        key = str(Path(entry).expanduser())
+        if key in seen:
+            continue
+        seen.add(key)
+        combined_dirs.append(entry)
+
     init_data: dict = {
         "embedding": {
             "provider": state["provider"],
@@ -664,7 +736,7 @@ def _write_config_and_summary(
             "dimension": state["dimension"],
         },
         "storage": {"backend": "sqlite", "sqlite_path": state["db_path"]},
-        "indexing": {"memory_dirs": [state["memory_dir"]]},
+        "indexing": {"memory_dirs": combined_dirs, "auto_discover": False},
         "namespace": {
             "enable_auto_ns": state["enable_auto_ns"],
             "default_namespace": state["default_ns"],
@@ -797,6 +869,9 @@ def _write_config_and_summary(
         click.echo(f"  Reranker:   fastembed/{state['rerank_model']}")
     click.echo(f"  Storage:    {state['db_path']}")
     click.echo(f"  Memory:     {state['memory_dir']}")
+    provider_dirs = state.get("provider_dirs", []) or []
+    if provider_dirs:
+        click.echo(f"  Providers:  {len(provider_dirs)} folder(s) added")
     ns_label = "auto" if state["enable_auto_ns"] else "manual"
     click.echo(f"  Namespace:  {ns_label} (default: {state['default_ns']})")
     click.echo(f"  Search:     top_k={state['top_k']}, tokenizer={state['tokenizer']}")
@@ -873,6 +948,18 @@ _MODEL_DIMS: dict[str, int] = {
 @click.option("--api-key", default=None, help="OpenAI API key")
 @click.option("--mcp", "mcp_mode", type=click.Choice(["claude", "json", "skip"]), default=None)
 @click.option(
+    "--include-provider",
+    "include_providers",
+    type=click.Choice(["claude-memory", "claude-plans", "codex"]),
+    multiple=True,
+    help=(
+        "Include provider memory folders in indexing (repeatable). Without this "
+        "flag, non-interactive runs add no provider folders. Options: "
+        "claude-memory (~/.claude/projects/*/memory/), claude-plans "
+        "(~/.claude/plans/), codex (~/.codex/memories/)."
+    ),
+)
+@click.option(
     "--fresh",
     is_flag=True,
     default=False,
@@ -899,6 +986,7 @@ def init(
     decay: bool,
     api_key: str | None,
     mcp_mode: str | None,
+    include_providers: tuple[str, ...],
     fresh: bool,
 ) -> None:
     """Set up memtomem with an interactive wizard."""
@@ -946,6 +1034,17 @@ def init(
         if not memory_path.exists():
             memory_path.mkdir(parents=True, exist_ok=True)
 
+        # Resolve --include-provider into concrete dirs that exist on this machine.
+        # Categories with no detected dirs are silently skipped — non-interactive
+        # callers don't get an error if they ask for codex on a Claude-only box.
+        from memtomem.config import _detect_provider_dirs
+
+        grouped = _detect_provider_dirs()
+        provider_dirs: list[str] = []
+        for category in include_providers:
+            for d in grouped.get(category, []):
+                provider_dirs.append(str(d))
+
         state.update(
             {
                 "provider": _provider,
@@ -954,6 +1053,7 @@ def init(
                 "api_key": api_key or "",
                 "rerank_enabled": False,
                 "memory_dir": _memory_dir,
+                "provider_dirs": provider_dirs,
                 "db_path": db_path or str(Path("~/.memtomem").expanduser() / "memtomem.db"),
                 "enable_auto_ns": auto_ns,
                 "default_ns": namespace or "default",
@@ -968,6 +1068,7 @@ def init(
             _step_embedding,
             _step_reranker,
             _step_memory_dir,
+            _step_provider_dirs,
             _step_storage,
             _step_namespace,
             _step_search,

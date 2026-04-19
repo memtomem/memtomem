@@ -98,8 +98,10 @@ the next save, provided the stale value now matches the comparand.
 `indexing.memory_dirs` participates in delta-only save, so on the
 machine where it was set the file typically omits it. When copying an
 existing `config.json` to a new machine, any `indexing.memory_dirs`
-entry carries over as-is and is **not** auto-replaced by the new
-machine's auto-discovered paths. Reset it explicitly when migrating:
+entry carries over as-is — provider memory paths from the source
+machine (e.g. `~/.claude/projects/<project-A>/memory/`) won't exist
+on the destination and won't be replaced by detection on the target.
+Reset it explicitly when migrating:
 
 ```bash
 # Option 1: targeted removal of the carried-over entry
@@ -255,7 +257,7 @@ When enabled, search results include surrounding chunks from the same source fil
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMTOMEM_INDEXING__MEMORY_DIRS` | `["~/.memtomem/memories"]` + auto-discovered | Directories to index (see below) |
+| `MEMTOMEM_INDEXING__MEMORY_DIRS` | `["~/.memtomem/memories"]` (+ provider folders selected in `mm init`) | Directories to index (see below) |
 | `MEMTOMEM_INDEXING__SUPPORTED_EXTENSIONS` | `[".md",".json",".yaml",".yml",".toml",".py",".js",".ts",".tsx",".jsx"]` | File types accepted by the indexer and file watcher |
 | `MEMTOMEM_INDEXING__MAX_CHUNK_TOKENS` | `512` | Maximum tokens per chunk |
 | `MEMTOMEM_INDEXING__MIN_CHUNK_TOKENS` | `128` | Merge threshold for short chunks |
@@ -279,7 +281,8 @@ extend them but cannot override them.
     "exclude_patterns": [
       "**/subagents/**",         // Claude Code subagent metadata
       "**/antigravity-browser-profile/**",
-      "**/.gemini/**/*.json"     // .gemini auto-discover noise
+      "**/.gemini/**/*.json"     // defensive — only relevant if you manually
+                                 // add ~/.gemini/ to memory_dirs
     ]
   }
 }
@@ -293,46 +296,74 @@ extend them but cannot override them.
 > - **Match against root-relative paths.** Patterns are evaluated against
 >   `path.relative_to(memory_dir)`, so `**/*.json` works, but a pattern that
 >   assumes a specific parent (e.g. `**/.claude/**/*.json`) may miss matches
->   when `~/.claude/projects` itself is the auto-discovered memory_dir root.
->   When in doubt, add both root-relative (`oauth_creds.json`) and `**/X`
->   (`**/oauth_creds.json`) forms.
+>   when a Claude Code per-project memory dir is itself the `memory_dir`
+>   root. When in doubt, add both root-relative (`oauth_creds.json`) and
+>   `**/X` (`**/oauth_creds.json`) forms.
 
-### Auto-discovered memory directories
+### Provider memory folders (opt-in via `mm init`)
 
-In addition to `~/.memtomem/memories`, memtomem automatically adds well-known
-AI tool directories to `memory_dirs` when they exist on the machine:
+memtomem can index AI tool memory folders alongside `~/.memtomem/memories`,
+but only when you explicitly opt in during `mm init`. The wizard's
+"Provider memory folders" step shows whichever of these are detected on
+your machine and lets you accept them per category:
 
-| Directory | Tool | Scope |
-|-----------|------|-------|
-| `~/.claude/projects` | Claude Code | per-project auto-memory |
-| `~/.gemini` | Gemini CLI | global `GEMINI.md` |
-| `~/.codex/memories` | Codex CLI | global memories |
+| Category | Source | Scope |
+|----------|--------|-------|
+| `claude-memory` | `~/.claude/projects/<project>/memory/` | Claude Code per-project auto-memory ([official docs](https://code.claude.com/docs/en/memory)) |
+| `claude-plans` | `~/.claude/plans/` | Claude Code plan files (local convention) |
+| `codex` | `~/.codex/memories/` | Codex CLI memories ([official docs](https://developers.openai.com/codex/memories)) |
 
-Auto-discovered directories are appended after `config.d/` and
-`config.json` overrides, so they are always available even if you
-override `memory_dirs` manually. This means `mem_index` and the file
-watcher accept paths under these directories without requiring explicit
-`MEMORY_DIRS` configuration.
+Accepted categories get appended directly to `indexing.memory_dirs` in
+`~/.memtomem/config.json`. Per-project Claude memory subdirs without any
+`*.md` files are skipped so empty session scaffolding doesn't pollute your
+index. New Claude Code projects created after the wizard runs are **not**
+auto-indexed — re-run `mm init` or use
+`mm config set indexing.memory_dirs` to add them when you want them
+searchable.
 
-To opt out of auto-discovery entirely, set `indexing.auto_discover = false`
-in `config.json` or export `MEMTOMEM_INDEXING__AUTO_DISCOVER=false`. When
-disabled, only the `memory_dirs` you configure explicitly are indexed — the
-three well-known directories above are ignored even if they exist on disk.
-You can also toggle this per-field from the Web UI or via
-`mm config set indexing.auto_discover false`.
+Non-interactive mode supports `--include-provider` (repeatable):
 
-> **Tip:** Use `mm ingest claude-memory`, `mm ingest gemini-memory`, or
-> `mm ingest codex-memory` for richer ingestion with per-tool tagging and
-> namespace assignment. Auto-discovery only removes the path restriction —
-> it does not apply tool-specific tags or namespaces.
+```bash
+mm init -y --include-provider claude-memory --include-provider codex
+```
 
-> **Watch out for noise under auto-discovered roots.** `~/.claude/projects`
-> sweeps in subagent metadata (`*/subagents/*.meta.json`) and `~/.gemini`
-> sweeps in browser profile + OAuth artifacts. The built-in denylist covers
-> common credentials but does not filter Claude subagent metadata or
-> browser-profile JSON — add a `config.d/` fragment with the
-> [`exclude_patterns`](#exclude-patterns) rules above so those don't bloat
-> your index.
+Asking for a category with no detected dirs is a silent no-op, not an
+error.
+
+#### Why Gemini is not in the list
+
+Gemini CLI's memory surface is the single file `~/.gemini/GEMINI.md`,
+which doesn't fit a `memory_dirs` (directory) abstraction, and the parent
+`~/.gemini/` directory contains secrets like `oauth_creds.json`. For
+Gemini users, run `mm ingest gemini-memory` for a one-shot import — it
+applies tool-specific tags and skips the noise.
+
+#### Migrating from `auto_discover` (legacy)
+
+Earlier releases used a runtime flag (`indexing.auto_discover`, default
+True) that silently appended provider home directories on every startup.
+That flag is now **deprecated** and serves only as a one-shot migration
+trigger:
+
+- If your existing `~/.memtomem/config.json` carries `auto_discover: true`
+  (or omits it, in which case it defaults True), the next CLI/server
+  startup converts the canonical provider memory dirs that exist on your
+  machine into explicit `memory_dirs` entries, then flips the flag to
+  False and persists both changes atomically.
+- The migration prints a single INFO log line. Subsequent startups see
+  `auto_discover: false` and do nothing.
+- Brand-new installs (no `config.json` yet) skip migration entirely —
+  the wizard is the only path that adds provider dirs.
+
+If your old install was indexing `~/.claude/projects/` wholesale (session
+JSONL transcripts, staging dirs, etc.), the migration narrows that to the
+canonical `*/memory/` subdirs only. To clean stale entries left over from
+the wider scan, run `mm index --rebuild` after the migration.
+
+> **Tip:** `mm ingest claude-memory`, `mm ingest gemini-memory`, and
+> `mm ingest codex-memory` apply per-tool tagging and namespace assignment
+> on top of indexing — useful when you want richer metadata than the plain
+> `memory_dirs` path-based indexing provides.
 
 > **Cloud-sync mounts** (Google Drive Stream, OneDrive Files-On-Demand ON,
 > iCloud Optimize Storage) generally do **not** emit fs watcher events to
@@ -422,7 +453,7 @@ the namespace, except for files sitting directly in a `memory_dirs` root
 (those fall back to `default_namespace`). This works well for shallow
 folder trees like `memtomem-memories/team/X.md` → `team`, but produces
 low-signal namespaces (`subagents`, `<UUID>`) when applied blindly under
-auto-discovered roots like `~/.claude/projects`.
+opt-in provider roots like `~/.claude/projects/<project>/memory/`.
 
 > **Recommendation.** Filter noise via `exclude_patterns` *before* enabling
 > `auto_ns`, otherwise opaque parent-folder names (like a Claude Code

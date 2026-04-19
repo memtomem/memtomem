@@ -120,10 +120,12 @@ class SearchConfig(BaseSettings):
 def _default_memory_dirs() -> list[Path]:
     """Build default memory_dirs.
 
-    Only the single canonical user dir ``~/.memtomem/memories`` is returned
-    here; auto-discovery of well-known AI tool directories is applied
-    separately by :func:`ensure_auto_discovered_dirs` so that the
-    ``indexing.auto_discover`` flag has a single gate point.
+    Only the single canonical user dir ``~/.memtomem/memories`` is returned.
+    Provider memory dirs (Claude Code per-project memory, Claude plans, Codex
+    memories) are added explicitly via the ``mm init`` wizard's
+    "Provider memory folders" step; existing installs that previously relied
+    on the legacy ``indexing.auto_discover`` flag get a one-shot migration
+    from :func:`_migrate_auto_discover_once`.
     """
     return [Path("~/.memtomem/memories")]
 
@@ -155,6 +157,12 @@ class IndexingConfig(BaseSettings):
     structured_chunk_mode: str = "original"  # "original" or "recursive"
     paragraph_split_threshold: int = 800  # split long prose into paragraphs above this token count
     exclude_patterns: Annotated[list[str], APPEND] = Field(default_factory=list)
+    # DEPRECATED: superseded by explicit ``mm init`` opt-in (provider memory dirs
+    # are added directly to ``memory_dirs``). Kept as a one-shot migration trigger
+    # for legacy installs — :func:`_migrate_auto_discover_once` discovers canonical
+    # provider paths, appends them to ``memory_dirs``, then flips this flag to
+    # False. Default stays True so existing users without an explicit value
+    # still trigger migration on next startup. Will be removed in a future release.
     auto_discover: bool = True
 
     @field_validator(
@@ -734,6 +742,11 @@ def load_config_overrides(config: Mem2MemConfig) -> None:
                         exc,
                     )
 
+    # One-shot migration of legacy auto_discover=True installs to explicit
+    # provider memory_dirs entries. No-op for fresh installs (no config.json)
+    # and for already-migrated installs (auto_discover=False).
+    _migrate_auto_discover_once(config)
+
 
 _CONFIG_D_PATH = Path("~/.memtomem/config.d")
 
@@ -928,39 +941,161 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False) -> None:
                         )
 
 
-def ensure_auto_discovered_dirs(config: Mem2MemConfig) -> None:
-    """Append auto-discovered well-known dirs that aren't already in memory_dirs.
+PROVIDER_DIR_CATEGORIES: tuple[str, ...] = ("claude-memory", "claude-plans", "codex")
 
-    Call *after* ``load_config_overrides`` so that user overrides don't
-    suppress auto-discovery of AI tool directories like ``~/.claude/projects``.
 
-    Users can opt out entirely by setting ``indexing.auto_discover = false`` in
-    ``config.json`` or exporting ``MEMTOMEM_INDEXING__AUTO_DISCOVER=false``.
-    When disabled, the caller's explicit ``memory_dirs`` list is left untouched.
+def _detect_provider_dirs() -> dict[str, list[Path]]:
+    """Group canonical provider memory dirs by category for wizard prompting.
+
+    Each category maps to zero or more existing directories. Empty
+    categories are still present as ``[]`` so callers can render
+    "(none found)" deterministically.
+
+    Categories (verified against official docs):
+
+    - ``claude-memory``: ``~/.claude/projects/<project>/memory/`` per-project
+      auto-memory (https://code.claude.com/docs/en/memory). Subdirs without
+      any ``*.md`` files are skipped to avoid pulling in empty session
+      scaffolding from projects Claude visited but never wrote memory for.
+    - ``claude-plans``: ``~/.claude/plans/`` (local convention, not in
+      official docs but commonly used for plan-mode artifacts).
+    - ``codex``: ``~/.codex/memories/``
+      (https://developers.openai.com/codex/memories).
+
+    Gemini CLI is intentionally excluded: its memory surface is the single
+    file ``~/.gemini/GEMINI.md`` (doesn't fit the directory abstraction)
+    and the parent directory contains secrets like ``oauth_creds.json``.
+    Use ``mm ingest gemini-memory`` for one-shot Gemini import instead.
+    """
+    grouped: dict[str, list[Path]] = {cat: [] for cat in PROVIDER_DIR_CATEGORIES}
+
+    claude_projects = Path("~/.claude/projects").expanduser()
+    if claude_projects.is_dir():
+        for project in sorted(claude_projects.iterdir()):
+            if not project.is_dir():
+                continue
+            mem = project / "memory"
+            if mem.is_dir() and any(mem.glob("*.md")):
+                grouped["claude-memory"].append(mem)
+
+    plans = Path("~/.claude/plans").expanduser()
+    if plans.is_dir():
+        grouped["claude-plans"].append(plans)
+
+    codex = Path("~/.codex/memories").expanduser()
+    if codex.is_dir():
+        grouped["codex"].append(codex)
+
+    return grouped
+
+
+def _canonical_provider_dirs() -> list[Path]:
+    """Flat list of all canonical provider dirs that exist on this machine.
+
+    Used by the legacy ``auto_discover`` migration. The wizard uses
+    :func:`_detect_provider_dirs` directly so it can group prompts by
+    category. See that function's docstring for scope rationale.
+    """
+    grouped = _detect_provider_dirs()
+    return [d for cat in PROVIDER_DIR_CATEGORIES for d in grouped[cat]]
+
+
+def _migrate_auto_discover_once(config: Mem2MemConfig) -> None:
+    """One-shot migration from legacy ``indexing.auto_discover`` to explicit
+    ``memory_dirs`` entries.
+
+    Releases 0.1.11 and earlier ran ``ensure_auto_discovered_dirs`` on every
+    startup to silently append three provider home dirs (``~/.claude/projects``,
+    ``~/.gemini``, ``~/.codex/memories``) whenever the flag was True. That
+    was both too wide (transcripts + secrets) and too quiet (no opt-in
+    surface). The replacement is a wizard step in ``mm init`` that picks
+    canonical provider memory dirs explicitly.
+
+    For existing installs with the legacy flag still True, this helper:
+
+    1. Enumerates :func:`_canonical_provider_dirs` (narrowed scope).
+    2. Appends each one not already in ``memory_dirs``.
+    3. Flips ``auto_discover`` to False in-memory.
+    4. Persists the result to ``~/.memtomem/config.json`` (atomic write)
+       so subsequent startups see the explicit entries and skip migration.
+
+    Brand-new installs (no ``config.json`` yet) skip migration: the wizard
+    is the only path that adds provider dirs there. The flag's deprecated
+    True default still applies in-memory but never triggers without a
+    config.json on disk to update — startup runtime no longer reads it.
     """
     if not config.indexing.auto_discover:
-        return
+        return  # already migrated, or explicitly opted out
+
+    config_path = _override_path()
+    if not config_path.exists():
+        return  # fresh install — wizard handles provider dirs explicitly
+
     existing = {Path(d).expanduser().resolve() for d in config.indexing.memory_dirs}
-    for d in _auto_discovered_memory_dirs():
-        resolved = d.expanduser().resolve()
-        if resolved not in existing:
-            config.indexing.memory_dirs.append(d)
+    new_dirs = [d for d in _canonical_provider_dirs() if d.expanduser().resolve() not in existing]
+
+    config.indexing.memory_dirs.extend(new_dirs)
+    config.indexing.auto_discover = False
+
+    # Persist the full post-migration memory_dirs list (factory default + any
+    # pre-existing entries + newly discovered dirs) so that the explicit
+    # config.json layer reflects the same effective list the migration just
+    # mutated in-memory. Without the full list we'd persist only ``new_dirs``,
+    # the REPLACE-on-set semantics of the config.json layer would drop the
+    # factory default on the next load, and users would lose
+    # ``~/.memtomem/memories`` silently.
+    _persist_auto_discover_migration(config_path, list(config.indexing.memory_dirs))
+
+    import logging
+
+    logging.getLogger(__name__).info(
+        "Migrated auto_discover -> explicit memory_dirs: added %d provider path(s). "
+        "See %s (auto_discover is deprecated and will be removed).",
+        len(new_dirs),
+        config_path,
+    )
 
 
-def _auto_discovered_memory_dirs() -> list[Path]:
-    """Return well-known AI tool directories that exist on this machine.
+def _persist_auto_discover_migration(config_path: Path, full_memory_dirs: list[Path]) -> None:
+    """Write the migration result to ``config.json`` atomically.
 
-    Checked directories:
-    - ``~/.claude/projects``  — Claude Code per-project auto-memory
-    - ``~/.gemini``           — Gemini CLI global GEMINI.md
-    - ``~/.codex/memories``   — Codex CLI global memories
+    Persists the *complete* post-migration ``memory_dirs`` list (factory
+    default included) and sets ``indexing.auto_discover`` to False so the
+    one-shot migration becomes idempotent. Read-merge-write so non-migrated
+    sections survive untouched.
     """
-    candidates: list[Path] = [
-        Path("~/.claude/projects"),
-        Path("~/.gemini"),
-        Path("~/.codex/memories"),
-    ]
-    return [p.expanduser() for p in candidates if p.expanduser().is_dir()]
+    import json as _json
+    import logging
+
+    _log = logging.getLogger(__name__)
+
+    existing: dict = {}
+    if config_path.exists():
+        try:
+            existing = _json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, _json.JSONDecodeError) as exc:
+            _log.warning(
+                "Cannot read %s during auto_discover migration (%s); skipping persist",
+                config_path,
+                exc,
+            )
+            return
+
+    if not isinstance(existing, dict):
+        return
+
+    indexing = existing.get("indexing")
+    if not isinstance(indexing, dict):
+        indexing = {}
+        existing["indexing"] = indexing
+
+    indexing["memory_dirs"] = [str(d) for d in full_memory_dirs]
+    indexing["auto_discover"] = False
+
+    try:
+        _atomic_write_json(config_path, existing)
+    except OSError as exc:
+        _log.warning("Failed to persist auto_discover migration to %s: %s", config_path, exc)
 
 
 # Fields that ``save_config_overrides`` persists but ``MUTABLE_FIELDS`` does
@@ -1053,12 +1188,12 @@ def build_comparand(*, quiet: bool = True) -> "Mem2MemConfig":
     """
     comparand = Mem2MemConfig()
     load_config_d(comparand, quiet=quiet)
-    # Auto-discovery is an env-dependent "factory" in spirit: it depends on
-    # the local filesystem, not on user choice. Running it here keeps the
-    # comparand apples-to-apples with the runtime config built by
-    # ``create_components`` so auto-discovered paths don't drag into
-    # ``config.json`` on unrelated saves.
-    ensure_auto_discovered_dirs(comparand)
+    # Provider memory dirs are now explicit ``memory_dirs`` entries (added by
+    # the ``mm init`` wizard or migrated once from legacy ``auto_discover``),
+    # not env-dependent factory output — so the comparand no longer needs a
+    # discovery step here. Runtime and comparand both reflect the same
+    # explicit list, and delta-only save still drops anything that matches
+    # defaults + env + fragments.
     return comparand
 
 

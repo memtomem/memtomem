@@ -118,7 +118,7 @@ mm init         # PyPI global install
 uv run mm init  # Project or source install
 ```
 
-The wizard walks you through 9 steps. Type `b` to go back, `q` to quit at any step.
+The wizard walks you through 10 steps. Type `b` to go back, `q` to quit at any step.
 
 #### Non-interactive mode (CI / automation)
 
@@ -130,17 +130,21 @@ mm init -y --provider onnx --model all-MiniLM-L6-v2     # local dense embeddings
 mm init -y --provider ollama --model nomic-embed-text   # Ollama (requires `ollama serve`)
 mm init -y --provider openai --api-key sk-...           # OpenAI
 mm init -y --memory-dir ~/notes --mcp claude            # custom dir + Claude Code auto-setup
+
+# Pull in AI tool memory folders (repeat per category):
+mm init -y --include-provider claude-memory --include-provider codex
 ```
 
 1. **Embedding provider** — BM25-only (default, zero-dependency), Local ONNX (no server), Ollama (local server), or OpenAI (cloud)
 2. **Reranker (optional)** — off by default; opt-in to a local fastembed cross-encoder. Korean/Chinese/Japanese/mixed content should pick the multilingual model
 3. **Memory directory** — where your notes live (e.g., `~/notes`, `~/memories`)
-4. **Storage** — SQLite database path (default: `~/.memtomem/memtomem.db`)
-5. **Namespace** — auto-assign namespace from folder name (e.g., `~/docs` → `docs`)
-6. **Search** — number of results per query (default: 10), time-decay toggle
-7. **Language** — tokenizer selection: Unicode (default) or Korean (kiwipiepy)
-8. **Claude Code hooks** — optional hook integration via settings.json
-9. **Editor connection** — Claude Code auto-setup, .mcp.json generation, or manual
+4. **Provider memory folders** — opt in (per category) to indexing Claude Code per-project memory (`~/.claude/projects/*/memory/`), Claude plans (`~/.claude/plans/`), and/or Codex memories (`~/.codex/memories/`). Skipped silently if none are present. Nothing is added without your confirmation
+5. **Storage** — SQLite database path (default: `~/.memtomem/memtomem.db`)
+6. **Namespace** — auto-assign namespace from folder name (e.g., `~/docs` → `docs`)
+7. **Search** — number of results per query (default: 10), time-decay toggle
+8. **Language** — tokenizer selection: Unicode (default) or Korean (kiwipiepy)
+9. **Claude Code hooks** — optional hook integration via settings.json
+10. **Editor connection** — Claude Code auto-setup, .mcp.json generation, or manual
 
 After the wizard, your MCP server is ready. Skip to [First use](#first-use) if you ran the wizard.
 
