@@ -1082,11 +1082,22 @@ _PROVIDER_VOCABULARY_LOCK_MESSAGE = (
     "See RFC #304 before adding providers."
 )
 
+# Distinct message for the key-axis drift: when this assert fires the
+# category vocabulary itself is fine — what's out of sync is the tag
+# mapping, so point the contributor at the right file instead of
+# re-reading ``_VALID_PROVIDER_CATEGORIES``.
+_CATEGORY_TO_PROVIDER_KEY_DRIFT_MESSAGE = (
+    "_CATEGORY_TO_PROVIDER keys out of sync with _VALID_PROVIDER_CATEGORIES. "
+    "Add or remove the matching key in _CATEGORY_TO_PROVIDER. See RFC #304."
+)
+
 # Paired asserts: keys mirror the category vocabulary, values mirror the
 # provider vocabulary. Without the value-side lock a future
 # ``_CATEGORY_TO_PROVIDER["skills"] = "anthropic"`` would add a new provider
 # silently; #313 locks the category axis only.
-assert set(_CATEGORY_TO_PROVIDER.keys()) == _VALID_PROVIDER_CATEGORIES, _VOCABULARY_LOCK_MESSAGE
+assert set(_CATEGORY_TO_PROVIDER.keys()) == _VALID_PROVIDER_CATEGORIES, (
+    _CATEGORY_TO_PROVIDER_KEY_DRIFT_MESSAGE
+)
 assert set(_CATEGORY_TO_PROVIDER.values()) == _VALID_PROVIDERS, _PROVIDER_VOCABULARY_LOCK_MESSAGE
 
 # Derived from ``_PROVIDER_CATEGORY_PATTERNS`` — do NOT edit independently.

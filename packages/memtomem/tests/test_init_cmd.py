@@ -1124,6 +1124,18 @@ def test_provider_vocabulary_lock_message_references_rfc() -> None:
     assert "#304" in _PROVIDER_VOCABULARY_LOCK_MESSAGE
 
 
+def test_category_to_provider_key_drift_message_names_mapping() -> None:
+    """Key-axis drift message must name ``_CATEGORY_TO_PROVIDER`` so a
+    contributor following the ``AssertionError`` traceback edits the
+    mapping rather than re-reading the category vocabulary — the two
+    live in the same file but fixing the wrong one produces a confusing
+    second failure."""
+    from memtomem.config import _CATEGORY_TO_PROVIDER_KEY_DRIFT_MESSAGE
+
+    assert "_CATEGORY_TO_PROVIDER" in _CATEGORY_TO_PROVIDER_KEY_DRIFT_MESSAGE
+    assert "#304" in _CATEGORY_TO_PROVIDER_KEY_DRIFT_MESSAGE
+
+
 def test_provider_for_category_roundtrip() -> None:
     """Public helper must agree with the internal mapping for every known
     category and fall back to ``"user"`` for anything unknown (mirrors
