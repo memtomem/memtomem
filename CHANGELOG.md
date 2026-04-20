@@ -17,7 +17,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   user-authored rules with the same `path_glob` but a different namespace
   are preserved rather than overwritten. The flag-driven non-interactive
   path (`--include-provider`) matches the interactive behavior. Labels are
-  deliberately flat pending RFC #304 (`{provider, product}` hierarchy).
+  deliberately flat pending RFC #304 (`{provider, product}` hierarchy). The
+  four-entry vocabulary (`user`, `claude-memory`, `claude-plans`, `codex`)
+  is locked against silent expansion via an import-time assertion (#313).
 - **Reranker candidate-pool scaling**: `rerank.oversample` (default `2.0`),
   `rerank.min_pool` (default `20`), and `rerank.max_pool` (default `200`).
   The cross-encoder now sees
