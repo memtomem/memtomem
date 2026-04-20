@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.13] — 2026-04-20
+
 ### Added
 - **`mm agent migrate` CLI**: renames legacy `agent/{id}` namespaces to
   `agent-runtime:{id}` (see `### Changed` below). Pass `--dry-run` to preview
