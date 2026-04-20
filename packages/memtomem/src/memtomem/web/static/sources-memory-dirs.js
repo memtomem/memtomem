@@ -10,10 +10,21 @@
  * Depends on globals from app.js (api, showToast, showConfirm, t, qs,
  * STATE, btnLoading, loadStats). Loaded AFTER app.js.
  *
- * Classification is now server-owned: each entry on
- * ``GET /api/memory-dirs/status`` carries a ``category`` field produced
- * by ``categorize_memory_dir`` in ``config.py``. The constants below are
- * presentation-only (group order, i18n label keys, default-collapse set).
+ * Classification is server-owned: each entry on
+ * ``GET /api/memory-dirs/status`` carries ``category`` and ``provider``
+ * fields from ``categorize_memory_dir`` / ``provider_for_category`` in
+ * ``config.py``. The constants below are presentation-only (render
+ * order, i18n label keys, default-collapse set).
+ *
+ * Layout: vendor → product tree per RFC #304 Phase 2. Single-leaf
+ * vendors (``user``, ``openai``→``codex``) render as a flat one-row
+ * ``<details>`` keyed by the product label, matching the previous
+ * one-level UI. Multi-leaf vendors (``claude`` → ``claude-memory`` +
+ * ``claude-plans``) render the vendor label at the outer summary with
+ * each product as an inner section carrying its own reindex button.
+ * Per-child collapse state is intentionally removed (Q4 resolution):
+ * opening the ``claude`` vendor reveals both products without a second
+ * click.
  */
 
 const _MEMORY_DIR_CATEGORY_ORDER = ['user', 'claude-memory', 'claude-plans', 'codex'];
@@ -23,10 +34,25 @@ const _MEMORY_DIR_CATEGORY_LABEL_KEY = {
   'claude-plans': 'sources.memory_dirs.category.claude_plans',
   'codex': 'sources.memory_dirs.category.codex',
 };
-// Categories that start collapsed. ``user`` is open by default because it
-// is usually short; the auto-discovered provider categories can have 20+
-// entries and would push the file list far below the fold.
-const _MEMORY_DIR_CATEGORY_COLLAPSED = new Set(['claude-memory', 'claude-plans', 'codex']);
+// Render order for vendor groups. See ``_CATEGORY_TO_PROVIDER`` in
+// ``config.py`` for the category→provider mapping (server-owned).
+const _MEMORY_DIR_PROVIDER_ORDER = ['user', 'claude', 'openai'];
+const _MEMORY_DIR_PROVIDER_LABEL_KEY = {
+  'user': 'sources.memory_dirs.provider.user',
+  'claude': 'sources.memory_dirs.provider.claude',
+  'openai': 'sources.memory_dirs.provider.openai',
+};
+// Vendor groups that start collapsed. ``user`` is open by default
+// because it is usually short; auto-discovered vendor groups can have
+// 20+ entries and would push the file list below the fold.
+const _MEMORY_DIR_PROVIDER_COLLAPSED = new Set(['claude', 'openai']);
+// Forward-compat: an ``/api/memory-dirs/status`` response carrying a
+// ``provider`` value the client doesn't recognize (e.g., a newer server
+// adds a vendor before the client deploys) falls through to ``user`` so
+// the dirs stay visible under the tree. Missing i18n keys fall back to
+// the raw key string via ``t()``'s built-in ``|| key`` path — no extra
+// guard needed here.
+const _MEMORY_DIR_PROVIDER_FALLBACK = 'user';
 
 function _buildMemoryDirsPanel(initialDirs) {
   const wrap = document.createElement('div');
@@ -246,147 +272,225 @@ function _buildMemoryDirsPanel(initialDirs) {
       wrap.appendChild(addRow);
     }
 
-    const byCategory = { 'user': [], 'claude-memory': [], 'claude-plans': [], 'codex': [] };
+    // Group dirs by provider → category. Server delivers both fields on
+    // ``/api/memory-dirs/status``; before the first fetch resolves we
+    // fall back to ``user`` so the tree layout renders without crashing
+    // and the next render settles each entry.
+    const byProvider = {};
+    for (const p of _MEMORY_DIR_PROVIDER_ORDER) byProvider[p] = { order: [], byCategory: {} };
     for (const d of dirs) {
-      // Server classifies via ``categorize_memory_dir`` and returns the
-      // result on ``/api/memory-dirs/status``. Before that fetch resolves
-      // (first paint / transient error) we fall back to ``user`` so the
-      // group layout renders without crashing; the next render settles
-      // each entry into its proper group.
       const st = statusByPath[d];
-      const cat = (st && byCategory[st.category]) ? st.category : 'user';
-      byCategory[cat].push(d);
+      const cat = (st && _MEMORY_DIR_CATEGORY_LABEL_KEY[st.category]) ? st.category : 'user';
+      const rawProvider = st && st.provider;
+      const provider = byProvider[rawProvider] ? rawProvider : _MEMORY_DIR_PROVIDER_FALLBACK;
+      const bucket = byProvider[provider];
+      if (!bucket.byCategory[cat]) {
+        bucket.byCategory[cat] = [];
+        bucket.order.push(cat);
+      }
+      bucket.byCategory[cat].push(d);
     }
 
-    for (const cat of _MEMORY_DIR_CATEGORY_ORDER) {
-      const entries = byCategory[cat];
-      if (!entries.length) continue;
+    function _buildItemRow(path, st) {
+      const item = document.createElement('li');
+      item.className = 'memory-dirs-item';
+      if (statusLoaded && st) {
+        if (st.chunk_count === 0) item.classList.add('memory-dirs-item-empty');
+        if (st.exists === false) item.classList.add('memory-dirs-item-missing');
+      }
 
-      const group = document.createElement('details');
-      group.className = 'memory-dirs-group';
-      group.dataset.category = cat;
-      if (!_MEMORY_DIR_CATEGORY_COLLAPSED.has(cat)) group.open = true;
+      const pathSpan = document.createElement('span');
+      pathSpan.className = 'memory-dirs-path';
+      pathSpan.textContent = path;
+      pathSpan.title = path;
+      item.appendChild(pathSpan);
 
-      let groupChunks = 0;
-      let groupFiles = 0;
-      let groupHasStatus = false;
+      if (statusLoaded && st) {
+        const badge = document.createElement('span');
+        badge.className = 'memory-dirs-status';
+        if (st.exists === false) {
+          badge.classList.add('missing');
+          badge.textContent = t('sources.memory_dirs.status_missing');
+        } else if ((st.chunk_count || 0) === 0) {
+          badge.classList.add('empty');
+          badge.textContent = t('sources.memory_dirs.status_empty');
+        } else {
+          badge.textContent = t(
+            'sources.memory_dirs.status_chunks',
+            { count: st.chunk_count },
+          );
+        }
+        item.appendChild(badge);
+      } else {
+        // Placeholder so the action buttons line up before status loads.
+        const ph = document.createElement('span');
+        ph.className = 'memory-dirs-status placeholder';
+        item.appendChild(ph);
+      }
+
+      const reindexBtn = document.createElement('button');
+      reindexBtn.type = 'button';
+      reindexBtn.className = 'btn btn-xs btn-ghost memory-dirs-reindex-btn';
+      // Label tracks state: "Index" before first index / when missing or
+      // empty, "Reindex" once chunks exist. Tooltip stays generic since
+      // the action is a reindex in both cases (force:false, recursive).
+      const hasChunks =
+        statusLoaded && st && st.exists !== false && (st.chunk_count || 0) > 0;
+      reindexBtn.textContent = t(
+        hasChunks ? 'sources.memory_dirs.action_reindex' : 'sources.memory_dirs.action_index',
+      );
+      reindexBtn.title = t('sources.memory_dirs.reindex_title');
+      reindexBtn.addEventListener('click', () => handleReindexOne(path, reindexBtn));
+      item.appendChild(reindexBtn);
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'btn btn-xs btn-ghost memory-dirs-remove-btn';
+      removeBtn.textContent = t('sources.memory_dirs.action_delete');
+      removeBtn.title = t('sources.memory_dirs.delete_title');
+      removeBtn.setAttribute('aria-label', t('sources.memory_dirs.delete_title'));
+      if (dirs.length <= 1) removeBtn.disabled = true;
+      removeBtn.addEventListener('click', () => handleRemove(path));
+      item.appendChild(removeBtn);
+
+      return item;
+    }
+
+    function _buildList(cat, entries) {
+      const list = document.createElement('ul');
+      list.className = 'memory-dirs-list';
+      // ``.memory-dirs-list-scroll`` stays bound to the ``claude-memory``
+      // *leaf*, not the new vendor wrapper — per-project auto-memory
+      // dirs can be 20+ entries and need the 280px scrollbox; other
+      // leaves stay un-capped.
+      if (cat === 'claude-memory') list.classList.add('memory-dirs-list-scroll');
+      for (const path of entries) list.appendChild(_buildItemRow(path, statusByPath[path]));
+      return list;
+    }
+
+    function _aggregateStatus(entries) {
+      let chunks = 0;
+      let files = 0;
+      let any = false;
       for (const path of entries) {
         const st = statusByPath[path];
         if (st) {
-          groupHasStatus = true;
-          groupChunks += st.chunk_count || 0;
-          groupFiles += st.source_file_count || 0;
+          any = true;
+          chunks += st.chunk_count || 0;
+          files += st.source_file_count || 0;
         }
       }
+      return { chunks, files, any };
+    }
+
+    function _buildStatusBadge(aggregate) {
+      const badge = document.createElement('span');
+      badge.className = 'memory-dirs-status-group';
+      if (aggregate.chunks === 0) badge.classList.add('empty');
+      badge.textContent = t(
+        'sources.memory_dirs.status_group',
+        { files: aggregate.files, chunks: aggregate.chunks },
+      );
+      return badge;
+    }
+
+    function _buildGroupReindexButton(cat) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn btn-xs btn-ghost memory-dirs-group-reindex';
+      btn.textContent = t('sources.memory_dirs.action_reindex_group');
+      btn.title = t('sources.memory_dirs.reindex_group');
+      btn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        handleReindexGroup(cat, btn);
+      });
+      return btn;
+    }
+
+    for (const provider of _MEMORY_DIR_PROVIDER_ORDER) {
+      const bucket = byProvider[provider];
+      if (!bucket.order.length) continue;
+
+      // Categories within this vendor rendered in the global category
+      // order (``user`` → ``claude-memory`` → ``claude-plans`` → ``codex``)
+      // so the product rows stay stable as the user adds/removes dirs.
+      const categories = _MEMORY_DIR_CATEGORY_ORDER.filter(c => bucket.byCategory[c]);
+      const allEntries = categories.flatMap(c => bucket.byCategory[c]);
+      const isSingleLeaf = categories.length === 1;
+
+      const group = document.createElement('details');
+      group.className = 'memory-dirs-group';
+      if (!isSingleLeaf) group.classList.add('memory-dirs-vendor-group');
+      group.dataset.provider = provider;
+      if (!_MEMORY_DIR_PROVIDER_COLLAPSED.has(provider)) group.open = true;
 
       const summary = document.createElement('summary');
       summary.className = 'memory-dirs-summary';
 
       const label = document.createElement('span');
       label.className = 'memory-dirs-summary-label';
-      label.textContent = t(_MEMORY_DIR_CATEGORY_LABEL_KEY[cat]);
+      // Single-leaf vendors collapse to one row labeled by the product
+      // (keeps "Codex" readable rather than the distant "OpenAI"); multi-
+      // leaf vendors use the vendor label at the top and move product
+      // labels to inner sections (Q4 — no per-child collapse).
+      const summaryLabelKey = isSingleLeaf
+        ? _MEMORY_DIR_CATEGORY_LABEL_KEY[categories[0]]
+        : _MEMORY_DIR_PROVIDER_LABEL_KEY[provider];
+      label.textContent = t(summaryLabelKey);
       summary.appendChild(label);
 
       const count = document.createElement('span');
       count.className = 'memory-dirs-summary-count';
-      count.textContent = String(entries.length);
+      count.textContent = String(allEntries.length);
       summary.appendChild(count);
 
-      if (statusLoaded && groupHasStatus) {
-        const groupBadge = document.createElement('span');
-        groupBadge.className = 'memory-dirs-status-group';
-        if (groupChunks === 0) groupBadge.classList.add('empty');
-        groupBadge.textContent = t(
-          'sources.memory_dirs.status_group',
-          { files: groupFiles, chunks: groupChunks },
-        );
-        summary.appendChild(groupBadge);
-      }
+      const vendorAgg = _aggregateStatus(allEntries);
+      if (statusLoaded && vendorAgg.any) summary.appendChild(_buildStatusBadge(vendorAgg));
 
-      const groupReindex = document.createElement('button');
-      groupReindex.type = 'button';
-      groupReindex.className = 'btn btn-xs btn-ghost memory-dirs-group-reindex';
-      groupReindex.textContent = t('sources.memory_dirs.action_reindex_group');
-      groupReindex.title = t('sources.memory_dirs.reindex_group');
-      groupReindex.addEventListener('click', (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        handleReindexGroup(cat, groupReindex);
-      });
-      summary.appendChild(groupReindex);
+      // Per-product reindex stays at the product level; no vendor bulk
+      // button (plan Q5). For single-leaf vendors the product *is* the
+      // vendor, so the button belongs on the summary row.
+      if (isSingleLeaf) summary.appendChild(_buildGroupReindexButton(categories[0]));
       group.appendChild(summary);
 
-      const list = document.createElement('ul');
-      list.className = 'memory-dirs-list';
-      if (cat === 'claude-memory') list.classList.add('memory-dirs-list-scroll');
+      if (isSingleLeaf) {
+        group.appendChild(_buildList(categories[0], bucket.byCategory[categories[0]]));
+      } else {
+        const products = document.createElement('div');
+        products.className = 'memory-dirs-products';
+        for (const cat of categories) {
+          const entries = bucket.byCategory[cat];
+          const section = document.createElement('section');
+          section.className = 'memory-dirs-product';
+          section.dataset.category = cat;
 
-      for (const path of entries) {
-        const item = document.createElement('li');
-        item.className = 'memory-dirs-item';
+          const header = document.createElement('div');
+          header.className = 'memory-dirs-product-header';
 
-        const st = statusByPath[path];
-        if (statusLoaded && st) {
-          if (st.chunk_count === 0) item.classList.add('memory-dirs-item-empty');
-          if (st.exists === false) item.classList.add('memory-dirs-item-missing');
-        }
+          const productLabel = document.createElement('span');
+          productLabel.className = 'memory-dirs-product-label';
+          productLabel.textContent = t(_MEMORY_DIR_CATEGORY_LABEL_KEY[cat]);
+          header.appendChild(productLabel);
 
-        const pathSpan = document.createElement('span');
-        pathSpan.className = 'memory-dirs-path';
-        pathSpan.textContent = path;
-        pathSpan.title = path;
-        item.appendChild(pathSpan);
+          const productCount = document.createElement('span');
+          productCount.className = 'memory-dirs-summary-count';
+          productCount.textContent = String(entries.length);
+          header.appendChild(productCount);
 
-        if (statusLoaded && st) {
-          const badge = document.createElement('span');
-          badge.className = 'memory-dirs-status';
-          if (st.exists === false) {
-            badge.classList.add('missing');
-            badge.textContent = t('sources.memory_dirs.status_missing');
-          } else if ((st.chunk_count || 0) === 0) {
-            badge.classList.add('empty');
-            badge.textContent = t('sources.memory_dirs.status_empty');
-          } else {
-            badge.textContent = t(
-              'sources.memory_dirs.status_chunks',
-              { count: st.chunk_count },
-            );
+          const productAgg = _aggregateStatus(entries);
+          if (statusLoaded && productAgg.any) {
+            header.appendChild(_buildStatusBadge(productAgg));
           }
-          item.appendChild(badge);
-        } else {
-          // Placeholder so the action buttons line up before status loads.
-          const ph = document.createElement('span');
-          ph.className = 'memory-dirs-status placeholder';
-          item.appendChild(ph);
+
+          header.appendChild(_buildGroupReindexButton(cat));
+          section.appendChild(header);
+          section.appendChild(_buildList(cat, entries));
+          products.appendChild(section);
         }
-
-        const reindexBtn = document.createElement('button');
-        reindexBtn.type = 'button';
-        reindexBtn.className = 'btn btn-xs btn-ghost memory-dirs-reindex-btn';
-        // Label tracks state: "Index" before first index / when missing or
-        // empty, "Reindex" once chunks exist. Tooltip stays generic since
-        // the action is a reindex in both cases (force:false, recursive).
-        const hasChunks =
-          statusLoaded && st && st.exists !== false && (st.chunk_count || 0) > 0;
-        reindexBtn.textContent = t(
-          hasChunks ? 'sources.memory_dirs.action_reindex' : 'sources.memory_dirs.action_index',
-        );
-        reindexBtn.title = t('sources.memory_dirs.reindex_title');
-        reindexBtn.addEventListener('click', () => handleReindexOne(path, reindexBtn));
-        item.appendChild(reindexBtn);
-
-        const removeBtn = document.createElement('button');
-        removeBtn.type = 'button';
-        removeBtn.className = 'btn btn-xs btn-ghost memory-dirs-remove-btn';
-        removeBtn.textContent = t('sources.memory_dirs.action_delete');
-        removeBtn.title = t('sources.memory_dirs.delete_title');
-        removeBtn.setAttribute('aria-label', t('sources.memory_dirs.delete_title'));
-        if (dirs.length <= 1) removeBtn.disabled = true;
-        removeBtn.addEventListener('click', () => handleRemove(path));
-        item.appendChild(removeBtn);
-
-        list.appendChild(item);
+        group.appendChild(products);
       }
-      group.appendChild(list);
+
       wrap.appendChild(group);
     }
   }

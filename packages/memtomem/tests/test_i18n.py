@@ -236,3 +236,19 @@ class TestNoHardcodedStrings:
         missing_ko = required - set(ko)
         assert not missing_en, f"Keys missing from en.json: {sorted(missing_en)}"
         assert not missing_ko, f"Keys missing from ko.json: {sorted(missing_ko)}"
+
+    def test_rfc_304_provider_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
+        """Vendor labels for the memory-dirs tree (RFC #304 Phase 2). Key
+        names mirror the server-side ``provider`` wire value from
+        ``_CATEGORY_TO_PROVIDER`` (``openai``, not ``codex``); deleting
+        any of these would leak the raw key string into the UI via
+        ``t()``'s fallback path."""
+        required = {
+            "sources.memory_dirs.provider.user",
+            "sources.memory_dirs.provider.claude",
+            "sources.memory_dirs.provider.openai",
+        }
+        missing_en = required - set(en)
+        missing_ko = required - set(ko)
+        assert not missing_en, f"Provider keys missing from en.json: {sorted(missing_en)}"
+        assert not missing_ko, f"Provider keys missing from ko.json: {sorted(missing_ko)}"
