@@ -1379,9 +1379,10 @@ class TestMemoryDirStats:
         assert result[0]["exists"] is True
         assert result[0]["chunk_count"] == 0
         assert result[0]["source_file_count"] == 0
-        # ``category`` is always present so the Web UI never has to guess
-        # whether the server supplied it.
+        # ``category`` / ``provider`` are always present so the Web UI
+        # never has to guess whether the server supplied them.
         assert result[0]["category"] == "user"
+        assert result[0]["provider"] == "user"
 
     async def test_category_reflects_provider_layout(self, tmp_path):
         """A mix of provider-shaped and user paths produces the right
@@ -1403,6 +1404,30 @@ class TestMemoryDirStats:
         assert by_path[str(codex)] == "codex"
         assert by_path[str(plans)] == "claude-plans"
         assert by_path[str(claude_mem)] == "claude-memory"
+
+    async def test_provider_tags_every_entry(self, tmp_path):
+        """Every entry carries ``provider`` tagged per RFC #304 Phase 1:
+        ``{user→user, claude-memory→claude, claude-plans→claude,
+        codex→openai}``. Client-side vendor grouping consumes this field
+        so it must be present on every response row."""
+        from memtomem.indexing.engine import memory_dir_stats
+
+        user = tmp_path / "notes"
+        codex = tmp_path / ".codex" / "memories"
+        plans = tmp_path / ".claude" / "plans"
+        claude_mem = tmp_path / ".claude" / "projects" / "demo" / "memory"
+        for d in (user, codex, plans, claude_mem):
+            d.mkdir(parents=True)
+
+        storage = _FakeStorageForStats([])
+        result = await memory_dir_stats(storage, [user, codex, plans, claude_mem])
+        by_path = {r["path"]: r["provider"] for r in result}
+        assert by_path[str(user)] == "user"
+        assert by_path[str(codex)] == "openai"
+        assert by_path[str(plans)] == "claude"
+        assert by_path[str(claude_mem)] == "claude"
+        # Belt-and-suspenders: no entry should be missing ``provider``.
+        assert all("provider" in r for r in result)
 
     async def test_dir_with_indexed_files_is_aggregated(self, tmp_path):
         from memtomem.indexing.engine import memory_dir_stats

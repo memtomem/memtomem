@@ -21,6 +21,7 @@ from memtomem.config import (
     NamespaceConfig,
     NamespacePolicyRule,
     categorize_memory_dir,
+    provider_for_category,
 )
 from memtomem.indexing.differ import compute_diff
 from memtomem.models import Chunk, ChunkMetadata, IndexingStats
@@ -103,14 +104,16 @@ async def memory_dir_stats(
 ) -> list[dict[str, object]]:
     """Return per-dir index status for each configured ``memory_dir``.
 
-    Shape: ``[{path, chunk_count, source_file_count, exists, category}]``
-    in the same order as ``memory_dirs``. Drives the web UI's "(N chunks)"
-    / "(not indexed)" badges so the user can see which dirs still need a
-    manual reindex (the file watcher only reacts to change events, so
-    pre-existing files in a newly added ``memory_dir`` stay invisible
-    until the user clicks the ↻ button). ``category`` is provided by
-    :func:`~memtomem.config.categorize_memory_dir` so the Web UI can
-    group entries without maintaining its own regex.
+    Shape: ``[{path, chunk_count, source_file_count, exists, category,
+    provider}]`` in the same order as ``memory_dirs``. Drives the web UI's
+    "(N chunks)" / "(not indexed)" badges so the user can see which dirs
+    still need a manual reindex (the file watcher only reacts to change
+    events, so pre-existing files in a newly added ``memory_dir`` stay
+    invisible until the user clicks the ↻ button). ``category`` is
+    provided by :func:`~memtomem.config.categorize_memory_dir` and
+    ``provider`` by :func:`~memtomem.config.provider_for_category`, so the
+    Web UI can build a vendor → product tree without maintaining its own
+    regex or mapping. RFC #304 Phase 1.
 
     Aggregation: one ``get_source_files_with_counts()`` call over the
     whole ``chunks`` table, bucketed in Python by normalised-path prefix
@@ -137,13 +140,15 @@ async def memory_dir_stats(
                 chunk_count += count
                 source_file_count += 1
 
+        category = categorize_memory_dir(d)
         out.append(
             {
                 "path": str(d),
                 "chunk_count": chunk_count,
                 "source_file_count": source_file_count,
                 "exists": exists,
-                "category": categorize_memory_dir(d),
+                "category": category,
+                "provider": provider_for_category(category),
             }
         )
     return out

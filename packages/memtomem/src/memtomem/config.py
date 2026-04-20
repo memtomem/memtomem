@@ -1065,9 +1065,43 @@ assert ({cat for cat, _ in _PROVIDER_CATEGORY_PATTERNS} | {"user"}) == _VALID_PR
     _VOCABULARY_LOCK_MESSAGE
 )
 
+# Vendor tag for each category. Exposed on ``memory_dir_stats()`` entries so
+# the Web UI can render a two-level vendor → product tree without duplicating
+# the category→vendor map in JS. RFC #304 Phase 1 — see plan #314 resolution.
+_CATEGORY_TO_PROVIDER: dict[str, str] = {
+    "user": "user",
+    "claude-memory": "claude",
+    "claude-plans": "claude",
+    "codex": "openai",
+}
+
+_VALID_PROVIDERS: frozenset[str] = frozenset({"user", "claude", "openai"})
+
+_PROVIDER_VOCABULARY_LOCK_MESSAGE = (
+    "Provider vocabulary changed without updating _VALID_PROVIDERS. "
+    "See RFC #304 before adding providers."
+)
+
+# Paired asserts: keys mirror the category vocabulary, values mirror the
+# provider vocabulary. Without the value-side lock a future
+# ``_CATEGORY_TO_PROVIDER["skills"] = "anthropic"`` would add a new provider
+# silently; #313 locks the category axis only.
+assert set(_CATEGORY_TO_PROVIDER.keys()) == _VALID_PROVIDER_CATEGORIES, _VOCABULARY_LOCK_MESSAGE
+assert set(_CATEGORY_TO_PROVIDER.values()) == _VALID_PROVIDERS, _PROVIDER_VOCABULARY_LOCK_MESSAGE
+
 # Derived from ``_PROVIDER_CATEGORY_PATTERNS`` — do NOT edit independently.
 # Add a new pattern row above and this tuple picks it up automatically.
 PROVIDER_DIR_CATEGORIES: tuple[str, ...] = tuple(cat for cat, _ in _PROVIDER_CATEGORY_PATTERNS)
+
+
+def provider_for_category(category: str) -> str:
+    """Return the vendor tag for a ``memory_dir`` category.
+
+    Consumed by :func:`~memtomem.indexing.engine.memory_dir_stats` so the
+    Web UI can group entries by vendor. Unknown categories fall back to
+    ``"user"`` — mirrors :func:`categorize_memory_dir`'s user-default.
+    """
+    return _CATEGORY_TO_PROVIDER.get(category, "user")
 
 
 def categorize_memory_dir(path: str | Path) -> str:

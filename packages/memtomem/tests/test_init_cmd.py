@@ -1094,6 +1094,51 @@ def test_vocabulary_lock_message_references_rfc() -> None:
     assert "#304" in _VOCABULARY_LOCK_MESSAGE
 
 
+def test_category_to_provider_keys_cover_categories() -> None:
+    """``_CATEGORY_TO_PROVIDER`` must tag every known category — the Web UI
+    relies on ``memory_dir_stats()`` emitting a non-empty ``provider`` on
+    every row. Without this lock, adding a category row without tagging
+    its vendor would silently fall back to ``"user"``."""
+    from memtomem.config import _CATEGORY_TO_PROVIDER, _VALID_PROVIDER_CATEGORIES
+
+    assert set(_CATEGORY_TO_PROVIDER.keys()) == _VALID_PROVIDER_CATEGORIES
+
+
+def test_providers_vocabulary_locked() -> None:
+    """Declared vendor set must match the tags used by
+    ``_CATEGORY_TO_PROVIDER``. Mirror of
+    :func:`test_provider_categories_vocabulary_locked` on the vendor axis
+    — without this, a future ``_CATEGORY_TO_PROVIDER["skills"] =
+    "anthropic"`` would introduce a new provider silently."""
+    from memtomem.config import _CATEGORY_TO_PROVIDER, _VALID_PROVIDERS
+
+    assert set(_CATEGORY_TO_PROVIDER.values()) == _VALID_PROVIDERS
+
+
+def test_provider_vocabulary_lock_message_references_rfc() -> None:
+    """Provider-axis lock message must reference RFC #304 for the same
+    reason as the category-axis message: an ``AssertionError`` traceback
+    should lead a future reader straight to the rationale."""
+    from memtomem.config import _PROVIDER_VOCABULARY_LOCK_MESSAGE
+
+    assert "#304" in _PROVIDER_VOCABULARY_LOCK_MESSAGE
+
+
+def test_provider_for_category_roundtrip() -> None:
+    """Public helper must agree with the internal mapping for every known
+    category and fall back to ``"user"`` for anything unknown (mirrors
+    :func:`~memtomem.config.categorize_memory_dir`'s user-default)."""
+    from memtomem.config import (
+        _CATEGORY_TO_PROVIDER,
+        _VALID_PROVIDER_CATEGORIES,
+        provider_for_category,
+    )
+
+    for cat in _VALID_PROVIDER_CATEGORIES:
+        assert provider_for_category(cat) == _CATEGORY_TO_PROVIDER[cat]
+    assert provider_for_category("not-a-real-category") == "user"
+
+
 class TestIncludeProviderFlag:
     """Non-interactive ``--include-provider`` wires categories into
     ``indexing.memory_dirs`` without prompting."""

@@ -858,3 +858,44 @@ class TestUnicodePaths:
                 json={"file": str(nfc_target)},
             )
         assert resp.status_code == 200, resp.text
+
+
+# ---------------------------------------------------------------------------
+# GET /api/memory-dirs/status
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryDirsStatus:
+    """Per-dir index status shape contract. The Web UI groups entries by
+    ``provider`` and ``category``, so both fields must be present on every
+    row returned by :func:`~memtomem.indexing.engine.memory_dir_stats`.
+    RFC #304 Phase 1."""
+
+    async def test_response_shape_includes_provider(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        # Mix of provider-shaped and user paths so the route output exercises
+        # every category→provider branch in one call.
+        user = tmp_path / "notes"
+        codex = tmp_path / ".codex" / "memories"
+        plans = tmp_path / ".claude" / "plans"
+        claude_mem = tmp_path / ".claude" / "projects" / "demo" / "memory"
+        for d in (user, codex, plans, claude_mem):
+            d.mkdir(parents=True)
+
+        app.state.config.indexing.memory_dirs = [user, codex, plans, claude_mem]
+
+        resp = await client.get("/api/memory-dirs/status")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        dirs = data["dirs"]
+        assert len(dirs) == 4
+        # Every entry carries provider + category — Web UI consumes both.
+        for entry in dirs:
+            assert "category" in entry
+            assert "provider" in entry
+        by_path = {r["path"]: r for r in dirs}
+        assert by_path[str(user)]["provider"] == "user"
+        assert by_path[str(codex)]["provider"] == "openai"
+        assert by_path[str(plans)]["provider"] == "claude"
+        assert by_path[str(claude_mem)]["provider"] == "claude"
