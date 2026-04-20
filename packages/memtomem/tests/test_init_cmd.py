@@ -769,7 +769,7 @@ class TestMcpPasteHints:
     ) -> None:
         from click import unstyle
 
-        from memtomem.cli.init_cmd import _write_config_and_summary
+        from memtomem.cli.init_cmd import _claude_desktop_config_hint, _write_config_and_summary
 
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.chdir(tmp_path)
@@ -783,7 +783,7 @@ class TestMcpPasteHints:
         assert "Cursor" in out and "~/.cursor/mcp.json" in out
         assert "Windsurf" in out and "~/.codeium/windsurf/mcp_config.json" in out
         assert "Claude Desktop" in out
-        assert "Library/Application Support/Claude/claude_desktop_config.json" in out
+        assert _claude_desktop_config_hint() in out
         assert "Gemini CLI" in out and "~/.gemini/settings.json" in out
         assert "Claude Code picks up ./.mcp.json in this project automatically" in out
 
@@ -829,6 +829,56 @@ class TestMcpPasteHints:
         assert "(for Cursor, Windsurf, etc.)" not in out, "old auto-compat wording leaked back in"
         assert "Claude Code project scope" in out
         assert "copy into your editor's config file" in out
+
+
+class TestClaudeDesktopConfigHint:
+    """The Claude Desktop paste-hint must point at the real Claude Desktop
+    config path for the user's OS, not the macOS-only path that used to be
+    hardcoded.
+
+    Regression for #328: Linux/Windows users following the old hint created
+    an unused file at a macOS-specific path and left their real Claude
+    Desktop config untouched."""
+
+    @pytest.mark.parametrize(
+        "platform,expected",
+        [
+            ("darwin", "~/Library/Application Support/Claude/claude_desktop_config.json"),
+            ("linux", "~/.config/Claude/claude_desktop_config.json"),
+            ("linux2", "~/.config/Claude/claude_desktop_config.json"),
+            ("freebsd14", "~/.config/Claude/claude_desktop_config.json"),
+            ("win32", r"%APPDATA%\Claude\claude_desktop_config.json"),
+        ],
+    )
+    def test_helper_returns_per_os_path(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        platform: str,
+        expected: str,
+    ) -> None:
+        from memtomem.cli.init_cmd import _claude_desktop_config_hint
+
+        monkeypatch.setattr("memtomem.cli.init_cmd.sys.platform", platform)
+
+        assert _claude_desktop_config_hint() == expected
+
+    def test_emit_hints_does_not_leak_darwin_path_on_linux(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Negative guard for the actual bug — `_emit_mcp_paste_hints` must
+        not echo the macOS ``Library/Application Support`` path on Linux."""
+        from click import unstyle
+
+        from memtomem.cli.init_cmd import _emit_mcp_paste_hints
+
+        monkeypatch.setattr("memtomem.cli.init_cmd.sys.platform", "linux")
+        _emit_mcp_paste_hints()
+
+        out = unstyle(capsys.readouterr().out)
+        assert "Library/Application Support" not in out
+        assert "~/.config/Claude/claude_desktop_config.json" in out
 
 
 class TestProviderDirsStep:
