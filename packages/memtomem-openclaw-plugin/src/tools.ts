@@ -556,7 +556,7 @@ export const TOOLS: ToolDef[] = [
   {
     name: "mem_agent_register",
     description:
-      "Register an agent with its own namespace (agent/{id}) for memory isolation",
+      "Register an agent with its own namespace (agent-runtime:{id}) for memory isolation",
     parameters: schema(
       {
         agent_id: Str("Unique agent identifier"),
@@ -588,7 +588,7 @@ export const TOOLS: ToolDef[] = [
       {
         chunk_id: Str("UUID of chunk to share"),
         target: {
-          ...Str("Target namespace (shared or agent/{id})"),
+          ...Str("Target namespace (shared or agent-runtime:{id})"),
           default: "shared",
         },
       },

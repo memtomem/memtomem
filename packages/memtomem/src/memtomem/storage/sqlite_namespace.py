@@ -9,30 +9,43 @@ from typing import Callable, Sequence
 from memtomem.errors import StorageError
 from memtomem.storage.sqlite_helpers import escape_like, now_iso, placeholders
 
-# Namespace names: alphanumeric, hyphens, underscores, dots, colons, @, spaces,
-# and ``/`` (max 255). The ``/`` is permitted so the multi-agent tool's
-# ``agent/{agent_id}`` namespace passes validation; callers that generate
-# namespaces with ``/`` as a separator must sanitize the remainder themselves
-# so a single ``/`` acts as the separator rather than allowing arbitrary depth.
-# See #318 for the separator-unification discussion — if that issue settles on
-# ``:``, this character class should drop ``/`` again.
-_NS_NAME_RE = re.compile(r"^[\w\-./:@ ]{1,255}$", re.UNICODE)
+# Namespace names: alphanumeric, hyphens, underscores, dots, colons, @, spaces
+# (max 255). Automatic namespace generators use a ``{bucket}-{kind}:`` format
+# (``claude-memory:``, ``codex-memory:``, ``agent-runtime:``); the second
+# segment is sanitized through :func:`sanitize_namespace_segment` so callers
+# never smuggle a stray separator character through.
+_NS_NAME_RE = re.compile(r"^[\w\-.:@ ]{1,255}$", re.UNICODE)
+
+# Characters outside the namespace allowlist — substituted to ``_`` by
+# :func:`sanitize_namespace_segment`.
+_SEGMENT_SAFE_RE = re.compile(r"[^\w\-.:@ ]")
 
 
 def validate_namespace(name: str) -> bool:
     """Check whether *name* is a valid namespace identifier.
 
-    Valid names contain word characters, hyphens, dots, colons, slashes, @,
-    and spaces, with a maximum length of 255.
+    Valid names contain word characters, hyphens, dots, colons, @, and spaces,
+    with a maximum length of 255.
     """
     return bool(_NS_NAME_RE.match(name))
+
+
+def sanitize_namespace_segment(name: str) -> str:
+    """Strip whitespace and replace disallowed characters with ``_``.
+
+    Shared by the ingest pipeline (``cli/ingest_cmd.py``) and the multi-agent
+    tool (``server/tools/multi_agent.py``) so both produce namespace segments
+    that satisfy :data:`_NS_NAME_RE`. Empty-input handling is the caller's
+    responsibility so this helper has no error path.
+    """
+    return _SEGMENT_SAFE_RE.sub("_", name.strip())
 
 
 def _ensure_valid_namespace(name: str) -> None:
     """Raise ``StorageError`` if *name* fails :func:`validate_namespace`."""
     if not validate_namespace(name):
         raise StorageError(
-            f"Invalid namespace: {name!r} (allowed characters: word, -, ., :, /, @, space; max 255)"
+            f"Invalid namespace: {name!r} (allowed characters: word, -, ., :, @, space; max 255)"
         )
 
 

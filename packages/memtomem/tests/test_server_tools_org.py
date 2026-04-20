@@ -101,17 +101,20 @@ class TestNamespace:
         assert ns["ns-a"] == 2
         assert ns["ns-b"] == 1
 
-    @pytest.mark.parametrize("bad", ["bad name!", "no\ttab", 'quote"here', "a" * 256])
+    @pytest.mark.parametrize(
+        "bad",
+        ["bad name!", "no\ttab", 'quote"here', "a" * 256, "agent/legacy"],
+    )
     async def test_set_namespace_meta_rejects_invalid(self, storage, bad):
         with pytest.raises(StorageError, match="Invalid namespace"):
             await storage.set_namespace_meta(bad, description="x")
 
-    async def test_set_namespace_meta_accepts_agent_slash_form(self, storage):
-        """``agent/{id}`` passes validation after widening ``_NS_NAME_RE``."""
-        await storage.set_namespace_meta("agent/alpha", description="multi-agent ns")
-        meta = await storage.get_namespace_meta("agent/alpha")
+    async def test_set_namespace_meta_accepts_agent_runtime_form(self, storage):
+        """``agent-runtime:{id}`` is the canonical multi-agent namespace format (#318)."""
+        await storage.set_namespace_meta("agent-runtime:alpha", description="multi-agent ns")
+        meta = await storage.get_namespace_meta("agent-runtime:alpha")
         assert meta is not None
-        assert meta["namespace"] == "agent/alpha"
+        assert meta["namespace"] == "agent-runtime:alpha"
 
     async def test_rename_namespace_rejects_invalid_target(self, storage):
         chunks = [make_chunk(content="x", namespace="source-ns")]

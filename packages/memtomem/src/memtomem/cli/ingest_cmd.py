@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 import click
+
+from memtomem.storage.sqlite_namespace import sanitize_namespace_segment
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -52,11 +53,6 @@ _TAG_PREFIXES: tuple[tuple[str, str], ...] = (
     ("user_", "user"),
     ("reference_", "reference"),
 )
-
-# Mirrors _NS_NAME_RE in storage/sqlite_namespace.py. Any character outside
-# this set in the derived slug is replaced with ``_`` before we hand the
-# namespace to the index engine.
-_NS_SAFE_RE = re.compile(r"[^\w\-.:@ ]")
 
 _NAMESPACE_PREFIX = "claude-memory:"
 
@@ -314,8 +310,7 @@ def _build_namespace(slug: str, prefix: str = _NAMESPACE_PREFIX) -> str:
     replaced with ``_`` so downstream storage never rejects the namespace.
     Default *prefix* is ``claude-memory:`` for backward compatibility.
     """
-    safe = _NS_SAFE_RE.sub("_", slug)
-    return f"{prefix}{safe}"
+    return f"{prefix}{sanitize_namespace_segment(slug)}"
 
 
 def _tags_for_file(file_path: Path) -> set[str]:

@@ -2,27 +2,16 @@
 
 from __future__ import annotations
 
-import re
-
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.storage.sqlite_namespace import sanitize_namespace_segment
 
-# Characters not in the namespace allowlist (mirrors ``_NS_SAFE_RE`` in
-# ``cli/ingest_cmd.py``). Substituted to ``_`` so a caller-supplied
-# ``agent_id`` cannot smuggle a second ``/`` separator into the generated
-# ``agent/{agent_id}`` namespace — keeping the agent namespace at depth 1.
-_AGENT_ID_SAFE_RE = re.compile(r"[^\w\-.:@ ]")
-
-
-def _sanitize_agent_id(agent_id: str) -> str:
-    """Strip surrounding whitespace and replace disallowed chars with ``_``.
-
-    Returns the sanitized form; emptiness check is the caller's responsibility
-    so the sanitizer itself has no error paths.
-    """
-    return _AGENT_ID_SAFE_RE.sub("_", agent_id.strip())
+# Automatic namespace prefix for the multi-agent tool. Follows the
+# ``{bucket}-{kind}:`` convention used by the ingest pipeline
+# (``claude-memory:``, ``codex-memory:``) — see #318 for the rule.
+_AGENT_NAMESPACE_PREFIX = "agent-runtime:"
 
 
 @mcp.tool()
@@ -36,8 +25,9 @@ async def mem_agent_register(
 ) -> str:
     """Register an agent in the multi-agent memory system.
 
-    Creates a namespace for the agent (agent/{agent_id}) and optionally
-    registers metadata. If the agent is already registered, updates metadata.
+    Creates a namespace for the agent (``agent-runtime:{agent_id}``) and
+    optionally registers metadata. If the agent is already registered,
+    updates metadata.
 
     Args:
         agent_id: Unique identifier for the agent
@@ -46,11 +36,11 @@ async def mem_agent_register(
     """
     if not agent_id or not agent_id.strip():
         return "Error: agent_id must be non-empty."
-    agent_id = _sanitize_agent_id(agent_id)
+    agent_id = sanitize_namespace_segment(agent_id)
     if not agent_id:
         return "Error: agent_id must contain at least one allowed character."
     app = _get_app(ctx)
-    namespace = f"agent/{agent_id}"
+    namespace = f"{_AGENT_NAMESPACE_PREFIX}{agent_id}"
 
     await app.storage.set_namespace_meta(namespace, description=description, color=color)
 
@@ -94,13 +84,13 @@ async def mem_agent_search(
     if agent_id is not None and not agent_id.strip():
         return "Error: agent_id must be non-empty if provided."
     if agent_id is not None:
-        agent_id = _sanitize_agent_id(agent_id)
+        agent_id = sanitize_namespace_segment(agent_id)
         if not agent_id:
             return "Error: agent_id must contain at least one allowed character."
     app = _get_app(ctx)
     from memtomem.server.formatters import _format_results
 
-    agent_ns = f"agent/{agent_id}" if agent_id else app.current_namespace
+    agent_ns = f"{_AGENT_NAMESPACE_PREFIX}{agent_id}" if agent_id else app.current_namespace
 
     # Build namespace filter
     if include_shared and agent_ns:
@@ -138,7 +128,7 @@ async def mem_agent_share(
 
     Args:
         chunk_id: UUID of the chunk to share
-        target: Target namespace — 'shared' or 'agent/{agent_id}'
+        target: Target namespace — 'shared' or 'agent-runtime:{agent_id}'
     """
     from uuid import UUID
 

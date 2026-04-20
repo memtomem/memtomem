@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 ## [Unreleased]
 
 ### Added
+- **`mm agent migrate` CLI**: renames legacy `agent/{id}` namespaces to
+  `agent-runtime:{id}` (see `### Changed` below). Pass `--dry-run` to preview
+  without applying. Safe to re-run — namespaces already in the new format
+  are skipped (#318).
 - **Wizard preset namespace rules**: `mm init` now appends matching
   `NamespacePolicyRule` entries to `namespace.rules` when you accept a
   provider category, so auto-discovered Claude-projects memory dirs route
@@ -29,6 +33,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   three knobs plus `rerank.enabled` are runtime-tunable via `mm config set`
   and the Web UI — no restart required. `provider`/`model`/`api_key` still
   need a restart (reranker instance is cached).
+
+### Changed
+- **Multi-agent namespace format**: `mem_agent_register` / `mem_agent_search`
+  now generate `agent-runtime:{agent_id}` instead of the legacy
+  `agent/{agent_id}`, aligning with the `{bucket}-{kind}:` convention used by
+  `claude-memory:` and `codex-memory:` (#318). `/` is dropped from
+  `_NS_NAME_RE` (reverting the temporary widening in #319) since no live
+  caller needs it, and the duplicated `_NS_SAFE_RE` (ingest) +
+  `_AGENT_ID_SAFE_RE` (multi-agent) sanitizers are consolidated into
+  `sanitize_namespace_segment` in `storage/sqlite_namespace.py` (no allowlist
+  change). Existing `agent/{id}` namespaces can be migrated with
+  `mm agent migrate`.
 
 ### Fixed
 - **Reranker candidate pool is now actually wired**: `RerankConfig.top_k`

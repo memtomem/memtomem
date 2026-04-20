@@ -15,6 +15,7 @@ def cli() -> None:
 
 # Register subcommands (lazy imports to keep startup fast)
 def _register() -> None:
+    from memtomem.cli.agent_cmd import agent
     from memtomem.cli.config_cmd import config
     from memtomem.cli.context_cmd import context
     from memtomem.cli.embedding_cmd import embedding_reset
@@ -46,6 +47,7 @@ def _register() -> None:
     cli.add_command(watchdog)
     cli.add_command(web)
     cli.add_command(shell)
+    cli.add_command(agent)
 
 
 _register()

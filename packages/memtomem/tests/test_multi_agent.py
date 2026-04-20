@@ -1,13 +1,20 @@
-"""Tests for multi-agent tool helpers (``mem_agent_*``)."""
+"""Tests for multi-agent namespace helpers (``mem_agent_*``).
+
+The sanitizer used by ``mem_agent_register`` / ``mem_agent_search`` lives in
+``storage/sqlite_namespace.py`` as ``sanitize_namespace_segment`` — shared
+with the ingest pipeline. These tests pin the behavior the multi-agent tool
+relies on (single-segment `agent_id` sanitization so the generated
+``agent-runtime:{id}`` namespace stays at depth 1).
+"""
 
 from __future__ import annotations
 
 import pytest
 
-from memtomem.server.tools.multi_agent import _sanitize_agent_id
+from memtomem.storage.sqlite_namespace import sanitize_namespace_segment
 
 
-class TestSanitizeAgentId:
+class TestSanitizeNamespaceSegment:
     @pytest.mark.parametrize(
         "raw, expected",
         [
@@ -22,12 +29,12 @@ class TestSanitizeAgentId:
         ],
     )
     def test_sanitize_replaces_disallowed(self, raw, expected):
-        assert _sanitize_agent_id(raw) == expected
+        assert sanitize_namespace_segment(raw) == expected
 
     def test_sanitize_preserves_allowed_chars(self):
         allowed = "abc_123-xyz.foo:bar@host"
-        assert _sanitize_agent_id(allowed) == allowed
+        assert sanitize_namespace_segment(allowed) == allowed
 
-    def test_sanitize_pure_separator_collapses_to_underscore(self):
-        """``agent_id="/"`` must not produce ``agent//`` (double separator)."""
-        assert _sanitize_agent_id("/") == "_"
+    def test_sanitize_pure_slash_collapses_to_underscore(self):
+        """``agent_id="/"`` must not produce ``agent-runtime://`` (double separator)."""
+        assert sanitize_namespace_segment("/") == "_"
