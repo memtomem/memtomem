@@ -9,6 +9,11 @@ CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
 
 @click.group(context_settings=CONTEXT_SETTINGS)
+@click.version_option(
+    package_name="memtomem",
+    prog_name="memtomem",
+    message="%(prog)s %(version)s",
+)
 def cli() -> None:
     """memtomem — markdown-first memory infrastructure for AI agents."""
 

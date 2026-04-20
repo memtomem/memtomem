@@ -45,6 +45,11 @@ class TestCLIGroup:
         assert result.exit_code == 0
         assert "markdown-first memory infrastructure" in result.output
 
+    def test_version_flag_prints_package_version(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["--version"])
+        assert result.exit_code == 0
+        assert result.output.strip().startswith("memtomem ")
+
     def test_registered_subcommands(self, runner: CliRunner) -> None:
         """All expected subcommands appear in help output."""
         result = runner.invoke(cli, ["--help"])

@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **`mm --version` flag** — Click's idiomatic entry point for version output,
+  added via `click.version_option` at the group level. Emits
+  `memtomem X.Y.Z`. (#330)
+
 ## [0.1.14] — 2026-04-21
 
 memtomem remains in **alpha**. APIs, defaults, and on-disk config surfaces
