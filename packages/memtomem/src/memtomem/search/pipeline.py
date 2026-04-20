@@ -15,6 +15,7 @@ from memtomem.config import (
     ContextWindowConfig,
     DecayConfig,
     MMRConfig,
+    RerankConfig,
     SearchConfig,
 )
 from memtomem.models import ContextInfo, NamespaceFilter, SearchResult
@@ -74,6 +75,7 @@ class SearchPipeline:
         mmr_config: MMRConfig | None = None,
         access_config: AccessConfig | None = None,
         reranker: object | None = None,
+        rerank_config: RerankConfig | None = None,
         expansion_config: object | None = None,
         importance_config: object | None = None,
         context_window_config: ContextWindowConfig | None = None,
@@ -86,6 +88,7 @@ class SearchPipeline:
         self._mmr_config = mmr_config or MMRConfig()
         self._access_config = access_config or AccessConfig()
         self._reranker = reranker
+        self._rerank_config = rerank_config
         self._expansion_config = expansion_config
         self._importance_config = importance_config
         self._context_window_config = context_window_config
@@ -112,6 +115,12 @@ class SearchPipeline:
         import hashlib
 
         ctx_win = self._resolve_context_window(context_window)
+        if self._reranker is not None and self._rerank_config is not None:
+            rerank_active = True
+            rerank_pool_key = self._rerank_config.top_k
+        else:
+            rerank_active = False
+            rerank_pool_key = 0
         raw = (
             f"{query}|{top_k}|{source_filter}|{tag_filter}|{namespace}"
             f"|bm25={self._config.enable_bm25}:{self._config.bm25_candidates}"
@@ -120,6 +129,7 @@ class SearchPipeline:
             f"|decay={self._decay_config.enabled}:{self._decay_config.half_life_days}"
             f"|mmr={self._mmr_config.enabled}:{self._mmr_config.lambda_param}"
             f"|ctx_win={ctx_win}"
+            f"|rerank={rerank_active}:{rerank_pool_key}"
         )
         return hashlib.md5(raw.encode()).hexdigest()
 
@@ -305,17 +315,25 @@ class SearchPipeline:
         )
 
         # Stage 3: fusion (or single-retriever passthrough)
+        # When reranking is active, widen the candidate pool so the
+        # cross-encoder can rescue items RRF ranked just outside top_k.
+        # Collapses to top_k when reranking is disabled — no behavior change.
+        if self._reranker is not None and self._rerank_config is not None:
+            rerank_pool = max(self._rerank_config.top_k, top_k)
+        else:
+            rerank_pool = top_k
+
         if use_bm25 and use_dense:
             fused = reciprocal_rank_fusion(
                 [bm25_results, dense_results],
                 k=self._config.rrf_k,
-                top_k=top_k,
+                top_k=rerank_pool,
                 weights=effective_weights,
             )
         elif use_bm25:
-            fused = bm25_results[:top_k]
+            fused = bm25_results[:rerank_pool]
         elif use_dense:
-            fused = dense_results[:top_k]
+            fused = dense_results[:rerank_pool]
         else:
             fused = []
         stats.fused_total = len(fused)

@@ -119,6 +119,7 @@ async def create_components(config: Mem2MemConfig | None = None) -> Components:
         mmr_config=config.mmr,
         access_config=config.access,
         reranker=reranker,
+        rerank_config=config.rerank,
         expansion_config=config.query_expansion,
         importance_config=config.importance,
         context_window_config=config.context_window,
