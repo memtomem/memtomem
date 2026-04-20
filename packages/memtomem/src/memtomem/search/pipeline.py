@@ -116,11 +116,10 @@ class SearchPipeline:
 
         ctx_win = self._resolve_context_window(context_window)
         if self._reranker is not None and self._rerank_config is not None:
-            rerank_active = True
-            rerank_pool_key = self._rerank_config.top_k
+            rcfg = self._rerank_config
+            rerank_signal = f"on:{rcfg.oversample}:{rcfg.min_pool}:{rcfg.max_pool}"
         else:
-            rerank_active = False
-            rerank_pool_key = 0
+            rerank_signal = "off"
         raw = (
             f"{query}|{top_k}|{source_filter}|{tag_filter}|{namespace}"
             f"|bm25={self._config.enable_bm25}:{self._config.bm25_candidates}"
@@ -129,7 +128,7 @@ class SearchPipeline:
             f"|decay={self._decay_config.enabled}:{self._decay_config.half_life_days}"
             f"|mmr={self._mmr_config.enabled}:{self._mmr_config.lambda_param}"
             f"|ctx_win={ctx_win}"
-            f"|rerank={rerank_active}:{rerank_pool_key}"
+            f"|rerank={rerank_signal}"
         )
         return hashlib.md5(raw.encode()).hexdigest()
 
@@ -317,9 +316,16 @@ class SearchPipeline:
         # Stage 3: fusion (or single-retriever passthrough)
         # When reranking is active, widen the candidate pool so the
         # cross-encoder can rescue items RRF ranked just outside top_k.
-        # Collapses to top_k when reranking is disabled — no behavior change.
+        # pool = clamp(oversample * top_k, [min_pool, max_pool]) — scales
+        # with the request and bounded by cost controls. Collapses to
+        # top_k when reranking is disabled so single-retriever passthrough
+        # size is unchanged.
         if self._reranker is not None and self._rerank_config is not None:
-            rerank_pool = max(self._rerank_config.top_k, top_k)
+            rcfg = self._rerank_config
+            rerank_pool = max(
+                rcfg.min_pool,
+                min(rcfg.max_pool, int(rcfg.oversample * top_k)),
+            )
         else:
             rerank_pool = top_k
 

@@ -342,15 +342,72 @@ class RerankConfig(BaseSettings):
     enabled: bool = False
     provider: str = "fastembed"  # "cohere" | "local" | "fastembed"
     model: str = "Xenova/ms-marco-MiniLM-L-6-v2"
-    top_k: int = 20  # candidates to pass to reranker
     api_key: str = ""
 
-    @field_validator("top_k")
+    # Candidate pool (Stage 3b oversample) — the reranker sees
+    # ``max(min_pool, min(max_pool, int(oversample * response_top_k)))``
+    # items, then returns the caller's response top_k. Defaults give the
+    # classic 2× oversample at top_k=10 (pool=20) while scaling with
+    # larger requests.
+    oversample: float = 2.0
+    min_pool: int = 20
+    max_pool: int = 200
+
+    # Deprecated: superseded by oversample/min_pool/max_pool. Kept as a
+    # field so legacy config.json and MEMTOMEM_RERANK__TOP_K env vars
+    # still load without errors; ``_migrate_legacy_top_k`` rewrites it
+    # to ``min_pool`` during validation. Slated for removal in 0.3.
+    top_k: int = 20
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_top_k(cls, data: object) -> object:
+        if not isinstance(data, dict) or "top_k" not in data:
+            return data
+        import warnings
+
+        if "min_pool" in data:
+            warnings.warn(
+                "rerank.top_k is deprecated and is ignored when rerank.min_pool "
+                "is set. Remove rerank.top_k from your config. "
+                "(Slated for removal in memtomem 0.3.)",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            data.pop("top_k")
+        else:
+            warnings.warn(
+                "rerank.top_k is deprecated; migrating to rerank.min_pool. "
+                "Use rerank.oversample + rerank.min_pool + rerank.max_pool to "
+                "scale the reranker candidate pool with the request top_k. "
+                "(Slated for removal in memtomem 0.3.)",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            data["min_pool"] = data.pop("top_k")
+        return data
+
+    @field_validator("top_k", "min_pool", "max_pool")
     @classmethod
     def must_be_positive(cls, v: int, info: ValidationInfo) -> int:
         if v <= 0:
             raise ValueError(f"{info.field_name} must be positive, got {v}")
         return v
+
+    @field_validator("oversample")
+    @classmethod
+    def oversample_must_be_positive(cls, v: float, info: ValidationInfo) -> float:
+        if v <= 0:
+            raise ValueError(f"{info.field_name} must be positive, got {v}")
+        return v
+
+    @model_validator(mode="after")
+    def _check_pool_bounds(self) -> "RerankConfig":
+        if self.max_pool < self.min_pool:
+            raise ValueError(
+                f"rerank.max_pool ({self.max_pool}) must be >= rerank.min_pool ({self.min_pool})"
+            )
+        return self
 
 
 class QueryExpansionConfig(BaseSettings):
@@ -544,6 +601,10 @@ MUTABLE_FIELDS: dict[str, set[str]] = {
     "decay": {"enabled", "half_life_days"},
     "mmr": {"enabled", "lambda_param"},
     "namespace": {"default_namespace", "enable_auto_ns", "rules"},
+    # ``provider``/``model``/``api_key`` require a restart (reranker
+    # instance is cached on startup), so only the pool-sizing knobs are
+    # runtime-mutable.
+    "rerank": {"enabled", "oversample", "min_pool", "max_pool"},
 }
 
 FIELD_CONSTRAINTS: dict[str, dict] = {
@@ -574,6 +635,10 @@ FIELD_CONSTRAINTS: dict[str, dict] = {
     "namespace.default_namespace": {"type": str},
     "namespace.enable_auto_ns": {"type": bool},
     "namespace.rules": {"type": list, "item_type": NamespacePolicyRule},
+    "rerank.enabled": {"type": bool},
+    "rerank.oversample": {"type": float, "min": 0.1, "max": 10.0},
+    "rerank.min_pool": {"type": int, "min": 1, "max": 1000},
+    "rerank.max_pool": {"type": int, "min": 1, "max": 1000},
 }
 
 

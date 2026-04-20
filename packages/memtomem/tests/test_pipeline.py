@@ -206,26 +206,17 @@ class TestRerankCandidatePool:
             rerank_config=rerank_config,
         )
 
-    @pytest.mark.asyncio
-    async def test_reranker_receives_widened_pool_rescuing_outranked_chunk(self):
-        """RRF ranks the relevant chunk at position 15; rerank_config.top_k=20
-        must let the cross-encoder see it and surface it into the response."""
-        from memtomem.config import RerankConfig
-
-        # 20 candidates, relevant one at BM25 rank 15 (0-indexed: 14)
-        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(20)]
-        relevant = fused_input[14]
-
-        received_pool_size: list[int] = []
-
-        class ScoringReranker:
+    @staticmethod
+    def _probe_reranker(received: list[int], target_chunk_id=None):
+        class _Probe:
             async def rerank(self, query, results, top_k):
-                received_pool_size.append(len(results))
-                # Score the "relevant" chunk highest, everything else near zero.
+                received.append(len(results))
+                if target_chunk_id is None:
+                    return results[:top_k]
                 scored = [
                     SearchResult(
                         chunk=r.chunk,
-                        score=1.0 if r.chunk.id == relevant.chunk.id else 0.01,
+                        score=1.0 if r.chunk.id == target_chunk_id else 0.01,
                         rank=r.rank,
                         source="reranked",
                     )
@@ -234,18 +225,29 @@ class TestRerankCandidatePool:
                 scored.sort(key=lambda r: r.score, reverse=True)
                 return scored[:top_k]
 
+        return _Probe()
+
+    @pytest.mark.asyncio
+    async def test_reranker_receives_widened_pool_rescuing_outranked_chunk(self):
+        """RRF ranks the relevant chunk at position 15; the default
+        ``oversample=2.0`` + ``min_pool=20`` must let the cross-encoder see
+        it and surface it into the response."""
+        from memtomem.config import RerankConfig
+
+        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(20)]
+        relevant = fused_input[14]
+
+        received_pool_size: list[int] = []
         pipeline = self._make_pipeline(
             fused_input,
-            reranker=ScoringReranker(),
-            rerank_config=RerankConfig(enabled=True, top_k=20),
+            reranker=self._probe_reranker(received_pool_size, relevant.chunk.id),
+            rerank_config=RerankConfig(enabled=True),
         )
 
         results, _ = await pipeline.search("anything", top_k=10)
 
-        # Reranker must receive the widened pool, not the response top_k.
+        # Default pool = max(20, min(200, 2.0*10)) = 20.
         assert received_pool_size == [20]
-        # And the relevant chunk — originally at RRF position 15 — must now
-        # be first in the response.
         assert results[0].chunk.id == relevant.chunk.id
         assert len(results) == 10
 
@@ -258,8 +260,46 @@ class TestRerankCandidatePool:
         results, _ = await pipeline.search("anything", top_k=10)
         assert len(results) == 10
 
-    def test_cache_key_changes_when_rerank_top_k_changes(self):
-        """Enabling rerank or changing ``rerank.top_k`` must bust the cache."""
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "top_k,oversample,min_pool,max_pool,expected_pool",
+        [
+            (10, 2.0, 20, 200, 20),  # default knobs at default top_k → 20
+            (5, 2.0, 20, 200, 20),  # tiny request → floored at min_pool
+            (20, 2.0, 20, 200, 40),  # scales with request (was stuck at 20 pre-fix)
+            (50, 2.0, 20, 200, 100),  # scales with request
+            (150, 2.0, 20, 200, 200),  # capped at max_pool
+            (10, 1.5, 20, 200, 20),  # 1.5× * 10 = 15, floored to 20
+            (40, 1.5, 20, 200, 60),  # 1.5× at mid-size
+            (10, 2.0, 1, 200, 20),  # min_pool=1 → 2×10 wins
+            (10, 2.0, 50, 200, 50),  # elevated floor wins
+        ],
+    )
+    async def test_pool_size_scaling_table(
+        self, top_k, oversample, min_pool, max_pool, expected_pool
+    ):
+        """Pool formula: ``max(min_pool, min(max_pool, int(oversample*top_k)))``."""
+        from memtomem.config import RerankConfig
+
+        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(250)]
+        received: list[int] = []
+        pipeline = self._make_pipeline(
+            fused_input,
+            reranker=self._probe_reranker(received),
+            rerank_config=RerankConfig(
+                enabled=True,
+                oversample=oversample,
+                min_pool=min_pool,
+                max_pool=max_pool,
+            ),
+        )
+
+        await pipeline.search("q", top_k=top_k)
+        assert received == [expected_pool]
+
+    def test_cache_key_changes_when_pool_knobs_change(self):
+        """Enabling rerank or changing any of oversample/min_pool/max_pool
+        must bust the cache."""
         from memtomem.config import RerankConfig
 
         class DummyReranker:
@@ -267,21 +307,73 @@ class TestRerankCandidatePool:
                 return results[:top_k]
 
         base = self._make_pipeline([], reranker=None, rerank_config=None)
-        key_no_rerank = base._cache_key("q", 10, None, None, None)
+        key_off = base._cache_key("q", 10, None, None, None)
 
-        with_20 = self._make_pipeline(
-            [],
-            reranker=DummyReranker(),
-            rerank_config=RerankConfig(enabled=True, top_k=20),
+        def _key_for(**kwargs):
+            pipe = self._make_pipeline(
+                [],
+                reranker=DummyReranker(),
+                rerank_config=RerankConfig(enabled=True, **kwargs),
+            )
+            return pipe._cache_key("q", 10, None, None, None)
+
+        key_default = _key_for()
+        key_oversample = _key_for(oversample=3.0)
+        key_min = _key_for(min_pool=30)
+        key_max = _key_for(max_pool=100)
+
+        assert len({key_off, key_default, key_oversample, key_min, key_max}) == 5
+
+    def test_legacy_top_k_migrates_to_min_pool_with_deprecation(self):
+        """``{rerank.top_k: 30}`` in legacy configs must warn and forward to min_pool."""
+        import warnings
+
+        from memtomem.config import RerankConfig
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cfg = RerankConfig(enabled=True, top_k=30)
+
+        assert cfg.min_pool == 30
+        assert any(
+            issubclass(w.category, DeprecationWarning) and "rerank.top_k" in str(w.message)
+            for w in caught
         )
-        key_20 = with_20._cache_key("q", 10, None, None, None)
 
-        with_50 = self._make_pipeline(
-            [],
-            reranker=DummyReranker(),
-            rerank_config=RerankConfig(enabled=True, top_k=50),
+    def test_legacy_top_k_ignored_when_min_pool_also_set(self):
+        import warnings
+
+        from memtomem.config import RerankConfig
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cfg = RerankConfig(enabled=True, top_k=99, min_pool=30)
+
+        assert cfg.min_pool == 30
+        assert any(
+            issubclass(w.category, DeprecationWarning) and "ignored" in str(w.message)
+            for w in caught
         )
-        key_50 = with_50._cache_key("q", 10, None, None, None)
 
-        assert key_no_rerank != key_20
-        assert key_20 != key_50
+    def test_max_pool_must_be_at_least_min_pool(self):
+        from memtomem.config import RerankConfig
+
+        with pytest.raises(ValueError, match="max_pool.*must be >= .*min_pool"):
+            RerankConfig(enabled=True, min_pool=50, max_pool=10)
+
+    def test_oversample_must_be_positive(self):
+        from memtomem.config import RerankConfig
+
+        with pytest.raises(ValueError, match="oversample"):
+            RerankConfig(enabled=True, oversample=0.0)
+
+    def test_pool_knobs_registered_as_mutable(self):
+        """Runtime mutation via `mm config set` / Web UI PATCH must accept
+        oversample/min_pool/max_pool (provider/model still need restart)."""
+        from memtomem.config import FIELD_CONSTRAINTS, MUTABLE_FIELDS
+
+        assert MUTABLE_FIELDS["rerank"] == {"enabled", "oversample", "min_pool", "max_pool"}
+        assert FIELD_CONSTRAINTS["rerank.oversample"]["type"] is float
+        assert FIELD_CONSTRAINTS["rerank.min_pool"]["type"] is int
+        assert FIELD_CONSTRAINTS["rerank.max_pool"]["type"] is int
+        assert FIELD_CONSTRAINTS["rerank.enabled"]["type"] is bool
