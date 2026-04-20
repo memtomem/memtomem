@@ -367,6 +367,32 @@ class TestRerankCandidatePool:
         with pytest.raises(ValueError, match="oversample"):
             RerankConfig(enabled=True, oversample=0.0)
 
+    @pytest.mark.asyncio
+    async def test_rerank_failure_falls_back_to_top_k_not_rerank_pool(self):
+        """If the reranker raises, the caller must still get ``top_k`` items —
+        not the wider ``rerank_pool`` that fusion produced upstream.
+
+        Regression guard: PR #308 widened fusion to rerank_pool but the
+        ``except`` branch left ``fused`` at that wider size, leaking pool
+        size as response size.
+        """
+        from memtomem.config import RerankConfig
+
+        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(20)]
+
+        class BrokenReranker:
+            async def rerank(self, query, results, top_k):
+                raise RuntimeError("model unavailable")
+
+        pipeline = self._make_pipeline(
+            fused_input,
+            reranker=BrokenReranker(),
+            rerank_config=RerankConfig(enabled=True),
+        )
+
+        results, _ = await pipeline.search("anything", top_k=10)
+        assert len(results) == 10
+
     def test_pool_knobs_registered_as_mutable(self):
         """Runtime mutation via `mm config set` / Web UI PATCH must accept
         oversample/min_pool/max_pool (provider/model still need restart)."""

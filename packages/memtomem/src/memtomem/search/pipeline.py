@@ -350,6 +350,9 @@ class SearchPipeline:
                 fused = await self._reranker.rerank(query, fused, top_k=top_k)
             except Exception as exc:
                 logger.warning("Reranking failed, using original order: %s", exc)
+                # Fallback must still honor the caller's response size —
+                # fused is at rerank_pool (e.g. 20) right now, not top_k.
+                fused = fused[:top_k]
 
         # Filter by source file if requested
         if source_filter:
