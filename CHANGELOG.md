@@ -7,6 +7,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [0.1.13] — 2026-04-20
 
+memtomem remains in **alpha**. APIs, defaults, and on-disk config surfaces
+may still shift between 0.1.x releases — external feedback and issue
+reports are especially welcome at
+[github.com/memtomem/memtomem/issues](https://github.com/memtomem/memtomem/issues).
+
 ### Added
 - **`mm agent migrate` CLI**: renames legacy `agent/{id}` namespaces to
   `agent-runtime:{id}` (see `### Changed` below). Pass `--dry-run` to preview
