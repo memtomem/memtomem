@@ -258,6 +258,107 @@ def _step_memory_dir(state: dict) -> None:
     click.echo()
 
 
+# Namespace policy rule templates applied when the user accepts a provider
+# category. Pairs with ``indexing.memory_dirs`` entries added in the same
+# wizard step so auto_ns doesn't collapse ``~/.claude/projects/FOO/memory/**``
+# to the generic ``default`` namespace (issue #296).
+#
+# ``claude-memory`` uses ``{ancestor:1}`` (the project-id folder above the
+# generic ``memory`` basename); single-dir categories use literal namespaces.
+# The flat ``claude-plans`` / ``codex`` labels are deliberately conservative:
+# RFC #304 may migrate these into a vendor/product hierarchy later. Re-visit
+# when that issue settles a wire format.
+_PROVIDER_RULE_TEMPLATES: dict[str, tuple[str, str]] = {
+    "claude-memory": ("~/.claude/projects/*/memory/**", "claude:{ancestor:1}"),
+    "claude-plans": ("~/.claude/plans/**", "claude-plans"),
+    "codex": ("~/.codex/memories/**", "codex"),
+}
+
+# Lock placeholders permitted in the preset table until RFC #304 settles the
+# hierarchy format. New templates beyond ``{ancestor:1}`` should get an
+# explicit review rather than a silent extension.
+_VALID_PRESET_PLACEHOLDERS: frozenset[str] = frozenset({"{ancestor:1}"})
+
+assert all(
+    not any(tok in ns for tok in ("{", "}")) or any(tok in ns for tok in _VALID_PRESET_PLACEHOLDERS)
+    for _, ns in _PROVIDER_RULE_TEMPLATES.values()
+), "preset namespaces may only use _VALID_PRESET_PLACEHOLDERS until #304 decides the hierarchy"
+
+
+def _expand_glob_for_compare(path_glob: str) -> str:
+    """Return ``path_glob`` with ``~`` expanded for dedup comparison.
+
+    Storage keeps the literal ``~`` form (matches what the user typed and
+    what the current wizard writes), but dedup should treat
+    ``~/.codex/memories/**`` and ``/Users/foo/.codex/memories/**`` as the
+    same rule so re-running ``mm init`` is idempotent regardless of which
+    form earlier runs or manual edits produced.
+    """
+    v = path_glob.strip()
+    if v == "~" or v.startswith("~/"):
+        v = str(Path(v).expanduser())
+    return v
+
+
+def _rule_matches_existing(new_path_glob: str, existing_rules: list[dict]) -> bool:
+    """Return True if ``new_path_glob`` is already covered by an existing rule.
+
+    Comparison is on ``path_glob`` only (after ``~`` expansion on both sides).
+    When a user already has a rule for the same glob with a different
+    namespace, the wizard respects that rule and skips the preset — the
+    user's manual override wins. Returning True signals "skip the wizard
+    rule"; the caller reports it in the banner so the skip isn't silent.
+    """
+    target = _expand_glob_for_compare(new_path_glob)
+    for rule in existing_rules:
+        existing_glob = rule.get("path_glob")
+        if not isinstance(existing_glob, str):
+            continue
+        if _expand_glob_for_compare(existing_glob) == target:
+            return True
+    return False
+
+
+def _proposed_rule_for_category(category: str) -> dict | None:
+    """Return the ``{path_glob, namespace}`` dict for a category, or None."""
+    template = _PROVIDER_RULE_TEMPLATES.get(category)
+    if template is None:
+        return None
+    path_glob, namespace = template
+    return {"path_glob": path_glob, "namespace": namespace}
+
+
+def _emit_rules_banner(
+    proposed: list[tuple[str, dict]],
+    skipped: list[tuple[str, dict]],
+) -> None:
+    """Print the pre-write rules banner.
+
+    ``proposed`` and ``skipped`` carry ``(category, rule_dict)`` pairs.
+    Banner is emitted only when at least one rule was offered; an
+    all-skipped run still prints a one-liner so the user knows the wizard
+    looked at rules but decided existing ones covered them.
+    """
+    if not proposed and not skipped:
+        return
+    click.echo("  Namespace rules:")
+    if not proposed and skipped:
+        n = len(skipped)
+        click.secho(
+            f"    {n} rule(s) already managed, nothing to add.",
+            fg="yellow",
+        )
+        click.echo()
+        return
+    for _, rule in proposed:
+        line = f"    + {rule['path_glob']:<40} → {rule['namespace']}"
+        click.secho(line, fg="green")
+    for _, rule in skipped:
+        line = f"    ⏭ {rule['path_glob']:<40} (existing rule kept)"
+        click.secho(line, fg="yellow")
+    click.echo()
+
+
 def _step_provider_dirs(state: dict) -> None:
     """Opt-in indexing of provider memory folders detected on this machine.
 
@@ -266,6 +367,13 @@ def _step_provider_dirs(state: dict) -> None:
     let the user pick exactly which surfaces to make searchable. Categories
     with zero detected directories are skipped silently — the step is a
     no-op on machines without any of these tools installed.
+
+    When a category is accepted and has a matching preset in
+    ``_PROVIDER_RULE_TEMPLATES``, the corresponding ``NamespacePolicyRule``
+    is collected into ``state['provider_rules']`` for the write step to
+    merge into ``namespace.rules``. This addresses #296: auto_ns collapses
+    to ``default`` for memory_dirs whose basename is non-discriminating
+    (``memory`` / ``plans`` / ``memories``).
     """
     step_header(4, "Provider Memory Folders")
     from memtomem.config import _detect_provider_dirs
@@ -285,6 +393,7 @@ def _step_provider_dirs(state: dict) -> None:
     click.echo()
 
     selected: list[Path] = []
+    accepted_categories: list[str] = []
 
     if "claude-memory" in available:
         n = len(available["claude-memory"])
@@ -294,6 +403,7 @@ def _step_provider_dirs(state: dict) -> None:
             default=False,
         ):
             selected.extend(available["claude-memory"])
+            accepted_categories.append("claude-memory")
 
     if "claude-plans" in available:
         if nav_confirm(
@@ -301,6 +411,7 @@ def _step_provider_dirs(state: dict) -> None:
             default=False,
         ):
             selected.extend(available["claude-plans"])
+            accepted_categories.append("claude-plans")
 
     if "codex" in available:
         if nav_confirm(
@@ -308,8 +419,14 @@ def _step_provider_dirs(state: dict) -> None:
             default=False,
         ):
             selected.extend(available["codex"])
+            accepted_categories.append("codex")
 
     state["provider_dirs"] = [str(p) for p in selected]
+    state["provider_rules"] = [
+        (cat, _proposed_rule_for_category(cat))
+        for cat in accepted_categories
+        if _proposed_rule_for_category(cat) is not None
+    ]
     if selected:
         click.secho(f"  Added {len(selected)} provider folder(s) to memory_dirs.", fg="green")
         click.echo("  New Claude Code projects created later won't be auto-indexed —")
@@ -784,6 +901,36 @@ def _write_config_and_summary(
                 raise SystemExit(1) from exc
             _drop_flat_keys(existing, fresh_drops)
 
+    # Namespace preset rules from accepted provider categories — append to
+    # existing ``namespace.rules`` (dedup by ``path_glob``, user rules win
+    # per the A-2 decision in #296's design thread). Mutates ``existing``
+    # directly because ``init_data["namespace"]`` intentionally doesn't
+    # carry ``rules`` (the merge loop would overwrite user rules via
+    # ``update``). Banner is printed *before* write so a partial failure
+    # surfaces what was attempted.
+    proposed_rules: list[tuple[str, dict]] = state.get("provider_rules") or []
+    if proposed_rules:
+        existing_ns = existing.setdefault("namespace", {})
+        raw_rules = existing_ns.get("rules")
+        existing_rules: list[dict] = raw_rules if isinstance(raw_rules, list) else []
+        to_append: list[tuple[str, dict]] = []
+        to_skip: list[tuple[str, dict]] = []
+        for cat, rule in proposed_rules:
+            if _rule_matches_existing(rule["path_glob"], existing_rules):
+                to_skip.append((cat, rule))
+            else:
+                to_append.append((cat, rule))
+        _emit_rules_banner(to_append, to_skip)
+        if to_append:
+            merged_rules = list(existing_rules)
+            for _, rule in to_append:
+                merged_rules.append(dict(rule))
+            existing_ns["rules"] = merged_rules
+        # Mark as wizard-touched so the Preserved block doesn't flag the
+        # merged-rule list as "leftover from a prior config" on a clean
+        # re-run where every preset is already present.
+        wizard_touched_keys.add("namespace.rules")
+
     # Merge: init fields overwrite, non-init sections/fields preserved
     for section, fields in init_data.items():
         if section not in existing:
@@ -1041,9 +1188,18 @@ def init(
 
         grouped = _detect_provider_dirs()
         provider_dirs: list[str] = []
+        provider_rules: list[tuple[str, dict]] = []
         for category in include_providers:
-            for d in grouped.get(category, []):
+            dirs_for_category = grouped.get(category, [])
+            for d in dirs_for_category:
                 provider_dirs.append(str(d))
+            # Mirror interactive parity: only register a preset rule when the
+            # category actually had detected dirs. A ``claude-memory`` rule
+            # with no Claude projects present is dead config.
+            if dirs_for_category:
+                rule = _proposed_rule_for_category(category)
+                if rule is not None:
+                    provider_rules.append((category, rule))
 
         state.update(
             {
@@ -1054,6 +1210,7 @@ def init(
                 "rerank_enabled": False,
                 "memory_dir": _memory_dir,
                 "provider_dirs": provider_dirs,
+                "provider_rules": provider_rules,
                 "db_path": db_path or str(Path("~/.memtomem").expanduser() / "memtomem.db"),
                 "enable_auto_ns": auto_ns,
                 "default_ns": namespace or "default",

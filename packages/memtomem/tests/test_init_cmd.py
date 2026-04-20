@@ -1196,3 +1196,328 @@ def test_memory_dirs_env_requires_json_array(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("MEMTOMEM_INDEXING__MEMORY_DIRS", "~/notes")
     with pytest.raises(Exception):  # noqa: BLE001 — pydantic SettingsError wraps JSONDecodeError
         Mem2MemConfig()
+
+
+class TestProviderPresetRules:
+    """Wizard appends matching ``NamespacePolicyRule`` entries to
+    ``namespace.rules`` when the user accepts a provider category (#296).
+
+    Without the preset, ``auto_ns`` collapses paths like
+    ``~/.claude/projects/FOO/memory/foo.md`` to the ``default`` namespace
+    because ``memory`` is a non-discriminating basename. The preset routes
+    the file under ``claude:FOO`` via the ``{ancestor:1}`` placeholder.
+    """
+
+    @pytest.mark.parametrize(
+        ("category", "expected_glob", "expected_ns"),
+        [
+            ("claude-memory", "~/.claude/projects/*/memory/**", "claude:{ancestor:1}"),
+            ("claude-plans", "~/.claude/plans/**", "claude-plans"),
+            ("codex", "~/.codex/memories/**", "codex"),
+        ],
+    )
+    def test_step_collects_rule_for_accepted_category(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        category: str,
+        expected_glob: str,
+        expected_ns: str,
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        target = tmp_path / category
+        target.mkdir()
+        grouped = {"claude-memory": [], "claude-plans": [], "codex": []}
+        grouped[category] = [target]
+        monkeypatch.setattr("memtomem.config._detect_provider_dirs", lambda: grouped)
+        monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: True)
+
+        state: dict = {}
+        init_cmd._step_provider_dirs(state)
+
+        rules = state.get("provider_rules", [])
+        assert len(rules) == 1
+        cat, rule = rules[0]
+        assert cat == category
+        assert rule == {"path_glob": expected_glob, "namespace": expected_ns}
+
+    def test_step_skips_rule_when_category_declined(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        codex = tmp_path / "codex"
+        codex.mkdir()
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": [codex]},
+        )
+        monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: False)
+
+        state: dict = {}
+        init_cmd._step_provider_dirs(state)
+        assert state.get("provider_rules") == []
+
+    def test_write_appends_preset_rules_to_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Accepted categories land as ``NamespacePolicyRule`` entries in
+        the persisted ``namespace.rules`` list."""
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        state = _make_init_state(tmp_path)
+        state["provider_rules"] = [
+            (
+                "claude-memory",
+                {"path_glob": "~/.claude/projects/*/memory/**", "namespace": "claude:{ancestor:1}"},
+            ),
+            ("codex", {"path_glob": "~/.codex/memories/**", "namespace": "codex"}),
+        ]
+        _write_config_and_summary(state, tmp_path)
+
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        rules = data["namespace"]["rules"]
+        assert {
+            "path_glob": "~/.claude/projects/*/memory/**",
+            "namespace": "claude:{ancestor:1}",
+        } in rules
+        assert {"path_glob": "~/.codex/memories/**", "namespace": "codex"} in rules
+
+    def test_write_is_idempotent_on_rerun(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Running ``mm init`` twice with the same accepted categories does
+        not duplicate rules — dedup is by ``path_glob``."""
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        state = _make_init_state(tmp_path)
+        state["provider_rules"] = [
+            ("codex", {"path_glob": "~/.codex/memories/**", "namespace": "codex"}),
+        ]
+
+        _write_config_and_summary(state, tmp_path)
+        _write_config_and_summary(state, tmp_path)
+
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        rules = data["namespace"]["rules"]
+        matching = [r for r in rules if r.get("path_glob") == "~/.codex/memories/**"]
+        assert len(matching) == 1, f"expected one codex rule, got {matching}"
+
+    def test_write_preserves_user_rule_on_same_glob_diff_namespace(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """User-authored rule with the preset's ``path_glob`` but a custom
+        ``namespace`` wins — the wizard does not overwrite it."""
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        # Seed config with a user-authored rule using the preset's glob.
+        config_dir = tmp_path / ".memtomem"
+        config_dir.mkdir()
+        (config_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "namespace": {
+                        "rules": [{"path_glob": "~/.codex/memories/**", "namespace": "my-codex"}]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        state = _make_init_state(tmp_path)
+        state["provider_rules"] = [
+            ("codex", {"path_glob": "~/.codex/memories/**", "namespace": "codex"}),
+        ]
+        _write_config_and_summary(state, tmp_path)
+
+        data = json.loads((config_dir / "config.json").read_text(encoding="utf-8"))
+        rules = data["namespace"]["rules"]
+        assert len(rules) == 1
+        assert rules[0]["namespace"] == "my-codex", "user override should be preserved"
+
+    def test_dedup_expanduser_normalizes_both_sides(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``~/.codex/memories/**`` and the expanded absolute form are
+        treated as the same rule for dedup purposes so manually edited
+        configs stay idempotent under ``mm init`` re-runs."""
+        from memtomem.cli.init_cmd import _rule_matches_existing
+
+        existing = [
+            {"path_glob": str(Path("~/.codex/memories/**").expanduser()), "namespace": "codex"},
+        ]
+        assert _rule_matches_existing("~/.codex/memories/**", existing) is True
+        assert _rule_matches_existing("~/.claude/plans/**", existing) is False
+
+    def test_include_provider_flag_writes_rule_when_dirs_present(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-interactive ``--include-provider`` parity: rule is appended
+        the same way as the interactive per-category prompt."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        codex = tmp_path / "codex"
+        codex.mkdir()
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": [codex]},
+        )
+
+        result = CliRunner().invoke(
+            init,
+            [
+                "--non-interactive",
+                "--memory-dir",
+                str(tmp_path / "memories"),
+                "--include-provider",
+                "codex",
+                "--mcp",
+                "skip",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        rules = data["namespace"]["rules"]
+        assert any(r.get("path_glob") == "~/.codex/memories/**" for r in rules)
+
+    def test_include_provider_flag_skips_rule_when_no_dirs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Asking for a category whose dirs don't exist on this machine
+        does NOT register a rule — parity with the interactive step skipping
+        empty categories keeps config clean of dead rules."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        result = CliRunner().invoke(
+            init,
+            [
+                "--non-interactive",
+                "--memory-dir",
+                str(tmp_path / "memories"),
+                "--include-provider",
+                "codex",
+                "--mcp",
+                "skip",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        rules = data.get("namespace", {}).get("rules", [])
+        assert rules == []
+
+    def test_banner_lists_proposed_and_skipped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Banner shows `+` for new rules and `⏭` for skipped (existing).
+        Pre-write output so a partial failure surfaces what was attempted."""
+        from click import unstyle
+
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        # Seed: codex rule already present, claude-plans not.
+        config_dir = tmp_path / ".memtomem"
+        config_dir.mkdir()
+        (config_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "namespace": {
+                        "rules": [{"path_glob": "~/.codex/memories/**", "namespace": "codex"}]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        state = _make_init_state(tmp_path)
+        state["provider_rules"] = [
+            ("claude-plans", {"path_glob": "~/.claude/plans/**", "namespace": "claude-plans"}),
+            ("codex", {"path_glob": "~/.codex/memories/**", "namespace": "codex"}),
+        ]
+        _write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "Namespace rules:" in out
+        assert "+ ~/.claude/plans/**" in out
+        assert "⏭ ~/.codex/memories/**" in out
+
+    def test_banner_silent_when_no_proposals(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """No accepted categories → no banner noise."""
+        from click import unstyle
+
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        state = _make_init_state(tmp_path)
+        state["provider_rules"] = []
+        _write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "Namespace rules:" not in out
+
+    def test_banner_all_skipped_one_liner(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Every proposed rule already exists → one-liner confirms the
+        wizard looked, instead of staying silent and leaving the user to
+        wonder whether rules were considered at all."""
+        from click import unstyle
+
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        config_dir = tmp_path / ".memtomem"
+        config_dir.mkdir()
+        (config_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "namespace": {
+                        "rules": [{"path_glob": "~/.codex/memories/**", "namespace": "codex"}]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        state = _make_init_state(tmp_path)
+        state["provider_rules"] = [
+            ("codex", {"path_glob": "~/.codex/memories/**", "namespace": "codex"}),
+        ]
+        _write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "already managed" in out
+        assert "nothing to add" in out
+
+    def test_preset_templates_only_use_allowed_placeholders(self) -> None:
+        """Lock the placeholder vocabulary until RFC #304 decides the
+        hierarchy format — extending the preset table beyond
+        ``{ancestor:1}`` needs an explicit review, not a silent edit."""
+        from memtomem.cli.init_cmd import (
+            _PROVIDER_RULE_TEMPLATES,
+            _VALID_PRESET_PLACEHOLDERS,
+        )
+
+        for _category, (_glob, namespace) in _PROVIDER_RULE_TEMPLATES.items():
+            if "{" in namespace or "}" in namespace:
+                # If placeholders are used, they must be one of the allowed set.
+                assert any(p in namespace for p in _VALID_PRESET_PLACEHOLDERS), (
+                    f"namespace {namespace!r} uses a placeholder outside "
+                    f"_VALID_PRESET_PLACEHOLDERS={_VALID_PRESET_PLACEHOLDERS}"
+                )

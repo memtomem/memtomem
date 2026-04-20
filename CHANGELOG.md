@@ -6,6 +6,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 ## [Unreleased]
 
 ### Added
+- **Wizard preset namespace rules**: `mm init` now appends matching
+  `NamespacePolicyRule` entries to `namespace.rules` when you accept a
+  provider category, so auto-discovered Claude-projects memory dirs route
+  to a meaningful namespace instead of collapsing to `default` (#296).
+  `claude-memory` → `claude:{ancestor:1}` (picks the project-id folder
+  above the generic `memory` basename); `claude-plans` → `claude-plans`;
+  `codex` → `codex`. Rules are deduplicated by `path_glob` (with `~`
+  expansion on both sides) so re-running `mm init` is idempotent, and
+  user-authored rules with the same `path_glob` but a different namespace
+  are preserved rather than overwritten. The flag-driven non-interactive
+  path (`--include-provider`) matches the interactive behavior. Labels are
+  deliberately flat pending RFC #304 (`{provider, product}` hierarchy).
 - **Reranker candidate-pool scaling**: `rerank.oversample` (default `2.0`),
   `rerank.min_pool` (default `20`), and `rerank.max_pool` (default `200`).
   The cross-encoder now sees
