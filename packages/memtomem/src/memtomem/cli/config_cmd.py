@@ -26,9 +26,16 @@ def config() -> None:
 
 @config.command("show")
 @click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
-def config_show(fmt: str) -> None:
+@click.option("--json", "as_json", is_flag=True, help="Shortcut for --format json.")
+def config_show(fmt: str, *, as_json: bool = False) -> None:
     """Show current configuration (API keys masked)."""
     from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
+
+    # --json is an alias for --format json (CONTRIBUTING "CLI output
+    # convention"); if both are passed, --json wins since it's the more
+    # specific intent.
+    if as_json:
+        fmt = "json"
 
     cfg = Mem2MemConfig()
     load_config_d(cfg)

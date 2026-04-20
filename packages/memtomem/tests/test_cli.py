@@ -145,6 +145,24 @@ class TestConfigCLI:
         assert result.exit_code == 0
         assert '"default_top_k": 10' in result.output
 
+    @patch("memtomem.config.load_config_overrides")
+    @patch("memtomem.config.Mem2MemConfig")
+    def test_config_show_json_flag_matches_format_json(
+        self, mock_cfg_cls, mock_load, runner: CliRunner
+    ) -> None:
+        """--json is a documented alias for --format json (CONTRIBUTING "CLI
+        output convention"). Both paths must emit identical output so the
+        alias can't quietly diverge."""
+        mock_cfg = MagicMock()
+        mock_cfg.model_dump.return_value = {"search": {"default_top_k": 10}}
+        mock_cfg_cls.return_value = mock_cfg
+
+        flag = runner.invoke(cli, ["config", "show", "--json"])
+        fmt = runner.invoke(cli, ["config", "show", "--format", "json"])
+        assert flag.exit_code == 0
+        assert fmt.exit_code == 0
+        assert flag.output == fmt.output
+
     def test_config_set_bad_key_format(self, runner: CliRunner) -> None:
         """Key without a dot separator is rejected."""
         result = runner.invoke(cli, ["config", "set", "noperiod", "10"])

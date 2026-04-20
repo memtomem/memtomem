@@ -10,6 +10,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - **`mm --version` flag** — Click's idiomatic entry point for version output,
   added via `click.version_option` at the group level. Emits
   `memtomem X.Y.Z`. (#330)
+- **`mm config show --json`** — alias of `--format json`, added to align with
+  the documented CLI output convention (binary human/machine scenario uses
+  `--json`). Both flag forms emit identical output. (#332)
+
+### Changed
+
+- **Documented CLI output convention** — `CONTRIBUTING.md` now spells out
+  when to use `--json` (binary scenario) vs `--format [table|json|...]`
+  (genuine non-JSON modes like `plain` / `context` / `smart`), with a
+  forward-compatibility guidance to prefer `--format` when a command might
+  grow additional modes later. (#332)
 
 ## [0.1.14] — 2026-04-21
 

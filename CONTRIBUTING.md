@@ -77,6 +77,30 @@ exceptions in the decorator or by adding a response filter. Changing the
 deployment model without addressing this turns error messages into an
 information disclosure surface.
 
+## CLI output convention
+
+When a CLI command needs machine-readable output, pick the option shape by
+the command's output semantics, not by parity with any particular existing
+command:
+
+| When | Use |
+|------|-----|
+| The only meaningful alternative to default human-readable output is JSON (binary "human vs machine" scenario) | `--json` flag |
+| There are genuine non-JSON output modes beyond cosmetic variants — e.g. `plain`, `context`, `smart`, `diff` | `--format [table\|json\|...]` |
+
+Examples in the current CLI:
+
+- `--json` — `mm watchdog status`, `mm watchdog run`, `mm config show`
+  (alias of `--format json`).
+- `--format` — `mm search` (has `context`, `smart`), `mm recall` (has
+  `plain`), `mm config show` (keeps the original option alongside
+  `--json`).
+
+**If the two-mode nature of a new command is uncertain** — i.e. it's
+plausible a `context` / `digest` / `diff` mode gets added later — choose
+`--format` from the start. Migrating from `--json` flag to `--format` is a
+breaking change for scripts; going the other way isn't necessary.
+
 ## Contributor License Agreement (CLA)
 
 Before we can merge your first pull request, you need to sign the
