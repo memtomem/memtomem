@@ -2,10 +2,27 @@
 
 from __future__ import annotations
 
+import re
+
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+
+# Characters not in the namespace allowlist (mirrors ``_NS_SAFE_RE`` in
+# ``cli/ingest_cmd.py``). Substituted to ``_`` so a caller-supplied
+# ``agent_id`` cannot smuggle a second ``/`` separator into the generated
+# ``agent/{agent_id}`` namespace — keeping the agent namespace at depth 1.
+_AGENT_ID_SAFE_RE = re.compile(r"[^\w\-.:@ ]")
+
+
+def _sanitize_agent_id(agent_id: str) -> str:
+    """Strip surrounding whitespace and replace disallowed chars with ``_``.
+
+    Returns the sanitized form; emptiness check is the caller's responsibility
+    so the sanitizer itself has no error paths.
+    """
+    return _AGENT_ID_SAFE_RE.sub("_", agent_id.strip())
 
 
 @mcp.tool()
@@ -29,6 +46,9 @@ async def mem_agent_register(
     """
     if not agent_id or not agent_id.strip():
         return "Error: agent_id must be non-empty."
+    agent_id = _sanitize_agent_id(agent_id)
+    if not agent_id:
+        return "Error: agent_id must contain at least one allowed character."
     app = _get_app(ctx)
     namespace = f"agent/{agent_id}"
 
@@ -73,6 +93,10 @@ async def mem_agent_search(
     """
     if agent_id is not None and not agent_id.strip():
         return "Error: agent_id must be non-empty if provided."
+    if agent_id is not None:
+        agent_id = _sanitize_agent_id(agent_id)
+        if not agent_id:
+            return "Error: agent_id must contain at least one allowed character."
     app = _get_app(ctx)
     from memtomem.server.formatters import _format_results
 
