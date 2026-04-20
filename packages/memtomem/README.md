@@ -17,14 +17,20 @@ Markdown-first long-term memory infrastructure for AI agents. Hybrid keyword + s
 # 1. Install memtomem (requires Python 3.12+)
 uv tool install memtomem        # or: pipx install memtomem
 
-# 2. Run the 9-step setup wizard
-#    (picks embedding provider, optional reranker, memory folder, MCP editor)
+# 2. Run the setup (preset picker → memory_dir + MCP)
 mm init    # on PATH after `uv tool install` — no `uv run` needed
 ```
 
-The wizard's default is **keyword-only** (BM25, no external deps). Pick
-ONNX (local, no server), Ollama (local server), or OpenAI (cloud) for
-semantic search — see [Embeddings](https://github.com/memtomem/memtomem/blob/main/docs/guides/embeddings.md).
+The picker offers three presets and an Advanced fallback:
+
+| Preset | Embedding | Reranker | Tokenizer |
+|---|---|---|---|
+| Minimal | BM25 only (no download) | — | unicode61 |
+| English (Recommended) | ONNX `bge-small-en-v1.5` (~33 MB, 384d) | English (`ms-marco-MiniLM-L-6-v2`) | unicode61 |
+| Korean-optimized | ONNX `bge-m3` (~1.2 GB, 1024d) | Multilingual (`jina-reranker-v2`) | `kiwipiepy` |
+| Advanced | — | — | — (full 10-step wizard, all options) |
+
+Pick a preset interactively, or use `mm init -y` (minimal), `mm init --preset korean -y`, or `mm init --advanced` for scripted runs. See [Embeddings](https://github.com/memtomem/memtomem/blob/main/docs/guides/embeddings.md) for the full model matrix.
 
 Then in your AI editor, ask:
 

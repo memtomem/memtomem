@@ -48,10 +48,20 @@ uv tool install memtomem             # or: pipx install memtomem
 ### 2. Setup
 
 ```bash
-mm init                               # 9-step wizard (or: mm init -y for CI)
+mm init                               # preset picker, then memory_dir + MCP
 ```
 
-The wizard picks your embedding provider, points at the folder you want indexed, and registers memtomem with your AI editor. The default is **keyword-only** (BM25, no external dependencies) — you can also pick ONNX (local, no server), Ollama (local server), or OpenAI (cloud). See [Embeddings](docs/guides/embeddings.md) for details.
+The interactive picker starts with three presets — **Minimal** (BM25, no downloads), **English (Recommended)** (ONNX `bge-small-en-v1.5` + English reranker + auto-discover providers), **Korean-optimized** (ONNX `bge-m3` + `kiwipiepy` tokenizer + multilingual reranker) — plus an **Advanced** entry that opens the full 10-step wizard. Preset paths only ask about the memory directory and MCP registration; everything else is set from the preset.
+
+For automation / CI:
+
+```bash
+mm init -y                            # minimal preset, same as before
+mm init --preset korean -y            # Korean-optimized bundle, no prompts
+mm init --advanced                    # force the full 10-step wizard
+```
+
+See [Embeddings](docs/guides/embeddings.md) for the full model/provider matrix.
 
 ### 3. Use
 

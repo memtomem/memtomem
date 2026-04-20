@@ -6,11 +6,13 @@ import copy
 import json
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 import click
 
+from memtomem.cli.init_presets import PRESETS, _VALID_PRESETS, get_preset
 from memtomem.cli.wizard import nav_confirm, nav_prompt, run_steps, step_header
 
 
@@ -1066,6 +1068,230 @@ def _write_mcp_json(server_cmd: str, server_args: list[str], mcp_env: dict[str, 
         mcp_path.write_text(json.dumps(mcp_config, indent=2), encoding="utf-8")
 
 
+# ── Preset quick-setup helpers ────────────────────────────────────────
+
+
+def _step_preset_picker(state: dict) -> None:
+    """First step of the default interactive path — pick a preset or Advanced.
+
+    Writes ``state["_preset_choice"]`` = one of ``"minimal" | "english" |
+    "korean" | "advanced"``. The Advanced entry falls through to the full
+    10-step wizard; the other three bundle embedding/reranker/tokenizer/
+    namespace defaults via ``_apply_preset`` so the user only sees the
+    essential memory-dir and MCP questions afterwards.
+    """
+    click.secho("  Choose setup style:", fg="yellow", bold=True)
+    click.echo(click.style("  (b: back, q: quit)", dim=True))
+    click.echo()
+
+    ordered: list[str] = ["minimal", "english", "korean"]
+    for i, name in enumerate(ordered, start=1):
+        spec = PRESETS[name]  # type: ignore[index]
+        click.echo(f"    [{i}] {spec.label}")
+        click.echo(f"        {spec.description}")
+    advanced_idx = len(ordered) + 1
+    click.echo(f"    [{advanced_idx}] Advanced — full 10-step wizard (all options)")
+    click.echo()
+
+    choice = nav_prompt("  Select", type=click.IntRange(1, advanced_idx), default=2)
+    click.echo()
+
+    if choice == advanced_idx:
+        state["_preset_choice"] = "advanced"
+    else:
+        state["_preset_choice"] = ordered[choice - 1]
+
+
+def _apply_preset(state: dict, preset_name: str) -> None:
+    """Populate ``state`` with a preset's bundled defaults.
+
+    Mirrors the flat keys individual ``_step_*`` functions write so the
+    downstream ``_write_config_and_summary`` merge path is unchanged.
+    Does NOT touch ``memory_dir`` or ``mcp_choice`` — those remain asked
+    interactively (or come from explicit CLI flags).
+    """
+    spec = get_preset(preset_name)
+    state["provider"] = spec.provider
+    state["model"] = spec.model
+    state["dimension"] = spec.dimension
+    state["api_key"] = ""
+    state["rerank_enabled"] = spec.rerank_enabled
+    if spec.rerank_enabled and spec.rerank_model is not None:
+        state["rerank_model"] = spec.rerank_model
+    state["tokenizer"] = spec.tokenizer
+    state["top_k"] = spec.default_top_k
+    state["enable_auto_ns"] = spec.enable_auto_ns
+    state["default_ns"] = spec.default_namespace
+    state["decay_enabled"] = spec.decay_enabled
+    state["db_path"] = str(Path("~/.memtomem").expanduser() / "memtomem.db")
+    state["settings_hooks"] = False
+    state["_preset_applied"] = preset_name
+
+
+def _step_provider_dirs_auto(state: dict) -> None:
+    """Auto-apply detected provider memory folders for preset 2/3.
+
+    Respects the preset's ``autodetect_providers`` flag: when False (minimal),
+    skips without scanning. When True, scans via ``_detect_provider_dirs``,
+    adds every detected category, emits a banner listing what was added (or
+    a one-line message when nothing was detected so the skip isn't silent).
+    """
+    preset_name = state.get("_preset_applied")
+    if preset_name is None:
+        state.setdefault("provider_dirs", [])
+        state.setdefault("provider_rules", [])
+        return
+
+    spec = get_preset(preset_name)
+    if not spec.autodetect_providers:
+        state["provider_dirs"] = []
+        state["provider_rules"] = []
+        return
+
+    from memtomem.config import _detect_provider_dirs
+
+    grouped = _detect_provider_dirs()
+    available = {cat: dirs for cat, dirs in grouped.items() if dirs}
+
+    if not available:
+        click.echo(
+            "  No provider memory folders detected (checked: ~/.claude/projects, "
+            "~/.claude/plans, ~/.codex/memories)."
+        )
+        click.echo("  Run 'mm init --advanced' later to add custom paths.")
+        click.echo()
+        state["provider_dirs"] = []
+        state["provider_rules"] = []
+        return
+
+    selected: list[Path] = []
+    accepted_categories: list[str] = []
+    for cat in ("claude-memory", "claude-plans", "codex"):
+        dirs_for_cat = available.get(cat, [])
+        if dirs_for_cat:
+            selected.extend(dirs_for_cat)
+            accepted_categories.append(cat)
+
+    state["provider_dirs"] = [str(p) for p in selected]
+    state["provider_rules"] = [
+        (cat, _proposed_rule_for_category(cat))
+        for cat in accepted_categories
+        if _proposed_rule_for_category(cat) is not None
+    ]
+    click.secho(
+        f"  Auto-added {len(selected)} provider folder(s) "
+        f"from {len(accepted_categories)} categor"
+        f"{'y' if len(accepted_categories) == 1 else 'ies'}.",
+        fg="green",
+    )
+    for cat in accepted_categories:
+        n = len(available[cat])
+        suffix = "dir" if n == 1 else "dirs"
+        click.echo(f"    • {cat} ({n} {suffix})")
+    click.echo()
+
+
+def _resolve_provider_dirs_non_interactive(
+    state: dict,
+    preset_name: str,
+    include_providers: tuple[str, ...],
+) -> None:
+    """Compute ``provider_dirs`` / ``provider_rules`` for the scripted path.
+
+    Union of the preset's autodetect set (when ``autodetect_providers`` is
+    True) and any categories named via ``--include-provider``. Categories
+    without detected dirs are silently skipped — mirrors the legacy
+    non-interactive policy (no error if a user asks for ``codex`` on a
+    Claude-only box).
+    """
+    from memtomem.config import _detect_provider_dirs
+
+    spec = get_preset(preset_name)
+    grouped = _detect_provider_dirs()
+    categories_to_add: set[str] = set()
+    if spec.autodetect_providers:
+        categories_to_add.update(cat for cat, dirs in grouped.items() if dirs)
+    for explicit in include_providers:
+        if grouped.get(explicit):
+            categories_to_add.add(explicit)
+
+    provider_dirs: list[str] = []
+    provider_rules: list[tuple[str, dict]] = []
+    for cat in ("claude-memory", "claude-plans", "codex"):
+        if cat in categories_to_add:
+            for d in grouped.get(cat, []):
+                provider_dirs.append(str(d))
+            rule = _proposed_rule_for_category(cat)
+            if rule is not None:
+                provider_rules.append((cat, rule))
+    state["provider_dirs"] = provider_dirs
+    state["provider_rules"] = provider_rules
+
+
+def _override_from_flags(
+    state: dict,
+    *,
+    provider: str | None,
+    model: str | None,
+    tokenizer: str | None,
+    memory_dir: str | None,
+    db_path: str | None,
+    namespace: str | None,
+    auto_ns: bool,
+    top_k: int | None,
+    decay: bool,
+    api_key: str | None,
+    mcp_mode: str | None,
+) -> None:
+    """Apply explicit CLI flag values over preset-populated state.
+
+    Called after ``_apply_preset`` in every preset branch (non-interactive,
+    explicit ``--preset``, interactive picker) so flag precedence is
+    consistent: preset sets the baseline, explicit flags win. ``--provider``
+    also refreshes ``dimension`` via ``_MODEL_DIMS`` to match the
+    non-interactive block's behavior.
+    """
+    if provider is not None:
+        state["provider"] = provider
+        if provider == "none":
+            if model is None:
+                state["model"] = ""
+                state["dimension"] = 0
+        elif model is None:
+            # Pick a sensible default model per provider when --provider is
+            # given without --model, mirroring the non-interactive branch.
+            defaults = {
+                "onnx": ("all-MiniLM-L6-v2", 384),
+                "ollama": ("nomic-embed-text", 768),
+                "openai": ("text-embedding-3-small", 1536),
+            }
+            if provider in defaults:
+                default_model, default_dim = defaults[provider]
+                state["model"] = default_model
+                state["dimension"] = default_dim
+    if model is not None:
+        state["model"] = model
+        state["dimension"] = _MODEL_DIMS.get(model, state.get("dimension", 0))
+    if tokenizer is not None:
+        state["tokenizer"] = tokenizer
+    if memory_dir is not None:
+        state["memory_dir"] = memory_dir
+    if db_path is not None:
+        state["db_path"] = db_path
+    if namespace is not None:
+        state["default_ns"] = namespace
+    if auto_ns:
+        state["enable_auto_ns"] = True
+    if top_k is not None:
+        state["top_k"] = top_k
+    if decay:
+        state["decay_enabled"] = True
+    if api_key is not None:
+        state["api_key"] = api_key
+    if mcp_mode is not None:
+        state["mcp_choice"] = {"claude": 1, "json": 2, "skip": 3}.get(mcp_mode, 3)
+
+
 # ── CLI entry point ───────────────────────────────────────────────────
 
 
@@ -1120,6 +1346,26 @@ _MODEL_DIMS: dict[str, int] = {
         "the web UI."
     ),
 )
+@click.option(
+    "--preset",
+    type=click.Choice(sorted(_VALID_PRESETS)),
+    default=None,
+    help=(
+        "Apply a preset bundle (minimal | english | korean) of embedding, "
+        "reranker, tokenizer, and namespace defaults. Without this flag, the "
+        "interactive picker asks at startup; `mm init -y` alone behaves as "
+        "`--preset minimal -y`. Mutually exclusive with --advanced."
+    ),
+)
+@click.option(
+    "--advanced",
+    is_flag=True,
+    default=False,
+    help=(
+        "Force the full 10-step wizard (skip the preset picker). Useful for "
+        "fine-grained control over every step. Mutually exclusive with --preset."
+    ),
+)
 def init(
     non_interactive: bool,
     provider: str | None,
@@ -1135,6 +1381,8 @@ def init(
     mcp_mode: str | None,
     include_providers: tuple[str, ...],
     fresh: bool,
+    preset: str | None,
+    advanced: bool,
 ) -> None:
     """Set up memtomem with an interactive wizard."""
     click.echo()
@@ -1160,79 +1408,96 @@ def init(
         click.echo(f"  Project directory: {state['project_dir']}")
         click.echo()
 
-    if non_interactive:
-        _provider = provider or "none"
-        if _provider == "none":
-            _model = ""
-            _dimension = 0
-        elif _provider == "onnx":
-            _model = model or "all-MiniLM-L6-v2"
-            _dimension = _MODEL_DIMS.get(_model, 384)
-        elif _provider == "ollama":
-            _model = model or "nomic-embed-text"
-            _dimension = _MODEL_DIMS.get(_model, 768)
-        else:
-            _model = model or "text-embedding-3-small"
-            _dimension = _MODEL_DIMS.get(_model, 1536)
-        _memory_dir = memory_dir or "~/memories"
+    if preset and advanced:
+        raise click.UsageError("--preset and --advanced are mutually exclusive")
 
-        # Auto-create memory directory
-        memory_path = Path(_memory_dir).expanduser()
+    advanced_steps = [
+        _step_embedding,
+        _step_reranker,
+        _step_memory_dir,
+        _step_provider_dirs,
+        _step_storage,
+        _step_namespace,
+        _step_search,
+        _step_language,
+        _step_settings,
+        _step_mcp,
+    ]
+
+    if non_interactive:
+        # `mm init -y` alone behaves as `--preset minimal -y`; minimal's defaults
+        # match the previous non-interactive block's (provider="none", no rerank,
+        # unicode61, auto_ns=False, top_k=10). Explicit flags then override the
+        # preset baseline, preserving the prior `-y --provider onnx --model X`
+        # contract.
+        effective_preset = preset or "minimal"
+        _apply_preset(state, effective_preset)
+        _override_from_flags(
+            state,
+            provider=provider,
+            model=model,
+            tokenizer=tokenizer,
+            memory_dir=memory_dir,
+            db_path=db_path,
+            namespace=namespace,
+            auto_ns=auto_ns,
+            top_k=top_k,
+            decay=decay,
+            api_key=api_key,
+            mcp_mode=mcp_mode,
+        )
+        if "memory_dir" not in state:
+            state["memory_dir"] = "~/memories"
+        if "mcp_choice" not in state:
+            state["mcp_choice"] = 3  # skip — scripted runs don't touch Claude
+
+        memory_path = Path(state["memory_dir"]).expanduser()
         if not memory_path.exists():
             memory_path.mkdir(parents=True, exist_ok=True)
 
-        # Resolve --include-provider into concrete dirs that exist on this machine.
-        # Categories with no detected dirs are silently skipped — non-interactive
-        # callers don't get an error if they ask for codex on a Claude-only box.
-        from memtomem.config import _detect_provider_dirs
-
-        grouped = _detect_provider_dirs()
-        provider_dirs: list[str] = []
-        provider_rules: list[tuple[str, dict]] = []
-        for category in include_providers:
-            dirs_for_category = grouped.get(category, [])
-            for d in dirs_for_category:
-                provider_dirs.append(str(d))
-            # Mirror interactive parity: only register a preset rule when the
-            # category actually had detected dirs. A ``claude-memory`` rule
-            # with no Claude projects present is dead config.
-            if dirs_for_category:
-                rule = _proposed_rule_for_category(category)
-                if rule is not None:
-                    provider_rules.append((category, rule))
-
-        state.update(
-            {
-                "provider": _provider,
-                "model": _model,
-                "dimension": _dimension,
-                "api_key": api_key or "",
-                "rerank_enabled": False,
-                "memory_dir": _memory_dir,
-                "provider_dirs": provider_dirs,
-                "provider_rules": provider_rules,
-                "db_path": db_path or str(Path("~/.memtomem").expanduser() / "memtomem.db"),
-                "enable_auto_ns": auto_ns,
-                "default_ns": namespace or "default",
-                "top_k": top_k or 10,
-                "tokenizer": tokenizer or "unicode61",
-                "decay_enabled": decay,
-                "mcp_choice": {"claude": 1, "json": 2, "skip": 3}.get(mcp_mode or "skip", 3),
-            }
+        _resolve_provider_dirs_non_interactive(state, effective_preset, include_providers)
+    elif advanced:
+        run_steps(advanced_steps, state)
+    elif preset:
+        _apply_preset(state, preset)
+        _override_from_flags(
+            state,
+            provider=provider,
+            model=model,
+            tokenizer=tokenizer,
+            memory_dir=memory_dir,
+            db_path=db_path,
+            namespace=namespace,
+            auto_ns=auto_ns,
+            top_k=top_k,
+            decay=decay,
+            api_key=api_key,
+            mcp_mode=mcp_mode,
         )
+        run_steps([_step_memory_dir, _step_provider_dirs_auto, _step_mcp], state)
     else:
-        steps = [
-            _step_embedding,
-            _step_reranker,
-            _step_memory_dir,
-            _step_provider_dirs,
-            _step_storage,
-            _step_namespace,
-            _step_search,
-            _step_language,
-            _step_settings,
-            _step_mcp,
-        ]
-        run_steps(steps, state)
+        # Default interactive path: show the preset picker, dispatch on choice.
+        if not sys.stdin.isatty():
+            raise click.UsageError("Non-interactive terminal detected. Pass --preset <name> or -y.")
+        run_steps([_step_preset_picker], state)
+        if state["_preset_choice"] == "advanced":
+            run_steps(advanced_steps, state)
+        else:
+            _apply_preset(state, state["_preset_choice"])
+            _override_from_flags(
+                state,
+                provider=provider,
+                model=model,
+                tokenizer=tokenizer,
+                memory_dir=memory_dir,
+                db_path=db_path,
+                namespace=namespace,
+                auto_ns=auto_ns,
+                top_k=top_k,
+                decay=decay,
+                api_key=api_key,
+                mcp_mode=mcp_mode,
+            )
+            run_steps([_step_memory_dir, _step_provider_dirs_auto, _step_mcp], state)
 
     _write_config_and_summary(state, fresh=fresh)

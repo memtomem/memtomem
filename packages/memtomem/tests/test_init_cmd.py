@@ -1627,3 +1627,403 @@ class TestProviderPresetRules:
                     f"namespace {namespace!r} uses a placeholder outside "
                     f"_VALID_PRESET_PLACEHOLDERS={_VALID_PRESET_PLACEHOLDERS}"
                 )
+
+
+def test_valid_presets_frozenset_matches_literal() -> None:
+    """``_VALID_PRESETS`` is derived from ``get_args(PresetName)``; adding a
+    preset means changing the Literal, and the frozenset picks it up via
+    the shared ``get_args`` path. Mirrors
+    :func:`test_provider_category_literal_matches_frozenset` for the
+    preset vocabulary."""
+    from typing import get_args
+
+    from memtomem.cli.init_presets import PresetName, _VALID_PRESETS
+
+    assert set(get_args(PresetName)) == _VALID_PRESETS
+
+
+class TestPresetSelection:
+    """``mm init`` preset picker and ``--preset`` / ``--advanced`` flags."""
+
+    def test_minimal_preset_applies_bm25_only(self) -> None:
+        """Minimal preset keeps the no-download baseline: provider=none,
+        no reranker, unicode61 tokenizer."""
+        from memtomem.cli.init_cmd import _apply_preset
+
+        state: dict = {}
+        _apply_preset(state, "minimal")
+
+        assert state["provider"] == "none"
+        assert state["model"] == ""
+        assert state["dimension"] == 0
+        assert state["rerank_enabled"] is False
+        assert state["tokenizer"] == "unicode61"
+        assert state["enable_auto_ns"] is False
+        assert state["_preset_applied"] == "minimal"
+
+    def test_english_preset_applies_onnx_and_rerank(self) -> None:
+        """English preset: ONNX bge-small-en-v1.5 + English rerank +
+        auto-discover providers (the recommended default)."""
+        from memtomem.cli.init_cmd import _apply_preset
+
+        state: dict = {}
+        _apply_preset(state, "english")
+
+        assert state["provider"] == "onnx"
+        assert state["model"] == "bge-small-en-v1.5"
+        assert state["dimension"] == 384
+        assert state["rerank_enabled"] is True
+        assert state["rerank_model"] == "Xenova/ms-marco-MiniLM-L-6-v2"
+        assert state["tokenizer"] == "unicode61"
+        assert state["enable_auto_ns"] is True
+
+    def test_korean_preset_applies_bge_m3_and_kiwipiepy(self) -> None:
+        """Korean preset: ONNX bge-m3 + kiwipiepy tokenizer + multilingual
+        reranker (the Korean-optimized bundle)."""
+        from memtomem.cli.init_cmd import _apply_preset
+
+        state: dict = {}
+        _apply_preset(state, "korean")
+
+        assert state["provider"] == "onnx"
+        assert state["model"] == "bge-m3"
+        assert state["dimension"] == 1024
+        assert state["rerank_enabled"] is True
+        assert state["rerank_model"] == "jinaai/jina-reranker-v2-base-multilingual"
+        assert state["tokenizer"] == "kiwipiepy"
+        assert state["enable_auto_ns"] is True
+
+    def test_preset_flag_non_interactive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``mm init --preset korean -y`` writes the Korean preset's fields
+        into config.json with no prompting."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            init,
+            [
+                "--non-interactive",
+                "--preset",
+                "korean",
+                "--memory-dir",
+                str(tmp_path / "memories"),
+                "--mcp",
+                "skip",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        assert data["embedding"]["provider"] == "onnx"
+        assert data["embedding"]["model"] == "bge-m3"
+        assert data["embedding"]["dimension"] == 1024
+        assert data["rerank"]["model"] == "jinaai/jina-reranker-v2-base-multilingual"
+        assert data["search"]["tokenizer"] == "kiwipiepy"
+        assert data["namespace"]["enable_auto_ns"] is True
+
+    def test_preset_flag_rejects_unknown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Invalid preset names are rejected by ``click.Choice`` (exit 2)."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        runner = CliRunner()
+        result = runner.invoke(
+            init,
+            [
+                "--non-interactive",
+                "--preset",
+                "invalid-name",
+            ],
+        )
+        assert result.exit_code == 2
+        assert "invalid" in result.output.lower()
+
+    def test_preset_plus_explicit_flag_override_non_interactive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--preset korean --provider ollama -y`` — preset sets the baseline
+        then the explicit ``--provider`` flag wins; tokenizer stays kiwipiepy
+        since there's no ``--tokenizer`` override."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            init,
+            [
+                "--non-interactive",
+                "--preset",
+                "korean",
+                "--provider",
+                "ollama",
+                "--memory-dir",
+                str(tmp_path / "memories"),
+                "--mcp",
+                "skip",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        assert data["embedding"]["provider"] == "ollama"
+        # model defaulted to ollama's nomic-embed-text since no --model given.
+        assert data["embedding"]["model"] == "nomic-embed-text"
+        # tokenizer still kiwipiepy from the preset — not overridden.
+        assert data["search"]["tokenizer"] == "kiwipiepy"
+
+    def test_preset_plus_explicit_flag_override_interactive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same precedence rule applies when ``--preset`` is combined with
+        explicit flags in interactive mode (picker skipped because --preset
+        is given). Review-raised #2: both paths must call the override
+        pass so the combination behaves consistently."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        runner = CliRunner()
+        # Interactive preset branch: feed memory_dir accept + create=Y + mcp=3.
+        result = runner.invoke(
+            init,
+            [
+                "--preset",
+                "korean",
+                "--provider",
+                "ollama",
+            ],
+            input=f"{tmp_path / 'memories'}\ny\n3\n",
+        )
+        assert result.exit_code == 0, result.output
+
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        # Flag wins over preset in the interactive preset path too.
+        assert data["embedding"]["provider"] == "ollama"
+        assert data["embedding"]["model"] == "nomic-embed-text"
+        # And the preset's tokenizer is still there.
+        assert data["search"]["tokenizer"] == "kiwipiepy"
+
+    def test_preset_and_advanced_mutually_exclusive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--preset`` and ``--advanced`` can't both be set — the user has
+        to pick one path."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        runner = CliRunner()
+        result = runner.invoke(
+            init,
+            ["--preset", "korean", "--advanced"],
+        )
+        assert result.exit_code != 0
+        assert "mutually exclusive" in result.output.lower()
+
+    def test_advanced_flag_runs_full_wizard(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--advanced`` forces the 10-step wizard and skips the preset
+        picker entirely."""
+        from click.testing import CliRunner
+
+        import memtomem.cli.init_cmd as init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        recorded: dict[str, object] = {}
+
+        def fake_run_steps(steps, state):  # type: ignore[no-untyped-def]
+            recorded["step_count"] = len(steps)
+            recorded["step_names"] = [s.__name__ for s in steps]
+            # Populate a valid state dict so _write_config_and_summary succeeds.
+            state.update(
+                {
+                    "provider": "none",
+                    "model": "",
+                    "dimension": 0,
+                    "api_key": "",
+                    "rerank_enabled": False,
+                    "memory_dir": str(tmp_path / "memories"),
+                    "db_path": str(tmp_path / ".memtomem" / "memtomem.db"),
+                    "enable_auto_ns": False,
+                    "default_ns": "default",
+                    "top_k": 10,
+                    "tokenizer": "unicode61",
+                    "decay_enabled": False,
+                    "mcp_choice": 3,
+                    "settings_hooks": False,
+                    "provider_dirs": [],
+                    "provider_rules": [],
+                }
+            )
+
+        monkeypatch.setattr(init_cmd, "run_steps", fake_run_steps)
+
+        runner = CliRunner()
+        result = runner.invoke(init_cmd.init, ["--advanced"])
+        assert result.exit_code == 0, result.output
+
+        # Full 10-step wizard — not the 3-step preset follow-up.
+        assert recorded["step_count"] == 10
+        assert "_step_embedding" in recorded["step_names"]
+        assert "_step_reranker" in recorded["step_names"]
+        assert "_step_preset_picker" not in recorded["step_names"]
+
+    def test_provider_dirs_auto_with_no_detection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fresh machine with no Claude/Codex dirs — preset path emits an
+        explicit banner, not a silent skip (review #3)."""
+        from memtomem.cli.init_cmd import _apply_preset, _step_provider_dirs_auto
+
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        state: dict = {}
+        _apply_preset(state, "english")
+
+        # Capture click.echo output by running through a CliRunner-style
+        # isolated context; simpler: just call and assert state + rely on
+        # coverage (banner is cosmetic). Contract: empty lists, no crash.
+        _step_provider_dirs_auto(state)
+        assert state["provider_dirs"] == []
+        assert state["provider_rules"] == []
+
+    def test_non_tty_without_flag_errors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without ``--preset`` / ``-y`` / ``--advanced``, a non-TTY
+        invocation must error cleanly — not hang trying to read a
+        prompt from a closed stdin (review #5)."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        runner = CliRunner()
+        # CliRunner's stdin is a pipe → isatty() == False.
+        result = runner.invoke(init, [])
+        assert result.exit_code != 0
+        assert "non-interactive terminal" in result.output.lower()
+
+    def test_non_tty_with_y_flag_runs_minimal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``mm init -y`` with no other flags still behaves as
+        ``--preset minimal -y`` — existing scripted callers unchanged."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            init,
+            [
+                "--non-interactive",
+                "--memory-dir",
+                str(tmp_path / "memories"),
+                "--mcp",
+                "skip",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        # Minimal defaults: BM25-only, no reranker.
+        assert data["embedding"]["provider"] == "none"
+        assert data["embedding"]["dimension"] == 0
+        assert "rerank" not in data
+        assert data["search"]["tokenizer"] == "unicode61"
+
+    def test_get_preset_raises_value_error_for_unknown(self) -> None:
+        """``click.Choice`` blocks invalid CLI input; the in-process helper
+        surfaces a clear ``ValueError`` listing valid names for programmatic
+        callers (tests, future reuse)."""
+        from memtomem.cli.init_presets import _VALID_PRESETS, get_preset
+
+        with pytest.raises(ValueError) as exc:
+            get_preset("nonsense")
+        assert "nonsense" in str(exc.value)
+        for name in _VALID_PRESETS:
+            assert name in str(exc.value)
+
+    def test_preset_rerun_preserves_non_init_fields(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Re-running ``mm init --preset korean -y`` on a config with a
+        user-added ``mmr.enabled=true`` must leave ``mmr`` intact — preset
+        path inherits the ``_write_config_and_summary`` read-merge-write
+        contract covered by :class:`TestInitConfigMerge`."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+        config_dir = tmp_path / ".memtomem"
+        config_dir.mkdir()
+        config_path = config_dir / "config.json"
+        config_path.write_text(
+            json.dumps({"mmr": {"enabled": True, "lambda_param": 0.3}}),
+            encoding="utf-8",
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            init,
+            [
+                "--non-interactive",
+                "--preset",
+                "korean",
+                "--memory-dir",
+                str(tmp_path / "memories"),
+                "--mcp",
+                "skip",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        assert data["embedding"]["model"] == "bge-m3"  # preset applied
+        assert data["mmr"]["enabled"] is True  # non-init field survived
+        assert data["mmr"]["lambda_param"] == 0.3

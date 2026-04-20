@@ -118,15 +118,31 @@ mm init         # PyPI global install
 uv run mm init  # Project or source install
 ```
 
-The wizard walks you through 10 steps. Type `b` to go back, `q` to quit at any step.
+`mm init` starts with a preset picker — pick one of three bundled setups (**Minimal**, **English (Recommended)**, **Korean-optimized**) or choose **Advanced** for the full 10-step wizard. Preset paths only ask about the memory directory and MCP registration.
+
+### Choose your setup
+
+| Preset | What it bundles | When to pick |
+|---|---|---|
+| **Minimal** | BM25 keyword search, no downloads, unicode61 tokenizer, no reranker | Want the lightest possible install, or starting from scratch to explore |
+| **English (Recommended)** | ONNX `bge-small-en-v1.5` (384d, ~33 MB) + English reranker (`Xenova/ms-marco-MiniLM-L-6-v2`) + auto-discover provider memory folders | Most English-language setups — good default if you're unsure |
+| **Korean-optimized** | ONNX `bge-m3` (1024d, ~1.2 GB) + multilingual reranker (`jinaai/jina-reranker-v2-base-multilingual`) + `kiwipiepy` tokenizer + auto-discover | Korean content (or Korean/Chinese/Japanese mixed) |
+| **Advanced** | — (10-step wizard, full control) | Need to set every knob — custom model, separate DB path, decay, etc. |
+
+Type `b` to go back or `q` to quit at any prompt.
 
 #### Non-interactive mode (CI / automation)
 
-Skip the wizard entirely with `-y`. All settings have sensible defaults:
+Skip prompting with `-y`. `mm init -y` alone applies the **Minimal** preset (same defaults as before this feature landed); pass `--preset` for the others:
 
 ```bash
-mm init -y                                              # all defaults (keyword-only, BM25)
-mm init -y --provider onnx --model all-MiniLM-L6-v2     # local dense embeddings, no server
+mm init -y                                              # Minimal preset (BM25-only)
+mm init --preset english -y                             # English recommended
+mm init --preset korean -y                              # Korean-optimized
+mm init --advanced                                      # Force the full 10-step wizard
+
+# Explicit flags override preset values:
+mm init -y --provider onnx --model all-MiniLM-L6-v2     # custom ONNX model
 mm init -y --provider ollama --model nomic-embed-text   # Ollama (requires `ollama serve`)
 mm init -y --provider openai --api-key sk-...           # OpenAI
 mm init -y --memory-dir ~/notes --mcp claude            # custom dir + Claude Code auto-setup
@@ -134,6 +150,12 @@ mm init -y --memory-dir ~/notes --mcp claude            # custom dir + Claude Co
 # Pull in AI tool memory folders (repeat per category):
 mm init -y --include-provider claude-memory --include-provider codex
 ```
+
+`--preset` and `--advanced` are mutually exclusive. Running without `-y` / `--preset` / `--advanced` from a non-TTY (e.g., piped stdin) exits with an error — pass one of those flags explicitly.
+
+#### Advanced (10-step wizard) step list
+
+Selecting **Advanced** (from the picker or `--advanced`) runs all ten steps:
 
 1. **Embedding provider** — BM25-only (default, zero-dependency), Local ONNX (no server), Ollama (local server), or OpenAI (cloud)
 2. **Reranker (optional)** — off by default; opt-in to a local fastembed cross-encoder. Korean/Chinese/Japanese/mixed content should pick the multilingual model
@@ -279,7 +301,7 @@ mm recall --since 2026-04-01
 All commands support `-h` and `--help`. Interactive wizards support `b` (back) and `q` (quit).
 
 ```bash
-mm init                    # 9-step setup wizard
+mm init                    # preset picker (or `--advanced` for the full 10-step wizard)
 mm search "query"          # hybrid search
 mm index ~/notes           # index files
 mm add "some note"         # add a memory

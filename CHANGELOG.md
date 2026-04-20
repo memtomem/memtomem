@@ -5,6 +5,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+- **`mm init` preset picker**: interactive `mm init` now opens with a preset
+  picker (`Minimal` / `English (Recommended)` / `Korean-optimized`) plus an
+  `Advanced` entry that runs the full 10-step wizard. Preset paths only
+  prompt for the memory directory and MCP registration; embedding /
+  reranker / tokenizer / namespace defaults come from the preset bundle.
+  New CLI flags `--preset <name>` and `--advanced` expose the same choices
+  non-interactively; `--preset` and `--advanced` are mutually exclusive.
+- **Non-TTY guard for `mm init`**: running the default interactive path
+  with piped stdin (no `--preset`, no `--advanced`, no `-y`) now exits
+  cleanly with a usage error pointing at those flags, instead of hanging
+  on a closed prompt.
+
+### Changed
+- **`mm init -y` behavior**: scripted `mm init -y` (with no other flags)
+  is now equivalent to `mm init --preset minimal -y` — same defaults as
+  before this release (provider=none, BM25-only, unicode61 tokenizer), so
+  existing CI / automation calls continue to work unchanged. Existing
+  explicit flags (`--provider`, `--model`, `--tokenizer`, ...) override
+  the preset baseline in both interactive and non-interactive paths.
+
 ## [0.1.13] — 2026-04-20
 
 memtomem remains in **alpha**. APIs, defaults, and on-disk config surfaces
