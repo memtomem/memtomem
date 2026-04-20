@@ -1151,6 +1151,29 @@ def test_provider_for_category_roundtrip() -> None:
     assert provider_for_category("not-a-real-category") == "user"
 
 
+def test_provider_category_literal_matches_frozenset() -> None:
+    """``_VALID_PROVIDER_CATEGORIES`` is derived from
+    ``get_args(ProviderCategory)``, so by construction they cannot drift.
+    This test documents that contract — if a future refactor inlines the
+    frozenset back into a literal, the explicit ``get_args`` equality
+    failure will catch it before mypy's implicit exhaustiveness does."""
+    from typing import get_args
+
+    from memtomem.config import ProviderCategory, _VALID_PROVIDER_CATEGORIES
+
+    assert set(get_args(ProviderCategory)) == _VALID_PROVIDER_CATEGORIES
+
+
+def test_provider_name_literal_matches_frozenset() -> None:
+    """Mirror of :func:`test_provider_category_literal_matches_frozenset`
+    on the vendor axis."""
+    from typing import get_args
+
+    from memtomem.config import ProviderName, _VALID_PROVIDERS
+
+    assert set(get_args(ProviderName)) == _VALID_PROVIDERS
+
+
 class TestIncludeProviderFlag:
     """Non-interactive ``--include-provider`` wires categories into
     ``indexing.memory_dirs`` without prompting."""

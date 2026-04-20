@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal, cast, get_args
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -1033,32 +1033,37 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False) -> None:
                         )
 
 
+# Typed vocabulary for provider-dir classification. ``ProviderCategory``
+# enumerates every category a ``memory_dir`` can be classified as;
+# ``ProviderName`` enumerates every vendor tag attached to a category.
+# Both are the *single source of truth* — ``_VALID_PROVIDER_CATEGORIES``
+# and ``_VALID_PROVIDERS`` are derived at module load via ``get_args``
+# so the frozensets can never drift from the ``Literal`` types mypy
+# sees at call sites. See RFC #304 Phase 1.
+ProviderCategory = Literal["user", "claude-memory", "claude-plans", "codex"]
+ProviderName = Literal["user", "claude", "openai"]
+
 # Single source of truth for provider-dir classification. Each row ties a
 # category name to the regex that recognises paths in that category. The
 # Web UI's ``/api/memory-dirs/status`` response carries the resulting
 # ``category`` field so the client does not maintain a parallel regex.
-_PROVIDER_CATEGORY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+_PROVIDER_CATEGORY_PATTERNS: tuple[tuple[ProviderCategory, re.Pattern[str]], ...] = (
     ("claude-memory", re.compile(r"/\.claude/projects/[^/]+/memory/?$")),
     ("claude-plans", re.compile(r"/\.claude/plans/?$")),
     ("codex", re.compile(r"/\.codex/memories/?$")),
 )
 
-# Vocabulary lock: new patterns must not silently expand the category set.
-# Until RFC #304 decides the hierarchy (vendor/product), any change here
-# requires a coordinated update to ``_VALID_PROVIDER_CATEGORIES``. Mirrors the
-# ``_VALID_PRESET_PLACEHOLDERS`` pattern in ``cli/init_cmd.py``.
-_VALID_PROVIDER_CATEGORIES: frozenset[str] = frozenset(
-    {
-        "user",
-        "claude-memory",
-        "claude-plans",
-        "codex",
-    }
-)
+# Derived from ``ProviderCategory`` — do NOT edit independently. Adding a
+# new category means adding it to the ``Literal`` above; the frozenset
+# (and mypy's exhaustiveness checking at call sites) picks it up for
+# free. Until RFC #304 decides a deeper hierarchy, any change here
+# requires a coordinated update to the pattern table + pin tests.
+# Mirrors the ``_VALID_PRESET_PLACEHOLDERS`` pattern in ``cli/init_cmd.py``.
+_VALID_PROVIDER_CATEGORIES: frozenset[str] = frozenset(get_args(ProviderCategory))
 
 _VOCABULARY_LOCK_MESSAGE = (
-    "Provider category vocabulary changed without updating "
-    "_VALID_PROVIDER_CATEGORIES. See RFC #304 before adding categories."
+    "Provider category patterns changed without updating the "
+    "ProviderCategory Literal. See RFC #304 before adding categories."
 )
 
 assert ({cat for cat, _ in _PROVIDER_CATEGORY_PATTERNS} | {"user"}) == _VALID_PROVIDER_CATEGORIES, (
@@ -1068,14 +1073,15 @@ assert ({cat for cat, _ in _PROVIDER_CATEGORY_PATTERNS} | {"user"}) == _VALID_PR
 # Vendor tag for each category. Exposed on ``memory_dir_stats()`` entries so
 # the Web UI can render a two-level vendor → product tree without duplicating
 # the category→vendor map in JS. RFC #304 Phase 1 — see plan #314 resolution.
-_CATEGORY_TO_PROVIDER: dict[str, str] = {
+_CATEGORY_TO_PROVIDER: dict[ProviderCategory, ProviderName] = {
     "user": "user",
     "claude-memory": "claude",
     "claude-plans": "claude",
     "codex": "openai",
 }
 
-_VALID_PROVIDERS: frozenset[str] = frozenset({"user", "claude", "openai"})
+# Derived from ``ProviderName`` — same discipline as ``_VALID_PROVIDER_CATEGORIES``.
+_VALID_PROVIDERS: frozenset[str] = frozenset(get_args(ProviderName))
 
 _PROVIDER_VOCABULARY_LOCK_MESSAGE = (
     "Provider vocabulary changed without updating _VALID_PROVIDERS. "
@@ -1102,27 +1108,34 @@ assert set(_CATEGORY_TO_PROVIDER.values()) == _VALID_PROVIDERS, _PROVIDER_VOCABU
 
 # Derived from ``_PROVIDER_CATEGORY_PATTERNS`` — do NOT edit independently.
 # Add a new pattern row above and this tuple picks it up automatically.
-PROVIDER_DIR_CATEGORIES: tuple[str, ...] = tuple(cat for cat, _ in _PROVIDER_CATEGORY_PATTERNS)
+# Excludes ``"user"`` by design (user dirs have no pattern; they fall
+# through :func:`categorize_memory_dir`'s default).
+PROVIDER_DIR_CATEGORIES: tuple[ProviderCategory, ...] = tuple(
+    cat for cat, _ in _PROVIDER_CATEGORY_PATTERNS
+)
 
 
-def provider_for_category(category: str) -> str:
+def provider_for_category(category: str) -> ProviderName:
     """Return the vendor tag for a ``memory_dir`` category.
 
     Consumed by :func:`~memtomem.indexing.engine.memory_dir_stats` so the
     Web UI can group entries by vendor. Unknown categories fall back to
     ``"user"`` — mirrors :func:`categorize_memory_dir`'s user-default.
+    Accepts ``str`` (not ``ProviderCategory``) so callers can pass
+    server-supplied strings without narrowing first.
     """
-    return _CATEGORY_TO_PROVIDER.get(category, "user")
+    return _CATEGORY_TO_PROVIDER.get(cast(ProviderCategory, category), "user")
 
 
-def categorize_memory_dir(path: str | Path) -> str:
-    """Return the category string for a ``memory_dir`` path.
+def categorize_memory_dir(path: str | Path) -> ProviderCategory:
+    """Return the category for a ``memory_dir`` path.
 
-    Returns one of ``PROVIDER_DIR_CATEGORIES`` or ``"user"`` for anything
-    that doesn't match a known provider layout. Classification only —
-    does not check existence or validity. Uses forward-slash regex, so
-    on Windows a backslash-normalised path will fall through to
-    ``"user"`` until a future path-sep-agnostic pass lands.
+    Returns one of ``ProviderCategory``'s literal values, defaulting to
+    ``"user"`` for anything that doesn't match a known provider layout.
+    Classification only — does not check existence or validity. Uses
+    forward-slash regex, so on Windows a backslash-normalised path will
+    fall through to ``"user"`` until a future path-sep-agnostic pass
+    lands (tracked in #316).
     """
     s = str(path).rstrip("/")
     for cat, pat in _PROVIDER_CATEGORY_PATTERNS:
