@@ -1043,6 +1043,28 @@ _PROVIDER_CATEGORY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("codex", re.compile(r"/\.codex/memories/?$")),
 )
 
+# Vocabulary lock: new patterns must not silently expand the category set.
+# Until RFC #304 decides the hierarchy (vendor/product), any change here
+# requires a coordinated update to ``_VALID_PROVIDER_CATEGORIES``. Mirrors the
+# ``_VALID_PRESET_PLACEHOLDERS`` pattern in ``cli/init_cmd.py``.
+_VALID_PROVIDER_CATEGORIES: frozenset[str] = frozenset(
+    {
+        "user",
+        "claude-memory",
+        "claude-plans",
+        "codex",
+    }
+)
+
+_VOCABULARY_LOCK_MESSAGE = (
+    "Provider category vocabulary changed without updating "
+    "_VALID_PROVIDER_CATEGORIES. See RFC #304 before adding categories."
+)
+
+assert ({cat for cat, _ in _PROVIDER_CATEGORY_PATTERNS} | {"user"}) == _VALID_PROVIDER_CATEGORIES, (
+    _VOCABULARY_LOCK_MESSAGE
+)
+
 # Derived from ``_PROVIDER_CATEGORY_PATTERNS`` — do NOT edit independently.
 # Add a new pattern row above and this tuple picks it up automatically.
 PROVIDER_DIR_CATEGORIES: tuple[str, ...] = tuple(cat for cat, _ in _PROVIDER_CATEGORY_PATTERNS)

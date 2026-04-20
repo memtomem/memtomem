@@ -1068,6 +1068,32 @@ class TestDetectProviderDirsRoundtrip:
         assert seen_any, "fixture should produce at least one discovered dir"
 
 
+def test_provider_categories_vocabulary_locked() -> None:
+    """Derived categories must match the declared vocabulary — regression
+    guard for silent expansion of ``_PROVIDER_CATEGORY_PATTERNS`` before
+    RFC #304 settles the hierarchy."""
+    from memtomem.config import (
+        _PROVIDER_CATEGORY_PATTERNS,
+        _VALID_PROVIDER_CATEGORIES,
+    )
+
+    derived = {cat for cat, _ in _PROVIDER_CATEGORY_PATTERNS} | {"user"}
+    assert derived == _VALID_PROVIDER_CATEGORIES
+
+
+def test_vocabulary_lock_message_references_rfc() -> None:
+    """Assertion message itself must reference RFC #304 so a future breaker
+    following the ``AssertionError`` traceback finds the rationale.
+
+    Checks the exported ``_VOCABULARY_LOCK_MESSAGE`` constant directly (not
+    a wide ``inspect.getsource`` scan), so unrelated ``#304`` mentions
+    elsewhere in ``config.py`` cannot mask a regression where the RFC
+    reference is dropped from the actual assertion message."""
+    from memtomem.config import _VOCABULARY_LOCK_MESSAGE
+
+    assert "#304" in _VOCABULARY_LOCK_MESSAGE
+
+
 class TestIncludeProviderFlag:
     """Non-interactive ``--include-provider`` wires categories into
     ``indexing.memory_dirs`` without prompting."""
