@@ -5,6 +5,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+- **Reranker candidate-pool scaling**: `rerank.oversample` (default `2.0`),
+  `rerank.min_pool` (default `20`), and `rerank.max_pool` (default `200`).
+  The cross-encoder now sees
+  `max(min_pool, min(max_pool, int(oversample * top_k)))` candidates, so the
+  classic 2× oversample holds at `top_k=10` (pool=20) and scales with
+  larger requests (`top_k=50` → pool=100, `top_k=150` → pool=200). All
+  three knobs plus `rerank.enabled` are runtime-tunable via `mm config set`
+  and the Web UI — no restart required. `provider`/`model`/`api_key` still
+  need a restart (reranker instance is cached).
+
+### Fixed
+- **Reranker candidate pool is now actually wired**: `RerankConfig.top_k`
+  was declared but never read, so the cross-encoder only ever saw the
+  response `top_k` and could not rescue items RRF ranked just outside it
+  (#307).
+- **Reranker-failure fallback now honors response size**: when the
+  cross-encoder raises, `fused` is trimmed to the caller's `top_k`
+  instead of leaking the wider pool size through the remaining pipeline
+  stages (#309).
+
+### Deprecated
+- `rerank.top_k` (env var `MEMTOMEM_RERANK__TOP_K`) is superseded by
+  `rerank.oversample` + `rerank.min_pool` + `rerank.max_pool`. Legacy
+  configs are migrated to `rerank.min_pool` with a `DeprecationWarning`.
+  Slated for removal in 0.3.
+
 ## [0.1.12] — 2026-04-19
 
 memtomem remains in **alpha**. APIs, defaults, and on-disk config surfaces

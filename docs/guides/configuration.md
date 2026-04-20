@@ -378,10 +378,22 @@ the wider scan, run `mm index --rebuild` after the migration.
 | `MEMTOMEM_RERANK__ENABLED` | `false` | Enable cross-encoder reranking after fusion |
 | `MEMTOMEM_RERANK__PROVIDER` | `fastembed` | `fastembed` (local ONNX), `cohere` (cloud), or `local` (sentence-transformers) |
 | `MEMTOMEM_RERANK__MODEL` | `Xenova/ms-marco-MiniLM-L-6-v2` | Reranker model name (provider-specific — see below) |
-| `MEMTOMEM_RERANK__TOP_K` | `20` | Candidates passed to the reranker (must be > 0) |
+| `MEMTOMEM_RERANK__OVERSAMPLE` | `2.0` | Candidate-pool multiplier applied to response `top_k` |
+| `MEMTOMEM_RERANK__MIN_POOL` | `20` | Lower bound on the candidate pool (floor for small queries) |
+| `MEMTOMEM_RERANK__MAX_POOL` | `200` | Upper bound on the candidate pool (cost cap for large queries) |
 | `MEMTOMEM_RERANK__API_KEY` | _(empty)_ | API key (required for Cohere) |
 
-Reranking runs as Stage 3b in the search pipeline — after BM25 + dense fusion, before source/tag filters. If reranking fails with a runtime error the pipeline falls back to the original fused order with a warning; configuration errors (unsupported model name, missing fastembed install) surface directly so the misconfiguration is visible.
+Reranking runs as Stage 3b in the search pipeline — after BM25 + dense fusion, before source/tag filters. The candidate pool passed to the cross-encoder is
+
+```
+pool = max(min_pool, min(max_pool, int(oversample * response_top_k)))
+```
+
+so the pool scales with the caller's requested `top_k` while staying bounded by both the floor (rescues small queries) and the cap (controls cost on large ones). The reranker then returns the caller's `top_k` — pool sizing only controls how many items it gets to choose from. If reranking fails with a runtime error the pipeline falls back to the original fused order, trimmed to the caller's `top_k`, with a warning; configuration errors (unsupported model name, missing fastembed install) surface directly so the misconfiguration is visible.
+
+`rerank.enabled`, `rerank.oversample`, `rerank.min_pool`, and `rerank.max_pool` are runtime-tunable via `mm config set` or the Web UI Settings panel — no restart required. `rerank.provider` / `rerank.model` / `rerank.api_key` are load-time only because the reranker instance is cached on startup.
+
+> **Deprecated:** earlier releases exposed `MEMTOMEM_RERANK__TOP_K` / `rerank.top_k` as an absolute candidate-pool size. The field still loads (legacy configs are migrated to `rerank.min_pool` with a `DeprecationWarning`) but will be removed in 0.3. Use `rerank.oversample` + `rerank.min_pool` + `rerank.max_pool` instead.
 
 ### Provider-specific models
 
