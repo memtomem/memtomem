@@ -33,6 +33,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   three knobs plus `rerank.enabled` are runtime-tunable via `mm config set`
   and the Web UI — no restart required. `provider`/`model`/`api_key` still
   need a restart (reranker instance is cached).
+- **Vendor → product grouping in the Memory Dirs panel**: the Sources tab
+  now groups memory directories by vendor (`User`, `Claude`, `OpenAI`)
+  with multi-product vendors (currently `Claude` → `Claude projects` +
+  `Claude plans`) rendering products as nested sections. Single-product
+  vendors keep the previous one-row layout with the product label
+  (`User`, `Codex`). Driven by a new `provider` field on
+  `GET /api/memory-dirs/status` so the client doesn't duplicate the
+  category → vendor map. RFC #304 Phase 1–2 (#321 + #322). New i18n
+  keys: `sources.memory_dirs.provider.{user,claude,openai}` (en + ko).
 
 ### Changed
 - **Multi-agent namespace format**: `mem_agent_register` / `mem_agent_search`
@@ -45,6 +54,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `sanitize_namespace_segment` in `storage/sqlite_namespace.py` (no allowlist
   change). Existing `agent/{id}` namespaces can be migrated with
   `mm agent migrate`.
+- **Memory Dirs panel: per-child collapse removed** (behavior change):
+  expanding the `Claude` vendor now reveals both `Claude projects` and
+  `Claude plans` together — they no longer collapse independently. Old
+  per-category collapse state was not persisted, so no migration is
+  needed. First-load defaults unchanged (`User` open, vendor groups
+  closed). No vendor-level bulk-reindex button; per-product reindex
+  buttons remain on each product section. RFC #304 Q4/Q5 (#322).
 
 ### Fixed
 - **Reranker candidate pool is now actually wired**: `RerankConfig.top_k`
