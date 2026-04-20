@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from helpers import make_chunk
+from memtomem.errors import StorageError
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +100,30 @@ class TestNamespace:
         ns = dict(await storage.list_namespaces())
         assert ns["ns-a"] == 2
         assert ns["ns-b"] == 1
+
+    @pytest.mark.parametrize("bad", ["bad name!", "no\ttab", 'quote"here', "a" * 256])
+    async def test_set_namespace_meta_rejects_invalid(self, storage, bad):
+        with pytest.raises(StorageError, match="Invalid namespace"):
+            await storage.set_namespace_meta(bad, description="x")
+
+    async def test_set_namespace_meta_accepts_agent_slash_form(self, storage):
+        """``agent/{id}`` passes validation after widening ``_NS_NAME_RE``."""
+        await storage.set_namespace_meta("agent/alpha", description="multi-agent ns")
+        meta = await storage.get_namespace_meta("agent/alpha")
+        assert meta is not None
+        assert meta["namespace"] == "agent/alpha"
+
+    async def test_rename_namespace_rejects_invalid_target(self, storage):
+        chunks = [make_chunk(content="x", namespace="source-ns")]
+        await storage.upsert_chunks(chunks)
+        with pytest.raises(StorageError, match="Invalid namespace"):
+            await storage.rename_namespace("source-ns", "bad!target")
+
+    async def test_assign_namespace_rejects_invalid_target(self, storage):
+        chunks = [make_chunk(content="x", namespace="orig")]
+        await storage.upsert_chunks(chunks)
+        with pytest.raises(StorageError, match="Invalid namespace"):
+            await storage.assign_namespace("bad\tname", old_namespace="orig")
 
 
 # ---------------------------------------------------------------------------

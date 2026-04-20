@@ -9,17 +9,31 @@ from typing import Callable, Sequence
 from memtomem.errors import StorageError
 from memtomem.storage.sqlite_helpers import escape_like, now_iso, placeholders
 
-# Namespace names: alphanumeric, hyphens, underscores, dots, colons, @, spaces (max 255)
-_NS_NAME_RE = re.compile(r"^[\w\-.:@ ]{1,255}$", re.UNICODE)
+# Namespace names: alphanumeric, hyphens, underscores, dots, colons, @, spaces,
+# and ``/`` (max 255). The ``/`` is permitted so the multi-agent tool's
+# ``agent/{agent_id}`` namespace passes validation; callers that generate
+# namespaces with ``/`` as a separator must sanitize the remainder themselves
+# so a single ``/`` acts as the separator rather than allowing arbitrary depth.
+# See #318 for the separator-unification discussion — if that issue settles on
+# ``:``, this character class should drop ``/`` again.
+_NS_NAME_RE = re.compile(r"^[\w\-./:@ ]{1,255}$", re.UNICODE)
 
 
 def validate_namespace(name: str) -> bool:
     """Check whether *name* is a valid namespace identifier.
 
-    Valid names contain word characters, hyphens, dots, colons, @, and spaces,
-    with a maximum length of 255.
+    Valid names contain word characters, hyphens, dots, colons, slashes, @,
+    and spaces, with a maximum length of 255.
     """
     return bool(_NS_NAME_RE.match(name))
+
+
+def _ensure_valid_namespace(name: str) -> None:
+    """Raise ``StorageError`` if *name* fails :func:`validate_namespace`."""
+    if not validate_namespace(name):
+        raise StorageError(
+            f"Invalid namespace: {name!r} (allowed characters: word, -, ., :, /, @, space; max 255)"
+        )
 
 
 class NamespaceOps:
@@ -84,6 +98,7 @@ class NamespaceOps:
         return len(rows)
 
     async def rename_namespace(self, old: str, new: str) -> int:
+        _ensure_valid_namespace(new)
         db = self._get_db()
         cursor = db.execute("UPDATE chunks SET namespace=? WHERE namespace=?", (new, old))
         db.execute(
@@ -116,6 +131,7 @@ class NamespaceOps:
         description: str | None = None,
         color: str | None = None,
     ) -> None:
+        _ensure_valid_namespace(namespace)
         db = self._get_db()
         existing = await self.get_namespace_meta(namespace)
         now = now_iso()
@@ -173,6 +189,7 @@ class NamespaceOps:
         old_namespace: str | None = None,
     ) -> int:
         """Move chunks matching filters to *namespace*. Returns affected row count."""
+        _ensure_valid_namespace(namespace)
         db = self._get_db()
         conditions: list[str] = []
         params: list = [namespace]
