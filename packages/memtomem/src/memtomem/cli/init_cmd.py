@@ -1080,8 +1080,12 @@ def _step_preset_picker(state: dict) -> None:
     namespace defaults via ``_apply_preset`` so the user only sees the
     essential memory-dir and MCP questions afterwards.
     """
+    # First step — no prior step to return to, so only surface 'q: quit'.
+    # 'b' still works (nav_prompt intercepts it before IntRange), but
+    # run_steps treats back-on-step-0 as a no-op, which would confuse
+    # users if advertised.
     click.secho("  Choose setup style:", fg="yellow", bold=True)
-    click.echo(click.style("  (b: back, q: quit)", dim=True))
+    click.echo(click.style("  (q: quit)", dim=True))
     click.echo()
 
     ordered: list[str] = ["minimal", "english", "korean"]
@@ -1252,23 +1256,27 @@ def _override_from_flags(
     non-interactive block's behavior.
     """
     if provider is not None:
+        # Only reset the preset-populated model/dimension when the user
+        # actually switches to a different provider AND hasn't supplied
+        # their own --model. `mm init --preset korean --provider onnx`
+        # must keep korean's bge-m3 (same provider); `--preset korean
+        # --provider ollama` must fall back to ollama's default model.
+        provider_changed = provider != state.get("provider")
         state["provider"] = provider
-        if provider == "none":
-            if model is None:
+        if provider_changed and model is None:
+            if provider == "none":
                 state["model"] = ""
                 state["dimension"] = 0
-        elif model is None:
-            # Pick a sensible default model per provider when --provider is
-            # given without --model, mirroring the non-interactive branch.
-            defaults = {
-                "onnx": ("all-MiniLM-L6-v2", 384),
-                "ollama": ("nomic-embed-text", 768),
-                "openai": ("text-embedding-3-small", 1536),
-            }
-            if provider in defaults:
-                default_model, default_dim = defaults[provider]
-                state["model"] = default_model
-                state["dimension"] = default_dim
+            else:
+                defaults = {
+                    "onnx": ("all-MiniLM-L6-v2", 384),
+                    "ollama": ("nomic-embed-text", 768),
+                    "openai": ("text-embedding-3-small", 1536),
+                }
+                if provider in defaults:
+                    default_model, default_dim = defaults[provider]
+                    state["model"] = default_model
+                    state["dimension"] = default_dim
     if model is not None:
         state["model"] = model
         state["dimension"] = _MODEL_DIMS.get(model, state.get("dimension", 0))

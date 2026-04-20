@@ -1792,6 +1792,47 @@ class TestPresetSelection:
         # tokenizer still kiwipiepy from the preset — not overridden.
         assert data["search"]["tokenizer"] == "kiwipiepy"
 
+    def test_override_same_provider_preserves_preset_model(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--preset korean --provider onnx -y`` — ``--provider`` re-states
+        the preset's own provider, so the default-model reset must NOT fire.
+        Regression for a clobber where same-provider override dropped
+        korean's bge-m3 back to onnx's ``all-MiniLM-L6-v2`` default."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            init,
+            [
+                "--non-interactive",
+                "--preset",
+                "korean",
+                "--provider",
+                "onnx",
+                "--memory-dir",
+                str(tmp_path / "memories"),
+                "--mcp",
+                "skip",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        # Preset's model/dimension survive because the provider didn't change.
+        assert data["embedding"]["provider"] == "onnx"
+        assert data["embedding"]["model"] == "bge-m3"
+        assert data["embedding"]["dimension"] == 1024
+        assert data["search"]["tokenizer"] == "kiwipiepy"
+
     def test_preset_plus_explicit_flag_override_interactive(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
