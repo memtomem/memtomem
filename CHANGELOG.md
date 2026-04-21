@@ -5,11 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.17] — 2026-04-22
+
+memtomem remains in **alpha**. This release closes the embedding-mismatch
+recovery loop end-to-end. The MCP server used to fail-fast crash at
+lifespan startup whenever a legacy `provider=none` DB (dim=0) was paired
+with a real-provider config, leaving MCP clients with no in-protocol path
+to fix it. The server now stays up in degraded mode, `mem_embedding_reset`
+drives recovery over MCP, and the `mm web` banner + one-click reset
+makes the same flow clickable instead of terminal-only.
+
 ### Added
 
 - **`mm version` subcommand** — prints `memtomem <version>`, identical output to
   `mm --version`. Adds parity with `mms version` (memtomem-stm) so users
-  switching between the two CLIs get consistent behavior.
+  switching between the two CLIs get consistent behavior. (#347)
 - **`mm init` detects reinstall-path embedding mismatch** — when the new
   preset's provider / dimension differs from what an existing
   `~/.memtomem/memtomem.db` has stored (classically a previous
@@ -20,14 +30,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   non-interactive `-y`, the wizard prints a loud recovery hint
   (`mm embedding-reset --mode apply-current`) instead of prompting. The
   chunks table itself is preserved; only the vector index is rebuilt,
-  so a re-index is required afterwards.
+  so a re-index is required afterwards. (#348)
 
 ### Changed
 
+- **MCP server degraded mode on embedding mismatch (behavior change)** —
+  `memtomem-server` no longer fail-fast crashes with
+  `EmbeddingDimensionMismatchError` when it encounters a `chunks_vec` /
+  provider mismatch at startup. It re-opens storage with
+  `strict_dim_check=False` (the same seam `mm embedding-reset` uses),
+  exposes the structured mismatch info on `AppContext.embedding_broken`,
+  and stays callable. Vector-dependent writes (`mem_add`, `mem_batch_add`,
+  `mem_edit`) return an actionable error instead of crashing on
+  `upsert_chunks`; `mem_status` / `mem_stats` surface a DEGRADED line;
+  `mem_embedding_reset` drives recovery entirely over MCP. File watcher
+  and background schedulers (consolidation, policy, health_watchdog) are
+  skipped in degraded mode — restart after recovery to bring them back.
+  (#349, #350)
+- **`mm web` banner fires on degraded mode** — the web lifespan used to
+  auto-sync runtime config to the DB-stored embedding info and clear the
+  mismatch flag, which for the dim=0 case silently downgraded the user's
+  onnx/bge-m3 config to BM25-only and suppressed the banner. The auto-sync
+  now skips when `embedding_broken` is set, so the existing
+  `#embedding-mismatch-banner` + "Reset vector index" button reach the
+  user. (#349 follow-up, #351)
 - **`docs/guides/uninstall.md` documents the reinstall-from-scratch path** —
   new section explaining that `mm init` only rewrites config/MCP and
   leaves the DB in place, with a `rm -rf ~/.memtomem && mm init` recipe
-  for users who want a fully blank slate.
+  for users who want a fully blank slate. (#348)
 
 ## [0.1.16] — 2026-04-21
 
