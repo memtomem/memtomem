@@ -414,13 +414,14 @@ See the [memtomem-stm README](https://github.com/memtomem/memtomem-stm#readme) f
 
 ## Optional: Web UI
 
-For a visual dashboard with search, tags, sessions, and health monitoring:
+For a visual dashboard:
 
 ```bash
-mm web                     # opens http://localhost:8080
+mm web                     # polished dashboard on http://127.0.0.1:8080
+mm web --dev               # adds opt-in maintainer pages
 ```
 
-Tabs cover search, sources, indexing, tags, timeline, and a "More" tab with config, namespaces, dedup/decay, export/import, and the harness (sessions, working memory, procedures, health).
+The default surface covers search, sources, indexing, tags, timeline, and a Settings tab. Pass `--dev` (or set `MEMTOMEM_WEB__MODE=dev` in your shell profile) to expose maintainer pages like Namespaces, Sessions, Working Memory, and Health Report — see [Configuration → Web UI Mode](configuration.md#web-ui-mode) for details.
 
 ---
 

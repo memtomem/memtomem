@@ -84,7 +84,7 @@ the editor: `~/.cursor/mcp.json` (Cursor),
 - **🏷️ Namespaces** — scope memories into groups (work / personal / project) with optional auto-derivation from folder names
 - **🧹 Maintenance** — near-duplicate detection with merge, time-based score decay, TTL expiration, auto-tagging
 - **🔄 Export / import** — JSON bundle backup and restore with re-embedding
-- **🌐 Web UI** — full-featured SPA dashboard for search, sources, indexing, tags, sessions, health monitoring
+- **🌐 Web UI** — polished SPA dashboard for search, sources, indexing, tags, and timeline (`mm web --dev` unlocks the full maintainer surface including Sessions, Working Memory, and Health Report)
 - **🛠️ 74 MCP tools** — full feature surface as MCP tools, with `mem_do` meta-tool routing all registered actions in `core` mode (default) for minimal context usage
 
 ## Documentation
