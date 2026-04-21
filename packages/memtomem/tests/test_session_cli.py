@@ -196,3 +196,31 @@ class TestActivityLogJson:
         result = runner.invoke(cli, ["activity", "log", "-c", "quiet"])
         assert result.exit_code == 0
         assert result.output == ""
+
+    def test_invalid_meta_emits_invalid_meta_ack(self, runner, monkeypatch):
+        """Malformed --meta under --json emits {ok: false, reason:
+        invalid_meta} (exit 0). Storage must not be touched — the parse
+        error happens before the async call."""
+        comp = _mock_components()
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        monkeypatch.setattr("memtomem.cli.session_cmd._read_current_session", lambda: "sess-1")
+
+        result = runner.invoke(cli, ["activity", "log", "-c", "x", "--meta", "{oops", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data == {"ok": False, "reason": "invalid_meta"}
+        comp.storage.add_session_event.assert_not_awaited()
+
+    def test_invalid_meta_text_path_bubbles(self, runner, monkeypatch):
+        """Malformed --meta without --json lets the JSONDecodeError bubble to
+        Click so a hook author mistyping meta sees the traceback.
+        Intentional per issue #338 — the silent-by-default hook contract is
+        about the *write* failure mode, not programmer input errors."""
+        comp = _mock_components()
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        monkeypatch.setattr("memtomem.cli.session_cmd._read_current_session", lambda: "sess-2")
+
+        result = runner.invoke(cli, ["activity", "log", "-c", "x", "--meta", "{oops"])
+        assert result.exit_code != 0
+        assert isinstance(result.exception, json.JSONDecodeError)
+        comp.storage.add_session_event.assert_not_awaited()

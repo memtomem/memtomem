@@ -274,7 +274,17 @@ def log_event(event_type: str, content: str, meta: str | None, *, as_json: bool 
         if as_json:
             click.echo(json.dumps({"ok": False, "reason": "no_active_session"}))
         return
-    metadata = json.loads(meta) if meta else None
+    try:
+        metadata = json.loads(meta) if meta else None
+    except json.JSONDecodeError:
+        # Malformed --meta: under --json emit the error ack (exit 0) so
+        # scripts can distinguish "bad input" from "write failed". Under
+        # text path, let Click surface the traceback — a hook author
+        # mistyping meta wants to see why.
+        if as_json:
+            click.echo(json.dumps({"ok": False, "reason": "invalid_meta"}))
+            return
+        raise
     try:
         asyncio.run(_log_event(session_id, event_type, content, metadata))
     except Exception:

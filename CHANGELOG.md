@@ -31,6 +31,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   ok-flag shape intentionally differs from `session events --json`'s
   `{error: ...}` — write acks have no natural disambiguator, so an
   explicit `ok` discriminator is clearer for consumers. (#335)
+- **`mm activity log --json` invalid-meta ack** — malformed `--meta`
+  JSON now emits `{ok: false, reason: "invalid_meta"}` under `--json`
+  (exit 0) so scripts can distinguish bad input from a write failure.
+  Without `--json` the `json.JSONDecodeError` still bubbles to Click
+  (traceback + exit 1) so a hook author mistyping meta sees why. (#338)
 
 ### Changed
 
