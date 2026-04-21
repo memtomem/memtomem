@@ -13,6 +13,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - **`mm config show --json`** — alias of `--format json`, added to align with
   the documented CLI output convention (binary human/machine scenario uses
   `--json`). Both flag forms emit identical output. (#332)
+- **`mm session list --json`** — scriptable JSON output for the session list,
+  emitting `{sessions: [...], count: N}`. Closes the parity gap where
+  `watchdog` and `config show` were already scriptable but `session list`
+  required parsing the text table. (#331)
+- **`mm session events --json`** — same treatment for per-session event
+  output, emitting `{session_id, events: [...], count: N}`. When invoked
+  without a session argument and no active session, returns
+  `{error: "no_session"}` on stdout (exit 0) so scripts can parse the
+  failure instead of getting a Click exit-1 + stderr line. Text path is
+  unchanged. (#331)
 
 ### Changed
 

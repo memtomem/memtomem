@@ -134,19 +134,38 @@ async def _end(session_id: str, summary: str | None, auto_summary: bool) -> None
 @click.option("--agent-id", "-a", default=None, help="Filter by agent ID")
 @click.option("--since", default=None, help="Filter by start date (YYYY-MM-DD)")
 @click.option("--limit", "-l", default=20, help="Max results")
-def list_sessions(agent_id: str | None, since: str | None, limit: int) -> None:
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON for scripting.")
+def list_sessions(
+    agent_id: str | None, since: str | None, limit: int, *, as_json: bool = False
+) -> None:
     """List sessions."""
     try:
-        asyncio.run(_list_sessions(agent_id, since, limit))
+        asyncio.run(_list_sessions(agent_id, since, limit, as_json=as_json))
     except Exception as e:
         raise click.ClickException(str(e)) from e
 
 
-async def _list_sessions(agent_id: str | None, since: str | None, limit: int) -> None:
+async def _list_sessions(
+    agent_id: str | None, since: str | None, limit: int, *, as_json: bool = False
+) -> None:
     from memtomem.cli._bootstrap import cli_components
 
     async with cli_components() as comp:
         sessions = await comp.storage.list_sessions(agent_id=agent_id, since=since, limit=limit)
+
+    if as_json:
+        payload = [
+            {
+                "id": s["id"],
+                "agent_id": s["agent_id"],
+                "started_at": s["started_at"],
+                "ended_at": s["ended_at"],
+                "status": "ended" if s["ended_at"] else "active",
+            }
+            for s in sessions
+        ]
+        click.echo(json.dumps({"sessions": payload, "count": len(payload)}, indent=2))
+        return
 
     if not sessions:
         click.echo("No sessions found.")
@@ -163,23 +182,47 @@ async def _list_sessions(agent_id: str | None, since: str | None, limit: int) ->
 
 @session.command()
 @click.argument("session_id", default="")
-def events(session_id: str) -> None:
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON for scripting.")
+def events(session_id: str, *, as_json: bool = False) -> None:
     """Show events for a session. Uses current session if no ID given."""
     if not session_id:
         session_id = _read_current_session() or ""
     if not session_id:
+        # JSON callers get a parseable error shape instead of a Click exit-1
+        # so ``mm session events --json | jq`` doesn't break when no session
+        # is active. Text callers keep the original ClickException path.
+        if as_json:
+            click.echo(json.dumps({"error": "no_session"}))
+            return
         raise click.ClickException("No session ID provided and no active session.")
     try:
-        asyncio.run(_events(session_id))
+        asyncio.run(_events(session_id, as_json=as_json))
     except Exception as e:
         raise click.ClickException(str(e)) from e
 
 
-async def _events(session_id: str) -> None:
+async def _events(session_id: str, *, as_json: bool = False) -> None:
     from memtomem.cli._bootstrap import cli_components
 
     async with cli_components() as comp:
         evts = await comp.storage.get_session_events(session_id)
+
+    if as_json:
+        payload = [
+            {
+                "created_at": ev["created_at"],
+                "event_type": ev["event_type"],
+                "content": ev["content"],
+            }
+            for ev in evts
+        ]
+        click.echo(
+            json.dumps(
+                {"session_id": session_id, "events": payload, "count": len(payload)},
+                indent=2,
+            )
+        )
+        return
 
     if not evts:
         click.echo("No events for this session.")
