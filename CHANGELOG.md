@@ -5,6 +5,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.16] — 2026-04-21
+
+memtomem remains in **alpha**. This release narrows the default `mm web`
+surface to the polished page set so first-time users see a coherent
+dashboard instead of the full maintainer toolbox. The full surface
+remains available via `mm web --dev` (or `MEMTOMEM_WEB__MODE=dev`), and
+every UI-level hide is backed by a matching 404 on the API so
+scripting callers fail loudly rather than against a half-built page.
+
 ### Added
 
 - **`mm web --mode` / `--dev` flags + `MEMTOMEM_WEB__MODE` env var** — select
@@ -12,9 +21,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   extends it with opt-in maintainer pages (Namespaces, Sessions, Working
   Memory, Procedures, Health Report, Artifact Sync, Hook Files,
   Skills/Commands/Agents). `--mode` and `--dev` are mutually exclusive; an
-  invalid env value fails fast instead of silently falling back.
+  invalid env value fails fast instead of silently falling back. (#343, #344)
 - **`GET /api/system/ui-mode`** — localhost-guarded endpoint returning the
-  resolved mode so the SPA can filter tabs on boot.
+  resolved mode so the SPA can filter tabs on boot. (#343)
 
 ### Changed
 
@@ -25,7 +34,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `MEMTOMEM_WEB__MODE=dev`). Their API routes (`/api/namespaces`,
   `/api/sessions`, `/api/scratch`, `/api/procedures`, `/api/context/*`,
   `/api/settings-sync`, `/api/watchdog/*`, `/api/eval/*`) now return
-  **404** in `prod` mode — scripts that rely on them need `dev` mode.
+  **404** in `prod` mode — scripts that rely on them need `dev` mode. (#344)
 
 ## [0.1.15] — 2026-04-21
 
