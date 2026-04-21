@@ -18,6 +18,14 @@ def cli() -> None:
     """memtomem — markdown-first memory infrastructure for AI agents."""
 
 
+@cli.command()
+def version() -> None:
+    """Show the installed memtomem version."""
+    from importlib.metadata import version as pkg_version
+
+    click.echo(f"memtomem {pkg_version('memtomem')}")
+
+
 # Register subcommands (lazy imports to keep startup fast)
 def _register() -> None:
     from memtomem.cli.agent_cmd import agent
