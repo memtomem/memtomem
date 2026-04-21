@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 from memtomem.web.app import (
     _DEV_ONLY_ROUTERS,
@@ -87,13 +87,46 @@ def test_resolve_web_mode_lenient_falls_back_to_prod(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["prod", "dev"])
-def test_ui_mode_endpoint_reflects_app_state(mode: str) -> None:
+async def test_ui_mode_endpoint_reflects_app_state(mode: str) -> None:
+    """Endpoint echoes ``app.state.web_mode``.
+
+    The endpoint is localhost-guarded (for consistency with other system
+    endpoints), so the transport has to spoof the ASGI scope ``client`` as
+    a loopback address — the default ``testclient`` host would get a 403.
+    """
     app = create_app(mode=mode)  # type: ignore[arg-type]
-    with TestClient(app) as client:
-        resp = client.get("/api/system/ui-mode")
+    transport = ASGITransport(app=app, client=("127.0.0.1", 0))
+    async with AsyncClient(transport=transport, base_url="http://testserver") as c:
+        resp = await c.get("/api/system/ui-mode")
     assert resp.status_code == 200
     assert resp.json() == {"mode": mode}
+
+
+@pytest.mark.asyncio
+async def test_ui_mode_endpoint_rejects_non_localhost() -> None:
+    """External scanners must not be able to fingerprint dev-mode servers."""
+    app = create_app(mode="dev")
+    transport = ASGITransport(app=app, client=("203.0.113.7", 0))
+    async with AsyncClient(transport=transport, base_url="http://testserver") as c:
+        resp = await c.get("/api/system/ui-mode")
+    assert resp.status_code == 403
+
+
+def test_module_level_app_is_memoized() -> None:
+    """Two imports of ``memtomem.web.app.app`` must return the same
+    ``FastAPI`` instance. ``__getattr__`` fires on every attribute access
+    that isn't already in the module ``__dict__`` — without a singleton
+    cache, every caller would get their own router set + state."""
+    from memtomem.web import app as app_mod
+
+    # Clear any prior cache so the test is deterministic regardless of
+    # import order from the rest of the suite.
+    app_mod._app_singleton = None
+    first = app_mod.app
+    second = app_mod.app
+    assert first is second
 
 
 # ---------------------------------------------------------------------------

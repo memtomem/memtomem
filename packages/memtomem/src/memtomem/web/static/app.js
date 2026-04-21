@@ -104,6 +104,10 @@ function _applyUiModeFilter() {
   const banner = qs('dev-mode-banner');
   if (banner) banner.hidden = isProd;
   document.querySelectorAll('[data-ui-tier="dev"]').forEach(el => {
+    // Belt-and-braces: some dev-only targets live inside `display: flex`
+    // parents (the Settings nav column) where `hidden` alone can be
+    // overridden by stylesheet rules. Pairing it with `display: none`
+    // keeps the filter predictable across CSS contexts.
     if (isProd) {
       el.hidden = true;
       el.style.display = 'none';
@@ -642,16 +646,10 @@ async function checkEmbeddingMismatch() {
 
 async function loadDashboard() {
   try {
-    const devMode = STATE.uiMode === 'dev';
-    // /api/namespaces becomes dev-only in PR 2 — skip the fetch in prod so
-    // the Home dashboard doesn't fire a guaranteed 404.
-    const nsPromise = devMode
-      ? api('GET', '/api/namespaces').catch(() => ({ namespaces: [] }))
-      : Promise.resolve({ namespaces: [] });
     const [stats, sourcesData, nsData, configData, embStatus, timelineData] = await Promise.all([
       api('GET', '/api/stats'),
       api('GET', '/api/sources'),
-      nsPromise,
+      api('GET', '/api/namespaces'),
       api('GET', '/api/config'),
       api('GET', '/api/embedding-status').catch(() => null),
       api('GET', '/api/timeline?days=365&limit=1000').catch(() => ({ chunks: [] })),
@@ -667,17 +665,12 @@ async function loadDashboard() {
     const totalSize = allSources.reduce((sum, s) => sum + (s.file_size || 0), 0);
     qs('home-total-size').textContent = formatBytes(totalSize) || '0 B';
 
-    // Harness stats (sessions + scratch) — dev-only in PR 2 onwards. In
-    // prod we leave the cards at 0 rather than firing guaranteed 404s.
+    // Harness stats (sessions + scratch)
     try {
-      let sessData = { total: 0 };
-      let scratchData = { total: 0 };
-      if (devMode) {
-        [sessData, scratchData] = await Promise.all([
-          api('GET', '/api/sessions?limit=1').catch(() => ({ total: 0 })),
-          api('GET', '/api/scratch').catch(() => ({ total: 0 })),
-        ]);
-      }
+      const [sessData, scratchData] = await Promise.all([
+        api('GET', '/api/sessions?limit=1').catch(() => ({ total: 0 })),
+        api('GET', '/api/scratch').catch(() => ({ total: 0 })),
+      ]);
       qs('home-sessions').textContent = sessData.total;
       qs('home-scratch').textContent = scratchData.total;
     } catch { /* non-critical */ }

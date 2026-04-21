@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import ModuleType
-from typing import Literal
+from typing import Literal, get_args
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -45,7 +45,10 @@ logger = logging.getLogger(__name__)
 _STATIC_DIR = Path(__file__).parent / "static"
 
 WebMode = Literal["prod", "dev"]
-_VALID_WEB_MODES: frozenset[str] = frozenset({"prod", "dev"})
+# Derive the runtime validator from the Literal so adding a future value
+# (e.g. "preview") in one place updates both type-checking and runtime
+# membership tests — see `feedback_literal_drives_frozenset.md`.
+_VALID_WEB_MODES: frozenset[str] = frozenset(get_args(WebMode))
 _WEB_MODE_ENV = "MEMTOMEM_WEB__MODE"
 
 # Routers that define the polished surface shipped to `uv tool install` users.
@@ -240,16 +243,28 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         await close_components(comp)
 
 
+_app_singleton: FastAPI | None = None
+
+
 def __getattr__(name: str):
-    """Lazy module-level ``app`` construction.
+    """Lazy module-level ``app`` construction, memoized.
 
     Only build the default ASGI app when something actually asks for it
     (``uvicorn memtomem.web.app:app``). Avoids a second ``create_app`` call —
     and its ``MEMTOMEM_WEB__MODE`` resolution warning — when the CLI imports
     ``resolve_web_mode_from_env`` or ``create_app`` directly.
+
+    The cached ``_app_singleton`` is critical: ``__getattr__`` runs on every
+    attribute access that isn't already in the module ``__dict__``, so
+    without memoization two ``from memtomem.web.app import app`` call sites
+    would each get a distinct ``FastAPI`` instance with its own routers,
+    state, and lifespan handlers.
     """
+    global _app_singleton
     if name == "app":
-        return create_app(lifespan=_lifespan, mode=resolve_web_mode_from_env())
+        if _app_singleton is None:
+            _app_singleton = create_app(lifespan=_lifespan, mode=resolve_web_mode_from_env())
+        return _app_singleton
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

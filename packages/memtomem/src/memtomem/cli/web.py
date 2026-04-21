@@ -71,12 +71,14 @@ def web(
     if mode is not None and dev_flag:
         raise click.UsageError("--mode and --dev are mutually exclusive")
 
-    from memtomem.web.app import resolve_web_mode_from_env
+    from memtomem.web.app import WebMode, resolve_web_mode_from_env
 
+    resolved_mode: WebMode
     if dev_flag:
-        resolved_mode: str = "dev"
+        resolved_mode = "dev"
     elif mode is not None:
-        resolved_mode = mode.lower()
+        # click.Choice has already constrained this to the literal set.
+        resolved_mode = mode.lower()  # type: ignore[assignment]
     else:
         try:
             resolved_mode = resolve_web_mode_from_env(strict=True)

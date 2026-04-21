@@ -256,6 +256,20 @@ def test_web_mode_and_dev_are_mutually_exclusive(
     assert "mutually exclusive" in result.output
 
 
+def test_web_mode_and_dev_mutex_rejects_same_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mutex is on presence, not value — ``--mode dev --dev`` is still
+    an error. Consistency matters: if users start relying on "same value is
+    fine" we'd have to pick a tie-breaker when they drift apart."""
+    monkeypatch.delenv("MEMTOMEM_WEB__MODE", raising=False)
+    runner = CliRunner()
+    with patch("memtomem.cli.web._missing_web_deps", return_value=None):
+        result = runner.invoke(web, ["--mode", "dev", "--dev"])
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.output
+
+
 def test_web_invalid_env_value_rejects_startup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

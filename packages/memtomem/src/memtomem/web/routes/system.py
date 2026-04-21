@@ -91,12 +91,19 @@ def _require_localhost(request: Request) -> None:
 router = APIRouter(tags=["system"])
 
 
-@router.get("/system/ui-mode")
+@router.get(
+    "/system/ui-mode",
+    dependencies=[Depends(_require_localhost)],
+)
 async def get_ui_mode(request: Request) -> dict[str, str]:
     """Return the current web UI mode (``prod`` or ``dev``).
 
     The SPA fetches this on boot to decide which tabs and settings sections
     to render. Falls back to ``prod`` if ``app.state.web_mode`` is missing.
+
+    Localhost-guarded for consistency with other ``system`` endpoints — the
+    SPA runs same-origin so this doesn't affect it, but it keeps external
+    scanners from fingerprinting which installs are in dev mode.
     """
     mode = getattr(request.app.state, "web_mode", "prod")
     return {"mode": mode}
