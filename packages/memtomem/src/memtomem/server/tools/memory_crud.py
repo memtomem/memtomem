@@ -11,7 +11,7 @@ from uuid import UUID
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app
 from memtomem.server.error_handler import tool_handler
-from memtomem.server.helpers import _announce_dim_mismatch_once
+from memtomem.server.helpers import _announce_dim_mismatch_once, _check_embedding_mismatch
 from memtomem.server.tool_registry import register
 from memtomem.server.validation import MAX_CONTENT_LENGTH
 from memtomem.server.webhooks import webhook_error_cb
@@ -71,6 +71,13 @@ async def _mem_add_core(
     from memtomem.tools.memory_writer import append_entry
 
     app = _get_app(ctx)
+
+    # Block vector-dependent writes when the server is in degraded mode
+    # (see issue #349). Without this gate the subsequent ``index_file``
+    # call hits ``upsert_chunks`` and crashes on a missing ``chunks_vec``.
+    mismatch_msg = _check_embedding_mismatch(app)
+    if mismatch_msg:
+        return (mismatch_msg, None)
 
     # Apply template if specified
     if template:
@@ -203,6 +210,9 @@ async def mem_edit(
     from memtomem.tools.memory_writer import replace_lines
 
     app = _get_app(ctx)
+    mismatch_msg = _check_embedding_mismatch(app)
+    if mismatch_msg:
+        return mismatch_msg
 
     try:
         uid = UUID(chunk_id)
@@ -342,6 +352,9 @@ async def mem_batch_add(
     from memtomem.tools.memory_writer import append_entry
 
     app = _get_app(ctx)
+    mismatch_msg = _check_embedding_mismatch(app)
+    if mismatch_msg:
+        return mismatch_msg
     mdirs = app.config.indexing.memory_dirs
 
     if file:

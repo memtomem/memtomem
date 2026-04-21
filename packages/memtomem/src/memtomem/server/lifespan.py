@@ -104,8 +104,13 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
     config = Mem2MemConfig()
     comp = await create_components(config)
 
+    # When the server came up in degraded mode (embedding mismatch, see
+    # issue #349) don't start the file watcher — indexing goes through
+    # ``upsert_chunks`` which needs ``chunks_vec`` and would crash on
+    # every file change. Recovery happens via ``mem_embedding_reset``.
     watcher = FileWatcher(comp.index_engine, config.indexing)
-    await watcher.start()
+    if comp.embedding_broken is None:
+        await watcher.start()
 
     dedup_scanner = DedupScanner(storage=comp.storage, embedder=comp.embedder)
 
@@ -126,11 +131,18 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
         dedup_scanner=dedup_scanner,
         webhook_manager=webhook_mgr,
         llm_provider=comp.llm,
+        embedding_broken=comp.embedding_broken,
     )
+
+    # Background schedulers are skipped in degraded mode (see issue #349) —
+    # they walk the index / re-embed chunks and would hit the same missing
+    # ``chunks_vec`` cascade as the watcher. They resume after a restart
+    # once ``mem_embedding_reset`` has fixed the DB.
+    degraded = comp.embedding_broken is not None
 
     # Auto-consolidation scheduler
     scheduler = None
-    if config.consolidation_schedule.enabled:
+    if config.consolidation_schedule.enabled and not degraded:
         from memtomem.server.scheduler import ConsolidationScheduler
 
         scheduler = ConsolidationScheduler(ctx, config.consolidation_schedule)
@@ -138,7 +150,7 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
 
     # Policy scheduler
     policy_scheduler = None
-    if config.policy.enabled:
+    if config.policy.enabled and not degraded:
         from memtomem.server.scheduler import PolicyScheduler
 
         policy_scheduler = PolicyScheduler(ctx, config.policy)
@@ -146,7 +158,7 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
 
     # Health watchdog
     watchdog = None
-    if config.health_watchdog.enabled:
+    if config.health_watchdog.enabled and not degraded:
         from memtomem.server.health_watchdog import HealthWatchdog
 
         watchdog = HealthWatchdog(ctx, config.health_watchdog)
