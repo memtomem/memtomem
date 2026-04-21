@@ -5,6 +5,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.18] — 2026-04-22
+
+First-UX patch on top of 0.1.17. New users following `mm init` →
+`mm web` with a base install hit two silent-failure modes that this
+release closes.
+
+### Fixed
+
+- **`mm init` surfaces missing `[onnx]`/`[web]` extras in the summary** —
+  preset paths (minimal/english/korean) skipped `_step_embedding`'s
+  inline fastembed check, and the `[web]` hint was gated out for
+  source-install users. The wizard summary now lists any missing extras
+  with a single `memtomem[all]` install hint (or narrower
+  `memtomem[onnx]` / `memtomem[web]` when only one is missing) before
+  "Next steps", so `mm index` and `mm web` don't fail with opaque
+  `fastembed is required` / `Web UI requires the [web] extra` errors
+  after following the printed commands. Interpreter-local
+  `importlib.util.find_spec` check matches the `mm` binary the wizard
+  is running under. (#353, #356)
+- **Web UI surfaces `/api/index` embedding failures** — the backend
+  route already propagated `IndexingStats.errors` in the response body,
+  but the main-tab index handler in `app.js` ignored the field and
+  always fired a green "Indexed N chunks" toast. A run where every file
+  failed to embed (base install missing `fastembed`) looked like a
+  clean success despite hundreds of `Embedding failed … fastembed is
+  required` entries on stderr. The handler now flips to a red
+  `toast.index_partial` toast and unhides an `Errors` row in the result
+  card with up to 5 entries plus a `"…and N more"` trailer. i18n
+  `toast.index_partial` / `index.result.errors` added for en + ko.
+  (#354, #357)
+
 ## [0.1.17] — 2026-04-22
 
 memtomem remains in **alpha**. This release closes the embedding-mismatch
