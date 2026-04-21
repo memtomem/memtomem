@@ -37,6 +37,14 @@ class AppContext:
     llm_provider: LLMProvider | None = None
     current_namespace: str | None = None
     current_session_id: str | None = None
+    # Populated when the server entered degraded mode at startup because of a
+    # ``chunks_vec`` / provider mismatch. Same shape as
+    # ``SqliteBackend.embedding_mismatch``. Vector-dependent tool handlers
+    # check this flag (via ``_check_embedding_mismatch``) and short-circuit
+    # with an actionable error; recovery tooling
+    # (``mem_embedding_reset``, ``mem_status``, ``mem_stats``) stays
+    # callable. See issue #349.
+    embedding_broken: dict | None = None
     # per-session, scoped to AppContext lifetime. Gate to emit a dim-mismatch
     # hint only once per MCP session so repeated mem_add / mem_search calls
     # do not spam the same notice. Writes go through ``_config_lock``.

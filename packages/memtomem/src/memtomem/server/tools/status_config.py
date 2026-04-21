@@ -35,12 +35,31 @@ async def mem_stats(
     total_sources = data.get("total_sources", 0)
     backend = app.config.storage.backend
 
-    return (
+    out = (
         f"Memory index statistics:\n"
         f"- Total chunks: {total_chunks}\n"
         f"- Total sources: {total_sources}\n"
         f"- Storage backend: {backend}"
     )
+
+    # Surface live degraded-mode state so monitoring probes and the Web UI
+    # can detect it without a second tool call. Reads from
+    # ``storage.embedding_mismatch`` (not the startup-time
+    # ``ctx.embedding_broken`` snapshot) so the line disappears as soon as
+    # ``mem_embedding_reset`` clears the mismatch. See ``mem_status`` for
+    # the full structured warning block.
+    mismatch = getattr(app.storage, "embedding_mismatch", None)
+    if mismatch is not None:
+        stored = mismatch["stored"]
+        cfg = mismatch["configured"]
+        out += (
+            "\n- Embedding: DEGRADED — "
+            f"stored {stored['provider']}/{stored['model']} ({stored['dimension']}d) "
+            f"vs configured {cfg['provider']}/{cfg['model']} ({cfg['dimension']}d). "
+            'Run mem_embedding_reset(mode="apply_current") to repair.'
+        )
+
+    return out
 
 
 @mcp.tool()

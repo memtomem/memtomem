@@ -14,6 +14,7 @@ from memtomem.chunking.restructured_text import ReStructuredTextChunker
 from memtomem.chunking.structured import StructuredChunker
 from memtomem.config import Mem2MemConfig
 from memtomem.embedding.factory import create_embedder
+from memtomem.errors import EmbeddingDimensionMismatchError
 from memtomem.indexing.engine import IndexEngine
 from memtomem.search.pipeline import SearchPipeline
 from memtomem.storage.factory import create_storage
@@ -36,6 +37,11 @@ class Components:
     index_engine: IndexEngine
     search_pipeline: SearchPipeline
     llm: LLMProvider | None = None
+    # Populated when startup detected a ``chunks_vec`` / provider mismatch
+    # (``EmbeddingDimensionMismatchError``) and the server came up in
+    # degraded mode instead of crashing. The dict has the same shape as
+    # ``SqliteBackend.embedding_mismatch``. See issue #349.
+    embedding_broken: dict | None = None
 
 
 async def create_components(config: Mem2MemConfig | None = None) -> Components:
@@ -54,9 +60,43 @@ async def create_components(config: Mem2MemConfig | None = None) -> Components:
 
     storage = create_storage(config)
     embedder: EmbeddingProvider | None = None
+    embedding_broken: dict | None = None
     try:
         embedder = create_embedder(config.embedding)
         await storage.initialize()
+    except EmbeddingDimensionMismatchError:
+        # Stored DB has ``embedding_dimension=0`` (prior NoopEmbedder / BM25
+        # install) but the runtime config points at a real provider. Instead
+        # of crashing the server — which leaves the user no MCP-level path to
+        # repair — come up in degraded mode: the storage is re-opened with
+        # ``strict_dim_check=False`` (same seam the ``mm embedding-reset``
+        # CLI uses) so the mismatch surfaces as a structured flag and the
+        # recovery tool (``mem_embedding_reset``) stays callable over MCP.
+        # Vector-dependent tools (``mem_add`` / ``mem_index`` / …) are gated
+        # separately via ``_check_embedding_mismatch``. See issue #349.
+        await storage.close()
+        _log.warning(
+            "Embedding dimension mismatch detected at startup — entering "
+            "degraded mode. Non-vector tools (mem_status, mem_stats, "
+            "mem_embedding_reset, mem_list, mem_read) stay available; "
+            "vector-dependent tools (mem_add, mem_index, ...) will return "
+            "an actionable error until `mem_embedding_reset` is run."
+        )
+        storage = SqliteBackend(
+            config.storage,
+            dimension=config.embedding.dimension,
+            embedding_provider=config.embedding.provider,
+            embedding_model=config.embedding.model,
+            strict_dim_check=False,
+        )
+        try:
+            await storage.initialize()
+        except Exception:
+            if embedder is not None:
+                await embedder.close()
+            await storage.close()
+            raise
+        embedding_broken = storage.embedding_mismatch
     except Exception:
         if embedder is not None:
             await embedder.close()
@@ -133,6 +173,7 @@ async def create_components(config: Mem2MemConfig | None = None) -> Components:
         index_engine=index_engine,
         search_pipeline=search_pipeline,
         llm=llm,
+        embedding_broken=embedding_broken,
     )
 
 
