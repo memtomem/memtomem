@@ -216,6 +216,158 @@ def test_write_config_and_summary_without_base_dir_falls_back_to_home(
     assert (tmp_path / ".memtomem" / "config.json").exists()
 
 
+class TestMissingExtrasWarning:
+    """`_write_config_and_summary` must surface missing-extras before Next Steps.
+
+    Preset paths (minimal/english/korean) skip ``_step_embedding`` which was
+    the only inline fastembed check; without a centralized warning, a Korean
+    preset user with a base (``[all]``-less) install hits
+    ``Embedding failed ... fastembed is required`` silently during index. The
+    summary also needs a ``[web]``-missing warning regardless of install
+    type, since source-install users can still invoke the global ``mm web``
+    binary (uv tool path) whose interpreter may lack ``[web]``.
+    """
+
+    def test_collect_missing_extras_none_when_provider_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """provider=none + all extras present → no warnings."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd, "_missing_web_deps", lambda: None, raising=False)
+        # Importlib.find_spec goes through the real import machinery; keep it
+        # unmocked here so fastembed presence on dev machines is the truth.
+        state = {"provider": "none", "rerank_enabled": False}
+        # onnx bucket only fires when provider=onnx OR rerank; none+none = []
+        assert init_cmd._collect_missing_extras(state) == []
+
+    def test_collect_missing_extras_onnx_when_fastembed_absent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """provider=onnx + fastembed not importable → ['onnx']."""
+        from memtomem.cli import init_cmd
+
+        def fake_find_spec(name: str) -> object | None:
+            return None if name == "fastembed" else object()
+
+        monkeypatch.setattr("importlib.util.find_spec", fake_find_spec)
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+        state = {"provider": "onnx", "rerank_enabled": False}
+        assert init_cmd._collect_missing_extras(state) == ["onnx"]
+
+    def test_collect_missing_extras_onnx_when_rerank_needs_fastembed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reranker enabled shares fastembed with onnx embedding — absent
+        fastembed still yields ['onnx'] even if provider=none."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "fastembed" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+        state = {
+            "provider": "none",
+            "rerank_enabled": True,
+            "rerank_model": "jinaai/jina-reranker-v2-base-multilingual",
+        }
+        assert init_cmd._collect_missing_extras(state) == ["onnx"]
+
+    def test_collect_missing_extras_web_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """provider=none + fastapi absent → ['web']."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: "fastapi", raising=False)
+        state = {"provider": "none", "rerank_enabled": False}
+        assert init_cmd._collect_missing_extras(state) == ["web"]
+
+    def test_collect_missing_extras_both(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """onnx + web both missing → ['onnx', 'web'] (ordered by failure
+        sequence: index before web)."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "fastembed" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: "fastapi", raising=False)
+        state = {"provider": "onnx", "rerank_enabled": False}
+        assert init_cmd._collect_missing_extras(state) == ["onnx", "web"]
+
+    def test_extra_install_hint_single_uses_narrow_extra(self) -> None:
+        """One missing extra → narrow hint (``[onnx]`` / ``[web]``)."""
+        from memtomem.cli.init_cmd import _extra_install_hint
+
+        assert _extra_install_hint(["onnx"]) == 'uv tool install --reinstall "memtomem[onnx]"'
+        assert _extra_install_hint(["web"]) == 'uv tool install --reinstall "memtomem[web]"'
+
+    def test_extra_install_hint_multiple_collapses_to_all(self) -> None:
+        """Two+ missing → collapse to ``[all]`` (single public extra covering
+        both, simpler than ``[onnx,web]`` listing)."""
+        from memtomem.cli.init_cmd import _extra_install_hint
+
+        assert _extra_install_hint(["onnx", "web"]) == (
+            'uv tool install --reinstall "memtomem[all]"'
+        )
+
+    def test_emit_missing_extras_warning_silent_when_empty(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Empty list → no output (common path must not add noise)."""
+        from memtomem.cli.init_cmd import _emit_missing_extras_warning
+
+        _emit_missing_extras_warning([])
+        assert capsys.readouterr().out == ""
+
+    def test_emit_missing_extras_warning_names_extras_and_hint(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Warning lists the extras, which commands will fail, and a single
+        install hint (the fix for users seeing 'fastembed required' silently
+        during index)."""
+        from click import unstyle
+
+        from memtomem.cli.init_cmd import _emit_missing_extras_warning
+
+        _emit_missing_extras_warning(["onnx", "web"])
+        out = unstyle(capsys.readouterr().out)
+        assert "Missing extras: onnx, web" in out
+        assert "mm index" in out
+        assert "mm web" in out
+        assert "memtomem[all]" in out
+
+    def test_summary_surfaces_onnx_warning_on_preset_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """End-to-end: Korean-preset-style state (provider=onnx) + fastembed
+        absent must produce a warning in the printed summary. Regression for
+        the preset paths skipping ``_step_embedding``'s inline check."""
+        from click import unstyle
+
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "fastembed" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+
+        state = _make_init_state(tmp_path)
+        state["provider"] = "onnx"
+        state["model"] = "bge-m3"
+        state["dimension"] = 1024
+        _write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "Missing extras: onnx" in out
+        assert "memtomem[onnx]" in out
+
+
 class TestPreservedSummary:
     """`_write_config_and_summary` flags non-default values that the wizard
     inherited from a previous config but did not ask about this run.

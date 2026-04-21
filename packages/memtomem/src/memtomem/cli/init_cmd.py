@@ -888,6 +888,81 @@ async def _check_embedding_mismatch(state: dict, *, interactive: bool) -> None:
         await storage.close()
 
 
+# Canonical hint for each extra. Mirrors the form in
+# ``memtomem.cli.web._web_install_hint`` so every user-facing missing-extras
+# message suggests the same install method (uv tool, which matches how the
+# global ``mm`` binary gets on PATH).
+_EXTRA_INSTALL_HINT_PREFIX: str = 'uv tool install --reinstall "memtomem'
+
+
+def _extra_install_hint(extras: list[str]) -> str:
+    """Return the uv-tool install command for one extra (``memtomem[onnx]``)
+    or the combined ``[all]`` extra when two or more are missing.
+
+    Multi-extra case collapses to ``[all]`` instead of bracketed multiples
+    (``memtomem[onnx,web]``) because ``[all]`` is the public, documented extra
+    in ``pyproject.toml``; the user doesn't need to know the sub-bundle."""
+    if len(extras) == 1:
+        return f'{_EXTRA_INSTALL_HINT_PREFIX}[{extras[0]}]"'
+    return f'{_EXTRA_INSTALL_HINT_PREFIX}[all]"'
+
+
+def _collect_missing_extras(state: dict) -> list[str]:
+    """Return ordered list of missing extras the chosen config will need.
+
+    Interpreter-local check via :func:`importlib.util.find_spec` — matches
+    the Python env the current ``mm`` binary runs under. The whole point of
+    this warning is that preset paths (``minimal`` / ``english`` / ``korean``)
+    skip the interactive ``_step_embedding`` that historically surfaced the
+    fastembed gap inline; the user's ``mm init`` → ``mm web`` flow otherwise
+    hits an opaque failure at the third ``Next steps`` command.
+
+    Order: ``onnx`` before ``web`` so the extras appear in the same order
+    the dependent commands fail (``mm index`` → ``mm web``)."""
+    from importlib.util import find_spec
+
+    from memtomem.cli.web import _missing_web_deps
+
+    missing: list[str] = []
+    # [onnx] = fastembed. Both the embedder and the fastembed reranker share
+    # this package — either on its own is enough to require the extra.
+    needs_fastembed = state.get("provider") == "onnx" or (
+        state.get("rerank_enabled") and state.get("rerank_model")
+    )
+    if needs_fastembed and find_spec("fastembed") is None:
+        missing.append("onnx")
+    # [web] = fastapi + uvicorn. Reuse ``_missing_web_deps`` so the check
+    # stays aligned with what ``mm web`` itself errors on.
+    if _missing_web_deps() is not None:
+        missing.append("web")
+    return missing
+
+
+def _emit_missing_extras_warning(missing: list[str]) -> None:
+    """Print an actionable warning about missing extras, or nothing.
+
+    Silent when ``missing`` is empty so the common "already installed" path
+    adds no output noise. When non-empty, names the missing extras, lists
+    which ``Next steps`` commands will fail without them, and prints a single
+    install command (narrow per-extra hint when one missing, ``[all]`` when
+    two+ — matches ``pyproject.toml``'s public extras)."""
+    if not missing:
+        return
+    click.echo()
+    click.secho(
+        f"  [!] Missing extras: {', '.join(missing)}",
+        fg="yellow",
+        bold=True,
+    )
+    if "onnx" in missing and "web" in missing:
+        click.echo("      'mm index' (embeddings) and 'mm web' (UI) will fail until installed.")
+    elif "onnx" in missing:
+        click.echo("      'mm index' will fail to embed until installed.")
+    elif "web" in missing:
+        click.echo("      'mm web' will fail to start until installed.")
+    click.echo(f"      → {_extra_install_hint(missing)}")
+
+
 def _write_config_and_summary(
     state: dict, base_dir: Path | None = None, fresh: bool = False
 ) -> None:
@@ -1138,21 +1213,21 @@ def _write_config_and_summary(
     click.echo()
     click.secho("  All settings are stored in ~/.memtomem/config.json.", dim=True)
     click.secho("  MCP config only contains the server command (no env overrides).", dim=True)
+
+    # Warn about missing extras (fastembed for onnx, fastapi/uvicorn for web)
+    # before Next Steps so users don't hit "fastembed required" or "Web UI
+    # requires the [web] extra" after following the printed commands. The
+    # interactive `_step_embedding` covers the onnx case inline, but preset
+    # paths (minimal/english/korean) skip that step entirely — check here so
+    # every path surfaces the gap.
+    _emit_missing_extras_warning(_collect_missing_extras(state))
+
     click.echo()
     click.secho("  Next steps:", fg="cyan")
     run_prefix = "uv run " if source_install or project_install else ""
     click.echo(f"    1. {run_prefix}mm index {state['memory_dir']}")
     click.echo(f"    2. {run_prefix}mm search 'your first query'")
-
-    # Web UI is behind the [web] extra (fastapi + uvicorn). If it isn't
-    # installed, surface a hint here rather than letting `mm web` fail later.
-    from memtomem.cli.web import _missing_web_deps, _web_install_hint
-
-    if not source_install and not project_install and _missing_web_deps() is not None:
-        click.echo("    3. mm web  (requires [web] extra — not included in base install)")
-        click.echo(f"       → {_web_install_hint()}")
-    else:
-        click.echo(f"    3. {run_prefix}mm web  (browse & manage your memories)")
+    click.echo(f"    3. {run_prefix}mm web  (browse & manage your memories)")
     click.echo()
 
 
