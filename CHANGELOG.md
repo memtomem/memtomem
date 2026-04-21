@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **`mm version` subcommand** — prints `memtomem <version>`, identical output to
+  `mm --version`. Adds parity with `mms version` (memtomem-stm) so users
+  switching between the two CLIs get consistent behavior.
+
 ## [0.1.16] — 2026-04-21
 
 memtomem remains in **alpha**. This release narrows the default `mm web`

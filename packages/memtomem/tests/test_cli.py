@@ -50,6 +50,13 @@ class TestCLIGroup:
         assert result.exit_code == 0
         assert result.output.strip().startswith("memtomem ")
 
+    def test_version_subcommand_matches_flag(self, runner: CliRunner) -> None:
+        flag = runner.invoke(cli, ["--version"])
+        sub = runner.invoke(cli, ["version"])
+        assert flag.exit_code == 0
+        assert sub.exit_code == 0
+        assert flag.output.strip() == sub.output.strip()
+
     def test_registered_subcommands(self, runner: CliRunner) -> None:
         """All expected subcommands appear in help output."""
         result = runner.invoke(cli, ["--help"])
@@ -65,6 +72,7 @@ class TestCLIGroup:
             "web",
             "shell",
             "init",
+            "version",
         ):
             assert cmd in result.output, f"'{cmd}' not found in help output"
 
