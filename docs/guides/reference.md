@@ -858,11 +858,15 @@ on promotion prevents the chunk from being immediately re-archived.
 ## Web UI
 
 ```bash
-memtomem-web                  # http://localhost:8080
-memtomem-web --port 3000      # custom port
+mm web                         # http://localhost:8080 (prod surface)
+mm web --port 3000             # custom port
+mm web --dev                   # adds opt-in maintainer pages
+mm web --mode {prod,dev}       # explicit mode (mutually exclusive with --dev)
 ```
 
-The dashboard exposes search, sources, indexing, tags, timeline, and a "More" tab covering config, namespaces, dedup/decay, export/import, and the harness (sessions, working memory, procedures, health).
+`mm web` defaults to the polished page set: Home, Search, Sources, Index, Tags, Timeline, and Settings (Config, Dedup, Age-out, Export/Import, Reset Database). `mm web --dev` — or setting `MEMTOMEM_WEB__MODE=dev` in your shell profile — extends the surface with maintainer pages (Namespaces, Sessions, Working Memory, Procedures, Health Report, Artifact Sync, Hook Files, Skills/Commands/Agents).
+
+Tab classification changes over time — run `mm web --dev` against your installed version to see the complete surface. The API endpoints backing dev-only pages return 404 in `prod` mode; scripts that hit `/api/sessions`, `/api/scratch`, `/api/namespaces`, `/api/context/*`, etc. need `dev` mode.
 
 ---
 
@@ -917,7 +921,8 @@ mm ingest codex-memory --source PATH   # index Codex CLI memory
 
 # Utilities
 mm shell                               # interactive REPL
-mm web                                 # launch Web UI (http://localhost:8080)
+mm web                                 # launch Web UI (prod surface)
+mm web --dev                           # Web UI with opt-in maintainer pages
 ```
 
 Install the CLI: `uv tool install memtomem` (PyPI) or `uv run mm ...` (source).

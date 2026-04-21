@@ -118,7 +118,7 @@ class FakeConfig:
 @pytest.fixture
 def app():
     """Create an app without lifespan and wire mock state."""
-    application = create_app(lifespan=None)
+    application = create_app(lifespan=None, mode="dev")
 
     # -- storage mock --
     storage = AsyncMock()
@@ -1072,7 +1072,7 @@ class TestNamespaceIntegration:
         comp = await create_components(config)
         _cfg.load_config_overrides = _orig
 
-        application = create_app(lifespan=None)
+        application = create_app(lifespan=None, mode="dev")
         application.state.storage = comp.storage
         application.state.config = config
         application.state.embedder = comp.embedder

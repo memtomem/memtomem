@@ -118,7 +118,7 @@ class FakeConfig:
 @pytest.fixture
 def app():
     """Create an app without lifespan and wire mock state."""
-    application = create_app(lifespan=None)
+    application = create_app(lifespan=None, mode="dev")
 
     # -- storage mock --
     storage = AsyncMock()

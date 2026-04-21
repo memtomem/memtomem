@@ -78,7 +78,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def app(home: Path):
-    application = create_app(lifespan=None)
+    application = create_app(lifespan=None, mode="dev")
 
     # Minimal component mocks — hot-reload path doesn't touch storage/embedder
     # in the read-through case, but some write handlers pass them through.
@@ -618,7 +618,7 @@ class TestSignature:
 
 class TestReloadIfStale:
     def test_no_change_returns_false(self, home: Path):
-        app = create_app(lifespan=None)
+        app = create_app(lifespan=None, mode="dev")
         app.state.config = _hot_reload._build_fresh_config()
         app.state.config_signature = _hot_reload.current_signature()
         app.state.last_reload_error = None
@@ -626,7 +626,7 @@ class TestReloadIfStale:
         assert _hot_reload.reload_if_stale(app) is False
 
     def test_change_swaps_config(self, home: Path):
-        app = create_app(lifespan=None)
+        app = create_app(lifespan=None, mode="dev")
         _write_config(home, {"mmr": {"enabled": False}})
         app.state.config = _hot_reload._build_fresh_config()
         app.state.config_signature = _hot_reload.current_signature()
@@ -638,7 +638,7 @@ class TestReloadIfStale:
         assert app.state.config.mmr.enabled is True
 
     def test_broken_disk_keeps_old_config(self, home: Path):
-        app = create_app(lifespan=None)
+        app = create_app(lifespan=None, mode="dev")
         _write_config(home, {"mmr": {"enabled": False}})
         app.state.config = _hot_reload._build_fresh_config()
         app.state.config_signature = _hot_reload.current_signature()

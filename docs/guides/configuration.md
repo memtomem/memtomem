@@ -684,6 +684,16 @@ The `openai` provider works with any OpenAI-compatible endpoint (LM Studio, vLLM
 
 In `core` mode, use `mem_do(action="...", params={...})` to access any of the 65+ non-core actions. Fewer tools means less context usage for AI agents.
 
+## Web UI Mode
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMTOMEM_WEB__MODE` | `prod` | Web UI surface: `prod` shows the polished page set; `dev` adds opt-in maintainer pages |
+
+`mm web --mode {prod,dev}` overrides the env. `mm web --dev` is a shortcut for `--mode dev` and is mutually exclusive with `--mode`. An invalid value fails fast rather than silently falling back.
+
+Tab classification changes over time — run `mm web --dev` to see the full surface of your installed version. The API endpoints backing dev-only pages (for example `/api/sessions`, `/api/scratch`, `/api/namespaces`, `/api/context/*`) return 404 in `prod` mode; switch to `dev` mode if you're scripting against them.
+
 ## Querying and Modifying at Runtime
 
 You can also inspect and change settings at runtime via the `mem_config` MCP tool (requires `MEMTOMEM_TOOL_MODE=full`; in `core` or `standard` mode, use `mm config` CLI or the Web UI Settings tab):
