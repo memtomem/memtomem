@@ -66,10 +66,10 @@ _PROD_ROUTERS: list[ModuleType] = [
     dedup,
     decay,
     export,
+    namespaces,
     timeline,
 ]
 _DEV_ONLY_ROUTERS: list[ModuleType] = [
-    namespaces,
     sessions,
     scratch,
     procedures,
