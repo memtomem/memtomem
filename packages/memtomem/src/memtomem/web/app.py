@@ -219,9 +219,15 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.index_engine = comp.index_engine
     app.state.dedup_scanner = DedupScanner(comp.storage, comp.embedder)
 
-    # Sync config to match DB-stored embedding info (prevents mismatch banner)
+    # Sync config to match DB-stored embedding info (prevents mismatch banner).
+    # Skipped when the server entered degraded mode (issue #349) — in the
+    # dim=0 / real-provider case the stored "embedding" is NoopEmbedder
+    # (provider=none, dim=0), so an auto-sync would silently downgrade the
+    # user's configured onnx/bge-m3 to BM25-only and swallow the broken
+    # state instead of surfacing it. The banner + ``/api/embedding-reset``
+    # flow recovers explicitly; soft-syncing would defeat it.
     stored_info = getattr(comp.storage, "stored_embedding_info", None)
-    if stored_info:
+    if stored_info and comp.embedding_broken is None:
         cfg = comp.config.embedding
         if cfg.model != stored_info["model"] or cfg.dimension != stored_info["dimension"]:
             logger.info(
