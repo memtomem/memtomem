@@ -41,6 +41,10 @@ const STATE = {
   touchStartX: 0,
   touchStartY: 0,
   helpVisible: true,
+  // Default to 'prod' so boot-race or fetch failure leaves the polished
+  // surface in place. Overwritten by the result of ``GET /api/system/ui-mode``
+  // during ``initUiMode()``.
+  uiMode: 'prod',
 };
 
 // ── C3: Theme init ──
@@ -56,7 +60,10 @@ const STATE = {
   document.addEventListener('DOMContentLoaded', async () => {
     const isDark = el.getAttribute('data-theme') !== 'light';
     qs('theme-toggle').textContent = isDark ? '🌙' : '☀️';
+    // Resolve UI mode + fetch locales in parallel. Both gate rendering.
+    const uiModePromise = initUiMode();
     if (typeof I18N !== 'undefined') await I18N.init();
+    await uiModePromise;
     renderRecentChips();
     _initTabHelp();
     // Re-apply i18n when language changes (dynamic JS strings)
@@ -68,12 +75,60 @@ const STATE = {
     // ``t()`` at build time, so they must run after the locale cache is
     // populated to avoid raw-key flashes.
     const hash = location.hash.slice(1);
-    const validTabs = ['home', 'search', 'sources', 'index', 'tags', 'timeline', 'settings'];
-    if (hash && validTabs.includes(hash)) {
+    if (hash && _visibleMainTabs().includes(hash)) {
       activateTab(hash);
     }
   });
 })();
+
+// ---------------------------------------------------------------------------
+// UI mode (prod / dev) — hides opt-in maintainer pages by default.
+// ---------------------------------------------------------------------------
+
+async function initUiMode() {
+  try {
+    const d = await api('GET', '/api/system/ui-mode');
+    STATE.uiMode = d && d.mode === 'dev' ? 'dev' : 'prod';
+  } catch (err) {
+    // Keep the 'prod' default — degrading toward the polished surface is
+    // safer than showing maintainer pages on a boot-time fetch failure.
+    console.warn('[ui-mode]', err);
+    STATE.uiMode = 'prod';
+  }
+  _applyUiModeFilter();
+}
+
+function _applyUiModeFilter() {
+  const isProd = STATE.uiMode !== 'dev';
+  document.body.classList.toggle('dev-mode', !isProd);
+  const banner = qs('dev-mode-banner');
+  if (banner) banner.hidden = isProd;
+  document.querySelectorAll('[data-ui-tier="dev"]').forEach(el => {
+    if (isProd) {
+      el.hidden = true;
+      el.style.display = 'none';
+    } else {
+      el.hidden = false;
+      el.style.display = '';
+    }
+  });
+}
+
+function _visibleMainTabs() {
+  const isProd = STATE.uiMode !== 'dev';
+  return Array.from(document.querySelectorAll('.tab-btn'))
+    .filter(btn => !isProd || btn.dataset.uiTier !== 'dev')
+    .map(btn => btn.dataset.tab)
+    .filter(Boolean);
+}
+
+function _visibleSettingsSections() {
+  const isProd = STATE.uiMode !== 'dev';
+  return Array.from(document.querySelectorAll('.settings-nav-btn'))
+    .filter(btn => !isProd || btn.dataset.uiTier !== 'dev')
+    .map(btn => btn.dataset.section)
+    .filter(Boolean);
+}
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -287,6 +342,19 @@ function showConfirm({ title, message = '', confirmText = t('common.confirm') })
 // ---------------------------------------------------------------------------
 
 function activateTab(tabName) {
+  // In prod mode, hide dev-only tabs by redirecting to the first visible
+  // main tab instead of showing a dev panel the polished surface doesn't
+  // expose.
+  const targetBtn = document.querySelector(`.tab-btn[data-tab="${tabName}"]`);
+  if (targetBtn && targetBtn.dataset.uiTier === 'dev' && STATE.uiMode !== 'dev') {
+    const visible = _visibleMainTabs();
+    showToast(t('toast.dev_only_section'), 'info');
+    if (visible.length && visible[0] !== tabName) {
+      activateTab(visible[0]);
+    }
+    return;
+  }
+
   // Deactivate all main tabs
   document.querySelectorAll('.tab-btn').forEach(b => {
     b.classList.remove('active');
@@ -398,6 +466,18 @@ function ensureActiveGroupExpanded(section) {
 
 function switchSettingsSection(sectionName) {
   sectionName = LEGACY_SECTION_MAP[sectionName] || sectionName;
+  // In prod mode, redirect dev-only sections to the first visible one.
+  const targetBtn = document.querySelector(
+    `.settings-nav-btn[data-section="${sectionName}"]`,
+  );
+  if (targetBtn && targetBtn.dataset.uiTier === 'dev' && STATE.uiMode !== 'dev') {
+    const visible = _visibleSettingsSections();
+    showToast(t('toast.dev_only_section'), 'info');
+    if (visible.length && visible[0] !== sectionName) {
+      switchSettingsSection(visible[0]);
+    }
+    return;
+  }
   STATE.lastSettingsSection = sectionName;
   try { localStorage.setItem(LAST_SECTION_KEY, sectionName); } catch {}
   document.querySelectorAll('.settings-nav-btn').forEach(b => {
@@ -562,10 +642,16 @@ async function checkEmbeddingMismatch() {
 
 async function loadDashboard() {
   try {
+    const devMode = STATE.uiMode === 'dev';
+    // /api/namespaces becomes dev-only in PR 2 — skip the fetch in prod so
+    // the Home dashboard doesn't fire a guaranteed 404.
+    const nsPromise = devMode
+      ? api('GET', '/api/namespaces').catch(() => ({ namespaces: [] }))
+      : Promise.resolve({ namespaces: [] });
     const [stats, sourcesData, nsData, configData, embStatus, timelineData] = await Promise.all([
       api('GET', '/api/stats'),
       api('GET', '/api/sources'),
-      api('GET', '/api/namespaces'),
+      nsPromise,
       api('GET', '/api/config'),
       api('GET', '/api/embedding-status').catch(() => null),
       api('GET', '/api/timeline?days=365&limit=1000').catch(() => ({ chunks: [] })),
@@ -581,12 +667,17 @@ async function loadDashboard() {
     const totalSize = allSources.reduce((sum, s) => sum + (s.file_size || 0), 0);
     qs('home-total-size').textContent = formatBytes(totalSize) || '0 B';
 
-    // Harness stats (sessions + scratch)
+    // Harness stats (sessions + scratch) — dev-only in PR 2 onwards. In
+    // prod we leave the cards at 0 rather than firing guaranteed 404s.
     try {
-      const [sessData, scratchData] = await Promise.all([
-        api('GET', '/api/sessions?limit=1').catch(() => ({ total: 0 })),
-        api('GET', '/api/scratch').catch(() => ({ total: 0 })),
-      ]);
+      let sessData = { total: 0 };
+      let scratchData = { total: 0 };
+      if (devMode) {
+        [sessData, scratchData] = await Promise.all([
+          api('GET', '/api/sessions?limit=1').catch(() => ({ total: 0 })),
+          api('GET', '/api/scratch').catch(() => ({ total: 0 })),
+        ]);
+      }
       qs('home-sessions').textContent = sessData.total;
       qs('home-scratch').textContent = scratchData.total;
     } catch { /* non-critical */ }

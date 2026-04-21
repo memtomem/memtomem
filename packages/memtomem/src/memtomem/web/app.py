@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import ModuleType
+from typing import Literal
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,9 +44,79 @@ logger = logging.getLogger(__name__)
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
+WebMode = Literal["prod", "dev"]
+_VALID_WEB_MODES: frozenset[str] = frozenset({"prod", "dev"})
+_WEB_MODE_ENV = "MEMTOMEM_WEB__MODE"
 
-def create_app(lifespan=None) -> FastAPI:
-    """Factory for creating the FastAPI app (testable without lifespan)."""
+# Routers that define the polished surface shipped to `uv tool install` users.
+# `_DEV_ONLY_ROUTERS` is the opt-in extension (PR 2 fills it in — currently
+# empty so this PR is mechanism-only with no user-visible change).
+_PROD_ROUTERS: list[ModuleType] = [
+    search,
+    chunks,
+    sources,
+    system,
+    tags,
+    dedup,
+    decay,
+    export,
+    namespaces,
+    timeline,
+    sessions,
+    scratch,
+    procedures,
+    evaluation,
+    watchdog,
+    settings_sync,
+    context_gateway,
+    context_skills,
+    context_commands,
+    context_agents,
+]
+_DEV_ONLY_ROUTERS: list[ModuleType] = []
+
+
+def resolve_web_mode_from_env(*, strict: bool = False) -> WebMode:
+    """Return the web mode from ``MEMTOMEM_WEB__MODE``.
+
+    With ``strict=True`` an invalid value raises ``ValueError`` (used by the
+    ``mm web`` CLI, which also enforces mutual exclusion with ``--mode`` /
+    ``--dev``). With ``strict=False`` an invalid value falls back to ``prod``
+    with a warning — this path is taken when ``uvicorn`` mounts the
+    module-level app without going through the CLI (e.g. tests, ASGI hosts).
+    """
+    raw = os.environ.get(_WEB_MODE_ENV, "").strip().lower()
+    if not raw:
+        return "prod"
+    if raw in _VALID_WEB_MODES:
+        return raw  # type: ignore[return-value]
+    if strict:
+        raise ValueError(
+            f"Invalid {_WEB_MODE_ENV}={raw!r}; expected one of {sorted(_VALID_WEB_MODES)}"
+        )
+    logger.warning(
+        "Ignoring invalid %s=%r; falling back to 'prod'. Valid values: %s",
+        _WEB_MODE_ENV,
+        raw,
+        sorted(_VALID_WEB_MODES),
+    )
+    return "prod"
+
+
+def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
+    """Factory for creating the FastAPI app (testable without lifespan).
+
+    ``mode`` controls which routers are mounted:
+
+    * ``prod`` (default) — the polished surface only.
+    * ``dev`` — adds the routers in ``_DEV_ONLY_ROUTERS`` for maintainers.
+
+    The SPA reads ``GET /api/system/ui-mode`` on boot and filters tabs /
+    sections accordingly.
+    """
+    if mode not in _VALID_WEB_MODES:
+        raise ValueError(f"Invalid web mode {mode!r}; expected one of {sorted(_VALID_WEB_MODES)}")
+
     app = FastAPI(
         title="memtomem Web UI",
         description="Web UI for memtomem memory infrastructure",
@@ -52,27 +125,13 @@ def create_app(lifespan=None) -> FastAPI:
         docs_url="/api/docs",
         redoc_url="/api/redoc",
     )
+    app.state.web_mode = mode
 
-    app.include_router(search.router, prefix="/api")
-    app.include_router(chunks.router, prefix="/api")
-    app.include_router(sources.router, prefix="/api")
-    app.include_router(system.router, prefix="/api")
-    app.include_router(tags.router, prefix="/api")
-    app.include_router(dedup.router, prefix="/api")
-    app.include_router(decay.router, prefix="/api")
-    app.include_router(export.router, prefix="/api")
-    app.include_router(namespaces.router, prefix="/api")
-    app.include_router(timeline.router, prefix="/api")
-    app.include_router(sessions.router, prefix="/api")
-    app.include_router(scratch.router, prefix="/api")
-    app.include_router(procedures.router, prefix="/api")
-    app.include_router(evaluation.router, prefix="/api")
-    app.include_router(watchdog.router, prefix="/api")
-    app.include_router(settings_sync.router, prefix="/api")
-    app.include_router(context_gateway.router, prefix="/api")
-    app.include_router(context_skills.router, prefix="/api")
-    app.include_router(context_commands.router, prefix="/api")
-    app.include_router(context_agents.router, prefix="/api")
+    for router_mod in _PROD_ROUTERS:
+        app.include_router(router_mod.router, prefix="/api")
+    if mode == "dev":
+        for router_mod in _DEV_ONLY_ROUTERS:
+            app.include_router(router_mod.router, prefix="/api")
 
     @app.exception_handler(ValueError)
     async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
@@ -181,13 +240,22 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         await close_components(comp)
 
 
-app = create_app(lifespan=_lifespan)
+def __getattr__(name: str):
+    """Lazy module-level ``app`` construction.
+
+    Only build the default ASGI app when something actually asks for it
+    (``uvicorn memtomem.web.app:app``). Avoids a second ``create_app`` call —
+    and its ``MEMTOMEM_WEB__MODE`` resolution warning — when the CLI imports
+    ``resolve_web_mode_from_env`` or ``create_app`` directly.
+    """
+    if name == "app":
+        return create_app(lifespan=_lifespan, mode=resolve_web_mode_from_env())
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def main() -> None:
     """Run the web UI server."""
     import argparse
-    import os
 
     import uvicorn
 

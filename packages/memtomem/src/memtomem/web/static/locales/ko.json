@@ -455,6 +455,7 @@
   "toast.config_saved": "설정이 저장되었습니다",
   "toast.fts_rebuilt": "FTS 인덱스가 재구축되었습니다 ({count}개 청크).",
   "toast.diff_shown": "차이점 표시: 기록 → 현재",
+  "toast.dev_only_section": "알 수 없는 섹션 (dev 전용)",
   "toast.stream_fallback": "스트리밍 실패. Index 버튼을 대신 사용하세요.",
   "toast.watchdog_disabled": "상태 워치독이 비활성화되어 있습니다. MEMTOMEM_HEALTH_WATCHDOG__ENABLED=true로 설정하세요.",
   "toast.file_filter": ".md/.txt/.py/.js/.ts/.json/.yaml 파일만 허용됩니다",

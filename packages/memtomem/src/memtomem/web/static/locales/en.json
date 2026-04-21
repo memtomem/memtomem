@@ -455,6 +455,7 @@
   "toast.config_saved": "Config saved",
   "toast.fts_rebuilt": "FTS index rebuilt ({count} chunks).",
   "toast.diff_shown": "Showing diff: history → current",
+  "toast.dev_only_section": "Unknown section (dev-only)",
   "toast.stream_fallback": "Streaming failed. Try the Index button instead.",
   "toast.watchdog_disabled": "Health watchdog is disabled. Set MEMTOMEM_HEALTH_WATCHDOG__ENABLED=true to enable.",
   "toast.file_filter": "Only .md/.txt/.py/.js/.ts/.json/.yaml files accepted",

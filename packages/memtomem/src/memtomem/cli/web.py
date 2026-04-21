@@ -5,6 +5,9 @@ from __future__ import annotations
 import click
 
 
+_WEB_MODE_CHOICES = ("prod", "dev")
+
+
 def _missing_web_deps() -> str | None:
     """Return the name of the first missing web-UI dependency, or None if all
     required packages are importable. Kept private so the wizard can reuse it."""
@@ -29,7 +32,27 @@ def _web_install_hint() -> str:
 @click.option(
     "--timeout", default=30, type=int, help="Timeout for web opening (seconds). Zero is no timeout."
 )
-def web(host: str, port: int, open_browser: bool, timeout: int) -> None:
+@click.option(
+    "--mode",
+    type=click.Choice(_WEB_MODE_CHOICES, case_sensitive=False),
+    default=None,
+    help="UI surface to expose. 'prod' (default) shows the polished page set; "
+    "'dev' adds opt-in maintainer pages. Overrides MEMTOMEM_WEB__MODE.",
+)
+@click.option(
+    "--dev",
+    "dev_flag",
+    is_flag=True,
+    help="Shortcut for --mode dev. Mutually exclusive with --mode.",
+)
+def web(
+    host: str,
+    port: int,
+    open_browser: bool,
+    timeout: int,
+    mode: str | None,
+    dev_flag: bool,
+) -> None:
     """Launch the memtomem Web UI (FastAPI + SPA)."""
     missing = _missing_web_deps()
     if missing is not None:
@@ -45,13 +68,28 @@ def web(host: str, port: int, open_browser: bool, timeout: int) -> None:
         click.echo('  Or, if using pip: pip install "memtomem[web]"')
         raise SystemExit(1)
 
+    if mode is not None and dev_flag:
+        raise click.UsageError("--mode and --dev are mutually exclusive")
+
+    from memtomem.web.app import resolve_web_mode_from_env
+
+    if dev_flag:
+        resolved_mode: str = "dev"
+    elif mode is not None:
+        resolved_mode = mode.lower()
+    else:
+        try:
+            resolved_mode = resolve_web_mode_from_env(strict=True)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="MEMTOMEM_WEB__MODE") from exc
+
     import uvicorn
 
     from memtomem.web.app import _lifespan, create_app
 
     import asyncio
 
-    click.echo(f"Starting memtomem Web UI at http://{host}:{port}")
+    click.echo(f"Starting memtomem Web UI at http://{host}:{port} (mode={resolved_mode})")
 
     async def after_started(server: uvicorn.Server, timeout: float) -> None:
         if not open_browser:
@@ -79,7 +117,11 @@ def web(host: str, port: int, open_browser: bool, timeout: int) -> None:
         webbrowser.open(f"http://{host}:{port}")
 
     async def start_server() -> None:
-        web_config = uvicorn.Config(create_app(lifespan=_lifespan), host=host, port=port)
+        web_config = uvicorn.Config(
+            create_app(lifespan=_lifespan, mode=resolved_mode),
+            host=host,
+            port=port,
+        )
         web_server = uvicorn.Server(web_config)
 
         await asyncio.gather(

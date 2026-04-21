@@ -91,6 +91,17 @@ def _require_localhost(request: Request) -> None:
 router = APIRouter(tags=["system"])
 
 
+@router.get("/system/ui-mode")
+async def get_ui_mode(request: Request) -> dict[str, str]:
+    """Return the current web UI mode (``prod`` or ``dev``).
+
+    The SPA fetches this on boot to decide which tabs and settings sections
+    to render. Falls back to ``prod`` if ``app.state.web_mode`` is missing.
+    """
+    mode = getattr(request.app.state, "web_mode", "prod")
+    return {"mode": mode}
+
+
 @router.get("/health")
 async def health(storage=Depends(get_storage), embedder=Depends(get_embedder)):
     checks: dict[str, str] = {}

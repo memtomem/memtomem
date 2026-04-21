@@ -201,3 +201,102 @@ def test_web_timeout_without_open_is_silent() -> None:
     assert result.exit_code == 0
     mock_browser.assert_not_called()
     assert "Warning" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# --mode / --dev plumbing (prod/dev tier; see test_web_mode.py for semantics)
+# ---------------------------------------------------------------------------
+
+
+def _patch_web_stack_no_create_app(server_mock: MagicMock):
+    """Like ``_patch_web_stack`` but leaves ``create_app`` unpatched so the
+    caller can install a capture via ``side_effect``."""
+    return [
+        patch("memtomem.cli.web._missing_web_deps", return_value=None),
+        patch("uvicorn.Config", return_value=MagicMock()),
+        patch("uvicorn.Server", return_value=server_mock),
+        patch("memtomem.web.app._lifespan", MagicMock()),
+    ]
+
+
+def _run_web_capturing_mode(
+    args: list[str],
+    monkeypatch: pytest.MonkeyPatch | None = None,
+    env_mode: str | None = None,
+) -> tuple[int, str, str | None]:
+    runner = CliRunner()
+    server_mock = _make_server_mock(started=True)
+    captured: dict[str, str | None] = {"mode": None}
+
+    def _capture(**kwargs) -> MagicMock:
+        captured["mode"] = kwargs.get("mode")
+        return MagicMock()
+
+    if monkeypatch is not None and env_mode is not None:
+        monkeypatch.setenv("MEMTOMEM_WEB__MODE", env_mode)
+    elif monkeypatch is not None:
+        monkeypatch.delenv("MEMTOMEM_WEB__MODE", raising=False)
+
+    with contextlib.ExitStack() as stack:
+        for p in _patch_web_stack_no_create_app(server_mock):
+            stack.enter_context(p)
+        stack.enter_context(patch("memtomem.web.app.create_app", side_effect=_capture))
+        result = runner.invoke(web, args)
+    return result.exit_code, result.output, captured["mode"]
+
+
+def test_web_mode_and_dev_are_mutually_exclusive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MEMTOMEM_WEB__MODE", raising=False)
+    runner = CliRunner()
+    with patch("memtomem.cli.web._missing_web_deps", return_value=None):
+        result = runner.invoke(web, ["--mode", "prod", "--dev"])
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.output
+
+
+def test_web_invalid_env_value_rejects_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bogus MEMTOMEM_WEB__MODE must fail fast — never silently fall back
+    to prod, which would mask a user typo."""
+    monkeypatch.setenv("MEMTOMEM_WEB__MODE", "preview")
+    runner = CliRunner()
+    with patch("memtomem.cli.web._missing_web_deps", return_value=None):
+        result = runner.invoke(web, [])
+    assert result.exit_code != 0
+    assert "MEMTOMEM_WEB__MODE" in result.output
+    assert "preview" in result.output
+
+
+def test_web_default_mode_is_prod(monkeypatch: pytest.MonkeyPatch) -> None:
+    exit_code, output, mode = _run_web_capturing_mode([], monkeypatch=monkeypatch)
+    assert exit_code == 0, output
+    assert mode == "prod"
+
+
+def test_web_dev_flag_selects_dev_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    exit_code, output, mode = _run_web_capturing_mode(["--dev"], monkeypatch=monkeypatch)
+    assert exit_code == 0, output
+    assert mode == "dev"
+
+
+def test_web_mode_flag_selects_dev_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    exit_code, output, mode = _run_web_capturing_mode(["--mode", "dev"], monkeypatch=monkeypatch)
+    assert exit_code == 0, output
+    assert mode == "dev"
+
+
+def test_web_env_mode_selects_dev_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    exit_code, output, mode = _run_web_capturing_mode([], monkeypatch=monkeypatch, env_mode="dev")
+    assert exit_code == 0, output
+    assert mode == "dev"
+
+
+def test_web_cli_flag_overrides_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    exit_code, output, mode = _run_web_capturing_mode(
+        ["--mode", "prod"], monkeypatch=monkeypatch, env_mode="dev"
+    )
+    assert exit_code == 0, output
+    assert mode == "prod"
