@@ -688,6 +688,7 @@ textarea#add-content:focus { border-color: var(--accent); }
 .index-result td { padding: 5px 0; font-size: 0.85rem; }
 .index-result td:first-child { color: var(--muted); padding-right: 20px; }
 .index-result td:last-child { font-family: var(--mono); color: var(--green); font-weight: 600; }
+.index-result td.index-result-errors { color: var(--red); white-space: pre-line; word-break: break-word; }
 
 .stat-card { padding: 20px; text-align: center; flex: 1; }
 .stat-value { font-size: 2rem; font-weight: 700; color: var(--accent); font-family: var(--mono); }

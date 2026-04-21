@@ -634,6 +634,33 @@ class TestIndex:
         resp = await client.post("/api/index", json={"path": "/etc"})
         assert resp.status_code == 403
 
+    async def test_trigger_index_surfaces_engine_errors(self, app, client: AsyncClient):
+        """#354 regression: POST /api/index must surface ``IndexingStats.errors``
+        in the response body. Before the fix the engine aggregated errors
+        into stats.errors (e.g. "Embedding failed: fastembed is required")
+        and the route ignored them, so callers got a clean 200 OK with
+        indexed_chunks=0 and no signal that anything went wrong."""
+        app.state.index_engine.index_path = AsyncMock(
+            return_value=IndexingStats(
+                total_files=3,
+                total_chunks=10,
+                indexed_chunks=0,
+                skipped_chunks=10,
+                deleted_chunks=0,
+                duration_ms=50.0,
+                errors=(
+                    "Embedding failed: fastembed is required for the ONNX "
+                    "embedding provider. Install it with: pip install memtomem[onnx]",
+                ),
+            )
+        )
+        resp = await client.post("/api/index", json={"path": "/tmp/memories"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["indexed_chunks"] == 0
+        assert len(data["errors"]) == 1
+        assert "fastembed" in data["errors"][0]
+
 
 # ---------------------------------------------------------------------------
 # GET /api/embedding-status

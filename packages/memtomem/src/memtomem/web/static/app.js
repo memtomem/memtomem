@@ -2303,13 +2303,44 @@ qs('index-btn').addEventListener('click', async () => {
 
   try {
     const data = await api('POST', '/api/index', { path, recursive, force, namespace });
-    showToast(t('toast.indexed_count', { count: data.indexed_chunks }), 'success');
+    const errList = Array.isArray(data.errors) ? data.errors : [];
+    // HTTP 200 ≠ success — backend returns 200 even when every file's
+    // embedding step fails (e.g. fastembed extra missing). #354: surface
+    // data.errors as a red toast + visible row so the UI isn't silently
+    // misleading the user that everything worked.
+    if (errList.length > 0) {
+      showToast(
+        t('toast.index_partial', {
+          count: data.indexed_chunks,
+          errors: errList.length,
+          first: errList[0],
+        }),
+        'error',
+      );
+    } else {
+      showToast(t('toast.indexed_count', { count: data.indexed_chunks }), 'success');
+    }
     qs('r-files').textContent    = data.total_files;
     qs('r-chunks').textContent   = data.total_chunks;
     qs('r-indexed').textContent  = data.indexed_chunks;
     qs('r-skipped').textContent  = data.skipped_chunks;
     qs('r-deleted').textContent  = data.deleted_chunks;
     qs('r-duration').textContent = `${data.duration_ms.toFixed(0)} ms`;
+    const errRow = qs('r-errors-row');
+    if (errList.length > 0) {
+      // Cap visible list at 5 entries with a trailing "+N more" line — a
+      // full ONNX-missing run emits hundreds of identical errors, one per
+      // indexed file, which would otherwise overflow the card.
+      const shown = errList.slice(0, 5);
+      const more = errList.length - shown.length;
+      qs('r-errors').textContent = (
+        more > 0 ? [...shown, `…and ${more} more`] : shown
+      ).join('\n');
+      errRow.hidden = false;
+    } else {
+      qs('r-errors').textContent = '';
+      errRow.hidden = true;
+    }
     show(result);
     _markDataStale();
     loadNamespaceDropdowns();
