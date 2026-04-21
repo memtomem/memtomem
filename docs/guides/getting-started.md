@@ -421,7 +421,7 @@ mm web                     # polished dashboard on http://127.0.0.1:8080
 mm web --dev               # adds opt-in maintainer pages
 ```
 
-The default surface covers search, sources, indexing, tags, timeline, and a Settings tab. Pass `--dev` (or set `MEMTOMEM_WEB__MODE=dev` in your shell profile) to expose maintainer pages like Namespaces, Sessions, Working Memory, and Health Report — see [Configuration → Web UI Mode](configuration.md#web-ui-mode) for details.
+The default surface covers the Home, Search, Sources, Index, Tags, Timeline, and More tabs (the More tab hosts Settings, Dedup, Age-out, Export/Import, and Reset Database). Pass `--dev` (or set `MEMTOMEM_WEB__MODE=dev` in your shell profile) to expose maintainer pages like Namespaces, Sessions, Working Memory, and Health Report — see [Configuration → Web UI Mode](configuration.md#web-ui-mode) for details.
 
 ---
 
