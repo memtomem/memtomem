@@ -23,6 +23,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `{error: "no_session"}` on stdout (exit 0) so scripts can parse the
   failure instead of getting a Click exit-1 + stderr line. Text path is
   unchanged. (#331)
+- **`mm activity log --json`** — scriptable ack output for hook-driven
+  event writes. Success: `{ok: true, session_id, event_type}`. No active
+  session: `{ok: false, reason: "no_active_session"}`. Write failure:
+  `{ok: false, reason: "write_failed"}`. Exit code is always 0 (the
+  silent-by-default hook contract is preserved without the flag). The
+  ok-flag shape intentionally differs from `session events --json`'s
+  `{error: ...}` — write acks have no natural disambiguator, so an
+  explicit `ok` discriminator is clearer for consumers. (#335)
 
 ### Changed
 

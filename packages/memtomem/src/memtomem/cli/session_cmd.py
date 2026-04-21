@@ -257,17 +257,33 @@ def activity() -> None:
 )
 @click.option("--content", "-c", required=True, help="Event description")
 @click.option("--meta", default=None, help="JSON metadata")
-def log_event(event_type: str, content: str, meta: str | None) -> None:
-    """Log an activity event to the current session."""
+@click.option("--json", "as_json", is_flag=True, help="Output a JSON ack for scripting.")
+def log_event(event_type: str, content: str, meta: str | None, *, as_json: bool = False) -> None:
+    """Log an activity event to the current session.
+
+    Silent by default so hook callers never fail. ``--json`` emits an ack
+    shape on stdout: ``{"ok": true, ...}`` on success, ``{"ok": false,
+    "reason": ...}`` when there is no active session or the write failed.
+    Exit code is always 0.
+    """
     session_id = _read_current_session()
     if not session_id:
-        # No active session — silently skip (hooks should not fail)
+        # No active session — silently skip (hooks should not fail).
+        # --json callers get a parseable skip ack so pipelines can tell
+        # "no session" apart from "event written".
+        if as_json:
+            click.echo(json.dumps({"ok": False, "reason": "no_active_session"}))
         return
     metadata = json.loads(meta) if meta else None
     try:
         asyncio.run(_log_event(session_id, event_type, content, metadata))
     except Exception:
         logger.warning("Activity hook failed", exc_info=True)
+        if as_json:
+            click.echo(json.dumps({"ok": False, "reason": "write_failed"}))
+        return
+    if as_json:
+        click.echo(json.dumps({"ok": True, "session_id": session_id, "event_type": event_type}))
 
 
 async def _log_event(session_id: str, event_type: str, content: str, metadata: dict | None) -> None:
