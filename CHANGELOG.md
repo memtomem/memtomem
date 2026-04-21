@@ -5,6 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.15] — 2026-04-21
+
+memtomem remains in **alpha**. APIs, defaults, and on-disk config surfaces
+may still shift between 0.1.x releases — external feedback and issue
+reports are especially welcome at
+[github.com/memtomem/memtomem/issues](https://github.com/memtomem/memtomem/issues).
+
+This release focuses on **CLI scriptability**. All read/write session
+commands now expose `--json` output for hook consumers and scripting
+pipelines, `mm --version` answers the obvious first question newcomers
+ask, and the contributor docs lock the `--json` error-shape convention
+(read vs write) so future flags don't re-litigate the shape per command.
+
 ### Added
 
 - **`mm --version` flag** — Click's idiomatic entry point for version output,
