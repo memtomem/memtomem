@@ -129,8 +129,10 @@ class TestActivityLogJson:
     """``mm activity log --json`` is write-side, so the ack shape uses an
     explicit ``ok`` discriminator (the success payload has no natural
     disambiguator like ``events: [...]``). Error shape intentionally diverges
-    from ``session events --json``'s ``{"error": ...}`` for that reason —
-    see commit / PR body."""
+    from ``session events --json``'s ``{"error": ...}`` — see the "JSON error
+    shape" subsection of ``CONTRIBUTING.md`` for the read/write rule. If you
+    change either this class's shape or ``TestSessionEventsJson``'s, update
+    CONTRIBUTING.md in the same PR or the docs and tests will drift."""
 
     def test_success_emits_ok_ack(self, runner, monkeypatch):
         comp = _mock_components()

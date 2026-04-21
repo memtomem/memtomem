@@ -39,6 +39,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   (genuine non-JSON modes like `plain` / `context` / `smart`), with a
   forward-compatibility guidance to prefer `--format` when a command might
   grow additional modes later. (#332)
+- **Documented JSON error shape convention** — `CONTRIBUTING.md` now
+  specifies the `--json` error shape by command kind: read commands
+  (`list`, `get`, `show`, `events`, `status`) emit `{"error": "<reason>"}`
+  since their success payloads self-disambiguate; write commands (`log`,
+  `add`, `set`, `run`) emit `{"ok": false, "reason": "<reason>"}` with an
+  explicit discriminator since write acks have no natural key-based
+  disambiguator. Both shapes exit 0 so `--json` pipelines don't break
+  on handled failures. Anchors the shape choice made in #336 / #337 so
+  future `--json` flags don't re-litigate per-command. (#339)
 
 ## [0.1.14] — 2026-04-21
 

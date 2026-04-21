@@ -101,6 +101,33 @@ plausible a `context` / `digest` / `diff` mode gets added later — choose
 `--format` from the start. Migrating from `--json` flag to `--format` is a
 breaking change for scripts; going the other way isn't necessary.
 
+### JSON error shape
+
+Pick the `--json` error shape by whether the command's success payload
+already disambiguates from an error:
+
+| Command kind | Success shape                       | Error shape                              |
+|--------------|-------------------------------------|------------------------------------------|
+| **Read** (`list`, `get`, `show`, `events`, `status`) | `{"<items>": [...], "count": N}` — the keys self-disambiguate | `{"error": "<reason>"}` |
+| **Write** (`log`, `add`, `set`, `run`) | `{"ok": true, ...}` — explicit flag | `{"ok": false, "reason": "<reason>"}` |
+
+Both shapes keep **exit code 0** under `--json`; the JSON body carries
+the outcome, not the exit code, so `cmd --json | jq` pipelines don't
+break on a handled failure. Unhandled exceptions (programmer errors,
+not expected failure modes) should still surface through Click.
+
+Rationale: read success payloads (`events: [...]`, `sessions: [...]`)
+are naturally disambiguated from `{error: ...}` by presence-of-key, so
+an explicit `ok` flag is redundant noise. Write acks have no such
+natural disambiguator — `{"event_id": ...}` vs `{"error": ...}` forces
+consumers to check by key rather than by a single boolean. An explicit
+`ok` flag is clearer for writes.
+
+The text-path behavior is unchanged by `--json`. No-op / no-session
+cases that are silent under text (hook callers depend on silence)
+should emit the JSON error shape only when `--json` is set, so adding
+the flag never breaks an existing text-path caller.
+
 ## Contributor License Agreement (CLA)
 
 Before we can merge your first pull request, you need to sign the
