@@ -24,7 +24,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   10 remaining Settings sections are opt-in via `mm web --dev` (or
   `MEMTOMEM_WEB__MODE=dev`). Their API routes (`/api/namespaces`,
   `/api/sessions`, `/api/scratch`, `/api/procedures`, `/api/context/*`,
-  `/api/settings-sync`, `/api/watchdog`, `/api/evaluation`) now return
+  `/api/settings-sync`, `/api/watchdog/*`, `/api/eval/*`) now return
   **404** in `prod` mode — scripts that rely on them need `dev` mode.
 
 ## [0.1.15] — 2026-04-21

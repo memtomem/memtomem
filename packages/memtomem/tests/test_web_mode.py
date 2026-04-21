@@ -165,17 +165,36 @@ def test_dev_routes_extend_prod_routes() -> None:
         ("/api/procedures", "GET"),
         ("/api/context/overview", "GET"),
         ("/api/watchdog/status", "GET"),
+        ("/api/settings-sync", "GET"),
+        ("/api/eval", "GET"),
     ],
 )
-async def test_dev_only_routes_return_404_in_prod(path: str, method: str) -> None:
-    """Spot-check a few representative dev-only endpoints — prod must not
-    expose them. Route-level filtering is the security boundary; the SPA's
-    ``data-ui-tier`` hiding is purely UX."""
-    app = create_app(mode="prod")
-    transport = ASGITransport(app=app, client=("127.0.0.1", 0))
-    async with AsyncClient(transport=transport, base_url="http://testserver") as c:
-        resp = await c.request(method, path)
-    assert resp.status_code == 404
+async def test_dev_only_routes_blocked_in_prod_but_exposed_in_dev(path: str, method: str) -> None:
+    """Spot-check a representative dev-only endpoint — prod must not expose
+    it, dev must. Asserting both sides catches the bug where a parametrize
+    entry with a typo (or wrong method) would trivially "pass" in prod
+    because the route doesn't exist in either mode. Route-level filtering
+    is the security boundary; the SPA's ``data-ui-tier`` hiding is UX.
+
+    The prod check uses real HTTP so we know the 404 comes from the
+    catch-all handler, not route-handler failure. The dev check reads the
+    registered ``app.routes`` set directly — this avoids having to wire
+    ``app.state.storage`` etc. for every dev-only router just to prove
+    the path got mounted."""
+    prod_app = create_app(mode="prod")
+    dev_app = create_app(mode="dev")
+
+    dev_paths = {getattr(r, "path", "") for r in dev_app.routes}
+    assert path in dev_paths, f"{method} {path} is missing in dev too — parametrize entry is wrong"
+
+    async with AsyncClient(
+        transport=ASGITransport(app=prod_app, client=("127.0.0.1", 0)),
+        base_url="http://testserver",
+    ) as c:
+        prod_resp = await c.request(method, path)
+    assert prod_resp.status_code == 404, (
+        f"{method} {path} is still reachable in prod: {prod_resp.status_code}"
+    )
 
 
 def test_prod_keeps_polished_routes_mounted() -> None:
@@ -244,6 +263,19 @@ def test_app_js_pins_ui_mode_default_and_toast_copy() -> None:
     ko = _read_static("locales/ko.json")
     assert '"toast.dev_only_section"' in en
     assert '"toast.dev_only_section"' in ko
+
+
+def test_html_main_tabs_all_stay_prod() -> None:
+    """Main top-nav tabs (Home / Search / Sources / Index / Tags / Timeline /
+    Settings) should all be prod today. Flipping a main tab to dev would be
+    a large UX decision — if it ever happens, update this assertion to an
+    explicit expected set so the intent is reviewable."""
+    html = _read_static("index.html")
+    dev_tabs = set(re.findall(r'data-ui-tier="dev"\s+data-tab="([^"]+)"', html))
+    assert dev_tabs == set(), (
+        f"Main tabs should all be prod; found dev: {dev_tabs}. "
+        "If intentional, replace this assertion with an explicit expected set."
+    )
 
 
 def test_html_classification_matches_router_lists() -> None:
