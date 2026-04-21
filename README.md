@@ -72,6 +72,17 @@ See [Embeddings](docs/guides/embeddings.md) for the full model/provider matrix.
 "Remember this insight"      →  mem_add(content="...", tags=["ops"])
 ```
 
+### 4. Web UI (optional)
+
+```bash
+mm web                # polished dashboard on http://127.0.0.1:8080
+mm web --dev          # maintainer surface (adds opt-in pages)
+```
+
+`mm web` shows the polished page set by default. Pass `--dev` (or set
+`MEMTOMEM_WEB__MODE=dev` in your shell profile) to expose maintainer pages
+like Namespaces, Sessions, Working Memory, and Health Report.
+
 <details>
 <summary><b>Other install options</b></summary>
 
@@ -98,7 +109,7 @@ See [MCP Client Setup](docs/guides/mcp-clients.md) for Cursor / Windsurf / Claud
 - **Incremental indexing** — chunk-level SHA-256 diff; only changed chunks get re-embedded
 - **Namespaces** — organize memories into scoped groups with auto-derivation from folder names
 - **Maintenance** — near-duplicate detection, time-based decay, TTL expiration, auto-tagging
-- **Web UI** — visual dashboard for search, sources, tags, sessions, health monitoring
+- **Web UI** — visual dashboard for search, sources, tags, timeline, dedup, and more (`mm web --dev` for the full maintainer surface)
 - **MCP tools** — `mem_do` meta-tool routes all non-core actions in `core` mode for minimal context usage
 
 ---

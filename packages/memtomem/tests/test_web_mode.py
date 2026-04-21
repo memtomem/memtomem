@@ -1,9 +1,9 @@
 """Tests for the web UI mode mechanism (prod / dev tier).
 
-PR 1 introduces the plumbing — ``create_app(mode=...)``, ``/api/system/ui-mode``,
-and SPA filtering — without moving any page into the dev-only tier yet.
-The route set between prod and dev is therefore identical in this PR; PR 2
-is where the classification change lands and this snapshot will diverge.
+Covers the ``create_app(mode=...)`` factory, the ``MEMTOMEM_WEB__MODE``
+env resolver, the ``/api/system/ui-mode`` endpoint, and the drift guards
+that keep the HTML ``data-ui-tier`` classification in sync with the
+Python ``_PROD_ROUTERS`` / ``_DEV_ONLY_ROUTERS`` lists.
 """
 
 from __future__ import annotations
@@ -138,21 +138,72 @@ def test_prod_dev_router_lists_are_disjoint() -> None:
     assert set(_PROD_ROUTERS).isdisjoint(set(_DEV_ONLY_ROUTERS))
 
 
-def test_pr1_leaves_dev_only_routers_empty() -> None:
-    """PR 1 is mechanism-only: no classification changes yet. When PR 2
-    populates ``_DEV_ONLY_ROUTERS`` this test must be updated alongside."""
-    assert _DEV_ONLY_ROUTERS == []
+def test_dev_only_routers_are_populated() -> None:
+    """Classification landed: dev mode must actually extend the prod set."""
+    assert _DEV_ONLY_ROUTERS, "_DEV_ONLY_ROUTERS is empty — classification missing"
 
 
-def test_route_counts_match_in_pr1_snapshot() -> None:
-    """With classification unchanged, prod and dev mount identical routes."""
+def _api_paths(app) -> set[str]:
+    return {
+        getattr(r, "path", "") for r in app.routes if getattr(r, "path", "").startswith("/api/")
+    }
 
-    def api_paths(app) -> set[str]:
-        return {
-            getattr(r, "path", "") for r in app.routes if getattr(r, "path", "").startswith("/api/")
-        }
 
-    assert api_paths(create_app(mode="prod")) == api_paths(create_app(mode="dev"))
+def test_dev_routes_extend_prod_routes() -> None:
+    prod_paths = _api_paths(create_app(mode="prod"))
+    dev_paths = _api_paths(create_app(mode="dev"))
+    assert prod_paths < dev_paths, "dev mode must strictly extend prod"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path,method",
+    [
+        ("/api/sessions", "GET"),
+        ("/api/scratch", "GET"),
+        ("/api/namespaces", "GET"),
+        ("/api/procedures", "GET"),
+        ("/api/context/overview", "GET"),
+        ("/api/watchdog/status", "GET"),
+        ("/api/settings-sync", "GET"),
+        ("/api/eval", "GET"),
+    ],
+)
+async def test_dev_only_routes_blocked_in_prod_but_exposed_in_dev(path: str, method: str) -> None:
+    """Spot-check a representative dev-only endpoint — prod must not expose
+    it, dev must. Asserting both sides catches the bug where a parametrize
+    entry with a typo (or wrong method) would trivially "pass" in prod
+    because the route doesn't exist in either mode. Route-level filtering
+    is the security boundary; the SPA's ``data-ui-tier`` hiding is UX.
+
+    The prod check uses real HTTP so we know the 404 comes from the
+    catch-all handler, not route-handler failure. The dev check reads the
+    registered ``app.routes`` set directly — this avoids having to wire
+    ``app.state.storage`` etc. for every dev-only router just to prove
+    the path got mounted."""
+    prod_app = create_app(mode="prod")
+    dev_app = create_app(mode="dev")
+
+    dev_paths = {getattr(r, "path", "") for r in dev_app.routes}
+    assert path in dev_paths, f"{method} {path} is missing in dev too — parametrize entry is wrong"
+
+    async with AsyncClient(
+        transport=ASGITransport(app=prod_app, client=("127.0.0.1", 0)),
+        base_url="http://testserver",
+    ) as c:
+        prod_resp = await c.request(method, path)
+    assert prod_resp.status_code == 404, (
+        f"{method} {path} is still reachable in prod: {prod_resp.status_code}"
+    )
+
+
+def test_prod_keeps_polished_routes_mounted() -> None:
+    """Sanity: the dev-only move mustn't brick the polished surface."""
+    prod_paths = _api_paths(create_app(mode="prod"))
+    for expected in ("/api/search", "/api/sources", "/api/stats", "/api/config"):
+        assert expected in prod_paths, (
+            f"{expected} is missing from prod — reclassify or the router list"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -194,16 +245,62 @@ def test_html_dev_mode_banner_is_present_and_starts_hidden() -> None:
 
 def test_app_js_pins_ui_mode_default_and_toast_copy() -> None:
     """JS grep pin — the test suite has no JS runtime. A source scan catches
-    regressions in the two behaviors we rely on."""
+    regressions in the three behaviors we rely on."""
     js = _read_static("app.js")
     # STATE.uiMode default must stay 'prod' so fetch failures degrade to the
     # polished surface rather than exposing dev pages.
     assert re.search(r"uiMode:\s*'prod'", js), "STATE.uiMode early default changed"
     # Hash-fallback / settings-section redirect toast — routed through i18n.
     assert "toast.dev_only_section" in js, "dev-only redirect toast key missing"
+    # Home dashboard must gate dev-only endpoints behind the mode check so
+    # prod users don't see guaranteed 404s on every Home render.
+    assert "const devMode = STATE.uiMode === 'dev'" in js, (
+        "Home dashboard lost its dev-only fetch gate"
+    )
     # And the locale entries themselves are pinned so a rename doesn't go
     # unnoticed by the i18n completeness check.
     en = _read_static("locales/en.json")
     ko = _read_static("locales/ko.json")
     assert '"toast.dev_only_section"' in en
     assert '"toast.dev_only_section"' in ko
+
+
+def test_html_main_tabs_all_stay_prod() -> None:
+    """Main top-nav tabs (Home / Search / Sources / Index / Tags / Timeline /
+    Settings) should all be prod today. Flipping a main tab to dev would be
+    a large UX decision — if it ever happens, update this assertion to an
+    explicit expected set so the intent is reviewable."""
+    html = _read_static("index.html")
+    dev_tabs = set(re.findall(r'data-ui-tier="dev"\s+data-tab="([^"]+)"', html))
+    assert dev_tabs == set(), (
+        f"Main tabs should all be prod; found dev: {dev_tabs}. "
+        "If intentional, replace this assertion with an explicit expected set."
+    )
+
+
+def test_html_classification_matches_router_lists() -> None:
+    """HTML ``data-ui-tier`` values must agree with the Python router lists
+    — drift between the two would hide/show a tab whose route disagrees,
+    breaking `mm web --dev` discovery or producing phantom prod 404s."""
+    html = _read_static("index.html")
+    dev_sections = set(re.findall(r'data-ui-tier="dev"\s+data-section="([^"]+)"', html))
+    # Expected dev sections derived from _DEV_ONLY_ROUTERS + naming (SPA
+    # section id != router module). Source of truth: whoever edits the
+    # router lists must also update the HTML, and this test enforces it.
+    expected_dev = {
+        "namespaces",
+        "ctx-overview",
+        "ctx-skills",
+        "ctx-commands",
+        "ctx-agents",
+        "hooks-sync",
+        "harness-sessions",
+        "harness-scratch",
+        "harness-procedures",
+        "harness-health",
+    }
+    assert dev_sections == expected_dev, (
+        f"HTML dev-tier sections drifted from expected set. "
+        f"Only in HTML: {dev_sections - expected_dev}. "
+        f"Missing: {expected_dev - dev_sections}."
+    )

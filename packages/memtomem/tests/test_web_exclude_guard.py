@@ -38,7 +38,7 @@ async def real_stack_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     cfg.indexing.exclude_patterns = []
 
     comp = await create_components(cfg)
-    app = create_app(lifespan=None)
+    app = create_app(lifespan=None, mode="dev")
     app.state.storage = comp.storage
     app.state.embedder = comp.embedder
     app.state.search_pipeline = comp.search_pipeline

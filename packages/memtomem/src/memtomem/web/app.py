@@ -52,8 +52,11 @@ _VALID_WEB_MODES: frozenset[str] = frozenset(get_args(WebMode))
 _WEB_MODE_ENV = "MEMTOMEM_WEB__MODE"
 
 # Routers that define the polished surface shipped to `uv tool install` users.
-# `_DEV_ONLY_ROUTERS` is the opt-in extension (PR 2 fills it in — currently
-# empty so this PR is mechanism-only with no user-visible change).
+# `_DEV_ONLY_ROUTERS` is the opt-in extension mounted only when
+# ``mode == "dev"`` — those pages have rougher UX, narrower audiences, or
+# are still in flux, so they stay hidden by default until they graduate.
+# Edit carefully: these lists are the source of truth; the SPA's
+# ``data-ui-tier`` attributes in ``index.html`` must match.
 _PROD_ROUTERS: list[ModuleType] = [
     search,
     chunks,
@@ -63,8 +66,10 @@ _PROD_ROUTERS: list[ModuleType] = [
     dedup,
     decay,
     export,
-    namespaces,
     timeline,
+]
+_DEV_ONLY_ROUTERS: list[ModuleType] = [
+    namespaces,
     sessions,
     scratch,
     procedures,
@@ -76,7 +81,6 @@ _PROD_ROUTERS: list[ModuleType] = [
     context_commands,
     context_agents,
 ]
-_DEV_ONLY_ROUTERS: list[ModuleType] = []
 
 
 def resolve_web_mode_from_env(*, strict: bool = False) -> WebMode:

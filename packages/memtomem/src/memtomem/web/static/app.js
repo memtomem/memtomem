@@ -646,10 +646,16 @@ async function checkEmbeddingMismatch() {
 
 async function loadDashboard() {
   try {
+    // /api/namespaces is dev-only; prod returns 404. Gate the fetch and
+    // let the namespace card render 0 rather than fire a guaranteed miss.
+    const devMode = STATE.uiMode === 'dev';
+    const nsPromise = devMode
+      ? api('GET', '/api/namespaces').catch(() => ({ namespaces: [] }))
+      : Promise.resolve({ namespaces: [] });
     const [stats, sourcesData, nsData, configData, embStatus, timelineData] = await Promise.all([
       api('GET', '/api/stats'),
       api('GET', '/api/sources'),
-      api('GET', '/api/namespaces'),
+      nsPromise,
       api('GET', '/api/config'),
       api('GET', '/api/embedding-status').catch(() => null),
       api('GET', '/api/timeline?days=365&limit=1000').catch(() => ({ chunks: [] })),
@@ -665,12 +671,17 @@ async function loadDashboard() {
     const totalSize = allSources.reduce((sum, s) => sum + (s.file_size || 0), 0);
     qs('home-total-size').textContent = formatBytes(totalSize) || '0 B';
 
-    // Harness stats (sessions + scratch)
+    // Harness stats (sessions + scratch) — dev-only routers. In prod we
+    // render zeroes rather than fire 404s on every Home render.
     try {
-      const [sessData, scratchData] = await Promise.all([
-        api('GET', '/api/sessions?limit=1').catch(() => ({ total: 0 })),
-        api('GET', '/api/scratch').catch(() => ({ total: 0 })),
-      ]);
+      let sessData = { total: 0 };
+      let scratchData = { total: 0 };
+      if (devMode) {
+        [sessData, scratchData] = await Promise.all([
+          api('GET', '/api/sessions?limit=1').catch(() => ({ total: 0 })),
+          api('GET', '/api/scratch').catch(() => ({ total: 0 })),
+        ]);
+      }
       qs('home-sessions').textContent = sessData.total;
       qs('home-scratch').textContent = scratchData.total;
     } catch { /* non-critical */ }

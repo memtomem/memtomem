@@ -5,6 +5,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **`mm web --mode` / `--dev` flags + `MEMTOMEM_WEB__MODE` env var** — select
+  the Web UI surface. `prod` (default) shows the polished page set; `dev`
+  extends it with opt-in maintainer pages (Namespaces, Sessions, Working
+  Memory, Procedures, Health Report, Artifact Sync, Hook Files,
+  Skills/Commands/Agents). `--mode` and `--dev` are mutually exclusive; an
+  invalid env value fails fast instead of silently falling back.
+- **`GET /api/system/ui-mode`** — localhost-guarded endpoint returning the
+  resolved mode so the SPA can filter tabs on boot.
+
+### Changed
+
+- **`mm web` default surface shrunk to the polished page set.** `Home`,
+  `Search`, `Sources`, `Index`, `Tags`, `Timeline`, and Settings (`Config`,
+  `Dedup`, `Age-out`, `Export/Import`, `Reset Database`) are always on. The
+  10 remaining Settings sections are opt-in via `mm web --dev` (or
+  `MEMTOMEM_WEB__MODE=dev`). Their API routes (`/api/namespaces`,
+  `/api/sessions`, `/api/scratch`, `/api/procedures`, `/api/context/*`,
+  `/api/settings-sync`, `/api/watchdog/*`, `/api/eval/*`) now return
+  **404** in `prod` mode — scripts that rely on them need `dev` mode.
+
 ## [0.1.15] — 2026-04-21
 
 memtomem remains in **alpha**. APIs, defaults, and on-disk config surfaces

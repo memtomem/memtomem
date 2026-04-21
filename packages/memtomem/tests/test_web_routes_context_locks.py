@@ -45,7 +45,7 @@ def gateway_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def app(gateway_home: Path):
-    application = create_app(lifespan=None)
+    application = create_app(lifespan=None, mode="dev")
     application.state.project_root = gateway_home
     application.state.storage = AsyncMock()
     application.state.config = None

@@ -20,7 +20,7 @@ from memtomem.web.app import create_app
 @pytest.fixture
 def ctx_app(tmp_path: Path):
     """App with project_root pointing to a temp directory."""
-    application = create_app(lifespan=None)
+    application = create_app(lifespan=None, mode="dev")
     application.state.project_root = tmp_path
     # Minimal stubs for deps the app might check
     application.state.storage = AsyncMock()
