@@ -10,6 +10,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - **`mm version` subcommand** — prints `memtomem <version>`, identical output to
   `mm --version`. Adds parity with `mms version` (memtomem-stm) so users
   switching between the two CLIs get consistent behavior.
+- **`mm init` detects reinstall-path embedding mismatch** — when the new
+  preset's provider / dimension differs from what an existing
+  `~/.memtomem/memtomem.db` has stored (classically a previous
+  `provider=none` install → `chunks_vec` at dim=0 vs a new `onnx/bge-m3`
+  1024d config), the wizard now prints the mismatch and offers to reset
+  the vector index in place. Without this prompt the next MCP server
+  startup would fail with `EmbeddingDimensionMismatchError`. Under
+  non-interactive `-y`, the wizard prints a loud recovery hint
+  (`mm embedding-reset --mode apply-current`) instead of prompting. The
+  chunks table itself is preserved; only the vector index is rebuilt,
+  so a re-index is required afterwards.
+
+### Changed
+
+- **`docs/guides/uninstall.md` documents the reinstall-from-scratch path** —
+  new section explaining that `mm init` only rewrites config/MCP and
+  leaves the DB in place, with a `rm -rf ~/.memtomem && mm init` recipe
+  for users who want a fully blank slate.
 
 ## [0.1.16] — 2026-04-21
 

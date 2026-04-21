@@ -71,6 +71,29 @@ whose commands reference `memtomem` or `mm`.
 
 ---
 
+## Reinstalling from scratch
+
+Switching presets (e.g. `Minimal` → `Korean-optimized`) leaves the previous
+SQLite DB in place, because `mm init` only rewrites `~/.memtomem/config.json`
+and the MCP registration. If the new preset uses a different embedding
+provider or dimension, the server startup will refuse to open a DB whose
+stored embedding metadata doesn't match — `mm init` now detects this and
+offers to reset the vector index in place.
+
+To skip the prompt and start from a fully blank slate, delete the data
+directory before re-running the wizard:
+
+```bash
+rm -rf ~/.memtomem
+mm init
+```
+
+This wipes chunks, embeddings, sessions, uploads, and persisted config.
+MCP registrations in each editor are separate — see step 1 above to clean
+those up first if you want them regenerated.
+
+---
+
 ## Next Steps
 
 - [Reference](reference.md) — Complete feature reference

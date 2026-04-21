@@ -2118,3 +2118,179 @@ class TestPresetSelection:
         assert data["embedding"]["model"] == "bge-m3"  # preset applied
         assert data["mmr"]["enabled"] is True  # non-init field survived
         assert data["mmr"]["lambda_param"] == 0.3
+
+
+class TestReinstallEmbeddingReconciliation:
+    """mm init must detect and offer to fix embedding mismatches left by a
+    previous install (e.g. provider=none → onnx switch leaves DB at dim=0)."""
+
+    @staticmethod
+    async def _seed_db(db_path: Path, provider: str, model: str, dimension: int) -> None:
+        """Create a SQLite DB pre-initialised as if a prior install wrote it."""
+        from memtomem.config import StorageConfig
+        from memtomem.storage.sqlite_backend import SqliteBackend
+
+        storage = SqliteBackend(
+            StorageConfig(sqlite_path=db_path),
+            dimension=dimension,
+            embedding_provider=provider,
+            embedding_model=model,
+            strict_dim_check=False,
+        )
+        await storage.initialize()
+        await storage.close()
+
+    def test_fresh_db_is_noop(self, tmp_path: Path) -> None:
+        """No DB at db_path → helper returns silently without prompting."""
+        from memtomem.cli.init_cmd import _maybe_offer_embedding_reset
+
+        state = _make_init_state(tmp_path)
+        state.update({"provider": "onnx", "model": "bge-m3", "dimension": 1024})
+        # db_path points at non-existent file
+        assert not Path(state["db_path"]).exists()
+
+        # Must not raise and must not emit a prompt (interactive=True would
+        # otherwise block on stdin if the helper tried to prompt).
+        _maybe_offer_embedding_reset(state, interactive=True)
+
+    def test_matching_db_is_noop(self, tmp_path: Path) -> None:
+        """DB already on the target provider/dim → no prompt."""
+        import asyncio
+
+        from memtomem.cli.init_cmd import _maybe_offer_embedding_reset
+
+        db_path = tmp_path / "memtomem.db"
+        asyncio.run(self._seed_db(db_path, "onnx", "bge-m3", 1024))
+
+        state = _make_init_state(tmp_path)
+        state.update(
+            {
+                "provider": "onnx",
+                "model": "bge-m3",
+                "dimension": 1024,
+                "db_path": str(db_path),
+            }
+        )
+        _maybe_offer_embedding_reset(state, interactive=True)
+
+    def test_mismatch_non_interactive_warns_without_reset(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Under -y, helper must print a recovery hint and leave DB untouched."""
+        import asyncio
+
+        from memtomem.cli.init_cmd import _maybe_offer_embedding_reset
+
+        db_path = tmp_path / "memtomem.db"
+        asyncio.run(self._seed_db(db_path, "none", "", 0))  # legacy NoopEmbedder
+
+        state = _make_init_state(tmp_path)
+        state.update(
+            {
+                "provider": "onnx",
+                "model": "bge-m3",
+                "dimension": 1024,
+                "db_path": str(db_path),
+            }
+        )
+        _maybe_offer_embedding_reset(state, interactive=False)
+
+        out = capsys.readouterr().out
+        assert "Existing DB detected" in out
+        assert "mm embedding-reset --mode apply-current" in out
+
+        # Stored meta is unchanged — non-interactive path must never reset.
+        from memtomem.config import StorageConfig
+        from memtomem.storage.sqlite_backend import SqliteBackend
+
+        storage = SqliteBackend(
+            StorageConfig(sqlite_path=db_path),
+            dimension=0,
+            embedding_provider="none",
+            embedding_model="",
+            strict_dim_check=False,
+        )
+        asyncio.run(storage.initialize())
+        assert storage.stored_embedding_info["dimension"] == 0
+        asyncio.run(storage.close())
+
+    def test_mismatch_interactive_confirm_resets(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Interactive yes → chunks_vec recreated at new dimension."""
+        import asyncio
+
+        from memtomem.cli.init_cmd import _maybe_offer_embedding_reset
+
+        db_path = tmp_path / "memtomem.db"
+        asyncio.run(self._seed_db(db_path, "none", "", 0))
+
+        state = _make_init_state(tmp_path)
+        state.update(
+            {
+                "provider": "onnx",
+                "model": "bge-m3",
+                "dimension": 1024,
+                "db_path": str(db_path),
+            }
+        )
+
+        import click
+
+        monkeypatch.setattr(click, "confirm", lambda *a, **kw: True)
+        _maybe_offer_embedding_reset(state, interactive=True)
+
+        out = capsys.readouterr().out
+        assert "Vector index reset" in out
+
+        from memtomem.config import StorageConfig
+        from memtomem.storage.sqlite_backend import SqliteBackend
+
+        storage = SqliteBackend(
+            StorageConfig(sqlite_path=db_path),
+            dimension=1024,
+            embedding_provider="onnx",
+            embedding_model="bge-m3",
+            strict_dim_check=False,
+        )
+        asyncio.run(storage.initialize())
+        # After reset, stored meta matches the new config — no mismatch.
+        assert storage.embedding_mismatch is None
+        assert storage.stored_embedding_info["dimension"] == 1024
+        asyncio.run(storage.close())
+
+    def test_mismatch_interactive_decline_skips(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Interactive no → DB untouched, helper points at recovery command."""
+        import asyncio
+
+        from memtomem.cli.init_cmd import _maybe_offer_embedding_reset
+
+        db_path = tmp_path / "memtomem.db"
+        asyncio.run(self._seed_db(db_path, "none", "", 0))
+
+        state = _make_init_state(tmp_path)
+        state.update(
+            {
+                "provider": "onnx",
+                "model": "bge-m3",
+                "dimension": 1024,
+                "db_path": str(db_path),
+            }
+        )
+
+        import click
+
+        monkeypatch.setattr(click, "confirm", lambda *a, **kw: False)
+        _maybe_offer_embedding_reset(state, interactive=True)
+
+        out = capsys.readouterr().out
+        assert "Skipped" in out
+        assert "mm embedding-reset --mode apply-current" in out

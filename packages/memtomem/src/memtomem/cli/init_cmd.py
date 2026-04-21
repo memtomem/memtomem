@@ -792,6 +792,102 @@ def _emit_preserved_block(
     click.echo("  to restore mmr.enabled=false).")
 
 
+def _maybe_offer_embedding_reset(state: dict, *, interactive: bool) -> None:
+    """Reconcile an existing DB's embedding metadata with the new config.
+
+    ``mm init`` rewrites ``~/.memtomem/config.json`` but leaves the SQLite DB
+    untouched. If a previous install wrote ``chunks_vec`` with a different
+    provider / dimension (classically ``provider=none`` → dim=0), the next
+    MCP server startup fails fast with ``EmbeddingDimensionMismatchError``.
+    Detect the mismatch here and offer to reset so users don't see an opaque
+    crash on their first ``mm web`` / MCP launch.
+
+    Interactive: prompt before the destructive reset (default=yes so the
+    wizard's common case flows forward without extra typing). Non-interactive
+    (``-y`` / piped stdin): print a loud warning pointing at the exact
+    recovery command instead of guessing.
+    """
+    import asyncio
+
+    db_path = Path(state["db_path"]).expanduser()
+    if not db_path.exists():
+        return
+
+    try:
+        asyncio.run(_check_embedding_mismatch(state, interactive=interactive))
+    except Exception as exc:
+        click.secho(
+            f"  Warning: could not check DB embedding state ({exc.__class__.__name__}: {exc}). "
+            f"Run 'mm embedding-reset --mode status' to verify manually.",
+            fg="yellow",
+        )
+
+
+async def _check_embedding_mismatch(state: dict, *, interactive: bool) -> None:
+    from memtomem.config import StorageConfig
+    from memtomem.storage.sqlite_backend import SqliteBackend
+
+    storage_cfg = StorageConfig(sqlite_path=Path(state["db_path"]).expanduser())
+    storage = SqliteBackend(
+        storage_cfg,
+        dimension=state["dimension"],
+        embedding_provider=state["provider"],
+        embedding_model=state["model"],
+        strict_dim_check=False,
+    )
+    await storage.initialize()
+    try:
+        mismatch = getattr(storage, "embedding_mismatch", None)
+        if mismatch is None:
+            return
+
+        stored = mismatch["stored"]
+        configured = mismatch["configured"]
+        click.echo()
+        click.secho("  Existing DB detected — embedding mismatch:", fg="yellow", bold=True)
+        click.echo(
+            f"    DB stored:  {stored['provider']}/{stored['model']} ({stored['dimension']}d)"
+        )
+        click.echo(
+            f"    New config: {configured['provider']}/{configured['model']} "
+            f"({configured['dimension']}d)"
+        )
+        click.echo()
+        click.echo("  The MCP server will fail to start until this is resolved.")
+
+        if not interactive:
+            click.secho(
+                "  Run 'mm embedding-reset --mode apply-current' to recreate the "
+                "vector index with the new dimension.",
+                fg="yellow",
+            )
+            return
+
+        click.echo()
+        if click.confirm(
+            "  Reset vector index now? (chunks table preserved, re-index required)",
+            default=True,
+        ):
+            await storage.reset_embedding_meta(
+                dimension=state["dimension"],
+                provider=state["provider"],
+                model=state["model"],
+            )
+            click.secho(
+                f"  Vector index reset to {state['provider']}/{state['model']} "
+                f"({state['dimension']}d). Run 'mm index <path>' to re-embed.",
+                fg="green",
+            )
+        else:
+            click.secho(
+                "  Skipped. Run 'mm embedding-reset --mode apply-current' before "
+                "starting the MCP server.",
+                fg="yellow",
+            )
+    finally:
+        await storage.close()
+
+
 def _write_config_and_summary(
     state: dict, base_dir: Path | None = None, fresh: bool = False
 ) -> None:
@@ -1519,3 +1615,4 @@ def init(
             run_steps([_step_memory_dir, _step_provider_dirs_auto, _step_mcp], state)
 
     _write_config_and_summary(state, fresh=fresh)
+    _maybe_offer_embedding_reset(state, interactive=not non_interactive)
