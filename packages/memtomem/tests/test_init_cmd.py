@@ -3876,7 +3876,7 @@ class TestInitialSeedThreshold:
         )
 
         state = {"provider": "onnx"}
-        assert init_cmd._maybe_seed_initial_index(memory_dir, state) is False
+        assert init_cmd._maybe_seed_initial_index([memory_dir], state) is False
         assert confirm_fired["yes"] is True  # prompt DID fire this time
         out = capsys.readouterr().out
         assert "11 file(s)" in out
@@ -3906,7 +3906,7 @@ class TestInitialSeedThreshold:
         )
 
         state = {"provider": "ollama"}
-        assert init_cmd._maybe_seed_initial_index(memory_dir, state) is False
+        assert init_cmd._maybe_seed_initial_index([memory_dir], state) is False
         assert confirm_fired["yes"] is True
         out = capsys.readouterr().out
         assert "5 file(s)" in out
@@ -3931,15 +3931,15 @@ class TestInitialSeedThreshold:
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         monkeypatch.setattr("click.confirm", lambda *a, **kw: True)
 
-        seen: dict[str, Path] = {}
+        seen: dict[str, list[Path]] = {}
         monkeypatch.setattr(
             init_cmd,
             "_seed_with_progress",
-            lambda p: seen.__setitem__("dir", p) or True,
+            lambda paths: seen.__setitem__("paths", list(paths)) or True,
         )
 
-        assert init_cmd._maybe_seed_initial_index(memory_dir, {"provider": "none"}) is True
-        assert seen["dir"] == memory_dir
+        assert init_cmd._maybe_seed_initial_index([memory_dir], {"provider": "none"}) is True
+        assert seen["paths"] == [memory_dir]
 
     def test_maybe_seed_non_tty_silent_skip(
         self,
@@ -3964,7 +3964,7 @@ class TestInitialSeedThreshold:
             lambda *a, **kw: confirm_fired.__setitem__("yes", True) or True,
         )
 
-        assert init_cmd._maybe_seed_initial_index(memory_dir, {"provider": "none"}) is False
+        assert init_cmd._maybe_seed_initial_index([memory_dir], {"provider": "none"}) is False
         assert confirm_fired["yes"] is False
         assert capsys.readouterr().out == ""
 
@@ -3988,7 +3988,7 @@ class TestInitialSeedThreshold:
 
         monkeypatch.setattr("sys.stdin.isatty", lambda: False)
 
-        assert init_cmd._maybe_seed_initial_index(memory_dir, {"provider": "onnx"}) is False
+        assert init_cmd._maybe_seed_initial_index([memory_dir], {"provider": "onnx"}) is False
         assert capsys.readouterr().out == ""
 
     def test_maybe_seed_prompt_decline(
@@ -4013,10 +4013,10 @@ class TestInitialSeedThreshold:
         monkeypatch.setattr(
             init_cmd,
             "_seed_with_progress",
-            lambda p: seed_called.__setitem__("yes", True) or True,
+            lambda paths: seed_called.__setitem__("yes", True) or True,
         )
 
-        assert init_cmd._maybe_seed_initial_index(memory_dir, {"provider": "none"}) is False
+        assert init_cmd._maybe_seed_initial_index([memory_dir], {"provider": "none"}) is False
         assert seed_called["yes"] is False
 
     def test_maybe_seed_prompt_accept_runs_seed(
@@ -4035,16 +4035,16 @@ class TestInitialSeedThreshold:
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         monkeypatch.setattr("click.confirm", lambda *a, **kw: True)
 
-        seen: dict[str, Path] = {}
+        seen: dict[str, list[Path]] = {}
 
-        def _stub_seed(p: Path) -> bool:
-            seen["dir"] = p
+        def _stub_seed(paths: list[Path]) -> bool:
+            seen["paths"] = list(paths)
             return True
 
         monkeypatch.setattr(init_cmd, "_seed_with_progress", _stub_seed)
 
-        assert init_cmd._maybe_seed_initial_index(memory_dir, {"provider": "none"}) is True
-        assert seen["dir"] == memory_dir
+        assert init_cmd._maybe_seed_initial_index([memory_dir], {"provider": "none"}) is True
+        assert seen["paths"] == [memory_dir]
 
     def test_seed_with_progress_failure_is_graceful(
         self,
@@ -4070,7 +4070,7 @@ class TestInitialSeedThreshold:
 
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _broken_components)
 
-        assert init_cmd._seed_with_progress(memory_dir) is False
+        assert init_cmd._seed_with_progress([memory_dir]) is False
         out = capsys.readouterr().out
         assert "Skipped initial seed" in out
         assert "embedder unavailable" in out
@@ -4126,7 +4126,7 @@ class TestInitialSeedThreshold:
 
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _fake_components)
 
-        assert init_cmd._seed_with_progress(memory_dir) is False
+        assert init_cmd._seed_with_progress([memory_dir]) is False
         out = capsys.readouterr().out
         assert "0 chunks were indexed" in out
         assert "embedding-reset" in out
@@ -4181,7 +4181,7 @@ class TestInitialSeedThreshold:
 
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _fake_components)
 
-        assert init_cmd._seed_with_progress(memory_dir) is True
+        assert init_cmd._seed_with_progress([memory_dir]) is True
         out = capsys.readouterr().out
         assert "Seeded initial index" in out
         assert "3 new chunk(s)" in out
@@ -4214,7 +4214,306 @@ class TestInitialSeedThreshold:
 
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _ctrl_c_components)
 
-        assert init_cmd._seed_with_progress(memory_dir) is False
+        assert init_cmd._seed_with_progress([memory_dir]) is False
         out = capsys.readouterr().out
         assert "Cancelled" in out
         assert f"mm index {memory_dir}" in out
+
+    # ------------------------------------------------------------------
+    # Multi-path (primary memory_dir + provider_dirs) — issue #360 f/u
+    # ------------------------------------------------------------------
+
+    def test_maybe_seed_empty_primary_plus_provider_dir_prompts(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Primary memory_dir empty + one provider dir with files → prompt
+        STILL fires with aggregated counts. Regression guard for the core
+        UX bug this landed: ``mm init --preset korean`` registers ~28
+        provider dirs but the prior code scanned only the primary dir,
+        which is typically the empty ``~/memories``, so the seed silently
+        skipped every real-world install."""
+        from memtomem.cli import init_cmd
+
+        primary = tmp_path / "memories"
+        primary.mkdir()  # empty
+        provider = tmp_path / "claude-memory"
+        provider.mkdir()
+        for i in range(3):
+            self._write_md(provider, f"m{i}.md", f"memo {i}")
+
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        prompts: list[str] = []
+
+        def _capture(text, *args, **kwargs):
+            prompts.append(text)
+            return False
+
+        monkeypatch.setattr("click.confirm", _capture)
+
+        assert (
+            init_cmd._maybe_seed_initial_index([primary, provider], {"provider": "none"}) is False
+        )
+        # Small-case prompt text passes through click.confirm's first arg —
+        # capsys wouldn't catch it. Aggregated counts: 3 from provider + 0
+        # from empty primary = 3; phrasing is "across 2 memory dirs".
+        assert len(prompts) == 1
+        assert "3 existing file(s)" in prompts[0]
+        assert "across 2 memory dirs" in prompts[0]
+
+    def test_maybe_seed_multi_path_skips_nonexistent(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Non-existent paths are dropped before the scan. Protects against
+        stale provider_dirs entries (user moved a folder between init
+        runs). If the union reduces to zero existing paths, we return
+        False silently — no "no files found" noise."""
+        from memtomem.cli import init_cmd
+
+        existing = tmp_path / "have"
+        existing.mkdir()
+        self._write_md(existing, "a.md", "hi")
+        missing = tmp_path / "gone"  # never created
+
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("click.confirm", lambda *a, **kw: True)
+
+        passed: dict[str, list[Path]] = {}
+        monkeypatch.setattr(
+            init_cmd,
+            "_seed_with_progress",
+            lambda paths: passed.__setitem__("paths", list(paths)) or True,
+        )
+
+        assert init_cmd._maybe_seed_initial_index([missing, existing], {"provider": "none"}) is True
+        assert passed["paths"] == [existing]
+
+    def test_maybe_seed_large_multi_path_resume_hint_mentions_web(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Large-case advisory for multi-path runs points at the Web UI
+        Reindex All, not ``mm index <dir>``. ``mm index`` is single-path
+        only, so suggesting it for a 28-dir union would leave 27 dirs
+        unindexed. Dev must match ``_seed_with_progress`` resume hint
+        (same cross-affordance)."""
+        from memtomem.cli import init_cmd
+
+        primary = tmp_path / "memories"
+        primary.mkdir()
+        provider = tmp_path / "claude-memory"
+        provider.mkdir()
+        for i in range(12):  # > _SEED_MAX_FILES
+            self._write_md(provider, f"m{i}.md", f"memo {i}")
+
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("click.confirm", lambda *a, **kw: False)
+
+        init_cmd._maybe_seed_initial_index([primary, provider], {"provider": "onnx"})
+        out = capsys.readouterr().out
+        assert "12 file(s)" in out
+        assert "across 2 memory dirs" in out
+        # Multi-path resume hint goes to Web UI, not `mm index <dir>`.
+        assert "Reindex All" in out
+        assert "`mm index <dir>`" not in out
+
+    def test_seed_with_progress_multi_path_aggregates_counters(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Two paths streamed serially → complete counters sum into one
+        green summary line. Pins the aggregation so a future refactor
+        that regresses to "report only the last path's counters" fails
+        instead of silently under-reporting."""
+        from contextlib import asynccontextmanager
+
+        from memtomem.cli import init_cmd
+
+        dir_a = tmp_path / "a"
+        dir_a.mkdir()
+        dir_b = tmp_path / "b"
+        dir_b.mkdir()
+        # _seed_with_progress pre-computes expected_total from
+        # _collect_seed_scale; write one .md each so the scan reports
+        # non-zero and the bar doesn't trip the "no files" fallback.
+        self._write_md(dir_a, "a.md", "hello")
+        self._write_md(dir_b, "b.md", "world")
+
+        path_counts = {
+            str(dir_a): {"total_files": 2, "indexed_chunks": 5, "skipped_chunks": 1},
+            str(dir_b): {"total_files": 3, "indexed_chunks": 7, "skipped_chunks": 2},
+        }
+
+        class _FakeEngine:
+            async def index_path_stream(self, path, recursive=True, force=False):
+                key = str(path)
+                counts = path_counts[key]
+                yield {
+                    "type": "progress",
+                    "file": f"{key}/file.md",
+                    "files_done": 1,
+                    "files_total": 1,
+                    "indexed": counts["indexed_chunks"],
+                    "skipped": counts["skipped_chunks"],
+                }
+                yield {
+                    "type": "complete",
+                    "total_files": counts["total_files"],
+                    "total_chunks": counts["indexed_chunks"],
+                    "indexed_chunks": counts["indexed_chunks"],
+                    "skipped_chunks": counts["skipped_chunks"],
+                    "deleted_chunks": 0,
+                    "duration_ms": 1.0,
+                }
+
+        class _FakeComp:
+            index_engine = _FakeEngine()
+
+        @asynccontextmanager  # type: ignore[misc]
+        async def _fake_components():
+            yield _FakeComp()
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _fake_components)
+
+        assert init_cmd._seed_with_progress([dir_a, dir_b]) is True
+        out = capsys.readouterr().out
+        # 2 + 3 = 5 files, 5 + 7 = 12 new chunks, 1 + 2 = 3 unchanged.
+        assert "5 file(s)" in out
+        assert "12 new chunk(s)" in out
+        assert "3 unchanged" in out
+
+    def test_seed_with_progress_keyboard_interrupt_multi_path_web_hint(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Ctrl-C during multi-path seed → resume hint points at
+        ``mm web``, not ``mm index <dir>``. Single-path hint continues to
+        use ``mm index`` (tested above); this pins the branch."""
+        from contextlib import asynccontextmanager
+
+        from memtomem.cli import init_cmd
+
+        dir_a = tmp_path / "a"
+        dir_a.mkdir()
+        dir_b = tmp_path / "b"
+        dir_b.mkdir()
+
+        @asynccontextmanager  # type: ignore[misc]
+        async def _ctrl_c_components() -> object:  # pragma: no cover - generator
+            raise KeyboardInterrupt
+            yield  # unreachable
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _ctrl_c_components)
+
+        assert init_cmd._seed_with_progress([dir_a, dir_b]) is False
+        out = capsys.readouterr().out
+        assert "Cancelled" in out
+        assert "Reindex All" in out
+        # Regression: must NOT print the single-dir `mm index <dir>` hint.
+        assert f"mm index {dir_a}" not in out
+        assert f"mm index {dir_b}" not in out
+
+    # ------------------------------------------------------------------
+    # Next-steps step 1 hint — seeded / single-dir / multi-dir branches
+    # ------------------------------------------------------------------
+
+    def test_next_steps_multi_dir_unseeded_points_at_web_reindex(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """When provider_dirs are present and the seed is declined/skipped,
+        step 1 must point at ``mm web`` → Sources → Reindex All.
+        ``mm index ~/memories`` would only cover the primary dir — leaving
+        the 28 provider dirs unindexed, which is exactly the UX bug this
+        PR fixes."""
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(init_cmd, "_maybe_seed_initial_index", lambda paths, state: False)
+
+        state = _make_init_state(tmp_path)
+        state["provider_dirs"] = [
+            str(tmp_path / "claude-memory"),
+            str(tmp_path / "claude-plans"),
+        ]
+        state["_profile"] = _make_test_profile(tmp_path, kind="source")
+
+        init_cmd._write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "Next steps:" in out
+        # 3 = primary memory_dir + 2 provider_dirs. Dedup would not fire here
+        # because the three paths are distinct.
+        assert "Reindex All to index 3 memory_dirs" in out
+        # Regression: single-dir hint must NOT fire for multi-dir unseeded.
+        assert f"mm index {state['memory_dir']}\n" not in out
+
+    def test_next_steps_single_dir_unseeded_keeps_mm_index_hint(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """No provider_dirs + seed declined → legacy ``mm index <primary>``
+        hint still fires. Guards against the multi-dir branch over-firing
+        and hijacking the single-dir UX."""
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(init_cmd, "_maybe_seed_initial_index", lambda paths, state: False)
+
+        state = _make_init_state(tmp_path)
+        state["provider_dirs"] = []
+        state["_profile"] = _make_test_profile(tmp_path, kind="source")
+
+        init_cmd._write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert f"mm index {state['memory_dir']}" in out
+        assert "Reindex All" not in out
+        assert "already seeded" not in out
+
+    def test_next_steps_seeded_annotates_mm_index_hint(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """When the seed ran inline, step 1 keeps ``mm index <primary>`` but
+        annotates "already seeded — re-run only if you add files" so users
+        don't double-index. Pins the annotation wording — changing it
+        silently would regress the UX clarity."""
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(init_cmd, "_maybe_seed_initial_index", lambda paths, state: True)
+
+        state = _make_init_state(tmp_path)
+        # provider_dirs populated — seeded=True path wins over multi-dir
+        # branch (already-seeded annotation applies to primary regardless).
+        state["provider_dirs"] = [str(tmp_path / "claude-memory")]
+        state["_profile"] = _make_test_profile(tmp_path, kind="source")
+
+        init_cmd._write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert f"mm index {state['memory_dir']}" in out
+        assert "already seeded" in out
+        assert "Reindex All" not in out

@@ -1324,18 +1324,27 @@ def _provider_seed_hint(provider: str) -> str | None:
     return None
 
 
-def _seed_with_progress(memory_dir: Path) -> bool:
-    """Run :meth:`IndexEngine.index_path_stream` with a click progress bar.
+def _seed_with_progress(paths: list[Path]) -> bool:
+    """Run :meth:`IndexEngine.index_path_stream` across ``paths`` with a
+    single click progress bar. Used by both small-case and large-case
+    branches of :func:`_maybe_seed_initial_index` so the progress surface
+    is consistent whether we're seeding one primary ``memory_dir`` or the
+    union of ``memory_dir`` + ``provider_dirs`` (issue #360 followup).
 
-    Returns ``True`` iff the seed completed. Used by both small-case and
-    large-case branches of :func:`_maybe_seed_initial_index` so the
-    progress surface is consistent.
+    Paths are streamed serially and their complete-event counters are
+    aggregated into one green summary line. The progress bar length is
+    pre-computed via :func:`_collect_seed_scale` so the percent indicator
+    is stable even when the streamed file list spans multiple roots.
 
     Cancellation: a ``KeyboardInterrupt`` inside the async stream escapes
     through ``asyncio.run`` as a regular ``KeyboardInterrupt`` — caught
     here to print a yellow resume hint. ``mm index`` is idempotent
     (content-hash dedup), so the next invocation picks up where the
-    cancelled run left off.
+    cancelled run left off. Single-path runs point back at ``mm index
+    <dir>`` to preserve the legacy affordance; multi-path runs point at
+    ``mm web`` → Sources → Reindex All, which iterates memory_dirs
+    (``web/routes/system.py`` ``/api/reindex``) — ``mm index`` is
+    single-path only as of v0.1.23.
 
     Failure: any other ``Exception`` (missing config, embedder init
     error, IO) prints a yellow warning + manual-rerun hint and returns
@@ -1343,7 +1352,14 @@ def _seed_with_progress(memory_dir: Path) -> bool:
     seed-only failure must not abort the overall flow."""
     import asyncio
 
+    if not paths:
+        return False
+
     bar_state: dict = {"bar": None}
+    agg = {"total_files": 0, "indexed": 0, "skipped": 0}
+    # Pre-compute so the progress bar length spans all paths, not just
+    # the first one. Stays accurate across serial iteration.
+    expected_total = sum(_collect_seed_scale(p)[0] for p in paths)
 
     def _close_bar() -> None:
         if bar_state["bar"] is not None:
@@ -1353,53 +1369,49 @@ def _seed_with_progress(memory_dir: Path) -> bool:
                 pass
             bar_state["bar"] = None
 
-    async def _stream() -> dict | None:
+    async def _stream() -> None:
         from memtomem.cli._bootstrap import cli_components
 
-        final: dict | None = None
         async with cli_components() as comp:
-            async for evt in comp.index_engine.index_path_stream(
-                memory_dir, recursive=True, force=False
-            ):
-                if evt["type"] == "progress":
-                    if bar_state["bar"] is None:
-                        bar_state["bar"] = click.progressbar(
-                            length=evt["files_total"],
-                            label="  Seeding",
-                            item_show_func=lambda item: (item or "").rsplit("/", 1)[-1][:40],
-                        ).__enter__()
-                    bar_state["bar"].update(1, evt["file"])
-                elif evt["type"] == "complete":
-                    final = evt
-        return final
+            for p in paths:
+                async for evt in comp.index_engine.index_path_stream(
+                    p, recursive=True, force=False
+                ):
+                    if evt["type"] == "progress":
+                        if bar_state["bar"] is None:
+                            bar_state["bar"] = click.progressbar(
+                                length=expected_total,
+                                label="  Seeding",
+                                item_show_func=lambda item: (item or "").rsplit("/", 1)[-1][:40],
+                            ).__enter__()
+                        bar_state["bar"].update(1, evt["file"])
+                    elif evt["type"] == "complete":
+                        agg["total_files"] += evt["total_files"]
+                        agg["indexed"] += evt["indexed_chunks"]
+                        agg["skipped"] += evt["skipped_chunks"]
+
+    resume_hint = f"mm index {paths[0]}" if len(paths) == 1 else "mm web  (Sources → Reindex All)"
 
     try:
-        result = asyncio.run(_stream())
+        asyncio.run(_stream())
     except KeyboardInterrupt:
         _close_bar()
         click.echo()
-        click.secho(
-            f"  Cancelled. Resume with: mm index {memory_dir}",
-            fg="yellow",
-        )
+        click.secho(f"  Cancelled. Resume with: {resume_hint}", fg="yellow")
         return False
     except Exception as e:
         _close_bar()
         click.secho(f"  Skipped initial seed: {e}", fg="yellow")
-        click.echo(f"  Run manually later:   mm index {memory_dir}")
+        click.echo(f"  Run manually later:   {resume_hint}")
         return False
 
     _close_bar()
-    if result is None:
+    if agg["total_files"] == 0:
         # No files discovered by the stream — shouldn't happen given the
         # callers already ensured file_count > 0, but handle defensively.
         return False
 
     click.echo()
-    total_files = result["total_files"]
-    indexed = result["indexed_chunks"]
-    skipped = result["skipped_chunks"]
-
     # Defensive: if the stream processed files but landed zero chunks
     # (neither new nor skipped-as-unchanged), something went wrong
     # silently — per-file errors are logged but the `complete` event
@@ -1409,9 +1421,9 @@ def _seed_with_progress(memory_dir: Path) -> bool:
     # (``feedback_chunks_vec_dim0_legacy.md``). Return False so the
     # Next-steps step 1 stays unmarked and the user knows to investigate
     # rather than seeing a false green success.
-    if total_files > 0 and indexed == 0 and skipped == 0:
+    if agg["indexed"] == 0 and agg["skipped"] == 0:
         click.secho(
-            f"  Seeded {total_files} file(s) but 0 chunks were indexed — "
+            f"  Seeded {agg['total_files']} file(s) but 0 chunks were indexed — "
             "check logs for upsert errors.",
             fg="yellow",
         )
@@ -1422,20 +1434,29 @@ def _seed_with_progress(memory_dir: Path) -> bool:
         return False
 
     click.secho(
-        f"  Seeded initial index: {total_files} file(s), "
-        f"{indexed} new chunk(s), {skipped} unchanged.",
+        f"  Seeded initial index: {agg['total_files']} file(s), "
+        f"{agg['indexed']} new chunk(s), {agg['skipped']} unchanged.",
         fg="green",
     )
     return True
 
 
-def _maybe_seed_initial_index(memory_dir: Path, state: dict) -> bool:
-    """Offer an opt-in seed of ``memory_dir`` at wizard end.
+def _maybe_seed_initial_index(paths: list[Path], state: dict) -> bool:
+    """Offer an opt-in seed of the wizard's memory dirs.
+
+    ``paths`` is the union of ``state["memory_dir"]`` and any
+    ``provider_dirs`` accepted during the wizard, dedup-preserving order
+    (caller in :func:`_write_config_and_summary` mirrors the
+    ``combined_dirs`` construction used to write ``indexing.memory_dirs``).
+    Prior to this, only the primary ``memory_dir`` was scanned, so a fresh
+    install with an empty ``~/memories`` and 28 auto-discovered provider
+    dirs silently skipped the seed — the UX gap this change closes.
 
     Policy:
 
-    1. Empty dir / non-existent → silent skip. The wizard already printed
-       ``Memory: <dir>``; adding "no files found" noise would confuse.
+    1. No existing paths / empty union → silent skip. The wizard already
+       printed ``Memory: <dir>``; adding "no files found" noise would
+       confuse.
     2. Non-TTY (CI, piped ``mm init -y``) → silent skip. ``click.confirm``
        with no TTY raises ``Abort``, so we gate explicitly
        (``feedback_click_prompt_needs_isatty_gate.md``).
@@ -1446,19 +1467,28 @@ def _maybe_seed_initial_index(memory_dir: Path, state: dict) -> bool:
        surfaces the file count, total size, and a provider-specific time
        expectation (``_provider_seed_hint``). ``y`` runs the seed inline
        with a visible progress bar so minutes-long runs don't look
-       hung; Ctrl-C cancels and is resumable via ``mm index``.
+       hung; Ctrl-C cancels and is resumable via ``mm index`` (single
+       path) or the Web UI Reindex All button (multi).
 
     PR #295 lesson: the *default* for both prompts is No because a user
     blindly pressing Enter through the wizard should not accidentally
     trigger a multi-minute CPU embedder job. The visible progress bar
     (when they opt in) is the mitigation for the "is it hung?" failure
-    mode that killed the earlier startup-scan attempt.
+    mode that killed the earlier startup-scan attempt. Note that the
+    wizard seed is confirmation-gated and progress-bar instrumented; it
+    does not re-introduce the silent background scan PR #295 removed.
 
     Returns ``True`` iff the seed actually ran (informs whether the
     Next-steps step 1 can be annotated as already-done)."""
-    if not memory_dir.exists():
+    existing = [p for p in paths if p.exists()]
+    if not existing:
         return False
-    file_count, total_bytes = _collect_seed_scale(memory_dir)
+    file_count = 0
+    total_bytes = 0
+    for p in existing:
+        c, b = _collect_seed_scale(p)
+        file_count += c
+        total_bytes += b
     if file_count == 0:
         return False
     if not sys.stdin.isatty():
@@ -1467,21 +1497,43 @@ def _maybe_seed_initial_index(memory_dir: Path, state: dict) -> bool:
     is_small = file_count <= _SEED_MAX_FILES and total_bytes <= _SEED_MAX_BYTES
     click.echo()
 
+    # Small-case prompt: phrasing adapts to single vs multi so a user with
+    # an empty ~/memories plus a tiny provider dir still sees a coherent
+    # sentence instead of "in /Users/x/memories" for files that live
+    # elsewhere.
     if is_small:
-        prompt = f"  Index the {file_count} existing file(s) in {memory_dir} now?"
+        if len(existing) == 1:
+            prompt = f"  Index the {file_count} existing file(s) in {existing[0]} now?"
+        else:
+            prompt = (
+                f"  Index the {file_count} existing file(s) across {len(existing)} memory dirs now?"
+            )
     else:
         size_str = _format_size(total_bytes)
-        click.secho(
-            f"  Found {file_count} file(s) ({size_str}) in {memory_dir}.",
-            fg="cyan",
-        )
+        if len(existing) == 1:
+            click.secho(
+                f"  Found {file_count} file(s) ({size_str}) in {existing[0]}.",
+                fg="cyan",
+            )
+        else:
+            click.secho(
+                f"  Found {file_count} file(s) ({size_str}) across {len(existing)} memory dirs.",
+                fg="cyan",
+            )
         provider_hint = _provider_seed_hint(state.get("provider", ""))
         if provider_hint:
             click.secho(f"  {provider_hint}.", fg="cyan")
-        click.secho(
-            "  Ctrl-C cancels; resume later with `mm index <dir>` (hash-dedup safe).",
-            fg="cyan",
-        )
+        if len(existing) == 1:
+            click.secho(
+                "  Ctrl-C cancels; resume later with `mm index <dir>` (hash-dedup safe).",
+                fg="cyan",
+            )
+        else:
+            click.secho(
+                "  Ctrl-C cancels; resume later via `mm web` → Sources → Reindex All "
+                "(hash-dedup safe).",
+                fg="cyan",
+            )
         prompt = "  Start seeding now?"
 
     try:
@@ -1490,7 +1542,7 @@ def _maybe_seed_initial_index(memory_dir: Path, state: dict) -> bool:
         return False
     if not do_seed:
         return False
-    return _seed_with_progress(memory_dir)
+    return _seed_with_progress(existing)
 
 
 def _collect_missing_extras(state: dict) -> list[str]:
@@ -1939,8 +1991,24 @@ def _write_config_and_summary(
     # _maybe_seed_initial_index for the full policy and
     # `feedback_pullbased_vs_startup_scan.md` for the PR #295 lesson
     # that shapes the default-No + progress-bar design.
+    #
+    # Seed scope = union of primary memory_dir + provider_dirs, deduped
+    # while preserving order. Mirrors the combined_dirs construction
+    # above so the seed's file-count / bytes advisory matches what the
+    # wizard actually wrote to ``indexing.memory_dirs``. Without this,
+    # a fresh install with empty ``~/memories`` + 28 auto-discovered
+    # provider dirs silently skipped the seed entirely.
     memory_dir_path = Path(state["memory_dir"]).expanduser()
-    seeded = _maybe_seed_initial_index(memory_dir_path, state)
+    provider_paths = [Path(p).expanduser() for p in (state.get("provider_dirs", []) or [])]
+    seed_paths: list[Path] = []
+    seen_seed_keys: set[str] = set()
+    for p in [memory_dir_path, *provider_paths]:
+        key = str(p)
+        if key in seen_seed_keys:
+            continue
+        seen_seed_keys.add(key)
+        seed_paths.append(p)
+    seeded = _maybe_seed_initial_index(seed_paths, state)
 
     click.echo()
     click.secho("  Next steps:", fg="cyan")
@@ -1951,9 +2019,22 @@ def _write_config_and_summary(
     # auto-indexed. `mm index` is idempotent (content-hash dedup) so
     # re-runs are safe. See docs/guides/configuration.md#memory_dirs.
     # When _maybe_seed_initial_index already ran, the hint is annotated
-    # so users don't think they need to run it a second time.
-    seed_suffix = "  (already seeded — re-run only if you add files)" if seeded else ""
-    click.echo(f"    1. {run_prefix}mm index {state['memory_dir']}{seed_suffix}")
+    # so users don't think they need to run it a second time. Multi-dir
+    # + unseeded case points at the Web UI Reindex All button because
+    # ``mm index`` CLI is single-path only (v0.1.23) — suggesting
+    # ``mm index ~/memories`` would miss the 28 provider dirs entirely.
+    if seeded:
+        click.echo(
+            f"    1. {run_prefix}mm index {state['memory_dir']}"
+            "  (already seeded — re-run only if you add files)"
+        )
+    elif len(seed_paths) > 1:
+        click.echo(
+            f"    1. {run_prefix}mm web  "
+            f"(Sources → Reindex All to index {len(seed_paths)} memory_dirs)"
+        )
+    else:
+        click.echo(f"    1. {run_prefix}mm index {state['memory_dir']}")
     click.echo(f"    2. {run_prefix}mm search 'your first query'")
     click.echo(f"    3. {run_prefix}mm web  (browse & manage your memories)")
     if profile.mm_binary_origin == "uvx":
