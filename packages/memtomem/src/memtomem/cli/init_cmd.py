@@ -183,7 +183,7 @@ def _runtime_profile() -> RuntimeProfile:
 
     Pure / inputs are ``Path.cwd()`` + ``sys.executable`` + ``sys.prefix``.
     Call once at :func:`init` entry; downstream code reads the cached
-    profile from ``state["_profile"]`` via :func:`_get_or_build_profile`."""
+    profile from ``state["_profile"]`` directly."""
     src_dir = _detect_source_install()
     proj_dir = _detect_project_install() if src_dir is None else None
 
@@ -226,71 +226,6 @@ def _runtime_profile() -> RuntimeProfile:
         mm_binary_origin=mm_binary_origin,
         runtime_matches_workspace=runtime_matches_workspace,
     )
-
-
-def _get_or_build_profile(state: dict) -> RuntimeProfile:
-    """Return ``state["_profile"]`` if present, else build a fresh profile
-    from the legacy ``state["source_install"]`` / ``project_install`` /
-    ``source_dir`` / ``project_dir`` keys.
-
-    Phase 3 cleanup (#368): after this cycle, production writes ``_profile``
-    exclusively — in-tree callers no longer populate the legacy keys, so the
-    reconstruction path below is effectively dead for production. The shim
-    persists for (a) the 2 :class:`TestRuntimeProfile` regression tests that
-    prove the reconstruction path still works and (b) downstream forks that
-    haven't migrated to ``_profile``. Its deletion is tracked in a separate
-    follow-up issue — reopen trigger: 1–2 minor releases (~v0.1.22) with no
-    external signal of legacy-key usage.
-
-    Tests that bypass :func:`init` and construct ``state`` directly never
-    populate ``_profile``; this shim builds one on demand from the legacy
-    booleans they DO set so the migration to RuntimeProfile doesn't require
-    rewriting every existing test fixture. Result is cached back into
-    ``state`` so multi-call paths (banner + warning + summary) all see the
-    same struct."""
-    profile = state.get("_profile")
-    if isinstance(profile, RuntimeProfile):
-        return profile
-
-    cwd_install_type: CwdInstallType
-    cwd_install_dir: Path | None
-    if state.get("source_install"):
-        cwd_install_type = "source"
-        cwd_install_dir = Path(state["source_dir"]) if state.get("source_dir") else None
-    elif state.get("project_install"):
-        cwd_install_type = "project"
-        cwd_install_dir = Path(state["project_dir"]) if state.get("project_dir") else None
-    else:
-        cwd_install_type = "pypi"
-        cwd_install_dir = None
-
-    runtime_interpreter = Path(sys.executable)
-    workspace_venv_path: Path | None = None
-    if cwd_install_dir is not None:
-        candidate = cwd_install_dir / ".venv"
-        workspace_venv_path = candidate if candidate.exists() else None
-
-    runtime_matches_workspace = False
-    if workspace_venv_path is not None:
-        try:
-            runtime_matches_workspace = runtime_interpreter.is_relative_to(workspace_venv_path)
-        except (OSError, ValueError):
-            runtime_matches_workspace = False
-
-    mm_binary_origin = _detect_mm_binary_origin(
-        runtime_interpreter, runtime_matches_workspace=runtime_matches_workspace
-    )
-
-    profile = RuntimeProfile(
-        cwd_install_type=cwd_install_type,
-        cwd_install_dir=cwd_install_dir,
-        runtime_interpreter=runtime_interpreter,
-        workspace_venv_path=workspace_venv_path,
-        mm_binary_origin=mm_binary_origin,
-        runtime_matches_workspace=runtime_matches_workspace,
-    )
-    state["_profile"] = profile
-    return profile
 
 
 def _have_module(name: str) -> bool:
@@ -1145,7 +1080,7 @@ def _workspace_python(state: dict) -> Path | None:
 
     Phase 3 (#363): reads ``workspace_venv_path`` from :class:`RuntimeProfile`
     so the source/project axis lives in one struct."""
-    profile = _get_or_build_profile(state)
+    profile = state["_profile"]
     if profile.workspace_venv_path is None:
         return None
     py = profile.workspace_venv_path / "bin" / "python"
@@ -1193,7 +1128,7 @@ def _workspace_needs_sync(state: dict) -> bool:
     absent — a fresh clone / fresh worktree. The summary shows a single
     ``run uv sync first`` line in this case instead of a noisy missing-
     extras warning that would have probed the wrong interpreter."""
-    profile = _get_or_build_profile(state)
+    profile = state["_profile"]
     if profile.cwd_install_type == "pypi":
         return False
     return _workspace_python(state) is None
@@ -1216,10 +1151,10 @@ def _extra_install_hint(extras: list[str], state: dict | None = None) -> str:
     sub-bundle.
 
     Phase 3 (#363): reads ``cwd_install_type`` from :class:`RuntimeProfile`
-    so the workspace-vs-tool branch lives in one place."""
-    state = state or {}
-    profile = _get_or_build_profile(state)
-    is_workspace = profile.cwd_install_type in ("source", "project")
+    so the workspace-vs-tool branch lives in one place. Treats missing
+    ``_profile`` as PyPI install (matches the ``state=None`` default)."""
+    profile = (state or {}).get("_profile")
+    is_workspace = profile is not None and profile.cwd_install_type in ("source", "project")
     name = extras[0] if len(extras) == 1 else "all"
     if is_workspace:
         return f"{_UV_SYNC_HINT_PREFIX}{name}"
@@ -1333,9 +1268,11 @@ def _collect_missing_extras(state: dict) -> list[str]:
     ``state['_extras_warned_inline']`` are filtered out so the interactive
     ``_step_embedding`` path doesn't double-print.
 
-    Phase 3 (#363): reads ``cwd_install_type`` from :class:`RuntimeProfile`."""
-    profile = _get_or_build_profile(state)
-    source = profile.cwd_install_type in ("source", "project")
+    Phase 3 (#363): reads ``cwd_install_type`` from :class:`RuntimeProfile`.
+    Treats missing ``_profile`` as PyPI install so tests can build minimal
+    state dicts without constructing a full profile."""
+    profile = state.get("_profile")
+    source = profile is not None and profile.cwd_install_type in ("source", "project")
     ws_py = _workspace_python(state) if source else None
 
     if source and ws_py is not None:
@@ -1381,7 +1318,7 @@ def _emit_cwd_runtime_mismatch_banner(state: dict) -> None:
     from :class:`RuntimeProfile`. The legacy ``_runtime_under_workspace_venv``
     helper has been folded into ``RuntimeProfile`` (raw-path comparison
     semantics preserved — see ``feedback_venv_raw_path_check.md``)."""
-    profile = _get_or_build_profile(state)
+    profile = state["_profile"]
     if profile.cwd_install_type == "pypi":
         return
     if profile.runtime_matches_workspace:
@@ -1443,13 +1380,13 @@ def _write_config_and_summary(
     config_dir.mkdir(parents=True, exist_ok=True)
 
     # All install-context branching reads from the single profile struct
-    # built once at init() entry (or lazily reconstructed from legacy state
-    # booleans by the _get_or_build_profile shim when downstream forks build
-    # state directly). #363 Phase 3 collapsed the prior 4 source_install /
-    # project_install / source_dir / project_dir reads into this struct;
-    # #368 dropped the remaining parallel state keys so there is now exactly
-    # one place a future install-context judgment can land.
-    profile = _get_or_build_profile(state)
+    # built once at init() entry. #363 Phase 3 collapsed the prior 4
+    # source_install / project_install / source_dir / project_dir reads
+    # into this struct; #368 dropped the parallel state keys and the
+    # follow-up removed the _get_or_build_profile back-compat shim, so
+    # there is now exactly one place a future install-context judgment
+    # can land.
+    profile = state["_profile"]
     source_install = profile.cwd_install_type == "source"
     project_install = profile.cwd_install_type == "project"
     workspace_dir = str(profile.cwd_install_dir) if profile.cwd_install_dir else None
@@ -2124,10 +2061,10 @@ def init(
 
     # Build the install-context profile once at entry — every downstream
     # decision (run_prefix, missing-extras hint, summary mismatch banner,
-    # MCP server command) reads from this single struct via
-    # _get_or_build_profile. #368 dropped the parallel legacy
-    # source_install/project_install/source_dir/project_dir state keys so
-    # there is exactly one place to land a new install-context judgment.
+    # MCP server command) reads from state["_profile"] directly. #368
+    # dropped the parallel legacy state keys and the follow-up removed
+    # the _get_or_build_profile back-compat shim, so there is exactly one
+    # place to land a new install-context judgment.
     profile = _runtime_profile()
     state: dict = {"_profile": profile}
 

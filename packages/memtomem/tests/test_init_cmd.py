@@ -1364,46 +1364,6 @@ class TestRuntimeProfile:
         assert profile.workspace_venv_path is None
         assert profile.runtime_matches_workspace is False
 
-    def test_get_or_build_profile_caches_in_state(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Second call returns the same instance (cached on state)."""
-        from memtomem.cli import init_cmd
-
-        monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
-
-        state: dict = {"source_install": False, "project_install": False}
-        first = init_cmd._get_or_build_profile(state)
-        second = init_cmd._get_or_build_profile(state)
-        assert first is second
-        assert state["_profile"] is first
-
-    def test_get_or_build_profile_falls_back_to_legacy_state_keys(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Tests that build state directly (no ``_profile``) get a profile
-        synthesized from ``state["source_install"]`` / ``source_dir``. This
-        is the back-compat shim that lets the dozens of pre-Phase-3 tests
-        continue to work without rewriting fixtures."""
-        from memtomem.cli import init_cmd
-
-        venv_bin = tmp_path / ".venv" / "bin"
-        venv_bin.mkdir(parents=True)
-        (venv_bin / "python").touch()
-        monkeypatch.setattr(init_cmd.sys, "executable", str(venv_bin / "python"))
-
-        state: dict = {
-            "source_install": True,
-            "source_dir": str(tmp_path),
-            "project_install": False,
-            "project_dir": None,
-        }
-        profile = init_cmd._get_or_build_profile(state)
-        assert profile.cwd_install_type == "source"
-        assert profile.cwd_install_dir == tmp_path
-        assert profile.workspace_venv_path == tmp_path / ".venv"
-        assert profile.runtime_matches_workspace is True
-
 
 class TestMmBinaryOriginDetection:
     """Issue #363 Phase 3 — first-class ``mm_binary_origin`` heuristic.
