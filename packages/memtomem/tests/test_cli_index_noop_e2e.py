@@ -54,9 +54,7 @@ class TestFreshNoopIndexInline:
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
-        monkeypatch.setattr(
-            _bootstrap, "_CONFIG_PATH", home / ".memtomem" / "config.json"
-        )
+        monkeypatch.setattr(_bootstrap, "_CONFIG_PATH", home / ".memtomem" / "config.json")
 
         mem_dir = _make_memory_dir(str(home))
 
