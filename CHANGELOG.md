@@ -5,6 +5,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.23] — 2026-04-22
+
+Feature release adding a first-class `mm uninstall` command so users can
+clean up local state (DB, config, fragments) with confirmation and
+install-context awareness, instead of guessing at `rm -rf ~/.memtomem/`.
+
+### Added
+
+- **`mm uninstall` CLI** — categorised inventory + confirmation prompt +
+  per-install-context binary-uninstall hint. Flags: `--keep-config`
+  (preserve `config.json` + `config.d/*` + backups), `--keep-data`
+  (preserve DB + WAL/SHM/journal + `memories/`), `--force` (bypass the
+  running-server safety check), `-y/--yes` (skip confirmation).
+
+  The command solves three concrete problems that `uv tool uninstall`
+  alone can't: (1) it tells you the right binary-removal command for
+  your detected install context (uv-tool / uvx / venv-relative / system
+  / unknown, reusing the existing `RuntimeProfile` from
+  `cli/init_cmd.py`), (2) it refuses to delete while the MCP server is
+  alive (open WAL handle during deletion risks corruption), and (3) it
+  honours custom `storage.sqlite_path` so DBs outside `~/.memtomem/` are
+  included in the cleanup. It falls back to default paths when
+  `config.json` can't be loaded (uninstall is itself a recovery
+  scenario), and detects external editor MCP entries (`~/.claude.json`,
+  `~/.codex/config.toml`, etc.) as inventory-only — those must still be
+  cleaned manually, tracked for a follow-up PR. Deletion runs in
+  low→high value order (pid/session → fragments → backups → config →
+  memories → DB) with per-group success logging, so a mid-flight
+  failure leaves a recoverable trail. (#379)
+
+### Docs
+
+- **`docs/guides/uninstall.md`** — adds a "Recommended: `mm uninstall`"
+  section at the top; the manual `rm -rf` flow remains below as a
+  fallback for environments without the CLI installed. (#379)
+
 ## [0.1.22] — 2026-04-22
 
 Bug-fix release closing the second root-cause path for "no such table:
