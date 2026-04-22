@@ -97,6 +97,11 @@ class SqliteBackend(
         self._meta: MetaManager | None = None
         self._ns: NamespaceOps | None = None
         self._in_transaction: bool = False
+        # Invariant: _has_vec_table is True iff sqlite_master contains 'chunks_vec',
+        # which holds iff self._dimension > 0. Maintained by initialize(),
+        # reset_embedding_meta(), and reset_all() — all three must update this
+        # flag in lockstep with the underlying DROP/CREATE.
+        self._has_vec_table: bool = False
 
     async def initialize(self) -> None:
         db_path = Path(self._config.sqlite_path).expanduser()
@@ -140,7 +145,7 @@ class SqliteBackend(
 
         try:
             self._meta = MetaManager(self._get_db)
-            self._ns = NamespaceOps(self._get_db)
+            self._ns = NamespaceOps(self._get_db, lambda: self._has_vec_table)
 
             self._dimension, self._dim_mismatch, self._model_mismatch = create_tables(
                 self._db,
@@ -149,6 +154,12 @@ class SqliteBackend(
                 self._embedding_provider,
                 self._embedding_model,
                 strict_dim_check=self._strict_dim_check,
+            )
+            self._has_vec_table = (
+                self._db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunks_vec'"
+                ).fetchone()
+                is not None
             )
         except Exception:
             await self.close()
@@ -284,10 +295,14 @@ class SqliteBackend(
             self._embedding_provider = provider
         if model:
             self._embedding_model = model
-        db.execute(f"""
-            CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec
-            USING vec0(embedding float[{self._dimension}])
-        """)
+        if self._dimension > 0:
+            db.execute(f"""
+                CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec
+                USING vec0(embedding float[{self._dimension}])
+            """)
+            self._has_vec_table = True
+        else:
+            self._has_vec_table = False
         db.commit()
         self.clear_embedding_mismatch()
 
@@ -341,10 +356,14 @@ class SqliteBackend(
             # Vector virtual table — drop + recreate is safest for vec0
             db.execute("DROP TABLE IF EXISTS chunks_vec")
             db.execute("DROP TABLE IF EXISTS chunks_vec_info")
-            db.execute(f"""
-                CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec
-                USING vec0(embedding float[{self._dimension}])
-            """)
+            if self._dimension > 0:
+                db.execute(f"""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec
+                    USING vec0(embedding float[{self._dimension}])
+                """)
+                self._has_vec_table = True
+            else:
+                self._has_vec_table = False
             deleted["chunks_vec"] = chunk_count
 
             if not self._in_transaction:
@@ -415,7 +434,7 @@ class SqliteBackend(
                     ],
                 )
                 vec_updates = [(c, rowid) for c, rowid in to_update if c.embedding]
-                if vec_updates:
+                if vec_updates and self._has_vec_table:
                     db.executemany(
                         "UPDATE chunks_vec SET embedding=? WHERE rowid=?",
                         [(serialize_f32(c.embedding), rowid) for c, rowid in vec_updates],  # type: ignore[arg-type]
@@ -466,10 +485,11 @@ class SqliteBackend(
                     f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders(len(new_rowids))})",
                     new_rowids,
                 )
-                db.execute(
-                    f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(new_rowids))})",
-                    new_rowids,
-                )
+                if self._has_vec_table:
+                    db.execute(
+                        f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(new_rowids))})",
+                        new_rowids,
+                    )
 
                 db.executemany(
                     "INSERT INTO chunks_fts(rowid, content, source_file) VALUES (?,?,?)",
@@ -488,7 +508,7 @@ class SqliteBackend(
                     for c in to_insert
                     if c.embedding and str(c.id) in new_rowid_map
                 ]
-                if vec_inserts:
+                if vec_inserts and self._has_vec_table:
                     db.executemany(
                         "INSERT INTO chunks_vec(rowid, embedding) VALUES (?,?)",
                         vec_inserts,
@@ -553,9 +573,10 @@ class SqliteBackend(
             db.execute(
                 f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders(len(rowids))})", rowids
             )
-            db.execute(
-                f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(rowids))})", rowids
-            )
+            if self._has_vec_table:
+                db.execute(
+                    f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(rowids))})", rowids
+                )
             if not self._in_transaction:
                 db.commit()
         except Exception as exc:
@@ -582,9 +603,10 @@ class SqliteBackend(
             db.execute(
                 f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders(len(rowids))})", rowids
             )
-            db.execute(
-                f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(rowids))})", rowids
-            )
+            if self._has_vec_table:
+                db.execute(
+                    f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(rowids))})", rowids
+                )
             if not self._in_transaction:
                 db.commit()
         except Exception as exc:
@@ -650,7 +672,7 @@ class SqliteBackend(
 
     async def get_embeddings_for_chunks(self, chunk_ids: list[str]) -> dict[str, list[float]]:
         """Fetch embeddings for a list of chunk IDs. Returns {id: embedding}."""
-        if not chunk_ids:
+        if not chunk_ids or not self._has_vec_table:
             return {}
         db = self._db
         assert db is not None
@@ -730,6 +752,11 @@ class SqliteBackend(
         top_k: int = 20,
         namespace_filter: NamespaceFilter | None = None,
     ) -> list[SearchResult]:
+        # bm25-only mode (dimension=0) — no chunks_vec table to query. Return
+        # early instead of raising OperationalError that the search pipeline
+        # would log as a misleading "Dense search unavailable" warning.
+        if not self._has_vec_table:
+            return []
         db = self._get_read_db()
 
         ns_clause = ""

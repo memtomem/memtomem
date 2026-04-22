@@ -52,8 +52,17 @@ def _ensure_valid_namespace(name: str) -> None:
 class NamespaceOps:
     """Namespace CRUD operations delegated from SqliteBackend."""
 
-    def __init__(self, get_db: Callable[[], sqlite3.Connection]) -> None:
+    def __init__(
+        self,
+        get_db: Callable[[], sqlite3.Connection],
+        has_vec_table: Callable[[], bool],
+    ) -> None:
         self._get_db = get_db
+        # Live lookup so reset_embedding_meta()'s flag flip is visible here
+        # without re-construction. Required (no default) — sole caller is
+        # SqliteBackend.initialize(); a default would silently regress the
+        # dim=0 guard if a future caller forgets it.
+        self._has_vec_table = has_vec_table
 
     async def list_namespaces(self) -> list[tuple[str, int]]:
         db = self._get_db()
@@ -98,9 +107,11 @@ class NamespaceOps:
             db.execute(
                 f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders(len(rowids))})", rowids
             )
-            db.execute(
-                f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(rowids))})", rowids
-            )
+            if self._has_vec_table():
+                db.execute(
+                    f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(rowids))})",
+                    rowids,
+                )
             db.execute("DELETE FROM namespace_metadata WHERE namespace=?", (namespace,))
             db.commit()
         except Exception as exc:
