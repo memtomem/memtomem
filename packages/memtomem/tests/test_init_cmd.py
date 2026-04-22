@@ -3777,3 +3777,214 @@ class TestReinstallEmbeddingReconciliation:
         out = capsys.readouterr().out
         assert "Skipped" in out
         assert "mm embedding-reset --mode apply-current" in out
+
+
+class TestInitialSeedThreshold:
+    """Opt-in initial-seed prompt at wizard end (PR #374 follow-up).
+
+    Policy pins: two-axis (file count AND total bytes) threshold so the
+    wizard doesn't silently block for minutes on CPU-heavy embedders when
+    the user has a large pre-existing memory dir (PR #295 failure mode).
+    Both axes must be under the ceiling to trigger the prompt; either over
+    falls back to a cyan hint pointing at `mm web` Reindex + manual
+    `mm index`. Non-TTY (CI / piped stdin) always skips silently so
+    scripted `mm init -y` pipelines keep passing."""
+
+    @staticmethod
+    def _write_md(dir_: Path, name: str, body: str) -> Path:
+        f = dir_ / name
+        f.write_text(body, encoding="utf-8")
+        return f
+
+    def test_collect_seed_scale_counts_md_only_and_sums_bytes(self, tmp_path: Path) -> None:
+        """`.md` files count toward both axes; `.json` / other extensions
+        don't (threshold is tuned for markdown embedding cost)."""
+        from memtomem.cli.init_cmd import _collect_seed_scale
+
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+        self._write_md(memory_dir, "a.md", "hello world\n")
+        self._write_md(memory_dir, "b.md", "x" * 100)
+        (memory_dir / "ignored.json").write_text('{"k": 1}', encoding="utf-8")
+
+        count, total = _collect_seed_scale(memory_dir)
+        assert count == 2
+        assert total == len("hello world\n") + 100
+
+    def test_collect_seed_scale_missing_dir_returns_zero(self, tmp_path: Path) -> None:
+        """Non-existent memory_dir → (0, 0). The caller uses count==0 to
+        skip silently — avoids the wizard printing "no files found" noise
+        right after it just printed `Memory: <dir>`."""
+        from memtomem.cli.init_cmd import _collect_seed_scale
+
+        assert _collect_seed_scale(tmp_path / "does-not-exist") == (0, 0)
+
+    def test_maybe_seed_large_by_count_emits_hint_no_prompt(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """11 small files (>10) → skip + hint. Prompt never fires (ensures
+        a hypothetical click.confirm mock would not be called)."""
+        from memtomem.cli import init_cmd
+
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+        for i in range(11):
+            self._write_md(memory_dir, f"m{i}.md", f"memo {i}")
+
+        called = {"confirm": False}
+
+        def _fail_confirm(*a: object, **kw: object) -> bool:
+            called["confirm"] = True
+            return False
+
+        monkeypatch.setattr("click.confirm", _fail_confirm)
+
+        assert init_cmd._maybe_seed_initial_index(memory_dir) is False
+        assert called["confirm"] is False
+        out = capsys.readouterr().out
+        assert "11 file(s)" in out
+        assert f"mm index {memory_dir}" in out
+
+    def test_maybe_seed_large_by_bytes_emits_hint_no_prompt(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """5 files but total > 64KB → skip too. Proves the AND-semantics
+        (count OK alone isn't enough when bytes axis trips)."""
+        from memtomem.cli import init_cmd
+
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+        for i in range(5):
+            self._write_md(memory_dir, f"big{i}.md", "x" * 20_000)  # 100 KB total
+
+        called = {"confirm": False}
+        monkeypatch.setattr(
+            "click.confirm",
+            lambda *a, **kw: called.__setitem__("confirm", True) or False,
+        )
+
+        assert init_cmd._maybe_seed_initial_index(memory_dir) is False
+        assert called["confirm"] is False
+        out = capsys.readouterr().out
+        assert "5 file(s)" in out
+        assert "KB)" in out
+
+    def test_maybe_seed_non_tty_silent_skip(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Small dir + no TTY → silent skip. Prompt-on-non-TTY would
+        raise click.Abort and break `mm init -y </dev/null` pipelines
+        (`feedback_click_prompt_needs_isatty_gate.md`)."""
+        from memtomem.cli import init_cmd
+
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+        self._write_md(memory_dir, "only.md", "short")
+
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+        confirm_fired = {"yes": False}
+        monkeypatch.setattr(
+            "click.confirm",
+            lambda *a, **kw: confirm_fired.__setitem__("yes", True) or True,
+        )
+
+        assert init_cmd._maybe_seed_initial_index(memory_dir) is False
+        assert confirm_fired["yes"] is False
+        assert capsys.readouterr().out == ""
+
+    def test_maybe_seed_prompt_decline(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Small + TTY + No → no seed call. Verifies the default-No
+        path (Enter-is-Skip) doesn't accidentally seed — the wizard's
+        other prompts mostly use default-Yes, so the contrast is worth
+        pinning."""
+        from memtomem.cli import init_cmd
+
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+        self._write_md(memory_dir, "only.md", "short")
+
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("click.confirm", lambda *a, **kw: False)
+
+        seed_called = {"yes": False}
+        monkeypatch.setattr(
+            init_cmd,
+            "_seed_initial_index",
+            lambda p: seed_called.__setitem__("yes", True) or True,
+        )
+
+        assert init_cmd._maybe_seed_initial_index(memory_dir) is False
+        assert seed_called["yes"] is False
+
+    def test_maybe_seed_prompt_accept_runs_seed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Small + TTY + Yes → _seed_initial_index invoked, return value
+        propagates. Seeder itself is stubbed — that path is exercised by
+        test_seed_initial_index_failure_graceful."""
+        from memtomem.cli import init_cmd
+
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+        self._write_md(memory_dir, "only.md", "short")
+
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("click.confirm", lambda *a, **kw: True)
+
+        seen: dict[str, Path] = {}
+
+        def _stub_seed(p: Path) -> bool:
+            seen["dir"] = p
+            return True
+
+        monkeypatch.setattr(init_cmd, "_seed_initial_index", _stub_seed)
+
+        assert init_cmd._maybe_seed_initial_index(memory_dir) is True
+        assert seen["dir"] == memory_dir
+
+    def test_seed_initial_index_failure_is_graceful(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """If cli_components / index_path raises, return False with a
+        yellow warning + manual-rerun hint. Wizard must not abort —
+        config.json is already written and the seed is best-effort."""
+        from memtomem.cli import init_cmd
+
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+
+        # Patch cli_components so the inner async body raises.
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager  # type: ignore[misc]
+        async def _broken_components() -> object:  # pragma: no cover - generator
+            raise RuntimeError("embedder unavailable")
+            yield  # unreachable
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _broken_components)
+
+        assert init_cmd._seed_initial_index(memory_dir) is False
+        out = capsys.readouterr().out
+        assert "Skipped initial seed" in out
+        assert "embedder unavailable" in out
+        assert f"mm index {memory_dir}" in out

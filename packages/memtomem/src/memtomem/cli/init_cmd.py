@@ -1064,6 +1064,22 @@ _PROBE_EXTRAS_CODE: str = (
     "if u.find_spec(n) is not None]))"
 )
 
+# Two-axis threshold for the wizard's opt-in initial-index seed. Only when
+# BOTH axes are under the ceiling does the wizard prompt to seed inline;
+# otherwise it falls back to a hint ("use `mm web` Reindex or run
+# `mm index <dir>`"). AND-semantics err on the side of skip — the downside
+# of a missed auto-seed is one extra command the user types; the downside
+# of a mis-sized auto-seed is the PR #295 failure mode (CPU-bound embedder
+# blocks the wizard for minutes on first invocation, user thinks it hung).
+#
+# Baseline 64 KB derives from bge-m3 (1024d ONNX) on CPU: ~1 byte/0.3 tokens
+# × ~1 ms/token ≈ 20 seconds worst case, well under the 30 s wizard attention
+# budget. 10 files / 64 KB also matches a "fresh ~/memories with a few seed
+# memos" shape — the dominant wizard workflow — without catching "moved my
+# Obsidian vault" installs.
+_SEED_MAX_FILES: int = 10
+_SEED_MAX_BYTES: int = 64 * 1024
+
 
 def _workspace_python(state: dict) -> Path | None:
     """Return ``<workspace_venv_path>/bin/python`` if it exists, else ``None``.
@@ -1247,6 +1263,120 @@ def _install_extras(
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
     return result.returncode == 0
+
+
+def _collect_seed_scale(memory_dir: Path) -> tuple[int, int]:
+    """Count ``.md`` files and total bytes under ``memory_dir``, recursive.
+
+    Two-axis decision input for :func:`_maybe_seed_initial_index`. ``.md``
+    only — other supported extensions (``.json``, ``.py``, etc.) exist but
+    the wizard's dominant workflow seeds human-written markdown memos, and
+    the embedder cost tuning lives in that regime. Silent on stat/permission
+    errors: a dir the user can't read is one the seed can't index either,
+    so return (0, 0) and fall through to "skip"."""
+    if not memory_dir.exists():
+        return 0, 0
+    count = 0
+    total = 0
+    try:
+        for f in memory_dir.rglob("*.md"):
+            try:
+                total += f.stat().st_size
+                count += 1
+            except OSError:
+                continue
+    except OSError:
+        return 0, 0
+    return count, total
+
+
+def _seed_initial_index(memory_dir: Path) -> bool:
+    """Run one-shot :meth:`IndexEngine.index_path` on ``memory_dir``.
+
+    Returns ``True`` iff the seed completed. On any failure
+    (ClickException from missing config, embedder error, IO) prints a
+    yellow warning + manual-rerun hint and returns ``False`` — the wizard
+    already succeeded at creating the config so we don't want to abort on
+    a seed-only stumble. The only caller is
+    :func:`_maybe_seed_initial_index`, which has already done the
+    threshold + TTY checks."""
+    import asyncio
+
+    async def _run() -> tuple[int, int, int] | None:
+        try:
+            from memtomem.cli._bootstrap import cli_components
+
+            async with cli_components() as comp:
+                stats = await comp.index_engine.index_path(
+                    memory_dir, recursive=True, force=False, namespace=None
+                )
+                return stats.total_files, stats.indexed_chunks, stats.skipped_chunks
+        except Exception as e:
+            click.secho(f"  Skipped initial seed: {e}", fg="yellow")
+            click.echo(f"  Run manually later:   mm index {memory_dir}")
+            return None
+
+    result = asyncio.run(_run())
+    if result is None:
+        return False
+    total, new, skipped = result
+    click.secho(
+        f"  Seeded initial index: {total} file(s), {new} new chunk(s), {skipped} unchanged.",
+        fg="green",
+    )
+    return True
+
+
+def _maybe_seed_initial_index(memory_dir: Path) -> bool:
+    """Offer an opt-in one-shot seed of ``memory_dir`` at wizard end.
+
+    Policy (tight, so the wizard stays predictable):
+
+    1. Empty dir / non-existent → silent skip. The wizard already printed
+       ``Memory: <dir>``; adding "no files found" noise would confuse.
+    2. Either axis over threshold
+       (``_SEED_MAX_FILES`` / ``_SEED_MAX_BYTES``) → cyan hint pointing at
+       ``mm web`` Reindex and ``mm index``, no prompt. Avoids the PR #295
+       failure mode (CPU-heavy embedder blocks wizard for minutes).
+    3. Both axes small but stdin isn't a TTY (CI, piped ``mm init -y``)
+       → silent skip. ``click.confirm`` with no TTY raises ``Abort``, so
+       we gate explicitly (``feedback_click_prompt_needs_isatty_gate.md``).
+    4. Small + TTY → prompt, default No. Enter preserves the legacy
+       "wizard writes config and exits, user runs step 1 manually"
+       behavior; explicit ``y`` runs the seed inline.
+
+    Returns ``True`` iff the seed actually ran (informs whether the
+    Next-steps step 1 can be annotated as already-done)."""
+    if not memory_dir.exists():
+        return False
+    file_count, total_bytes = _collect_seed_scale(memory_dir)
+    if file_count == 0:
+        return False
+    if file_count > _SEED_MAX_FILES or total_bytes > _SEED_MAX_BYTES:
+        kb = total_bytes // 1024
+        click.echo()
+        click.secho(
+            f"  Found {file_count} file(s) ({kb} KB) in {memory_dir}.",
+            fg="cyan",
+        )
+        click.secho(
+            f"  Seed with:  mm index {memory_dir}  (or click 'Reindex' in `mm web`).",
+            fg="cyan",
+        )
+        return False
+    if not sys.stdin.isatty():
+        return False
+    click.echo()
+    try:
+        do_seed = click.confirm(
+            f"  Index the {file_count} existing file(s) in {memory_dir} now?",
+            default=False,
+        )
+    except click.Abort:
+        return False
+    if not do_seed:
+        return False
+    return _seed_initial_index(memory_dir)
 
 
 def _collect_missing_extras(state: dict) -> list[str]:
@@ -1688,6 +1818,15 @@ def _write_config_and_summary(
             else:
                 _emit_missing_extras_warning(missing, state)
 
+    # Offer to seed the initial index inline when the memory_dir is small
+    # enough (two-axis threshold) and stdin is a TTY. Large-case or
+    # non-TTY paths fall back to the printed `mm index` Next-step. See
+    # _maybe_seed_initial_index for the policy rationale and
+    # `feedback_pullbased_vs_startup_scan.md` for why this is gated
+    # narrowly (PR #295 failed trying to scan on lifespan startup).
+    memory_dir_path = Path(state["memory_dir"]).expanduser()
+    seeded = _maybe_seed_initial_index(memory_dir_path)
+
     click.echo()
     click.secho("  Next steps:", fg="cyan")
     run_prefix = "uv run " if profile.cwd_install_type in ("source", "project") else ""
@@ -1696,7 +1835,10 @@ def _write_config_and_summary(
     # in memory_dirs. After this one-shot, subsequent edits are
     # auto-indexed. `mm index` is idempotent (content-hash dedup) so
     # re-runs are safe. See docs/guides/configuration.md#memory_dirs.
-    click.echo(f"    1. {run_prefix}mm index {state['memory_dir']}")
+    # When _maybe_seed_initial_index already ran, the hint is annotated
+    # so users don't think they need to run it a second time.
+    seed_suffix = "  (already seeded — re-run only if you add files)" if seeded else ""
+    click.echo(f"    1. {run_prefix}mm index {state['memory_dir']}{seed_suffix}")
     click.echo(f"    2. {run_prefix}mm search 'your first query'")
     click.echo(f"    3. {run_prefix}mm web  (browse & manage your memories)")
     if profile.mm_binary_origin == "uvx":
