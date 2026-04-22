@@ -1290,60 +1290,137 @@ def _collect_seed_scale(memory_dir: Path) -> tuple[int, int]:
     return count, total
 
 
-def _seed_initial_index(memory_dir: Path) -> bool:
-    """Run one-shot :meth:`IndexEngine.index_path` on ``memory_dir``.
+def _format_size(total_bytes: int) -> str:
+    """Human-readable size — KB below 1024 KB, MB above (integer-only,
+    avoids fractional noise in the wizard's one-line advisory)."""
+    kb = total_bytes // 1024
+    return f"{kb // 1024} MB" if kb >= 1024 else f"{kb} KB"
 
-    Returns ``True`` iff the seed completed. On any failure
-    (ClickException from missing config, embedder error, IO) prints a
-    yellow warning + manual-rerun hint and returns ``False`` — the wizard
-    already succeeded at creating the config so we don't want to abort on
-    a seed-only stumble. The only caller is
-    :func:`_maybe_seed_initial_index`, which has already done the
-    threshold + TTY checks."""
+
+def _provider_seed_hint(provider: str) -> str | None:
+    """Per-provider expectation string for the large-case advisory.
+
+    Returns ``None`` for unknown providers so the wizard falls back to a
+    generic "watch the progress bar" message rather than making up a
+    number. The magnitudes below come from rough bge-m3 CPU benchmarking
+    (~1 ms/token) and network-latency-bound cloud calls — precise enough
+    to set expectations, not so precise users will hold us to them."""
+    if provider == "onnx":
+        return "bge-m3 / CPU embedder → may take several minutes"
+    if provider == "ollama":
+        return "Ollama embedder → time varies by model; watch the progress bar"
+    if provider == "openai":
+        return "OpenAI API → mostly network-bound, usually under a minute"
+    if provider == "none":
+        return "BM25-only provider → tokenize-only, usually fast"
+    return None
+
+
+def _seed_with_progress(memory_dir: Path) -> bool:
+    """Run :meth:`IndexEngine.index_path_stream` with a click progress bar.
+
+    Returns ``True`` iff the seed completed. Used by both small-case and
+    large-case branches of :func:`_maybe_seed_initial_index` so the
+    progress surface is consistent.
+
+    Cancellation: a ``KeyboardInterrupt`` inside the async stream escapes
+    through ``asyncio.run`` as a regular ``KeyboardInterrupt`` — caught
+    here to print a yellow resume hint. ``mm index`` is idempotent
+    (content-hash dedup), so the next invocation picks up where the
+    cancelled run left off.
+
+    Failure: any other ``Exception`` (missing config, embedder init
+    error, IO) prints a yellow warning + manual-rerun hint and returns
+    ``False``. The wizard already succeeded at writing config.json so a
+    seed-only failure must not abort the overall flow."""
     import asyncio
 
-    async def _run() -> tuple[int, int, int] | None:
-        try:
-            from memtomem.cli._bootstrap import cli_components
+    bar_state: dict = {"bar": None}
 
-            async with cli_components() as comp:
-                stats = await comp.index_engine.index_path(
-                    memory_dir, recursive=True, force=False, namespace=None
-                )
-                return stats.total_files, stats.indexed_chunks, stats.skipped_chunks
-        except Exception as e:
-            click.secho(f"  Skipped initial seed: {e}", fg="yellow")
-            click.echo(f"  Run manually later:   mm index {memory_dir}")
-            return None
+    def _close_bar() -> None:
+        if bar_state["bar"] is not None:
+            try:
+                bar_state["bar"].__exit__(None, None, None)
+            except Exception:  # pragma: no cover - click bar cleanup
+                pass
+            bar_state["bar"] = None
 
-    result = asyncio.run(_run())
-    if result is None:
+    async def _stream() -> dict | None:
+        from memtomem.cli._bootstrap import cli_components
+
+        final: dict | None = None
+        async with cli_components() as comp:
+            async for evt in comp.index_engine.index_path_stream(
+                memory_dir, recursive=True, force=False
+            ):
+                if evt["type"] == "progress":
+                    if bar_state["bar"] is None:
+                        bar_state["bar"] = click.progressbar(
+                            length=evt["files_total"],
+                            label="  Seeding",
+                            item_show_func=lambda item: (item or "").rsplit("/", 1)[-1][:40],
+                        ).__enter__()
+                    bar_state["bar"].update(1, evt["file"])
+                elif evt["type"] == "complete":
+                    final = evt
+        return final
+
+    try:
+        result = asyncio.run(_stream())
+    except KeyboardInterrupt:
+        _close_bar()
+        click.echo()
+        click.secho(
+            f"  Cancelled. Resume with: mm index {memory_dir}",
+            fg="yellow",
+        )
         return False
-    total, new, skipped = result
+    except Exception as e:
+        _close_bar()
+        click.secho(f"  Skipped initial seed: {e}", fg="yellow")
+        click.echo(f"  Run manually later:   mm index {memory_dir}")
+        return False
+
+    _close_bar()
+    if result is None:
+        # No files discovered by the stream — shouldn't happen given the
+        # callers already ensured file_count > 0, but handle defensively.
+        return False
+
+    click.echo()
     click.secho(
-        f"  Seeded initial index: {total} file(s), {new} new chunk(s), {skipped} unchanged.",
+        f"  Seeded initial index: {result['total_files']} file(s), "
+        f"{result['indexed_chunks']} new chunk(s), "
+        f"{result['skipped_chunks']} unchanged.",
         fg="green",
     )
     return True
 
 
-def _maybe_seed_initial_index(memory_dir: Path) -> bool:
-    """Offer an opt-in one-shot seed of ``memory_dir`` at wizard end.
+def _maybe_seed_initial_index(memory_dir: Path, state: dict) -> bool:
+    """Offer an opt-in seed of ``memory_dir`` at wizard end.
 
-    Policy (tight, so the wizard stays predictable):
+    Policy:
 
     1. Empty dir / non-existent → silent skip. The wizard already printed
        ``Memory: <dir>``; adding "no files found" noise would confuse.
-    2. Either axis over threshold
-       (``_SEED_MAX_FILES`` / ``_SEED_MAX_BYTES``) → cyan hint pointing at
-       ``mm web`` Reindex and ``mm index``, no prompt. Avoids the PR #295
-       failure mode (CPU-heavy embedder blocks wizard for minutes).
-    3. Both axes small but stdin isn't a TTY (CI, piped ``mm init -y``)
-       → silent skip. ``click.confirm`` with no TTY raises ``Abort``, so
-       we gate explicitly (``feedback_click_prompt_needs_isatty_gate.md``).
-    4. Small + TTY → prompt, default No. Enter preserves the legacy
-       "wizard writes config and exits, user runs step 1 manually"
-       behavior; explicit ``y`` runs the seed inline.
+    2. Non-TTY (CI, piped ``mm init -y``) → silent skip. ``click.confirm``
+       with no TTY raises ``Abort``, so we gate explicitly
+       (``feedback_click_prompt_needs_isatty_gate.md``).
+    3. Small (both axes under threshold) → short confirm, default No.
+       Enter preserves the legacy "wizard writes config, user runs step
+       1 manually" behavior; explicit ``y`` runs the seed inline.
+    4. Large (either axis over) → advisory + confirm, default No. Advisory
+       surfaces the file count, total size, and a provider-specific time
+       expectation (``_provider_seed_hint``). ``y`` runs the seed inline
+       with a visible progress bar so minutes-long runs don't look
+       hung; Ctrl-C cancels and is resumable via ``mm index``.
+
+    PR #295 lesson: the *default* for both prompts is No because a user
+    blindly pressing Enter through the wizard should not accidentally
+    trigger a multi-minute CPU embedder job. The visible progress bar
+    (when they opt in) is the mitigation for the "is it hung?" failure
+    mode that killed the earlier startup-scan attempt.
 
     Returns ``True`` iff the seed actually ran (informs whether the
     Next-steps step 1 can be annotated as already-done)."""
@@ -1352,31 +1429,36 @@ def _maybe_seed_initial_index(memory_dir: Path) -> bool:
     file_count, total_bytes = _collect_seed_scale(memory_dir)
     if file_count == 0:
         return False
-    if file_count > _SEED_MAX_FILES or total_bytes > _SEED_MAX_BYTES:
-        kb = total_bytes // 1024
-        click.echo()
-        click.secho(
-            f"  Found {file_count} file(s) ({kb} KB) in {memory_dir}.",
-            fg="cyan",
-        )
-        click.secho(
-            f"  Seed with:  mm index {memory_dir}  (or click 'Reindex' in `mm web`).",
-            fg="cyan",
-        )
-        return False
     if not sys.stdin.isatty():
         return False
+
+    is_small = file_count <= _SEED_MAX_FILES and total_bytes <= _SEED_MAX_BYTES
     click.echo()
-    try:
-        do_seed = click.confirm(
-            f"  Index the {file_count} existing file(s) in {memory_dir} now?",
-            default=False,
+
+    if is_small:
+        prompt = f"  Index the {file_count} existing file(s) in {memory_dir} now?"
+    else:
+        size_str = _format_size(total_bytes)
+        click.secho(
+            f"  Found {file_count} file(s) ({size_str}) in {memory_dir}.",
+            fg="cyan",
         )
+        provider_hint = _provider_seed_hint(state.get("provider", ""))
+        if provider_hint:
+            click.secho(f"  {provider_hint}.", fg="cyan")
+        click.secho(
+            "  Ctrl-C cancels; resume later with `mm index <dir>` (hash-dedup safe).",
+            fg="cyan",
+        )
+        prompt = "  Start seeding now?"
+
+    try:
+        do_seed = click.confirm(prompt, default=False)
     except click.Abort:
         return False
     if not do_seed:
         return False
-    return _seed_initial_index(memory_dir)
+    return _seed_with_progress(memory_dir)
 
 
 def _collect_missing_extras(state: dict) -> list[str]:
@@ -1818,14 +1900,15 @@ def _write_config_and_summary(
             else:
                 _emit_missing_extras_warning(missing, state)
 
-    # Offer to seed the initial index inline when the memory_dir is small
-    # enough (two-axis threshold) and stdin is a TTY. Large-case or
-    # non-TTY paths fall back to the printed `mm index` Next-step. See
-    # _maybe_seed_initial_index for the policy rationale and
-    # `feedback_pullbased_vs_startup_scan.md` for why this is gated
-    # narrowly (PR #295 failed trying to scan on lifespan startup).
+    # Offer to seed the initial index inline. Both small and large cases
+    # now prompt (TTY-only, default No), with a visible progress bar and
+    # Ctrl-C resume hint so long runs don't look hung. Large-case adds a
+    # provider-specific advisory ("bge-m3 CPU → several minutes"). See
+    # _maybe_seed_initial_index for the full policy and
+    # `feedback_pullbased_vs_startup_scan.md` for the PR #295 lesson
+    # that shapes the default-No + progress-bar design.
     memory_dir_path = Path(state["memory_dir"]).expanduser()
-    seeded = _maybe_seed_initial_index(memory_dir_path)
+    seeded = _maybe_seed_initial_index(memory_dir_path, state)
 
     click.echo()
     click.secho("  Next steps:", fg="cyan")
