@@ -10,11 +10,21 @@ _WEB_MODE_CHOICES = ("prod", "dev")
 
 def _missing_web_deps() -> str | None:
     """Return the name of the first missing web-UI dependency, or None if all
-    required packages are importable. Kept private so the wizard can reuse it."""
+    required packages are importable. Kept private so the wizard can reuse it.
+
+    Uses ``importlib.util.find_spec`` so the probe is cheap (no module init
+    side-effects) and matches the semantic the wizard's
+    ``_collect_missing_extras`` uses — both sites now answer the
+    "is the package installed" question the same way (#363 Phase 3,
+    eliminates the historical ``__import__`` vs ``find_spec`` split)."""
+    from importlib.util import find_spec
+
     for mod in ("fastapi", "uvicorn"):
         try:
-            __import__(mod)
-        except ImportError:
+            present = find_spec(mod) is not None
+        except (ImportError, ValueError):
+            present = False
+        if not present:
             return mod
     return None
 

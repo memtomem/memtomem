@@ -5,6 +5,35 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed
+
+- **`mm init` now classifies `uvx memtomem init` as ephemeral** — when the
+  wizard detects it's running under `uvx` (sys.prefix points at
+  `~/.cache/uv/archive-v0/…` or `builds-v0/…`), the summary labels the
+  install as `uvx (ephemeral)` and `Next steps` adds a one-line note
+  explaining the env is destroyed on exit and pointing at
+  `uv tool install "memtomem[all]"` for repeat use. Pre-Phase-3 the wizard
+  bucketed uvx into the generic "PyPI" label and the existing
+  `_install_extras` uvx hint branch was dead code (the call site never
+  routed to it). (#363)
+
+### Internal
+
+- **`RuntimeProfile` dataclass + single-source-of-truth refactor** — the
+  cwd filesystem axis (source / project / pypi) and runtime interpreter
+  axis (`sys.executable`, workspace `.venv` match, `mm` binary origin) are
+  now built once at `mm init` entry into a frozen `RuntimeProfile` struct
+  threaded through state; downstream call sites
+  (`_collect_missing_extras`, `_extra_install_hint`, the cwd-vs-runtime
+  mismatch banner, `Next steps` `run_prefix`, summary `Install:` label)
+  all read from it. Replaces 4 near-identical 5-ancestor walks
+  (`_is_source_install` / `_detect_source_dir` / `_is_project_install` /
+  `_detect_project_dir`) with 2 helpers returning `Path | None`. Also
+  unifies the in-process module-presence check on `importlib.util.find_spec`
+  across `mm init` and `mm web` (was split between `find_spec` and
+  `__import__`). 20 new tests cover RuntimeProfile fields, the 5-way
+  `mm_binary_origin` heuristic, and the project-install path E2E. (#363)
+
 ## [0.1.20] — 2026-04-22
 
 Phase 2 of the `mm init` install-context UX series (#360 → #361 → this

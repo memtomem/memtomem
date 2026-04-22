@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -17,6 +18,8 @@ from memtomem.cli.init_presets import PRESETS, _VALID_PRESETS, get_preset
 from memtomem.cli.wizard import nav_confirm, nav_prompt, run_steps, step_header
 
 InstallType = Literal["source", "project", "tool", "uvx"]
+CwdInstallType = Literal["source", "project", "pypi"]
+MmBinaryOrigin = Literal["uv-tool", "uvx", "venv-relative", "system", "unknown"]
 
 
 def _run(cmd: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
@@ -57,42 +60,247 @@ def _test_openai_key(api_key: str) -> bool:
         return False
 
 
-def _is_source_install() -> bool:
+def _detect_source_install() -> Path | None:
+    """Walk up at most 5 ancestors looking for a workspace root marker
+    (``pyproject.toml`` + ``packages/`` dir). Returns the workspace root
+    ``Path`` or ``None`` if no source checkout is detected.
+
+    Replaces the legacy ``_is_source_install`` / ``_detect_source_dir`` pair
+    (#363 Phase 3) — a single helper returning the path-or-None lets callers
+    truthy-check for the legacy bool case (``if _detect_source_install():``)
+    without needing two near-identical 5-ancestor walks."""
     check = Path.cwd()
     for _ in range(5):
         if (check / "pyproject.toml").exists() and (check / "packages").exists():
-            return True
-        check = check.parent
-    return False
-
-
-def _detect_source_dir() -> str | None:
-    check = Path.cwd()
-    for _ in range(5):
-        if (check / "pyproject.toml").exists() and (check / "packages").exists():
-            return str(check)
+            return check
         check = check.parent
     return None
 
 
-def _is_project_install() -> bool:
-    """Detect project-scoped install (uv add memtomem)."""
+def _detect_project_install() -> Path | None:
+    """Walk up at most 5 ancestors looking for a project-scoped install marker
+    (``pyproject.toml`` WITHOUT a ``packages/`` dir — i.e. ``uv add memtomem``
+    in someone else's project, not the memtomem monorepo). Returns the project
+    root ``Path`` or ``None``.
+
+    Pair with :func:`_detect_source_install`. Caller convention: check source
+    first; only check project when source returned ``None`` so a monorepo
+    checkout never falsely classifies as a project install."""
     check = Path.cwd()
     for _ in range(5):
         if (check / "pyproject.toml").exists() and not (check / "packages").exists():
-            return True
-        check = check.parent
-    return False
-
-
-def _detect_project_dir() -> str | None:
-    """Find project root for project-scoped install."""
-    check = Path.cwd()
-    for _ in range(5):
-        if (check / "pyproject.toml").exists() and not (check / "packages").exists():
-            return str(check)
+            return check
         check = check.parent
     return None
+
+
+def _detect_mm_binary_origin(
+    interpreter: Path, *, runtime_matches_workspace: bool
+) -> MmBinaryOrigin:
+    """Classify how the current ``mm`` interpreter was installed/invoked.
+
+    - ``venv-relative`` — interpreter lives under the workspace ``.venv/``.
+      Caller passes ``runtime_matches_workspace`` because that comparison
+      needs the workspace root, which lives in :class:`RuntimeProfile`.
+    - ``uvx`` — ephemeral environment cached under ``uv/archive-v*`` or
+      ``uv/builds-v*`` (uvx-managed cache dirs).
+    - ``uv-tool`` — installed via ``uv tool install``; venv lives under
+      ``uv/tools/<name>/`` in uv's data dir.
+    - ``system`` — interpreter is a well-known system Python location
+      (``/usr/bin``, ``/usr/local/bin``, ``/opt/homebrew/bin``, ``/bin``).
+    - ``unknown`` — anything else. Conservative default; the wizard treats
+      this like ``uv-tool`` in branching for now (most non-uvx, non-system
+      installs ARE ``uv tool install``).
+
+    Path-segment matching uses :attr:`Path.parts` so the logic is OS-neutral
+    (avoids ``/`` vs ``\\`` slash assumptions for the rare case someone runs
+    on Windows). Heuristic, not authoritative — wrong answers degrade to the
+    legacy ``uv-tool`` branch via the default mapping in the caller."""
+    if runtime_matches_workspace:
+        return "venv-relative"
+
+    parts = Path(sys.prefix).parts
+    for i in range(len(parts) - 1):
+        if parts[i] == "uv":
+            nxt = parts[i + 1]
+            if nxt.startswith("archive-v") or nxt.startswith("builds-v"):
+                return "uvx"
+            if nxt == "tools":
+                return "uv-tool"
+
+    exe_str = str(interpreter)
+    for sys_loc in ("/usr/bin/", "/usr/local/bin/", "/opt/homebrew/bin/", "/bin/"):
+        if exe_str.startswith(sys_loc):
+            return "system"
+
+    return "unknown"
+
+
+@dataclass(frozen=True)
+class RuntimeProfile:
+    """Single source of truth for every install-context judgment in the wizard.
+
+    Built once at :func:`init` entry (via :func:`_runtime_profile`) and
+    threaded through ``state["_profile"]`` so downstream call sites
+    (:func:`_collect_missing_extras`, :func:`_extra_install_hint`,
+    :func:`_emit_cwd_runtime_mismatch_banner`, ``Next steps`` ``run_prefix``)
+    read from one consistent struct instead of independently re-deriving the
+    cwd / runtime axes.
+
+    #363 Phase 3 introduces this to close the v0.1.18 axis-mismatch class
+    of bugs at the source: when there's exactly one place to add a new
+    install-context judgment, the next contributor can't accidentally
+    re-create the inconsistency in a different code path.
+
+    Fields:
+
+    - ``cwd_install_type`` — what the cwd filesystem says (source repo,
+      a project that depends on memtomem, or a PyPI / standalone install).
+    - ``cwd_install_dir`` — the workspace root for source/project installs;
+      ``None`` for ``pypi``.
+    - ``runtime_interpreter`` — ``sys.executable`` as a ``Path`` (raw, no
+      ``.resolve()`` — see ``feedback_venv_raw_path_check.md``).
+    - ``workspace_venv_path`` — ``<cwd_install_dir>/.venv`` if it exists,
+      ``None`` otherwise. Used to probe extras via the workspace's
+      interpreter rather than the wizard's own.
+    - ``mm_binary_origin`` — how the running ``mm`` was installed/invoked
+      (``uv-tool`` / ``uvx`` / ``venv-relative`` / ``system`` / ``unknown``).
+    - ``runtime_matches_workspace`` — does ``runtime_interpreter`` actually
+      live under ``workspace_venv_path``? If True the user is running
+      ``uv run mm`` from the workspace; if False the wizard's interpreter
+      and the workspace venv are different envs."""
+
+    cwd_install_type: CwdInstallType
+    cwd_install_dir: Path | None
+    runtime_interpreter: Path
+    workspace_venv_path: Path | None
+    mm_binary_origin: MmBinaryOrigin
+    runtime_matches_workspace: bool
+
+
+def _runtime_profile() -> RuntimeProfile:
+    """Build a :class:`RuntimeProfile` from the current cwd + interpreter.
+
+    Pure / inputs are ``Path.cwd()`` + ``sys.executable`` + ``sys.prefix``.
+    Call once at :func:`init` entry; downstream code reads the cached
+    profile from ``state["_profile"]`` via :func:`_get_or_build_profile`."""
+    src_dir = _detect_source_install()
+    proj_dir = _detect_project_install() if src_dir is None else None
+
+    cwd_install_type: CwdInstallType
+    cwd_install_dir: Path | None
+    if src_dir is not None:
+        cwd_install_type = "source"
+        cwd_install_dir = src_dir
+    elif proj_dir is not None:
+        cwd_install_type = "project"
+        cwd_install_dir = proj_dir
+    else:
+        cwd_install_type = "pypi"
+        cwd_install_dir = None
+
+    runtime_interpreter = Path(sys.executable)
+    workspace_venv_path: Path | None
+    if cwd_install_dir is not None:
+        candidate = cwd_install_dir / ".venv"
+        workspace_venv_path = candidate if candidate.exists() else None
+    else:
+        workspace_venv_path = None
+
+    runtime_matches_workspace = False
+    if workspace_venv_path is not None:
+        try:
+            runtime_matches_workspace = runtime_interpreter.is_relative_to(workspace_venv_path)
+        except (OSError, ValueError):
+            runtime_matches_workspace = False
+
+    mm_binary_origin = _detect_mm_binary_origin(
+        runtime_interpreter, runtime_matches_workspace=runtime_matches_workspace
+    )
+
+    return RuntimeProfile(
+        cwd_install_type=cwd_install_type,
+        cwd_install_dir=cwd_install_dir,
+        runtime_interpreter=runtime_interpreter,
+        workspace_venv_path=workspace_venv_path,
+        mm_binary_origin=mm_binary_origin,
+        runtime_matches_workspace=runtime_matches_workspace,
+    )
+
+
+def _get_or_build_profile(state: dict) -> RuntimeProfile:
+    """Return ``state["_profile"]`` if present, else build a fresh profile
+    from the legacy ``state["source_install"]`` / ``project_install`` /
+    ``source_dir`` / ``project_dir`` keys.
+
+    Tests that bypass :func:`init` and construct ``state`` directly never
+    populate ``_profile``; this shim builds one on demand from the legacy
+    booleans they DO set so the migration to RuntimeProfile doesn't require
+    rewriting every existing test fixture. Result is cached back into
+    ``state`` so multi-call paths (banner + warning + summary) all see the
+    same struct."""
+    profile = state.get("_profile")
+    if isinstance(profile, RuntimeProfile):
+        return profile
+
+    cwd_install_type: CwdInstallType
+    cwd_install_dir: Path | None
+    if state.get("source_install"):
+        cwd_install_type = "source"
+        cwd_install_dir = Path(state["source_dir"]) if state.get("source_dir") else None
+    elif state.get("project_install"):
+        cwd_install_type = "project"
+        cwd_install_dir = Path(state["project_dir"]) if state.get("project_dir") else None
+    else:
+        cwd_install_type = "pypi"
+        cwd_install_dir = None
+
+    runtime_interpreter = Path(sys.executable)
+    workspace_venv_path: Path | None = None
+    if cwd_install_dir is not None:
+        candidate = cwd_install_dir / ".venv"
+        workspace_venv_path = candidate if candidate.exists() else None
+
+    runtime_matches_workspace = False
+    if workspace_venv_path is not None:
+        try:
+            runtime_matches_workspace = runtime_interpreter.is_relative_to(workspace_venv_path)
+        except (OSError, ValueError):
+            runtime_matches_workspace = False
+
+    mm_binary_origin = _detect_mm_binary_origin(
+        runtime_interpreter, runtime_matches_workspace=runtime_matches_workspace
+    )
+
+    profile = RuntimeProfile(
+        cwd_install_type=cwd_install_type,
+        cwd_install_dir=cwd_install_dir,
+        runtime_interpreter=runtime_interpreter,
+        workspace_venv_path=workspace_venv_path,
+        mm_binary_origin=mm_binary_origin,
+        runtime_matches_workspace=runtime_matches_workspace,
+    )
+    state["_profile"] = profile
+    return profile
+
+
+def _have_module(name: str) -> bool:
+    """Return True iff ``name`` is importable in the current interpreter.
+
+    Centralizes the in-process module-presence check shared by the wizard
+    (extras probe) and ``mm web`` (web-deps gate). Both used to roll their
+    own — the wizard called ``importlib.util.find_spec`` and ``mm web``
+    used ``__import__``. ``find_spec`` is the right semantic for the
+    "is the package installed" question (cheaper, no side-effects from
+    module init code) and is now the single answer site."""
+    from importlib.util import find_spec
+
+    try:
+        return find_spec(name) is not None
+    except (ImportError, ValueError):
+        # ImportError: parent package failed to import.
+        # ValueError: name is malformed (shouldn't happen but be defensive).
+        return False
 
 
 # ── Step functions ────────────────────────────────────────────────────
@@ -914,22 +1122,24 @@ _PROBE_EXTRAS_CODE: str = (
 
 
 def _workspace_python(state: dict) -> Path | None:
-    """Return ``<source_dir|project_dir>/.venv/bin/python`` if the workspace
-    venv exists, else ``None``.
+    """Return ``<workspace_venv_path>/bin/python`` if it exists, else ``None``.
 
     This is the reconcile hook between the cwd-filesystem axis
-    (:func:`_is_source_install`) and the runtime-interpreter axis
-    (``sys.executable``) — the Phase 1 fix for issue #360. When the user
-    runs ``mm init`` from a source/project checkout via a global ``mm``
-    binary (``uv tool install``), the wizard's own interpreter is the tool
-    env (which may lack ``[all]``), but ``Next steps`` prints ``uv run mm``
-    which will use the workspace venv. Probing the workspace venv here
-    avoids warning the user to reinstall the tool env when the workspace
-    already has the extras."""
-    root = state.get("source_dir") or state.get("project_dir")
-    if not root:
+    (:attr:`RuntimeProfile.cwd_install_type`) and the runtime-interpreter axis
+    (:attr:`RuntimeProfile.runtime_interpreter`) — the Phase 1 fix for issue
+    #360. When the user runs ``mm init`` from a source/project checkout via
+    a global ``mm`` binary (``uv tool install``), the wizard's own interpreter
+    is the tool env (which may lack ``[all]``), but ``Next steps`` prints
+    ``uv run mm`` which will use the workspace venv. Probing the workspace
+    venv here avoids warning the user to reinstall the tool env when the
+    workspace already has the extras.
+
+    Phase 3 (#363): reads ``workspace_venv_path`` from :class:`RuntimeProfile`
+    so the source/project axis lives in one struct."""
+    profile = _get_or_build_profile(state)
+    if profile.workspace_venv_path is None:
         return None
-    py = Path(root) / ".venv" / "bin" / "python"
+    py = profile.workspace_venv_path / "bin" / "python"
     return py if py.exists() else None
 
 
@@ -954,14 +1164,19 @@ def _probe_workspace_extras(py: Path) -> set[str] | None:
 
 
 def _inproc_have_extras() -> tuple[bool, bool]:
-    """Return ``(have_fastembed, have_web)`` via in-process ``find_spec`` /
+    """Return ``(have_fastembed, have_web)`` via :func:`_have_module` /
     :func:`memtomem.cli.web._missing_web_deps`. Used when not a
-    source/project install, or when the workspace-python probe fails."""
-    from importlib.util import find_spec
+    source/project install, or when the workspace-python probe fails.
 
+    Phase 3 (#363): both call sites now use ``find_spec`` semantics under
+    the hood — ``_have_module`` directly, and ``_missing_web_deps`` after
+    its own migration in this PR. Routing the web check through
+    ``_missing_web_deps`` keeps it as the single seam ``mm web`` and the
+    wizard agree on for the web-extra question (and preserves the existing
+    monkeypatch surface tests rely on)."""
     from memtomem.cli.web import _missing_web_deps
 
-    return (find_spec("fastembed") is not None, _missing_web_deps() is None)
+    return (_have_module("fastembed"), _missing_web_deps() is None)
 
 
 def _workspace_needs_sync(state: dict) -> bool:
@@ -969,8 +1184,8 @@ def _workspace_needs_sync(state: dict) -> bool:
     absent — a fresh clone / fresh worktree. The summary shows a single
     ``run uv sync first`` line in this case instead of a noisy missing-
     extras warning that would have probed the wrong interpreter."""
-    source = state.get("source_install") or state.get("project_install")
-    if not source:
+    profile = _get_or_build_profile(state)
+    if profile.cwd_install_type == "pypi":
         return False
     return _workspace_python(state) is None
 
@@ -989,9 +1204,13 @@ def _extra_install_hint(extras: list[str], state: dict | None = None) -> str:
     Multi-extra case collapses to ``[all]`` instead of bracketed multiples
     (``memtomem[onnx,web]``) because ``[all]`` is the public, documented
     extra in ``pyproject.toml``; the user doesn't need to know the
-    sub-bundle."""
+    sub-bundle.
+
+    Phase 3 (#363): reads ``cwd_install_type`` from :class:`RuntimeProfile`
+    so the workspace-vs-tool branch lives in one place."""
     state = state or {}
-    is_workspace = state.get("source_install") or state.get("project_install")
+    profile = _get_or_build_profile(state)
+    is_workspace = profile.cwd_install_type in ("source", "project")
     name = extras[0] if len(extras) == 1 else "all"
     if is_workspace:
         return f"{_UV_SYNC_HINT_PREFIX}{name}"
@@ -1103,8 +1322,11 @@ def _collect_missing_extras(state: dict) -> list[str]:
     Order: ``onnx`` before ``web`` so the extras appear in the same order
     the dependent commands fail (``mm index`` → ``mm web``). Entries in
     ``state['_extras_warned_inline']`` are filtered out so the interactive
-    ``_step_embedding`` path doesn't double-print."""
-    source = state.get("source_install") or state.get("project_install")
+    ``_step_embedding`` path doesn't double-print.
+
+    Phase 3 (#363): reads ``cwd_install_type`` from :class:`RuntimeProfile`."""
+    profile = _get_or_build_profile(state)
+    source = profile.cwd_install_type in ("source", "project")
     ws_py = _workspace_python(state) if source else None
 
     if source and ws_py is not None:
@@ -1132,29 +1354,6 @@ def _collect_missing_extras(state: dict) -> list[str]:
     return [x for x in missing if x not in warned]
 
 
-def _runtime_under_workspace_venv(state: dict) -> bool:
-    """True iff the current ``sys.executable`` is inside ``<workspace>/.venv/``.
-
-    Used by :func:`_emit_cwd_runtime_mismatch_banner` to decide whether the
-    user is running a global ``mm`` from inside a source/project checkout
-    (mismatch) vs. ``uv run mm`` from the workspace venv (aligned).
-
-    Compares raw path strings (no ``.resolve()``) on purpose: ``uv`` creates
-    ``.venv/bin/python3`` as a symlink to its managed interpreter cache
-    (``~/.local/share/uv/python/...``). Resolving the symlink would always
-    land outside the workspace and fire the banner even when the runtime
-    IS the workspace venv. The raw prefix comparison matches how Python
-    itself reports ``sys.executable`` (it reports the symlink path, not
-    the target)."""
-    root = state.get("source_dir") or state.get("project_dir")
-    if not root:
-        return False
-    try:
-        return Path(sys.executable).is_relative_to(Path(root) / ".venv")
-    except (OSError, ValueError):
-        return False
-
-
 def _emit_cwd_runtime_mismatch_banner(state: dict) -> None:
     """Info banner for ``source/project cwd + non-workspace runtime``.
 
@@ -1167,12 +1366,18 @@ def _emit_cwd_runtime_mismatch_banner(state: dict) -> None:
     Trigger is orthogonal to extras presence — the mismatch is a property
     of the axes themselves, not of what's installed. Prints nothing when
     the runtime interpreter is inside the workspace venv, or when the
-    install type is PyPI / tool (no cwd axis to disagree with)."""
-    if not (state.get("source_install") or state.get("project_install")):
+    install type is PyPI / tool (no cwd axis to disagree with).
+
+    Phase 3 (#363): reads ``cwd_install_type`` and ``runtime_matches_workspace``
+    from :class:`RuntimeProfile`. The legacy ``_runtime_under_workspace_venv``
+    helper has been folded into ``RuntimeProfile`` (raw-path comparison
+    semantics preserved — see ``feedback_venv_raw_path_check.md``)."""
+    profile = _get_or_build_profile(state)
+    if profile.cwd_install_type == "pypi":
         return
-    if _runtime_under_workspace_venv(state):
+    if profile.runtime_matches_workspace:
         return
-    cwd_type = "source" if state.get("source_install") else "project"
+    cwd_type = profile.cwd_install_type
     click.echo()
     click.secho(
         f"  i  cwd: {cwd_type} / runtime: uv tool — Next steps assume `uv run mm`.",
@@ -1228,10 +1433,20 @@ def _write_config_and_summary(
     config_dir = base_dir / ".memtomem"
     config_dir.mkdir(parents=True, exist_ok=True)
 
-    source_install = state.get("source_install", False)
-    source_dir = state.get("source_dir")
-    project_install = state.get("project_install", False)
-    project_dir = state.get("project_dir")
+    # All install-context branching reads from the single profile struct
+    # built once at init() entry (or lazily reconstructed from legacy state
+    # booleans in tests via _get_or_build_profile). Phase 3 (#363) collapses
+    # the prior 4 source_install/project_install/source_dir/project_dir reads
+    # so a future install-context judgment has exactly one place to land.
+    profile = _get_or_build_profile(state)
+    source_install = profile.cwd_install_type == "source"
+    project_install = profile.cwd_install_type == "project"
+    source_dir = (
+        str(profile.cwd_install_dir) if source_install and profile.cwd_install_dir else None
+    )
+    project_dir = (
+        str(profile.cwd_install_dir) if project_install and profile.cwd_install_dir else None
+    )
 
     # Write ~/.memtomem/config.json (read-merge-write to preserve non-init fields)
     click.secho("Writing configuration...", fg="green")
@@ -1454,8 +1669,21 @@ def _write_config_and_summary(
     click.echo(f"  Namespace:  {ns_label} (default: {state['default_ns']})")
     click.echo(f"  Search:     top_k={state['top_k']}, tokenizer={state['tokenizer']}")
     click.echo(f"  Decay:      {'on' if state['decay_enabled'] else 'off'}")
-    install_type = "source" if source_install else "project" if project_install else "PyPI"
-    click.echo(f"  Install:    {install_type}")
+    # Install-line label is derived from the profile so the uvx case is
+    # visible in the summary instead of being lumped into the generic
+    # "PyPI" bucket — a v0.1.18 surprise the user hit when running
+    # `uvx memtomem init` and seeing no hint that the env was ephemeral.
+    if profile.cwd_install_type == "source":
+        install_label = "source"
+    elif profile.cwd_install_type == "project":
+        install_label = "project"
+    elif profile.mm_binary_origin == "uvx":
+        install_label = "uvx (ephemeral)"
+    elif profile.mm_binary_origin == "uv-tool":
+        install_label = "uv tool"
+    else:
+        install_label = "PyPI"
+    click.echo(f"  Install:    {install_label}")
     click.echo()
     click.echo(f"  Config:     {config_path}")
     click.echo()
@@ -1480,9 +1708,19 @@ def _write_config_and_summary(
     # stays quiet about the tool-env extras and which invocation shape the
     # printed Next steps assume.
     _emit_cwd_runtime_mismatch_banner(state)
-    install_type_lit: InstallType = (
-        "source" if source_install else "project" if project_install else "tool"
-    )
+    # ``install_type_lit`` routes the missing-extras flow through
+    # :func:`_install_extras`. Phase 3 (#363) makes uvx first-class — when
+    # the user is running via ``uvx memtomem init``, the helper's existing
+    # uvx hint-only branch fires (was dead code in v0.1.20: this site
+    # never set the literal to ``"uvx"``).
+    if profile.cwd_install_type == "source":
+        install_type_lit: InstallType = "source"
+    elif profile.cwd_install_type == "project":
+        install_type_lit = "project"
+    elif profile.mm_binary_origin == "uvx":
+        install_type_lit = "uvx"
+    else:
+        install_type_lit = "tool"
     if _workspace_needs_sync(state):
         click.echo()
         click.secho(
@@ -1511,10 +1749,24 @@ def _write_config_and_summary(
 
     click.echo()
     click.secho("  Next steps:", fg="cyan")
-    run_prefix = "uv run " if source_install or project_install else ""
+    run_prefix = "uv run " if profile.cwd_install_type in ("source", "project") else ""
     click.echo(f"    1. {run_prefix}mm index {state['memory_dir']}")
     click.echo(f"    2. {run_prefix}mm search 'your first query'")
     click.echo(f"    3. {run_prefix}mm web  (browse & manage your memories)")
+    if profile.mm_binary_origin == "uvx":
+        # uvx envs are destroyed when the process exits — the next `mm web`
+        # invocation starts in a fresh ephemeral env that won't have any
+        # extras installed. Surface the permanent-install path so users
+        # don't think `uvx memtomem init` left a usable setup behind.
+        click.echo()
+        click.secho(
+            "  uvx is ephemeral — the env above is destroyed when this command exits.",
+            fg="yellow",
+        )
+        click.secho(
+            '  For repeat use, install permanently: uv tool install "memtomem[all]"',
+            fg="yellow",
+        )
     click.echo()
 
 
@@ -1866,22 +2118,33 @@ def init(
     click.secho("  ─────────────", fg="cyan")
     click.echo()
 
-    source_install = _is_source_install()
-    project_install = not source_install and _is_project_install()
+    # Build the install-context profile once at entry — every downstream
+    # decision (run_prefix, missing-extras hint, summary mismatch banner)
+    # reads from this single struct via _get_or_build_profile. Legacy
+    # state.source_install/project_install/source_dir/project_dir are also
+    # populated for backward compatibility with code paths that haven't
+    # been migrated yet (provider rules banner, MCP server command).
+    profile = _runtime_profile()
+    source_install = profile.cwd_install_type == "source"
+    project_install = profile.cwd_install_type == "project"
     state: dict = {
+        "_profile": profile,
         "source_install": source_install,
-        "source_dir": _detect_source_dir() if source_install else None,
+        "source_dir": str(profile.cwd_install_dir) if source_install else None,
         "project_install": project_install,
-        "project_dir": _detect_project_dir() if project_install else None,
+        "project_dir": str(profile.cwd_install_dir) if project_install else None,
     }
 
-    if state["source_install"]:
+    if source_install:
         click.secho("  Detected: source install", fg="blue")
         click.echo(f"  Source directory: {state['source_dir']}")
         click.echo()
-    elif state["project_install"]:
+    elif project_install:
         click.secho("  Detected: project install", fg="blue")
         click.echo(f"  Project directory: {state['project_dir']}")
+        click.echo()
+    elif profile.mm_binary_origin == "uvx":
+        click.secho("  Detected: uvx (ephemeral) install", fg="blue")
         click.echo()
 
     if preset and advanced:
