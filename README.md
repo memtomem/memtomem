@@ -42,11 +42,13 @@ flowchart LR
 ### 1. Install
 
 ```bash
-uv tool install memtomem             # or: pipx install memtomem
+uv tool install 'memtomem[all]'       # or: pipx install 'memtomem[all]'
 mm --version                          # verify install
 ```
 
-> If `mm --version` shows an older version than the [latest release](https://github.com/memtomem/memtomem/releases), `uv` is likely serving cached PyPI metadata — re-run with `uv tool install memtomem --refresh`, or clear the cache first: `uv cache clean memtomem`.
+`[all]` bundles the features the sections below describe — ONNX dense embeddings, Korean tokenizer, Ollama / OpenAI providers, code chunker, and the Web UI. For a BM25-only install without those downloads (~40 MB vs ~250 MB), see the [Minimal install](#minimal-install) option below.
+
+> If `mm --version` shows an older version than the [latest release](https://github.com/memtomem/memtomem/releases), `uv` is likely serving cached PyPI metadata — re-run with `uv tool install 'memtomem[all]' --refresh`, or clear the cache first: `uv cache clean memtomem`.
 
 > **`mm: command not found`?** `uv tool install` drops the shim into `~/.local/bin`, which isn't on `$PATH` in fresh shells on macOS/Linux. Run `uv tool update-shell`, then open a new shell and re-run `mm --version`.
 
@@ -91,9 +93,16 @@ like Namespaces, Sessions, Working Memory, and Health Report.
 <details>
 <summary><b>Other install options</b></summary>
 
+<a id="minimal-install"></a>
+**Minimal** (BM25-only, ~40 MB):
+```bash
+uv tool install memtomem             # no extras — dense search, web UI, Korean tokenizer unavailable until you add them
+```
+Opt in later per-feature: `uv tool install --reinstall 'memtomem[onnx,web]'` (see the extras table in [Getting Started](docs/guides/getting-started.md#option-c-from-source-for-development-or-testing)).
+
 **Project-scoped** (per-project isolation):
 ```bash
-uv add memtomem && uv run mm init    # all commands need `uv run` prefix
+uv add 'memtomem[all]' && uv run mm init    # all commands need `uv run` prefix
 ```
 
 **No install** (uvx on demand):

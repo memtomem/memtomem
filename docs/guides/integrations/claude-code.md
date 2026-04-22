@@ -132,7 +132,7 @@ mem_index(path="~/notes", recursive=True)
 
 > **Plugin users**: Hooks are included in the plugin. You only need to install the CLI for them to activate:
 > ```bash
-> uv tool install memtomem   # or: pipx install memtomem
+> uv tool install 'memtomem[all]'   # or: pipx install 'memtomem[all]'
 > ```
 > Skip to [Tool Usage Guidelines](#tool-usage-guidelines-add-to-claudemd) if you're using the plugin.
 

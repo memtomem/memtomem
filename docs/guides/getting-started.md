@@ -52,11 +52,19 @@ No install needed for MCP usage — `uvx` downloads and runs memtomem on demand 
 
 If you also want the CLI (`mm` command):
 ```bash
-uv tool install memtomem    # or: pipx install memtomem
-mm --version                # verify install
+uv tool install 'memtomem[all]'    # or: pipx install 'memtomem[all]'
+mm --version                        # verify install
 ```
 
-> **If `mm --version` shows an older release**: `uv` caches PyPI metadata per package, and a fresh install can resolve to the cached entry for a short window after a new release. Re-run with `uv tool install memtomem --refresh`, or clear the cache first: `uv cache clean memtomem`. Check the [latest release](https://github.com/memtomem/memtomem/releases) for the expected version.
+**`[all]` vs minimal**: `[all]` bundles ONNX dense embeddings, Korean tokenizer, Ollama / OpenAI SDKs, code chunker, and the Web UI (~250 MB total). For a BM25-only install without downloads (~40 MB), skip the extras:
+
+```bash
+uv tool install memtomem            # BM25 only — dense search, Web UI, Korean tokenizer unavailable
+```
+
+You can opt in to individual features later with `uv tool install --reinstall 'memtomem[onnx,web]'` or any combination from the extras table in [Option C](#option-c-from-source-for-development-or-testing).
+
+> **If `mm --version` shows an older release**: `uv` caches PyPI metadata per package, and a fresh install can resolve to the cached entry for a short window after a new release. Re-run with `uv tool install 'memtomem[all]' --refresh`, or clear the cache first: `uv cache clean memtomem`. Check the [latest release](https://github.com/memtomem/memtomem/releases) for the expected version.
 
 > **If you see `mm: command not found`**: `uv tool install` writes the `mm` shim to `~/.local/bin` (macOS/Linux default), but that directory isn't on `$PATH` in a fresh shell profile. Run `uv tool update-shell` once, then open a new shell and re-run `mm --version`. (`uv` prints a one-line hint on first-ever tool install, but it's easy to miss.)
 
@@ -67,7 +75,7 @@ Skip to [Connect to your AI editor](#connect-to-your-ai-editor).
 Add memtomem as a project dependency — version pinned in `pyproject.toml`:
 
 ```bash
-uv add memtomem                 # or: uv add memtomem[all]
+uv add 'memtomem[all]'          # or: uv add memtomem (BM25-only, skip extras)
 ```
 
 All CLI commands need the `uv run` prefix:
@@ -367,7 +375,7 @@ mm index ~/notes                            # re-index
 
 The CLI isn't installed. Install it:
 ```bash
-uv tool install memtomem     # PyPI
+uv tool install 'memtomem[all]'     # PyPI
 # or
 uv pip install -e "packages/memtomem[all]"  # Source
 ```

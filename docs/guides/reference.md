@@ -939,7 +939,7 @@ mm web                                 # launch Web UI (prod surface)
 mm web --dev                           # Web UI with opt-in maintainer pages
 ```
 
-Install the CLI: `uv tool install memtomem` (PyPI) or `uv run mm ...` (source).
+Install the CLI: `uv tool install 'memtomem[all]'` (PyPI) or `uv run mm ...` (source).
 All commands support `-h` and `--help`.
 
 ---

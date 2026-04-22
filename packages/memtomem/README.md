@@ -14,15 +14,17 @@ Markdown-first long-term memory infrastructure for AI agents. Hybrid keyword + s
 ## Quick Start
 
 ```bash
-# 1. Install memtomem (requires Python 3.12+)
-uv tool install memtomem        # or: pipx install memtomem
-mm --version                    # verify — if stale, re-run with --refresh
+# 1. Install memtomem with all features (requires Python 3.12+)
+uv tool install 'memtomem[all]'  # or: pipx install 'memtomem[all]'
+mm --version                     # verify — if stale, re-run with --refresh
 
 # 2. Run the setup (preset picker → memory_dir + MCP)
 mm init    # on PATH after `uv tool install` — no `uv run` needed
 ```
 
-> `uv` caches PyPI metadata. If `mm --version` doesn't match the [latest release](https://github.com/memtomem/memtomem/releases) right after install, re-run with `uv tool install memtomem --refresh` or clear the cache: `uv cache clean memtomem`.
+`[all]` pulls in ONNX dense embeddings, Korean tokenizer, Ollama / OpenAI SDKs, code chunker, and the Web UI. Skip it (`uv tool install memtomem` bare) for a BM25-only install (~40 MB); opt in later with `uv tool install --reinstall 'memtomem[onnx,web]'` or similar.
+
+> `uv` caches PyPI metadata. If `mm --version` doesn't match the [latest release](https://github.com/memtomem/memtomem/releases) right after install, re-run with `uv tool install 'memtomem[all]' --refresh` or clear the cache: `uv cache clean memtomem`.
 
 > **`mm: command not found`?** `uv` installs the shim to `~/.local/bin` — add it to `$PATH` with `uv tool update-shell`, then open a new shell.
 
