@@ -5,6 +5,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.21] — 2026-04-22
+
+Phase 3 of the `mm init` install-context series (#360 → v0.1.20 → this
+release). The v0.1.18 axis-mismatch bug exposed two independent axes
+(cwd filesystem vs runtime interpreter) being re-derived at five
+different call sites with no shared contract; this release collapses
+them into a single `RuntimeProfile` struct so the next install-context
+judgment has exactly one place to land. Also adds first-class `uvx`
+detection — pre-Phase-3 the wizard bucketed ephemeral-env invocations
+into the generic "PyPI" label and the ephemeral-install hint branch
+was dead code.
+
 ### Changed
 
 - **`mm init` now classifies `uvx memtomem init` as ephemeral** — when the
@@ -33,6 +45,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   across `mm init` and `mm web` (was split between `find_spec` and
   `__import__`). 20 new tests cover RuntimeProfile fields, the 5-way
   `mm_binary_origin` heuristic, and the project-install path E2E. (#363)
+- **Legacy `state["source_install"] / source_dir / project_install /
+  project_dir` keys dropped from `mm init`** — after the Phase 3
+  `RuntimeProfile` refactor landed, the parallel legacy state keys were
+  intentionally left in place so #367 could ship as a structural-only
+  change. This release removes them: `init()` entry now writes only
+  `state["_profile"]`, and every downstream reader (the MCP server
+  command builder, the missing-extras workspace dir, the "Detected:
+  install" echo paths) reads from `profile.cwd_install_type` /
+  `profile.cwd_install_dir` directly. Test fixtures migrate to a new
+  `_make_test_profile(tmp_path, kind=...)` helper that builds a
+  `RuntimeProfile` without invoking the live `_runtime_profile()`. (#368,
+  #369)
+- **`_get_or_build_profile` back-compat shim removed** — the shim existed
+  to let test fixtures build state directly without populating
+  `_profile`. With the legacy state keys gone (#369) the reconstruction
+  path was dead for production; this release deletes the function
+  entirely (~65 lines) and inlines `state["_profile"]` at the 6 call
+  sites. `_extra_install_hint` and `_collect_missing_extras` now tolerate
+  missing `_profile` via `state.get("_profile")` + `None`-check, treating
+  it as PyPI install — preserves the documented "no state / PyPI default"
+  contract that `_extra_install_hint(extras, state=None)` already
+  advertised. (#370)
 
 ## [0.1.20] — 2026-04-22
 
