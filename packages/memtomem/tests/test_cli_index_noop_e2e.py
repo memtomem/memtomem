@@ -37,10 +37,26 @@ def _make_memory_dir(home: str) -> str:
 
 class TestFreshNoopIndexInline:
     def test_init_index_search_via_cli_runner(self, tmp_path, monkeypatch):
-        """``CliRunner`` round-trip: init → index → search must all succeed."""
+        """``CliRunner`` round-trip: init → index → search must all succeed.
+
+        Two-layer isolation needed in-process:
+
+        1. ``HOME`` env override — caught by ``Path.home()`` calls that run
+           inside command functions (e.g. ``init_cmd.py`` config writer).
+        2. Patch ``_bootstrap._CONFIG_PATH`` — that module-level constant is
+           bound at import time, so ``monkeypatch.setenv`` alone leaves the
+           ``cli_components`` existence check pointing at the real home.
+           Previously masked locally by a pre-existing real ``~/.memtomem/
+           config.json`` but exposed in CI (no leaked state).
+        """
+        from memtomem.cli import _bootstrap
+
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(
+            _bootstrap, "_CONFIG_PATH", home / ".memtomem" / "config.json"
+        )
 
         mem_dir = _make_memory_dir(str(home))
 
