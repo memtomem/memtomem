@@ -48,6 +48,8 @@ mm --version                          # verify install
 
 > If `mm --version` shows an older version than the [latest release](https://github.com/memtomem/memtomem/releases), `uv` is likely serving cached PyPI metadata — re-run with `uv tool install memtomem --refresh`, or clear the cache first: `uv cache clean memtomem`.
 
+> **`mm: command not found`?** `uv tool install` drops the shim into `~/.local/bin`, which isn't on `$PATH` in fresh shells on macOS/Linux. Run `uv tool update-shell`, then open a new shell and re-run `mm --version`.
+
 ### 2. Setup
 
 ```bash

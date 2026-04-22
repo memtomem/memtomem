@@ -58,6 +58,8 @@ mm --version                # verify install
 
 > **If `mm --version` shows an older release**: `uv` caches PyPI metadata per package, and a fresh install can resolve to the cached entry for a short window after a new release. Re-run with `uv tool install memtomem --refresh`, or clear the cache first: `uv cache clean memtomem`. Check the [latest release](https://github.com/memtomem/memtomem/releases) for the expected version.
 
+> **If you see `mm: command not found`**: `uv tool install` writes the `mm` shim to `~/.local/bin` (macOS/Linux default), but that directory isn't on `$PATH` in a fresh shell profile. Run `uv tool update-shell` once, then open a new shell and re-run `mm --version`. (`uv` prints a one-line hint on first-ever tool install, but it's easy to miss.)
+
 Skip to [Connect to your AI editor](#connect-to-your-ai-editor).
 
 ### Option B: Project dependency (per-project isolation)
