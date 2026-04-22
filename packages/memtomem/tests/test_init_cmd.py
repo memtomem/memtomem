@@ -296,7 +296,8 @@ class TestMissingExtrasWarning:
         assert init_cmd._collect_missing_extras(state) == ["onnx", "web"]
 
     def test_extra_install_hint_single_uses_narrow_extra(self) -> None:
-        """One missing extra → narrow hint (``[onnx]`` / ``[web]``)."""
+        """One missing extra → narrow hint. Default (no state / PyPI install)
+        keeps the tool-install reinstall path."""
         from memtomem.cli.init_cmd import _extra_install_hint
 
         assert _extra_install_hint(["onnx"]) == 'uv tool install --reinstall "memtomem[onnx]"'
@@ -311,13 +312,33 @@ class TestMissingExtrasWarning:
             'uv tool install --reinstall "memtomem[all]"'
         )
 
+    def test_extra_install_hint_source_install_uses_uv_sync(self) -> None:
+        """Source-install state → ``uv sync --extra <name>`` (single) and
+        ``--extra all`` (multiple). Issue #360 Phase 1: workspace ``.venv``
+        is what ``uv run mm`` uses, so ``uv sync`` is the right install."""
+        from memtomem.cli.init_cmd import _extra_install_hint
+
+        state = {"source_install": True}
+        assert _extra_install_hint(["onnx"], state) == "uv sync --extra onnx"
+        assert _extra_install_hint(["web"], state) == "uv sync --extra web"
+        assert _extra_install_hint(["onnx", "web"], state) == "uv sync --extra all"
+
+    def test_extra_install_hint_project_install_uses_uv_sync(self) -> None:
+        """Project-install (``uv add memtomem`` in a non-source project)
+        also resolves to the workspace ``uv sync`` hint."""
+        from memtomem.cli.init_cmd import _extra_install_hint
+
+        state = {"project_install": True}
+        assert _extra_install_hint(["onnx"], state) == "uv sync --extra onnx"
+        assert _extra_install_hint(["onnx", "web"], state) == "uv sync --extra all"
+
     def test_emit_missing_extras_warning_silent_when_empty(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """Empty list → no output (common path must not add noise)."""
         from memtomem.cli.init_cmd import _emit_missing_extras_warning
 
-        _emit_missing_extras_warning([])
+        _emit_missing_extras_warning([], {})
         assert capsys.readouterr().out == ""
 
     def test_emit_missing_extras_warning_names_extras_and_hint(
@@ -330,7 +351,7 @@ class TestMissingExtrasWarning:
 
         from memtomem.cli.init_cmd import _emit_missing_extras_warning
 
-        _emit_missing_extras_warning(["onnx", "web"])
+        _emit_missing_extras_warning(["onnx", "web"], {})
         out = unstyle(capsys.readouterr().out)
         assert "Missing extras: onnx, web" in out
         assert "mm index" in out
@@ -345,7 +366,8 @@ class TestMissingExtrasWarning:
     ) -> None:
         """End-to-end: Korean-preset-style state (provider=onnx) + fastembed
         absent must produce a warning in the printed summary. Regression for
-        the preset paths skipping ``_step_embedding``'s inline check."""
+        the preset paths skipping ``_step_embedding``'s inline check.
+        Default state has ``source_install=False`` → PyPI hint preserved."""
         from click import unstyle
 
         from memtomem.cli.init_cmd import _write_config_and_summary
@@ -366,6 +388,261 @@ class TestMissingExtrasWarning:
         out = unstyle(capsys.readouterr().out)
         assert "Missing extras: onnx" in out
         assert "memtomem[onnx]" in out
+
+
+class TestInstallAxesReconcile:
+    """Issue #360 Phase 1 — ``mm init`` install-type detection vs runtime
+    interpreter axis reconcile.
+
+    The wizard's cwd-filesystem axis (``_is_source_install`` /
+    ``_is_project_install``) decided ``Next steps: uv run mm …``, but the
+    extras probe ran in the wizard's own Python via ``find_spec``. For
+    "source repo cwd + global ``mm`` (uv tool, no ``[all]``)" + "workspace
+    ``.venv`` HAS ``[all]``", v0.1.18 wrongly hinted at a tool-env reinstall
+    when the workspace was already set up. Phase 1 probes the workspace
+    ``.venv/bin/python`` and branches the install hint by install type."""
+
+    @staticmethod
+    def _make_state_source_with_venv(tmp_path: Path) -> dict:
+        """Build a source-install state whose ``.venv/bin/python`` exists.
+
+        ``_workspace_python`` only checks ``.exists()`` so a touched empty
+        file is enough; the actual subprocess call is monkeypatched."""
+        state = _make_init_state(tmp_path)
+        venv_bin = tmp_path / ".venv" / "bin"
+        venv_bin.mkdir(parents=True, exist_ok=True)
+        (venv_bin / "python").touch()
+        state["source_install"] = True
+        state["source_dir"] = str(tmp_path)
+        return state
+
+    def test_source_cwd_workspace_has_all_suppresses_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Acceptance #1: source cwd + global ``mm`` (no extras in tool env)
+        + workspace ``.venv/`` HAS extras → no missing-extras warning. The
+        in-process probe would say "missing" but the workspace probe is
+        authoritative for what ``uv run mm`` will use."""
+        from memtomem.cli import init_cmd
+
+        # In-process probe would report missing — must be ignored.
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "fastembed" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: "fastapi", raising=False)
+        # Workspace probe says everything is there.
+        monkeypatch.setattr(
+            init_cmd,
+            "_probe_workspace_extras",
+            lambda py: {"fastembed", "fastapi", "uvicorn"},
+        )
+
+        state = self._make_state_source_with_venv(tmp_path)
+        state["provider"] = "onnx"
+        assert init_cmd._collect_missing_extras(state) == []
+
+    def test_source_cwd_workspace_missing_all_suggests_uv_sync_all(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Acceptance #2: workspace ``.venv/`` exists but lacks both extras
+        → ``uv sync --extra all`` hint, not the tool-install reinstall."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd, "_probe_workspace_extras", lambda py: set())
+
+        state = self._make_state_source_with_venv(tmp_path)
+        state["provider"] = "onnx"
+        missing = init_cmd._collect_missing_extras(state)
+        assert missing == ["onnx", "web"]
+        assert init_cmd._extra_install_hint(missing, state) == "uv sync --extra all"
+
+    def test_source_cwd_workspace_missing_onnx_only_suggests_uv_sync_onnx(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Workspace has web deps but not fastembed → narrow ``uv sync
+        --extra onnx`` hint."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(
+            init_cmd,
+            "_probe_workspace_extras",
+            lambda py: {"fastapi", "uvicorn"},
+        )
+
+        state = self._make_state_source_with_venv(tmp_path)
+        state["provider"] = "onnx"
+        missing = init_cmd._collect_missing_extras(state)
+        assert missing == ["onnx"]
+        assert init_cmd._extra_install_hint(missing, state) == "uv sync --extra onnx"
+
+    def test_pypi_install_preserves_uv_tool_reinstall_hint(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Acceptance #3: outside any source/project repo (PyPI / ``uv tool``
+        install) + tool env lacks fastembed → existing tool-install
+        reinstall hint preserved. v0.1.18 regression guard."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "fastembed" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+
+        state = {
+            "provider": "onnx",
+            "rerank_enabled": False,
+            "source_install": False,
+            "project_install": False,
+        }
+        missing = init_cmd._collect_missing_extras(state)
+        assert missing == ["onnx"]
+        hint = init_cmd._extra_install_hint(missing, state)
+        assert hint.startswith(init_cmd._EXTRA_INSTALL_HINT_PREFIX)
+        assert hint == 'uv tool install --reinstall "memtomem[onnx]"'
+
+    def test_project_install_workspace_has_all_no_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Project install (``uv add memtomem``) + workspace .venv complete
+        → no warning, same path as source install."""
+        from memtomem.cli import init_cmd
+
+        venv_bin = tmp_path / ".venv" / "bin"
+        venv_bin.mkdir(parents=True, exist_ok=True)
+        (venv_bin / "python").touch()
+        monkeypatch.setattr(
+            init_cmd,
+            "_probe_workspace_extras",
+            lambda py: {"fastembed", "fastapi", "uvicorn"},
+        )
+
+        state = _make_init_state(tmp_path)
+        state["provider"] = "onnx"
+        state["project_install"] = True
+        state["project_dir"] = str(tmp_path)
+        assert init_cmd._collect_missing_extras(state) == []
+
+    def test_missing_venv_shows_sync_one_liner_not_warning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Source/project install detected but ``.venv/`` is absent (fresh
+        worktree) → summary shows a single ``run uv sync first`` line, NOT
+        the ``[!] Missing extras`` warning. No noisy probe of the wrong
+        interpreter."""
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        # No .venv created on tmp_path.
+        # In-process probe would say missing — irrelevant, must be skipped.
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "fastembed" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: "fastapi", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        state = _make_init_state(tmp_path)
+        state["provider"] = "onnx"
+        state["model"] = "bge-m3"
+        state["dimension"] = 1024
+        state["source_install"] = True
+        state["source_dir"] = str(tmp_path)
+
+        assert init_cmd._workspace_needs_sync(state) is True
+
+        init_cmd._write_config_and_summary(state, tmp_path)
+        out = unstyle(capsys.readouterr().out)
+        assert "Workspace .venv not found" in out
+        assert "uv sync --extra all" in out
+        assert "Missing extras:" not in out
+
+    def test_subprocess_timeout_falls_back_to_inproc(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the workspace-python subprocess fails (``None`` sentinel),
+        fall back to in-process probe so the wizard still surfaces missing
+        extras (better than going silent)."""
+        from memtomem.cli import init_cmd
+
+        # In-process probe says missing.
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "fastembed" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+        # Subprocess probe fails (timeout / FileNotFoundError simulation).
+        monkeypatch.setattr(init_cmd, "_probe_workspace_extras", lambda py: None)
+
+        state = self._make_state_source_with_venv(tmp_path)
+        state["provider"] = "onnx"
+        assert init_cmd._collect_missing_extras(state) == ["onnx"]
+
+    def test_inline_warned_onnx_dedup_from_summary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Acceptance #4: when ``_step_embedding`` already printed the
+        fastembed warning inline, ``_collect_missing_extras`` filters
+        ``onnx`` out of the summary so the user doesn't see the same hint
+        twice."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd, "_probe_workspace_extras", lambda py: set())
+
+        state = self._make_state_source_with_venv(tmp_path)
+        state["provider"] = "onnx"
+        state["_extras_warned_inline"] = {"onnx"}
+        # Probe says fastembed AND web missing; only web should remain.
+        assert init_cmd._collect_missing_extras(state) == ["web"]
+
+    def test_summary_source_install_workspace_has_all_silent(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """End-to-end acceptance #1: full ``_write_config_and_summary`` with
+        a source-install state where the workspace probe reports complete
+        extras → summary has no missing-extras warning, and ``Next steps``
+        prints ``uv run mm …`` (workspace is what will run)."""
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        venv_bin = tmp_path / ".venv" / "bin"
+        venv_bin.mkdir(parents=True, exist_ok=True)
+        (venv_bin / "python").touch()
+        # In-process probe would report missing; workspace probe is truth.
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "fastembed" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: "fastapi", raising=False)
+        monkeypatch.setattr(
+            init_cmd,
+            "_probe_workspace_extras",
+            lambda py: {"fastembed", "fastapi", "uvicorn"},
+        )
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        state = _make_init_state(tmp_path)
+        state["provider"] = "onnx"
+        state["model"] = "bge-m3"
+        state["dimension"] = 1024
+        state["source_install"] = True
+        state["source_dir"] = str(tmp_path)
+        init_cmd._write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "Missing extras:" not in out
+        assert "Workspace .venv not found" not in out
+        assert "Next steps:" in out
+        assert "uv run mm" in out
 
 
 class TestPreservedSummary:

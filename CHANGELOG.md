@@ -5,6 +5,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.19] — 2026-04-22
+
+First-UX follow-up to 0.1.18. The new missing-extras warning misfired on
+the "source repo cwd + global `mm`" combination, sending users into an
+unnecessary tool-env reinstall when their workspace `.venv` already had
+the extras `uv run mm` would use.
+
+### Fixed
+
+- **`mm init` reconciles install-type detection with runtime interpreter**
+  — when source-install or project-install is detected, the missing-extras
+  probe now spawns `<dir>/.venv/bin/python` (the interpreter `uv run mm`
+  will use) instead of running `find_spec` in the wizard's own process,
+  and the install hint branches by install type: workspace installs get
+  `uv sync --extra <name>` / `--extra all`, while PyPI / `uv tool install`
+  paths keep the existing `uv tool install --reinstall "memtomem[…]"`
+  hint. Fresh worktrees without a workspace `.venv` see a single
+  `Workspace .venv not found — run \`uv sync --extra all\` first.` line
+  instead of a noisy warning that probes the wrong interpreter. The
+  interactive `_step_embedding` advanced path also shares the install-type
+  hint and marks the warning as surfaced so the summary doesn't double-
+  print. Subprocess probe failures (timeout / missing binary / bad JSON)
+  fall back to the in-process probe so the wizard never silently swallows
+  a real gap. (#360 Phase 1)
+
 ## [0.1.18] — 2026-04-22
 
 First-UX patch on top of 0.1.17. New users following `mm init` →

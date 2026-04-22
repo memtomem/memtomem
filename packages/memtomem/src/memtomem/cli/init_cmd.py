@@ -124,9 +124,13 @@ def _step_embedding(state: dict) -> None:
             _onnx_available = True
         except ImportError:
             click.secho("  fastembed not installed.", fg="yellow")
-            click.echo("  Install with: pip install memtomem[onnx]")
+            # Use the install-type-aware hint so the inline message matches
+            # what the summary would otherwise print, then mark the warning
+            # as already surfaced so ``_collect_missing_extras`` skips it.
+            click.echo(f"  Install with: {_extra_install_hint(['onnx'], state)}")
             click.echo("  Saving ONNX config now so you're ready after install.")
             click.echo()
+            state.setdefault("_extras_warned_inline", set()).add("onnx")
 
         click.echo("  Available models:")
         click.echo("    [1] all-MiniLM-L6-v2 — English, fast, tiny (~22 MB, 384d)")
@@ -888,40 +892,139 @@ async def _check_embedding_mismatch(state: dict, *, interactive: bool) -> None:
         await storage.close()
 
 
-# Canonical hint for each extra. Mirrors the form in
-# ``memtomem.cli.web._web_install_hint`` so every user-facing missing-extras
-# message suggests the same install method (uv tool, which matches how the
-# global ``mm`` binary gets on PATH).
+# Canonical hint prefixes. Branching lives in ``_extra_install_hint``:
+# source/project installs use the workspace ``uv sync`` path so the extras
+# land in the same ``.venv`` that ``uv run mm`` will use; everything else
+# (``uv tool install`` / PyPI) stays on the tool-env reinstall path that the
+# global ``mm`` binary relies on.
 _EXTRA_INSTALL_HINT_PREFIX: str = 'uv tool install --reinstall "memtomem'
+_UV_SYNC_HINT_PREFIX: str = "uv sync --extra "
+
+# Probe snippet for extras presence in a foreign Python. ``find_spec`` is
+# cheaper than ``__import__`` and matches ``_collect_missing_extras``'s
+# historical semantic.
+_PROBE_EXTRAS_CODE: str = (
+    "import json, importlib.util as u; "
+    "print(json.dumps([n for n in ['fastembed','fastapi','uvicorn'] "
+    "if u.find_spec(n) is not None]))"
+)
 
 
-def _extra_install_hint(extras: list[str]) -> str:
-    """Return the uv-tool install command for one extra (``memtomem[onnx]``)
-    or the combined ``[all]`` extra when two or more are missing.
+def _workspace_python(state: dict) -> Path | None:
+    """Return ``<source_dir|project_dir>/.venv/bin/python`` if the workspace
+    venv exists, else ``None``.
+
+    This is the reconcile hook between the cwd-filesystem axis
+    (:func:`_is_source_install`) and the runtime-interpreter axis
+    (``sys.executable``) — the Phase 1 fix for issue #360. When the user
+    runs ``mm init`` from a source/project checkout via a global ``mm``
+    binary (``uv tool install``), the wizard's own interpreter is the tool
+    env (which may lack ``[all]``), but ``Next steps`` prints ``uv run mm``
+    which will use the workspace venv. Probing the workspace venv here
+    avoids warning the user to reinstall the tool env when the workspace
+    already has the extras."""
+    root = state.get("source_dir") or state.get("project_dir")
+    if not root:
+        return None
+    py = Path(root) / ".venv" / "bin" / "python"
+    return py if py.exists() else None
+
+
+def _probe_workspace_extras(py: Path) -> set[str] | None:
+    """Ask a foreign Python which of ``fastembed`` / ``fastapi`` / ``uvicorn``
+    are importable. Returns the importable subset, or ``None`` on subprocess
+    failure (missing binary, timeout, non-zero rc, bad JSON). Callers treat
+    ``None`` as "unknown — fall back to the in-process probe"."""
+    try:
+        result = _run([str(py), "-c", _PROBE_EXTRAS_CODE], timeout=5)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        parsed = json.loads(result.stdout.strip())
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(parsed, list):
+        return None
+    return set(parsed)
+
+
+def _inproc_have_extras() -> tuple[bool, bool]:
+    """Return ``(have_fastembed, have_web)`` via in-process ``find_spec`` /
+    :func:`memtomem.cli.web._missing_web_deps`. Used when not a
+    source/project install, or when the workspace-python probe fails."""
+    from importlib.util import find_spec
+
+    from memtomem.cli.web import _missing_web_deps
+
+    return (find_spec("fastembed") is not None, _missing_web_deps() is None)
+
+
+def _workspace_needs_sync(state: dict) -> bool:
+    """True iff source/project install detected but ``<dir>/.venv/`` is
+    absent — a fresh clone / fresh worktree. The summary shows a single
+    ``run uv sync first`` line in this case instead of a noisy missing-
+    extras warning that would have probed the wrong interpreter."""
+    source = state.get("source_install") or state.get("project_install")
+    if not source:
+        return False
+    return _workspace_python(state) is None
+
+
+def _extra_install_hint(extras: list[str], state: dict | None = None) -> str:
+    """Return the install command for one or more missing extras, branched
+    by install type.
+
+    - source / project install → ``uv sync --extra <name>`` (single) or
+      ``uv sync --extra all`` (two+). The workspace ``.venv`` is what
+      ``uv run mm`` will use, so ``uv sync`` is the right install path.
+    - PyPI / ``uv tool install`` (default) → ``uv tool install --reinstall
+      "memtomem[<name>]"`` or ``[all]``. Matches how the global ``mm``
+      binary is installed.
 
     Multi-extra case collapses to ``[all]`` instead of bracketed multiples
-    (``memtomem[onnx,web]``) because ``[all]`` is the public, documented extra
-    in ``pyproject.toml``; the user doesn't need to know the sub-bundle."""
-    if len(extras) == 1:
-        return f'{_EXTRA_INSTALL_HINT_PREFIX}[{extras[0]}]"'
-    return f'{_EXTRA_INSTALL_HINT_PREFIX}[all]"'
+    (``memtomem[onnx,web]``) because ``[all]`` is the public, documented
+    extra in ``pyproject.toml``; the user doesn't need to know the
+    sub-bundle."""
+    state = state or {}
+    is_workspace = state.get("source_install") or state.get("project_install")
+    name = extras[0] if len(extras) == 1 else "all"
+    if is_workspace:
+        return f"{_UV_SYNC_HINT_PREFIX}{name}"
+    return f'{_EXTRA_INSTALL_HINT_PREFIX}[{name}]"'
 
 
 def _collect_missing_extras(state: dict) -> list[str]:
     """Return ordered list of missing extras the chosen config will need.
 
-    Interpreter-local check via :func:`importlib.util.find_spec` — matches
-    the Python env the current ``mm`` binary runs under. The whole point of
-    this warning is that preset paths (``minimal`` / ``english`` / ``korean``)
-    skip the interactive ``_step_embedding`` that historically surfaced the
-    fastembed gap inline; the user's ``mm init`` → ``mm web`` flow otherwise
-    hits an opaque failure at the third ``Next steps`` command.
+    Source/project install: probes the workspace ``.venv/bin/python`` — the
+    interpreter ``uv run mm`` will use — so the warning matches what
+    ``Next steps`` will actually run. If the workspace venv is absent the
+    caller shows a ``run uv sync first`` one-liner instead, so this path
+    only fires when the probe has authoritative state.
+
+    Everything else (PyPI / ``uv tool install``) uses in-process
+    ``find_spec`` as before — it matches the ``mm`` binary the wizard is
+    running under, which is also what the un-prefixed ``mm index`` /
+    ``mm web`` commands will use.
 
     Order: ``onnx`` before ``web`` so the extras appear in the same order
-    the dependent commands fail (``mm index`` → ``mm web``)."""
-    from importlib.util import find_spec
+    the dependent commands fail (``mm index`` → ``mm web``). Entries in
+    ``state['_extras_warned_inline']`` are filtered out so the interactive
+    ``_step_embedding`` path doesn't double-print."""
+    source = state.get("source_install") or state.get("project_install")
+    ws_py = _workspace_python(state) if source else None
 
-    from memtomem.cli.web import _missing_web_deps
+    if source and ws_py is not None:
+        importable = _probe_workspace_extras(ws_py)
+        if importable is not None:
+            have_fastembed = "fastembed" in importable
+            have_web = {"fastapi", "uvicorn"}.issubset(importable)
+        else:
+            have_fastembed, have_web = _inproc_have_extras()
+    else:
+        have_fastembed, have_web = _inproc_have_extras()
 
     missing: list[str] = []
     # [onnx] = fastembed. Both the embedder and the fastembed reranker share
@@ -929,23 +1032,25 @@ def _collect_missing_extras(state: dict) -> list[str]:
     needs_fastembed = state.get("provider") == "onnx" or (
         state.get("rerank_enabled") and state.get("rerank_model")
     )
-    if needs_fastembed and find_spec("fastembed") is None:
+    if needs_fastembed and not have_fastembed:
         missing.append("onnx")
-    # [web] = fastapi + uvicorn. Reuse ``_missing_web_deps`` so the check
-    # stays aligned with what ``mm web`` itself errors on.
-    if _missing_web_deps() is not None:
+    if not have_web:
         missing.append("web")
-    return missing
+
+    warned = state.get("_extras_warned_inline") or set()
+    return [x for x in missing if x not in warned]
 
 
-def _emit_missing_extras_warning(missing: list[str]) -> None:
+def _emit_missing_extras_warning(missing: list[str], state: dict) -> None:
     """Print an actionable warning about missing extras, or nothing.
 
     Silent when ``missing`` is empty so the common "already installed" path
     adds no output noise. When non-empty, names the missing extras, lists
     which ``Next steps`` commands will fail without them, and prints a single
     install command (narrow per-extra hint when one missing, ``[all]`` when
-    two+ — matches ``pyproject.toml``'s public extras)."""
+    two+ — matches ``pyproject.toml``'s public extras). The hint is branched
+    by install type: workspace installs get ``uv sync --extra …``, tool
+    installs get ``uv tool install --reinstall …``."""
     if not missing:
         return
     click.echo()
@@ -960,7 +1065,7 @@ def _emit_missing_extras_warning(missing: list[str]) -> None:
         click.echo("      'mm index' will fail to embed until installed.")
     elif "web" in missing:
         click.echo("      'mm web' will fail to start until installed.")
-    click.echo(f"      → {_extra_install_hint(missing)}")
+    click.echo(f"      → {_extra_install_hint(missing, state)}")
 
 
 def _write_config_and_summary(
@@ -1220,7 +1325,20 @@ def _write_config_and_summary(
     # interactive `_step_embedding` covers the onnx case inline, but preset
     # paths (minimal/english/korean) skip that step entirely — check here so
     # every path surfaces the gap.
-    _emit_missing_extras_warning(_collect_missing_extras(state))
+    #
+    # Source/project install + workspace .venv absent (fresh worktree) →
+    # the missing-extras probe has no authoritative interpreter to query;
+    # show a single ``run uv sync first`` line instead. Otherwise probe the
+    # workspace venv (if present) or in-process and emit the regular
+    # warning. Issue #360 Phase 1.
+    if _workspace_needs_sync(state):
+        click.echo()
+        click.secho(
+            "  Workspace .venv not found — run `uv sync --extra all` first.",
+            fg="yellow",
+        )
+    else:
+        _emit_missing_extras_warning(_collect_missing_extras(state), state)
 
     click.echo()
     click.secho("  Next steps:", fg="cyan")
