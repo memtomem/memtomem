@@ -41,6 +41,7 @@ def _register() -> None:
     from memtomem.cli.init_cmd import init
     from memtomem.cli.session_cmd import activity, session
     from memtomem.cli.shell import shell
+    from memtomem.cli.uninstall_cmd import uninstall
     from memtomem.cli.watchdog_cmd import watchdog
     from memtomem.cli.web import web
 
@@ -61,6 +62,7 @@ def _register() -> None:
     cli.add_command(web)
     cli.add_command(shell)
     cli.add_command(agent)
+    cli.add_command(uninstall)
 
 
 _register()

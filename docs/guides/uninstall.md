@@ -1,5 +1,38 @@
 # Uninstalling memtomem
 
+## Recommended: `mm uninstall`
+
+Since v0.1.23 the CLI ships an `uninstall` subcommand that handles the
+state cleanup (steps 3 below) and prints the package-manager command for
+your detected install context. It detects `~/.memtomem/`, custom
+`storage.sqlite_path` outside the default dir, and config.d fragments,
+then deletes them in a low→high-value order with confirmation. It does
+NOT touch external editor configs (step 1) — those are reported and left
+for you to clean manually.
+
+```bash
+mm uninstall                  # interactive, removes everything
+mm uninstall -y               # skip the confirmation prompt
+mm uninstall --keep-config    # preserve config.json + config.d/* + backups
+mm uninstall --keep-data      # preserve the SQLite DB + ~/.memtomem/memories/
+mm uninstall --force          # bypass the running-server safety check
+```
+
+The command refuses to run while the MCP server is still alive (open WAL
+handles risk corruption); stop the server first or pass `--force`.
+
+After `mm uninstall` finishes, follow the binary-removal command it prints
+(varies by install context — `uv tool uninstall memtomem`, `pip
+uninstall memtomem`, etc.). Then continue with step 1 below to clean up
+editor MCP entries.
+
+If you don't have the CLI available (e.g. the wheel is broken or you
+never installed it), follow the manual steps below.
+
+---
+
+## Manual cleanup
+
 ## 1. Remove the MCP server from your editor
 
 Remove the `"memtomem"` entry from the `mcpServers` block in your editor's
