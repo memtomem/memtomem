@@ -9,11 +9,13 @@ pydantic-settings parses list-typed env vars as JSON arrays.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
-from memtomem.cli.init_cmd import _write_mcp_json
+from memtomem.cli.init_cmd import MmBinaryOrigin, RuntimeProfile, _write_mcp_json
 from memtomem.config import Mem2MemConfig
 
 
@@ -48,6 +50,58 @@ def test_write_mcp_json_preserves_valid_env(
     assert data["mcpServers"]["memtomem"]["env"] == env
 
 
+def _make_test_profile(
+    tmp_path: Path | None = None,
+    *,
+    kind: Literal["source", "project", "pypi"] = "pypi",
+    mm_binary_origin: MmBinaryOrigin = "unknown",
+    runtime_matches_workspace: bool | None = None,
+) -> RuntimeProfile:
+    """Build a :class:`RuntimeProfile` for tests without invoking
+    :func:`_runtime_profile`.
+
+    Replaces the pre-#368 pattern of setting
+    ``state["source_install"] = True`` + ``state["source_dir"] = str(tmp_path)``
+    — those legacy keys no longer exist after Phase 3 cleanup so tests that
+    want a non-pypi profile seed ``state["_profile"]`` directly via this
+    helper. Workspace venv detection mirrors :func:`_runtime_profile`:
+    ``<cwd_install_dir>/.venv`` if it exists on disk.
+
+    ``tmp_path`` is only meaningful when ``kind`` is ``"source"`` or
+    ``"project"`` (it becomes ``cwd_install_dir``). For ``kind="pypi"`` it
+    is ignored — callers may pass ``None`` or omit it.
+
+    ``runtime_matches_workspace`` defaults to ``None`` which auto-computes
+    via ``Path(sys.executable).is_relative_to(workspace_venv_path)`` — the
+    same rule :func:`_runtime_profile` uses. Tests that monkeypatch
+    ``sys.executable`` to point inside ``<tmp_path>/.venv`` then get ``True``
+    automatically; explicit ``True``/``False`` force the flag regardless."""
+    cwd_install_dir = tmp_path if kind in ("source", "project") else None
+    venv = (cwd_install_dir / ".venv") if cwd_install_dir else None
+    workspace_venv_path = venv if (venv and venv.exists()) else None
+    runtime_interpreter = Path(sys.executable)
+
+    matches: bool
+    if runtime_matches_workspace is not None:
+        matches = runtime_matches_workspace
+    elif workspace_venv_path is not None:
+        try:
+            matches = runtime_interpreter.is_relative_to(workspace_venv_path)
+        except (OSError, ValueError):
+            matches = False
+    else:
+        matches = False
+
+    return RuntimeProfile(
+        cwd_install_type=kind,
+        cwd_install_dir=cwd_install_dir,
+        runtime_interpreter=runtime_interpreter,
+        workspace_venv_path=workspace_venv_path,
+        mm_binary_origin=mm_binary_origin,
+        runtime_matches_workspace=matches,
+    )
+
+
 def _make_init_state(tmp_path: Path) -> dict:
     """Return a minimal wizard state dict pointing at *tmp_path*."""
     return {
@@ -65,10 +119,12 @@ def _make_init_state(tmp_path: Path) -> dict:
         # Non-config keys required by _write_config_and_summary
         "mcp_choice": 3,  # skip MCP setup
         "settings_hooks": False,
-        "source_install": False,
-        "source_dir": None,
-        "project_install": False,
-        "project_dir": None,
+        # #368: legacy source_install / project_install / source_dir /
+        # project_dir keys have been dropped — seed a default pypi profile
+        # here so production code reads install-context via profile only.
+        # Tests that need source/project classification overwrite
+        # state["_profile"] via _make_test_profile(tmp_path, kind=...).
+        "_profile": _make_test_profile(),  # default: pypi / unknown
     }
 
 
@@ -318,7 +374,7 @@ class TestMissingExtrasWarning:
         is what ``uv run mm`` uses, so ``uv sync`` is the right install."""
         from memtomem.cli.init_cmd import _extra_install_hint
 
-        state = {"source_install": True}
+        state = {"_profile": _make_test_profile(kind="source")}
         assert _extra_install_hint(["onnx"], state) == "uv sync --extra onnx"
         assert _extra_install_hint(["web"], state) == "uv sync --extra web"
         assert _extra_install_hint(["onnx", "web"], state) == "uv sync --extra all"
@@ -328,7 +384,7 @@ class TestMissingExtrasWarning:
         also resolves to the workspace ``uv sync`` hint."""
         from memtomem.cli.init_cmd import _extra_install_hint
 
-        state = {"project_install": True}
+        state = {"_profile": _make_test_profile(kind="project")}
         assert _extra_install_hint(["onnx"], state) == "uv sync --extra onnx"
         assert _extra_install_hint(["onnx", "web"], state) == "uv sync --extra all"
 
@@ -419,8 +475,7 @@ class TestInstallAxesReconcile:
         venv_bin = tmp_path / ".venv" / "bin"
         venv_bin.mkdir(parents=True, exist_ok=True)
         (venv_bin / "python").touch()
-        state["source_install"] = True
-        state["source_dir"] = str(tmp_path)
+        state["_profile"] = _make_test_profile(tmp_path, kind="source")
         return state
 
     def test_source_cwd_workspace_has_all_suppresses_warning(
@@ -500,8 +555,7 @@ class TestInstallAxesReconcile:
         state = {
             "provider": "onnx",
             "rerank_enabled": False,
-            "source_install": False,
-            "project_install": False,
+            "_profile": _make_test_profile(kind="pypi"),
         }
         missing = init_cmd._collect_missing_extras(state)
         assert missing == ["onnx"]
@@ -527,8 +581,7 @@ class TestInstallAxesReconcile:
 
         state = _make_init_state(tmp_path)
         state["provider"] = "onnx"
-        state["project_install"] = True
-        state["project_dir"] = str(tmp_path)
+        state["_profile"] = _make_test_profile(tmp_path, kind="project")
         assert init_cmd._collect_missing_extras(state) == []
 
     def test_missing_venv_shows_sync_one_liner_not_warning(
@@ -558,8 +611,7 @@ class TestInstallAxesReconcile:
         state["provider"] = "onnx"
         state["model"] = "bge-m3"
         state["dimension"] = 1024
-        state["source_install"] = True
-        state["source_dir"] = str(tmp_path)
+        state["_profile"] = _make_test_profile(tmp_path, kind="source")
 
         assert init_cmd._workspace_needs_sync(state) is True
 
@@ -641,8 +693,7 @@ class TestInstallAxesReconcile:
         state["provider"] = "onnx"
         state["model"] = "bge-m3"
         state["dimension"] = 1024
-        state["source_install"] = True
-        state["source_dir"] = str(tmp_path)
+        state["_profile"] = _make_test_profile(tmp_path, kind="source")
         init_cmd._write_config_and_summary(state, tmp_path)
 
         out = unstyle(capsys.readouterr().out)
@@ -1038,8 +1089,7 @@ class TestMismatchBanner:
         venv_bin = tmp_path / ".venv" / "bin"
         venv_bin.mkdir(parents=True, exist_ok=True)
         (venv_bin / "python").touch()
-        state["source_install"] = True
-        state["source_dir"] = str(tmp_path)
+        state["_profile"] = _make_test_profile(tmp_path, kind="source")
         state["provider"] = "onnx"
         state["model"] = "bge-m3"
         state["dimension"] = 1024
@@ -1095,8 +1145,7 @@ class TestMismatchBanner:
         monkeypatch.setenv("HOME", str(tmp_path))
 
         state = _make_init_state(tmp_path)
-        state["project_install"] = True
-        state["project_dir"] = str(tmp_path)
+        state["_profile"] = _make_test_profile(tmp_path, kind="project")
         state["provider"] = "onnx"
         state["model"] = "bge-m3"
         state["dimension"] = 1024
@@ -1201,8 +1250,7 @@ class TestMismatchBanner:
 
         # NOTE: no .venv/ created — triggers _workspace_needs_sync branch.
         state = _make_init_state(tmp_path)
-        state["source_install"] = True
-        state["source_dir"] = str(tmp_path)
+        state["_profile"] = _make_test_profile(tmp_path, kind="source")
         state["provider"] = "onnx"
         state["model"] = "bge-m3"
         state["dimension"] = 1024
@@ -1471,8 +1519,7 @@ class TestProjectInstallE2E:
     def _project_state(tmp_path: Path, *, with_venv: bool) -> dict:
         """Build a project-install state with optional workspace venv."""
         state = _make_init_state(tmp_path)
-        state["project_install"] = True
-        state["project_dir"] = str(tmp_path)
+        state["_profile"] = _make_test_profile(tmp_path, kind="project")
         state["provider"] = "onnx"
         state["model"] = "bge-m3"
         state["dimension"] = 1024
@@ -1630,10 +1677,9 @@ class TestUvxBranching:
         monkeypatch.setenv("HOME", str(tmp_path))
 
         state = _make_init_state(tmp_path)
-        # Drop legacy booleans to force profile-based classification.
-        state["source_install"] = False
-        state["project_install"] = False
-        # State pre-built profile must NOT be present so the live one fires.
+        # Explicit uvx profile — pypi classification + uvx binary origin
+        # drives the "Install: uvx (ephemeral)" label and Next-steps hint.
+        state["_profile"] = _make_test_profile(kind="pypi", mm_binary_origin="uvx")
         init_cmd._write_config_and_summary(state, tmp_path)
 
         out = unstyle(capsys.readouterr().out)

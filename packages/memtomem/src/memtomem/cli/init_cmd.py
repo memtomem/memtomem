@@ -233,6 +233,15 @@ def _get_or_build_profile(state: dict) -> RuntimeProfile:
     from the legacy ``state["source_install"]`` / ``project_install`` /
     ``source_dir`` / ``project_dir`` keys.
 
+    Phase 3 cleanup (#368): after this cycle, production writes ``_profile``
+    exclusively — in-tree callers no longer populate the legacy keys, so the
+    reconstruction path below is effectively dead for production. The shim
+    persists for (a) the 2 :class:`TestRuntimeProfile` regression tests that
+    prove the reconstruction path still works and (b) downstream forks that
+    haven't migrated to ``_profile``. Its deletion is tracked in a separate
+    follow-up issue — reopen trigger: 1–2 minor releases (~v0.1.22) with no
+    external signal of legacy-key usage.
+
     Tests that bypass :func:`init` and construct ``state`` directly never
     populate ``_profile``; this shim builds one on demand from the legacy
     booleans they DO set so the migration to RuntimeProfile doesn't require
@@ -1435,18 +1444,15 @@ def _write_config_and_summary(
 
     # All install-context branching reads from the single profile struct
     # built once at init() entry (or lazily reconstructed from legacy state
-    # booleans in tests via _get_or_build_profile). Phase 3 (#363) collapses
-    # the prior 4 source_install/project_install/source_dir/project_dir reads
-    # so a future install-context judgment has exactly one place to land.
+    # booleans by the _get_or_build_profile shim when downstream forks build
+    # state directly). #363 Phase 3 collapsed the prior 4 source_install /
+    # project_install / source_dir / project_dir reads into this struct;
+    # #368 dropped the remaining parallel state keys so there is now exactly
+    # one place a future install-context judgment can land.
     profile = _get_or_build_profile(state)
     source_install = profile.cwd_install_type == "source"
     project_install = profile.cwd_install_type == "project"
-    source_dir = (
-        str(profile.cwd_install_dir) if source_install and profile.cwd_install_dir else None
-    )
-    project_dir = (
-        str(profile.cwd_install_dir) if project_install and profile.cwd_install_dir else None
-    )
+    workspace_dir = str(profile.cwd_install_dir) if profile.cwd_install_dir else None
 
     # Write ~/.memtomem/config.json (read-merge-write to preserve non-init fields)
     click.secho("Writing configuration...", fg="green")
@@ -1606,13 +1612,17 @@ def _write_config_and_summary(
             written = existing  # unreachable in practice; stay safe
         _emit_preserved_block(existing_before, written, wizard_touched_keys)
 
-    # Build MCP server command
-    if source_install and source_dir:
+    # Build MCP server command. source_install and project_install both
+    # resolve to the same `uv run --directory <workspace_dir>` shape — only
+    # the directory differs. The branches are kept separate (not collapsed
+    # into `if workspace_dir:`) so a reader bisecting a bad .mcp.json can
+    # still tell which install-type produced it from the wizard source.
+    if source_install and workspace_dir:
         server_cmd = "uv"
-        server_args = ["run", "--directory", source_dir, "memtomem-server"]
-    elif project_install and project_dir:
+        server_args = ["run", "--directory", workspace_dir, "memtomem-server"]
+    elif project_install and workspace_dir:
         server_cmd = "uv"
-        server_args = ["run", "--directory", project_dir, "memtomem-server"]
+        server_args = ["run", "--directory", workspace_dir, "memtomem-server"]
     else:
         server_cmd = "uvx"
         server_args = ["--from", "memtomem", "memtomem-server"]
@@ -1730,13 +1740,7 @@ def _write_config_and_summary(
     else:
         missing = _collect_missing_extras(state)
         if missing:
-            ws: Path | None
-            if source_install:
-                ws = Path(state["source_dir"])
-            elif project_install:
-                ws = Path(state["project_dir"])
-            else:
-                ws = None
+            ws = profile.cwd_install_dir if (source_install or project_install) else None
             installed = _install_extras(install_type_lit, missing, confirm=False, workspace_dir=ws)
             if installed:
                 click.echo()
@@ -2119,29 +2123,21 @@ def init(
     click.echo()
 
     # Build the install-context profile once at entry — every downstream
-    # decision (run_prefix, missing-extras hint, summary mismatch banner)
-    # reads from this single struct via _get_or_build_profile. Legacy
-    # state.source_install/project_install/source_dir/project_dir are also
-    # populated for backward compatibility with code paths that haven't
-    # been migrated yet (provider rules banner, MCP server command).
+    # decision (run_prefix, missing-extras hint, summary mismatch banner,
+    # MCP server command) reads from this single struct via
+    # _get_or_build_profile. #368 dropped the parallel legacy
+    # source_install/project_install/source_dir/project_dir state keys so
+    # there is exactly one place to land a new install-context judgment.
     profile = _runtime_profile()
-    source_install = profile.cwd_install_type == "source"
-    project_install = profile.cwd_install_type == "project"
-    state: dict = {
-        "_profile": profile,
-        "source_install": source_install,
-        "source_dir": str(profile.cwd_install_dir) if source_install else None,
-        "project_install": project_install,
-        "project_dir": str(profile.cwd_install_dir) if project_install else None,
-    }
+    state: dict = {"_profile": profile}
 
-    if source_install:
+    if profile.cwd_install_type == "source":
         click.secho("  Detected: source install", fg="blue")
-        click.echo(f"  Source directory: {state['source_dir']}")
+        click.echo(f"  Source directory: {profile.cwd_install_dir}")
         click.echo()
-    elif project_install:
+    elif profile.cwd_install_type == "project":
         click.secho("  Detected: project install", fg="blue")
-        click.echo(f"  Project directory: {state['project_dir']}")
+        click.echo(f"  Project directory: {profile.cwd_install_dir}")
         click.echo()
     elif profile.mm_binary_origin == "uvx":
         click.secho("  Detected: uvx (ephemeral) install", fg="blue")
