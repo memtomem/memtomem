@@ -11,6 +11,7 @@ import os
 
 from mcp.server.fastmcp import FastMCP
 
+from memtomem import __version__ as _memtomem_version
 from memtomem.server.component_factory import (
     Components as Components,
     close_components as close_components,
@@ -37,6 +38,10 @@ from memtomem.server.lifespan import app_lifespan
 
 # ── mcp instance — must be created before tool-module imports ──────────
 mcp = FastMCP("memtomem", lifespan=app_lifespan)
+# FastMCP has no `version=` kwarg; set it on the underlying Server so the
+# MCP `initialize` handshake reports our package version instead of the
+# SDK's fallback (see #383).
+mcp._mcp_server.version = _memtomem_version
 
 # ── Register ALL tools (decorators bind to `mcp` on import) ───────────
 from memtomem.server.tools.ask import mem_ask  # noqa: E402, F401

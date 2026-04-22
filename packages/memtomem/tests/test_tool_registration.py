@@ -67,3 +67,22 @@ def test_all_mcp_tool_modules_imported():
             lines
         )
         raise AssertionError(msg)
+
+
+def test_mcp_serverinfo_version_matches_package():
+    """MCP ``initialize`` handshake must report the memtomem package version.
+
+    ``FastMCP`` exposes no ``version=`` kwarg, so the underlying
+    ``Server.version`` is ``None`` by default and the handshake falls back
+    to the ``mcp`` SDK's own version — a foot-gun for anyone monitoring
+    ``serverInfo.version`` (#383).  ``server/__init__.py`` sets it
+    explicitly; this test pins that assignment against refactors.
+    """
+    from memtomem import __version__
+    from memtomem.server import mcp
+
+    opts = mcp._mcp_server.create_initialization_options()
+    assert opts.server_version == __version__, (
+        f"serverInfo.version={opts.server_version!r} but memtomem.__version__={__version__!r} — "
+        "server/__init__.py must set `mcp._mcp_server.version = __version__`"
+    )
