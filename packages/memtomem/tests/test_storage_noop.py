@@ -96,12 +96,14 @@ class TestDeleteNoopMode:
         n = await noop_backend.delete_by_source(Path("/tmp/b.md"))
         assert n == 2
 
-        # delete_by_namespace on empty namespace is a no-op (returns 0)
-        # but should not raise — re-add and exercise the path.
+        # delete_by_namespace: exercise both populated and empty-namespace paths.
         c4 = make_chunk("fourth", namespace="ns-c", embedding=[])
         await noop_backend.upsert_chunks([c4])
         n = await noop_backend.delete_by_namespace("ns-c")
         assert n == 1
+        # No-op path: namespace with no rows must return 0 without raising.
+        n = await noop_backend.delete_by_namespace("nonexistent-ns")
+        assert n == 0
 
 
 class TestResetFromNoopToReal:

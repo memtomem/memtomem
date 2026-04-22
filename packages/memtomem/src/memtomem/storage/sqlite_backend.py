@@ -490,10 +490,6 @@ class SqliteBackend(
                         f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(new_rowids))})",
                         new_rowids,
                     )
-                else:
-                    logger.debug(
-                        "bm25-only mode (dimension=0); skipping chunks_vec write in upsert_chunks"
-                    )
 
                 db.executemany(
                     "INSERT INTO chunks_fts(rowid, content, source_file) VALUES (?,?,?)",

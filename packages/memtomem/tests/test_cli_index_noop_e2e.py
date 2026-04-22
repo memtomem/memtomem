@@ -83,8 +83,16 @@ class TestFreshNoopIndexSubprocess:
         what real users hit.
         """
         mm_bin = os.path.join(os.path.dirname(sys.executable), "mm")
+        # Fail loudly instead of pytest.skip — any valid test environment
+        # (``uv run pytest`` or ``uv pip install -e``) must provide the
+        # ``mm`` entry point. A silent skip here would turn this subprocess
+        # regression guard into CI false-green if the editable install is
+        # ever dropped.
         if not os.path.exists(mm_bin):
-            pytest.skip(f"mm binary not installed at {mm_bin}")
+            pytest.fail(
+                f"mm binary not found at {mm_bin}. "
+                "Run `uv pip install -e packages/memtomem[all]` before testing."
+            )
 
         home = tmp_path / "home"
         home.mkdir()
