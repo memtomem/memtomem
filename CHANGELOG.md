@@ -5,6 +5,55 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.24] — 2026-04-23
+
+Bug-fix release closing a first-run UX gap in `mm init --preset <name>`
+and a matching prod-mode log-noise bug in the web UI. Wizard installs
+that auto-discover provider memory folders (Claude Code projects,
+Claude Desktop plans, Codex memories) now actually consider those
+folders in the seed decision, instead of silently skipping the seed
+because the primary `~/memories` happens to be empty.
+
+### Fixed
+
+- **Wizard auto-seed now scans `memory_dir + provider_dirs` union.**
+  `mm init --preset korean` / `--preset english` / `--preset minimal`
+  registers the primary memory dir plus every auto-discovered provider
+  folder into `indexing.memory_dirs`, but the opt-in inline seed only
+  inspected the primary dir. Since the primary is typically the empty
+  `~/memories` on a fresh install, the seed silently returned `False`
+  and the Next-steps hint pointed at `mm index ~/memories` — which
+  indexed zero files and left the 28 provider dirs invisible to search
+  until the user found Sources → Reindex All in the web UI.
+
+  The seed now sums file count and bytes across the union (deduped
+  preserving order, mirrors the `combined_dirs` construction that
+  feeds `indexing.memory_dirs`) and prompts with "across N memory
+  dirs" phrasing when more than one dir is in scope. `_seed_with_progress`
+  streams paths serially with a single progress bar. Multi-path Ctrl-C
+  / failure hints point at `mm web` → Sources → Reindex All instead of
+  a misleading single-path `mm index <dir>` (the `mm index` CLI is
+  single-path only as of v0.1.23). Next-steps step 1 in
+  `_write_config_and_summary` gets the same split — declined seed with
+  multi-dir registration now reads "uv run mm web  (Sources → Reindex
+  All to index N memory_dirs)" instead of `mm index ~/memories`.
+  PR #295 constraints remain intact: every seed action is
+  confirmation-gated (default No), progress-bar instrumented, and
+  Ctrl-C resumable. No silent startup scan is reintroduced. (#388)
+
+- **Web UI: `loadNamespaceDropdowns` gated on dev mode.** `/api/namespaces`
+  is mounted only in `_DEV_ONLY_ROUTERS` by design (test pin in
+  `test_web_mode.py::test_dev_only_routes_blocked_in_prod_but_exposed_in_dev`),
+  and the `loadDashboard` caller already had the matching gate. The
+  dropdown loader in `settings-namespaces.js` was the orphan: every
+  prod session fired a guaranteed 404 at page load (bare module-level
+  call) and another on each switch to the search or timeline tab.
+  Gate is now internal to `loadNamespaceDropdowns` (prod → early
+  return, filter dropdowns keep the static "All Namespaces" option);
+  boot-time populate moves into `_applyUiModeFilter` which runs after
+  `STATE.uiMode` resolves, so dev still gets a single deterministic
+  fetch instead of the previous race-dependent bare call. (#385)
+
 ## [0.1.23] — 2026-04-22
 
 Feature release adding a first-class `mm uninstall` command so users can
