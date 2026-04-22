@@ -24,6 +24,8 @@ mm init    # on PATH after `uv tool install` — no `uv run` needed
 
 > `uv` caches PyPI metadata. If `mm --version` doesn't match the [latest release](https://github.com/memtomem/memtomem/releases) right after install, re-run with `uv tool install memtomem --refresh` or clear the cache: `uv cache clean memtomem`.
 
+> **`mm: command not found`?** `uv` installs the shim to `~/.local/bin` — add it to `$PATH` with `uv tool update-shell`, then open a new shell.
+
 The picker offers three presets and an Advanced fallback:
 
 | Preset | Embedding | Reranker | Tokenizer |
