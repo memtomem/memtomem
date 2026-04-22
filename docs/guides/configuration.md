@@ -255,9 +255,27 @@ When enabled, search results include surrounding chunks from the same source fil
 
 ## Indexing
 
+### `memory_dirs` — reactive watch vs one-shot seed
+
+`indexing.memory_dirs` is the source-of-truth list for the file watcher
+that `mm server` starts on boot. The watcher is **reactive only** — it
+reindexes files when the filesystem emits modify / create / move events
+for paths under these directories. Pre-existing files on disk at the
+time the watcher starts are **NOT auto-scanned**; you seed them once
+with either
+
+- `mm index <dir>` from the CLI, or
+- the **Reindex** button per memory_dir in `mm web`.
+
+Both paths are idempotent: chunks are content-hashed, so unchanged files
+are skipped on re-runs. This is why the `mm init` wizard's `Next steps`
+prints `mm index {memory_dir}` as step 1 — once seeded, subsequent edits
+flow through the watcher automatically (as long as `mm server` is
+running).
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMTOMEM_INDEXING__MEMORY_DIRS` | `["~/.memtomem/memories"]` (+ provider folders selected in `mm init`) | Directories to index (see below) |
+| `MEMTOMEM_INDEXING__MEMORY_DIRS` | `["~/.memtomem/memories"]` (+ provider folders selected in `mm init`) | Directories watched for reactive re-index (see above) |
 | `MEMTOMEM_INDEXING__SUPPORTED_EXTENSIONS` | `[".md",".json",".yaml",".yml",".toml",".py",".js",".ts",".tsx",".jsx"]` | File types accepted by the indexer and file watcher |
 | `MEMTOMEM_INDEXING__MAX_CHUNK_TOKENS` | `512` | Maximum tokens per chunk |
 | `MEMTOMEM_INDEXING__MIN_CHUNK_TOKENS` | `128` | Merge threshold for short chunks |

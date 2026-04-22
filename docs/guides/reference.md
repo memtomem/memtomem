@@ -163,9 +163,22 @@ mem_index(path="~/work/docs", namespace="work")
 mem_index(path="~/personal/notes", namespace="personal")
 ```
 
-### Auto-watch
+### Auto-watch vs manual seed
 
-Files in `MEMTOMEM_INDEXING__MEMORY_DIRS` are watched for changes and re-indexed automatically. For files outside watched directories, call `mem_index` manually.
+`MEMTOMEM_INDEXING__MEMORY_DIRS` feeds a file watcher that runs inside
+the `mm server` (MCP) process. The watcher is **reactive only** — it
+reindexes files when the filesystem emits modify / create / move events.
+Two cases it does NOT cover:
+
+- **Pre-existing files on disk** when you first configure a `memory_dir`.
+  Run `mm index <dir>` (or `mem_index(path="<dir>")`) once to seed them;
+  after that, the watcher picks up further edits.
+- **Files outside `memory_dirs`.** Call `mem_index` / `mm index` manually
+  with the path you want indexed ad-hoc.
+
+Both are idempotent — chunks are content-hashed, so unchanged files are
+skipped on re-runs. This is why the `mm init` wizard's `Next steps` lists
+`mm index {memory_dir}` as step 1.
 
 ---
 
@@ -880,7 +893,7 @@ mm init                                # 9-step interactive wizard (b: back, q: 
 
 # Core (daily use)
 mm search "deployment"                 # hybrid search (keywords + meaning)
-mm index ~/notes                       # index directory
+mm index ~/notes                       # manual one-shot index (seed pre-existing files)
 mm add "note" --tags "tag1"            # add a memory
 mm recall --since 2026-03-01           # recall by date
 

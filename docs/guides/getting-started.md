@@ -249,6 +249,11 @@ You should see index statistics (0 chunks if nothing indexed yet).
 
 ### 1. Index your notes
 
+This one-shot command seeds the index with files already on disk. After
+this, the `mm server` file watcher keeps your `memory_dirs` in sync with
+new edits automatically — you only need to run `mm index` again when you
+add a brand-new directory or want a forced rebuild (`--force`).
+
 In your editor:
 ```
 "Index my notes folder"  →  mem_index(path="~/notes")
@@ -259,7 +264,7 @@ Or via CLI:
 mm index ~/notes
 ```
 
-This scans all supported files (`.md`, `.json`, `.yaml`, `.py`, `.js`, `.ts`, etc.), splits them into searchable chunks, and creates embeddings.
+This scans all supported files (`.md`, `.json`, `.yaml`, `.py`, `.js`, `.ts`, etc.), splits them into searchable chunks, and creates embeddings. The re-run is idempotent (content-hash dedup), so it's safe to repeat.
 
 ### 2. Search
 

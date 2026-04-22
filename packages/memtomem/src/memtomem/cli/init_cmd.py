@@ -1691,6 +1691,11 @@ def _write_config_and_summary(
     click.echo()
     click.secho("  Next steps:", fg="cyan")
     run_prefix = "uv run " if profile.cwd_install_type in ("source", "project") else ""
+    # Step 1 seeds the initial index: the FileWatcher (started by
+    # `mm server`) is reactive-only and won't scan pre-existing files
+    # in memory_dirs. After this one-shot, subsequent edits are
+    # auto-indexed. `mm index` is idempotent (content-hash dedup) so
+    # re-runs are safe. See docs/guides/configuration.md#memory_dirs.
     click.echo(f"    1. {run_prefix}mm index {state['memory_dir']}")
     click.echo(f"    2. {run_prefix}mm search 'your first query'")
     click.echo(f"    3. {run_prefix}mm web  (browse & manage your memories)")
