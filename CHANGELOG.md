@@ -5,6 +5,52 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.22] — 2026-04-22
+
+Bug-fix release closing the second root-cause path for "no such table:
+chunks_vec". v0.1.21 (#305) added the startup gate for legacy DBs whose
+stored `dim=0` mismatched a real configured provider; this release fixes
+the symmetric writer-side gap that surfaced on **fresh** `mm init
+--provider none` installs (no provider switch, just intentional BM25-only
+mode). Also bundles two follow-ups from the v0.1.21 wizard work that
+wouldn't have made sense to ship separately.
+
+### Fixed
+
+- **`mm index` now succeeds on fresh `--provider none` installs** —
+  NoopEmbedder reports `dimension=0`, so the schema gate at
+  `sqlite_schema.py` correctly skipped creating the `chunks_vec` virtual
+  table. But the writer never honored that skip: `upsert_chunks`,
+  `delete_chunks`, `delete_by_source`, and `delete_by_namespace` issued
+  unconditional SQL against `chunks_vec`, rolling back the whole
+  transaction with `no such table: chunks_vec`. Every file indexed as 0
+  chunks, and BM25 search returned empty because the FTS write shared
+  the same rolled-back transaction. Fix gates every chunks_vec touch on
+  `SqliteBackend._has_vec_table` (cached boolean, primed from a one-time
+  `sqlite_master` probe at `initialize()` and refreshed by
+  `reset_embedding_meta` / `reset_all`). `NamespaceOps` receives the
+  flag as a required live callable so dim=0 → real-provider recovery
+  flips cleanly without reconstruction. Existing dim=0 DBs need no
+  migration; `mm embedding-reset` recovery path is unchanged. (#377)
+
+### Added
+
+- **Wizard auto-seeds the initial index for small memory dirs** — when
+  the discovered `memory_dirs` are below the size threshold and stdin is
+  a TTY, `mm init` offers an opt-in confirmation (default No) to run the
+  initial `mm index` inline so users see search results immediately
+  without a separate command. (#375)
+- **Wizard shows progress bar + final summary for large memory dirs** —
+  same opt-in seed extended to large dirs with a streaming progress bar
+  (files-done / files-total) and a defensive "0 chunks indexed" yellow
+  warning if the stream lands zero counters. (#376)
+
+### Docs
+
+- **Indexing model clarified** — `memory_dirs` are auto-watched (file
+  changes are picked up live) while `mm index` is the one-shot
+  manual-seed entry; previous wording conflated the two. (#374)
+
 ## [0.1.21] — 2026-04-22
 
 Phase 3 of the `mm init` install-context series (#360 → v0.1.20 → this
