@@ -742,6 +742,7 @@ class TestInstallExtrasHelper:
             captured["cwd"] = kw.get("cwd")
             return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
 
+        monkeypatch.setattr(init_cmd.sys.stdin, "isatty", lambda: True)
         monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: True)
         monkeypatch.setattr(init_cmd.subprocess, "run", _fake_run)
 
@@ -767,6 +768,7 @@ class TestInstallExtrasHelper:
             captured["cwd"] = kw.get("cwd")
             return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
 
+        monkeypatch.setattr(init_cmd.sys.stdin, "isatty", lambda: True)
         monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: True)
         monkeypatch.setattr(init_cmd.subprocess, "run", _fake_run)
 
@@ -791,6 +793,7 @@ class TestInstallExtrasHelper:
             captured["cwd"] = kw.get("cwd")
             return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
 
+        monkeypatch.setattr(init_cmd.sys.stdin, "isatty", lambda: True)
         monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: True)
         monkeypatch.setattr(init_cmd.subprocess, "run", _fake_run)
 
@@ -842,6 +845,7 @@ class TestInstallExtrasHelper:
             captured["cmd"] = cmd
             return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
 
+        monkeypatch.setattr(init_cmd.sys.stdin, "isatty", lambda: True)
         monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: True)
         monkeypatch.setattr(init_cmd.subprocess, "run", _fake_run)
 
@@ -862,6 +866,7 @@ class TestInstallExtrasHelper:
         def _no_subprocess(*a, **kw):  # pragma: no cover - must not run
             raise AssertionError("subprocess.run must not be called when user declines")
 
+        monkeypatch.setattr(init_cmd.sys.stdin, "isatty", lambda: True)
         monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: False)
         monkeypatch.setattr(init_cmd.subprocess, "run", _no_subprocess)
 
@@ -875,6 +880,7 @@ class TestInstallExtrasHelper:
         def _raise_fnf(*a, **kw):
             raise FileNotFoundError("uv not found")
 
+        monkeypatch.setattr(init_cmd.sys.stdin, "isatty", lambda: True)
         monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: True)
         monkeypatch.setattr(init_cmd.subprocess, "run", _raise_fnf)
 
@@ -889,6 +895,7 @@ class TestInstallExtrasHelper:
         def _raise_timeout(*a, **kw):
             raise _sp.TimeoutExpired(cmd=a[0] if a else "uv", timeout=600)
 
+        monkeypatch.setattr(init_cmd.sys.stdin, "isatty", lambda: True)
         monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: True)
         monkeypatch.setattr(init_cmd.subprocess, "run", _raise_timeout)
 
@@ -904,6 +911,7 @@ class TestInstallExtrasHelper:
         def _fake_run(cmd, **kw):
             return _sp.CompletedProcess(cmd, returncode=1, stdout="", stderr="boom")
 
+        monkeypatch.setattr(init_cmd.sys.stdin, "isatty", lambda: True)
         monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: True)
         monkeypatch.setattr(init_cmd.subprocess, "run", _fake_run)
 
@@ -921,6 +929,7 @@ class TestInstallExtrasHelper:
         def _no_subprocess(*a, **kw):  # pragma: no cover - must not run
             raise AssertionError("subprocess.run must not be called without workspace_dir")
 
+        monkeypatch.setattr(init_cmd.sys.stdin, "isatty", lambda: True)
         monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: True)
         monkeypatch.setattr(init_cmd.subprocess, "run", _no_subprocess)
 
@@ -942,6 +951,7 @@ class TestInstallExtrasHelper:
             seen_defaults.append(default)
             return False  # always decline — we only care about the default
 
+        monkeypatch.setattr(init_cmd.sys.stdin, "isatty", lambda: True)
         monkeypatch.setattr(init_cmd, "nav_confirm", _spy_confirm)
         monkeypatch.setattr(
             init_cmd.subprocess,
@@ -952,6 +962,64 @@ class TestInstallExtrasHelper:
         init_cmd._install_extras("tool", ["onnx"], confirm=True)
         init_cmd._install_extras("tool", ["onnx"], confirm=False)
         assert seen_defaults == [True, False]
+
+    def test_non_tty_stdin_skips_prompt(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Scripted / non-TTY contexts (``mm init -y </dev/null``, CI jobs,
+        Docker build steps) must not hit the prompt — ``click.prompt``
+        raises ``Abort!`` on stdin EOF rather than returning the
+        ``default=``, which would hard-exit the wizard mid-summary.
+
+        Regression guard for the Phase 2 follow-up: without this gate,
+        every scripted ``mm init`` pipeline that used to pass on v0.1.19
+        would abort in v0.1.20."""
+        from memtomem.cli import init_cmd
+
+        def _no_prompt(*a, **kw):  # pragma: no cover - must not run
+            raise AssertionError("nav_confirm must not be called in non-TTY context")
+
+        def _no_subprocess(*a, **kw):  # pragma: no cover - must not run
+            raise AssertionError("subprocess.run must not be called in non-TTY context")
+
+        monkeypatch.setattr(init_cmd.sys.stdin, "isatty", lambda: False)
+        monkeypatch.setattr(init_cmd, "nav_confirm", _no_prompt)
+        monkeypatch.setattr(init_cmd.subprocess, "run", _no_subprocess)
+
+        # Every install_type path that would otherwise prompt must short-circuit.
+        assert init_cmd._install_extras("tool", ["onnx"], confirm=False) is False
+        assert (
+            init_cmd._install_extras("source", ["onnx"], confirm=False, workspace_dir=Path("/tmp"))
+            is False
+        )
+        assert (
+            init_cmd._install_extras("project", ["onnx"], confirm=False, workspace_dir=Path("/tmp"))
+            is False
+        )
+
+    def test_tty_stdin_still_prompts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Reverse pin: the non-TTY gate must not accidentally disable the
+        prompt for real interactive runs. With ``isatty=True`` the helper
+        still invokes ``nav_confirm`` and proceeds to subprocess on
+        confirm."""
+        import subprocess as _sp
+
+        from memtomem.cli import init_cmd
+
+        called = {"confirm": False, "run": False}
+
+        def _spy_confirm(prompt, default=False):
+            called["confirm"] = True
+            return True
+
+        def _fake_run(cmd, **kw):
+            called["run"] = True
+            return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(init_cmd.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr(init_cmd, "nav_confirm", _spy_confirm)
+        monkeypatch.setattr(init_cmd.subprocess, "run", _fake_run)
+
+        assert init_cmd._install_extras("tool", ["onnx"], confirm=False) is True
+        assert called == {"confirm": True, "run": True}
 
 
 class TestMismatchBanner:

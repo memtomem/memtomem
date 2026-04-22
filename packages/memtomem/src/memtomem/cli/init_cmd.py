@@ -1025,15 +1025,38 @@ def _install_extras(
     and MUST be ``None`` for ``"tool"`` / ``"uvx"``. Callers are expected
     to branch on the install type before calling.
 
+    Non-interactive contexts (no TTY on stdin — scripted ``mm init -y
+    </dev/null``, CI jobs, Docker build steps) skip the prompt entirely
+    and return ``False`` so the caller falls through to the Phase 1
+    hint. This is the only sensible choice: ``click.prompt`` raises
+    ``Abort!`` on stdin EOF rather than returning the ``default=``, so
+    without this gate the wizard would hard-exit mid-summary on
+    scripted runs. The ``uvx`` hint-only branch fires BEFORE this check
+    so the hint still prints in non-TTY contexts (it's informational,
+    not a prompt).
+
     Returns ``True`` only when a subprocess actually ran and exited 0. In
     every other case — empty ``extras``, missing ``workspace_dir`` for
     source/project, ``uvx`` branch (hint-only, no install semantic),
-    user decline, ``FileNotFoundError``, ``TimeoutExpired``, or non-zero
-    rc — returns ``False`` so the caller falls back to the Phase 1
-    :func:`_emit_missing_extras_warning` hint path."""
+    non-TTY stdin, user decline, ``FileNotFoundError``, ``TimeoutExpired``,
+    or non-zero rc — returns ``False`` so the caller falls back to the
+    Phase 1 :func:`_emit_missing_extras_warning` hint path."""
     if not extras:
         return False
     name = extras[0] if len(extras) == 1 else "all"
+
+    if install_type == "uvx":  # ephemeral env; a non-ephemeral install is meaningless
+        click.echo(
+            "  (uvx is ephemeral — re-invoke with "
+            f'`uvx --from "memtomem[{name}]" memtomem ...` instead)'
+        )
+        return False
+
+    # Non-TTY: skip prompt and defer to Phase 1 hint. Without this,
+    # click.prompt raises Abort! on stdin EOF — a regression for every
+    # scripted `mm init -y` pipeline that worked on v0.1.19.
+    if not sys.stdin.isatty():
+        return False
 
     cwd: str | None
     if install_type in ("source", "project"):
@@ -1041,15 +1064,9 @@ def _install_extras(
             return False
         cmd = ["uv", "sync", "--extra", name]
         cwd = str(workspace_dir)
-    elif install_type == "tool":
+    else:  # install_type == "tool"
         cmd = ["uv", "tool", "install", "--reinstall", f"memtomem[{name}]"]
         cwd = None
-    else:  # uvx — ephemeral env; a non-ephemeral install is meaningless
-        click.echo(
-            "  (uvx is ephemeral — re-invoke with "
-            f'`uvx --from "memtomem[{name}]" memtomem ...` instead)'
-        )
-        return False
 
     prompt = f"  Install memtomem[{name}] now?"
     if not nav_confirm(prompt, default=confirm):
