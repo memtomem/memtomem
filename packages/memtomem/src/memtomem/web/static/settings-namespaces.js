@@ -58,7 +58,10 @@ function _groupNamespaces(namespaces) {
 
 async function loadNamespaceDropdowns() {
   try {
-    const data = await api('GET', '/api/namespaces');
+    const devMode = STATE.uiMode === 'dev';
+    const data = devMode
+      ? await api('GET', '/api/namespaces').catch(() => ({ namespaces: [] }))
+      : { namespaces: [] };
     const namespaces = data.namespaces || [];
     const { groups, ungrouped } = _groupNamespaces(namespaces);
     ['ns-filter', 'tl-namespace', 'exp-namespace'].forEach(id => {
@@ -169,7 +172,10 @@ async function loadNamespacesTab() {
   list.innerHTML = '<div class="loading-panel"><div class="spinner-panel"></div></div>';
 
   try {
-    const data = await api('GET', '/api/namespaces');
+    const devMode = STATE.uiMode === 'dev';
+    const data = devMode
+      ? await api('GET', '/api/namespaces').catch(() => ({ namespaces: [] }))
+      : { namespaces: [] };
     const namespaces = data.namespaces || [];
     if (!namespaces.length) {
       list.innerHTML = emptyState('📁', 'No namespaces yet', 'Index files with a namespace to get started');
