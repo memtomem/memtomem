@@ -53,7 +53,10 @@ No install needed for MCP usage — `uvx` downloads and runs memtomem on demand 
 If you also want the CLI (`mm` command):
 ```bash
 uv tool install memtomem    # or: pipx install memtomem
+mm --version                # verify install
 ```
+
+> **If `mm --version` shows an older release**: `uv` caches PyPI metadata per package, and a fresh install can resolve to the cached entry for a short window after a new release. Re-run with `uv tool install memtomem --refresh`, or clear the cache first: `uv cache clean memtomem`. Check the [latest release](https://github.com/memtomem/memtomem/releases) for the expected version.
 
 Skip to [Connect to your AI editor](#connect-to-your-ai-editor).
 
