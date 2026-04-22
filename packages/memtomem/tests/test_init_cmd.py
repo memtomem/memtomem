@@ -3821,6 +3821,21 @@ class TestInitialSeedThreshold:
 
         assert _collect_seed_scale(tmp_path / "does-not-exist") == (0, 0)
 
+    def test_format_size_boundaries(self) -> None:
+        """Sub-KB totals display as ``<1 KB`` not ``0 KB``. Regression
+        guard: 15 tiny memo files triggered the large-by-count branch
+        and showed "(0 KB)" to the user, who'd reasonably think it was
+        a display bug. Also pin the MB boundary (>= 1024 KB) to catch
+        off-by-one rounding."""
+        from memtomem.cli.init_cmd import _format_size
+
+        assert _format_size(0) == "0 bytes"
+        assert _format_size(500) == "<1 KB"
+        assert _format_size(1024) == "1 KB"
+        assert _format_size(65 * 1024) == "65 KB"
+        assert _format_size(1024 * 1024) == "1 MB"
+        assert _format_size(12 * 1024 * 1024) == "12 MB"
+
     def test_provider_seed_hint_variants(self) -> None:
         """Provider-specific advisory strings. Pins the four known
         providers so a silent change (e.g. dropping ``openai``) fails a
@@ -4060,6 +4075,63 @@ class TestInitialSeedThreshold:
         assert "Skipped initial seed" in out
         assert "embedder unavailable" in out
         assert f"mm index {memory_dir}" in out
+
+    def test_seed_with_progress_zero_chunks_emits_warning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Stream processes files but lands 0 chunks → yellow warning,
+        return False. Known trigger: provider=none (NoopEmbedder dim=0)
+        leaves ``chunks_vec`` vtable uncreated, ``upsert_chunks`` rolls
+        back every insert. Wizard previously printed green "Seeded N
+        file(s), 0 new chunk(s), 0 unchanged" — misleading success.
+        Regression guard: any future silent per-file failure that
+        aggregates to zero counters should surface as yellow, not green,
+        and skip the Next-steps step-1 annotation."""
+        from contextlib import asynccontextmanager
+
+        from memtomem.cli import init_cmd
+
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+
+        class _FakeEngine:
+            async def index_path_stream(self, path, recursive=True, force=False):
+                yield {
+                    "type": "progress",
+                    "file": str(memory_dir / "a.md"),
+                    "files_done": 1,
+                    "files_total": 1,
+                    "indexed": 0,
+                    "skipped": 0,
+                }
+                yield {
+                    "type": "complete",
+                    "total_files": 1,
+                    "total_chunks": 0,
+                    "indexed_chunks": 0,
+                    "skipped_chunks": 0,
+                    "deleted_chunks": 0,
+                    "duration_ms": 1.0,
+                }
+
+        class _FakeComp:
+            index_engine = _FakeEngine()
+
+        @asynccontextmanager  # type: ignore[misc]
+        async def _fake_components():
+            yield _FakeComp()
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _fake_components)
+
+        assert init_cmd._seed_with_progress(memory_dir) is False
+        out = capsys.readouterr().out
+        assert "0 chunks were indexed" in out
+        assert "embedding-reset" in out
+        # Regression: must NOT print green "Seeded initial index" success line.
+        assert "Seeded initial index" not in out
 
     def test_seed_with_progress_keyboard_interrupt_is_graceful(
         self,

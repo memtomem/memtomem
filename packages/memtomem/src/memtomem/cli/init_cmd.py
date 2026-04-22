@@ -1291,10 +1291,18 @@ def _collect_seed_scale(memory_dir: Path) -> tuple[int, int]:
 
 
 def _format_size(total_bytes: int) -> str:
-    """Human-readable size — KB below 1024 KB, MB above (integer-only,
-    avoids fractional noise in the wizard's one-line advisory)."""
+    """Human-readable size — ``<1 KB`` for sub-KB totals (15 tiny memo
+    files shouldn't display as "0 KB"), ``N KB`` up to 1024 KB, ``N MB``
+    above. Integer-only beyond the sub-KB floor to avoid fractional noise
+    in the wizard's one-line advisory."""
+    if total_bytes == 0:
+        return "0 bytes"
     kb = total_bytes // 1024
-    return f"{kb // 1024} MB" if kb >= 1024 else f"{kb} KB"
+    if kb == 0:
+        return "<1 KB"
+    if kb >= 1024:
+        return f"{kb // 1024} MB"
+    return f"{kb} KB"
 
 
 def _provider_seed_hint(provider: str) -> str | None:
@@ -1388,10 +1396,34 @@ def _seed_with_progress(memory_dir: Path) -> bool:
         return False
 
     click.echo()
+    total_files = result["total_files"]
+    indexed = result["indexed_chunks"]
+    skipped = result["skipped_chunks"]
+
+    # Defensive: if the stream processed files but landed zero chunks
+    # (neither new nor skipped-as-unchanged), something went wrong
+    # silently — per-file errors are logged but the `complete` event
+    # aggregates to zero counters. Known trigger: provider=none
+    # (NoopEmbedder dim=0) which leaves the ``chunks_vec`` virtual
+    # table uncreated, so ``upsert_chunks`` rolls back every insert
+    # (``feedback_chunks_vec_dim0_legacy.md``). Return False so the
+    # Next-steps step 1 stays unmarked and the user knows to investigate
+    # rather than seeing a false green success.
+    if total_files > 0 and indexed == 0 and skipped == 0:
+        click.secho(
+            f"  Seeded {total_files} file(s) but 0 chunks were indexed — "
+            "check logs for upsert errors.",
+            fg="yellow",
+        )
+        click.secho(
+            "  If you switched embedders recently, try `mm embedding-reset --mode apply-current`.",
+            fg="yellow",
+        )
+        return False
+
     click.secho(
-        f"  Seeded initial index: {result['total_files']} file(s), "
-        f"{result['indexed_chunks']} new chunk(s), "
-        f"{result['skipped_chunks']} unchanged.",
+        f"  Seeded initial index: {total_files} file(s), "
+        f"{indexed} new chunk(s), {skipped} unchanged.",
         fg="green",
     )
     return True
