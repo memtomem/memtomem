@@ -5,30 +5,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.20] — 2026-04-22
+
+Phase 2 of the `mm init` install-context UX series (#360 → #361 → this
+release). Phase 1 (v0.1.19) fixed the install-hint text for the
+cwd-vs-runtime mismatch; this release closes the UX loop by actually
+explaining the mismatch and offering to install the missing extras.
+
 ### Changed
 
 - **`mm init` now offers to auto-install missing python extras** — the
-  summary still surfaces the same Phase-1 install-type-aware hint, but
+  summary still surfaces the same Phase 1 install-type-aware hint, but
   first prompts `Install memtomem[all] now?` (defaulting to No — Enter
   skips, preserving the previous hint-only behavior). When the user
-  confirms, the wizard shells out to `uv sync --extra …` (source/project
-  installs) or `uv tool install --reinstall "memtomem[…]"` (tool
-  installs) and prints a single `Installed missing extras: …` line on
-  success. Subprocess failures (missing binary, timeout, non-zero rc)
-  fall back to the hint. Also adds a one-line info banner when the
-  wizard is run from a source/project checkout with a global (non-
-  workspace-venv) interpreter, explaining that `Next steps` assume
-  `uv run mm` — Phase 1 silenced the false warning for this combination
-  but didn't explain why. (#360 Phase 2, #362)
-- **Behavior note for scripted / non-interactive `mm init -y` runs
-  with missing extras**: non-interactive contexts (no TTY on stdin —
-  e.g. `mm init -y </dev/null`, CI jobs, Docker build steps) skip the
-  `Install memtomem[all] now?` prompt entirely and fall back to the
-  Phase-1 hint output; TTY runs show the prompt with a **No** default.
-  The non-TTY gate is required because `click.prompt` raises `Abort!`
-  on stdin EOF rather than returning the default — without it, every
-  scripted pipeline that passed on v0.1.19 would hard-exit in v0.1.20.
-  (#364 follow-up)
+  confirms, the wizard shells out to `uv sync --extra …`
+  (source/project installs) or `uv tool install --reinstall
+  "memtomem[…]"` (tool installs) and prints a single `Installed missing
+  extras: …` line on success. Subprocess failures (missing binary,
+  timeout, non-zero rc) fall back to the hint. Also adds a one-line
+  info banner when the wizard is run from a source/project checkout
+  with a global (non-workspace-venv) interpreter, explaining that
+  `Next steps` assume `uv run mm` — Phase 1 silenced the false warning
+  for this combination but didn't explain why. (#360 Phase 2, #362,
+  #364)
+- **Non-interactive `mm init -y` runs skip the new prompt** —
+  non-TTY contexts (e.g. `mm init -y </dev/null`, CI jobs, Docker
+  build steps) short-circuit the `Install memtomem[all] now?` prompt
+  entirely and fall back to the Phase 1 hint output; TTY runs show
+  the prompt with a **No** default. The non-TTY gate is required
+  because `click.prompt` raises `Abort!` on stdin EOF rather than
+  returning the `default=` — without it, every scripted pipeline that
+  passed on v0.1.19 would hard-exit in v0.1.20. (#365)
 
 ## [0.1.19] — 2026-04-22
 
