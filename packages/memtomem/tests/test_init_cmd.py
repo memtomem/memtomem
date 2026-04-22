@@ -4133,6 +4133,62 @@ class TestInitialSeedThreshold:
         # Regression: must NOT print green "Seeded initial index" success line.
         assert "Seeded initial index" not in out
 
+    def test_seed_with_progress_happy_path_suppresses_zero_chunks_warning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Happy-path pin: when the stream reports ``indexed > 0`` (the
+        expected outcome of fresh ``--provider none`` post-fix), the yellow
+        "0 chunks were indexed" warning must NOT fire. Guards against the
+        warning condition widening over time — if someone later tightens the
+        threshold (e.g. ``indexed < 2``), this test catches it before users
+        see spurious warnings on valid BM25-only installs."""
+        from contextlib import asynccontextmanager
+
+        from memtomem.cli import init_cmd
+
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+
+        class _FakeEngine:
+            async def index_path_stream(self, path, recursive=True, force=False):
+                yield {
+                    "type": "progress",
+                    "file": str(memory_dir / "a.md"),
+                    "files_done": 1,
+                    "files_total": 1,
+                    "indexed": 3,
+                    "skipped": 0,
+                }
+                yield {
+                    "type": "complete",
+                    "total_files": 1,
+                    "total_chunks": 3,
+                    "indexed_chunks": 3,
+                    "skipped_chunks": 0,
+                    "deleted_chunks": 0,
+                    "duration_ms": 1.0,
+                }
+
+        class _FakeComp:
+            index_engine = _FakeEngine()
+
+        @asynccontextmanager  # type: ignore[misc]
+        async def _fake_components():
+            yield _FakeComp()
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _fake_components)
+
+        assert init_cmd._seed_with_progress(memory_dir) is True
+        out = capsys.readouterr().out
+        assert "Seeded initial index" in out
+        assert "3 new chunk(s)" in out
+        # Regression: yellow warning must NOT fire on happy path.
+        assert "0 chunks were indexed" not in out
+        assert "embedding-reset" not in out
+
     def test_seed_with_progress_keyboard_interrupt_is_graceful(
         self,
         tmp_path: Path,
