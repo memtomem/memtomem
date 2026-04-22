@@ -57,6 +57,11 @@ function _groupNamespaces(namespaces) {
 // ---------------------------------------------------------------------------
 
 async function loadNamespaceDropdowns() {
+  // /api/namespaces is mounted only in dev mode (web/app.py _DEV_ONLY_ROUTERS).
+  // Skip the fetch in prod to avoid a guaranteed 404 — the filter dropdowns
+  // keep their static "All Namespaces" option. Mirrors the gate pattern in
+  // app.js loadDashboard.
+  if (STATE.uiMode !== 'dev') return;
   try {
     const data = await api('GET', '/api/namespaces');
     const namespaces = data.namespaces || [];
@@ -93,8 +98,10 @@ async function loadNamespaceDropdowns() {
   } catch (e) { console.warn('[ns-dropdown]', e); }
 }
 
-// Load on startup and when switching to related tabs
-loadNamespaceDropdowns();
+// Tab-switch triggers (app.js activateTab) and mutation handlers below
+// re-invoke loadNamespaceDropdowns after STATE.uiMode is known. The initial
+// boot-time populate is driven from _applyUiModeFilter once ui-mode has
+// resolved — running here would always race initUiMode and no-op.
 
 // Namespaces tab
 qs('ns-refresh-btn').addEventListener('click', loadNamespacesTab);
