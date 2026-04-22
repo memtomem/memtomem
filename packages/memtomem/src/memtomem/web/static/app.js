@@ -116,6 +116,12 @@ function _applyUiModeFilter() {
       el.style.display = '';
     }
   });
+  // Boot-time populate for namespace filter dropdowns. loadNamespaceDropdowns
+  // self-gates on STATE.uiMode, so this is safe to fire in both modes — prod
+  // is a no-op. Replaces a bare module-level call in settings-namespaces.js
+  // that was racing initUiMode (STATE.uiMode still defaulted to 'prod' at
+  // module load, so the bare call never helped dev mode either).
+  if (typeof loadNamespaceDropdowns === 'function') loadNamespaceDropdowns();
 }
 
 function _visibleMainTabs() {
