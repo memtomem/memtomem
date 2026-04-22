@@ -5,6 +5,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed
+
+- **`mm init` now offers to auto-install missing python extras** — the
+  summary still surfaces the same Phase-1 install-type-aware hint, but
+  first prompts `Install memtomem[all] now?` (defaulting to No — Enter
+  skips, preserving the previous hint-only behavior). When the user
+  confirms, the wizard shells out to `uv sync --extra …` (source/project
+  installs) or `uv tool install --reinstall "memtomem[…]"` (tool
+  installs) and prints a single `Installed missing extras: …` line on
+  success. Subprocess failures (missing binary, timeout, non-zero rc)
+  fall back to the hint. Also adds a one-line info banner when the
+  wizard is run from a source/project checkout with a global (non-
+  workspace-venv) interpreter, explaining that `Next steps` assume
+  `uv run mm` — Phase 1 silenced the false warning for this combination
+  but didn't explain why. (#360 Phase 2, #362)
+- **Behavior note for scripted `mm init -y` runs with missing extras**:
+  the `Install memtomem[all] now?` prompt defaults to No, so an
+  unattended Enter (or TTY-less run) preserves the Phase-1 hint output
+  — no silent install — but scripts that auto-feed the wizard may see
+  one extra prompt line when extras are missing.
+
 ## [0.1.19] — 2026-04-22
 
 First-UX follow-up to 0.1.18. The new missing-extras warning misfired on

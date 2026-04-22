@@ -9,11 +9,14 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Literal
 
 import click
 
 from memtomem.cli.init_presets import PRESETS, _VALID_PRESETS, get_preset
 from memtomem.cli.wizard import nav_confirm, nav_prompt, run_steps, step_header
+
+InstallType = Literal["source", "project", "tool", "uvx"]
 
 
 def _run(cmd: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
@@ -995,6 +998,77 @@ def _extra_install_hint(extras: list[str], state: dict | None = None) -> str:
     return f'{_EXTRA_INSTALL_HINT_PREFIX}[{name}]"'
 
 
+def _install_extras(
+    install_type: InstallType,
+    extras: list[str],
+    *,
+    confirm: bool = False,
+    workspace_dir: Path | None = None,
+) -> bool:
+    """Confirm-then-subprocess install for python package extras.
+
+    Scope is intentionally narrow: python package extras only. Ollama model-
+    pull and ``claude mcp add`` have different shapes (no ``install_type ×
+    extras`` axis — a model name vs. a package-extras list) and stay inline
+    at their current call sites. Generalizing this helper into an arbitrary
+    "confirm + subprocess + fallback" runner would bloat it with call-site-
+    specific prompt strings for zero reuse today.
+
+    ``confirm`` is passed as ``default=`` to :func:`nav_confirm`: ``True``
+    means Enter-is-Yes (ollama-style — the user likely wants the heavy
+    model download), ``False`` means Enter-is-No (python-extras-style —
+    the user has already typed through the wizard and a ``[all]`` reinstall
+    is heavy).
+
+    ``workspace_dir`` is REQUIRED when ``install_type`` is ``"source"`` or
+    ``"project"`` (used as ``subprocess.run`` ``cwd=`` for ``uv sync``)
+    and MUST be ``None`` for ``"tool"`` / ``"uvx"``. Callers are expected
+    to branch on the install type before calling.
+
+    Returns ``True`` only when a subprocess actually ran and exited 0. In
+    every other case — empty ``extras``, missing ``workspace_dir`` for
+    source/project, ``uvx`` branch (hint-only, no install semantic),
+    user decline, ``FileNotFoundError``, ``TimeoutExpired``, or non-zero
+    rc — returns ``False`` so the caller falls back to the Phase 1
+    :func:`_emit_missing_extras_warning` hint path."""
+    if not extras:
+        return False
+    name = extras[0] if len(extras) == 1 else "all"
+
+    cwd: str | None
+    if install_type in ("source", "project"):
+        if workspace_dir is None:
+            return False
+        cmd = ["uv", "sync", "--extra", name]
+        cwd = str(workspace_dir)
+    elif install_type == "tool":
+        cmd = ["uv", "tool", "install", "--reinstall", f"memtomem[{name}]"]
+        cwd = None
+    else:  # uvx — ephemeral env; a non-ephemeral install is meaningless
+        click.echo(
+            "  (uvx is ephemeral — re-invoke with "
+            f'`uvx --from "memtomem[{name}]" memtomem ...` instead)'
+        )
+        return False
+
+    prompt = f"  Install memtomem[{name}] now?"
+    if not nav_confirm(prompt, default=confirm):
+        return False
+
+    click.echo(f"  Running: {' '.join(cmd)}")
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
 def _collect_missing_extras(state: dict) -> list[str]:
     """Return ordered list of missing extras the chosen config will need.
 
@@ -1039,6 +1113,58 @@ def _collect_missing_extras(state: dict) -> list[str]:
 
     warned = state.get("_extras_warned_inline") or set()
     return [x for x in missing if x not in warned]
+
+
+def _runtime_under_workspace_venv(state: dict) -> bool:
+    """True iff the current ``sys.executable`` is inside ``<workspace>/.venv/``.
+
+    Used by :func:`_emit_cwd_runtime_mismatch_banner` to decide whether the
+    user is running a global ``mm`` from inside a source/project checkout
+    (mismatch) vs. ``uv run mm`` from the workspace venv (aligned).
+
+    Compares raw path strings (no ``.resolve()``) on purpose: ``uv`` creates
+    ``.venv/bin/python3`` as a symlink to its managed interpreter cache
+    (``~/.local/share/uv/python/...``). Resolving the symlink would always
+    land outside the workspace and fire the banner even when the runtime
+    IS the workspace venv. The raw prefix comparison matches how Python
+    itself reports ``sys.executable`` (it reports the symlink path, not
+    the target)."""
+    root = state.get("source_dir") or state.get("project_dir")
+    if not root:
+        return False
+    try:
+        return Path(sys.executable).is_relative_to(Path(root) / ".venv")
+    except (OSError, ValueError):
+        return False
+
+
+def _emit_cwd_runtime_mismatch_banner(state: dict) -> None:
+    """Info banner for ``source/project cwd + non-workspace runtime``.
+
+    Phase 1 (#361) silenced the false missing-extras warning for this
+    combination (the wizard's own interpreter is the tool env but Next-
+    steps uses ``uv run mm`` which probes the workspace venv). Phase 2
+    closes the UX loop by explaining the silence: users otherwise wonder
+    whether the wizard did the right thing or swallowed an error.
+
+    Trigger is orthogonal to extras presence — the mismatch is a property
+    of the axes themselves, not of what's installed. Prints nothing when
+    the runtime interpreter is inside the workspace venv, or when the
+    install type is PyPI / tool (no cwd axis to disagree with)."""
+    if not (state.get("source_install") or state.get("project_install")):
+        return
+    if _runtime_under_workspace_venv(state):
+        return
+    cwd_type = "source" if state.get("source_install") else "project"
+    click.echo()
+    click.secho(
+        f"  i  cwd: {cwd_type} / runtime: uv tool — Next steps assume `uv run mm`.",
+        fg="cyan",
+    )
+    click.secho(
+        "     If you intend to run bare `mm`, install [all] into the tool env.",
+        fg="cyan",
+    )
 
 
 def _emit_missing_extras_warning(missing: list[str], state: dict) -> None:
@@ -1331,6 +1457,15 @@ def _write_config_and_summary(
     # show a single ``run uv sync first`` line instead. Otherwise probe the
     # workspace venv (if present) or in-process and emit the regular
     # warning. Issue #360 Phase 1.
+    #
+    # Before either branch: cwd-vs-runtime mismatch banner (#360 Phase 2).
+    # Source/project cwd + non-workspace runtime → explain why the wizard
+    # stays quiet about the tool-env extras and which invocation shape the
+    # printed Next steps assume.
+    _emit_cwd_runtime_mismatch_banner(state)
+    install_type_lit: InstallType = (
+        "source" if source_install else "project" if project_install else "tool"
+    )
     if _workspace_needs_sync(state):
         click.echo()
         click.secho(
@@ -1338,7 +1473,24 @@ def _write_config_and_summary(
             fg="yellow",
         )
     else:
-        _emit_missing_extras_warning(_collect_missing_extras(state), state)
+        missing = _collect_missing_extras(state)
+        if missing:
+            ws: Path | None
+            if source_install:
+                ws = Path(state["source_dir"])
+            elif project_install:
+                ws = Path(state["project_dir"])
+            else:
+                ws = None
+            installed = _install_extras(install_type_lit, missing, confirm=False, workspace_dir=ws)
+            if installed:
+                click.echo()
+                click.secho(
+                    f"  Installed missing extras: {', '.join(missing)}.",
+                    fg="green",
+                )
+            else:
+                _emit_missing_extras_warning(missing, state)
 
     click.echo()
     click.secho("  Next steps:", fg="cyan")

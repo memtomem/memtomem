@@ -367,9 +367,15 @@ class TestMissingExtrasWarning:
         """End-to-end: Korean-preset-style state (provider=onnx) + fastembed
         absent must produce a warning in the printed summary. Regression for
         the preset paths skipping ``_step_embedding``'s inline check.
-        Default state has ``source_install=False`` → PyPI hint preserved."""
+        Default state has ``source_install=False`` → PyPI hint preserved.
+
+        Phase 2 (#362): the summary now routes missing extras through
+        ``_install_extras`` first; with the helper stubbed to ``False``
+        (simulating user decline / subprocess failure / non-TTY) the
+        Phase 1 warning path must still fire."""
         from click import unstyle
 
+        from memtomem.cli import init_cmd
         from memtomem.cli.init_cmd import _write_config_and_summary
 
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -378,6 +384,7 @@ class TestMissingExtrasWarning:
             lambda name: None if name == "fastembed" else object(),
         )
         monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+        monkeypatch.setattr(init_cmd, "_install_extras", lambda *a, **kw: False)
 
         state = _make_init_state(tmp_path)
         state["provider"] = "onnx"
@@ -643,6 +650,525 @@ class TestInstallAxesReconcile:
         assert "Workspace .venv not found" not in out
         assert "Next steps:" in out
         assert "uv run mm" in out
+
+    def test_warning_still_fires_when_helper_declines(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Phase 2 regression: when ``_install_extras`` returns ``False``
+        (user declined / subprocess failed / empty contract) the summary
+        must still surface the Phase 1 ``[!] Missing extras:`` warning so
+        the hint path is never silently skipped."""
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd, "_probe_workspace_extras", lambda py: set())
+        monkeypatch.setattr(init_cmd, "_install_extras", lambda *a, **kw: False)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        state = self._make_state_source_with_venv(tmp_path)
+        state["provider"] = "onnx"
+        state["model"] = "bge-m3"
+        state["dimension"] = 1024
+        init_cmd._write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "Missing extras:" in out
+        assert "Installed missing extras:" not in out
+
+    def test_helper_success_skips_warning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Phase 2: when ``_install_extras`` returns ``True`` (subprocess
+        ran and exited 0) the summary shows the success line and skips the
+        Phase 1 warning — a hint after a successful install would be
+        noise."""
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd, "_probe_workspace_extras", lambda py: set())
+        monkeypatch.setattr(init_cmd, "_install_extras", lambda *a, **kw: True)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        state = self._make_state_source_with_venv(tmp_path)
+        state["provider"] = "onnx"
+        state["model"] = "bge-m3"
+        state["dimension"] = 1024
+        init_cmd._write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "Missing extras:" not in out
+        assert "Installed missing extras:" in out
+
+
+class TestInstallExtrasHelper:
+    """Issue #362 Phase 2 — ``_install_extras`` helper unit tests.
+
+    Covers the ``install_type × extras × confirm`` matrix and the failure-
+    fallback contract (helper returns ``False`` on every non-success path
+    so the caller can fall through to :func:`_emit_missing_extras_warning`
+    without losing the Phase 1 hint)."""
+
+    def test_empty_extras_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Empty ``extras`` list → ``False`` without prompt or subprocess."""
+        from memtomem.cli import init_cmd
+
+        def _no_subprocess(*a, **kw):  # pragma: no cover - must not run
+            raise AssertionError("subprocess.run must not be called for empty extras")
+
+        monkeypatch.setattr(init_cmd.subprocess, "run", _no_subprocess)
+        assert init_cmd._install_extras("source", [], workspace_dir=Path("/tmp")) is False
+
+    def test_source_confirm_yes_runs_uv_sync(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``install_type='source'`` + nav_confirm→True → spawns ``uv sync
+        --extra onnx`` with ``cwd=workspace_dir``; returns ``True`` on rc=0."""
+        import subprocess as _sp
+
+        from memtomem.cli import init_cmd
+
+        captured: dict = {}
+
+        def _fake_run(cmd, **kw):
+            captured["cmd"] = cmd
+            captured["cwd"] = kw.get("cwd")
+            return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: True)
+        monkeypatch.setattr(init_cmd.subprocess, "run", _fake_run)
+
+        assert (
+            init_cmd._install_extras("source", ["onnx"], confirm=False, workspace_dir=tmp_path)
+            is True
+        )
+        assert captured["cmd"] == ["uv", "sync", "--extra", "onnx"]
+        assert captured["cwd"] == str(tmp_path)
+
+    def test_project_confirm_yes_runs_uv_sync(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``install_type='project'`` behaves identically to ``'source'``."""
+        import subprocess as _sp
+
+        from memtomem.cli import init_cmd
+
+        captured: dict = {}
+
+        def _fake_run(cmd, **kw):
+            captured["cmd"] = cmd
+            captured["cwd"] = kw.get("cwd")
+            return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: True)
+        monkeypatch.setattr(init_cmd.subprocess, "run", _fake_run)
+
+        assert (
+            init_cmd._install_extras("project", ["onnx"], confirm=False, workspace_dir=tmp_path)
+            is True
+        )
+        assert captured["cmd"] == ["uv", "sync", "--extra", "onnx"]
+        assert captured["cwd"] == str(tmp_path)
+
+    def test_tool_confirm_yes_runs_uv_tool_reinstall(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``install_type='tool'`` → ``uv tool install --reinstall
+        "memtomem[onnx]"`` with ``cwd=None``."""
+        import subprocess as _sp
+
+        from memtomem.cli import init_cmd
+
+        captured: dict = {}
+
+        def _fake_run(cmd, **kw):
+            captured["cmd"] = cmd
+            captured["cwd"] = kw.get("cwd")
+            return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: True)
+        monkeypatch.setattr(init_cmd.subprocess, "run", _fake_run)
+
+        assert init_cmd._install_extras("tool", ["onnx"], confirm=False) is True
+        assert captured["cmd"] == [
+            "uv",
+            "tool",
+            "install",
+            "--reinstall",
+            "memtomem[onnx]",
+        ]
+        assert captured["cwd"] is None
+
+    def test_uvx_branch_hints_and_returns_false(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """``install_type='uvx'`` is ephemeral — helper prints a hint
+        about ``uvx --from`` and returns ``False`` without any
+        subprocess call."""
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        def _no_subprocess(*a, **kw):  # pragma: no cover - must not run
+            raise AssertionError("subprocess.run must not be called for uvx")
+
+        monkeypatch.setattr(init_cmd.subprocess, "run", _no_subprocess)
+        monkeypatch.setattr(
+            init_cmd, "nav_confirm", lambda *a, **kw: True
+        )  # should not reach nav_confirm either
+
+        assert init_cmd._install_extras("uvx", ["onnx"]) is False
+        out = unstyle(capsys.readouterr().out)
+        assert "uvx is ephemeral" in out
+
+    def test_multi_extras_collapse_to_all(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Two or more missing extras → helper collapses to
+        ``memtomem[all]`` / ``--extra all`` (matches ``_extra_install_hint``
+        and keeps ``pyproject.toml``'s public bundle contract)."""
+        import subprocess as _sp
+
+        from memtomem.cli import init_cmd
+
+        captured: dict = {}
+
+        def _fake_run(cmd, **kw):
+            captured["cmd"] = cmd
+            return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: True)
+        monkeypatch.setattr(init_cmd.subprocess, "run", _fake_run)
+
+        assert init_cmd._install_extras("tool", ["onnx", "web"], confirm=False) is True
+        assert captured["cmd"] == [
+            "uv",
+            "tool",
+            "install",
+            "--reinstall",
+            "memtomem[all]",
+        ]
+
+    def test_confirm_declined_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """User presses Enter / N → ``nav_confirm`` → False → helper
+        returns ``False`` and does not spawn a subprocess."""
+        from memtomem.cli import init_cmd
+
+        def _no_subprocess(*a, **kw):  # pragma: no cover - must not run
+            raise AssertionError("subprocess.run must not be called when user declines")
+
+        monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: False)
+        monkeypatch.setattr(init_cmd.subprocess, "run", _no_subprocess)
+
+        assert init_cmd._install_extras("tool", ["onnx"], confirm=False) is False
+
+    def test_filenotfound_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``FileNotFoundError`` (e.g. ``uv`` binary missing) → helper
+        returns ``False`` without crashing."""
+        from memtomem.cli import init_cmd
+
+        def _raise_fnf(*a, **kw):
+            raise FileNotFoundError("uv not found")
+
+        monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: True)
+        monkeypatch.setattr(init_cmd.subprocess, "run", _raise_fnf)
+
+        assert init_cmd._install_extras("tool", ["onnx"], confirm=False) is False
+
+    def test_timeout_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``subprocess.TimeoutExpired`` → helper returns ``False``."""
+        import subprocess as _sp
+
+        from memtomem.cli import init_cmd
+
+        def _raise_timeout(*a, **kw):
+            raise _sp.TimeoutExpired(cmd=a[0] if a else "uv", timeout=600)
+
+        monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: True)
+        monkeypatch.setattr(init_cmd.subprocess, "run", _raise_timeout)
+
+        assert init_cmd._install_extras("tool", ["onnx"], confirm=False) is False
+
+    def test_nonzero_rc_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """subprocess exit code != 0 → helper returns ``False`` so the
+        caller falls back to the Phase 1 hint."""
+        import subprocess as _sp
+
+        from memtomem.cli import init_cmd
+
+        def _fake_run(cmd, **kw):
+            return _sp.CompletedProcess(cmd, returncode=1, stdout="", stderr="boom")
+
+        monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: True)
+        monkeypatch.setattr(init_cmd.subprocess, "run", _fake_run)
+
+        assert init_cmd._install_extras("tool", ["onnx"], confirm=False) is False
+
+    def test_source_without_workspace_dir_returns_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Contract: ``source/project`` install_type requires
+        ``workspace_dir``; passing ``None`` is a caller bug — helper
+        fails safe (returns ``False``) rather than spawning a
+        ``uv sync`` in whatever the current cwd happens to be."""
+        from memtomem.cli import init_cmd
+
+        def _no_subprocess(*a, **kw):  # pragma: no cover - must not run
+            raise AssertionError("subprocess.run must not be called without workspace_dir")
+
+        monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: True)
+        monkeypatch.setattr(init_cmd.subprocess, "run", _no_subprocess)
+
+        assert init_cmd._install_extras("source", ["onnx"], workspace_dir=None) is False
+
+    def test_confirm_kwarg_passed_as_default_to_nav_confirm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D1 pin: helper's ``confirm`` param is forwarded verbatim to
+        ``nav_confirm``'s ``default`` kwarg — ``True`` = Enter-is-Yes
+        (ollama-style), ``False`` = Enter-is-No (python-extras-style)."""
+        import subprocess as _sp
+
+        from memtomem.cli import init_cmd
+
+        seen_defaults: list[bool] = []
+
+        def _spy_confirm(prompt, default=False):
+            seen_defaults.append(default)
+            return False  # always decline — we only care about the default
+
+        monkeypatch.setattr(init_cmd, "nav_confirm", _spy_confirm)
+        monkeypatch.setattr(
+            init_cmd.subprocess,
+            "run",
+            lambda *a, **kw: _sp.CompletedProcess([], returncode=0),
+        )
+
+        init_cmd._install_extras("tool", ["onnx"], confirm=True)
+        init_cmd._install_extras("tool", ["onnx"], confirm=False)
+        assert seen_defaults == [True, False]
+
+
+class TestMismatchBanner:
+    """Issue #362 Phase 2 — cwd-vs-runtime mismatch info banner.
+
+    Phase 1 silenced the false ``[!] Missing extras:`` warning for the
+    ``source cwd + global uv-tool mm + workspace .venv has [all]``
+    combination; Phase 2 adds a one-line banner explaining *why* the
+    wizard is quiet. Trigger is orthogonal to extras presence — it
+    fires whenever the cwd axis says source/project but
+    ``sys.executable`` lives outside the workspace ``.venv/``."""
+
+    @staticmethod
+    def _source_state_with_venv(tmp_path: Path) -> dict:
+        state = _make_init_state(tmp_path)
+        venv_bin = tmp_path / ".venv" / "bin"
+        venv_bin.mkdir(parents=True, exist_ok=True)
+        (venv_bin / "python").touch()
+        state["source_install"] = True
+        state["source_dir"] = str(tmp_path)
+        state["provider"] = "onnx"
+        state["model"] = "bge-m3"
+        state["dimension"] = 1024
+        return state
+
+    def test_banner_fires_source_cwd_tool_runtime(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Source install + ``sys.executable`` outside workspace venv →
+        banner lines present."""
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
+        monkeypatch.setattr(
+            init_cmd,
+            "_probe_workspace_extras",
+            lambda py: {"fastembed", "fastapi", "uvicorn"},
+        )
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        state = self._source_state_with_venv(tmp_path)
+        init_cmd._write_config_and_summary(state, tmp_path)
+        out = unstyle(capsys.readouterr().out)
+        assert "cwd: source / runtime: uv tool" in out
+        assert "bare `mm`" in out
+
+    def test_banner_fires_project_cwd_tool_runtime(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Project install (``uv add memtomem``) + external runtime →
+        banner uses ``cwd: project``."""
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
+        venv_bin = tmp_path / ".venv" / "bin"
+        venv_bin.mkdir(parents=True, exist_ok=True)
+        (venv_bin / "python").touch()
+        monkeypatch.setattr(
+            init_cmd,
+            "_probe_workspace_extras",
+            lambda py: {"fastembed", "fastapi", "uvicorn"},
+        )
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        state = _make_init_state(tmp_path)
+        state["project_install"] = True
+        state["project_dir"] = str(tmp_path)
+        state["provider"] = "onnx"
+        state["model"] = "bge-m3"
+        state["dimension"] = 1024
+        init_cmd._write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "cwd: project / runtime: uv tool" in out
+
+    def test_banner_silent_when_runtime_under_workspace_venv(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """``sys.executable`` points inside ``<workspace>/.venv/`` →
+        runtime matches cwd axis, banner stays silent."""
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        ws_python = tmp_path / ".venv" / "bin" / "python"
+        monkeypatch.setattr(init_cmd.sys, "executable", str(ws_python))
+        monkeypatch.setattr(
+            init_cmd,
+            "_probe_workspace_extras",
+            lambda py: {"fastembed", "fastapi", "uvicorn"},
+        )
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        state = self._source_state_with_venv(tmp_path)
+        init_cmd._write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "cwd: source / runtime:" not in out
+
+    def test_banner_silent_for_pypi_install(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Neither source nor project install → no cwd axis to
+        disagree with, banner stays silent regardless of runtime."""
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        state = _make_init_state(tmp_path)
+        init_cmd._write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "cwd:" not in out
+        assert "runtime:" not in out
+
+    def test_banner_precedes_warning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Mismatch + missing extras + helper declines → banner line
+        index in output < ``[!] Missing extras:`` line index (the
+        banner explains the silence *before* the warning)."""
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
+        monkeypatch.setattr(init_cmd, "_probe_workspace_extras", lambda py: set())
+        monkeypatch.setattr(init_cmd, "_install_extras", lambda *a, **kw: False)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        state = self._source_state_with_venv(tmp_path)
+        init_cmd._write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "cwd: source / runtime: uv tool" in out
+        assert "Missing extras:" in out
+        banner_at = out.index("cwd: source / runtime: uv tool")
+        warning_at = out.index("Missing extras:")
+        assert banner_at < warning_at
+
+    def test_banner_and_missing_venv_both_fire(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Source install + ``.venv/`` absent + external runtime → banner
+        (cyan) AND ``Workspace .venv not found`` (yellow) both show."""
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        # NOTE: no .venv/ created — triggers _workspace_needs_sync branch.
+        state = _make_init_state(tmp_path)
+        state["source_install"] = True
+        state["source_dir"] = str(tmp_path)
+        state["provider"] = "onnx"
+        state["model"] = "bge-m3"
+        state["dimension"] = 1024
+        init_cmd._write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "cwd: source / runtime: uv tool" in out
+        assert "Workspace .venv not found" in out
+
+    def test_banner_still_fires_after_successful_install(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Banner is orthogonal to extras — a successful install does
+        NOT change the fact that cwd and runtime axes disagree. Banner
+        must still print after ``Installed missing extras: …``."""
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
+        monkeypatch.setattr(init_cmd, "_probe_workspace_extras", lambda py: set())
+        monkeypatch.setattr(init_cmd, "_install_extras", lambda *a, **kw: True)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        state = self._source_state_with_venv(tmp_path)
+        init_cmd._write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "cwd: source / runtime: uv tool" in out
+        assert "Installed missing extras:" in out
+        assert "Missing extras:" not in out
 
 
 class TestPreservedSummary:
