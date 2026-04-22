@@ -1239,6 +1239,460 @@ class TestMismatchBanner:
         assert "Missing extras:" not in out
 
 
+class TestRuntimeProfile:
+    """Issue #363 Phase 3 — :class:`RuntimeProfile` dataclass + builder.
+
+    Locks the contract for the single source-of-truth struct that downstream
+    wizard decisions read from. Tests exercise the builder directly so a
+    future install-context judgment that forgets to populate one of the
+    fields surfaces in CI rather than in user-visible misclassification."""
+
+    def test_source_install_profile_fields_populated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Source workspace marker (``pyproject.toml`` + ``packages/``) +
+        existing ``.venv/`` + matching interpreter → all six fields filled
+        with the source-install variant."""
+        from memtomem.cli import init_cmd
+
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='mm'\n", encoding="utf-8")
+        (tmp_path / "packages").mkdir()
+        venv_bin = tmp_path / ".venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        (venv_bin / "python").touch()
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(init_cmd.sys, "executable", str(venv_bin / "python"))
+        # Avoid uvx/uv-tool detection from the parent test process's sys.prefix
+        monkeypatch.setattr(init_cmd.sys, "prefix", str(tmp_path / ".venv"))
+
+        profile = init_cmd._runtime_profile()
+        assert profile.cwd_install_type == "source"
+        assert profile.cwd_install_dir == tmp_path
+        assert profile.runtime_interpreter == venv_bin / "python"
+        assert profile.workspace_venv_path == tmp_path / ".venv"
+        assert profile.runtime_matches_workspace is True
+        assert profile.mm_binary_origin == "venv-relative"
+
+    def test_project_install_profile_no_packages_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``pyproject.toml`` WITHOUT a ``packages/`` dir → project install,
+        not source. The ``packages/`` marker is what disambiguates the
+        memtomem monorepo from a user project that ``uv add memtomem``'d."""
+        from memtomem.cli import init_cmd
+
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='userproj'\n", encoding="utf-8")
+        # NOTE: no packages/ dir created
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
+        monkeypatch.setattr(init_cmd.sys, "prefix", "/usr/local")
+
+        profile = init_cmd._runtime_profile()
+        assert profile.cwd_install_type == "project"
+        assert profile.cwd_install_dir == tmp_path
+        assert profile.workspace_venv_path is None  # no .venv/ created
+        assert profile.runtime_matches_workspace is False
+        assert profile.mm_binary_origin == "system"
+
+    def test_pypi_install_profile_no_workspace_marker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No ancestor with ``pyproject.toml`` → ``pypi`` cwd type, no
+        workspace dir, runtime never matches workspace."""
+        from memtomem.cli import init_cmd
+
+        # tmp_path has no pyproject.toml; walk up 5 levels finds none either
+        # (assuming tmp_path is under a sufficiently nested location).
+        nested = tmp_path / "a" / "b" / "c" / "d" / "e"
+        nested.mkdir(parents=True)
+        monkeypatch.chdir(nested)
+        monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
+        monkeypatch.setattr(init_cmd.sys, "prefix", "/usr/local")
+
+        profile = init_cmd._runtime_profile()
+        assert profile.cwd_install_type == "pypi"
+        assert profile.cwd_install_dir is None
+        assert profile.workspace_venv_path is None
+        assert profile.runtime_matches_workspace is False
+
+    def test_get_or_build_profile_caches_in_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Second call returns the same instance (cached on state)."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
+
+        state: dict = {"source_install": False, "project_install": False}
+        first = init_cmd._get_or_build_profile(state)
+        second = init_cmd._get_or_build_profile(state)
+        assert first is second
+        assert state["_profile"] is first
+
+    def test_get_or_build_profile_falls_back_to_legacy_state_keys(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Tests that build state directly (no ``_profile``) get a profile
+        synthesized from ``state["source_install"]`` / ``source_dir``. This
+        is the back-compat shim that lets the dozens of pre-Phase-3 tests
+        continue to work without rewriting fixtures."""
+        from memtomem.cli import init_cmd
+
+        venv_bin = tmp_path / ".venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        (venv_bin / "python").touch()
+        monkeypatch.setattr(init_cmd.sys, "executable", str(venv_bin / "python"))
+
+        state: dict = {
+            "source_install": True,
+            "source_dir": str(tmp_path),
+            "project_install": False,
+            "project_dir": None,
+        }
+        profile = init_cmd._get_or_build_profile(state)
+        assert profile.cwd_install_type == "source"
+        assert profile.cwd_install_dir == tmp_path
+        assert profile.workspace_venv_path == tmp_path / ".venv"
+        assert profile.runtime_matches_workspace is True
+
+
+class TestMmBinaryOriginDetection:
+    """Issue #363 Phase 3 — first-class ``mm_binary_origin`` heuristic.
+
+    Five-way classification (``uv-tool`` / ``uvx`` / ``venv-relative`` /
+    ``system`` / ``unknown``). The ``uvx`` branch is the one that closes
+    the v0.1.18 ephemeral-env hint gap; the others exist so the wizard
+    has a non-default answer for every install permutation."""
+
+    def test_origin_uvx_archive_v0_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``sys.prefix`` containing ``uv/archive-v0/`` → ``uvx``. The
+        pattern is uv's ephemeral-env cache layout."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(
+            init_cmd.sys,
+            "prefix",
+            "/Users/x/.cache/uv/archive-v0/abcdef1234/",
+        )
+        origin = init_cmd._detect_mm_binary_origin(
+            Path("/Users/x/.cache/uv/archive-v0/abcdef1234/bin/python"),
+            runtime_matches_workspace=False,
+        )
+        assert origin == "uvx"
+
+    def test_origin_uvx_builds_v0_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``sys.prefix`` containing ``uv/builds-v0/`` → ``uvx`` (alternate
+        cache layout for the build phase)."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(
+            init_cmd.sys,
+            "prefix",
+            "/Users/x/.cache/uv/builds-v0/789abc/",
+        )
+        origin = init_cmd._detect_mm_binary_origin(
+            Path("/Users/x/.cache/uv/builds-v0/789abc/bin/python"),
+            runtime_matches_workspace=False,
+        )
+        assert origin == "uvx"
+
+    def test_origin_uv_tool_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``sys.prefix`` containing ``uv/tools/<name>/`` → ``uv-tool``."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(
+            init_cmd.sys,
+            "prefix",
+            "/Users/x/.local/share/uv/tools/memtomem",
+        )
+        origin = init_cmd._detect_mm_binary_origin(
+            Path("/Users/x/.local/share/uv/tools/memtomem/bin/python"),
+            runtime_matches_workspace=False,
+        )
+        assert origin == "uv-tool"
+
+    def test_origin_venv_relative_short_circuits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When the caller already detected a workspace match, the heuristic
+        returns ``venv-relative`` regardless of ``sys.prefix`` content."""
+        from memtomem.cli import init_cmd
+
+        # sys.prefix would otherwise classify as uv-tool — but the caller
+        # has authoritatively decided the runtime IS the workspace venv.
+        monkeypatch.setattr(
+            init_cmd.sys,
+            "prefix",
+            "/Users/x/.local/share/uv/tools/memtomem",
+        )
+        origin = init_cmd._detect_mm_binary_origin(
+            Path("/anywhere/python"),
+            runtime_matches_workspace=True,
+        )
+        assert origin == "venv-relative"
+
+    def test_origin_system_paths(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Well-known system Python locations classify as ``system``."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd.sys, "prefix", "/usr/local")
+        for path in (
+            "/usr/bin/python3",
+            "/usr/local/bin/python",
+            "/opt/homebrew/bin/python3.13",
+            "/bin/python",
+        ):
+            origin = init_cmd._detect_mm_binary_origin(Path(path), runtime_matches_workspace=False)
+            assert origin == "system", f"path {path} should classify as system"
+
+    def test_origin_unknown_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Anything that doesn't match a known pattern → ``unknown``. The
+        wizard treats this conservatively (defaults to ``tool`` branch in
+        ``install_type_lit`` mapping)."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd.sys, "prefix", "/random/path/somewhere")
+        origin = init_cmd._detect_mm_binary_origin(
+            Path("/random/path/somewhere/bin/python"),
+            runtime_matches_workspace=False,
+        )
+        assert origin == "unknown"
+
+
+class TestProjectInstallE2E:
+    """Issue #363 Phase 3 — end-to-end coverage for the ``project_install``
+    path (``uv add memtomem`` in a non-source project).
+
+    Pre-Phase-3 the project-install branch had unit tests for individual
+    helpers but no E2E summary tests; this class covers the three scenarios
+    called out in the issue acceptance: workspace ``.venv`` ready, missing
+    ``.venv`` (fresh clone), and re-run idempotency."""
+
+    @staticmethod
+    def _project_state(tmp_path: Path, *, with_venv: bool) -> dict:
+        """Build a project-install state with optional workspace venv."""
+        state = _make_init_state(tmp_path)
+        state["project_install"] = True
+        state["project_dir"] = str(tmp_path)
+        state["provider"] = "onnx"
+        state["model"] = "bge-m3"
+        state["dimension"] = 1024
+        if with_venv:
+            venv_bin = tmp_path / ".venv" / "bin"
+            venv_bin.mkdir(parents=True, exist_ok=True)
+            (venv_bin / "python").touch()
+        return state
+
+    def test_project_install_summary_shows_install_label(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """``Install:`` summary line says ``project`` for project installs."""
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
+        monkeypatch.setattr(
+            init_cmd, "_probe_workspace_extras", lambda py: {"fastembed", "fastapi", "uvicorn"}
+        )
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        state = self._project_state(tmp_path, with_venv=True)
+        init_cmd._write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "Install:    project" in out
+        assert "uv run mm" in out, "project install Next steps must use `uv run mm`"
+
+    def test_project_install_missing_extras_uses_uv_sync_hint(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Missing extras + project install + helper declines → hint must
+        be ``uv sync --extra ...`` not ``uv tool install --reinstall``."""
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
+        monkeypatch.setattr(init_cmd, "_probe_workspace_extras", lambda py: set())
+        monkeypatch.setattr(init_cmd, "_install_extras", lambda *a, **kw: False)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        state = self._project_state(tmp_path, with_venv=True)
+        init_cmd._write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "uv sync --extra all" in out
+        assert "uv tool install --reinstall" not in out
+
+    def test_project_install_missing_venv_shows_sync_one_liner(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Project install detected + no ``.venv/`` (fresh clone) → single
+        ``Workspace .venv not found — run \\`uv sync --extra all\\` first.``
+        line, NOT a ``[!] Missing extras:`` warning that would have probed
+        the wrong (parent-process) interpreter."""
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        state = self._project_state(tmp_path, with_venv=False)
+        assert init_cmd._workspace_needs_sync(state) is True
+
+        init_cmd._write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "Workspace .venv not found" in out
+        assert "uv sync --extra all" in out
+        assert "Missing extras:" not in out
+
+    def test_project_install_rerun_preserves_install_decisions(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Re-running the wizard from the same project-install cwd produces
+        the same ``Install:`` and ``Next steps`` lines on every run — no
+        first-run-vs-later-run discrepancy in the install-context branch."""
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
+        monkeypatch.setattr(
+            init_cmd,
+            "_probe_workspace_extras",
+            lambda py: {"fastembed", "fastapi", "uvicorn"},
+        )
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        # First run
+        state1 = self._project_state(tmp_path, with_venv=True)
+        init_cmd._write_config_and_summary(state1, tmp_path)
+        first_out = unstyle(capsys.readouterr().out)
+
+        # Second run — fresh state dict, same cwd
+        state2 = self._project_state(tmp_path, with_venv=True)
+        init_cmd._write_config_and_summary(state2, tmp_path)
+        second_out = unstyle(capsys.readouterr().out)
+
+        for marker in ("Install:    project", "uv run mm"):
+            assert marker in first_out
+            assert marker in second_out
+
+
+class TestUvxBranching:
+    """Issue #363 Phase 3 — ``uvx`` install detection routes through the
+    summary branch and the ``_install_extras`` uvx hint.
+
+    The wizard now classifies its own runtime as ``uvx`` when ``sys.prefix``
+    points at uv's ephemeral-env cache (``uv/archive-v*`` or ``uv/builds-v*``).
+    Pre-Phase-3 this branch was dead code — ``install_type_lit`` was always
+    ``"tool"`` for non-source/project paths."""
+
+    def test_summary_install_label_is_uvx(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """``Install:`` summary line says ``uvx (ephemeral)`` when the
+        wizard detects it's running under uvx."""
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        # Force uvx detection via sys.prefix.
+        monkeypatch.setattr(
+            init_cmd.sys,
+            "prefix",
+            "/Users/x/.cache/uv/archive-v0/deadbeef",
+        )
+        monkeypatch.setattr(
+            init_cmd.sys,
+            "executable",
+            "/Users/x/.cache/uv/archive-v0/deadbeef/bin/python",
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        state = _make_init_state(tmp_path)
+        # Drop legacy booleans to force profile-based classification.
+        state["source_install"] = False
+        state["project_install"] = False
+        # State pre-built profile must NOT be present so the live one fires.
+        init_cmd._write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "Install:    uvx (ephemeral)" in out
+        assert "uvx is ephemeral" in out
+
+    def test_install_extras_uvx_hint_branch(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """``_install_extras(install_type=\"uvx\", ...)`` prints the
+        ephemeral hint and returns False — the install semantic is moot
+        because the env will be destroyed on exit."""
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        # Returns False even if stdin is a TTY — uvx branch fires first.
+        result = init_cmd._install_extras("uvx", ["onnx"])
+        assert result is False
+        out = unstyle(capsys.readouterr().out)
+        assert "uvx is ephemeral" in out
+        assert "memtomem[onnx]" in out
+
+
+class TestFindSpecUnification:
+    """Issue #363 Phase 3 acceptance D — ``__import__`` vs ``find_spec``
+    semantic unification across ``mm web`` and ``mm init``.
+
+    Both probes now use ``importlib.util.find_spec`` so the in-process
+    answer to "is the package installed" is the same regardless of which
+    code path asked. ``_have_module`` is the shared primitive."""
+
+    def test_have_module_returns_true_for_installed(self) -> None:
+        """``json`` is in the stdlib — always installed."""
+        from memtomem.cli.init_cmd import _have_module
+
+        assert _have_module("json") is True
+
+    def test_have_module_returns_false_for_missing(self) -> None:
+        from memtomem.cli.init_cmd import _have_module
+
+        assert _have_module("definitely_not_a_real_package_xyz123") is False
+
+    def test_missing_web_deps_uses_find_spec(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``_missing_web_deps`` patches via ``find_spec`` (not
+        ``__import__``) confirms the migration."""
+        import memtomem.cli.web as web_mod
+
+        original = __import__("importlib.util", fromlist=["find_spec"]).find_spec
+
+        def fake_find_spec(name: str):  # type: ignore[no-untyped-def]
+            if name == "fastapi":
+                return None
+            return original(name)
+
+        monkeypatch.setattr("importlib.util.find_spec", fake_find_spec)
+        assert web_mod._missing_web_deps() == "fastapi"
+
+
 class TestPreservedSummary:
     """`_write_config_and_summary` flags non-default values that the wizard
     inherited from a previous config but did not ask about this run.
