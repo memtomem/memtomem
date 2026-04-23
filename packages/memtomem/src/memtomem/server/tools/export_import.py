@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 from memtomem.server.helpers import _check_embedding_mismatch
@@ -35,7 +35,7 @@ async def mem_export(
 
     from memtomem.tools.export_import import export_chunks
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     since_dt: datetime | None = None
     if since:
@@ -78,7 +78,7 @@ async def mem_import(
     """
     from memtomem.tools.export_import import import_chunks
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     # Block import if embedding config mismatches DB
     mismatch_msg = _check_embedding_mismatch(app)

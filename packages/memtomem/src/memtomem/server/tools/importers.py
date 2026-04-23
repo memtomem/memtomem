@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 
@@ -31,7 +31,7 @@ async def mem_import_notion(
     """
     from memtomem.indexing.importers import import_notion
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     export_path = Path(path).expanduser().resolve()
 
     if not export_path.exists():
@@ -105,7 +105,7 @@ async def mem_import_obsidian(
     """
     from memtomem.indexing.importers import import_obsidian
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     vault = Path(vault_path).expanduser().resolve()
 
     if not vault.exists() or not vault.is_dir():

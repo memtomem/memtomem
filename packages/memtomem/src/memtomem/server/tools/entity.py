@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 
@@ -38,7 +38,7 @@ async def mem_entity_scan(
 
     from memtomem.tools.entity_extraction import extract_entities_with_llm
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     storage = app.storage
 
     # Get all source files
@@ -135,7 +135,7 @@ async def mem_entity_search(
     if not 1 <= limit <= 500:
         return f"Error: limit must be between 1 and 500, got {limit}."
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     results = await app.storage.search_entities(
         entity_type=entity_type,
         value=value,

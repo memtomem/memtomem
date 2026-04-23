@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 
@@ -25,7 +25,7 @@ async def mem_search_history(
     if not 1 <= limit <= 200:
         return f"Error: limit must be between 1 and 200, got {limit}."
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     rows = await app.storage.get_query_history(limit=limit, since=since)
     if not rows:
         return "No search history found."
@@ -53,7 +53,7 @@ async def mem_search_suggest(
     if not prefix.strip():
         return "Error: prefix cannot be empty."
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     suggestions = await app.storage.suggest_queries(prefix=prefix, limit=limit)
     if not suggestions:
         return f'No suggestions for "{prefix}".'

@@ -5,7 +5,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.formatters import _display_path
 
@@ -31,7 +31,7 @@ async def mem_list(
     """
     from fnmatch import fnmatch
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     rows = await app.storage.get_source_files_with_counts()
 
     if not rows:
@@ -77,7 +77,7 @@ async def mem_read(
     Args:
         chunk_id: The UUID of the chunk (shown in mem_search results)
     """
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     try:
         uid = UUID(chunk_id)

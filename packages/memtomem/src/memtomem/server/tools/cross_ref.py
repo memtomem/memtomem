@@ -5,7 +5,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 
@@ -32,7 +32,7 @@ async def mem_link(
     if source_id == target_id:
         return "Error: cannot link a chunk to itself."
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     try:
         src_uid = UUID(source_id)
@@ -73,7 +73,7 @@ async def mem_unlink(
         source_id: UUID of the first chunk
         target_id: UUID of the second chunk
     """
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     try:
         src_uid = UUID(source_id)
@@ -101,7 +101,7 @@ async def mem_related(
     Args:
         chunk_id: UUID of the chunk to find relations for
     """
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     try:
         uid = UUID(chunk_id)

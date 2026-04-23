@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 
@@ -31,7 +31,7 @@ async def mem_scratch_set(
 
     if ttl_minutes is not None and ttl_minutes <= 0:
         return f"Error: ttl_minutes must be a positive number, got {ttl_minutes}."
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     expires_at = None
     if ttl_minutes is not None and ttl_minutes > 0:
         expires_at = (datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)).isoformat(
@@ -62,7 +62,7 @@ async def mem_scratch_get(
     Args:
         key: The key to look up. Omit to list all entries.
     """
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     if key is None:
         entries = await app.storage.scratch_list(session_id=app.current_session_id)
@@ -110,7 +110,7 @@ async def mem_scratch_promote(
     """
     from memtomem.server.tools.memory_crud import mem_add
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     entry = await app.storage.scratch_get(key)
 
     if entry is None:

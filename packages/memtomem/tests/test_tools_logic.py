@@ -1223,14 +1223,20 @@ class TestAutoConsolidate:
 
 
 def _fake_ctx(components):
-    """Minimal ctx stub that mimics what _get_app() unwraps.
+    """Minimal ctx stub that mimics what _get_app_initialized() unwraps.
 
     The production MCP context is ``ctx.request_context.lifespan_context``.
     We fabricate a SimpleNamespace matching that shape, filled with real
     services from the ``components`` fixture plus the few AppContext fields
     the tools access (``current_namespace``, ``webhook_manager``).
+
+    ``ensure_initialized`` is a no-op AsyncMock: handlers now call
+    ``await _get_app_initialized(ctx)`` which awaits it before reading
+    storage/embedder, so the stub has to be awaitable. The fake is already
+    populated with the real services — nothing to initialize.
     """
     from types import SimpleNamespace
+    from unittest.mock import AsyncMock
 
     app = SimpleNamespace(
         config=components.config,
@@ -1240,6 +1246,7 @@ def _fake_ctx(components):
         search_pipeline=components.search_pipeline,
         current_namespace=None,
         webhook_manager=None,
+        ensure_initialized=AsyncMock(),
     )
     return SimpleNamespace(request_context=SimpleNamespace(lifespan_context=app))
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 from memtomem.storage.sqlite_namespace import sanitize_namespace_segment
@@ -39,7 +39,7 @@ async def mem_agent_register(
     agent_id = sanitize_namespace_segment(agent_id)
     if not agent_id:
         return "Error: agent_id must contain at least one allowed character."
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     namespace = f"{_AGENT_NAMESPACE_PREFIX}{agent_id}"
 
     await app.storage.set_namespace_meta(namespace, description=description, color=color)
@@ -87,7 +87,7 @@ async def mem_agent_search(
         agent_id = sanitize_namespace_segment(agent_id)
         if not agent_id:
             return "Error: agent_id must contain at least one allowed character."
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     from memtomem.server.formatters import _format_results
 
     agent_ns = f"{_AGENT_NAMESPACE_PREFIX}{agent_id}" if agent_id else app.current_namespace
@@ -132,7 +132,7 @@ async def mem_agent_share(
     """
     from uuid import UUID
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     try:
         uid = UUID(chunk_id)

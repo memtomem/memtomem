@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 
@@ -35,7 +35,7 @@ async def mem_fetch(
     if not url.startswith(("http://", "https://")):
         return "Error: URL must start with http:// or https://"
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     if not app.config.indexing.memory_dirs:
         return "Error: no memory directories configured. Run 'mm init' first."
     memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 
@@ -22,7 +22,7 @@ async def mem_tag_list(
 
     Use this to see which tags exist in the index and how many chunks use each tag.
     """
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     tag_counts = await app.storage.get_tag_counts()
 
     if not tag_counts:
@@ -56,7 +56,7 @@ async def mem_tag_rename(
     if old_tag == new_tag:
         return "Error: old_tag and new_tag are the same."
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     updated = await app.storage.rename_tag(old_tag.strip(), new_tag.strip())
     return f"Renamed tag '{old_tag}' → '{new_tag}' in {updated} chunks."
 
@@ -78,6 +78,6 @@ async def mem_tag_delete(
     if not tag.strip():
         return "Error: tag must be non-empty."
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     updated = await app.storage.delete_tag(tag.strip())
     return f"Removed tag '{tag}' from {updated} chunks."

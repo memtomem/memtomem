@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 
@@ -59,7 +59,7 @@ async def mem_procedure_list(
     ctx: CtxType = None,
 ) -> str:
     """List all saved procedures."""
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     # Find all chunks tagged with "procedure"
     results, _ = await app.search_pipeline.search(

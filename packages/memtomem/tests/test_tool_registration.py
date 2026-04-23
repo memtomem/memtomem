@@ -67,3 +67,51 @@ def test_all_mcp_tool_modules_imported():
             lines
         )
         raise AssertionError(msg)
+
+
+def _files_importing_bare_get_app() -> list[Path]:
+    """Return handler files that import ``_get_app`` instead of ``_get_app_initialized``.
+
+    Issue #399 requires every MCP tool / resource handler to fetch the
+    app via ``_get_app_initialized`` so the first handler call (not the
+    lifespan handshake) triggers DB + embedder creation. A file still
+    importing bare ``_get_app`` from ``memtomem.server.context`` is a
+    regression — Phase 3 will drop the eager ``ensure_initialized`` call
+    in ``app_lifespan`` and such a handler would then operate on an
+    uninitialised context.
+    """
+    offenders: list[Path] = []
+    candidates: list[Path] = [_SRC / "resources.py", *_TOOLS_DIR.glob("*.py")]
+    for py in candidates:
+        if py.name == "__init__.py":
+            continue
+        tree = ast.parse(py.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if node.module != "memtomem.server.context":
+                continue
+            for alias in node.names:
+                if alias.name == "_get_app":
+                    offenders.append(py)
+                    break
+    return offenders
+
+
+def test_handlers_use_get_app_initialized():
+    """Tool / resource modules must import ``_get_app_initialized``, not ``_get_app``.
+
+    Guards the Phase 2 handler migration (issue #399): every handler has
+    to await ``ensure_initialized`` before touching storage / embedder /
+    index_engine / search_pipeline. Using ``_get_app`` bypasses that step
+    and will crash on a read once Phase 3 removes the lifespan's eager
+    init.
+    """
+    offenders = _files_importing_bare_get_app()
+    if offenders:
+        rel = sorted(str(p.relative_to(_SRC.parent)) for p in offenders)
+        msg = (
+            "Handler files importing bare ``_get_app`` — migrate to "
+            "``_get_app_initialized`` (issue #399 Phase 2):\n" + "\n".join(f"  {p}" for p in rel)
+        )
+        raise AssertionError(msg)
