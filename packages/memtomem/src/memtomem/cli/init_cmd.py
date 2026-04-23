@@ -2237,6 +2237,13 @@ def _apply_preset(state: dict, preset_name: str) -> None:
     state["model"] = spec.model
     state["dimension"] = spec.dimension
     state["api_key"] = ""
+    # Drop any stale rerank_model before reapplying — otherwise a
+    # re-pick from a rerank-enabled preset to a rerank-disabled one
+    # (#371 "b" navigation) leaves the old rerank_model string in
+    # state. Downstream readers gate on rerank_enabled first so the
+    # stale value is benign today, but the docstring promises a full
+    # preset-surface overwrite — honoring that avoids future surprises.
+    state.pop("rerank_model", None)
     state["rerank_enabled"] = spec.rerank_enabled
     if spec.rerank_enabled and spec.rerank_model is not None:
         state["rerank_model"] = spec.rerank_model

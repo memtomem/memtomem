@@ -80,6 +80,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   The explicit `--preset <name>` flag path is unchanged — there's no
   picker to return to there. (#371)
 
+- **`mm init` default-interactive CLI flag precedence is now "flag wins
+  over prompt", matching the documented behavior of
+  `_override_from_flags`.** The default path used to run the override
+  pass before the memory-dir / MCP prompts, so prompts silently
+  clobbered explicit flags: `mm init --memory-dir /x` (no `--preset`,
+  no `-y`) would apply `/x`, then immediately ask for a directory and
+  overwrite with whatever the user typed (usually the default
+  `~/memories`). The override pass now runs after the combined
+  `run_steps` on the preset branch, so flag values win — same rule that
+  already held for `--preset <name>` (path 2) and `-y` (non-interactive).
+  User-visible effect: `mm init --memory-dir /x` now respects `/x`
+  without requiring `--preset`. Advanced (`--advanced`) is unchanged —
+  advanced prompts per-field and has no baseline to override. (#371)
+
 - **MCP `serverInfo.version` now reports the memtomem package version.**
   Previously `FastMCP.__init__` left the underlying `Server.version`
   at `None`, so the lowlevel server fell back to
