@@ -1,0 +1,42 @@
+name: Stale PR triage
+
+on:
+  schedule:
+    - cron: "37 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  pull-requests: write
+  issues: none
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+        with:
+          days-before-pr-stale: 30
+          days-before-pr-close: 30
+          stale-pr-label: stale
+          exempt-pr-labels: >-
+            release,security,needs-maintainer-decision,pinned,do-not-stale
+          exempt-draft-pr: true
+          exempt-all-pr-milestones: true
+          stale-pr-message: |
+            This PR has had no updates for 30 days. Marking as `stale`.
+
+            If you'd like to keep working on it, leave any comment or push
+            a commit — that's enough to clear the label. Otherwise, it'll
+            receive one more nudge in 15 days and close 15 days after that.
+
+            Thanks for the contribution — this is an automated triage
+            message, not a judgement on the PR itself.
+          close-pr-message: |
+            Closing this PR after 60 days without updates. Feel free to
+            re-open or open a new PR when you're ready to pick it back up —
+            no explanation needed.
+          days-before-issue-stale: -1
+          days-before-issue-close: -1
+          operations-per-run: 30
+          ascending: true
+          remove-stale-when-updated: true
