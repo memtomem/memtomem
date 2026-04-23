@@ -51,6 +51,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **MCP `serverInfo.version` now reports the memtomem package version.**
+  Previously `FastMCP.__init__` left the underlying `Server.version`
+  at `None`, so the lowlevel server fell back to
+  `importlib.metadata.version("mcp")` and every `initialize` response
+  carried the MCP SDK version (e.g. `1.27.0`) as `serverInfo.version`
+  instead of `mm --version` (e.g. `0.1.24`). Monitoring probes, client
+  telemetry, and any "which version are we both on" comparison saw a
+  misleading field. The value is now pinned at module construction
+  time via a direct write to `mcp._mcp_server.version`. (#383)
+
 - **`mem_embedding_reset(mode="revert_to_stored")` no longer raises
   `AttributeError` on the recovery path.** #399 Phase 1 made `embedder`,
   `search_pipeline`, and `index_engine` read-only `@property`s on

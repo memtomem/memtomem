@@ -40,6 +40,18 @@ from memtomem.server.lifespan import app_lifespan
 # ── mcp instance — must be created before tool-module imports ──────────
 mcp = FastMCP("memtomem", lifespan=app_lifespan)
 
+# Pin ``serverInfo.version`` in the MCP ``initialize`` response to the
+# memtomem package version (#383). ``FastMCP.__init__`` has no ``version``
+# parameter; when the underlying ``Server.version`` stays ``None`` the
+# lowlevel server falls back to ``importlib.metadata.version("mcp")`` —
+# which made every memtomem handshake report the MCP SDK version
+# (e.g. ``1.27.0``) instead of ``mm --version`` (e.g. ``0.1.24``).
+# External consumers keying off ``serverInfo.version`` (telemetry,
+# error reports, "which version are we both on") saw misleading data.
+from memtomem import __version__ as _memtomem_version
+
+mcp._mcp_server.version = _memtomem_version
+
 # ── Register ALL tools (decorators bind to `mcp` on import) ───────────
 from memtomem.server.tools.ask import mem_ask  # noqa: E402, F401
 from memtomem.server.tools.indexing import mem_index  # noqa: E402, F401
