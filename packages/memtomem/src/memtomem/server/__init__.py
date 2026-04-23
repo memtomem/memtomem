@@ -8,6 +8,7 @@ All public symbols are re-exported here for backward compatibility:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
@@ -139,11 +140,36 @@ if _TOOL_MODE != "full":
             mcp._tool_manager.remove_tool(name)
 
 
+def _install_sigterm_handler(pid_file: Path) -> None:
+    """Install a SIGTERM handler that unlinks ``pid_file`` and hard-exits.
+
+    ``mcp.run()`` runs an asyncio event loop, and asyncio swallows
+    ``SystemExit`` raised from a classic ``signal.signal`` handler — the
+    integration test in ``test_server_sigterm.py`` is the live repro.
+    So we can't rely on ``sys.exit(0)`` + ``atexit``: we unlink
+    explicitly and call ``os._exit(0)`` to bypass the event loop.
+
+    Only register after the flock succeeds, so we never unlink a pid
+    file another primary owns. ``atexit`` still handles the normal
+    stdin-EOF shutdown path.
+    """
+    import os as _os
+    import signal
+
+    def _handle(_signum: int, _frame: object) -> None:
+        try:
+            pid_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        _os._exit(0)
+
+    signal.signal(signal.SIGTERM, _handle)
+
+
 def main() -> None:
     """Run the MCP server."""
     import atexit
     import fcntl
-    from pathlib import Path
 
     pid_dir = Path("~/.memtomem").expanduser()
     pid_dir.mkdir(parents=True, exist_ok=True)
@@ -156,7 +182,9 @@ def main() -> None:
         fcntl.flock(_lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         # Another server already holds the lock — proceed anyway (the editor
-        # expects the process to stay alive), but log a warning.
+        # expects the process to stay alive), but log a warning. Don't register
+        # atexit unlink or the SIGTERM handler: either would yank the primary
+        # server's pid file out from under it.
         _lock_fp.close()
         import logging
 
@@ -165,11 +193,10 @@ def main() -> None:
             pid_file,
         )
     else:
-        import os
-
         _lock_fp.write(str(os.getpid()))
         _lock_fp.flush()
         atexit.register(lambda: _lock_fp.close())  # LIFO: runs second
         atexit.register(lambda: pid_file.unlink(missing_ok=True))  # LIFO: runs first
+        _install_sigterm_handler(pid_file)
 
     mcp.run()

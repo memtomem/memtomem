@@ -8,14 +8,35 @@ loud and immediate (MEDIUM 6 mitigation).
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
 from memtomem.cli import cli
+
+
+@contextlib.contextmanager
+def _hold_pid_lock(pid_file: Path) -> Iterator[None]:
+    """Hold an exclusive flock on ``pid_file`` for the duration of the block.
+
+    Mirrors what ``server/__init__.py:main`` does at runtime so the
+    flock-based liveness probe (#387) sees a live writer.
+    """
+    fp = open(pid_file, "rb+")
+    try:
+        fcntl.flock(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            yield
+        finally:
+            fcntl.flock(fp, fcntl.LOCK_UN)
+    finally:
+        fp.close()
 
 
 # ---------------------------------------------------------------- fixtures
@@ -295,10 +316,14 @@ class TestRuntimeProfileImportPin:
 class TestServerAliveRefuses:
     def test_refuses_when_server_alive(self, home):
         state = _seed_state(home)
-        # Use the current process pid — guaranteed alive for the test duration.
-        (state / ".server.pid").write_text(str(os.getpid()), encoding="utf-8")
+        pid_file = state / ".server.pid"
+        # The PID inside the file is just for the user-facing message now;
+        # the flock probe (#387) is what decides alive/dead.
+        pid_file.write_text(str(os.getpid()), encoding="utf-8")
 
-        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        with _hold_pid_lock(pid_file):
+            result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
         assert result.exit_code == 2
         assert "Server still running" in result.output
         assert str(os.getpid()) in result.output
@@ -308,10 +333,31 @@ class TestServerAliveRefuses:
 
     def test_force_overrides_liveness(self, home):
         state = _seed_state(home)
+        pid_file = state / ".server.pid"
+        pid_file.write_text(str(os.getpid()), encoding="utf-8")
+
+        with _hold_pid_lock(pid_file):
+            result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
+
+        assert result.exit_code == 0, result.output
+        assert not state.exists()
+
+
+class TestPidRecyclingDoesNotFalsePositive:
+    """#387: a recorded PID that happens to point at a live unrelated process
+    must not trip the liveness probe. With the old ``os.kill(pid, 0)`` probe
+    this returned alive → uninstall refused. With the flock probe the absence
+    of a lock holder is the sole signal."""
+
+    def test_pid_alive_but_no_lock_means_dead(self, home):
+        state = _seed_state(home)
+        # Our own PID — definitely alive — but nobody is holding the flock.
         (state / ".server.pid").write_text(str(os.getpid()), encoding="utf-8")
 
-        result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
         assert result.exit_code == 0, result.output
+        assert "Server still running" not in result.output
         assert not state.exists()
 
 

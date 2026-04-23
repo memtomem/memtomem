@@ -22,7 +22,7 @@ Design notes:
 
 from __future__ import annotations
 
-import os
+import fcntl
 import shutil
 import sys
 from dataclasses import dataclass
@@ -116,31 +116,60 @@ def _load_config_safely() -> tuple[Path, str | None]:
 
 
 def _check_server_liveness(state_dir: Path) -> _ServerState:
-    """Probe ``state_dir/.server.pid`` via ``os.kill(pid, 0)``.
+    """Probe ``state_dir/.server.pid`` via ``fcntl.flock``.
 
-    ``os.kill(pid, 0)`` is a no-op signal that raises ``ProcessLookupError``
-    if the pid is dead and ``PermissionError`` if it's alive but owned by
-    another user (we treat that as alive — refuse and let the user decide).
+    ``server/__init__.py:main`` opens this file and holds an exclusive
+    flock for the entire server lifetime. If we can acquire
+    ``LOCK_EX | LOCK_NB`` on it, no live writer is holding it (the file
+    is a stale leftover, or fresh and unowned). If we cannot, a writer
+    is alive — *regardless* of whether the recorded PID is still valid,
+    has been recycled to an unrelated process, or was never set at all.
+
+    This replaces the previous ``os.kill(pid, 0)`` probe, which was
+    correct for stale-pid cases but produced false positives once the
+    kernel recycled the recorded PID to an unrelated process (issue
+    #387). The PID inside the file is now read for display only.
     """
     pid_file = state_dir / ".server.pid"
     if not pid_file.exists():
         return _ServerState(alive=False, pid=None, pid_file=None)
+
+    pid: int | None
     try:
         pid_text = pid_file.read_text().strip()
         pid = int(pid_text)
     except (OSError, ValueError):
-        # Unreadable / non-int → treat as dead so we can clean it up.
-        return _ServerState(alive=False, pid=None, pid_file=pid_file)
+        # Unreadable / non-int — leave pid=None for the message; the lock
+        # probe below still decides alive vs. dead independently.
+        pid = None
+
     try:
-        os.kill(pid, 0)
-        return _ServerState(alive=True, pid=pid, pid_file=pid_file)
-    except ProcessLookupError:
-        return _ServerState(alive=False, pid=pid, pid_file=pid_file)
-    except PermissionError:
-        return _ServerState(alive=True, pid=pid, pid_file=pid_file)
+        # Read-mode is enough; advisory flock works regardless of fd mode.
+        # Probing ``rb`` rather than ``rb+`` avoids any chance of accidental
+        # truncation on an exotic filesystem if we later abort.
+        fp = open(pid_file, "rb")
     except OSError:
-        # Conservative — unknown error treated as alive.
+        # Conservative — couldn't even open the file (permissions, race
+        # with deletion). Treat as alive so the user explicitly --forces.
         return _ServerState(alive=True, pid=pid, pid_file=pid_file)
+
+    try:
+        try:
+            fcntl.flock(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # Another process is holding the lock → live writer.
+            return _ServerState(alive=True, pid=pid, pid_file=pid_file)
+        except OSError:
+            # Unsupported filesystem (some NFS configurations, FUSE) or
+            # other unknown error — be conservative.
+            return _ServerState(alive=True, pid=pid, pid_file=pid_file)
+        # Got the lock. Release immediately — we don't want to hold it,
+        # only probe; holding would block a server starting in the gap
+        # between this probe and the eventual unlink.
+        fcntl.flock(fp, fcntl.LOCK_UN)
+        return _ServerState(alive=False, pid=pid, pid_file=pid_file)
+    finally:
+        fp.close()
 
 
 # ---- inventory -----------------------------------------------------------
