@@ -66,6 +66,15 @@ memtomem status:
   - Embedding model: ollama/nomic-embed-text
 ```
 
+Or skip the editor and run the same check directly:
+
+```bash
+mm status
+```
+
+`mm status` is a CLI mirror of `mem_status` (same output) — handy when
+Cursor hasn't reconnected yet, or for scripted health checks.
+
 ---
 
 ## Step 3: First Indexing
@@ -77,7 +86,12 @@ Index my project docs directory
 Agent:
 ```
 mem_index(path="./docs", recursive=True)
-→ "Indexed 23 files, 567 chunks in 1.8s"
+→ Indexing complete:
+  - Files scanned: 23
+  - Total chunks: 567
+  - Indexed: 567
+  - Skipped (unchanged): 0
+  - Deleted (stale): 0
 ```
 
 ---
