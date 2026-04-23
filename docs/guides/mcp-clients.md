@@ -342,9 +342,9 @@ ollama pull bge-m3
 1. **Restart your editor** after changing MCP configuration
 2. Check that you used `memtomem-server` (not `memtomem`) in your config
 3. Verify install: `uvx --from memtomem mm --version` should print the
-   memtomem version (`mm` and `memtomem-server` ship from the same package —
-   running `memtomem-server` bare is not a useful check because it expects
-   JSON-RPC on stdin, so a TTY emits noisy `Invalid JSON` errors)
+   memtomem version. (`mm` and `memtomem-server` ship from the same package.
+   Running `memtomem-server` bare isn't a useful check — it expects JSON-RPC
+   on stdin, so a TTY emits noisy `Invalid JSON` errors.)
 
 ### "Connection refused" or timeout
 

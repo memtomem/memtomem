@@ -385,9 +385,9 @@ uv pip install -e "packages/memtomem[all]"  # Source
 1. Restart your editor after configuring MCP
 2. Check that `memtomem-server` (not `memtomem`) is in your MCP config
 3. Verify install: `uvx --from memtomem mm --version` should print the memtomem
-   version (`mm` and `memtomem-server` ship from the same package — running
-   `memtomem-server` bare is not a useful check because it expects JSON-RPC
-   on stdin, so a TTY emits noisy `Invalid JSON` errors)
+   version. (`mm` and `memtomem-server` ship from the same package. Running
+   `memtomem-server` bare isn't a useful check — it expects JSON-RPC on stdin,
+   so a TTY emits noisy `Invalid JSON` errors.)
 
 ---
 
