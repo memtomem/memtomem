@@ -396,8 +396,8 @@ def _step_embedding(state: dict) -> None:
         if not _have_module("openai"):
             click.secho("  openai Python client not installed.", fg="yellow")
             click.echo(f"  Install with: {_extra_install_hint(['openai'], state)}")
-            click.echo(_y_refuse_hint("--provider openai", "openai"))
             click.echo("  Saving OpenAI config now so you're ready after install.")
+            click.echo(_y_refuse_hint("--provider openai", "openai"))
             click.echo()
             state.setdefault("_extras_warned_inline", set()).add("openai")
 
