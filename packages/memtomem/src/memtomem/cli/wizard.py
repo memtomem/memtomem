@@ -64,6 +64,21 @@ def nav_confirm(text: str, default: bool = False) -> bool:
         click.echo("  Please answer y or n.")
 
 
+def silent_step(fn: Callable[[dict], None]) -> Callable[[dict], None]:
+    """Mark a step as silent (no user prompt — only side effects like banners).
+
+    Silent steps are skipped during back-navigation so ``b`` lands on the
+    previous *interactive* step instead of re-running the banner and falling
+    straight back to where the user came from.
+    """
+    fn._silent_in_back_nav = True  # type: ignore[attr-defined]
+    return fn
+
+
+def _is_silent(step: Callable[[dict], None]) -> bool:
+    return getattr(step, "_silent_in_back_nav", False)
+
+
 def run_steps(
     steps: Sequence[Callable[[dict], None]],
     state: dict | None = None,
@@ -71,7 +86,8 @@ def run_steps(
     """Run a list of step functions with back/cancel support.
 
     Each step function receives a shared state dict and modifies it.
-    Raising StepBack goes to the previous step, WizardCancel aborts.
+    Raising StepBack goes to the previous interactive step (skipping any
+    ``@silent_step`` in between). WizardCancel aborts.
     """
     if state is None:
         state = {}
@@ -81,8 +97,11 @@ def run_steps(
             steps[i](state)
             i += 1
         except StepBack:
-            if i > 0:
-                i -= 1
+            target = i - 1
+            while target >= 0 and _is_silent(steps[target]):
+                target -= 1
+            if target >= 0:
+                i = target
                 click.echo()
             else:
                 click.echo("  (already at first step)")

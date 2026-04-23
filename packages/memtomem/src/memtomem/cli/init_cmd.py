@@ -15,7 +15,7 @@ from typing import Literal
 import click
 
 from memtomem.cli.init_presets import PRESETS, _VALID_PRESETS, get_preset
-from memtomem.cli.wizard import nav_confirm, nav_prompt, run_steps, step_header
+from memtomem.cli.wizard import nav_confirm, nav_prompt, run_steps, silent_step, step_header
 
 InstallType = Literal["source", "project", "tool", "uvx"]
 CwdInstallType = Literal["source", "project", "pypi"]
@@ -2249,6 +2249,7 @@ def _apply_preset(state: dict, preset_name: str) -> None:
     state["_preset_applied"] = preset_name
 
 
+@silent_step
 def _step_provider_dirs_auto(state: dict) -> None:
     """Auto-apply detected provider memory folders for preset 2/3.
 
@@ -2256,6 +2257,12 @@ def _step_provider_dirs_auto(state: dict) -> None:
     skips without scanning. When True, scans via ``_detect_provider_dirs``,
     adds every detected category, emits a banner listing what was added (or
     a one-line message when nothing was detected so the skip isn't silent).
+
+    Marked ``@silent_step`` because this function has no ``nav_prompt`` /
+    ``nav_confirm`` call — it only emits banners. ``run_steps`` skips past
+    it during back-navigation so ``b`` at the next step (``_step_mcp``) lands
+    on the previous *interactive* step (``_step_memory_dir``) instead of
+    re-running the banner and falling through to ``_step_mcp`` again. (#421)
     """
     preset_name = state.get("_preset_applied")
     if preset_name is None:

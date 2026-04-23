@@ -5161,3 +5161,101 @@ class TestYRefuseHintParity:
         assert _count_calls(language_src, "--tokenizer kiwipiepy", "korean") >= 1, (
             "kiwipiepy fallback must surface -y refuse hint (#403)"
         )
+
+
+class TestBackNavThroughSilentStep:
+    """(#421) "b" at ``_step_mcp`` must skip past the silent
+    ``_step_provider_dirs_auto`` and land on ``_step_memory_dir`` (the previous
+    interactive step). Previously it landed on the silent step, which re-ran
+    its banner and advanced straight back to ``_step_mcp`` — so "b" appeared
+    to do nothing.
+
+    Unit-level coverage of the skip mechanism lives in ``test_wizard.py``;
+    this class is the CliRunner-level regression that proves the
+    ``@silent_step`` decoration is wired into the real wizard.
+    """
+
+    def test_back_at_mcp_reaches_memory_dir_prompt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After "b" at the mcp step, the next interactive prompt must be
+        ``_step_memory_dir`` (not mcp re-prompting). Pinned by counting the
+        ``Memory Directory`` header occurrences in the captured output —
+        pre-fix this would be 1 (back-nav never escaped the silent step),
+        post-fix it is 2 (original visit + post-back re-entry)."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        # CliRunner substitutes sys.stdin; route through init_cmd._isatty seam
+        # so the picker's non-TTY gate doesn't short-circuit (per
+        # feedback_clirunner_isatty_seam.md).
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        runner = CliRunner()
+        memory_dir = tmp_path / "memories"
+        # 1) picker: "2" (english, default)
+        # 2) memory_dir: tmp path
+        # 3) "Create it?": y  → path now exists
+        # 4) (silent step runs: "No provider memory folders detected" banner)
+        # 5) mcp: "b"  → expected to skip silent and land on memory_dir
+        # 6) memory_dir: re-enter same path (no create prompt this time —
+        #    the dir was created in step 3)
+        # 7) (silent step runs again — forward direction, expected)
+        # 8) mcp: "3" (skip — don't write to any client config)
+        result = runner.invoke(init, [], input=f"2\n{memory_dir}\ny\nb\n{memory_dir}\n3\n")
+        assert result.exit_code == 0, result.output
+
+        # Memory Directory header must appear twice: initial visit + after
+        # back-nav from mcp. If the silent-skip fix is missing, this is 1.
+        assert result.output.count("Memory Directory") == 2, result.output
+        # MCP header also appears twice: once before "b", once after the
+        # back-and-forward trip. Mostly a sanity check on the flow.
+        assert result.output.count("Connect to AI Editor") == 2, result.output
+
+    def test_silent_step_banner_does_not_refire_on_back_pass(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Between the mcp prompt where "b" is typed and the next memory_dir
+        prompt, the silent step's banner must NOT appear — that's the whole
+        point of the skip. We slice the output at the first mcp prompt and
+        look for banner strings in the window up to the second memory_dir
+        header; any banner text there means the silent step re-ran on the
+        back-pass (pre-fix behavior)."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        runner = CliRunner()
+        memory_dir = tmp_path / "memories"
+        result = runner.invoke(init, [], input=f"2\n{memory_dir}\ny\nb\n{memory_dir}\n3\n")
+        assert result.exit_code == 0, result.output
+
+        out = result.output
+        # Locate the two "Memory Directory" headers. The window *between*
+        # them is the back-nav transition (mcp "b" → land on memory_dir).
+        first_md = out.find("Memory Directory")
+        second_md = out.find("Memory Directory", first_md + 1)
+        assert first_md != -1 and second_md != -1, out
+
+        # Grab the segment after user's "b" at mcp until the second memory_dir
+        # header. Starting from the first mcp prompt keeps things anchored;
+        # the silent banner must NOT appear in this slice.
+        first_mcp = out.find("Connect to AI Editor")
+        assert first_mcp != -1, out
+        back_pass_window = out[first_mcp:second_md]
+        assert "No provider memory folders detected" not in back_pass_window, (
+            f"Silent-step banner re-fired on back-pass-through:\n{back_pass_window}"
+        )

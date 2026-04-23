@@ -65,6 +65,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm init`: "b" (back) at the MCP step now reaches the memory-directory
+  prompt instead of stalling on a silent banner.** The wizard's
+  `_step_provider_dirs_auto` sits between `_step_memory_dir` and `_step_mcp`
+  but only prints a detection banner — no prompt. Pre-fix, "b" at the MCP
+  step decremented the step index onto that silent step, which re-emitted
+  its banner and advanced straight back to `_step_mcp` — so "b" appeared to
+  do nothing until the user hit it twice. `wizard.run_steps` now skips past
+  `@silent_step`-marked functions when handling `StepBack`, so "b" lands on
+  the previous *interactive* step (memory_dir). Banner does not re-fire on
+  the back-pass (it only runs forward, once after each memory_dir
+  confirmation). Unit coverage for the skip mechanism lives in
+  `test_wizard.py`; end-to-end CliRunner regression is in
+  `test_init_cmd.py::TestBackNavThroughSilentStep`. (#421)
+
 - **`mm init`: "b" (back) now works at step 3 in the default interactive
   path.** The preset picker and its follow-up steps (memory dir, provider
   dirs auto-detect, MCP config) used to run in two separate `run_steps`
