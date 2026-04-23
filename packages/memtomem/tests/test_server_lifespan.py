@@ -46,8 +46,14 @@ async def test_teardown_all_none_is_noop() -> None:
 
 
 @pytest.mark.asyncio
-async def test_teardown_calls_each_in_reverse_allocation_order() -> None:
-    """All resources present → stop/close called in reverse-allocation order."""
+async def test_teardown_order_matches_documented_sequence() -> None:
+    """All resources present → stop/close in the documented sequence.
+
+    Not strict reverse-allocation — ``webhook_mgr`` is stopped before
+    ``watcher`` and ``ctx``. See ``_teardown_startup_resources`` docstring
+    for rationale (webhook has no storage/index dependency, closing it
+    early drops retries during the slower component teardown).
+    """
     order: list[str] = []
 
     class _Rec:
@@ -83,7 +89,7 @@ async def test_teardown_calls_each_in_reverse_allocation_order() -> None:
         "webhook_mgr",
         "watcher",
         "ctx",
-    ], "teardown must run in reverse-allocation order"
+    ], "teardown order must match the documented sequence"
 
 
 @pytest.mark.asyncio
@@ -119,6 +125,47 @@ async def test_teardown_continues_after_intermediate_failure() -> None:
 
     assert called == ["bad", "good", "good"], (
         "watchdog failure must not skip scheduler/ctx teardown"
+    )
+
+
+@pytest.mark.asyncio
+async def test_teardown_reraises_cancelled_error() -> None:
+    """``CancelledError`` must propagate — swallowing it would hide task
+    cancellation, and continuing teardown after cancellation could mask
+    the original startup exception in the ``except BaseException`` caller.
+    """
+    import asyncio
+
+    called: list[str] = []
+
+    async def _cancel_stop() -> None:
+        called.append("watchdog")
+        raise asyncio.CancelledError()
+
+    async def _good_stop() -> None:
+        called.append("scheduler")
+
+    class _R:
+        pass
+
+    watchdog = _R()
+    watchdog.stop = _cancel_stop  # type: ignore[attr-defined]
+    scheduler = _R()
+    scheduler.stop = _good_stop  # type: ignore[attr-defined]
+
+    with pytest.raises(asyncio.CancelledError):
+        await _teardown_startup_resources(
+            watchdog=watchdog,
+            policy_scheduler=None,
+            scheduler=scheduler,
+            webhook_mgr=None,
+            watcher=None,
+            ctx=None,
+        )
+
+    # Later steps were skipped because the cancellation propagated.
+    assert called == ["watchdog"], (
+        f"teardown must stop at CancelledError — later steps reached: {called}"
     )
 
 

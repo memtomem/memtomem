@@ -95,47 +95,70 @@ async def _teardown_startup_resources(
     watcher: FileWatcher | None,
     ctx: AppContext | None,
 ) -> None:
-    """Tear down startup-allocated resources in reverse-allocation order.
+    """Tear down startup-allocated resources; called on both shutdown paths.
 
-    Called from both the normal shutdown path (after ``yield``) and the
-    startup-failure path (before re-raising, #404). Each step swallows so
-    a later failure doesn't skip earlier ones — shutdown must always
-    complete whatever it can.
+    Invoked from the normal post-``yield`` ``finally`` and from the
+    startup-failure ``except BaseException`` (before re-raising, #404).
+    Each step catches ``Exception`` so a later failure doesn't skip
+    earlier ones — shutdown must always complete whatever it can — but
+    ``CancelledError`` is re-raised so task cancellation propagates and
+    the caller can decide whether to mask the original startup failure.
 
-    Allocation order in :func:`app_lifespan` is:
-    webhook_mgr → ctx/components → watcher → scheduler → policy_scheduler
-    → watchdog. Teardown is the reverse.
+    Order (matches the existing post-yield shutdown sequence since
+    before #404; #404 only centralised it into this helper):
+
+        watchdog → policy_scheduler → scheduler → webhook_mgr → watcher → ctx
+
+    This is *not* strict reverse-allocation order: ``webhook_mgr`` is
+    stopped before ``watcher`` and ``ctx`` because it has no dependency
+    on storage/index — closing it early drops network state that might
+    otherwise hold retries open during the slower component teardown.
+    ``ctx.close()`` is last so the schedulers/watchdog can still touch
+    storage while they stop.
     """
+    import asyncio
+
+    def _log_teardown_failure(stage: str, exc: BaseException) -> None:
+        # CancelledError is BaseException-derived in Python 3.8+; we still
+        # want to record that a teardown step was cancelled (otherwise the
+        # cancellation silently drops the original startup exception if it
+        # happens mid-teardown), then re-raise so cancellation propagates
+        # and the caller decides what to do.
+        if isinstance(exc, asyncio.CancelledError):
+            logger.warning("Shutdown step '%s' cancelled", stage)
+            raise exc
+        logger.warning("Shutdown step '%s' failed", stage, exc_info=True)
+
     if watchdog is not None:
         try:
             await watchdog.stop()  # type: ignore[attr-defined]
-        except Exception:
-            logger.warning("Failed to stop health watchdog", exc_info=True)
+        except BaseException as exc:
+            _log_teardown_failure("health_watchdog", exc)
     if policy_scheduler is not None:
         try:
             await policy_scheduler.stop()  # type: ignore[attr-defined]
-        except Exception:
-            logger.warning("Failed to stop policy scheduler", exc_info=True)
+        except BaseException as exc:
+            _log_teardown_failure("policy_scheduler", exc)
     if scheduler is not None:
         try:
             await scheduler.stop()  # type: ignore[attr-defined]
-        except Exception:
-            logger.warning("Failed to stop scheduler", exc_info=True)
+        except BaseException as exc:
+            _log_teardown_failure("scheduler", exc)
     if webhook_mgr is not None:
         try:
             await webhook_mgr.close()  # type: ignore[attr-defined]
-        except Exception:
-            logger.warning("Failed to close webhook manager", exc_info=True)
+        except BaseException as exc:
+            _log_teardown_failure("webhook_manager", exc)
     if watcher is not None:
         try:
             await watcher.stop()
-        except Exception:
-            logger.warning("Shutdown step 'watcher' failed", exc_info=True)
+        except BaseException as exc:
+            _log_teardown_failure("watcher", exc)
     if ctx is not None:
         try:
             await ctx.close()
-        except Exception:
-            logger.warning("Shutdown step 'components' failed", exc_info=True)
+        except BaseException as exc:
+            _log_teardown_failure("components", exc)
 
 
 @asynccontextmanager
