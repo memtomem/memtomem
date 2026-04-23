@@ -12,9 +12,12 @@ Design notes:
   (uv-tool / uvx / venv-relative / system / unknown) need different
   uninstall commands; we print the right one but never execute, since the
   package manager owns its own permissions and lifecycle.
-* If the MCP server is still running we refuse — deleting an open SQLite
-  file under WAL mode risks corruption. ``--force`` overrides for the
-  rare case the user knows the pid is wrong.
+* If the MCP server is still running (``.server.pid``) OR any other
+  process holds a SQLite write lock on the DB (``mm web``, ``mm
+  watchdog``, ad-hoc connections) we refuse — deleting an open SQLite
+  file under WAL mode risks corruption. ``--force`` overrides. The
+  write-lock probe uses ``BEGIN IMMEDIATE`` to catch writers the pid
+  file doesn't know about (see ``_check_db_lock``).
 * If config.json is corrupted we fall back to defaults rather than
   aborting — uninstall is itself a recovery path, so it cannot depend on
   a valid config.
@@ -24,6 +27,7 @@ from __future__ import annotations
 
 import fcntl
 import shutil
+import sqlite3
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -82,6 +86,20 @@ class _ServerState:
     alive: bool
     pid: int | None
     pid_file: Path | None
+
+
+@dataclass(frozen=True)
+class _DbLockState:
+    """Result of probing the SQLite DB for an active writer.
+
+    ``locked`` is True only when another connection holds a RESERVED /
+    PENDING / EXCLUSIVE lock at probe time — i.e. an active writer.
+    Pure readers (SHARED locks only) are not detected; that's an
+    accepted tradeoff (see ``_check_db_lock``).
+    """
+
+    locked: bool
+    probe_error: str | None
 
 
 @dataclass(frozen=True)
@@ -193,6 +211,79 @@ def _check_server_liveness() -> _ServerState:
         if state.alive:
             return state
     return _ServerState(alive=False, pid=None, pid_file=None)
+
+
+def _check_db_lock(db_path: Path) -> _DbLockState:
+    """Probe whether another connection holds a write lock on ``db_path``.
+
+    Motivation: the ``.server.pid`` check only catches the MCP
+    ``memtomem-server`` entrypoint. ``mm web``, ``mm watchdog``, and any
+    user-run sqlite3 connection are invisible to that scheme, so
+    uninstall could silently proceed while a live writer was holding the
+    WAL (observed in issue #384).
+
+    Mechanism: open a short-timeout connection and attempt
+    ``BEGIN IMMEDIATE`` — that tries to acquire a RESERVED lock and
+    raises ``SQLITE_BUSY`` (``sqlite3.OperationalError`` whose message
+    contains "locked"/"busy") if any other connection holds
+    RESERVED/PENDING/EXCLUSIVE. On success we ``ROLLBACK`` immediately;
+    the probe never modifies data.
+
+    Tradeoff: a process that only reads (SHARED lock) does NOT block
+    ``BEGIN IMMEDIATE`` in WAL mode, so a quiet-at-probe-time reader
+    slips through. That's an accepted tradeoff here — the WAL-corruption
+    path (active writer) is the severe case and is what this probe is
+    meant to guard. Complete reader-detection would need an ``lsof``
+    fallback or an extended pid-file scheme (see issue #384 discussion).
+
+    Error handling: if the probe can't run (file missing, corrupt,
+    permission denied, sqlite unavailable), returns ``locked=False`` with
+    ``probe_error`` set. Uninstall is itself a recovery path and must not
+    be blocked by unrelated DB integrity issues.
+    """
+    if not db_path.exists():
+        return _DbLockState(locked=False, probe_error=None)
+
+    # Header gate: only probe real SQLite files. Opening a corrupt /
+    # non-SQLite file with ``mode=rw`` can still trigger side effects on
+    # sibling ``-wal`` / ``-shm`` files (observed: a fake-content WAL
+    # got unlinked when SQLite tried to verify it). Stay out of that
+    # code path unless the file is actually a SQLite database.
+    try:
+        with db_path.open("rb") as fh:
+            header = fh.read(16)
+    except OSError as exc:
+        return _DbLockState(locked=False, probe_error=f"{type(exc).__name__}: {exc}")
+    if header != b"SQLite format 3\x00":
+        return _DbLockState(locked=False, probe_error="not a SQLite database")
+
+    conn: sqlite3.Connection | None = None
+    try:
+        # mode=rw: don't auto-create if the file vanishes between stat
+        # and connect (paranoia for concurrent deletions).
+        conn = sqlite3.connect(
+            f"file:{db_path}?mode=rw",
+            uri=True,
+            timeout=0.25,
+        )
+        conn.execute("BEGIN IMMEDIATE")
+        conn.rollback()
+        return _DbLockState(locked=False, probe_error=None)
+    except sqlite3.OperationalError as exc:
+        msg = str(exc).lower()
+        if "locked" in msg or "busy" in msg:
+            return _DbLockState(locked=True, probe_error=None)
+        # Other OperationalError (not-a-database, read-only, etc.) — skip
+        # probe, let uninstall proceed.
+        return _DbLockState(locked=False, probe_error=f"{type(exc).__name__}: {exc}")
+    except (sqlite3.Error, OSError) as exc:
+        return _DbLockState(locked=False, probe_error=f"{type(exc).__name__}: {exc}")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
 
 # ---- inventory -----------------------------------------------------------
@@ -552,6 +643,7 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
     state_dir = _DEFAULT_STATE_DIR
 
     server = _check_server_liveness()
+    db_lock = _check_db_lock(db_path)
 
     # Empty-state fast path.
     if not state_dir.exists() and not db_path.exists():
@@ -571,14 +663,29 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
     label, lines = _binary_uninstall_hint(profile)
     _print_binary_hint(label, lines)
 
-    if server.alive and not force:
+    if (server.alive or db_lock.locked) and not force:
         click.echo("")
-        click.secho(
-            f"Server still running (pid {server.pid}). Refusing to delete state — "
-            "an active server holds the SQLite WAL and deleting it risks corruption.",
-            fg="red",
-        )
-        click.secho("  Stop the server first, or pass --force to override.", fg="red")
+        if server.alive:
+            click.secho(
+                f"Server still running (pid {server.pid}). Refusing to delete state — "
+                "an active server holds the SQLite WAL and deleting it risks corruption.",
+                fg="red",
+            )
+            click.secho("  Stop the server first, or pass --force to override.", fg="red")
+        else:
+            # db_lock.locked only — writer without .server.pid (mm web,
+            # mm watchdog, ad-hoc script, ...). Point the user at lsof /
+            # ps so they can find it without another round-trip.
+            click.secho(
+                f"Another process holds a write lock on {db_path}. Refusing to delete "
+                "state — an active writer can corrupt the WAL.",
+                fg="red",
+            )
+            click.secho(
+                f"  Find it with `lsof {db_path}` (or `ps aux | grep memtomem`), "
+                "stop it, or pass --force to override.",
+                fg="red",
+            )
         sys.exit(2)
 
     if will_delete_bytes == 0 and not inv.other_files.paths:

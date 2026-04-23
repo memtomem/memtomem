@@ -12,6 +12,7 @@ import contextlib
 import fcntl
 import json
 import os
+import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -452,6 +453,71 @@ class TestRuntimePidCleanedWithOther:
 
 
 # -------------------------------------------------------------------- 13
+
+
+class TestDbWriterLockRefuses:
+    """Active SQLite writer without a .server.pid (mm web / watchdog / ad-hoc)
+    must also block the uninstall — the gap #384 called out.
+
+    The probe relies on ``BEGIN IMMEDIATE`` raising ``SQLITE_BUSY`` when
+    another connection holds RESERVED-or-above. Holding an open
+    ``BEGIN IMMEDIATE`` transaction in the test process reproduces this
+    cross-process lock contention within a single pytest run.
+    """
+
+    def _make_real_db(self, home: Path) -> tuple[Path, sqlite3.Connection]:
+        state = home / ".memtomem"
+        state.mkdir(parents=True, exist_ok=True)
+        # Keep parity with _seed_state for non-DB files so the inventory
+        # path is exercised end-to-end, but seed a *real* SQLite DB.
+        (state / "config.json").write_text('{"embedding": {"provider": "none"}}', encoding="utf-8")
+        (state / "memories").mkdir(exist_ok=True)
+        db_path = state / "memtomem.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE _probe (id INTEGER)")
+        conn.commit()
+        return db_path, conn
+
+    def test_refuses_when_writer_holds_lock(self, home):
+        db_path, conn = self._make_real_db(home)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            result = CliRunner().invoke(cli, ["uninstall", "-y"])
+            assert result.exit_code == 2, result.output
+            assert "holds a write lock" in result.output
+            assert str(db_path) in result.output
+            assert "lsof" in result.output
+            # "Server still running" path must NOT trigger — no .server.pid here.
+            assert "Server still running" not in result.output
+            # Nothing deleted while the writer is alive.
+            assert db_path.exists()
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def test_force_overrides_db_lock(self, home):
+        db_path, conn = self._make_real_db(home)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
+            assert result.exit_code == 0, result.output
+            # State dir gets wiped — even if the lock-holding connection
+            # still has the inode, the directory entry is gone.
+            assert not db_path.exists()
+        finally:
+            try:
+                conn.rollback()
+            except sqlite3.ProgrammingError:
+                pass  # connection may be invalidated after the file vanished
+            conn.close()
+
+    def test_proceeds_when_db_exists_but_no_writer(self, home):
+        db_path, conn = self._make_real_db(home)
+        conn.close()  # release before probing — no writer held.
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "holds a write lock" not in result.output
+        assert not db_path.exists()
 
 
 class TestPidStaleProceeds:
