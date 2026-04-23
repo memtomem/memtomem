@@ -7,6 +7,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [0.1.25] — 2026-04-23
+
+Feature + UX release. Adds `mm status` CLI as the terminal mirror of
+`mem_status`. Cuts idle-handshake disk writes: MCP handshake no longer
+creates `~/.memtomem/` — the DB opens on the first tool call, and the
+server pid file moved to `$XDG_RUNTIME_DIR/memtomem/`. Plus several
+`mm init` back-navigation and flag-precedence fixes (#371, #420, #421),
+a `serverInfo.version` pin (#383), a `mem_embedding_reset` recovery-path
+fix (#409), `-y` refuses to write config for missing extras (#396, #402),
+and a docs troubleshooting cleanup (#398).
+
+### Added
+
 - **`mm status` CLI command — terminal mirror of the MCP `mem_status` tool.**
   Closes the gap noted in #382: the README and Quick Start told first-time
   users to "call the `mem_status` tool" to confirm a healthy install, but
@@ -62,6 +79,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   now leaves `~/.memtomem/` untouched altogether — the advisory-lock
   write that forced its creation moved to `$XDG_RUNTIME_DIR`. (#399,
   #411; builds on #400 plumbing and #410 handler migration.)
+
+- **Docs: troubleshooting dropped the misleading `memtomem-server` TTY
+  verify command.** `uvx --from memtomem memtomem-server` launched bare in
+  a terminal paints the terminal with JSON-RPC parse errors on a healthy
+  install (the server expects JSON-RPC on stdin, so TTY noise triggers
+  `ERROR` lines) and silently provisions `~/.memtomem/`. "Tools don't
+  appear in my editor" in `docs/guides/getting-started.md` and
+  `docs/guides/mcp-clients.md` now point at side-effect-free checks
+  instead: `mm --version` (or `uvx --from memtomem mm --version` for
+  uvx-only setups), then a `mem_status` call from inside the editor.
+  A blockquote explains why the old command is not a healthy-install
+  indicator. (#398, closes #381)
 
 ### Fixed
 
