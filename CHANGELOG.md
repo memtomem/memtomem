@@ -11,6 +11,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+## [0.1.26] — 2026-04-24
+
+Hotfix release. Closes the stale-legacy-pid-file race that caused
+`memtomem-server` to intermittently refuse to start after an earlier
+shutdown, producing the misleading "pre-0.1.25 install" error in
+Claude Code / `claude mcp list`. The live-orphan-holder axis of the
+same user symptom (server alive, handshake failed, lock legitimately
+held) is tracked as a separate follow-up (#440).
+
+### Fixed
+
 - **Legacy `.server.pid` teardown: `~/.memtomem/.server.pid` is now
   unlinked on both normal exit and SIGTERM.** Previously the legacy
   path was only `flock`-released by kernel cleanup but the file itself
@@ -19,7 +30,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   with the misleading "pre-0.1.25 install" message.
   `_install_sigterm_handler` is now variadic and tracks both the new
   `$XDG_RUNTIME_DIR` pid file and the legacy one (when held), matching
-  the `atexit` cleanup. (#437)
+  the `atexit` cleanup. (#437, PR #439)
 
 ## [0.1.25] — 2026-04-23
 
