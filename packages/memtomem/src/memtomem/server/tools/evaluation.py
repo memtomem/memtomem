@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 
@@ -25,7 +25,7 @@ async def mem_eval(
         since: Only analyze activity after this date (YYYY-MM-DD or ISO)
         namespace: Scope analysis to this namespace
     """
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     report = await app.storage.get_health_report(namespace=namespace)
 
     lines = ["## Memory Health Report\n"]

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.helpers import _announce_dim_mismatch_once, _check_embedding_mismatch
 from memtomem.server.tool_registry import register
@@ -70,7 +70,7 @@ async def _mem_add_core(
 
     from memtomem.tools.memory_writer import append_entry
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     # Block vector-dependent writes when the server is in degraded mode
     # (see issue #349). Without this gate the subsequent ``index_file``
@@ -209,7 +209,7 @@ async def mem_edit(
 
     from memtomem.tools.memory_writer import replace_lines
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     mismatch_msg = _check_embedding_mismatch(app)
     if mismatch_msg:
         return mismatch_msg
@@ -273,7 +273,7 @@ async def mem_delete(
     """
     from memtomem.tools.memory_writer import remove_lines
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     if chunk_id:
         try:
@@ -351,7 +351,7 @@ async def mem_batch_add(
 
     from memtomem.tools.memory_writer import append_entry
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     mismatch_msg = _check_embedding_mismatch(app)
     if mismatch_msg:
         return mismatch_msg

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 
@@ -35,7 +35,7 @@ async def mem_reflect(
     if not 1 <= limit <= 200:
         return f"Error: limit must be between 1 and 200, got {limit}."
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     storage = app.storage
 
     lines = ["## Memory Reflection Report\n"]
@@ -143,7 +143,7 @@ async def mem_reflect_save(
 
     # Link related chunks to the new insight
     if related_chunks:
-        app = _get_app(ctx)
+        app = await _get_app_initialized(ctx)
         from uuid import UUID
 
         recent = await app.storage.recall_chunks(limit=1)

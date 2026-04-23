@@ -6,7 +6,7 @@ import logging
 from typing import Literal
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.formatters import _display_path, _format_recall_structured
 from memtomem.server.helpers import _announce_dim_mismatch_once, _parse_recall_date
@@ -51,7 +51,7 @@ async def mem_recall(
 
     from memtomem.models import NamespaceFilter
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     try:
         since_dt = _parse_recall_date(since) if since else None

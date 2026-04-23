@@ -218,3 +218,23 @@ def _get_app(ctx: CtxType) -> AppContext:
     # tool signatures exists only so the param isn't positional-required.
     assert ctx is not None, "MCP framework must inject ctx at call time"
     return ctx.request_context.lifespan_context
+
+
+async def _get_app_initialized(ctx: CtxType) -> AppContext:
+    """Fetch the ``AppContext`` and guarantee its components are populated.
+
+    Handlers that touch storage / embedder / index_engine / search_pipeline
+    must call this (not ``_get_app``) so the DB + embedder are opened on
+    first use rather than at lifespan startup — that's the whole point of
+    #399: an MCP handshake + ``tools/list`` leaves ``~/.memtomem/`` alone.
+
+    Phase 1 kept ``app_lifespan`` calling ``ensure_initialized`` eagerly,
+    so every handler currently sees populated components even via
+    ``_get_app``. Phase 3 drops the eager call — at that point any handler
+    still reaching through ``_get_app`` would hit the
+    ``_require_initialized`` guard on first property read. Migrating every
+    handler now (Phase 2) is what makes the Phase 3 flip safe.
+    """
+    app = _get_app(ctx)
+    await app.ensure_initialized()
+    return app

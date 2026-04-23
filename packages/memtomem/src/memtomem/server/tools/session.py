@@ -5,7 +5,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 
@@ -29,7 +29,7 @@ async def mem_session_start(
         title: Optional human-readable session title (e.g. "Sprint Planning")
         namespace: Session namespace (default: current session namespace)
     """
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     session_id = str(uuid4())
     effective_ns = namespace or app.current_namespace or "default"
 
@@ -61,7 +61,7 @@ async def mem_session_end(
     Args:
         summary: Optional summary of what was accomplished in this session
     """
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     if not app.current_session_id:
         return "No active session."
@@ -112,7 +112,7 @@ async def mem_session_list(
     if not 1 <= limit <= 200:
         return f"Error: limit must be between 1 and 200, got {limit}."
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     sessions = await app.storage.list_sessions(agent_id=agent_id, since=since, limit=limit)
 
     if not sessions:

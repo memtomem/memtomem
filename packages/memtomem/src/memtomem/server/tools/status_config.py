@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from memtomem import __version__
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 from memtomem.server.helpers import _set_config_key
@@ -29,7 +29,7 @@ async def mem_stats(
 
     Use this to quickly assess how many memories are indexed before searching.
     """
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     data = await app.storage.get_stats()
     total_chunks = data.get("total_chunks", 0)
     total_sources = data.get("total_sources", 0)
@@ -91,7 +91,7 @@ async def mem_status(
     sub-blocks echoing the DB vs runtime provider/model/dimension so the
     user can see what changed without consulting another tool.
     """
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     stats = await app.storage.get_stats()
     config = app.config
 
@@ -183,7 +183,7 @@ async def mem_config(
         persist: If True, save the change to ~/.memtomem/config.json so it
                  survives server restarts. Default is runtime-only.
     """
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     if key and value is not None:
         result = _set_config_key(app.config, key, value)
@@ -294,7 +294,7 @@ async def mem_embedding_reset(
             - "apply_current": Reset DB to current config. DESTRUCTIVE — deletes all vectors, re-index required.
             - "revert_to_stored": Switch runtime embedder to match DB stored values. Non-destructive.
     """
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     if mode not in ("status", "apply_current", "revert_to_stored"):
         return f"Invalid mode '{mode}'. Use: status, apply_current, or revert_to_stored."
@@ -351,7 +351,7 @@ async def mem_reset(
         confirm: Must be True to proceed. Prevents accidental data loss.
     """
     if not confirm:
-        app = _get_app(ctx)
+        app = await _get_app_initialized(ctx)
         stats = await app.storage.get_stats()
         total = stats.get("total_chunks", 0)
         return (
@@ -360,7 +360,7 @@ async def mem_reset(
             "Pass confirm=True to proceed."
         )
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     deleted = await app.storage.reset_all()
     summary = ", ".join(f"{t}: {c}" for t, c in deleted.items() if c > 0)
     return f"Database reset complete. Deleted: {summary or 'empty'}. Run mem_index to re-index."

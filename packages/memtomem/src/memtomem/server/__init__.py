@@ -21,6 +21,7 @@ from memtomem.server.context import (
     AppContext as AppContext,
     CtxType as CtxType,
     _get_app as _get_app,
+    _get_app_initialized as _get_app_initialized,
 )
 from memtomem.server.formatters import (
     _format_compact_result as _format_compact_result,

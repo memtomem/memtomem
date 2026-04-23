@@ -6,7 +6,7 @@ import json
 import logging
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 
@@ -107,7 +107,7 @@ async def mem_policy_add(
     except json.JSONDecodeError as exc:
         return f"Error: invalid JSON config: {exc}"
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     existing = await app.storage.policy_get(name)
     if existing:
         return f"Error: policy '{name}' already exists."
@@ -123,7 +123,7 @@ async def mem_policy_list(
     ctx: CtxType = None,
 ) -> str:
     """List all memory lifecycle policies."""
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     policies = await app.storage.policy_list()
 
     if not policies:
@@ -152,7 +152,7 @@ async def mem_policy_delete(
     Args:
         name: Policy name to delete
     """
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     deleted = await app.storage.policy_delete(name)
     if not deleted:
         return f"Error: policy '{name}' not found."
@@ -175,7 +175,7 @@ async def mem_policy_run(
     """
     from memtomem.tools.policy_engine import run_all_enabled, run_policy
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     if name:
         policy = await app.storage.policy_get(name)

@@ -6,7 +6,7 @@ import logging
 from typing import Any
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 
@@ -39,7 +39,7 @@ async def mem_consolidate(
     if min_group_size < 2:
         return f"Error: min_group_size must be at least 2, got {min_group_size}."
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     effective_ns = namespace or app.current_namespace
 
     # Group chunks by source file
@@ -162,7 +162,7 @@ async def mem_consolidate_apply(
         link_consolidation_relations,
     )
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     entry = await app.storage.scratch_get("consolidation_groups")
     if not entry:

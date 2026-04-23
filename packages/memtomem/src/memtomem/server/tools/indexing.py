@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.helpers import _check_embedding_mismatch
 
@@ -29,7 +29,7 @@ async def mem_index(
         namespace: Assign all indexed chunks to this namespace
         auto_tag: If True, run keyword-based auto-tagging on newly indexed chunks
     """
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     # Block indexing if embedding config mismatches DB
     mismatch_msg = _check_embedding_mismatch(app)

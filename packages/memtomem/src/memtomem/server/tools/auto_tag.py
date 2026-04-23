@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 
@@ -31,7 +31,7 @@ async def mem_auto_tag(
     """
     from memtomem.tools.auto_tag import auto_tag_storage
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     stats = await auto_tag_storage(
         app.storage,
         source_filter=source_filter,
