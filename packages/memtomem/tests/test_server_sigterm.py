@@ -65,6 +65,29 @@ def test_sigterm_handler_unlinks_pid_file_and_hard_exits(
     assert exit_calls == [0], "handler must call os._exit(0), not sys.exit or return"
 
 
+def test_sigterm_handler_unlinks_all_pid_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Variadic form: during the #412 transition ``main()`` tracks two pid
+    files (new XDG path + legacy ``~/.memtomem/.server.pid``). Both must
+    be cleaned up on SIGTERM, otherwise the next server start hits the
+    stale-legacy-lock branch (#437)."""
+    xdg_pid = tmp_path / "server.pid"
+    legacy_pid = tmp_path / "legacy.pid"
+    xdg_pid.write_text("12345")
+    legacy_pid.write_text("12345")
+
+    captured: dict[int, object] = {}
+    monkeypatch.setattr(signal, "signal", lambda sig, h: captured.setdefault(sig, h))
+    monkeypatch.setattr(os, "_exit", lambda code: None)
+
+    _install_sigterm_handler(xdg_pid, legacy_pid)
+    captured[signal.SIGTERM](signal.SIGTERM, None)  # type: ignore[operator]
+
+    assert not xdg_pid.exists(), "XDG pid file must be unlinked"
+    assert not legacy_pid.exists(), "legacy pid file must be unlinked (#437)"
+
+
 # ── integration ──────────────────────────────────────────────────────
 
 
@@ -194,6 +217,53 @@ def test_server_uses_tempdir_fallback_when_xdg_unset(tmp_path: Path) -> None:
     finally:
         _cleanup_proc(proc)
         proc.wait(timeout=5)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="SIGTERM semantics differ on Windows; server is POSIX-only"
+)
+def test_sigterm_unlinks_legacy_pid_file_end_to_end(tmp_path: Path) -> None:
+    """Issue #437: when ``~/.memtomem/`` exists but no live server holds
+    the legacy flock, a new server acquires it, runs, and must unlink
+    the legacy pid file on SIGTERM too.
+
+    Without the fix, the legacy file is left behind after every shutdown.
+    The next start opens it, fails ``flock`` intermittently under
+    parallel probes (``claude mcp list`` probing multiple MCP servers),
+    and prints the misleading "pre-0.1.25 install" message.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".memtomem").mkdir()  # triggers _try_hold_legacy_flock's is_dir() gate
+    legacy_pid = home / ".memtomem" / ".server.pid"
+    xdg = tmp_path / "xdg_runtime"
+    xdg.mkdir()
+    os.chmod(xdg, 0o700)
+    xdg_pid = xdg / "memtomem" / "server.pid"
+
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["XDG_RUNTIME_DIR"] = str(xdg)
+
+    proc = _spawn_server(env)
+    try:
+        _wait_for_pid_file(proc, xdg_pid)
+        assert legacy_pid.exists(), (
+            "server should have created the legacy pid file on acquiring the flock"
+        )
+
+        proc.send_signal(signal.SIGTERM)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pytest.fail("Server did not exit within 10s of SIGTERM")
+
+        assert not legacy_pid.exists(), (
+            "legacy pid file must be unlinked on SIGTERM (#437); still present leaves "
+            "a stale artifact that the next server spawn misreads as a pre-0.1.25 holder"
+        )
+    finally:
+        _cleanup_proc(proc)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="server is POSIX-only")

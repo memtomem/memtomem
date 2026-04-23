@@ -11,6 +11,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Legacy `.server.pid` teardown: `~/.memtomem/.server.pid` is now
+  unlinked on both normal exit and SIGTERM.** Previously the legacy
+  path was only `flock`-released by kernel cleanup but the file itself
+  survived, so the next server spawn could race against the stale file
+  under parallel MCP health probes (e.g. `claude mcp list`) and abort
+  with the misleading "pre-0.1.25 install" message.
+  `_install_sigterm_handler` is now variadic and tracks both the new
+  `$XDG_RUNTIME_DIR` pid file and the legacy one (when held), matching
+  the `atexit` cleanup. (#437)
+
 ## [0.1.25] — 2026-04-23
 
 Feature + UX release. Adds `mm status` CLI as the terminal mirror of
