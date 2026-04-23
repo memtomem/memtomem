@@ -389,6 +389,18 @@ def _step_embedding(state: dict) -> None:
 
     else:
         provider = "openai"
+        # Mirror the Ollama / ONNX / kiwipiepy probe pattern (#405 / #403):
+        # the ``-y`` extras gate (#402) refuses without the ``openai``
+        # Python client, so the wizard must hint before prompting for a
+        # key the user could otherwise spend effort validating.
+        if not _have_module("openai"):
+            click.secho("  openai Python client not installed.", fg="yellow")
+            click.echo(f"  Install with: {_extra_install_hint(['openai'], state)}")
+            click.echo("  Saving OpenAI config now so you're ready after install.")
+            click.echo(_y_refuse_hint("--provider openai", "openai"))
+            click.echo()
+            state.setdefault("_extras_warned_inline", set()).add("openai")
+
         click.echo("  Available models:")
         click.echo("    [1] text-embedding-3-small — balanced (1536d)")
         click.echo("    [2] text-embedding-3-large — highest accuracy (3072d)")
