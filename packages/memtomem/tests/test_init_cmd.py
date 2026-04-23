@@ -5259,3 +5259,211 @@ class TestBackNavThroughSilentStep:
         assert "No provider memory folders detected" not in back_pass_window, (
             f"Silent-step banner re-fired on back-pass-through:\n{back_pass_window}"
         )
+
+
+class TestStepHeaderPosition:
+    """(#420) ``step_header`` reads its step number from
+    ``state["_wizard_position"]`` (seeded by ``run_steps``) rather than from a
+    hardcoded integer in each ``_step_*``. That lets the same step function
+    show the correct position in every flow it participates in —
+    ``--advanced`` (1..10), ``--preset X`` (1..3), and default-interactive
+    (1..4 including the picker and the silent provider-dirs step).
+    """
+
+    def test_run_steps_seeds_position_before_each_step(self) -> None:
+        """``run_steps`` must write ``(i + 1, len(steps))`` into state BEFORE
+        invoking each step — step functions read that value during execution,
+        so a post-hoc seed would be too late."""
+        from memtomem.cli.wizard import run_steps
+
+        observed: list[tuple[int, int]] = []
+
+        def step_a(state: dict) -> None:
+            observed.append(state["_wizard_position"])
+
+        def step_b(state: dict) -> None:
+            observed.append(state["_wizard_position"])
+
+        def step_c(state: dict) -> None:
+            observed.append(state["_wizard_position"])
+
+        run_steps([step_a, step_b, step_c])
+
+        assert observed == [(1, 3), (2, 3), (3, 3)]
+
+    def test_position_reseeded_after_back_nav(self) -> None:
+        """After ``StepBack`` + re-enter, the previous step sees its own
+        position again (not the position it had moments before when the user
+        hit 'b'). Pin this so the re-prompt header renders the correct
+        number."""
+        from memtomem.cli.wizard import StepBack, run_steps
+
+        observed: list[tuple[str, tuple[int, int]]] = []
+        call_counts = {"a": 0, "b": 0}
+
+        def step_a(state: dict) -> None:
+            call_counts["a"] += 1
+            observed.append(("a", state["_wizard_position"]))
+
+        def step_b(state: dict) -> None:
+            call_counts["b"] += 1
+            observed.append(("b", state["_wizard_position"]))
+            if call_counts["b"] == 1:
+                raise StepBack()
+
+        run_steps([step_a, step_b])
+
+        # a(1/2) → b(2/2) raises back → a(1/2) → b(2/2) completes.
+        assert observed == [
+            ("a", (1, 2)),
+            ("b", (2, 2)),
+            ("a", (1, 2)),
+            ("b", (2, 2)),
+        ]
+
+    def test_step_header_renders_number_from_state(self) -> None:
+        """With ``_wizard_position`` seeded, ``step_header`` prints
+        ``N. Title`` where N is the 1-based current index."""
+        import click
+        from click.testing import CliRunner
+
+        from memtomem.cli.wizard import step_header
+
+        @click.command()
+        def cmd() -> None:
+            state = {"_wizard_position": (2, 4)}
+            step_header(state, "Memory Directory")
+
+        result = CliRunner().invoke(cmd, [])
+        assert result.exit_code == 0
+        assert "2. Memory Directory" in result.output
+
+    def test_step_header_renders_without_number_when_state_unseeded(self) -> None:
+        """Standalone use (no prior ``run_steps``) must not crash — fall
+        back to an unnumbered title. Tests and external callers need this
+        escape hatch."""
+        import click
+        from click.testing import CliRunner
+
+        from memtomem.cli.wizard import step_header
+
+        @click.command()
+        def cmd() -> None:
+            step_header({}, "Memory Directory")
+
+        result = CliRunner().invoke(cmd, [])
+        assert result.exit_code == 0
+        assert "Memory Directory" in result.output
+        # No leading "N. " prefix.
+        assert "1. Memory Directory" not in result.output
+        assert "2. Memory Directory" not in result.output
+
+    def test_advanced_flow_shows_numbers_1_through_10(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``mm init --advanced`` runs 10 interactive steps — step_header
+        must show ``1.`` through ``10.`` respectively. Pre-fix this was
+        correct by coincidence (hardcoded N == actual position); the
+        regression guard pins it to the new seed path."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+
+        runner = CliRunner()
+        memory_dir = tmp_path / "memories"
+        # Advanced walks through every step. Inputs chosen to minimize
+        # branching: no-rerank, no provider dirs, skip mcp.
+        # 1. embedding: 1 (quick start / none)
+        # 2. reranker: N (no)
+        # 3. memory_dir: path, y create
+        # 4. provider_dirs: N (skip for all three categories)
+        # 5. storage: accept default (empty line)
+        # 6. namespace: N (no auto-ns), default namespace accept
+        # 7. search: top_k default (empty), decay N
+        # 8. language: 1 (english)
+        # 9. settings hooks: N
+        # 10. mcp: 3 (skip)
+        result = runner.invoke(
+            init,
+            ["--advanced"],
+            input=f"1\nn\n{memory_dir}\ny\nn\nn\nn\n\nn\n\n\n\nn\n1\nn\n3\n",
+        )
+        assert result.exit_code == 0, result.output
+
+        out = result.output
+        assert "1. Embedding Provider" in out
+        assert "2. Reranker (optional)" in out
+        assert "3. Memory Directory" in out
+        assert "4. Provider Memory Folders" in out
+        assert "5. Storage" in out
+        assert "6. Namespace" in out
+        assert "7. Search" in out
+        assert "8. Language" in out
+        assert "9. Claude Code Hooks" in out
+        assert "10. Connect to AI Editor" in out
+
+    def test_default_preset_flow_renumbers_from_picker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``mm init`` (default interactive, preset chosen) runs
+        ``[picker, memory_dir, provider_dirs_auto, mcp]`` — four steps.
+        ``_step_memory_dir`` is position 2/4 here, not 3 (which was the
+        hardcoded value correct only for ``--advanced``). Silent
+        ``_step_provider_dirs_auto`` sits at position 3 but prints no
+        header of its own; mcp is 4."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        runner = CliRunner()
+        memory_dir = tmp_path / "memories"
+        # picker: 2 (english) → memory_dir → create → (silent) → mcp skip
+        result = runner.invoke(init, [], input=f"2\n{memory_dir}\ny\n3\n")
+        assert result.exit_code == 0, result.output
+
+        out = result.output
+        assert "2. Memory Directory" in out
+        assert "4. Connect to AI Editor" in out
+        # Pre-fix values must NOT appear (they were the bug).
+        assert "3. Memory Directory" not in out
+        assert "10. Connect to AI Editor" not in out
+
+    def test_explicit_preset_flow_renumbers_from_memory_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``mm init --preset korean`` runs only
+        ``[memory_dir, provider_dirs_auto, mcp]`` — three steps, memory_dir
+        at position 1. Pre-fix this showed ``3. Memory Directory`` which
+        was the bug's most visible symptom."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        runner = CliRunner()
+        memory_dir = tmp_path / "memories"
+        result = runner.invoke(init, ["--preset", "korean"], input=f"{memory_dir}\ny\n3\n")
+        assert result.exit_code == 0, result.output
+
+        out = result.output
+        assert "1. Memory Directory" in out
+        assert "3. Connect to AI Editor" in out
+        # Old hardcoded values must not leak.
+        assert "3. Memory Directory" not in out
+        assert "10. Connect to AI Editor" not in out

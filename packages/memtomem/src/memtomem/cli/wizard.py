@@ -88,11 +88,20 @@ def run_steps(
     Each step function receives a shared state dict and modifies it.
     Raising StepBack goes to the previous interactive step (skipping any
     ``@silent_step`` in between). WizardCancel aborts.
+
+    Before each invocation, ``state["_wizard_position"] = (i + 1, len(steps))``
+    is seeded so :func:`step_header` (and any other display helper) can render
+    a number reflecting the step's actual position in *this* flow — not a
+    value hardcoded at the step definition. Without the seed the number was
+    only correct for the 10-step ``--advanced`` flow; preset flows showed
+    e.g. ``3. Memory Directory`` when memory-dir was actually the first step
+    the user saw. (#420)
     """
     if state is None:
         state = {}
     i = 0
     while i < len(steps):
+        state["_wizard_position"] = (i + 1, len(steps))
         try:
             steps[i](state)
             i += 1
@@ -116,7 +125,17 @@ def run_steps(
     return state
 
 
-def step_header(number: int, title: str) -> None:
-    """Print a step header with navigation hint."""
-    click.secho(f"{number}. {title}", fg="yellow", bold=True)
+def step_header(state: dict, title: str) -> None:
+    """Print a step header with navigation hint.
+
+    The number is read from ``state["_wizard_position"]`` as seeded by
+    :func:`run_steps`. If the key is absent (standalone / test use), the
+    header is rendered without a number. (#420)
+    """
+    position = state.get("_wizard_position")
+    if position is not None:
+        current, _total = position
+        click.secho(f"{current}. {title}", fg="yellow", bold=True)
+    else:
+        click.secho(title, fg="yellow", bold=True)
     click.echo(click.style("  (b: back, q: quit)", dim=True))

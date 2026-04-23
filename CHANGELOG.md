@@ -65,6 +65,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm init`: step headers show the correct position in every flow —
+  not a hardcoded number correct only for `--advanced`.** Previously every
+  `_step_*` function called `step_header(N, title)` with a hardcoded `N`
+  that matched the step's index in the 10-step advanced sequence. Preset
+  flows re-use the same step functions in shorter sequences, so
+  `_step_memory_dir` advertised `3. Memory Directory` even when it was
+  the first prompt the user saw (`--preset korean`) or the second (default
+  interactive after a preset pick). `wizard.run_steps` now seeds
+  `state["_wizard_position"] = (current_index, total)` before each
+  invocation, and `step_header(state, title)` reads that instead of
+  taking the integer as an argument. Numbers: advanced 1–10 (unchanged),
+  `--preset X` 1–3, default-interactive 1–4 (picker counts as step 1, the
+  silent `_step_provider_dirs_auto` counts as step 3 but prints no header
+  of its own). (#420)
+
 - **`mm init`: "b" (back) at the MCP step now reaches the memory-directory
   prompt instead of stalling on a silent banner.** The wizard's
   `_step_provider_dirs_auto` sits between `_step_memory_dir` and `_step_mcp`
