@@ -13,8 +13,6 @@ from mcp.server.fastmcp import FastMCP
 
 from memtomem.config import Mem2MemConfig
 from memtomem.indexing.watcher import FileWatcher
-from memtomem.search.dedup import DedupScanner
-from memtomem.server.component_factory import Components, close_components, create_components
 from memtomem.server.context import AppContext
 
 logger = logging.getLogger(__name__)
@@ -83,14 +81,6 @@ def _load_dotenv() -> None:
         pass
 
 
-async def _shutdown(watcher: FileWatcher, comp: Components) -> None:
-    for label, coro in [("watcher", watcher.stop()), ("components", close_components(comp))]:
-        try:
-            await coro
-        except Exception:
-            logger.warning("Shutdown step '%s' failed", label, exc_info=True)
-
-
 # ---------------------------------------------------------------------------
 # Main lifespan
 # ---------------------------------------------------------------------------
@@ -102,7 +92,21 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
     _setup_logging()
 
     config = Mem2MemConfig()
-    comp = await create_components(config)
+
+    # Webhook manager is storage-free; safe to construct before component init.
+    webhook_mgr = None
+    if config.webhook.enabled and config.webhook.url:
+        from memtomem.server.webhooks import WebhookManager
+
+        webhook_mgr = WebhookManager(config.webhook)
+
+    ctx = AppContext(config=config, webhook_manager=webhook_mgr)
+
+    # Phase 1 of #399 keeps init eager: the rest of startup (watcher,
+    # schedulers, watchdog) needs storage/embedder ready. Phase 3 will move
+    # this call (and the watcher/scheduler startup below) into the first
+    # tool-call path.
+    comp = await ctx.ensure_initialized()
 
     # When the server came up in degraded mode (embedding mismatch, see
     # issue #349) don't start the file watcher — indexing goes through
@@ -111,28 +115,6 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
     watcher = FileWatcher(comp.index_engine, config.indexing)
     if comp.embedding_broken is None:
         await watcher.start()
-
-    dedup_scanner = DedupScanner(storage=comp.storage, embedder=comp.embedder)
-
-    # Webhook manager
-    webhook_mgr = None
-    if config.webhook.enabled and config.webhook.url:
-        from memtomem.server.webhooks import WebhookManager
-
-        webhook_mgr = WebhookManager(config.webhook)
-
-    ctx = AppContext(
-        config=config,
-        storage=comp.storage,
-        embedder=comp.embedder,
-        index_engine=comp.index_engine,
-        search_pipeline=comp.search_pipeline,
-        watcher=watcher,
-        dedup_scanner=dedup_scanner,
-        webhook_manager=webhook_mgr,
-        llm_provider=comp.llm,
-        embedding_broken=comp.embedding_broken,
-    )
 
     # Background schedulers are skipped in degraded mode (see issue #349) —
     # they walk the index / re-embed chunks and would hit the same missing
@@ -163,7 +145,7 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
 
         watchdog = HealthWatchdog(ctx, config.health_watchdog)
         await watchdog.start()
-        ctx.health_watchdog = watchdog
+        ctx.set_health_watchdog(watchdog)
 
     try:
         yield ctx
@@ -188,4 +170,11 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
                 await webhook_mgr.close()
             except Exception:
                 logger.warning("Failed to close webhook manager", exc_info=True)
-        await _shutdown(watcher, comp)
+        try:
+            await watcher.stop()
+        except Exception:
+            logger.warning("Shutdown step 'watcher' failed", exc_info=True)
+        try:
+            await ctx.close()
+        except Exception:
+            logger.warning("Shutdown step 'components' failed", exc_info=True)

@@ -131,15 +131,7 @@ def _make_app(components) -> AppContext:
     Skips watcher / scheduler startup — those would try to touch ``chunks_vec``
     in degraded mode, which is exactly what the lifespan already gates against.
     """
-    return AppContext(
-        config=components.config,
-        storage=components.storage,
-        embedder=components.embedder,
-        index_engine=components.index_engine,
-        search_pipeline=components.search_pipeline,
-        watcher=None,  # type: ignore[arg-type]
-        embedding_broken=components.embedding_broken,
-    )
+    return AppContext.from_components(components)
 
 
 async def test_create_components_enters_degraded_instead_of_raising(degraded_components):
