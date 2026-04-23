@@ -159,6 +159,15 @@ def _install_sigterm_handler() -> None:
 
 def main() -> None:
     """Run the MCP server."""
+    # Install the SIGTERM → sys.exit(0) bridge *first* so the entire ``main()``
+    # body is covered. A SIGTERM arriving between the interpreter entering
+    # ``main()`` and the atexit registrations below still runs atexit and
+    # cleans up whatever was registered at that point (possibly nothing,
+    # which is exactly right — no pid file exists yet, so nothing to unlink).
+    # Installing after the lock was the old shape and left a window where
+    # ``pkill`` during startup reproduced the original #387 bug.
+    _install_sigterm_handler()
+
     import atexit
     import fcntl
     from pathlib import Path
@@ -174,7 +183,9 @@ def main() -> None:
         fcntl.flock(_lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         # Another server already holds the lock — proceed anyway (the editor
-        # expects the process to stay alive), but log a warning.
+        # expects the process to stay alive), but log a warning. We don't
+        # register an unlink on atexit here: unlinking the shared ``.server.pid``
+        # would yank the primary server's lock file out from under it.
         _lock_fp.close()
         import logging
 
@@ -189,8 +200,5 @@ def main() -> None:
         _lock_fp.flush()
         atexit.register(lambda: _lock_fp.close())  # LIFO: runs second
         atexit.register(lambda: pid_file.unlink(missing_ok=True))  # LIFO: runs first
-        # Bridge SIGTERM (e.g. ``pkill -f memtomem-server``, supervisord stop)
-        # into the atexit path so the unlink above actually runs (#387).
-        _install_sigterm_handler()
 
     mcp.run()
