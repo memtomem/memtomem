@@ -83,17 +83,9 @@ async def _watchdog_run(as_json: bool) -> None:
     from memtomem.config import HealthWatchdogConfig
     from memtomem.server.context import AppContext
     from memtomem.server.health_watchdog import HealthWatchdog
-    from memtomem.indexing.watcher import FileWatcher
 
     async with cli_components() as comp:
-        ctx = AppContext(
-            config=comp.config,
-            storage=comp.storage,
-            embedder=comp.embedder,
-            index_engine=comp.index_engine,
-            search_pipeline=comp.search_pipeline,
-            watcher=FileWatcher(comp.index_engine, comp.config.indexing),
-        )
+        ctx = AppContext.from_components(comp)
         config = HealthWatchdogConfig(enabled=True)
         wd = HealthWatchdog(ctx, config)
         await wd.start()
