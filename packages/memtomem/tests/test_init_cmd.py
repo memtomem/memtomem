@@ -3603,6 +3603,173 @@ class TestPresetSelection:
         assert data["mmr"]["lambda_param"] == 0.3
 
 
+class TestPresetWizardBackNav:
+    """(#371) "b" at the memory-dir step must navigate back to the preset
+    picker in the default interactive path. Previously the picker and its
+    follow-up steps lived in separate ``run_steps`` calls, so ``_step_memory_dir``
+    was index 0 of the second call and "b" silently re-prompted instead of
+    going back. The combined-run_steps fix puts the picker at index 0 of one
+    list so ``StepBack`` from memory_dir decrements cleanly into the picker.
+    """
+
+    def test_back_at_memory_dir_returns_to_preset_picker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pick english, hit "b" at memory-dir, re-pick korean. The final
+        config must reflect korean (bge-m3 + kiwipiepy), proving the picker
+        ran a second time AND the re-pick actually overwrote the first
+        preset's state."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        # CliRunner swaps sys.stdin mid-invoke so `sys.stdin.isatty` can't be
+        # patched through that boundary; init_cmd exposes the ``_isatty``
+        # seam for exactly this case.
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        runner = CliRunner()
+        # 1) picker: "2" (english, default)
+        # 2) memory_dir: "b"  → back to picker
+        # 3) picker: "3" (korean)
+        # 4) memory_dir: the tmp path
+        # 5) "create it?": y
+        # 6) mcp: "3" (skip)
+        memory_dir = tmp_path / "memories"
+        result = runner.invoke(init, [], input=f"2\nb\n3\n{memory_dir}\ny\n3\n")
+        assert result.exit_code == 0, result.output
+
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        # Korean re-pick, not the initial English pick.
+        assert data["embedding"]["model"] == "bge-m3"
+        assert data["search"]["tokenizer"] == "kiwipiepy"
+
+    def test_advanced_from_picker_routes_to_full_wizard(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Picking ``[4] Advanced`` at the picker raises ``_AdvancedSelected``,
+        which must break out of the combined ``run_steps`` and dispatch the
+        full 10-step wizard. Regression guard against losing the advanced
+        dispatch when refactoring the picker flow."""
+        from click.testing import CliRunner
+
+        import memtomem.cli.init_cmd as init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+
+        recorded: list[list[str]] = []
+        original_run_steps = init_cmd.run_steps
+
+        def tracking_run_steps(steps, state=None):  # type: ignore[no-untyped-def]
+            names = [s.__name__ for s in steps]
+            recorded.append(names)
+            # First call: combined picker + follow-ups — let the real
+            # run_steps execute so the picker can raise _AdvancedSelected.
+            if "_step_preset_picker" in names:
+                return original_run_steps(steps, state)
+            # Second call: advanced_steps — short-circuit with a valid state
+            # so _write_config_and_summary succeeds.
+            if state is None:
+                state = {}
+            state.update(
+                {
+                    "provider": "none",
+                    "model": "",
+                    "dimension": 0,
+                    "api_key": "",
+                    "rerank_enabled": False,
+                    "memory_dir": str(tmp_path / "memories"),
+                    "db_path": str(tmp_path / ".memtomem" / "memtomem.db"),
+                    "enable_auto_ns": False,
+                    "default_ns": "default",
+                    "top_k": 10,
+                    "tokenizer": "unicode61",
+                    "decay_enabled": False,
+                    "mcp_choice": 3,
+                    "settings_hooks": False,
+                    "provider_dirs": [],
+                    "provider_rules": [],
+                }
+            )
+            return state
+
+        monkeypatch.setattr(init_cmd, "run_steps", tracking_run_steps)
+
+        runner = CliRunner()
+        # Pick "4" = advanced. Picker raises _AdvancedSelected → outer catches
+        # → advanced_steps runs (stubbed).
+        result = runner.invoke(init_cmd.init, [], input="4\n")
+        assert result.exit_code == 0, result.output
+
+        assert len(recorded) == 2, f"expected 2 run_steps calls, got {len(recorded)}: {recorded}"
+        combined, advanced = recorded
+        # First call bundles picker with memory_dir and friends in ONE list —
+        # this is the whole point of the fix.
+        assert combined[0] == "_step_preset_picker"
+        assert "_step_memory_dir" in combined
+        # Second call is the 10-step advanced wizard.
+        assert len(advanced) == 10
+        assert "_step_embedding" in advanced
+        assert "_step_preset_picker" not in advanced
+
+    def test_preset_picker_applies_preset_inline_on_non_advanced(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unit: picking a non-advanced preset must populate state with the
+        preset's fields before ``_step_preset_picker`` returns — that's what
+        lets the combined run_steps continue straight into ``_step_memory_dir``
+        without a separate ``_apply_preset`` call."""
+        import click
+
+        from memtomem.cli.init_cmd import _step_preset_picker
+
+        @click.command()
+        def harness() -> None:
+            state: dict = {}
+            _step_preset_picker(state)
+            # Make the outcome observable via exit code / echo
+            click.echo(f"preset={state.get('_preset_applied')} model={state.get('model')}")
+
+        from click.testing import CliRunner
+
+        runner = CliRunner()
+        result = runner.invoke(harness, input="3\n")  # "3" = korean
+        assert result.exit_code == 0, result.output
+        assert "preset=korean" in result.output
+        assert "model=bge-m3" in result.output
+
+    def test_preset_picker_advanced_choice_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Unit: picking Advanced raises ``_AdvancedSelected`` rather than
+        applying a preset. The exception is what the caller relies on to
+        break out of the combined ``run_steps`` and route to advanced_steps."""
+        import click
+
+        from memtomem.cli.init_cmd import _AdvancedSelected, _step_preset_picker
+
+        @click.command()
+        def harness() -> None:
+            state: dict = {}
+            try:
+                _step_preset_picker(state)
+            except _AdvancedSelected:
+                click.echo(f"raised preset={state.get('_preset_choice')}")
+                return
+            click.echo("did not raise")  # pragma: no cover — guarded by assertion
+
+        from click.testing import CliRunner
+
+        runner = CliRunner()
+        result = runner.invoke(harness, input="4\n")  # "4" = advanced
+        assert result.exit_code == 0, result.output
+        assert "raised preset=advanced" in result.output
+
+
 class TestReinstallEmbeddingReconciliation:
     """mm init must detect and offer to fix embedding mismatches left by a
     previous install (e.g. provider=none → onnx switch leaves DB at dim=0)."""

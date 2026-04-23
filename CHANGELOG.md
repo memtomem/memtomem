@@ -65,6 +65,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm init`: "b" (back) now works at step 3 in the default interactive
+  path.** The preset picker and its follow-up steps (memory dir, provider
+  dirs auto-detect, MCP config) used to run in two separate `run_steps`
+  calls, which made `_step_memory_dir` index 0 of the second call — so
+  hitting "b" at the "Memory Directory" prompt showed `(already at first
+  step)` and re-prompted the same step instead of returning to the preset
+  picker. The two calls are now combined into one: `_step_preset_picker`
+  applies the chosen preset inline and raises a new `_AdvancedSelected`
+  exception when the user picks Advanced, which the caller catches to
+  dispatch the full 10-step wizard. "b" from memory-dir decrements back
+  into the picker, and re-picking a different preset overwrites the
+  previously applied state cleanly (via the idempotent `_apply_preset`).
+  The explicit `--preset <name>` flag path is unchanged — there's no
+  picker to return to there. (#371)
+
 - **MCP `serverInfo.version` now reports the memtomem package version.**
   Previously `FastMCP.__init__` left the underlying `Server.version`
   at `None`, so the lowlevel server fell back to

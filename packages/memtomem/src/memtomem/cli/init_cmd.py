@@ -27,6 +27,19 @@ def _run(cmd: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
+def _isatty() -> bool:
+    """Module-level indirection for ``sys.stdin.isatty()``.
+
+    Exists so tests can patch the default-interactive TTY gate without
+    fighting CliRunner's substituted ``sys.stdin`` (see
+    ``feedback_clirunner_isatty_seam.md``). Only the picker-path gate at
+    the bottom of :func:`init` routes through this; the other legacy
+    ``sys.stdin.isatty()`` call sites in this module each have their own
+    test paths.
+    """
+    return sys.stdin.isatty()
+
+
 def _ollama_available() -> bool:
     return shutil.which("ollama") is not None
 
@@ -2159,14 +2172,29 @@ def _write_mcp_json(server_cmd: str, server_args: list[str], mcp_env: dict[str, 
 # ── Preset quick-setup helpers ────────────────────────────────────────
 
 
+class _AdvancedSelected(Exception):
+    """Raised by ``_step_preset_picker`` when the user picks Advanced.
+
+    Breaks out of the combined preset ``run_steps`` so the caller can
+    dispatch the full 10-step wizard. See the default-interactive branch
+    in :func:`init`.
+    """
+
+
 def _step_preset_picker(state: dict) -> None:
     """First step of the default interactive path — pick a preset or Advanced.
 
     Writes ``state["_preset_choice"]`` = one of ``"minimal" | "english" |
-    "korean" | "advanced"``. The Advanced entry falls through to the full
-    10-step wizard; the other three bundle embedding/reranker/tokenizer/
-    namespace defaults via ``_apply_preset`` so the user only sees the
-    essential memory-dir and MCP questions afterwards.
+    "korean" | "advanced"``. The Advanced entry raises
+    :class:`_AdvancedSelected` so the caller can dispatch the full
+    10-step wizard; the other three apply the preset inline via
+    :func:`_apply_preset` so the rest of ``run_steps`` can continue with
+    ``_step_memory_dir``, ``_step_provider_dirs_auto``, and ``_step_mcp``
+    against fully populated state.
+
+    Re-entry via ``"b"`` from a later step is safe: :func:`_apply_preset`
+    overwrites the full preset surface, so re-picking a different preset
+    takes effect cleanly.
     """
     # First step — no prior step to return to, so only surface 'q: quit'.
     # 'b' still works (nav_prompt intercepts it before IntRange), but
@@ -2190,8 +2218,10 @@ def _step_preset_picker(state: dict) -> None:
 
     if choice == advanced_idx:
         state["_preset_choice"] = "advanced"
-    else:
-        state["_preset_choice"] = ordered[choice - 1]
+        raise _AdvancedSelected()
+
+    state["_preset_choice"] = ordered[choice - 1]
+    _apply_preset(state, state["_preset_choice"])
 
 
 def _apply_preset(state: dict, preset_name: str) -> None:
@@ -2598,13 +2628,26 @@ def init(
         run_steps([_step_memory_dir, _step_provider_dirs_auto, _step_mcp], state)
     else:
         # Default interactive path: show the preset picker, dispatch on choice.
-        if not sys.stdin.isatty():
+        if not _isatty():
             raise click.UsageError("Non-interactive terminal detected. Pass --preset <name> or -y.")
-        run_steps([_step_preset_picker], state)
-        if state["_preset_choice"] == "advanced":
+        # Combine the picker with its follow-up steps in ONE run_steps call so
+        # "b" at ``_step_memory_dir`` navigates back to the picker (#371). The
+        # previous split ran picker alone in a separate call, which left
+        # memory_dir as step-0 of a second run_steps where "b" was a no-op.
+        # ``_step_preset_picker`` applies the preset inline on a non-advanced
+        # choice, and raises ``_AdvancedSelected`` to break out to the full
+        # 10-step wizard below.
+        try:
+            run_steps(
+                [_step_preset_picker, _step_memory_dir, _step_provider_dirs_auto, _step_mcp],
+                state,
+            )
+        except _AdvancedSelected:
             run_steps(advanced_steps, state)
         else:
-            _apply_preset(state, state["_preset_choice"])
+            # CLI flag overrides apply only to the preset branch — advanced
+            # prompts for every field interactively, so there's no preset
+            # baseline to override there.
             _override_from_flags(
                 state,
                 provider=provider,
@@ -2619,7 +2662,6 @@ def init(
                 api_key=api_key,
                 mcp_mode=mcp_mode,
             )
-            run_steps([_step_memory_dir, _step_provider_dirs_auto, _step_mcp], state)
 
     _write_config_and_summary(state, fresh=fresh)
     _maybe_offer_embedding_reset(state, interactive=not non_interactive)
