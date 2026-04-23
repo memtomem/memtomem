@@ -390,7 +390,10 @@ uv pip install -e "packages/memtomem[all]"  # Source
 
 1. Restart your editor after configuring MCP
 2. Check that `memtomem-server` (not `memtomem`) is in your MCP config
-3. Verify: `uvx --from memtomem memtomem-server` should start without errors
+3. Verify the install is reachable: `mm --version` (or `uvx --from memtomem mm --version` for uvx-only setups) — side-effect-free, no state dir is touched
+4. From inside the editor, ask it to call the `mem_status` tool — a successful response confirms the MCP handshake reached the server
+
+> Don't run `uvx --from memtomem memtomem-server` in a terminal to test — it expects JSON-RPC on stdin, so TTY noise triggers `ERROR` lines that don't reflect install health, and the startup itself provisions `~/.memtomem/` even on a fresh machine.
 
 ---
 
