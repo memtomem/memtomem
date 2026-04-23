@@ -286,9 +286,11 @@ uses, so the output is identical. Useful as a sanity check between
 | **Import** | `mem_import_notion`, `mem_import_obsidian` |
 | **Maintenance** | `mem_dedup_scan`, `mem_dedup_merge`, `mem_decay_scan`, `mem_decay_expire` |
 | **Data** | `mem_export`, `mem_import` |
-| **Config** | `mem_stats`, `mem_status`, `mem_config`, `mem_embedding_reset`, `mem_reset` |
+| **Config** | `mem_stats`, `mem_status`, `mem_config`\*, `mem_embedding_reset`\*, `mem_reset`\* |
 | **Evaluation** | `mem_eval` |
 | **Context** | `mem_context_detect`, `mem_context_generate`, `mem_context_diff`, `mem_context_sync` (each accepts `include="skills,agents,commands"` to fan out `.memtomem/{skills,agents,commands}/` to Claude/Gemini/Codex runtimes; `generate`/`sync` also accept `strict=True` to fail on sub-agent or command field drops) |
+
+\* Requires `MEMTOMEM_TOOL_MODE=full`. In `core` or `standard` mode, use `mm config` (CLI) or the Web UI Settings tab instead.
 
 > **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 tools, default), `standard` (core + common packs + `mem_do`), or `full` (all 74 tools individually) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
 
