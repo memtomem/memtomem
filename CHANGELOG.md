@@ -17,8 +17,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   succeed and silently degrade. `-y` now exits non-zero with an actionable
   error listing the missing extras (and collapses multiple misses into a
   `memtomem[all]` hint when all four are missing). The interactive wizard's
-  warn-and-continue path is unchanged; #403 tracks aligning its wording with
-  the new `-y` refuse semantics. (#396, #402)
+  warn-and-continue path is unchanged; the wizard wording was aligned with
+  the new `-y` refuse semantics in #405 (closes #403). (#396, #402)
 
 ## [0.1.24] — 2026-04-23
 

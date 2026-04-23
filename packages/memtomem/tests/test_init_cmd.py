@@ -4859,23 +4859,39 @@ class TestYRefuseHintParity:
     def test_wizard_fallback_paths_call_y_refuse_hint(self) -> None:
         """Source-scan pin — each fallback branch must call ``_y_refuse_hint``.
 
-        Fragile by nature (a rename of the helper breaks the scan), but the
-        call pattern is specific enough that false positives are unlikely.
-        Rename → update test in the same PR, same seam.
+        Regex-based so a future reformatter splitting the call across
+        lines doesn't break the scan. The call pattern is specific
+        enough that false positives are unlikely.
         """
         import inspect
+        import re
 
         from memtomem.cli import init_cmd
 
         embedding_src = inspect.getsource(init_cmd._step_embedding)
         language_src = inspect.getsource(init_cmd._step_language)
 
-        assert '_y_refuse_hint("--provider onnx", "onnx")' in embedding_src, (
+        def _count_calls(src: str, flag: str, extra: str) -> int:
+            pattern = (
+                r"_y_refuse_hint\(\s*"
+                + re.escape(f'"{flag}"')
+                + r"\s*,\s*"
+                + re.escape(f'"{extra}"')
+                + r"\s*\)"
+            )
+            return len(re.findall(pattern, src))
+
+        assert _count_calls(embedding_src, "--provider onnx", "onnx") >= 1, (
             "ONNX fallback must surface -y refuse hint (#403)"
         )
-        assert '_y_refuse_hint("--provider ollama", "ollama")' in embedding_src, (
-            "Ollama fallback must surface -y refuse hint (#403)"
+        # Ollama has two orthogonal preconditions (binary + Python client),
+        # so the wizard must hint in both branches — binary-missing and
+        # binary-present-but-module-missing — to cover what ``-y`` refuses
+        # (#405 follow-up to #403).
+        assert _count_calls(embedding_src, "--provider ollama", "ollama") >= 2, (
+            "Ollama fallback must surface -y refuse hint in both "
+            "binary-missing and module-missing branches (#405)"
         )
-        assert '_y_refuse_hint("--tokenizer kiwipiepy", "korean")' in language_src, (
+        assert _count_calls(language_src, "--tokenizer kiwipiepy", "korean") >= 1, (
             "kiwipiepy fallback must surface -y refuse hint (#403)"
         )

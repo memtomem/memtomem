@@ -328,16 +328,37 @@ def _step_embedding(state: dict) -> None:
 
     elif choice == 3:
         provider = "ollama"
-        if not _ollama_available():
+        # Two orthogonal preconditions for Ollama: the runtime binary
+        # (``_ollama_available()`` = ``shutil.which("ollama")``) and the
+        # ``ollama`` Python client (``_have_module("ollama")``). The
+        # ``-y`` extras gate (#402) checks the Python client, not the
+        # binary — so the refuse-hint must fire whenever the Python
+        # client is missing, whether or not the binary is on PATH.
+        have_ollama_binary = _ollama_available()
+        have_ollama_module = _have_module("ollama")
+
+        if not have_ollama_binary:
             click.secho("  Ollama not found.", fg="yellow")
             click.echo("  Install from https://ollama.com, then run 'mm index' to embed.")
             click.echo("  Saving Ollama config now so you're ready after install.")
-            click.echo(_y_refuse_hint("--provider ollama", "ollama"))
+            if not have_ollama_module:
+                click.echo(_y_refuse_hint("--provider ollama", "ollama"))
+                state.setdefault("_extras_warned_inline", set()).add("ollama")
             click.echo()
             # Record intent — config is written, embedding runs when Ollama is available.
             model = "nomic-embed-text"
             dimension = 768
         else:
+            if not have_ollama_module:
+                # Binary is on PATH but the ``-y`` gate additionally
+                # requires the ``ollama`` Python client. Surface the
+                # install hint + refuse note up front so scripted
+                # retries don't surprise the user.
+                click.secho("  ollama Python client not installed.", fg="yellow")
+                click.echo(f"  Install with: {_extra_install_hint(['ollama'], state)}")
+                click.echo(_y_refuse_hint("--provider ollama", "ollama"))
+                click.echo()
+                state.setdefault("_extras_warned_inline", set()).add("ollama")
             if not _ollama_running():
                 click.secho("  Ollama not running. Starting 'ollama serve'...", fg="yellow")
                 click.echo("  Run 'ollama serve' in another terminal if this fails.")
