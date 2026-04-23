@@ -172,6 +172,10 @@ function _buildNsCard(ns, defaultNs) {
 }
 
 async function loadNamespacesTab() {
+  // /api/namespaces is mounted only in dev mode (web/app.py _DEV_ONLY_ROUTERS).
+  // Skip the fetch in prod to avoid a guaranteed 404 — the tab keeps its
+  // initial state. Mirrors the gate pattern in loadNamespaceDropdowns above.
+  if (STATE.uiMode !== 'dev') return;
   const list = qs('ns-list');
   list.innerHTML = '<div class="loading-panel"><div class="spinner-panel"></div></div>';
 
