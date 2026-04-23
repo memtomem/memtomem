@@ -5,6 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mm init -y` refuses to write `config.json` when required extras are missing.**
+  Previously `-y` accepted `--provider onnx|ollama|openai` and
+  `--tokenizer kiwipiepy` without checking whether the corresponding Python
+  extras were importable, then wrote the user-specified choice to
+  `config.json`. The mismatch surfaced only at runtime as a stderr warning
+  from `component_factory` (embedder falls back to 0d) or `fts_tokenizer`
+  (kiwipiepy falls back to unicode61) — a scripted install would appear to
+  succeed and silently degrade. `-y` now exits non-zero with an actionable
+  error listing the missing extras (and collapses multiple misses into a
+  `memtomem[all]` hint when all four are missing). The interactive wizard's
+  warn-and-continue path is unchanged; #403 tracks aligning its wording with
+  the new `-y` refuse semantics. (#396, #402)
+
 ## [0.1.24] — 2026-04-23
 
 Bug-fix release closing a first-run UX gap in `mm init --preset <name>`
