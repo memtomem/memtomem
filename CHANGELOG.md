@@ -5,6 +5,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed
+
+- **MCP handshake no longer creates `~/.memtomem/memtomem.db`.** Previously,
+  every MCP client that connected to memtomem (Claude Code's `claude mcp list`,
+  Cursor, Windsurf, Gemini CLI) instantiated the SQLite database on handshake —
+  even before the user ran `mm init`, and even for short-lived health-check
+  spawns. The DB now opens on the first tool call (`mem_search`, `mem_add`,
+  `mem_status`, …) instead of on the lifespan startup, so a client that
+  connects but never calls a tool leaves the storage path alone. Two
+  follow-on behavior changes are accepted as part of the trade-off:
+
+  - The `"Embedding dimension mismatch detected at startup — entering
+    degraded mode"` warning for issue #349 no longer fires on
+    `memtomem-server` boot stderr. It now surfaces inside the first tool
+    call that triggers initialization. Recovery tools
+    (`mem_embedding_reset`, `mem_status`, `mem_stats`, `mem_list`,
+    `mem_read`) remain callable; users learn about the mismatch from
+    the first tool response instead of the boot log.
+  - An idle server (no tool calls) no longer runs background
+    maintenance. Consolidation, policy, and health-watchdog schedulers
+    start on the first tool call rather than the lifespan handshake.
+    A client that connects but never calls a tool will not see
+    scheduler ticks — consistent with "no DB to maintain" but worth
+    flagging for any maintenance schedule that assumed
+    background-without-tool-calls semantics.
+
+  Note: `~/.memtomem/` itself is still created at process start by the
+  `memtomem-server` `.server.pid` advisory-lock acquisition; relocating
+  that to `$XDG_RUNTIME_DIR` is tracked separately in #384/#387.
+  (#399, #411; builds on #400 plumbing and #410 handler migration.)
+
 ### Fixed
 
 - **`mm init -y` refuses to write `config.json` when required extras are missing.**
