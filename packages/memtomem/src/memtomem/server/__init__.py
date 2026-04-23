@@ -8,6 +8,7 @@ All public symbols are re-exported here for backward compatibility:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
@@ -139,38 +140,36 @@ if _TOOL_MODE != "full":
             mcp._tool_manager.remove_tool(name)
 
 
-def _install_sigterm_handler() -> None:
-    """Translate SIGTERM into a clean ``sys.exit(0)`` so ``atexit`` handlers run.
+def _install_sigterm_handler(pid_file: Path) -> None:
+    """Install a SIGTERM handler that unlinks ``pid_file`` and hard-exits.
 
-    Python's default SIGTERM behavior is to terminate the interpreter
-    without running ``atexit``, which means ``pkill -f memtomem-server``
-    bypasses the ``.server.pid`` unlink registered in :func:`main`. The
-    handler installed here calls ``sys.exit(0)``, which *does* run
-    ``atexit``, closing the common stale-pid case from issue #387.
+    ``mcp.run()`` runs an asyncio event loop, and asyncio swallows
+    ``SystemExit`` raised from a classic ``signal.signal`` handler — the
+    integration test in ``test_server_sigterm.py`` is the live repro.
+    So we can't rely on ``sys.exit(0)`` + ``atexit``: we unlink
+    explicitly and call ``os._exit(0)`` to bypass the event loop.
+
+    Only register after the flock succeeds, so we never unlink a pid
+    file another primary owns. ``atexit`` still handles the normal
+    stdin-EOF shutdown path.
     """
+    import os as _os
     import signal
-    import sys as _sys
 
     def _handle(_signum: int, _frame: object) -> None:
-        _sys.exit(0)
+        try:
+            pid_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        _os._exit(0)
 
     signal.signal(signal.SIGTERM, _handle)
 
 
 def main() -> None:
     """Run the MCP server."""
-    # Install the SIGTERM → sys.exit(0) bridge *first* so the entire ``main()``
-    # body is covered. A SIGTERM arriving between the interpreter entering
-    # ``main()`` and the atexit registrations below still runs atexit and
-    # cleans up whatever was registered at that point (possibly nothing,
-    # which is exactly right — no pid file exists yet, so nothing to unlink).
-    # Installing after the lock was the old shape and left a window where
-    # ``pkill`` during startup reproduced the original #387 bug.
-    _install_sigterm_handler()
-
     import atexit
     import fcntl
-    from pathlib import Path
 
     pid_dir = Path("~/.memtomem").expanduser()
     pid_dir.mkdir(parents=True, exist_ok=True)
@@ -183,9 +182,9 @@ def main() -> None:
         fcntl.flock(_lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         # Another server already holds the lock — proceed anyway (the editor
-        # expects the process to stay alive), but log a warning. We don't
-        # register an unlink on atexit here: unlinking the shared ``.server.pid``
-        # would yank the primary server's lock file out from under it.
+        # expects the process to stay alive), but log a warning. Don't register
+        # atexit unlink or the SIGTERM handler: either would yank the primary
+        # server's pid file out from under it.
         _lock_fp.close()
         import logging
 
@@ -194,11 +193,10 @@ def main() -> None:
             pid_file,
         )
     else:
-        import os
-
         _lock_fp.write(str(os.getpid()))
         _lock_fp.flush()
         atexit.register(lambda: _lock_fp.close())  # LIFO: runs second
         atexit.register(lambda: pid_file.unlink(missing_ok=True))  # LIFO: runs first
+        _install_sigterm_handler(pid_file)
 
     mcp.run()
