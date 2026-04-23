@@ -139,6 +139,24 @@ if _TOOL_MODE != "full":
             mcp._tool_manager.remove_tool(name)
 
 
+def _install_sigterm_handler() -> None:
+    """Translate SIGTERM into a clean ``sys.exit(0)`` so ``atexit`` handlers run.
+
+    Python's default SIGTERM behavior is to terminate the interpreter
+    without running ``atexit``, which means ``pkill -f memtomem-server``
+    bypasses the ``.server.pid`` unlink registered in :func:`main`. The
+    handler installed here calls ``sys.exit(0)``, which *does* run
+    ``atexit``, closing the common stale-pid case from issue #387.
+    """
+    import signal
+    import sys as _sys
+
+    def _handle(_signum: int, _frame: object) -> None:
+        _sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _handle)
+
+
 def main() -> None:
     """Run the MCP server."""
     import atexit
@@ -171,5 +189,8 @@ def main() -> None:
         _lock_fp.flush()
         atexit.register(lambda: _lock_fp.close())  # LIFO: runs second
         atexit.register(lambda: pid_file.unlink(missing_ok=True))  # LIFO: runs first
+        # Bridge SIGTERM (e.g. ``pkill -f memtomem-server``, supervisord stop)
+        # into the atexit path so the unlink above actually runs (#387).
+        _install_sigterm_handler()
 
     mcp.run()
