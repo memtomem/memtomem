@@ -3718,47 +3718,141 @@ class TestPresetWizardBackNav:
         assert "_step_embedding" in advanced
         assert "_step_preset_picker" not in advanced
 
+    @pytest.mark.parametrize(
+        "choice, expected_preset, expected_model, expected_tokenizer",
+        [
+            ("1", "minimal", "", "unicode61"),
+            ("2", "english", "bge-small-en-v1.5", "unicode61"),
+            ("3", "korean", "bge-m3", "kiwipiepy"),
+        ],
+    )
     def test_preset_picker_applies_preset_inline_on_non_advanced(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        choice: str,
+        expected_preset: str,
+        expected_model: str,
+        expected_tokenizer: str,
     ) -> None:
-        """Unit: picking a non-advanced preset must populate state with the
+        """Unit: picking any non-advanced preset must populate state with that
         preset's fields before ``_step_preset_picker`` returns — that's what
         lets the combined run_steps continue straight into ``_step_memory_dir``
-        without a separate ``_apply_preset`` call."""
+        without a separate ``_apply_preset`` call. Parametrized across all
+        three non-advanced options so a future preset-spec drift on any one
+        breaks loudly and immediately."""
         import click
 
         from memtomem.cli.init_cmd import _step_preset_picker
+
+        captured: dict[str, object] = {}
 
         @click.command()
         def harness() -> None:
             state: dict = {}
             _step_preset_picker(state)
-            # Make the outcome observable via exit code / echo
-            click.echo(f"preset={state.get('_preset_applied')} model={state.get('model')}")
+            captured.update(state)
 
         from click.testing import CliRunner
 
         runner = CliRunner()
-        result = runner.invoke(harness, input="3\n")  # "3" = korean
+        result = runner.invoke(harness, input=f"{choice}\n")
         assert result.exit_code == 0, result.output
-        assert "preset=korean" in result.output
-        assert "model=bge-m3" in result.output
+        assert captured.get("_preset_choice") == expected_preset
+        assert captured.get("_preset_applied") == expected_preset
+        assert captured.get("model") == expected_model
+        assert captured.get("tokenizer") == expected_tokenizer
+
+    def test_repeated_back_to_same_preset_is_idempotent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end: pick korean, "b", re-pick korean, proceed. The
+        idempotent re-apply claim in the picker's docstring must hold for
+        the same-preset case too (not only the different-preset case
+        covered by test_back_at_memory_dir_returns_to_preset_picker).
+        Regression guard: a future _apply_preset that toggles state (e.g.
+        flips a bool) rather than assigning flat keys would fail here."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        memory_dir = tmp_path / "memories"
+        result = CliRunner().invoke(
+            init,
+            [],
+            # 3 (korean) → b → 3 (korean again) → dir → y → 3 (mcp skip)
+            input=f"3\nb\n3\n{memory_dir}\ny\n3\n",
+        )
+        assert result.exit_code == 0, result.output
+
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        assert data["embedding"]["model"] == "bge-m3"
+        assert data["search"]["tokenizer"] == "kiwipiepy"
+
+    def test_repeated_back_cycle_through_multiple_presets(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end: pick english → "b" → korean → "b" → minimal, then
+        proceed. Exercises multiple back-cycles; the final preset must
+        fully replace every previous partial application (provider flips
+        onnx → onnx → none, rerank flips True → True → False, etc.). If
+        any field from english/korean leaked past the final minimal pick
+        this assertion would see it."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        memory_dir = tmp_path / "memories"
+        result = CliRunner().invoke(
+            init,
+            [],
+            # 2 (english) → b → 3 (korean) → b → 1 (minimal) → dir → y → 3
+            input=f"2\nb\n3\nb\n1\n{memory_dir}\ny\n3\n",
+        )
+        assert result.exit_code == 0, result.output
+
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        # Final pick was minimal: provider=none + no rerank + unicode61.
+        assert data["embedding"]["provider"] == "none"
+        assert data["embedding"]["model"] == ""
+        assert data["search"]["tokenizer"] == "unicode61"
+        # No stale rerank field leaked through (the #418 follow-up fix).
+        assert "model" not in data.get("rerank", {}), data.get("rerank")
 
     def test_preset_picker_advanced_choice_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Unit: picking Advanced raises ``_AdvancedSelected`` rather than
-        applying a preset. The exception is what the caller relies on to
-        break out of the combined ``run_steps`` and route to advanced_steps."""
+        """Unit: picking Advanced raises ``_AdvancedSelected`` without
+        touching state (no ``_preset_choice`` write, no ``_apply_preset``
+        call). The exception alone is what the caller relies on to break
+        out of the combined ``run_steps`` and route to advanced_steps, so
+        no state-based sentinel is needed."""
         import click
 
         from memtomem.cli.init_cmd import _AdvancedSelected, _step_preset_picker
 
         @click.command()
         def harness() -> None:
-            state: dict = {}
+            state: dict = {"sentinel": "untouched"}
             try:
                 _step_preset_picker(state)
             except _AdvancedSelected:
-                click.echo(f"raised preset={state.get('_preset_choice')}")
+                click.echo(
+                    f"raised preset_choice={state.get('_preset_choice')} "
+                    f"applied={state.get('_preset_applied')} "
+                    f"sentinel={state.get('sentinel')}"
+                )
                 return
             click.echo("did not raise")  # pragma: no cover — guarded by assertion
 
@@ -3767,7 +3861,8 @@ class TestPresetWizardBackNav:
         runner = CliRunner()
         result = runner.invoke(harness, input="4\n")  # "4" = advanced
         assert result.exit_code == 0, result.output
-        assert "raised preset=advanced" in result.output
+        # No dead write, no preset application — just the exception.
+        assert "raised preset_choice=None applied=None sentinel=untouched" in result.output
 
 
 class TestReinstallEmbeddingReconciliation:

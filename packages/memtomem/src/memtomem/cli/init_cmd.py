@@ -2184,22 +2184,15 @@ class _AdvancedSelected(Exception):
 def _step_preset_picker(state: dict) -> None:
     """First step of the default interactive path — pick a preset or Advanced.
 
-    Writes ``state["_preset_choice"]`` = one of ``"minimal" | "english" |
-    "korean" | "advanced"``. The Advanced entry raises
-    :class:`_AdvancedSelected` so the caller can dispatch the full
-    10-step wizard; the other three apply the preset inline via
-    :func:`_apply_preset` so the rest of ``run_steps`` can continue with
-    ``_step_memory_dir``, ``_step_provider_dirs_auto``, and ``_step_mcp``
-    against fully populated state.
-
-    Re-entry via ``"b"`` from a later step is safe: :func:`_apply_preset`
-    overwrites the full preset surface, so re-picking a different preset
-    takes effect cleanly.
+    Advanced raises :class:`_AdvancedSelected` so the caller can dispatch
+    the full 10-step wizard. The three preset entries apply the preset
+    inline via :func:`_apply_preset` and set ``state["_preset_choice"]``
+    so the rest of ``run_steps`` can continue with ``_step_memory_dir``,
+    ``_step_provider_dirs_auto``, and ``_step_mcp`` against fully
+    populated state. Re-entry via ``"b"`` is safe — :func:`_apply_preset`
+    overwrites the full preset surface.
     """
-    # First step — no prior step to return to, so only surface 'q: quit'.
-    # 'b' still works (nav_prompt intercepts it before IntRange), but
-    # run_steps treats back-on-step-0 as a no-op, which would confuse
-    # users if advertised.
+    # First step — "b" is a no-op here, so only advertise "q: quit".
     click.secho("  Choose setup style:", fg="yellow", bold=True)
     click.echo(click.style("  (q: quit)", dim=True))
     click.echo()
@@ -2217,7 +2210,6 @@ def _step_preset_picker(state: dict) -> None:
     click.echo()
 
     if choice == advanced_idx:
-        state["_preset_choice"] = "advanced"
         raise _AdvancedSelected()
 
     state["_preset_choice"] = ordered[choice - 1]
