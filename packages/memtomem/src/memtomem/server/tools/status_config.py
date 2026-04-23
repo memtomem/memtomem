@@ -62,36 +62,13 @@ async def mem_stats(
     return out
 
 
-@mcp.tool()
-@tool_handler
-async def mem_status(
-    ctx: CtxType = None,
-) -> str:
-    """Show indexing statistics and current configuration summary.
+async def format_status_report(app: AppContext) -> str:
+    """Render the status report shared by ``mem_status`` and ``mm status``.
 
-    Reports storage backend, embedding info, chunk/source counts, and
-    warns when orphaned source files are detected (files removed from
-    disk but still indexed — run mem_cleanup_orphans to fix).
-
-    When a configuration drift is detected (e.g. embedding dimension
-    mismatch between the DB and the runtime config) the output carries
-    a ``Warnings`` block whose entries follow this schema — kept stable
-    across versions so external consumers (uptime probes, dashboards)
-    can pattern-match on the keys:
-
-    ``kind``    open enum describing the warning. Current values:
-                ``embedding_dim_mismatch``. Future releases may add
-                ``stale_index``, ``orphan_vectors``, etc. — consumers
-                must tolerate unknown kinds rather than erroring.
-    ``fix``     the canonical CLI command a user should run.
-    ``doc``     a relative-path link into ``docs/guides/`` with the full
-                remediation flow (see ``configuration.md#reset-flow``).
-
-    Embedding-mismatch entries also include ``stored`` and ``configured``
-    sub-blocks echoing the DB vs runtime provider/model/dimension so the
-    user can see what changed without consulting another tool.
+    Kept as a free function so the CLI wrapper (#382) can reuse the exact
+    same formatting without going through MCP — both surface the same
+    text so users learn one output and can recognize it in either place.
     """
-    app = await _get_app_initialized(ctx)
     stats = await app.storage.get_stats()
     config = app.config
 
@@ -163,6 +140,39 @@ async def mem_status(
         lines.append("  doc:        docs/guides/configuration.md#reset-flow")
 
     return "\n".join(lines)
+
+
+@mcp.tool()
+@tool_handler
+async def mem_status(
+    ctx: CtxType = None,
+) -> str:
+    """Show indexing statistics and current configuration summary.
+
+    Reports storage backend, embedding info, chunk/source counts, and
+    warns when orphaned source files are detected (files removed from
+    disk but still indexed — run mem_cleanup_orphans to fix).
+
+    When a configuration drift is detected (e.g. embedding dimension
+    mismatch between the DB and the runtime config) the output carries
+    a ``Warnings`` block whose entries follow this schema — kept stable
+    across versions so external consumers (uptime probes, dashboards)
+    can pattern-match on the keys:
+
+    ``kind``    open enum describing the warning. Current values:
+                ``embedding_dim_mismatch``. Future releases may add
+                ``stale_index``, ``orphan_vectors``, etc. — consumers
+                must tolerate unknown kinds rather than erroring.
+    ``fix``     the canonical CLI command a user should run.
+    ``doc``     a relative-path link into ``docs/guides/`` with the full
+                remediation flow (see ``configuration.md#reset-flow``).
+
+    Embedding-mismatch entries also include ``stored`` and ``configured``
+    sub-blocks echoing the DB vs runtime provider/model/dimension so the
+    user can see what changed without consulting another tool.
+    """
+    app = await _get_app_initialized(ctx)
+    return await format_status_report(app)
 
 
 @mcp.tool()

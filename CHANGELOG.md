@@ -5,6 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **`mm status` CLI command — terminal mirror of the MCP `mem_status` tool.**
+  Closes the gap noted in #382: the README and Quick Start told first-time
+  users to "call the `mem_status` tool" to confirm a healthy install, but
+  there was no equivalent CLI command — only `mm config show` (config, not
+  runtime state) and `mm watchdog status` (periodic-check results). Users
+  with no editor open, or running a scripted post-install check, had no
+  one-liner that surfaced "is the DB reachable, what's indexed, is the
+  embedding config in sync." `mm status` is a thin wrapper that builds an
+  `AppContext` from `cli_components` and calls the same `format_status_report`
+  helper now shared by `mem_status`, so the CLI and MCP outputs are
+  identical. (#382)
+
 ### Changed
 
 - **`memtomem-server` pid / flock file moved to `$XDG_RUNTIME_DIR/memtomem/server.pid`.**

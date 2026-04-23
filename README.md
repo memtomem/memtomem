@@ -79,6 +79,8 @@ See [Embeddings](docs/guides/embeddings.md) for the full model/provider matrix.
 "Remember this insight"      →  mem_add(content="...", tags=["ops"])
 ```
 
+> Prefer the terminal? `mm status` is a CLI mirror of `mem_status` — same output, no editor needed.
+
 ### 4. Web UI (optional)
 
 ```bash

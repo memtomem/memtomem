@@ -104,6 +104,15 @@ memtomem status:
   - Embedding model: ollama/nomic-embed-text
 ```
 
+Or skip the editor and run the same check directly:
+
+```bash
+mm status
+```
+
+`mm status` is a CLI mirror of `mem_status` (same output) — handy when
+the editor hasn't reconnected yet, or for scripted health checks.
+
 > **MCP Reconnection**: After changing `.mcp.json`, restart Claude Code or use the `/mcp` command to reconnect.
 
 ---

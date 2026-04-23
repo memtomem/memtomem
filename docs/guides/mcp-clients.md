@@ -225,6 +225,19 @@ memtomem status:
   - Embedding model: none (BM25 keyword search only)
 ```
 
+### From a terminal — `mm status`
+
+If the editor isn't reachable yet (or you want to verify the install
+without involving any client), run the same check from a terminal:
+
+```bash
+mm status
+```
+
+`mm status` is a thin CLI wrapper over the same code path `mem_status`
+uses, so the output is identical. Useful as a sanity check between
+`mm init` and the first editor-side call.
+
 ### Available MCP Tools (74)
 
 | Category | Tools |
