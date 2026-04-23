@@ -278,7 +278,7 @@ def _y_refuse_hint(flag: str, extra: str) -> str:
 
 
 def _step_embedding(state: dict) -> None:
-    step_header(1, "Embedding Provider")
+    step_header(state, "Embedding Provider")
     click.echo("  Choose how to generate embeddings:")
     click.echo("    [1] Quick start — keyword search only, no setup needed (recommended)")
     click.echo("    [2] Local ONNX — dense search, no server needed (pip install memtomem[onnx])")
@@ -440,7 +440,7 @@ def _step_embedding(state: dict) -> None:
 
 
 def _step_reranker(state: dict) -> None:
-    step_header(2, "Reranker (optional)")
+    step_header(state, "Reranker (optional)")
     click.echo("  Cross-encoder reranking sharpens search relevance after BM25+dense fusion.")
     click.echo("  Runs locally via fastembed ONNX — no API key, no server.")
     enabled = nav_confirm("  Enable reranker?", default=False)
@@ -468,7 +468,7 @@ def _step_reranker(state: dict) -> None:
 
 
 def _step_memory_dir(state: dict) -> None:
-    step_header(3, "Memory Directory")
+    step_header(state, "Memory Directory")
     click.echo("  Where are the files you want to index?")
     memory_dir = nav_prompt("  Directory", default="~/memories")
     memory_path = Path(memory_dir).expanduser()
@@ -598,7 +598,7 @@ def _step_provider_dirs(state: dict) -> None:
     to ``default`` for memory_dirs whose basename is non-discriminating
     (``memory`` / ``plans`` / ``memories``).
     """
-    step_header(4, "Provider Memory Folders")
+    step_header(state, "Provider Memory Folders")
     from memtomem.config import _detect_provider_dirs
 
     grouped = _detect_provider_dirs()
@@ -658,7 +658,7 @@ def _step_provider_dirs(state: dict) -> None:
 
 
 def _step_storage(state: dict) -> None:
-    step_header(5, "Storage")
+    step_header(state, "Storage")
     config_dir = Path("~/.memtomem").expanduser()
     db_default = str(config_dir / "memtomem.db")
     state["db_path"] = nav_prompt("  SQLite DB path", default=db_default)
@@ -666,7 +666,7 @@ def _step_storage(state: dict) -> None:
 
 
 def _step_namespace(state: dict) -> None:
-    step_header(6, "Namespace")
+    step_header(state, "Namespace")
     click.echo("  Organize memories into scoped groups (work, personal, project).")
     state["enable_auto_ns"] = nav_confirm(
         "  Auto-assign namespace from folder name? (~/docs → 'docs')", default=False
@@ -676,7 +676,7 @@ def _step_namespace(state: dict) -> None:
 
 
 def _step_search(state: dict) -> None:
-    step_header(7, "Search")
+    step_header(state, "Search")
     state["top_k"] = nav_prompt("  Results per search", type=click.INT, default=10)
     state["decay_enabled"] = nav_confirm(
         "  Enable time-decay? (older memories rank lower)", default=False
@@ -685,7 +685,7 @@ def _step_search(state: dict) -> None:
 
 
 def _step_language(state: dict) -> None:
-    step_header(8, "Language")
+    step_header(state, "Language")
     click.echo("  Search tokenizer:")
     click.echo("    [1] Unicode (default — English and most languages)")
     click.echo("    [2] Korean (kiwipiepy — better Korean word splitting)")
@@ -705,7 +705,7 @@ def _step_language(state: dict) -> None:
 
 
 def _step_settings(state: dict) -> None:
-    step_header(9, "Claude Code Hooks")
+    step_header(state, "Claude Code Hooks")
 
     # Skip entirely if Claude Code is not installed
     claude_dir = Path.home() / ".claude"
@@ -748,7 +748,7 @@ def _step_settings(state: dict) -> None:
 
 
 def _step_mcp(state: dict) -> None:
-    step_header(10, "Connect to AI Editor")
+    step_header(state, "Connect to AI Editor")
     click.echo("  How do you want to connect memtomem?")
     click.echo("    [1] Claude Code (run 'claude mcp add' automatically)")
     click.echo("    [2] Generate .mcp.json here (Claude Code project scope;")
