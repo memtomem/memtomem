@@ -31,7 +31,7 @@ from typing import Iterable
 
 import click
 
-from memtomem._runtime_paths import legacy_server_pid_path, server_pid_path
+from memtomem._runtime_paths import legacy_server_pid_path, runtime_dir, server_pid_path
 from memtomem.cli.init_cmd import RuntimeProfile, _runtime_profile
 
 _DEFAULT_STATE_DIR = Path.home() / ".memtomem"
@@ -172,7 +172,7 @@ def _probe_pid_file(pid_file: Path) -> _ServerState:
         fp.close()
 
 
-def _check_server_liveness(_state_dir: Path) -> _ServerState:
+def _check_server_liveness() -> _ServerState:
     """Probe the server pid file at both the new and legacy locations.
 
     As of #412 the server writes its pid / lock file under
@@ -182,9 +182,11 @@ def _check_server_liveness(_state_dir: Path) -> _ServerState:
     server still running, new uninstall CLI) refuses correctly. First
     live holder wins; if neither is held the state is dead.
 
-    ``_state_dir`` is kept as a parameter for call-site symmetry and
-    future use (other DB writers covered by #384 may register pid files
-    the same way), but both probes use canonical absolute paths today.
+    No ``state_dir`` parameter — both probes use canonical absolute
+    paths from :mod:`memtomem._runtime_paths`. When #384 expands the
+    scheme to cover other writers (``mm web``, ``mm watchdog``) the
+    glob will still live inside :func:`_runtime_paths.runtime_dir`,
+    not under the persistent state dir.
     """
     for pid_file in (server_pid_path(), legacy_server_pid_path()):
         state = _probe_pid_file(pid_file)
@@ -518,9 +520,7 @@ def _delete_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) ->
     # Prune the runtime subdir (``$XDG_RUNTIME_DIR/memtomem`` or
     # ``$TMPDIR/memtomem-{uid}``) if we emptied it. We don't own the
     # parent (the kernel / OS does), so we only rmdir our own subdir.
-    from memtomem._runtime_paths import runtime_dir as _rd
-
-    rt = _rd()
+    rt = runtime_dir()
     if rt.exists() and rt.is_dir() and not any(rt.iterdir()):
         try:
             rt.rmdir()
@@ -551,7 +551,7 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
     db_path, config_error = _load_config_safely()
     state_dir = _DEFAULT_STATE_DIR
 
-    server = _check_server_liveness(state_dir)
+    server = _check_server_liveness()
 
     # Empty-state fast path.
     if not state_dir.exists() and not db_path.exists():

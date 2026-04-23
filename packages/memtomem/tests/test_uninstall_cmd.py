@@ -63,6 +63,7 @@ def home(tmp_path, monkeypatch):
     h.mkdir()
     xdg = tmp_path / "xdg_runtime"
     xdg.mkdir()
+    os.chmod(xdg, 0o700)  # _runtime_paths validator requires owner-only
     monkeypatch.setenv("HOME", str(h))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
     monkeypatch.setattr(_bootstrap, "_CONFIG_PATH", h / ".memtomem" / "config.json")
@@ -423,6 +424,31 @@ class TestRuntimePidCleanedWithOther:
         assert not pid_file.exists(), "runtime pid file must be deleted"
         # subdir should be gone too — we own it
         assert not runtime_dir().exists(), "empty runtime subdir must be pruned"
+
+    def test_runtime_subdir_preserved_when_unrelated_files_present(self, home):
+        """Pin the empty-check precondition on the ``rmdir`` call so a
+        future condition invert (``not any(iterdir())`` → ``any(...)``)
+        wouldn't silently wipe unrelated files someone else parked in
+        the runtime subdir. ``mm uninstall`` is scoped; other memtomem
+        entry points (or a future #384 expansion) may legitimately
+        register more pid files in the same dir."""
+        from memtomem._runtime_paths import ensure_runtime_dir, runtime_dir
+
+        _seed_state(home)
+        rt = ensure_runtime_dir()
+        # Our own pid file is cleaned, but a sibling registered by
+        # another memtomem tool must survive.
+        (rt / "server.pid").write_text("0", encoding="utf-8")
+        sibling = rt / "someone-elses.pid"
+        sibling.write_text("42", encoding="utf-8")
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 0, result.output
+        # server.pid must be gone; sibling must remain; subdir must NOT rmdir.
+        assert not (rt / "server.pid").exists()
+        assert sibling.exists(), "unrelated file in runtime subdir must survive"
+        assert runtime_dir().exists(), "runtime subdir must not be pruned when other files remain"
 
 
 # -------------------------------------------------------------------- 13
