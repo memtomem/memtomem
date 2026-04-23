@@ -2500,10 +2500,6 @@ def init(
         if "mcp_choice" not in state:
             state["mcp_choice"] = 3  # skip — scripted runs don't touch Claude
 
-        memory_path = Path(state["memory_dir"]).expanduser()
-        if not memory_path.exists():
-            memory_path.mkdir(parents=True, exist_ok=True)
-
         _resolve_provider_dirs_non_interactive(state, effective_preset, include_providers)
 
         # #396: fail loudly when the requested provider / tokenizer needs an
@@ -2512,6 +2508,10 @@ def init(
         # would enter degraded mode for onnx without fastembed). Scripted
         # workflows prefer a non-zero exit here over a stale config.
         # Interactive paths keep their warn-and-continue semantics below.
+        #
+        # Gate runs BEFORE any disk side effect (memory_dir mkdir, config
+        # write) so a refused -y leaves the filesystem untouched. The earlier
+        # mkdir-then-gate ordering left ``~/memories`` behind on rejected runs.
         missing = _collect_missing_extras(state)
         required = [x for x in missing if x in _REQUIRED_EXTRAS_FOR_NON_INTERACTIVE]
         if required:
@@ -2523,6 +2523,10 @@ def init(
                 f"  Or drop the flag(s) that require them "
                 f"(e.g. --provider none, --tokenizer unicode61)."
             )
+
+        memory_path = Path(state["memory_dir"]).expanduser()
+        if not memory_path.exists():
+            memory_path.mkdir(parents=True, exist_ok=True)
     elif advanced:
         run_steps(advanced_steps, state)
     elif preset:

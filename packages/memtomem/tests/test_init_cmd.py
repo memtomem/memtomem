@@ -4706,3 +4706,131 @@ class TestNonInteractiveExtrasValidation:
 
         assert result.exit_code == 0, result.output
         assert (tmp_path / ".memtomem" / "config.json").exists()
+
+    def test_yes_flag_provider_openai_missing_client_exits_non_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--provider openai`` is shaped the same as ollama/onnx at the
+        extras-gate layer, but ``--api-key`` plumbing sits alongside in
+        ``_override_from_flags``. Exercising the full CLI path proves the
+        two don't accidentally interact — the gate fires before the key
+        handling runs."""
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli, init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "openai" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+
+        result = CliRunner().invoke(
+            cli,
+            [
+                "init",
+                "-y",
+                "--provider",
+                "openai",
+                "--model",
+                "text-embedding-3-small",
+                "--api-key",
+                "sk-fake-test-key",
+                "--mcp",
+                "skip",
+            ],
+        )
+
+        assert result.exit_code != 0, result.output
+        assert "Missing required extras" in result.output
+        assert "openai" in result.output
+        assert not (tmp_path / ".memtomem" / "config.json").exists()
+
+    def test_yes_flag_multi_extra_missing_reports_both(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both ``--provider onnx`` + ``--tokenizer kiwipiepy`` missing at
+        once. The error must name both so the user knows to install both
+        or drop both, not just the first one encountered."""
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli, init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name in ("fastembed", "kiwipiepy") else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+
+        result = CliRunner().invoke(
+            cli,
+            [
+                "init",
+                "-y",
+                "--provider",
+                "onnx",
+                "--model",
+                "bge-m3",
+                "--tokenizer",
+                "kiwipiepy",
+                "--mcp",
+                "skip",
+            ],
+        )
+
+        assert result.exit_code != 0, result.output
+        assert "Missing required extras" in result.output
+        # Both extras must be named, not just the first one encountered.
+        assert "onnx" in result.output
+        assert "korean" in result.output
+        # Multi-extra hint collapses to [all] per _extra_install_hint policy.
+        assert "memtomem[all]" in result.output
+        assert not (tmp_path / ".memtomem" / "config.json").exists()
+
+    def test_yes_flag_refused_leaves_memory_dir_untouched(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Gate must run BEFORE ``memory_path.mkdir``. An earlier shape
+        created ``~/memories`` before validating extras, leaving directory
+        debris on refused runs."""
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli, init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "fastembed" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+
+        memory_dir = tmp_path / "scratch_memories"
+        # Pre-condition: memory_dir does not exist yet.
+        assert not memory_dir.exists()
+
+        result = CliRunner().invoke(
+            cli,
+            [
+                "init",
+                "-y",
+                "--provider",
+                "onnx",
+                "--model",
+                "bge-m3",
+                "--memory-dir",
+                str(memory_dir),
+                "--mcp",
+                "skip",
+            ],
+        )
+
+        assert result.exit_code != 0, result.output
+        # The refused run must not have created the memory dir.
+        assert not memory_dir.exists(), (
+            "memory_dir must not be created on refused -y runs (gate must precede mkdir)"
+        )
