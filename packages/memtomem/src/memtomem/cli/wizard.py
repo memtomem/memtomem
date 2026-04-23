@@ -131,6 +131,12 @@ def step_header(state: dict, title: str) -> None:
     The number is read from ``state["_wizard_position"]`` as seeded by
     :func:`run_steps`. If the key is absent (standalone / test use), the
     header is rendered without a number. (#420)
+
+    The nav hint is trimmed to ``(q: quit)`` on the first step of a
+    ``run_steps`` call, because ``b`` has nothing to back into there --
+    advertising it as an option is misleading (#422). Any step after the
+    first (including the memory-dir step when it follows a preset
+    picker) still shows the full hint.
     """
     position = state.get("_wizard_position")
     if position is not None:
@@ -138,4 +144,9 @@ def step_header(state: dict, title: str) -> None:
         click.secho(f"{current}. {title}", fg="yellow", bold=True)
     else:
         click.secho(title, fg="yellow", bold=True)
-    click.echo(click.style("  (b: back, q: quit)", dim=True))
+
+    is_first_step = position is not None and position[0] == 1
+    if is_first_step:
+        click.echo(click.style("  (q: quit)", dim=True))
+    else:
+        click.echo(click.style("  (b: back, q: quit)", dim=True))
