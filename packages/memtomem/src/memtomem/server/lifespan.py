@@ -145,7 +145,7 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
 
         watchdog = HealthWatchdog(ctx, config.health_watchdog)
         await watchdog.start()
-        ctx._health_watchdog = watchdog
+        ctx.set_health_watchdog(watchdog)
 
     try:
         yield ctx
