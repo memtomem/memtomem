@@ -68,7 +68,7 @@ You can opt in to individual features later with `uv tool install --reinstall 'm
 
 > **If you see `mm: command not found`**: `uv tool install` writes the `mm` shim to `~/.local/bin` (macOS/Linux default), but that directory isn't on `$PATH` in a fresh shell profile. Run `uv tool update-shell` once, then open a new shell and re-run `mm --version`. (`uv` prints a one-line hint on first-ever tool install, but it's easy to miss.)
 
-Skip to [Connect to your AI editor](#connect-to-your-ai-editor).
+Skip to [Connect to your AI editor](#connect-to-your-ai-editor-manual).
 
 ### Option B: Project dependency (per-project isolation)
 
