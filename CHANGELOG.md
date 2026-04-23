@@ -7,6 +7,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **`memtomem-server` pid / flock file moved to `$XDG_RUNTIME_DIR/memtomem/server.pid`.**
+  Previously the server wrote `~/.memtomem/.server.pid` at startup, which
+  forced `~/.memtomem/` into existence on every MCP handshake (even for
+  clients that connect but never call a tool). Runtime state now lives
+  on `$XDG_RUNTIME_DIR/memtomem/` when the platform provides it
+  (Linux w/ systemd), or `$TMPDIR/memtomem-$UID/` otherwise (macOS, BSD,
+  Linux without systemd). Combined with #399 Phase 3's lazy DB creation,
+  an idle MCP handshake against a fresh machine now leaves `~/.memtomem/`
+  untouched entirely. `mm uninstall` probes both the new and legacy
+  locations during the transition window, so a mixed-version upgrade
+  (pre-#412 server still running + new uninstall CLI) still refuses
+  correctly. (#412)
+
 - **MCP handshake no longer creates `~/.memtomem/memtomem.db`.** Previously,
   every MCP client that connected to memtomem (Claude Code's `claude mcp list`,
   Cursor, Windsurf, Gemini CLI) instantiated the SQLite database on handshake —
@@ -31,10 +44,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
     flagging for any maintenance schedule that assumed
     background-without-tool-calls semantics.
 
-  Note: `~/.memtomem/` itself is still created at process start by the
-  `memtomem-server` `.server.pid` advisory-lock acquisition; relocating
-  that to `$XDG_RUNTIME_DIR` is tracked separately in #384/#387.
-  (#399, #411; builds on #400 plumbing and #410 handler migration.)
+  Paired with #412 (runtime pid file relocation), an idle MCP handshake
+  now leaves `~/.memtomem/` untouched altogether — the advisory-lock
+  write that forced its creation moved to `$XDG_RUNTIME_DIR`. (#399,
+  #411; builds on #400 plumbing and #410 handler migration.)
 
 ### Fixed
 

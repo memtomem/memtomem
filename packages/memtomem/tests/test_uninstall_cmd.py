@@ -51,13 +51,21 @@ def home(tmp_path, monkeypatch):
     at import time, so ``monkeypatch.setenv("HOME")`` alone leaves it
     pointing at the developer's real home. Patching it directly is
     required for hermetic tests.
+
+    Also isolates ``$XDG_RUNTIME_DIR`` so the new runtime pid file
+    location (#412) lives under ``tmp_path`` rather than the developer's
+    real ``/run/user/{uid}/memtomem/`` or a shared ``/tmp`` subdir.
     """
     from memtomem.cli import _bootstrap
     from memtomem.cli import uninstall_cmd
 
     h = tmp_path / "home"
     h.mkdir()
+    xdg = tmp_path / "xdg_runtime"
+    xdg.mkdir()
+    os.chmod(xdg, 0o700)  # _runtime_paths validator requires owner-only
     monkeypatch.setenv("HOME", str(h))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
     monkeypatch.setattr(_bootstrap, "_CONFIG_PATH", h / ".memtomem" / "config.json")
     monkeypatch.setattr(uninstall_cmd, "_DEFAULT_STATE_DIR", h / ".memtomem")
     return h
@@ -314,7 +322,10 @@ class TestRuntimeProfileImportPin:
 
 
 class TestServerAliveRefuses:
-    def test_refuses_when_server_alive(self, home):
+    def test_refuses_when_server_alive_at_legacy_path(self, home):
+        """Pre-#412 servers still write ``~/.memtomem/.server.pid``. The
+        mixed-version upgrade path (old server running, new uninstall)
+        must still refuse — the flock probe checks both locations."""
         state = _seed_state(home)
         pid_file = state / ".server.pid"
         # The PID inside the file is just for the user-facing message now;
@@ -330,6 +341,24 @@ class TestServerAliveRefuses:
         # nothing deleted
         assert (state / "memtomem.db").exists()
         assert (state / "config.json").exists()
+
+    def test_refuses_when_server_alive_at_runtime_path(self, home):
+        """Post-#412 servers hold the flock at
+        ``$XDG_RUNTIME_DIR/memtomem/server.pid``. The probe must see it
+        even though the pid file lives outside ``~/.memtomem/``."""
+        from memtomem._runtime_paths import ensure_runtime_dir
+
+        _seed_state(home)
+        pid_file = ensure_runtime_dir() / "server.pid"
+        pid_file.write_text(str(os.getpid()), encoding="utf-8")
+
+        with _hold_pid_lock(pid_file):
+            result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 2
+        assert "Server still running" in result.output
+        assert str(os.getpid()) in result.output
+        assert (home / ".memtomem" / "memtomem.db").exists()
 
     def test_force_overrides_liveness(self, home):
         state = _seed_state(home)
@@ -359,6 +388,67 @@ class TestPidRecyclingDoesNotFalsePositive:
         assert result.exit_code == 0, result.output
         assert "Server still running" not in result.output
         assert not state.exists()
+
+    def test_runtime_pid_alive_but_no_lock_means_dead(self, home):
+        """Same as above at the new runtime location — a stale
+        ``server.pid`` with a recycled live PID but no flock holder must
+        not refuse the uninstall."""
+        from memtomem._runtime_paths import ensure_runtime_dir
+
+        _seed_state(home)
+        (ensure_runtime_dir() / "server.pid").write_text(str(os.getpid()), encoding="utf-8")
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 0, result.output
+        assert "Server still running" not in result.output
+        assert not (home / ".memtomem").exists()
+
+
+class TestRuntimePidCleanedWithOther:
+    """The runtime pid file lives outside ``~/.memtomem/`` but is still
+    transient server state — uninstall must clean it up so a reinstall
+    starts fresh. The runtime subdir is rmdir'd if we empty it."""
+
+    def test_runtime_pid_deleted_and_subdir_pruned(self, home):
+        from memtomem._runtime_paths import ensure_runtime_dir, runtime_dir
+
+        _seed_state(home)
+        rt = ensure_runtime_dir()
+        pid_file = rt / "server.pid"
+        pid_file.write_text("0", encoding="utf-8")
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 0, result.output
+        assert not pid_file.exists(), "runtime pid file must be deleted"
+        # subdir should be gone too — we own it
+        assert not runtime_dir().exists(), "empty runtime subdir must be pruned"
+
+    def test_runtime_subdir_preserved_when_unrelated_files_present(self, home):
+        """Pin the empty-check precondition on the ``rmdir`` call so a
+        future condition invert (``not any(iterdir())`` → ``any(...)``)
+        wouldn't silently wipe unrelated files someone else parked in
+        the runtime subdir. ``mm uninstall`` is scoped; other memtomem
+        entry points (or a future #384 expansion) may legitimately
+        register more pid files in the same dir."""
+        from memtomem._runtime_paths import ensure_runtime_dir, runtime_dir
+
+        _seed_state(home)
+        rt = ensure_runtime_dir()
+        # Our own pid file is cleaned, but a sibling registered by
+        # another memtomem tool must survive.
+        (rt / "server.pid").write_text("0", encoding="utf-8")
+        sibling = rt / "someone-elses.pid"
+        sibling.write_text("42", encoding="utf-8")
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 0, result.output
+        # server.pid must be gone; sibling must remain; subdir must NOT rmdir.
+        assert not (rt / "server.pid").exists()
+        assert sibling.exists(), "unrelated file in runtime subdir must survive"
+        assert runtime_dir().exists(), "runtime subdir must not be pruned when other files remain"
 
 
 # -------------------------------------------------------------------- 13

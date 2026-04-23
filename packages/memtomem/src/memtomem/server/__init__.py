@@ -167,14 +167,80 @@ def _install_sigterm_handler(pid_file: Path) -> None:
     signal.signal(signal.SIGTERM, _handle)
 
 
+def _try_hold_legacy_flock(legacy_pid: Path) -> object | None:
+    """Acquire a lifetime flock on the pre-#412 pid file, if present.
+
+    During the transition window a user may still have a v0.1.24 or older
+    ``memtomem-server`` running — it holds ``fcntl.flock`` on
+    ``~/.memtomem/.server.pid``. The new server's own flock target lives
+    on ``$XDG_RUNTIME_DIR``, so without this probe two servers could run
+    concurrently against the same SQLite DB and corrupt the WAL (#412
+    review B1).
+
+    Behavior:
+
+    - If ``~/.memtomem/`` does not exist, skip — this is a fresh install
+      with no upgrade history, and touching it would re-pollute the
+      directory that #412 specifically keeps out of handshake.
+    - Otherwise, open the legacy path (``a+b`` creates it if missing; we
+      are inside an already-existing ``~/.memtomem/`` so no new
+      pollution) and try ``LOCK_EX | LOCK_NB``.
+    - Lock held by another process → an old server is alive; print to
+      stderr and ``sys.exit(1)``. Two concurrent writers is strictly
+      worse than one missed MCP handshake.
+    - Lock acquired → return the file handle; caller holds it for the
+      process lifetime so a *future* old server starting after us also
+      hits this lock and bails via its own concurrent-detection path.
+
+    Returns ``None`` on the skip paths (fresh install, open error). The
+    returned fd must stay referenced for the lock to persist.
+    """
+    import fcntl
+    import sys
+
+    legacy_state_dir = Path.home() / ".memtomem"
+    if not legacy_state_dir.is_dir():
+        return None
+
+    try:
+        legacy_fp = open(legacy_pid, "a+b")
+    except OSError:
+        return None
+
+    try:
+        fcntl.flock(legacy_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        print(
+            f"error: another memtomem-server holds a lock at {legacy_pid} "
+            f"(likely a pre-0.1.25 install). Stop it before starting a new "
+            f"server; `mm uninstall` will also refuse until it is gone.",
+            file=sys.stderr,
+        )
+        legacy_fp.close()
+        sys.exit(1)
+    return legacy_fp
+
+
 def main() -> None:
     """Run the MCP server."""
     import atexit
     import fcntl
 
-    pid_dir = Path("~/.memtomem").expanduser()
-    pid_dir.mkdir(parents=True, exist_ok=True)
-    pid_file = pid_dir / ".server.pid"
+    from memtomem._runtime_paths import ensure_runtime_dir, legacy_server_pid_path
+
+    # B1: bidirectional mutual exclusion during the transition window.
+    # Hold the legacy flock for the process lifetime so an old (pre-#412)
+    # server running *now* is detected and a future one starting *after*
+    # us also bails.
+    _legacy_lock_fp = _try_hold_legacy_flock(legacy_server_pid_path())
+    if _legacy_lock_fp is not None:
+        atexit.register(lambda: _legacy_lock_fp.close())
+
+    # Runtime files (pid / flock) live on ``$XDG_RUNTIME_DIR/memtomem``
+    # when the platform provides one, otherwise a per-user temp subdir.
+    # This keeps ``~/.memtomem/`` untouched during MCP handshake — it is
+    # created only when persistent storage is first written (#412).
+    pid_file = ensure_runtime_dir() / "server.pid"
 
     # Advisory lock — prevents multiple MCP servers from writing concurrently.
     # The lock is held for the lifetime of the process and auto-released on exit.

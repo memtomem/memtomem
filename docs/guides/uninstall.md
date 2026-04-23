@@ -84,7 +84,13 @@ This removes:
 | `memories/` | User-created memories from `mem_add` |
 | `uploads/` | Files uploaded via the Web UI |
 | `.current_session` | Active session marker |
-| `.server.pid` | MCP server advisory lock |
+| `.server.pid` | Legacy MCP server advisory lock (pre-#412 installs only) |
+
+The running server's pid/flock file lives **outside** `~/.memtomem/`
+under `$XDG_RUNTIME_DIR/memtomem/server.pid` (Linux w/ systemd) or
+`$TMPDIR/memtomem-$UID/server.pid` (macOS, BSD). It is cleaned by
+`mm uninstall` automatically; a manual cleanup is rarely needed but
+equivalent to `rm -rf "${XDG_RUNTIME_DIR:-/tmp}/memtomem"*`.
 
 ## 4. Clean up project-scoped files (optional)
 
