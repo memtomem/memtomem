@@ -4517,3 +4517,192 @@ class TestInitialSeedThreshold:
         assert f"mm index {state['memory_dir']}" in out
         assert "already seeded" in out
         assert "Reindex All" not in out
+
+
+class TestNonInteractiveExtrasValidation:
+    """Issue #396: ``mm init -y`` must refuse to write a config when the
+    requested ``--provider`` / ``--tokenizer`` needs an extra that is not
+    importable. Previously ``-y`` accepted the flag values as given and
+    the mismatch surfaced only at runtime (embedder falls back to 0d,
+    kiwipiepy falls back to unicode61, etc.). Scripted workflows prefer
+    a non-zero exit here over a silently-stale config."""
+
+    def test_collect_missing_extras_ollama_when_client_absent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "ollama" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+        state = {"provider": "ollama", "rerank_enabled": False}
+        assert init_cmd._collect_missing_extras(state) == ["ollama"]
+
+    def test_collect_missing_extras_openai_when_client_absent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "openai" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+        state = {"provider": "openai", "rerank_enabled": False}
+        assert init_cmd._collect_missing_extras(state) == ["openai"]
+
+    def test_collect_missing_extras_kiwipiepy_when_tokenizer_chose(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "kiwipiepy" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+        state = {"provider": "none", "tokenizer": "kiwipiepy", "rerank_enabled": False}
+        assert init_cmd._collect_missing_extras(state) == ["korean"]
+
+    def test_yes_flag_provider_onnx_missing_fastembed_exits_non_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli, init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        # Force the runtime profile to PyPI so the in-process find_spec probe
+        # is authoritative (no workspace-python subprocess to consider).
+        monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "fastembed" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+
+        result = CliRunner().invoke(
+            cli,
+            [
+                "init",
+                "-y",
+                "--provider",
+                "onnx",
+                "--model",
+                "bge-small-en-v1.5",
+                "--mcp",
+                "skip",
+            ],
+        )
+
+        assert result.exit_code != 0, result.output
+        assert "Missing required extras" in result.output
+        assert "onnx" in result.output
+        # Hint should be install-type-aware — pypi → uv tool install --reinstall.
+        assert "uv tool install --reinstall" in result.output
+        # Config must not be written.
+        assert not (tmp_path / ".memtomem" / "config.json").exists()
+
+    def test_yes_flag_tokenizer_kiwipiepy_missing_exits_non_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli, init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "kiwipiepy" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+
+        result = CliRunner().invoke(
+            cli, ["init", "-y", "--tokenizer", "kiwipiepy", "--mcp", "skip"]
+        )
+
+        assert result.exit_code != 0, result.output
+        assert "Missing required extras" in result.output
+        assert "korean" in result.output
+        assert not (tmp_path / ".memtomem" / "config.json").exists()
+
+    def test_yes_flag_provider_ollama_missing_client_exits_non_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli, init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "ollama" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+
+        result = CliRunner().invoke(
+            cli,
+            [
+                "init",
+                "-y",
+                "--provider",
+                "ollama",
+                "--model",
+                "nomic-embed-text",
+                "--mcp",
+                "skip",
+            ],
+        )
+
+        assert result.exit_code != 0, result.output
+        assert "Missing required extras" in result.output
+        assert "ollama" in result.output
+        assert not (tmp_path / ".memtomem" / "config.json").exists()
+
+    def test_yes_flag_web_only_missing_still_writes_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """web is deliberately excluded from the required-extras set —
+        scripted runs with ``--mcp skip`` don't plan to run ``mm web``,
+        and the runtime ``mm web`` error is already loud. A config write
+        must proceed in this case."""
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli, init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name in ("fastapi", "uvicorn") else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: "fastapi", raising=False)
+
+        result = CliRunner().invoke(cli, ["init", "-y", "--provider", "none", "--mcp", "skip"])
+
+        assert result.exit_code == 0, result.output
+        assert (tmp_path / ".memtomem" / "config.json").exists()
+
+    def test_yes_flag_all_extras_present_writes_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli, init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+
+        result = CliRunner().invoke(
+            cli,
+            ["init", "-y", "--provider", "onnx", "--model", "bge-m3", "--mcp", "skip"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert (tmp_path / ".memtomem" / "config.json").exists()

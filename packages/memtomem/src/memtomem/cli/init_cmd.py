@@ -1060,7 +1060,8 @@ _UV_SYNC_HINT_PREFIX: str = "uv sync --extra "
 # historical semantic.
 _PROBE_EXTRAS_CODE: str = (
     "import json, importlib.util as u; "
-    "print(json.dumps([n for n in ['fastembed','fastapi','uvicorn'] "
+    "print(json.dumps([n for n in "
+    "['fastembed','fastapi','uvicorn','ollama','openai','kiwipiepy'] "
     "if u.find_spec(n) is not None]))"
 )
 
@@ -1576,24 +1577,57 @@ def _collect_missing_extras(state: dict) -> list[str]:
         if importable is not None:
             have_fastembed = "fastembed" in importable
             have_web = {"fastapi", "uvicorn"}.issubset(importable)
+            have_ollama = "ollama" in importable
+            have_openai = "openai" in importable
+            have_kiwipiepy = "kiwipiepy" in importable
         else:
             have_fastembed, have_web = _inproc_have_extras()
+            have_ollama = _have_module("ollama")
+            have_openai = _have_module("openai")
+            have_kiwipiepy = _have_module("kiwipiepy")
     else:
         have_fastembed, have_web = _inproc_have_extras()
+        have_ollama = _have_module("ollama")
+        have_openai = _have_module("openai")
+        have_kiwipiepy = _have_module("kiwipiepy")
 
     missing: list[str] = []
     # [onnx] = fastembed. Both the embedder and the fastembed reranker share
     # this package — either on its own is enough to require the extra.
-    needs_fastembed = state.get("provider") == "onnx" or (
+    provider = state.get("provider")
+    needs_fastembed = provider == "onnx" or (
         state.get("rerank_enabled") and state.get("rerank_model")
     )
     if needs_fastembed and not have_fastembed:
         missing.append("onnx")
+    # [ollama] / [openai] — provider-specific client libs. `mm init -y
+    # --provider <x>` previously wrote the choice to config without this
+    # check and the failure surfaced only at runtime (#396).
+    if provider == "ollama" and not have_ollama:
+        missing.append("ollama")
+    if provider == "openai" and not have_openai:
+        missing.append("openai")
+    # [korean] = kiwipiepy. The tokenizer falls back to unicode61 at runtime
+    # if kiwipiepy is absent, so missing it is not fatal — but `mm init -y
+    # --tokenizer kiwipiepy` should still be caught up front (#396).
+    if state.get("tokenizer") == "kiwipiepy" and not have_kiwipiepy:
+        missing.append("korean")
     if not have_web:
         missing.append("web")
 
     warned = state.get("_extras_warned_inline") or set()
     return [x for x in missing if x not in warned]
+
+
+# Extras that ``-y`` must refuse to write a config for when absent. ``web``
+# is excluded — scripted runs often use ``--mcp skip`` without any intention
+# to run the web UI, and the runtime fallback (clear ``mm web`` error on
+# missing fastapi) is already loud. Update this set alongside new provider/
+# tokenizer entries in ``_collect_missing_extras`` if they gain a runtime
+# fallback that silently flips the user-visible config.
+_REQUIRED_EXTRAS_FOR_NON_INTERACTIVE: frozenset[str] = frozenset(
+    {"onnx", "ollama", "openai", "korean"}
+)
 
 
 def _emit_cwd_runtime_mismatch_banner(state: dict) -> None:
@@ -2471,6 +2505,24 @@ def init(
             memory_path.mkdir(parents=True, exist_ok=True)
 
         _resolve_provider_dirs_non_interactive(state, effective_preset, include_providers)
+
+        # #396: fail loudly when the requested provider / tokenizer needs an
+        # extra that isn't importable. Previously `-y` silently wrote the
+        # config and the mismatch surfaced only at runtime (e.g. `mm index`
+        # would enter degraded mode for onnx without fastembed). Scripted
+        # workflows prefer a non-zero exit here over a stale config.
+        # Interactive paths keep their warn-and-continue semantics below.
+        missing = _collect_missing_extras(state)
+        required = [x for x in missing if x in _REQUIRED_EXTRAS_FOR_NON_INTERACTIVE]
+        if required:
+            hint = _extra_install_hint(required, state)
+            raise click.ClickException(
+                f"Missing required extras for `mm init -y`: "
+                f"{', '.join(required)}.\n"
+                f"  Install first: {hint}\n"
+                f"  Or drop the flag(s) that require them "
+                f"(e.g. --provider none, --tokenizer unicode61)."
+            )
     elif advanced:
         run_steps(advanced_steps, state)
     elif preset:
