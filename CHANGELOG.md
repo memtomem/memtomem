@@ -38,6 +38,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mem_embedding_reset(mode="revert_to_stored")` no longer raises
+  `AttributeError` on the recovery path.** #399 Phase 1 made `embedder`,
+  `search_pipeline`, and `index_engine` read-only `@property`s on
+  `AppContext`, but `_revert_to_stored` kept writing to them directly.
+  Any user hitting the degraded-mode "revert to stored" recovery flow
+  would see `AttributeError: property 'embedder' of 'AppContext' object
+  has no setter` — the exact scenario the tool exists to handle. The
+  writes now mutate `app._components` fields directly (the underlying
+  dataclass is still mutable by design), and a new end-to-end test
+  pins all three runtime slots as swapped, not just `embedder`. (#409)
+
 - **`mm init -y` refuses to write `config.json` when required extras are missing.**
   Previously `-y` accepted `--provider onnx|ollama|openai` and
   `--tokenizer kiwipiepy` without checking whether the corresponding Python

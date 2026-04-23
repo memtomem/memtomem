@@ -208,3 +208,45 @@ async def test_mem_embedding_reset_apply_current_repairs_mismatch(degraded_compo
     assert "Embedding mismatch detected" not in message
     assert add_stats is not None
     assert add_stats.indexed_chunks >= 1
+
+
+async def test_mem_embedding_reset_revert_to_stored_swaps_runtime(degraded_components):
+    """Regression for #409: ``revert_to_stored`` mutates ``app._components``
+    fields directly (not the read-only ``AppContext`` properties introduced
+    by #399 Phase 1). Pre-fix this path raised
+    ``AttributeError: property 'embedder' of 'AppContext' object has no setter``
+    the moment it ran, defeating the whole recovery flow.
+
+    The degraded fixture pins stored=none/dim=0, configured=onnx/bge-m3/1024,
+    so reverting downgrades the runtime to a ``NoopEmbedder`` and clears
+    the mismatch. We verify the three runtime slots actually got swapped,
+    not just ``embedder`` — a partial fix that touched only ``embedder``
+    would leave ``search_pipeline`` / ``index_engine`` holding stale
+    references to the configured embedder.
+    """
+    app = _make_app(degraded_components)
+    ctx = _StubCtx(app)
+    pre_embedder = app.embedder
+    pre_search = app.search_pipeline
+    pre_index = app.index_engine
+
+    reset_out = await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
+
+    assert "Reverted to stored DB settings" in reset_out
+    assert "none/" in reset_out  # stored provider was "none"
+    assert "0d" in reset_out  # stored dimension was 0
+
+    # All three runtime slots swapped. Identity check is the right assertion:
+    # construction creates a new instance, so the post object is a different
+    # Python object than the pre. Anything narrower (e.g. "dimension == 0")
+    # would silently pass if only ``embedder`` was touched and the pipelines
+    # kept pointing at the old one.
+    assert app.embedder is not pre_embedder
+    assert app.search_pipeline is not pre_search
+    assert app.index_engine is not pre_index
+
+    # Stored-side settings are now reflected in config + live storage view.
+    assert app.config.embedding.provider == "none"
+    assert app.config.embedding.dimension == 0
+    assert app.storage.embedding_mismatch is None
+    assert "DEGRADED" not in await mem_stats(ctx=ctx)  # type: ignore[arg-type]

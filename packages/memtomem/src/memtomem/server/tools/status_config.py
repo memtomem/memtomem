@@ -250,10 +250,21 @@ def _revert_to_stored(app: AppContext) -> str:
     config.embedding.model = stored["model"]
     config.embedding.dimension = stored["dimension"]
 
+    # ``app.embedder`` / ``app.search_pipeline`` / ``app.index_engine`` are
+    # read-only properties that proxy to ``app._components.<name>`` (#399
+    # Phase 1). Direct assignment would raise ``AttributeError``. The
+    # ``Components`` dataclass is mutable, so we swap fields on the inner
+    # container and the properties pick up the new values automatically.
+    # ``app.storage`` above already dereferenced ``_components``, so the
+    # container is guaranteed non-None by the time we reach here.
+    comp = app._components
+    assert comp is not None, (
+        "_revert_to_stored called before ensure_initialized — "
+        "handler must go through _get_app_initialized"
+    )
     new_embedder = create_embedder(config.embedding)
-    app.embedder = new_embedder
-
-    app.search_pipeline = SearchPipeline(
+    comp.embedder = new_embedder
+    comp.search_pipeline = SearchPipeline(
         storage=storage,
         embedder=new_embedder,
         config=config.search,
@@ -263,7 +274,7 @@ def _revert_to_stored(app: AppContext) -> str:
         context_window_config=config.context_window,
         llm_provider=app.llm_provider,
     )
-    app.index_engine = IndexEngine(
+    comp.index_engine = IndexEngine(
         storage=storage,
         embedder=new_embedder,
         config=config.indexing,
