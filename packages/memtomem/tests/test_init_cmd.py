@@ -4892,6 +4892,10 @@ class TestYRefuseHintParity:
             "Ollama fallback must surface -y refuse hint in both "
             "binary-missing and module-missing branches (#405)"
         )
+        assert _count_calls(embedding_src, "--provider openai", "openai") >= 1, (
+            "OpenAI fallback must surface -y refuse hint when the openai "
+            "Python client is missing (#407)"
+        )
         assert _count_calls(language_src, "--tokenizer kiwipiepy", "korean") >= 1, (
             "kiwipiepy fallback must surface -y refuse hint (#403)"
         )
