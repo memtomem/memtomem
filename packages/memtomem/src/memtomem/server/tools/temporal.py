@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 from memtomem.server.helpers import _parse_recall_date
@@ -42,7 +42,7 @@ async def mem_timeline(
 
     from memtomem.tools.temporal import build_timeline, format_timeline
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     # Search for topic
     results, _stats = await app.search_pipeline.search(
@@ -111,7 +111,7 @@ async def mem_activity(
     """
     from memtomem.tools.temporal import ActivityDay, format_activity
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     # Default: last 30 days
     now = datetime.now(timezone.utc)

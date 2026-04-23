@@ -96,13 +96,35 @@ In Claude Code (or run `/memtomem:status` if using the plugin):
 Call the mem_status tool
 ```
 
-Example of a successful response:
+Example of a successful response (Ollama config; first 12 lines of the
+full report — the `Embedding` and `Dimension` rows change with the
+provider picked in the wizard):
+
 ```
-memtomem status:
-  - Storage backend: SQLite
-  - Total chunks: 0 (not yet indexed)
-  - Embedding model: ollama/nomic-embed-text
+memtomem Status
+==============
+Storage:   sqlite
+DB path:   ~/.memtomem/memtomem.db
+Embedding: ollama / nomic-embed-text
+Dimension: 768
+Top-K:     10
+RRF k:     60
+
+Index stats
+-----------
+Total chunks:  0
+Source files:  0
+...
 ```
+
+Or skip the editor and run the same check directly:
+
+```bash
+mm status
+```
+
+`mm status` is a CLI mirror of `mem_status` (same output) — handy when
+the editor hasn't reconnected yet, or for scripted health checks.
 
 > **MCP Reconnection**: After changing `.mcp.json`, restart Claude Code or use the `/mcp` command to reconnect.
 

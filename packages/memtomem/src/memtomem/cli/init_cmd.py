@@ -15,7 +15,7 @@ from typing import Literal
 import click
 
 from memtomem.cli.init_presets import PRESETS, _VALID_PRESETS, get_preset
-from memtomem.cli.wizard import nav_confirm, nav_prompt, run_steps, step_header
+from memtomem.cli.wizard import nav_confirm, nav_prompt, run_steps, silent_step, step_header
 
 InstallType = Literal["source", "project", "tool", "uvx"]
 CwdInstallType = Literal["source", "project", "pypi"]
@@ -25,6 +25,19 @@ MmBinaryOrigin = Literal["uv-tool", "uvx", "venv-relative", "system", "unknown"]
 def _run(cmd: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
     """Run a command and return the result."""
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def _isatty() -> bool:
+    """Module-level indirection for ``sys.stdin.isatty()``.
+
+    Exists so tests can patch the default-interactive TTY gate without
+    fighting CliRunner's substituted ``sys.stdin`` (see
+    ``feedback_clirunner_isatty_seam.md``). Only the picker-path gate at
+    the bottom of :func:`init` routes through this; the other legacy
+    ``sys.stdin.isatty()`` call sites in this module each have their own
+    test paths.
+    """
+    return sys.stdin.isatty()
 
 
 def _ollama_available() -> bool:
@@ -247,11 +260,25 @@ def _have_module(name: str) -> bool:
         return False
 
 
+def _y_refuse_hint(flag: str, extra: str) -> str:
+    """Wizard → ``-y`` discoverability bridge (#403).
+
+    Interactive wizard warns-and-saves when an extra is missing; ``mm init -y``
+    refuses with a non-zero exit (#396 / #402). A user who copies a wizard
+    choice into a scripted install gets an unexpected hard failure without
+    this hint. Surface the asymmetry at the wizard warning site.
+    """
+    return (
+        f"  Note: `mm init -y {flag}` refuses without `memtomem[{extra}]`; "
+        f"install first for scripted setups."
+    )
+
+
 # ── Step functions ────────────────────────────────────────────────────
 
 
 def _step_embedding(state: dict) -> None:
-    step_header(1, "Embedding Provider")
+    step_header(state, "Embedding Provider")
     click.echo("  Choose how to generate embeddings:")
     click.echo("    [1] Quick start — keyword search only, no setup needed (recommended)")
     click.echo("    [2] Local ONNX — dense search, no server needed (pip install memtomem[onnx])")
@@ -284,6 +311,7 @@ def _step_embedding(state: dict) -> None:
             # as already surfaced so ``_collect_missing_extras`` skips it.
             click.echo(f"  Install with: {_extra_install_hint(['onnx'], state)}")
             click.echo("  Saving ONNX config now so you're ready after install.")
+            click.echo(_y_refuse_hint("--provider onnx", "onnx"))
             click.echo()
             state.setdefault("_extras_warned_inline", set()).add("onnx")
 
@@ -313,15 +341,37 @@ def _step_embedding(state: dict) -> None:
 
     elif choice == 3:
         provider = "ollama"
-        if not _ollama_available():
+        # Two orthogonal preconditions for Ollama: the runtime binary
+        # (``_ollama_available()`` = ``shutil.which("ollama")``) and the
+        # ``ollama`` Python client (``_have_module("ollama")``). The
+        # ``-y`` extras gate (#402) checks the Python client, not the
+        # binary — so the refuse-hint must fire whenever the Python
+        # client is missing, whether or not the binary is on PATH.
+        have_ollama_binary = _ollama_available()
+        have_ollama_module = _have_module("ollama")
+
+        if not have_ollama_binary:
             click.secho("  Ollama not found.", fg="yellow")
             click.echo("  Install from https://ollama.com, then run 'mm index' to embed.")
             click.echo("  Saving Ollama config now so you're ready after install.")
+            if not have_ollama_module:
+                click.echo(_y_refuse_hint("--provider ollama", "ollama"))
+                state.setdefault("_extras_warned_inline", set()).add("ollama")
             click.echo()
             # Record intent — config is written, embedding runs when Ollama is available.
             model = "nomic-embed-text"
             dimension = 768
         else:
+            if not have_ollama_module:
+                # Binary is on PATH but the ``-y`` gate additionally
+                # requires the ``ollama`` Python client. Surface the
+                # install hint + refuse note up front so scripted
+                # retries don't surprise the user.
+                click.secho("  ollama Python client not installed.", fg="yellow")
+                click.echo(f"  Install with: {_extra_install_hint(['ollama'], state)}")
+                click.echo(_y_refuse_hint("--provider ollama", "ollama"))
+                click.echo()
+                state.setdefault("_extras_warned_inline", set()).add("ollama")
             if not _ollama_running():
                 click.secho("  Ollama not running. Starting 'ollama serve'...", fg="yellow")
                 click.echo("  Run 'ollama serve' in another terminal if this fails.")
@@ -352,6 +402,18 @@ def _step_embedding(state: dict) -> None:
 
     else:
         provider = "openai"
+        # Mirror the Ollama / ONNX / kiwipiepy probe pattern (#405 / #403):
+        # the ``-y`` extras gate (#402) refuses without the ``openai``
+        # Python client, so the wizard must hint before prompting for a
+        # key the user could otherwise spend effort validating.
+        if not _have_module("openai"):
+            click.secho("  openai Python client not installed.", fg="yellow")
+            click.echo(f"  Install with: {_extra_install_hint(['openai'], state)}")
+            click.echo("  Saving OpenAI config now so you're ready after install.")
+            click.echo(_y_refuse_hint("--provider openai", "openai"))
+            click.echo()
+            state.setdefault("_extras_warned_inline", set()).add("openai")
+
         click.echo("  Available models:")
         click.echo("    [1] text-embedding-3-small — balanced (1536d)")
         click.echo("    [2] text-embedding-3-large — highest accuracy (3072d)")
@@ -378,7 +440,7 @@ def _step_embedding(state: dict) -> None:
 
 
 def _step_reranker(state: dict) -> None:
-    step_header(2, "Reranker (optional)")
+    step_header(state, "Reranker (optional)")
     click.echo("  Cross-encoder reranking sharpens search relevance after BM25+dense fusion.")
     click.echo("  Runs locally via fastembed ONNX — no API key, no server.")
     enabled = nav_confirm("  Enable reranker?", default=False)
@@ -406,7 +468,7 @@ def _step_reranker(state: dict) -> None:
 
 
 def _step_memory_dir(state: dict) -> None:
-    step_header(3, "Memory Directory")
+    step_header(state, "Memory Directory")
     click.echo("  Where are the files you want to index?")
     memory_dir = nav_prompt("  Directory", default="~/memories")
     memory_path = Path(memory_dir).expanduser()
@@ -536,7 +598,7 @@ def _step_provider_dirs(state: dict) -> None:
     to ``default`` for memory_dirs whose basename is non-discriminating
     (``memory`` / ``plans`` / ``memories``).
     """
-    step_header(4, "Provider Memory Folders")
+    step_header(state, "Provider Memory Folders")
     from memtomem.config import _detect_provider_dirs
 
     grouped = _detect_provider_dirs()
@@ -596,7 +658,7 @@ def _step_provider_dirs(state: dict) -> None:
 
 
 def _step_storage(state: dict) -> None:
-    step_header(5, "Storage")
+    step_header(state, "Storage")
     config_dir = Path("~/.memtomem").expanduser()
     db_default = str(config_dir / "memtomem.db")
     state["db_path"] = nav_prompt("  SQLite DB path", default=db_default)
@@ -604,7 +666,7 @@ def _step_storage(state: dict) -> None:
 
 
 def _step_namespace(state: dict) -> None:
-    step_header(6, "Namespace")
+    step_header(state, "Namespace")
     click.echo("  Organize memories into scoped groups (work, personal, project).")
     state["enable_auto_ns"] = nav_confirm(
         "  Auto-assign namespace from folder name? (~/docs → 'docs')", default=False
@@ -614,7 +676,7 @@ def _step_namespace(state: dict) -> None:
 
 
 def _step_search(state: dict) -> None:
-    step_header(7, "Search")
+    step_header(state, "Search")
     state["top_k"] = nav_prompt("  Results per search", type=click.INT, default=10)
     state["decay_enabled"] = nav_confirm(
         "  Enable time-decay? (older memories rank lower)", default=False
@@ -623,7 +685,7 @@ def _step_search(state: dict) -> None:
 
 
 def _step_language(state: dict) -> None:
-    step_header(8, "Language")
+    step_header(state, "Language")
     click.echo("  Search tokenizer:")
     click.echo("    [1] Unicode (default — English and most languages)")
     click.echo("    [2] Korean (kiwipiepy — better Korean word splitting)")
@@ -637,12 +699,13 @@ def _step_language(state: dict) -> None:
             click.secho("  kiwipiepy is installed.", fg="green")
         except ImportError:
             click.secho("  kiwipiepy not installed. Run: pip install kiwipiepy", fg="yellow")
+            click.echo(_y_refuse_hint("--tokenizer kiwipiepy", "korean"))
     state["tokenizer"] = tokenizer
     click.echo()
 
 
 def _step_settings(state: dict) -> None:
-    step_header(9, "Claude Code Hooks")
+    step_header(state, "Claude Code Hooks")
 
     # Skip entirely if Claude Code is not installed
     claude_dir = Path.home() / ".claude"
@@ -685,7 +748,7 @@ def _step_settings(state: dict) -> None:
 
 
 def _step_mcp(state: dict) -> None:
-    step_header(10, "Connect to AI Editor")
+    step_header(state, "Connect to AI Editor")
     click.echo("  How do you want to connect memtomem?")
     click.echo("    [1] Claude Code (run 'claude mcp add' automatically)")
     click.echo("    [2] Generate .mcp.json here (Claude Code project scope;")
@@ -1060,7 +1123,8 @@ _UV_SYNC_HINT_PREFIX: str = "uv sync --extra "
 # historical semantic.
 _PROBE_EXTRAS_CODE: str = (
     "import json, importlib.util as u; "
-    "print(json.dumps([n for n in ['fastembed','fastapi','uvicorn'] "
+    "print(json.dumps([n for n in "
+    "['fastembed','fastapi','uvicorn','ollama','openai','kiwipiepy'] "
     "if u.find_spec(n) is not None]))"
 )
 
@@ -1576,24 +1640,57 @@ def _collect_missing_extras(state: dict) -> list[str]:
         if importable is not None:
             have_fastembed = "fastembed" in importable
             have_web = {"fastapi", "uvicorn"}.issubset(importable)
+            have_ollama = "ollama" in importable
+            have_openai = "openai" in importable
+            have_kiwipiepy = "kiwipiepy" in importable
         else:
             have_fastembed, have_web = _inproc_have_extras()
+            have_ollama = _have_module("ollama")
+            have_openai = _have_module("openai")
+            have_kiwipiepy = _have_module("kiwipiepy")
     else:
         have_fastembed, have_web = _inproc_have_extras()
+        have_ollama = _have_module("ollama")
+        have_openai = _have_module("openai")
+        have_kiwipiepy = _have_module("kiwipiepy")
 
     missing: list[str] = []
     # [onnx] = fastembed. Both the embedder and the fastembed reranker share
     # this package — either on its own is enough to require the extra.
-    needs_fastembed = state.get("provider") == "onnx" or (
+    provider = state.get("provider")
+    needs_fastembed = provider == "onnx" or (
         state.get("rerank_enabled") and state.get("rerank_model")
     )
     if needs_fastembed and not have_fastembed:
         missing.append("onnx")
+    # [ollama] / [openai] — provider-specific client libs. `mm init -y
+    # --provider <x>` previously wrote the choice to config without this
+    # check and the failure surfaced only at runtime (#396).
+    if provider == "ollama" and not have_ollama:
+        missing.append("ollama")
+    if provider == "openai" and not have_openai:
+        missing.append("openai")
+    # [korean] = kiwipiepy. The tokenizer falls back to unicode61 at runtime
+    # if kiwipiepy is absent, so missing it is not fatal — but `mm init -y
+    # --tokenizer kiwipiepy` should still be caught up front (#396).
+    if state.get("tokenizer") == "kiwipiepy" and not have_kiwipiepy:
+        missing.append("korean")
     if not have_web:
         missing.append("web")
 
     warned = state.get("_extras_warned_inline") or set()
     return [x for x in missing if x not in warned]
+
+
+# Extras that ``-y`` must refuse to write a config for when absent. ``web``
+# is excluded — scripted runs often use ``--mcp skip`` without any intention
+# to run the web UI, and the runtime fallback (clear ``mm web`` error on
+# missing fastapi) is already loud. Update this set alongside new provider/
+# tokenizer entries in ``_collect_missing_extras`` if they gain a runtime
+# fallback that silently flips the user-visible config.
+_REQUIRED_EXTRAS_FOR_NON_INTERACTIVE: frozenset[str] = frozenset(
+    {"onnx", "ollama", "openai", "korean"}
+)
 
 
 def _emit_cwd_runtime_mismatch_banner(state: dict) -> None:
@@ -2075,19 +2172,27 @@ def _write_mcp_json(server_cmd: str, server_args: list[str], mcp_env: dict[str, 
 # ── Preset quick-setup helpers ────────────────────────────────────────
 
 
+class _AdvancedSelected(Exception):
+    """Raised by ``_step_preset_picker`` when the user picks Advanced.
+
+    Breaks out of the combined preset ``run_steps`` so the caller can
+    dispatch the full 10-step wizard. See the default-interactive branch
+    in :func:`init`.
+    """
+
+
 def _step_preset_picker(state: dict) -> None:
     """First step of the default interactive path — pick a preset or Advanced.
 
-    Writes ``state["_preset_choice"]`` = one of ``"minimal" | "english" |
-    "korean" | "advanced"``. The Advanced entry falls through to the full
-    10-step wizard; the other three bundle embedding/reranker/tokenizer/
-    namespace defaults via ``_apply_preset`` so the user only sees the
-    essential memory-dir and MCP questions afterwards.
+    Advanced raises :class:`_AdvancedSelected` so the caller can dispatch
+    the full 10-step wizard. The three preset entries apply the preset
+    inline via :func:`_apply_preset` and set ``state["_preset_choice"]``
+    so the rest of ``run_steps`` can continue with ``_step_memory_dir``,
+    ``_step_provider_dirs_auto``, and ``_step_mcp`` against fully
+    populated state. Re-entry via ``"b"`` is safe — :func:`_apply_preset`
+    overwrites the full preset surface.
     """
-    # First step — no prior step to return to, so only surface 'q: quit'.
-    # 'b' still works (nav_prompt intercepts it before IntRange), but
-    # run_steps treats back-on-step-0 as a no-op, which would confuse
-    # users if advertised.
+    # First step — "b" is a no-op here, so only advertise "q: quit".
     click.secho("  Choose setup style:", fg="yellow", bold=True)
     click.echo(click.style("  (q: quit)", dim=True))
     click.echo()
@@ -2105,9 +2210,10 @@ def _step_preset_picker(state: dict) -> None:
     click.echo()
 
     if choice == advanced_idx:
-        state["_preset_choice"] = "advanced"
-    else:
-        state["_preset_choice"] = ordered[choice - 1]
+        raise _AdvancedSelected()
+
+    state["_preset_choice"] = ordered[choice - 1]
+    _apply_preset(state, state["_preset_choice"])
 
 
 def _apply_preset(state: dict, preset_name: str) -> None:
@@ -2123,6 +2229,13 @@ def _apply_preset(state: dict, preset_name: str) -> None:
     state["model"] = spec.model
     state["dimension"] = spec.dimension
     state["api_key"] = ""
+    # Drop any stale rerank_model before reapplying — otherwise a
+    # re-pick from a rerank-enabled preset to a rerank-disabled one
+    # (#371 "b" navigation) leaves the old rerank_model string in
+    # state. Downstream readers gate on rerank_enabled first so the
+    # stale value is benign today, but the docstring promises a full
+    # preset-surface overwrite — honoring that avoids future surprises.
+    state.pop("rerank_model", None)
     state["rerank_enabled"] = spec.rerank_enabled
     if spec.rerank_enabled and spec.rerank_model is not None:
         state["rerank_model"] = spec.rerank_model
@@ -2136,6 +2249,7 @@ def _apply_preset(state: dict, preset_name: str) -> None:
     state["_preset_applied"] = preset_name
 
 
+@silent_step
 def _step_provider_dirs_auto(state: dict) -> None:
     """Auto-apply detected provider memory folders for preset 2/3.
 
@@ -2143,6 +2257,12 @@ def _step_provider_dirs_auto(state: dict) -> None:
     skips without scanning. When True, scans via ``_detect_provider_dirs``,
     adds every detected category, emits a banner listing what was added (or
     a one-line message when nothing was detected so the skip isn't silent).
+
+    Marked ``@silent_step`` because this function has no ``nav_prompt`` /
+    ``nav_confirm`` call — it only emits banners. ``run_steps`` skips past
+    it during back-navigation so ``b`` at the next step (``_step_mcp``) lands
+    on the previous *interactive* step (``_step_memory_dir``) instead of
+    re-running the banner and falling through to ``_step_mcp`` again. (#421)
     """
     preset_name = state.get("_preset_applied")
     if preset_name is None:
@@ -2466,11 +2586,33 @@ def init(
         if "mcp_choice" not in state:
             state["mcp_choice"] = 3  # skip — scripted runs don't touch Claude
 
+        _resolve_provider_dirs_non_interactive(state, effective_preset, include_providers)
+
+        # #396: fail loudly when the requested provider / tokenizer needs an
+        # extra that isn't importable. Previously `-y` silently wrote the
+        # config and the mismatch surfaced only at runtime (e.g. `mm index`
+        # would enter degraded mode for onnx without fastembed). Scripted
+        # workflows prefer a non-zero exit here over a stale config.
+        # Interactive paths keep their warn-and-continue semantics below.
+        #
+        # Gate runs BEFORE any disk side effect (memory_dir mkdir, config
+        # write) so a refused -y leaves the filesystem untouched. The earlier
+        # mkdir-then-gate ordering left ``~/memories`` behind on rejected runs.
+        missing = _collect_missing_extras(state)
+        required = [x for x in missing if x in _REQUIRED_EXTRAS_FOR_NON_INTERACTIVE]
+        if required:
+            hint = _extra_install_hint(required, state)
+            raise click.ClickException(
+                f"Missing required extras for `mm init -y`: "
+                f"{', '.join(required)}.\n"
+                f"  Install first: {hint}\n"
+                f"  Or drop the flag(s) that require them "
+                f"(e.g. --provider none, --tokenizer unicode61)."
+            )
+
         memory_path = Path(state["memory_dir"]).expanduser()
         if not memory_path.exists():
             memory_path.mkdir(parents=True, exist_ok=True)
-
-        _resolve_provider_dirs_non_interactive(state, effective_preset, include_providers)
     elif advanced:
         run_steps(advanced_steps, state)
     elif preset:
@@ -2492,13 +2634,26 @@ def init(
         run_steps([_step_memory_dir, _step_provider_dirs_auto, _step_mcp], state)
     else:
         # Default interactive path: show the preset picker, dispatch on choice.
-        if not sys.stdin.isatty():
+        if not _isatty():
             raise click.UsageError("Non-interactive terminal detected. Pass --preset <name> or -y.")
-        run_steps([_step_preset_picker], state)
-        if state["_preset_choice"] == "advanced":
+        # Combine the picker with its follow-up steps in ONE run_steps call so
+        # "b" at ``_step_memory_dir`` navigates back to the picker (#371). The
+        # previous split ran picker alone in a separate call, which left
+        # memory_dir as step-0 of a second run_steps where "b" was a no-op.
+        # ``_step_preset_picker`` applies the preset inline on a non-advanced
+        # choice, and raises ``_AdvancedSelected`` to break out to the full
+        # 10-step wizard below.
+        try:
+            run_steps(
+                [_step_preset_picker, _step_memory_dir, _step_provider_dirs_auto, _step_mcp],
+                state,
+            )
+        except _AdvancedSelected:
             run_steps(advanced_steps, state)
         else:
-            _apply_preset(state, state["_preset_choice"])
+            # CLI flag overrides apply only to the preset branch — advanced
+            # prompts for every field interactively, so there's no preset
+            # baseline to override there.
             _override_from_flags(
                 state,
                 provider=provider,
@@ -2513,7 +2668,6 @@ def init(
                 api_key=api_key,
                 mcp_mode=mcp_mode,
             )
-            run_steps([_step_memory_dir, _step_provider_dirs_auto, _step_mcp], state)
 
     _write_config_and_summary(state, fresh=fresh)
     _maybe_offer_embedding_reset(state, interactive=not non_interactive)

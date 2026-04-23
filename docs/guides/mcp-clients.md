@@ -216,14 +216,45 @@ Ask the AI:
 Call the mem_status tool to show the current status
 ```
 
-Expected response example (keyword-only default — the embedding line
-changes depending on the provider picked in the wizard):
+Expected response (BM25 default — the `Embedding` and `Dimension`
+lines change depending on the provider picked in the wizard):
+
 ```
-memtomem status:
-  - Storage backend: SQLite
-  - Total chunks: 0 (not yet indexed)
-  - Embedding model: none (BM25 keyword search only)
+memtomem Status
+==============
+Storage:   sqlite
+DB path:   ~/.memtomem/memtomem.db
+Embedding: none /
+Dimension: 0
+Top-K:     10
+RRF k:     60
+
+Index stats
+-----------
+Total chunks:  0
+Source files:  0
+...
 ```
+
+The full report also includes an `Immutable fields` block (provider /
+model / tokenizer / backend echoed back as a "what can't be changed at
+runtime" reminder), and a `Warnings` block with stable schema keys
+(`kind` / `fix` / `doc` / `stored` / `configured`) when an embedding-
+dimension mismatch is detected. Run `mm status` from a terminal to see
+the exact output your install produces.
+
+### From a terminal — `mm status`
+
+If the editor isn't reachable yet (or you want to verify the install
+without involving any client), run the same check from a terminal:
+
+```bash
+mm status
+```
+
+`mm status` is a thin CLI wrapper over the same code path `mem_status`
+uses, so the output is identical. Useful as a sanity check between
+`mm init` and the first editor-side call.
 
 ### Available MCP Tools (74)
 

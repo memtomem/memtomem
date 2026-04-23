@@ -8,6 +8,7 @@ All public symbols are re-exported here for backward compatibility:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
@@ -20,6 +21,7 @@ from memtomem.server.context import (
     AppContext as AppContext,
     CtxType as CtxType,
     _get_app as _get_app,
+    _get_app_initialized as _get_app_initialized,
 )
 from memtomem.server.formatters import (
     _format_compact_result as _format_compact_result,
@@ -37,6 +39,18 @@ from memtomem.server.lifespan import app_lifespan
 
 # ── mcp instance — must be created before tool-module imports ──────────
 mcp = FastMCP("memtomem", lifespan=app_lifespan)
+
+# Pin ``serverInfo.version`` in the MCP ``initialize`` response to the
+# memtomem package version (#383). ``FastMCP.__init__`` has no ``version``
+# parameter; when the underlying ``Server.version`` stays ``None`` the
+# lowlevel server falls back to ``importlib.metadata.version("mcp")`` —
+# which made every memtomem handshake report the MCP SDK version
+# (e.g. ``1.27.0``) instead of ``mm --version`` (e.g. ``0.1.24``).
+# External consumers keying off ``serverInfo.version`` (telemetry,
+# error reports, "which version are we both on") saw misleading data.
+from memtomem import __version__ as _memtomem_version
+
+mcp._mcp_server.version = _memtomem_version
 
 # ── Register ALL tools (decorators bind to `mcp` on import) ───────────
 from memtomem.server.tools.ask import mem_ask  # noqa: E402, F401
@@ -139,15 +153,106 @@ if _TOOL_MODE != "full":
             mcp._tool_manager.remove_tool(name)
 
 
+def _install_sigterm_handler(pid_file: Path) -> None:
+    """Install a SIGTERM handler that unlinks ``pid_file`` and hard-exits.
+
+    ``mcp.run()`` runs an asyncio event loop, and asyncio swallows
+    ``SystemExit`` raised from a classic ``signal.signal`` handler — the
+    integration test in ``test_server_sigterm.py`` is the live repro.
+    So we can't rely on ``sys.exit(0)`` + ``atexit``: we unlink
+    explicitly and call ``os._exit(0)`` to bypass the event loop.
+
+    Only register after the flock succeeds, so we never unlink a pid
+    file another primary owns. ``atexit`` still handles the normal
+    stdin-EOF shutdown path.
+    """
+    import os as _os
+    import signal
+
+    def _handle(_signum: int, _frame: object) -> None:
+        try:
+            pid_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        _os._exit(0)
+
+    signal.signal(signal.SIGTERM, _handle)
+
+
+def _try_hold_legacy_flock(legacy_pid: Path) -> object | None:
+    """Acquire a lifetime flock on the pre-#412 pid file, if present.
+
+    During the transition window a user may still have a v0.1.24 or older
+    ``memtomem-server`` running — it holds ``fcntl.flock`` on
+    ``~/.memtomem/.server.pid``. The new server's own flock target lives
+    on ``$XDG_RUNTIME_DIR``, so without this probe two servers could run
+    concurrently against the same SQLite DB and corrupt the WAL (#412
+    review B1).
+
+    Behavior:
+
+    - If ``~/.memtomem/`` does not exist, skip — this is a fresh install
+      with no upgrade history, and touching it would re-pollute the
+      directory that #412 specifically keeps out of handshake.
+    - Otherwise, open the legacy path (``a+b`` creates it if missing; we
+      are inside an already-existing ``~/.memtomem/`` so no new
+      pollution) and try ``LOCK_EX | LOCK_NB``.
+    - Lock held by another process → an old server is alive; print to
+      stderr and ``sys.exit(1)``. Two concurrent writers is strictly
+      worse than one missed MCP handshake.
+    - Lock acquired → return the file handle; caller holds it for the
+      process lifetime so a *future* old server starting after us also
+      hits this lock and bails via its own concurrent-detection path.
+
+    Returns ``None`` on the skip paths (fresh install, open error). The
+    returned fd must stay referenced for the lock to persist.
+    """
+    import fcntl
+    import sys
+
+    legacy_state_dir = Path.home() / ".memtomem"
+    if not legacy_state_dir.is_dir():
+        return None
+
+    try:
+        legacy_fp = open(legacy_pid, "a+b")
+    except OSError:
+        return None
+
+    try:
+        fcntl.flock(legacy_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        print(
+            f"error: another memtomem-server holds a lock at {legacy_pid} "
+            f"(likely a pre-0.1.25 install). Stop it before starting a new "
+            f"server; `mm uninstall` will also refuse until it is gone.",
+            file=sys.stderr,
+        )
+        legacy_fp.close()
+        sys.exit(1)
+    return legacy_fp
+
+
 def main() -> None:
     """Run the MCP server."""
     import atexit
     import fcntl
-    from pathlib import Path
 
-    pid_dir = Path("~/.memtomem").expanduser()
-    pid_dir.mkdir(parents=True, exist_ok=True)
-    pid_file = pid_dir / ".server.pid"
+    from memtomem._runtime_paths import ensure_runtime_dir, legacy_server_pid_path
+
+    # B1: bidirectional mutual exclusion during the transition window.
+    # Hold the legacy flock for the process lifetime so an old (pre-#412)
+    # server running *now* is detected and a future one starting *after*
+    # us also bails.
+    _legacy_lock_fp = _try_hold_legacy_flock(legacy_server_pid_path())
+    if _legacy_lock_fp is not None:
+        atexit.register(lambda: _legacy_lock_fp.close())
+
+    # Runtime files (pid / flock) live on ``$XDG_RUNTIME_DIR/memtomem``
+    # when the platform provides one, otherwise a per-user temp subdir.
+    # This keeps ``~/.memtomem/`` untouched during MCP handshake — it is
+    # created only when persistent storage is first written (#412).
+    pid_file = ensure_runtime_dir() / "server.pid"
 
     # Advisory lock — prevents multiple MCP servers from writing concurrently.
     # The lock is held for the lifetime of the process and auto-released on exit.
@@ -156,7 +261,9 @@ def main() -> None:
         fcntl.flock(_lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         # Another server already holds the lock — proceed anyway (the editor
-        # expects the process to stay alive), but log a warning.
+        # expects the process to stay alive), but log a warning. Don't register
+        # atexit unlink or the SIGTERM handler: either would yank the primary
+        # server's pid file out from under it.
         _lock_fp.close()
         import logging
 
@@ -165,11 +272,10 @@ def main() -> None:
             pid_file,
         )
     else:
-        import os
-
         _lock_fp.write(str(os.getpid()))
         _lock_fp.flush()
         atexit.register(lambda: _lock_fp.close())  # LIFO: runs second
         atexit.register(lambda: pid_file.unlink(missing_ok=True))  # LIFO: runs first
+        _install_sigterm_handler(pid_file)
 
     mcp.run()

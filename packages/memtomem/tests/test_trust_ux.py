@@ -484,6 +484,7 @@ def _recall_ctx(components):
     """
     import asyncio
     from types import SimpleNamespace
+    from unittest.mock import AsyncMock
 
     app = SimpleNamespace(
         config=components.config,
@@ -491,6 +492,7 @@ def _recall_ctx(components):
         current_namespace=None,
         _dim_mismatch_announced=False,
         _config_lock=asyncio.Lock(),
+        ensure_initialized=AsyncMock(),
     )
     return SimpleNamespace(request_context=SimpleNamespace(lifespan_context=app))
 
@@ -503,6 +505,7 @@ def _search_ctx(components):
     """
     import asyncio
     from types import SimpleNamespace
+    from unittest.mock import AsyncMock
 
     app = SimpleNamespace(
         config=components.config,
@@ -512,5 +515,6 @@ def _search_ctx(components):
         webhook_manager=None,
         _dim_mismatch_announced=False,
         _config_lock=asyncio.Lock(),
+        ensure_initialized=AsyncMock(),
     )
     return SimpleNamespace(request_context=SimpleNamespace(lifespan_context=app))

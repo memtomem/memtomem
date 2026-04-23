@@ -48,6 +48,8 @@ Then in your AI editor, ask:
 "Remember this insight"      →  mem_add(content="...", tags=["ops"])
 ```
 
+> Prefer the terminal? `mm status` is a CLI mirror of `mem_status` — same output, no editor needed.
+
 That's it. Your agent now has a long-term memory built from plain markdown files.
 
 For full setup, OpenAI configuration, and troubleshooting, see the [Getting Started guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/getting-started.md).

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from memtomem import __version__
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 from memtomem.server.helpers import _set_config_key
@@ -29,7 +29,7 @@ async def mem_stats(
 
     Use this to quickly assess how many memories are indexed before searching.
     """
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     data = await app.storage.get_stats()
     total_chunks = data.get("total_chunks", 0)
     total_sources = data.get("total_sources", 0)
@@ -62,36 +62,13 @@ async def mem_stats(
     return out
 
 
-@mcp.tool()
-@tool_handler
-async def mem_status(
-    ctx: CtxType = None,
-) -> str:
-    """Show indexing statistics and current configuration summary.
+async def format_status_report(app: AppContext) -> str:
+    """Render the status report shared by ``mem_status`` and ``mm status``.
 
-    Reports storage backend, embedding info, chunk/source counts, and
-    warns when orphaned source files are detected (files removed from
-    disk but still indexed — run mem_cleanup_orphans to fix).
-
-    When a configuration drift is detected (e.g. embedding dimension
-    mismatch between the DB and the runtime config) the output carries
-    a ``Warnings`` block whose entries follow this schema — kept stable
-    across versions so external consumers (uptime probes, dashboards)
-    can pattern-match on the keys:
-
-    ``kind``    open enum describing the warning. Current values:
-                ``embedding_dim_mismatch``. Future releases may add
-                ``stale_index``, ``orphan_vectors``, etc. — consumers
-                must tolerate unknown kinds rather than erroring.
-    ``fix``     the canonical CLI command a user should run.
-    ``doc``     a relative-path link into ``docs/guides/`` with the full
-                remediation flow (see ``configuration.md#reset-flow``).
-
-    Embedding-mismatch entries also include ``stored`` and ``configured``
-    sub-blocks echoing the DB vs runtime provider/model/dimension so the
-    user can see what changed without consulting another tool.
+    Kept as a free function so the CLI wrapper (#382) can reuse the exact
+    same formatting without going through MCP — both surface the same
+    text so users learn one output and can recognize it in either place.
     """
-    app = _get_app(ctx)
     stats = await app.storage.get_stats()
     config = app.config
 
@@ -167,6 +144,39 @@ async def mem_status(
 
 @mcp.tool()
 @tool_handler
+async def mem_status(
+    ctx: CtxType = None,
+) -> str:
+    """Show indexing statistics and current configuration summary.
+
+    Reports storage backend, embedding info, chunk/source counts, and
+    warns when orphaned source files are detected (files removed from
+    disk but still indexed — run mem_cleanup_orphans to fix).
+
+    When a configuration drift is detected (e.g. embedding dimension
+    mismatch between the DB and the runtime config) the output carries
+    a ``Warnings`` block whose entries follow this schema — kept stable
+    across versions so external consumers (uptime probes, dashboards)
+    can pattern-match on the keys:
+
+    ``kind``    open enum describing the warning. Current values:
+                ``embedding_dim_mismatch``. Future releases may add
+                ``stale_index``, ``orphan_vectors``, etc. — consumers
+                must tolerate unknown kinds rather than erroring.
+    ``fix``     the canonical CLI command a user should run.
+    ``doc``     a relative-path link into ``docs/guides/`` with the full
+                remediation flow (see ``configuration.md#reset-flow``).
+
+    Embedding-mismatch entries also include ``stored`` and ``configured``
+    sub-blocks echoing the DB vs runtime provider/model/dimension so the
+    user can see what changed without consulting another tool.
+    """
+    app = await _get_app_initialized(ctx)
+    return await format_status_report(app)
+
+
+@mcp.tool()
+@tool_handler
 @register("advanced")
 async def mem_config(
     key: str | None = None,
@@ -183,7 +193,7 @@ async def mem_config(
         persist: If True, save the change to ~/.memtomem/config.json so it
                  survives server restarts. Default is runtime-only.
     """
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     if key and value is not None:
         result = _set_config_key(app.config, key, value)
@@ -250,10 +260,21 @@ def _revert_to_stored(app: AppContext) -> str:
     config.embedding.model = stored["model"]
     config.embedding.dimension = stored["dimension"]
 
+    # ``app.embedder`` / ``app.search_pipeline`` / ``app.index_engine`` are
+    # read-only properties that proxy to ``app._components.<name>`` (#399
+    # Phase 1). Direct assignment would raise ``AttributeError``. The
+    # ``Components`` dataclass is mutable, so we swap fields on the inner
+    # container and the properties pick up the new values automatically.
+    # ``app.storage`` above already dereferenced ``_components``, so the
+    # container is guaranteed non-None by the time we reach here.
+    comp = app._components
+    assert comp is not None, (
+        "_revert_to_stored called before ensure_initialized — "
+        "handler must go through _get_app_initialized"
+    )
     new_embedder = create_embedder(config.embedding)
-    app.embedder = new_embedder
-
-    app.search_pipeline = SearchPipeline(
+    comp.embedder = new_embedder
+    comp.search_pipeline = SearchPipeline(
         storage=storage,
         embedder=new_embedder,
         config=config.search,
@@ -263,7 +284,7 @@ def _revert_to_stored(app: AppContext) -> str:
         context_window_config=config.context_window,
         llm_provider=app.llm_provider,
     )
-    app.index_engine = IndexEngine(
+    comp.index_engine = IndexEngine(
         storage=storage,
         embedder=new_embedder,
         config=config.indexing,
@@ -294,7 +315,7 @@ async def mem_embedding_reset(
             - "apply_current": Reset DB to current config. DESTRUCTIVE — deletes all vectors, re-index required.
             - "revert_to_stored": Switch runtime embedder to match DB stored values. Non-destructive.
     """
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     if mode not in ("status", "apply_current", "revert_to_stored"):
         return f"Invalid mode '{mode}'. Use: status, apply_current, or revert_to_stored."
@@ -351,7 +372,7 @@ async def mem_reset(
         confirm: Must be True to proceed. Prevents accidental data loss.
     """
     if not confirm:
-        app = _get_app(ctx)
+        app = await _get_app_initialized(ctx)
         stats = await app.storage.get_stats()
         total = stats.get("total_chunks", 0)
         return (
@@ -360,7 +381,7 @@ async def mem_reset(
             "Pass confirm=True to proceed."
         )
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     deleted = await app.storage.reset_all()
     summary = ", ".join(f"{t}: {c}" for t, c in deleted.items() if c > 0)
     return f"Database reset complete. Deleted: {summary or 'empty'}. Run mem_index to re-index."

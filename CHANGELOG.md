@@ -5,6 +5,158 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **`mm status` CLI command — terminal mirror of the MCP `mem_status` tool.**
+  Closes the gap noted in #382: the README and Quick Start told first-time
+  users to "call the `mem_status` tool" to confirm a healthy install, but
+  there was no equivalent CLI command — only `mm config show` (config, not
+  runtime state) and `mm watchdog status` (periodic-check results). Users
+  with no editor open, or running a scripted post-install check, had no
+  one-liner that surfaced "is the DB reachable, what's indexed, is the
+  embedding config in sync." `mm status` is a thin wrapper that builds an
+  `AppContext` from `cli_components` and calls the same `format_status_report`
+  helper now shared by `mem_status`, so the CLI and MCP outputs are
+  identical. (#382)
+
+### Changed
+
+- **`memtomem-server` pid / flock file moved to `$XDG_RUNTIME_DIR/memtomem/server.pid`.**
+  Previously the server wrote `~/.memtomem/.server.pid` at startup, which
+  forced `~/.memtomem/` into existence on every MCP handshake (even for
+  clients that connect but never call a tool). Runtime state now lives
+  on `$XDG_RUNTIME_DIR/memtomem/` when the platform provides it
+  (Linux w/ systemd), or `$TMPDIR/memtomem-$UID/` otherwise (macOS, BSD,
+  Linux without systemd). Combined with #399 Phase 3's lazy DB creation,
+  an idle MCP handshake against a fresh machine now leaves `~/.memtomem/`
+  untouched entirely. `mm uninstall` probes both the new and legacy
+  locations during the transition window, so a mixed-version upgrade
+  (pre-#412 server still running + new uninstall CLI) still refuses
+  correctly. (#412)
+
+- **MCP handshake no longer creates `~/.memtomem/memtomem.db`.** Previously,
+  every MCP client that connected to memtomem (Claude Code's `claude mcp list`,
+  Cursor, Windsurf, Gemini CLI) instantiated the SQLite database on handshake —
+  even before the user ran `mm init`, and even for short-lived health-check
+  spawns. The DB now opens on the first tool call (`mem_search`, `mem_add`,
+  `mem_status`, …) instead of on the lifespan startup, so a client that
+  connects but never calls a tool leaves the storage path alone. Two
+  follow-on behavior changes are accepted as part of the trade-off:
+
+  - The `"Embedding dimension mismatch detected at startup — entering
+    degraded mode"` warning for issue #349 no longer fires on
+    `memtomem-server` boot stderr. It now surfaces inside the first tool
+    call that triggers initialization. Recovery tools
+    (`mem_embedding_reset`, `mem_status`, `mem_stats`, `mem_list`,
+    `mem_read`) remain callable; users learn about the mismatch from
+    the first tool response instead of the boot log.
+  - An idle server (no tool calls) no longer runs background
+    maintenance. Consolidation, policy, and health-watchdog schedulers
+    start on the first tool call rather than the lifespan handshake.
+    A client that connects but never calls a tool will not see
+    scheduler ticks — consistent with "no DB to maintain" but worth
+    flagging for any maintenance schedule that assumed
+    background-without-tool-calls semantics.
+
+  Paired with #412 (runtime pid file relocation), an idle MCP handshake
+  now leaves `~/.memtomem/` untouched altogether — the advisory-lock
+  write that forced its creation moved to `$XDG_RUNTIME_DIR`. (#399,
+  #411; builds on #400 plumbing and #410 handler migration.)
+
+### Fixed
+
+- **`mm init`: step headers show the correct position in every flow —
+  not a hardcoded number correct only for `--advanced`.** Previously every
+  `_step_*` function called `step_header(N, title)` with a hardcoded `N`
+  that matched the step's index in the 10-step advanced sequence. Preset
+  flows re-use the same step functions in shorter sequences, so
+  `_step_memory_dir` advertised `3. Memory Directory` even when it was
+  the first prompt the user saw (`--preset korean`) or the second (default
+  interactive after a preset pick). `wizard.run_steps` now seeds
+  `state["_wizard_position"] = (current_index, total)` before each
+  invocation, and `step_header(state, title)` reads that instead of
+  taking the integer as an argument. Numbers: advanced 1–10 (unchanged),
+  `--preset X` 1–3, default-interactive 1–4 (picker counts as step 1, the
+  silent `_step_provider_dirs_auto` counts as step 3 but prints no header
+  of its own). (#420)
+
+- **`mm init`: "b" (back) at the MCP step now reaches the memory-directory
+  prompt instead of stalling on a silent banner.** The wizard's
+  `_step_provider_dirs_auto` sits between `_step_memory_dir` and `_step_mcp`
+  but only prints a detection banner — no prompt. Pre-fix, "b" at the MCP
+  step decremented the step index onto that silent step, which re-emitted
+  its banner and advanced straight back to `_step_mcp` — so "b" appeared to
+  do nothing until the user hit it twice. `wizard.run_steps` now skips past
+  `@silent_step`-marked functions when handling `StepBack`, so "b" lands on
+  the previous *interactive* step (memory_dir). Banner does not re-fire on
+  the back-pass (it only runs forward, once after each memory_dir
+  confirmation). Unit coverage for the skip mechanism lives in
+  `test_wizard.py`; end-to-end CliRunner regression is in
+  `test_init_cmd.py::TestBackNavThroughSilentStep`. (#421)
+
+- **`mm init`: "b" (back) now works at step 3 in the default interactive
+  path.** The preset picker and its follow-up steps (memory dir, provider
+  dirs auto-detect, MCP config) used to run in two separate `run_steps`
+  calls, which made `_step_memory_dir` index 0 of the second call — so
+  hitting "b" at the "Memory Directory" prompt showed `(already at first
+  step)` and re-prompted the same step instead of returning to the preset
+  picker. The two calls are now combined into one: `_step_preset_picker`
+  applies the chosen preset inline and raises a new `_AdvancedSelected`
+  exception when the user picks Advanced, which the caller catches to
+  dispatch the full 10-step wizard. "b" from memory-dir decrements back
+  into the picker, and re-picking a different preset overwrites the
+  previously applied state cleanly (via the idempotent `_apply_preset`).
+  The explicit `--preset <name>` flag path is unchanged — there's no
+  picker to return to there. (#371)
+
+- **`mm init` default-interactive CLI flag precedence is now "flag wins
+  over prompt", matching the documented behavior of
+  `_override_from_flags`.** The default path used to run the override
+  pass before the memory-dir / MCP prompts, so prompts silently
+  clobbered explicit flags: `mm init --memory-dir /x` (no `--preset`,
+  no `-y`) would apply `/x`, then immediately ask for a directory and
+  overwrite with whatever the user typed (usually the default
+  `~/memories`). The override pass now runs after the combined
+  `run_steps` on the preset branch, so flag values win — same rule that
+  already held for `--preset <name>` (path 2) and `-y` (non-interactive).
+  User-visible effect: `mm init --memory-dir /x` now respects `/x`
+  without requiring `--preset`. Advanced (`--advanced`) is unchanged —
+  advanced prompts per-field and has no baseline to override. (#371)
+
+- **MCP `serverInfo.version` now reports the memtomem package version.**
+  Previously `FastMCP.__init__` left the underlying `Server.version`
+  at `None`, so the lowlevel server fell back to
+  `importlib.metadata.version("mcp")` and every `initialize` response
+  carried the MCP SDK version (e.g. `1.27.0`) as `serverInfo.version`
+  instead of `mm --version` (e.g. `0.1.24`). Monitoring probes, client
+  telemetry, and any "which version are we both on" comparison saw a
+  misleading field. The value is now pinned at module construction
+  time via a direct write to `mcp._mcp_server.version`. (#383)
+
+- **`mem_embedding_reset(mode="revert_to_stored")` no longer raises
+  `AttributeError` on the recovery path.** #399 Phase 1 made `embedder`,
+  `search_pipeline`, and `index_engine` read-only `@property`s on
+  `AppContext`, but `_revert_to_stored` kept writing to them directly.
+  Any user hitting the degraded-mode "revert to stored" recovery flow
+  would see `AttributeError: property 'embedder' of 'AppContext' object
+  has no setter` — the exact scenario the tool exists to handle. The
+  writes now mutate `app._components` fields directly (the underlying
+  dataclass is still mutable by design), and a new end-to-end test
+  pins all three runtime slots as swapped, not just `embedder`. (#409)
+
+- **`mm init -y` refuses to write `config.json` when required extras are missing.**
+  Previously `-y` accepted `--provider onnx|ollama|openai` and
+  `--tokenizer kiwipiepy` without checking whether the corresponding Python
+  extras were importable, then wrote the user-specified choice to
+  `config.json`. The mismatch surfaced only at runtime as a stderr warning
+  from `component_factory` (embedder falls back to 0d) or `fts_tokenizer`
+  (kiwipiepy falls back to unicode61) — a scripted install would appear to
+  succeed and silently degrade. `-y` now exits non-zero with an actionable
+  error listing the missing extras (and collapses multiple misses into a
+  `memtomem[all]` hint when all four are missing). The interactive wizard's
+  warn-and-continue path is unchanged; the wizard wording was aligned with
+  the new `-y` refuse semantics in #405 (closes #403). (#396, #402)
+
 ## [0.1.24] — 2026-04-23
 
 Bug-fix release closing a first-run UX gap in `mm init --preset <name>`

@@ -5,7 +5,7 @@ mem_ns_update.
 from __future__ import annotations
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 
@@ -17,7 +17,7 @@ async def mem_ns_list(
     ctx: CtxType = None,
 ) -> str:
     """List all namespaces and their chunk counts."""
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     ns_list = await app.storage.list_namespaces()
 
     if not ns_list:
@@ -46,7 +46,7 @@ async def mem_ns_delete(
     """
     if not namespace.strip():
         return "Error: namespace must be non-empty."
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     deleted = await app.storage.delete_by_namespace(namespace)
     return f"Deleted {deleted} chunks from namespace '{namespace}'"
 
@@ -66,7 +66,7 @@ async def mem_ns_set(
     """
     if not namespace.strip():
         return "Error: namespace must be non-empty."
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     async with app._config_lock:
         app.current_namespace = namespace.strip()
     return f"Session namespace set to '{namespace.strip()}'"
@@ -79,7 +79,7 @@ async def mem_ns_get(
     ctx: CtxType = None,
 ) -> str:
     """Get the current session namespace."""
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     ns = app.current_namespace
     if ns is None:
         return "No session namespace set (using global default)"
@@ -101,7 +101,7 @@ async def mem_ns_rename(
     """
     if not old.strip() or not new.strip():
         return "Error: both old and new namespace names must be non-empty."
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     count = await app.storage.rename_namespace(old.strip(), new.strip())
     return f"Renamed namespace '{old.strip()}' -> '{new.strip()}' ({count} chunks updated)"
 
@@ -122,7 +122,7 @@ async def mem_ns_update(
         description: Optional description text
         color: Optional color hex code (e.g. "#6c5ce7")
     """
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     await app.storage.set_namespace_meta(namespace, description=description, color=color)
     return f"Updated metadata for namespace '{namespace}'"
 
@@ -150,7 +150,7 @@ async def mem_ns_assign(
         return "Error: namespace must be non-empty."
     if not source_filter and not old_namespace:
         return "Error: at least one filter (source_filter or old_namespace) is required."
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     count = await app.storage.assign_namespace(
         namespace.strip(), source_filter=source_filter, old_namespace=old_namespace
     )

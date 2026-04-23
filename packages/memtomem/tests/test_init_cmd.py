@@ -3603,6 +3603,268 @@ class TestPresetSelection:
         assert data["mmr"]["lambda_param"] == 0.3
 
 
+class TestPresetWizardBackNav:
+    """(#371) "b" at the memory-dir step must navigate back to the preset
+    picker in the default interactive path. Previously the picker and its
+    follow-up steps lived in separate ``run_steps`` calls, so ``_step_memory_dir``
+    was index 0 of the second call and "b" silently re-prompted instead of
+    going back. The combined-run_steps fix puts the picker at index 0 of one
+    list so ``StepBack`` from memory_dir decrements cleanly into the picker.
+    """
+
+    def test_back_at_memory_dir_returns_to_preset_picker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pick english, hit "b" at memory-dir, re-pick korean. The final
+        config must reflect korean (bge-m3 + kiwipiepy), proving the picker
+        ran a second time AND the re-pick actually overwrote the first
+        preset's state."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        # CliRunner swaps sys.stdin mid-invoke so `sys.stdin.isatty` can't be
+        # patched through that boundary; init_cmd exposes the ``_isatty``
+        # seam for exactly this case.
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        runner = CliRunner()
+        # 1) picker: "2" (english, default)
+        # 2) memory_dir: "b"  → back to picker
+        # 3) picker: "3" (korean)
+        # 4) memory_dir: the tmp path
+        # 5) "create it?": y
+        # 6) mcp: "3" (skip)
+        memory_dir = tmp_path / "memories"
+        result = runner.invoke(init, [], input=f"2\nb\n3\n{memory_dir}\ny\n3\n")
+        assert result.exit_code == 0, result.output
+
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        # Korean re-pick, not the initial English pick.
+        assert data["embedding"]["model"] == "bge-m3"
+        assert data["search"]["tokenizer"] == "kiwipiepy"
+
+    def test_advanced_from_picker_routes_to_full_wizard(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Picking ``[4] Advanced`` at the picker raises ``_AdvancedSelected``,
+        which must break out of the combined ``run_steps`` and dispatch the
+        full 10-step wizard. Regression guard against losing the advanced
+        dispatch when refactoring the picker flow."""
+        from click.testing import CliRunner
+
+        import memtomem.cli.init_cmd as init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+
+        recorded: list[list[str]] = []
+        original_run_steps = init_cmd.run_steps
+
+        def tracking_run_steps(steps, state=None):  # type: ignore[no-untyped-def]
+            names = [s.__name__ for s in steps]
+            recorded.append(names)
+            # First call: combined picker + follow-ups — let the real
+            # run_steps execute so the picker can raise _AdvancedSelected.
+            if "_step_preset_picker" in names:
+                return original_run_steps(steps, state)
+            # Second call: advanced_steps — short-circuit with a valid state
+            # so _write_config_and_summary succeeds.
+            if state is None:
+                state = {}
+            state.update(
+                {
+                    "provider": "none",
+                    "model": "",
+                    "dimension": 0,
+                    "api_key": "",
+                    "rerank_enabled": False,
+                    "memory_dir": str(tmp_path / "memories"),
+                    "db_path": str(tmp_path / ".memtomem" / "memtomem.db"),
+                    "enable_auto_ns": False,
+                    "default_ns": "default",
+                    "top_k": 10,
+                    "tokenizer": "unicode61",
+                    "decay_enabled": False,
+                    "mcp_choice": 3,
+                    "settings_hooks": False,
+                    "provider_dirs": [],
+                    "provider_rules": [],
+                }
+            )
+            return state
+
+        monkeypatch.setattr(init_cmd, "run_steps", tracking_run_steps)
+
+        runner = CliRunner()
+        # Pick "4" = advanced. Picker raises _AdvancedSelected → outer catches
+        # → advanced_steps runs (stubbed).
+        result = runner.invoke(init_cmd.init, [], input="4\n")
+        assert result.exit_code == 0, result.output
+
+        assert len(recorded) == 2, f"expected 2 run_steps calls, got {len(recorded)}: {recorded}"
+        combined, advanced = recorded
+        # First call bundles picker with memory_dir and friends in ONE list —
+        # this is the whole point of the fix.
+        assert combined[0] == "_step_preset_picker"
+        assert "_step_memory_dir" in combined
+        # Second call is the 10-step advanced wizard.
+        assert len(advanced) == 10
+        assert "_step_embedding" in advanced
+        assert "_step_preset_picker" not in advanced
+
+    @pytest.mark.parametrize(
+        "choice, expected_preset, expected_model, expected_tokenizer",
+        [
+            ("1", "minimal", "", "unicode61"),
+            ("2", "english", "bge-small-en-v1.5", "unicode61"),
+            ("3", "korean", "bge-m3", "kiwipiepy"),
+        ],
+    )
+    def test_preset_picker_applies_preset_inline_on_non_advanced(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        choice: str,
+        expected_preset: str,
+        expected_model: str,
+        expected_tokenizer: str,
+    ) -> None:
+        """Unit: picking any non-advanced preset must populate state with that
+        preset's fields before ``_step_preset_picker`` returns — that's what
+        lets the combined run_steps continue straight into ``_step_memory_dir``
+        without a separate ``_apply_preset`` call. Parametrized across all
+        three non-advanced options so a future preset-spec drift on any one
+        breaks loudly and immediately."""
+        import click
+
+        from memtomem.cli.init_cmd import _step_preset_picker
+
+        captured: dict[str, object] = {}
+
+        @click.command()
+        def harness() -> None:
+            state: dict = {}
+            _step_preset_picker(state)
+            captured.update(state)
+
+        from click.testing import CliRunner
+
+        runner = CliRunner()
+        result = runner.invoke(harness, input=f"{choice}\n")
+        assert result.exit_code == 0, result.output
+        assert captured.get("_preset_choice") == expected_preset
+        assert captured.get("_preset_applied") == expected_preset
+        assert captured.get("model") == expected_model
+        assert captured.get("tokenizer") == expected_tokenizer
+
+    def test_repeated_back_to_same_preset_is_idempotent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end: pick korean, "b", re-pick korean, proceed. The
+        idempotent re-apply claim in the picker's docstring must hold for
+        the same-preset case too (not only the different-preset case
+        covered by test_back_at_memory_dir_returns_to_preset_picker).
+        Regression guard: a future _apply_preset that toggles state (e.g.
+        flips a bool) rather than assigning flat keys would fail here."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        memory_dir = tmp_path / "memories"
+        result = CliRunner().invoke(
+            init,
+            [],
+            # 3 (korean) → b → 3 (korean again) → dir → y → 3 (mcp skip)
+            input=f"3\nb\n3\n{memory_dir}\ny\n3\n",
+        )
+        assert result.exit_code == 0, result.output
+
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        assert data["embedding"]["model"] == "bge-m3"
+        assert data["search"]["tokenizer"] == "kiwipiepy"
+
+    def test_repeated_back_cycle_through_multiple_presets(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end: pick english → "b" → korean → "b" → minimal, then
+        proceed. Exercises multiple back-cycles; the final preset must
+        fully replace every previous partial application (provider flips
+        onnx → onnx → none, rerank flips True → True → False, etc.). If
+        any field from english/korean leaked past the final minimal pick
+        this assertion would see it."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        memory_dir = tmp_path / "memories"
+        result = CliRunner().invoke(
+            init,
+            [],
+            # 2 (english) → b → 3 (korean) → b → 1 (minimal) → dir → y → 3
+            input=f"2\nb\n3\nb\n1\n{memory_dir}\ny\n3\n",
+        )
+        assert result.exit_code == 0, result.output
+
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        # Final pick was minimal: provider=none + no rerank + unicode61.
+        assert data["embedding"]["provider"] == "none"
+        assert data["embedding"]["model"] == ""
+        assert data["search"]["tokenizer"] == "unicode61"
+        # No stale rerank field leaked through (the #418 follow-up fix).
+        assert "model" not in data.get("rerank", {}), data.get("rerank")
+
+    def test_preset_picker_advanced_choice_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Unit: picking Advanced raises ``_AdvancedSelected`` without
+        touching state (no ``_preset_choice`` write, no ``_apply_preset``
+        call). The exception alone is what the caller relies on to break
+        out of the combined ``run_steps`` and route to advanced_steps, so
+        no state-based sentinel is needed."""
+        import click
+
+        from memtomem.cli.init_cmd import _AdvancedSelected, _step_preset_picker
+
+        @click.command()
+        def harness() -> None:
+            state: dict = {"sentinel": "untouched"}
+            try:
+                _step_preset_picker(state)
+            except _AdvancedSelected:
+                click.echo(
+                    f"raised preset_choice={state.get('_preset_choice')} "
+                    f"applied={state.get('_preset_applied')} "
+                    f"sentinel={state.get('sentinel')}"
+                )
+                return
+            click.echo("did not raise")  # pragma: no cover — guarded by assertion
+
+        from click.testing import CliRunner
+
+        runner = CliRunner()
+        result = runner.invoke(harness, input="4\n")  # "4" = advanced
+        assert result.exit_code == 0, result.output
+        # No dead write, no preset application — just the exception.
+        assert "raised preset_choice=None applied=None sentinel=untouched" in result.output
+
+
 class TestReinstallEmbeddingReconciliation:
     """mm init must detect and offer to fix embedding mismatches left by a
     previous install (e.g. provider=none → onnx switch leaves DB at dim=0)."""
@@ -4517,3 +4779,691 @@ class TestInitialSeedThreshold:
         assert f"mm index {state['memory_dir']}" in out
         assert "already seeded" in out
         assert "Reindex All" not in out
+
+
+class TestNonInteractiveExtrasValidation:
+    """Issue #396: ``mm init -y`` must refuse to write a config when the
+    requested ``--provider`` / ``--tokenizer`` needs an extra that is not
+    importable. Previously ``-y`` accepted the flag values as given and
+    the mismatch surfaced only at runtime (embedder falls back to 0d,
+    kiwipiepy falls back to unicode61, etc.). Scripted workflows prefer
+    a non-zero exit here over a silently-stale config."""
+
+    def test_collect_missing_extras_ollama_when_client_absent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "ollama" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+        state = {"provider": "ollama", "rerank_enabled": False}
+        assert init_cmd._collect_missing_extras(state) == ["ollama"]
+
+    def test_collect_missing_extras_openai_when_client_absent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "openai" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+        state = {"provider": "openai", "rerank_enabled": False}
+        assert init_cmd._collect_missing_extras(state) == ["openai"]
+
+    def test_collect_missing_extras_kiwipiepy_when_tokenizer_chose(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "kiwipiepy" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+        state = {"provider": "none", "tokenizer": "kiwipiepy", "rerank_enabled": False}
+        assert init_cmd._collect_missing_extras(state) == ["korean"]
+
+    def test_yes_flag_provider_onnx_missing_fastembed_exits_non_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli, init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        # Force the runtime profile to PyPI so the in-process find_spec probe
+        # is authoritative (no workspace-python subprocess to consider).
+        monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "fastembed" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+
+        result = CliRunner().invoke(
+            cli,
+            [
+                "init",
+                "-y",
+                "--provider",
+                "onnx",
+                "--model",
+                "bge-small-en-v1.5",
+                "--mcp",
+                "skip",
+            ],
+        )
+
+        assert result.exit_code != 0, result.output
+        assert "Missing required extras" in result.output
+        assert "onnx" in result.output
+        # Hint should be install-type-aware — pypi → uv tool install --reinstall.
+        assert "uv tool install --reinstall" in result.output
+        # Config must not be written.
+        assert not (tmp_path / ".memtomem" / "config.json").exists()
+
+    def test_yes_flag_tokenizer_kiwipiepy_missing_exits_non_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli, init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "kiwipiepy" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+
+        result = CliRunner().invoke(
+            cli, ["init", "-y", "--tokenizer", "kiwipiepy", "--mcp", "skip"]
+        )
+
+        assert result.exit_code != 0, result.output
+        assert "Missing required extras" in result.output
+        assert "korean" in result.output
+        assert not (tmp_path / ".memtomem" / "config.json").exists()
+
+    def test_yes_flag_provider_ollama_missing_client_exits_non_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli, init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "ollama" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+
+        result = CliRunner().invoke(
+            cli,
+            [
+                "init",
+                "-y",
+                "--provider",
+                "ollama",
+                "--model",
+                "nomic-embed-text",
+                "--mcp",
+                "skip",
+            ],
+        )
+
+        assert result.exit_code != 0, result.output
+        assert "Missing required extras" in result.output
+        assert "ollama" in result.output
+        assert not (tmp_path / ".memtomem" / "config.json").exists()
+
+    def test_yes_flag_web_only_missing_still_writes_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """web is deliberately excluded from the required-extras set —
+        scripted runs with ``--mcp skip`` don't plan to run ``mm web``,
+        and the runtime ``mm web`` error is already loud. A config write
+        must proceed in this case."""
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli, init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name in ("fastapi", "uvicorn") else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: "fastapi", raising=False)
+
+        result = CliRunner().invoke(cli, ["init", "-y", "--provider", "none", "--mcp", "skip"])
+
+        assert result.exit_code == 0, result.output
+        assert (tmp_path / ".memtomem" / "config.json").exists()
+
+    def test_yes_flag_all_extras_present_writes_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli, init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+
+        result = CliRunner().invoke(
+            cli,
+            ["init", "-y", "--provider", "onnx", "--model", "bge-m3", "--mcp", "skip"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert (tmp_path / ".memtomem" / "config.json").exists()
+
+    def test_yes_flag_provider_openai_missing_client_exits_non_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--provider openai`` is shaped the same as ollama/onnx at the
+        extras-gate layer, but ``--api-key`` plumbing sits alongside in
+        ``_override_from_flags``. Exercising the full CLI path proves the
+        two don't accidentally interact — the gate fires before the key
+        handling runs."""
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli, init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "openai" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+
+        result = CliRunner().invoke(
+            cli,
+            [
+                "init",
+                "-y",
+                "--provider",
+                "openai",
+                "--model",
+                "text-embedding-3-small",
+                "--api-key",
+                "sk-fake-test-key",
+                "--mcp",
+                "skip",
+            ],
+        )
+
+        assert result.exit_code != 0, result.output
+        assert "Missing required extras" in result.output
+        assert "openai" in result.output
+        assert not (tmp_path / ".memtomem" / "config.json").exists()
+
+    def test_yes_flag_multi_extra_missing_reports_both(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both ``--provider onnx`` + ``--tokenizer kiwipiepy`` missing at
+        once. The error must name both so the user knows to install both
+        or drop both, not just the first one encountered."""
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli, init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name in ("fastembed", "kiwipiepy") else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+
+        result = CliRunner().invoke(
+            cli,
+            [
+                "init",
+                "-y",
+                "--provider",
+                "onnx",
+                "--model",
+                "bge-m3",
+                "--tokenizer",
+                "kiwipiepy",
+                "--mcp",
+                "skip",
+            ],
+        )
+
+        assert result.exit_code != 0, result.output
+        assert "Missing required extras" in result.output
+        # Both extras must be named, not just the first one encountered.
+        assert "onnx" in result.output
+        assert "korean" in result.output
+        # Multi-extra hint collapses to [all] per _extra_install_hint policy.
+        assert "memtomem[all]" in result.output
+        assert not (tmp_path / ".memtomem" / "config.json").exists()
+
+    def test_yes_flag_refused_leaves_memory_dir_untouched(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Gate must run BEFORE ``memory_path.mkdir``. An earlier shape
+        created ``~/memories`` before validating extras, leaving directory
+        debris on refused runs."""
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli, init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "fastembed" else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+
+        memory_dir = tmp_path / "scratch_memories"
+        # Pre-condition: memory_dir does not exist yet.
+        assert not memory_dir.exists()
+
+        result = CliRunner().invoke(
+            cli,
+            [
+                "init",
+                "-y",
+                "--provider",
+                "onnx",
+                "--model",
+                "bge-m3",
+                "--memory-dir",
+                str(memory_dir),
+                "--mcp",
+                "skip",
+            ],
+        )
+
+        assert result.exit_code != 0, result.output
+        # The refused run must not have created the memory dir.
+        assert not memory_dir.exists(), (
+            "memory_dir must not be created on refused -y runs (gate must precede mkdir)"
+        )
+
+
+class TestYRefuseHintParity:
+    """#403 — wizard fallback paths must mention the ``-y`` refuse semantic.
+
+    #402 added a new axis: ``-y`` refuses non-zero while the interactive
+    wizard still warns-and-saves. A user who copies a wizard choice into a
+    scripted install gets an unexpected hard failure unless the wizard
+    warning surfaces the asymmetry. These tests pin:
+    (1) the helper's shape, and
+    (2) that each missing-extra fallback path actually calls it.
+    """
+
+    def test_y_refuse_hint_shape(self) -> None:
+        from memtomem.cli import init_cmd
+
+        hint = init_cmd._y_refuse_hint("--provider onnx", "onnx")
+        assert "mm init -y --provider onnx" in hint
+        assert "memtomem[onnx]" in hint
+        assert "refuses" in hint
+        assert "scripted" in hint
+
+    def test_wizard_fallback_paths_call_y_refuse_hint(self) -> None:
+        """Source-scan pin — each fallback branch must call ``_y_refuse_hint``.
+
+        Regex-based so a future reformatter splitting the call across
+        lines doesn't break the scan. The call pattern is specific
+        enough that false positives are unlikely.
+        """
+        import inspect
+        import re
+
+        from memtomem.cli import init_cmd
+
+        embedding_src = inspect.getsource(init_cmd._step_embedding)
+        language_src = inspect.getsource(init_cmd._step_language)
+
+        def _count_calls(src: str, flag: str, extra: str) -> int:
+            pattern = (
+                r"_y_refuse_hint\(\s*"
+                + re.escape(f'"{flag}"')
+                + r"\s*,\s*"
+                + re.escape(f'"{extra}"')
+                + r"\s*\)"
+            )
+            return len(re.findall(pattern, src))
+
+        assert _count_calls(embedding_src, "--provider onnx", "onnx") >= 1, (
+            "ONNX fallback must surface -y refuse hint (#403)"
+        )
+        # Ollama has two orthogonal preconditions (binary + Python client),
+        # so the wizard must hint in both branches — binary-missing and
+        # binary-present-but-module-missing — to cover what ``-y`` refuses
+        # (#405 follow-up to #403).
+        assert _count_calls(embedding_src, "--provider ollama", "ollama") >= 2, (
+            "Ollama fallback must surface -y refuse hint in both "
+            "binary-missing and module-missing branches (#405)"
+        )
+        assert _count_calls(embedding_src, "--provider openai", "openai") >= 1, (
+            "OpenAI fallback must surface -y refuse hint when the openai "
+            "Python client is missing (#407)"
+        )
+        assert _count_calls(language_src, "--tokenizer kiwipiepy", "korean") >= 1, (
+            "kiwipiepy fallback must surface -y refuse hint (#403)"
+        )
+
+
+class TestBackNavThroughSilentStep:
+    """(#421) "b" at ``_step_mcp`` must skip past the silent
+    ``_step_provider_dirs_auto`` and land on ``_step_memory_dir`` (the previous
+    interactive step). Previously it landed on the silent step, which re-ran
+    its banner and advanced straight back to ``_step_mcp`` — so "b" appeared
+    to do nothing.
+
+    Unit-level coverage of the skip mechanism lives in ``test_wizard.py``;
+    this class is the CliRunner-level regression that proves the
+    ``@silent_step`` decoration is wired into the real wizard.
+    """
+
+    def test_back_at_mcp_reaches_memory_dir_prompt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After "b" at the mcp step, the next interactive prompt must be
+        ``_step_memory_dir`` (not mcp re-prompting). Pinned by counting the
+        ``Memory Directory`` header occurrences in the captured output —
+        pre-fix this would be 1 (back-nav never escaped the silent step),
+        post-fix it is 2 (original visit + post-back re-entry)."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        # CliRunner substitutes sys.stdin; route through init_cmd._isatty seam
+        # so the picker's non-TTY gate doesn't short-circuit (per
+        # feedback_clirunner_isatty_seam.md).
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        runner = CliRunner()
+        memory_dir = tmp_path / "memories"
+        # 1) picker: "2" (english, default)
+        # 2) memory_dir: tmp path
+        # 3) "Create it?": y  → path now exists
+        # 4) (silent step runs: "No provider memory folders detected" banner)
+        # 5) mcp: "b"  → expected to skip silent and land on memory_dir
+        # 6) memory_dir: re-enter same path (no create prompt this time —
+        #    the dir was created in step 3)
+        # 7) (silent step runs again — forward direction, expected)
+        # 8) mcp: "3" (skip — don't write to any client config)
+        result = runner.invoke(init, [], input=f"2\n{memory_dir}\ny\nb\n{memory_dir}\n3\n")
+        assert result.exit_code == 0, result.output
+
+        # Memory Directory header must appear twice: initial visit + after
+        # back-nav from mcp. If the silent-skip fix is missing, this is 1.
+        assert result.output.count("Memory Directory") == 2, result.output
+        # MCP header also appears twice: once before "b", once after the
+        # back-and-forward trip. Mostly a sanity check on the flow.
+        assert result.output.count("Connect to AI Editor") == 2, result.output
+
+    def test_silent_step_banner_does_not_refire_on_back_pass(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Between the mcp prompt where "b" is typed and the next memory_dir
+        prompt, the silent step's banner must NOT appear — that's the whole
+        point of the skip. We slice the output at the first mcp prompt and
+        look for banner strings in the window up to the second memory_dir
+        header; any banner text there means the silent step re-ran on the
+        back-pass (pre-fix behavior)."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        runner = CliRunner()
+        memory_dir = tmp_path / "memories"
+        result = runner.invoke(init, [], input=f"2\n{memory_dir}\ny\nb\n{memory_dir}\n3\n")
+        assert result.exit_code == 0, result.output
+
+        out = result.output
+        # Locate the two "Memory Directory" headers. The window *between*
+        # them is the back-nav transition (mcp "b" → land on memory_dir).
+        first_md = out.find("Memory Directory")
+        second_md = out.find("Memory Directory", first_md + 1)
+        assert first_md != -1 and second_md != -1, out
+
+        # Grab the segment after user's "b" at mcp until the second memory_dir
+        # header. Starting from the first mcp prompt keeps things anchored;
+        # the silent banner must NOT appear in this slice.
+        first_mcp = out.find("Connect to AI Editor")
+        assert first_mcp != -1, out
+        back_pass_window = out[first_mcp:second_md]
+        assert "No provider memory folders detected" not in back_pass_window, (
+            f"Silent-step banner re-fired on back-pass-through:\n{back_pass_window}"
+        )
+
+
+class TestStepHeaderPosition:
+    """(#420) ``step_header`` reads its step number from
+    ``state["_wizard_position"]`` (seeded by ``run_steps``) rather than from a
+    hardcoded integer in each ``_step_*``. That lets the same step function
+    show the correct position in every flow it participates in —
+    ``--advanced`` (1..10), ``--preset X`` (1..3), and default-interactive
+    (1..4 including the picker and the silent provider-dirs step).
+    """
+
+    def test_run_steps_seeds_position_before_each_step(self) -> None:
+        """``run_steps`` must write ``(i + 1, len(steps))`` into state BEFORE
+        invoking each step — step functions read that value during execution,
+        so a post-hoc seed would be too late."""
+        from memtomem.cli.wizard import run_steps
+
+        observed: list[tuple[int, int]] = []
+
+        def step_a(state: dict) -> None:
+            observed.append(state["_wizard_position"])
+
+        def step_b(state: dict) -> None:
+            observed.append(state["_wizard_position"])
+
+        def step_c(state: dict) -> None:
+            observed.append(state["_wizard_position"])
+
+        run_steps([step_a, step_b, step_c])
+
+        assert observed == [(1, 3), (2, 3), (3, 3)]
+
+    def test_position_reseeded_after_back_nav(self) -> None:
+        """After ``StepBack`` + re-enter, the previous step sees its own
+        position again (not the position it had moments before when the user
+        hit 'b'). Pin this so the re-prompt header renders the correct
+        number."""
+        from memtomem.cli.wizard import StepBack, run_steps
+
+        observed: list[tuple[str, tuple[int, int]]] = []
+        call_counts = {"a": 0, "b": 0}
+
+        def step_a(state: dict) -> None:
+            call_counts["a"] += 1
+            observed.append(("a", state["_wizard_position"]))
+
+        def step_b(state: dict) -> None:
+            call_counts["b"] += 1
+            observed.append(("b", state["_wizard_position"]))
+            if call_counts["b"] == 1:
+                raise StepBack()
+
+        run_steps([step_a, step_b])
+
+        # a(1/2) → b(2/2) raises back → a(1/2) → b(2/2) completes.
+        assert observed == [
+            ("a", (1, 2)),
+            ("b", (2, 2)),
+            ("a", (1, 2)),
+            ("b", (2, 2)),
+        ]
+
+    def test_step_header_renders_number_from_state(self) -> None:
+        """With ``_wizard_position`` seeded, ``step_header`` prints
+        ``N. Title`` where N is the 1-based current index."""
+        import click
+        from click.testing import CliRunner
+
+        from memtomem.cli.wizard import step_header
+
+        @click.command()
+        def cmd() -> None:
+            state = {"_wizard_position": (2, 4)}
+            step_header(state, "Memory Directory")
+
+        result = CliRunner().invoke(cmd, [])
+        assert result.exit_code == 0
+        assert "2. Memory Directory" in result.output
+
+    def test_step_header_renders_without_number_when_state_unseeded(self) -> None:
+        """Standalone use (no prior ``run_steps``) must not crash — fall
+        back to an unnumbered title. Tests and external callers need this
+        escape hatch."""
+        import click
+        from click.testing import CliRunner
+
+        from memtomem.cli.wizard import step_header
+
+        @click.command()
+        def cmd() -> None:
+            step_header({}, "Memory Directory")
+
+        result = CliRunner().invoke(cmd, [])
+        assert result.exit_code == 0
+        assert "Memory Directory" in result.output
+        # No leading "N. " prefix.
+        assert "1. Memory Directory" not in result.output
+        assert "2. Memory Directory" not in result.output
+
+    def test_advanced_flow_shows_numbers_1_through_10(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``mm init --advanced`` runs 10 interactive steps — step_header
+        must show ``1.`` through ``10.`` respectively. Pre-fix this was
+        correct by coincidence (hardcoded N == actual position); the
+        regression guard pins it to the new seed path."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+
+        runner = CliRunner()
+        memory_dir = tmp_path / "memories"
+        # Advanced walks through every step. Inputs chosen to minimize
+        # branching: no-rerank, no provider dirs, skip mcp.
+        # 1. embedding: 1 (quick start / none)
+        # 2. reranker: N (no)
+        # 3. memory_dir: path, y create
+        # 4. provider_dirs: N (skip for all three categories)
+        # 5. storage: accept default (empty line)
+        # 6. namespace: N (no auto-ns), default namespace accept
+        # 7. search: top_k default (empty), decay N
+        # 8. language: 1 (english)
+        # 9. settings hooks: N
+        # 10. mcp: 3 (skip)
+        result = runner.invoke(
+            init,
+            ["--advanced"],
+            input=f"1\nn\n{memory_dir}\ny\nn\nn\nn\n\nn\n\n\n\nn\n1\nn\n3\n",
+        )
+        assert result.exit_code == 0, result.output
+
+        out = result.output
+        assert "1. Embedding Provider" in out
+        assert "2. Reranker (optional)" in out
+        assert "3. Memory Directory" in out
+        assert "4. Provider Memory Folders" in out
+        assert "5. Storage" in out
+        assert "6. Namespace" in out
+        assert "7. Search" in out
+        assert "8. Language" in out
+        assert "9. Claude Code Hooks" in out
+        assert "10. Connect to AI Editor" in out
+
+    def test_default_preset_flow_renumbers_from_picker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``mm init`` (default interactive, preset chosen) runs
+        ``[picker, memory_dir, provider_dirs_auto, mcp]`` — four steps.
+        ``_step_memory_dir`` is position 2/4 here, not 3 (which was the
+        hardcoded value correct only for ``--advanced``). Silent
+        ``_step_provider_dirs_auto`` sits at position 3 but prints no
+        header of its own; mcp is 4."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        runner = CliRunner()
+        memory_dir = tmp_path / "memories"
+        # picker: 2 (english) → memory_dir → create → (silent) → mcp skip
+        result = runner.invoke(init, [], input=f"2\n{memory_dir}\ny\n3\n")
+        assert result.exit_code == 0, result.output
+
+        out = result.output
+        assert "2. Memory Directory" in out
+        assert "4. Connect to AI Editor" in out
+        # Pre-fix values must NOT appear (they were the bug).
+        assert "3. Memory Directory" not in out
+        assert "10. Connect to AI Editor" not in out
+
+    def test_explicit_preset_flow_renumbers_from_memory_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``mm init --preset korean`` runs only
+        ``[memory_dir, provider_dirs_auto, mcp]`` — three steps, memory_dir
+        at position 1. Pre-fix this showed ``3. Memory Directory`` which
+        was the bug's most visible symptom."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        runner = CliRunner()
+        memory_dir = tmp_path / "memories"
+        result = runner.invoke(init, ["--preset", "korean"], input=f"{memory_dir}\ny\n3\n")
+        assert result.exit_code == 0, result.output
+
+        out = result.output
+        assert "1. Memory Directory" in out
+        assert "3. Connect to AI Editor" in out
+        # Old hardcoded values must not leak.
+        assert "3. Memory Directory" not in out
+        assert "10. Connect to AI Editor" not in out

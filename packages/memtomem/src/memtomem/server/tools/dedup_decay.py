@@ -6,7 +6,7 @@ from pathlib import Path
 from uuid import UUID
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 
@@ -32,7 +32,7 @@ async def mem_dedup_scan(
     if not 1 <= limit <= 500:
         return f"Error: limit must be between 1 and 500, got {limit}."
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     if app.dedup_scanner is None:
         return "DedupScanner not initialized."
     candidates = await app.dedup_scanner.scan(threshold=threshold, limit=limit, max_scan=max_scan)
@@ -72,7 +72,7 @@ async def mem_dedup_merge(
         keep_id: UUID of the chunk to keep
         delete_ids: UUIDs of chunks to delete
     """
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     if app.dedup_scanner is None:
         return "DedupScanner not initialized."
     try:
@@ -105,7 +105,7 @@ async def mem_decay_scan(
 
     from memtomem.search.decay import expire_chunks
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     stats = await expire_chunks(
         app.storage, max_age_days=max_age_days, dry_run=True, source_filter=source_filter
     )
@@ -140,7 +140,7 @@ async def mem_decay_expire(
 
     from memtomem.search.decay import expire_chunks
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     stats = await expire_chunks(
         app.storage, max_age_days=max_age_days, dry_run=dry_run, source_filter=source_filter
     )
@@ -169,7 +169,7 @@ async def mem_cleanup_orphans(
     Args:
         dry_run: If True (default), only list orphaned files without deleting.
     """
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     source_files = await app.storage.get_all_source_files()
 
     orphaned: list[Path] = []

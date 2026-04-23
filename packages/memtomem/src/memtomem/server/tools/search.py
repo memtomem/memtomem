@@ -8,7 +8,7 @@ from typing import Literal
 from uuid import UUID
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.formatters import _display_path, _format_results, _format_structured_results
 from memtomem.server.helpers import _announce_dim_mismatch_once
@@ -65,7 +65,7 @@ async def mem_search(
     if effective_format not in ("compact", "verbose", "structured"):
         return f"Error: invalid output_format '{output_format}'."
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     effective_ns = namespace or app.current_namespace
 
     rrf_weights = None
@@ -196,7 +196,7 @@ async def mem_expand(
         window: Number of adjacent chunks before and after (default 2, max 10)
     """
     window = max(0, min(window, MAX_CONTEXT_WINDOW_CHUNKS))
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     try:
         uid = UUID(chunk_id)
@@ -271,7 +271,7 @@ async def mem_increment_access(
     Args:
         chunk_ids: List of chunk UUIDs (strings) to boost
     """
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
 
     if not chunk_ids:
         return "No chunk_ids provided."

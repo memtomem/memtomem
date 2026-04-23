@@ -259,7 +259,9 @@ class TestMemExpand:
         ctx = SimpleNamespace()
 
         with pytest.MonkeyPatch.context() as m:
-            m.setattr("memtomem.server.tools.search._get_app", lambda _: app)
+            m.setattr(
+                "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
+            )
             result = await mem_expand(chunk_id=str(target.id), window=2, ctx=ctx)
 
         assert "chunk 3/5" in result
@@ -280,7 +282,9 @@ class TestMemExpand:
 
         ctx = SimpleNamespace()
         with pytest.MonkeyPatch.context() as m:
-            m.setattr("memtomem.server.tools.search._get_app", lambda _: app)
+            m.setattr(
+                "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
+            )
             result = await mem_expand(chunk_id=str(target.id), window=2, ctx=ctx)
 
         assert "Before" not in result
@@ -295,7 +299,9 @@ class TestMemExpand:
 
         ctx = SimpleNamespace()
         with pytest.MonkeyPatch.context() as m:
-            m.setattr("memtomem.server.tools.search._get_app", lambda _: app)
+            m.setattr(
+                "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
+            )
             result = await mem_expand(chunk_id=str(uuid4()), window=2, ctx=ctx)
 
         assert "not found" in result
@@ -325,7 +331,9 @@ class TestMemIncrementAccess:
         app.storage.increment_access = AsyncMock()
 
         with pytest.MonkeyPatch.context() as m:
-            m.setattr("memtomem.server.tools.search._get_app", lambda _: app)
+            m.setattr(
+                "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
+            )
             result = await mem_increment_access(chunk_ids=[], ctx=SimpleNamespace())
 
         assert "No chunk_ids" in result
@@ -339,7 +347,9 @@ class TestMemIncrementAccess:
         app.storage.increment_access = AsyncMock()
 
         with pytest.MonkeyPatch.context() as m:
-            m.setattr("memtomem.server.tools.search._get_app", lambda _: app)
+            m.setattr(
+                "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
+            )
             result = await mem_increment_access(
                 chunk_ids=["not-a-uuid", "also-bad"],
                 ctx=SimpleNamespace(),
@@ -358,7 +368,9 @@ class TestMemIncrementAccess:
 
         ids = [str(uuid4()), str(uuid4()), str(uuid4())]
         with pytest.MonkeyPatch.context() as m:
-            m.setattr("memtomem.server.tools.search._get_app", lambda _: app)
+            m.setattr(
+                "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
+            )
             result = await mem_increment_access(chunk_ids=ids, ctx=SimpleNamespace())
 
         assert "3 chunk(s)" in result
@@ -376,7 +388,9 @@ class TestMemIncrementAccess:
 
         valid_id = str(uuid4())
         with pytest.MonkeyPatch.context() as m:
-            m.setattr("memtomem.server.tools.search._get_app", lambda _: app)
+            m.setattr(
+                "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
+            )
             result = await mem_increment_access(
                 chunk_ids=[valid_id, "not-a-uuid"],
                 ctx=SimpleNamespace(),

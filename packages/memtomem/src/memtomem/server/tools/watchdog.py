@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 
@@ -26,7 +26,7 @@ async def mem_watchdog(
         check: Filter by check name (for history command)
         hours: Hours of history to return (default 24)
     """
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     watchdog = app.health_watchdog
     if watchdog is None:
         return "Health watchdog is not enabled. Set MEMTOMEM_HEALTH_WATCHDOG__ENABLED=true"

@@ -12,10 +12,7 @@ from contextlib import asynccontextmanager
 from mcp.server.fastmcp import FastMCP
 
 from memtomem.config import Mem2MemConfig
-from memtomem.indexing.watcher import FileWatcher
-from memtomem.search.dedup import DedupScanner
-from memtomem.server.component_factory import Components, close_components, create_components
-from memtomem.server.context import AppContext
+from memtomem.server.context import AppContext, _stop_quietly
 
 logger = logging.getLogger(__name__)
 
@@ -83,14 +80,6 @@ def _load_dotenv() -> None:
         pass
 
 
-async def _shutdown(watcher: FileWatcher, comp: Components) -> None:
-    for label, coro in [("watcher", watcher.stop()), ("components", close_components(comp))]:
-        try:
-            await coro
-        except Exception:
-            logger.warning("Shutdown step '%s' failed", label, exc_info=True)
-
-
 # ---------------------------------------------------------------------------
 # Main lifespan
 # ---------------------------------------------------------------------------
@@ -98,94 +87,48 @@ async def _shutdown(watcher: FileWatcher, comp: Components) -> None:
 
 @asynccontextmanager
 async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
+    """Run the MCP server with lazy component init (Phase 3 of #399).
+
+    Startup is deliberately minimal: load env, set up logging, build the
+    optional webhook manager, allocate the ``AppContext`` itself. None of
+    these touch ``~/.memtomem/`` — that's the whole point of the lazy
+    init. The first tool-call path goes through
+    :meth:`AppContext.ensure_initialized`, which opens storage/embedder
+    and starts the file watcher + schedulers + health watchdog inside
+    the context (which from then on owns their lifetime).
+
+    Shutdown closes the webhook manager first — dropping outstanding
+    network retries before the slower DB teardown, see PR #404 — then
+    ``ctx.close()`` stops anything ``ensure_initialized`` started and
+    finally closes components. Both stop calls go through
+    :func:`_stop_quietly` so a teardown failure on one side does not
+    skip the other, and ``CancelledError`` propagates rather than being
+    silently swallowed (see #406).
+    """
     _load_dotenv()
     _setup_logging()
 
     config = Mem2MemConfig()
-    comp = await create_components(config)
 
-    # When the server came up in degraded mode (embedding mismatch, see
-    # issue #349) don't start the file watcher — indexing goes through
-    # ``upsert_chunks`` which needs ``chunks_vec`` and would crash on
-    # every file change. Recovery happens via ``mem_embedding_reset``.
-    watcher = FileWatcher(comp.index_engine, config.indexing)
-    if comp.embedding_broken is None:
-        await watcher.start()
-
-    dedup_scanner = DedupScanner(storage=comp.storage, embedder=comp.embedder)
-
-    # Webhook manager
     webhook_mgr = None
-    if config.webhook.enabled and config.webhook.url:
-        from memtomem.server.webhooks import WebhookManager
+    ctx: AppContext | None = None
 
-        webhook_mgr = WebhookManager(config.webhook)
+    try:
+        if config.webhook.enabled and config.webhook.url:
+            from memtomem.server.webhooks import WebhookManager
 
-    ctx = AppContext(
-        config=config,
-        storage=comp.storage,
-        embedder=comp.embedder,
-        index_engine=comp.index_engine,
-        search_pipeline=comp.search_pipeline,
-        watcher=watcher,
-        dedup_scanner=dedup_scanner,
-        webhook_manager=webhook_mgr,
-        llm_provider=comp.llm,
-        embedding_broken=comp.embedding_broken,
-    )
-
-    # Background schedulers are skipped in degraded mode (see issue #349) —
-    # they walk the index / re-embed chunks and would hit the same missing
-    # ``chunks_vec`` cascade as the watcher. They resume after a restart
-    # once ``mem_embedding_reset`` has fixed the DB.
-    degraded = comp.embedding_broken is not None
-
-    # Auto-consolidation scheduler
-    scheduler = None
-    if config.consolidation_schedule.enabled and not degraded:
-        from memtomem.server.scheduler import ConsolidationScheduler
-
-        scheduler = ConsolidationScheduler(ctx, config.consolidation_schedule)
-        await scheduler.start()
-
-    # Policy scheduler
-    policy_scheduler = None
-    if config.policy.enabled and not degraded:
-        from memtomem.server.scheduler import PolicyScheduler
-
-        policy_scheduler = PolicyScheduler(ctx, config.policy)
-        await policy_scheduler.start()
-
-    # Health watchdog
-    watchdog = None
-    if config.health_watchdog.enabled and not degraded:
-        from memtomem.server.health_watchdog import HealthWatchdog
-
-        watchdog = HealthWatchdog(ctx, config.health_watchdog)
-        await watchdog.start()
-        ctx.health_watchdog = watchdog
+            webhook_mgr = WebhookManager(config.webhook)
+        ctx = AppContext(config=config, webhook_manager=webhook_mgr)
+    except BaseException:
+        # ``AppContext()`` is allocation-only and never touches storage,
+        # so the webhook is the only thing that could be partially
+        # allocated here. Close it before re-raising so we don't leak
+        # the network state into the failure path.
+        await _stop_quietly(webhook_mgr, "webhook_manager")
+        raise
 
     try:
         yield ctx
     finally:
-        if watchdog:
-            try:
-                await watchdog.stop()
-            except Exception:
-                logger.warning("Failed to stop health watchdog", exc_info=True)
-        if policy_scheduler:
-            try:
-                await policy_scheduler.stop()
-            except Exception:
-                logger.warning("Failed to stop policy scheduler", exc_info=True)
-        if scheduler:
-            try:
-                await scheduler.stop()
-            except Exception:
-                logger.warning("Failed to stop scheduler", exc_info=True)
-        if webhook_mgr:
-            try:
-                await webhook_mgr.close()
-            except Exception:
-                logger.warning("Failed to close webhook manager", exc_info=True)
-        await _shutdown(watcher, comp)
+        await _stop_quietly(webhook_mgr, "webhook_manager")
+        await _stop_quietly(ctx, "app_context")

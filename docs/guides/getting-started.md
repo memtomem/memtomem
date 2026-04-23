@@ -256,6 +256,11 @@ Call the mem_status tool
 
 You should see index statistics (0 chunks if nothing indexed yet).
 
+Or from a terminal — same output, no editor needed:
+```bash
+mm status
+```
+
 ---
 
 ## First use
@@ -327,6 +332,7 @@ mm recall --since 2026-04  # recall by date
 mm config show             # view settings
 mm config set key value    # change a setting
 mm config unset key        # drop a pinned override (e.g., mmr.enabled)
+mm status                  # show indexing stats + config (terminal mirror of mem_status)
 mm embedding-reset         # check/resolve embedding model mismatch
 mm reset                   # delete all data and reinitialize the DB
 mm context detect          # find agent config files

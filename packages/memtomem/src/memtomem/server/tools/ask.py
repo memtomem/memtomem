@@ -6,7 +6,7 @@ import asyncio
 import logging
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.validation import MAX_QUERY_LENGTH
 from memtomem.server.webhooks import webhook_error_cb
@@ -47,7 +47,7 @@ async def mem_ask(
     if not 1 <= top_k <= 20:
         return f"Error: top_k must be between 1 and 20, got {top_k}."
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     effective_ns = namespace or app.current_namespace
 
     results, stats = await app.search_pipeline.search(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 
@@ -86,7 +86,7 @@ async def _ingest_claude(resolved: Path, dry_run: bool, ctx: CtxType) -> str:
                 lines.append(f"    {f.name}  tags=[{', '.join(tags)}]")
         return "\n".join(lines)
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     total_indexed = 0
     total_skipped = 0
     total_deleted = 0
@@ -147,7 +147,7 @@ async def _ingest_gemini(resolved: Path, dry_run: bool, ctx: CtxType) -> str:
             lines.append(f"  {f.name}  tags=[{', '.join(tags)}]")
         return "\n".join(lines)
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     summary = await _ingest_files_with_components(
         app,
         files,
@@ -188,7 +188,7 @@ async def _ingest_codex(resolved: Path, dry_run: bool, ctx: CtxType) -> str:
             lines.append(f"  {f.name}  tags=[{', '.join(tags)}]")
         return "\n".join(lines)
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     summary = await _ingest_files_with_components(
         app,
         files,
@@ -227,7 +227,7 @@ async def _ingest_single(
             lines.append(f"  {f.name}  tags=[{', '.join(tags)}]")
         return "\n".join(lines)
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     summary = await ingest_fn(app, files, ns, tag_fn=tag_fn)  # type: ignore[arg-type]
     result = (
         f"Ingested {len(files)} file(s) into '{ns}': "

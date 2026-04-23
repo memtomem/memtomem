@@ -12,9 +12,12 @@ Design notes:
   (uv-tool / uvx / venv-relative / system / unknown) need different
   uninstall commands; we print the right one but never execute, since the
   package manager owns its own permissions and lifecycle.
-* If the MCP server is still running we refuse — deleting an open SQLite
-  file under WAL mode risks corruption. ``--force`` overrides for the
-  rare case the user knows the pid is wrong.
+* If the MCP server is still running (``.server.pid``) OR any other
+  process holds a SQLite write lock on the DB (``mm web``, ``mm
+  watchdog``, ad-hoc connections) we refuse — deleting an open SQLite
+  file under WAL mode risks corruption. ``--force`` overrides. The
+  write-lock probe uses ``BEGIN IMMEDIATE`` to catch writers the pid
+  file doesn't know about (see ``_check_db_lock``).
 * If config.json is corrupted we fall back to defaults rather than
   aborting — uninstall is itself a recovery path, so it cannot depend on
   a valid config.
@@ -22,8 +25,9 @@ Design notes:
 
 from __future__ import annotations
 
-import os
+import fcntl
 import shutil
+import sqlite3
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +35,7 @@ from typing import Iterable
 
 import click
 
+from memtomem._runtime_paths import legacy_server_pid_path, runtime_dir, server_pid_path
 from memtomem.cli.init_cmd import RuntimeProfile, _runtime_profile
 
 _DEFAULT_STATE_DIR = Path.home() / ".memtomem"
@@ -84,6 +89,20 @@ class _ServerState:
 
 
 @dataclass(frozen=True)
+class _DbLockState:
+    """Result of probing the SQLite DB for an active writer.
+
+    ``locked`` is True only when another connection holds a RESERVED /
+    PENDING / EXCLUSIVE lock at probe time — i.e. an active writer.
+    Pure readers (SHARED locks only) are not detected; that's an
+    accepted tradeoff (see ``_check_db_lock``).
+    """
+
+    locked: bool
+    probe_error: str | None
+
+
+@dataclass(frozen=True)
 class _External:
     path: Path
     reason: str
@@ -115,32 +134,156 @@ def _load_config_safely() -> tuple[Path, str | None]:
 # ---- server liveness probe -----------------------------------------------
 
 
-def _check_server_liveness(state_dir: Path) -> _ServerState:
-    """Probe ``state_dir/.server.pid`` via ``os.kill(pid, 0)``.
+def _probe_pid_file(pid_file: Path) -> _ServerState:
+    """Probe a single pid file via ``fcntl.flock``.
 
-    ``os.kill(pid, 0)`` is a no-op signal that raises ``ProcessLookupError``
-    if the pid is dead and ``PermissionError`` if it's alive but owned by
-    another user (we treat that as alive — refuse and let the user decide).
+    ``server/__init__.py:main`` opens this file and holds an exclusive
+    flock for the entire server lifetime. If we can acquire
+    ``LOCK_EX | LOCK_NB`` on it, no live writer is holding it (the file
+    is a stale leftover, or fresh and unowned). If we cannot, a writer
+    is alive — *regardless* of whether the recorded PID is still valid,
+    has been recycled to an unrelated process, or was never set at all.
+
+    This replaces the previous ``os.kill(pid, 0)`` probe, which was
+    correct for stale-pid cases but produced false positives once the
+    kernel recycled the recorded PID to an unrelated process (issue
+    #387). The PID inside the file is now read for display only.
     """
-    pid_file = state_dir / ".server.pid"
     if not pid_file.exists():
         return _ServerState(alive=False, pid=None, pid_file=None)
+
+    pid: int | None
     try:
         pid_text = pid_file.read_text().strip()
         pid = int(pid_text)
     except (OSError, ValueError):
-        # Unreadable / non-int → treat as dead so we can clean it up.
-        return _ServerState(alive=False, pid=None, pid_file=pid_file)
+        # Unreadable / non-int — leave pid=None for the message; the lock
+        # probe below still decides alive vs. dead independently.
+        pid = None
+
     try:
-        os.kill(pid, 0)
-        return _ServerState(alive=True, pid=pid, pid_file=pid_file)
-    except ProcessLookupError:
-        return _ServerState(alive=False, pid=pid, pid_file=pid_file)
-    except PermissionError:
-        return _ServerState(alive=True, pid=pid, pid_file=pid_file)
+        # Read-mode is enough; advisory flock works regardless of fd mode.
+        # Probing ``rb`` rather than ``rb+`` avoids any chance of accidental
+        # truncation on an exotic filesystem if we later abort.
+        fp = open(pid_file, "rb")
     except OSError:
-        # Conservative — unknown error treated as alive.
+        # Conservative — couldn't even open the file (permissions, race
+        # with deletion). Treat as alive so the user explicitly --forces.
         return _ServerState(alive=True, pid=pid, pid_file=pid_file)
+
+    try:
+        try:
+            fcntl.flock(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # Another process is holding the lock → live writer.
+            return _ServerState(alive=True, pid=pid, pid_file=pid_file)
+        except OSError:
+            # Unsupported filesystem (some NFS configurations, FUSE) or
+            # other unknown error — be conservative.
+            return _ServerState(alive=True, pid=pid, pid_file=pid_file)
+        # Got the lock. Release immediately — we don't want to hold it,
+        # only probe; holding would block a server starting in the gap
+        # between this probe and the eventual unlink.
+        fcntl.flock(fp, fcntl.LOCK_UN)
+        return _ServerState(alive=False, pid=pid, pid_file=pid_file)
+    finally:
+        fp.close()
+
+
+def _check_server_liveness() -> _ServerState:
+    """Probe the server pid file at both the new and legacy locations.
+
+    As of #412 the server writes its pid / lock file under
+    ``$XDG_RUNTIME_DIR/memtomem/server.pid`` (see ``_runtime_paths``).
+    During the transition window we also probe the legacy
+    ``~/.memtomem/.server.pid`` so a mixed-version upgrade (pre-#412
+    server still running, new uninstall CLI) refuses correctly. First
+    live holder wins; if neither is held the state is dead.
+
+    No ``state_dir`` parameter — both probes use canonical absolute
+    paths from :mod:`memtomem._runtime_paths`. When #384 expands the
+    scheme to cover other writers (``mm web``, ``mm watchdog``) the
+    glob will still live inside :func:`_runtime_paths.runtime_dir`,
+    not under the persistent state dir.
+    """
+    for pid_file in (server_pid_path(), legacy_server_pid_path()):
+        state = _probe_pid_file(pid_file)
+        if state.alive:
+            return state
+    return _ServerState(alive=False, pid=None, pid_file=None)
+
+
+def _check_db_lock(db_path: Path) -> _DbLockState:
+    """Probe whether another connection holds a write lock on ``db_path``.
+
+    Motivation: the ``.server.pid`` check only catches the MCP
+    ``memtomem-server`` entrypoint. ``mm web``, ``mm watchdog``, and any
+    user-run sqlite3 connection are invisible to that scheme, so
+    uninstall could silently proceed while a live writer was holding the
+    WAL (observed in issue #384).
+
+    Mechanism: open a short-timeout connection and attempt
+    ``BEGIN IMMEDIATE`` — that tries to acquire a RESERVED lock and
+    raises ``SQLITE_BUSY`` (``sqlite3.OperationalError`` whose message
+    contains "locked"/"busy") if any other connection holds
+    RESERVED/PENDING/EXCLUSIVE. On success we ``ROLLBACK`` immediately;
+    the probe never modifies data.
+
+    Tradeoff: a process that only reads (SHARED lock) does NOT block
+    ``BEGIN IMMEDIATE`` in WAL mode, so a quiet-at-probe-time reader
+    slips through. That's an accepted tradeoff here — the WAL-corruption
+    path (active writer) is the severe case and is what this probe is
+    meant to guard. Complete reader-detection would need an ``lsof``
+    fallback or an extended pid-file scheme (see issue #384 discussion).
+
+    Error handling: if the probe can't run (file missing, corrupt,
+    permission denied, sqlite unavailable), returns ``locked=False`` with
+    ``probe_error`` set. Uninstall is itself a recovery path and must not
+    be blocked by unrelated DB integrity issues.
+    """
+    if not db_path.exists():
+        return _DbLockState(locked=False, probe_error=None)
+
+    # Header gate: only probe real SQLite files. Opening a corrupt /
+    # non-SQLite file with ``mode=rw`` can still trigger side effects on
+    # sibling ``-wal`` / ``-shm`` files (observed: a fake-content WAL
+    # got unlinked when SQLite tried to verify it). Stay out of that
+    # code path unless the file is actually a SQLite database.
+    try:
+        with db_path.open("rb") as fh:
+            header = fh.read(16)
+    except OSError as exc:
+        return _DbLockState(locked=False, probe_error=f"{type(exc).__name__}: {exc}")
+    if header != b"SQLite format 3\x00":
+        return _DbLockState(locked=False, probe_error="not a SQLite database")
+
+    conn: sqlite3.Connection | None = None
+    try:
+        # mode=rw: don't auto-create if the file vanishes between stat
+        # and connect (paranoia for concurrent deletions).
+        conn = sqlite3.connect(
+            f"file:{db_path}?mode=rw",
+            uri=True,
+            timeout=0.25,
+        )
+        conn.execute("BEGIN IMMEDIATE")
+        conn.rollback()
+        return _DbLockState(locked=False, probe_error=None)
+    except sqlite3.OperationalError as exc:
+        msg = str(exc).lower()
+        if "locked" in msg or "busy" in msg:
+            return _DbLockState(locked=True, probe_error=None)
+        # Other OperationalError (not-a-database, read-only, etc.) — skip
+        # probe, let uninstall proceed.
+        return _DbLockState(locked=False, probe_error=f"{type(exc).__name__}: {exc}")
+    except (sqlite3.Error, OSError) as exc:
+        return _DbLockState(locked=False, probe_error=f"{type(exc).__name__}: {exc}")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
 
 # ---- inventory -----------------------------------------------------------
@@ -194,6 +337,13 @@ def _collect_inventory(db_path: Path) -> _Inventory:
         candidate = state_dir / name
         if candidate.exists():
             other.append(candidate)
+    # New-location pid file lives outside state_dir (#412: on
+    # ``$XDG_RUNTIME_DIR/memtomem/`` or a per-user temp subdir). Include
+    # it in the transient "other" group so it's cleaned with the legacy
+    # ``.server.pid`` and the user sees a single row per file.
+    runtime_pid = server_pid_path()
+    if runtime_pid.exists():
+        other.append(runtime_pid)
 
     return _Inventory(
         state_dir=state_dir,
@@ -458,6 +608,16 @@ def _delete_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) ->
         except OSError:
             pass
 
+    # Prune the runtime subdir (``$XDG_RUNTIME_DIR/memtomem`` or
+    # ``$TMPDIR/memtomem-{uid}``) if we emptied it. We don't own the
+    # parent (the kernel / OS does), so we only rmdir our own subdir.
+    rt = runtime_dir()
+    if rt.exists() and rt.is_dir() and not any(rt.iterdir()):
+        try:
+            rt.rmdir()
+        except OSError:
+            pass
+
     return ", ".join(completed) if completed else "nothing"
 
 
@@ -482,7 +642,8 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
     db_path, config_error = _load_config_safely()
     state_dir = _DEFAULT_STATE_DIR
 
-    server = _check_server_liveness(state_dir)
+    server = _check_server_liveness()
+    db_lock = _check_db_lock(db_path)
 
     # Empty-state fast path.
     if not state_dir.exists() and not db_path.exists():
@@ -502,14 +663,29 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
     label, lines = _binary_uninstall_hint(profile)
     _print_binary_hint(label, lines)
 
-    if server.alive and not force:
+    if (server.alive or db_lock.locked) and not force:
         click.echo("")
-        click.secho(
-            f"Server still running (pid {server.pid}). Refusing to delete state — "
-            "an active server holds the SQLite WAL and deleting it risks corruption.",
-            fg="red",
-        )
-        click.secho("  Stop the server first, or pass --force to override.", fg="red")
+        if server.alive:
+            click.secho(
+                f"Server still running (pid {server.pid}). Refusing to delete state — "
+                "an active server holds the SQLite WAL and deleting it risks corruption.",
+                fg="red",
+            )
+            click.secho("  Stop the server first, or pass --force to override.", fg="red")
+        else:
+            # db_lock.locked only — writer without .server.pid (mm web,
+            # mm watchdog, ad-hoc script, ...). Point the user at lsof /
+            # ps so they can find it without another round-trip.
+            click.secho(
+                f"Another process holds a write lock on {db_path}. Refusing to delete "
+                "state — an active writer can corrupt the WAL.",
+                fg="red",
+            )
+            click.secho(
+                f"  Find it with `lsof {db_path}` (or `ps aux | grep memtomem`), "
+                "stop it, or pass --force to override.",
+                fg="red",
+            )
         sys.exit(2)
 
     if will_delete_bytes == 0 and not inv.other_files.paths:

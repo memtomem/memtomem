@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app
+from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 
@@ -27,7 +27,7 @@ async def mem_importance_scan(
 
     from memtomem.search.importance import compute_importance
 
-    app = _get_app(ctx)
+    app = await _get_app_initialized(ctx)
     rows = await app.storage.get_chunk_factors(namespace=namespace)
     now = datetime.now(timezone.utc)
 
