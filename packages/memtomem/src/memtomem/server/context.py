@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -14,11 +15,40 @@ from memtomem.config import Mem2MemConfig
 if TYPE_CHECKING:
     from memtomem.embedding.base import EmbeddingProvider
     from memtomem.indexing.engine import IndexEngine
+    from memtomem.indexing.watcher import FileWatcher
     from memtomem.llm.base import LLMProvider
     from memtomem.search.dedup import DedupScanner
     from memtomem.search.pipeline import SearchPipeline
     from memtomem.server.component_factory import Components
     from memtomem.storage.sqlite_backend import SqliteBackend
+
+
+logger = logging.getLogger(__name__)
+
+
+async def _stop_quietly(resource: object | None, stage: str) -> None:
+    """Stop ``resource`` and log (don't propagate) ordinary failures.
+
+    Used by both :meth:`AppContext.ensure_initialized` failure cleanup and
+    :meth:`AppContext.close` so a single resource going wrong does not
+    skip the rest of the teardown sequence — shutdown must always finish
+    whatever it can. ``CancelledError`` is re-raised so task cancellation
+    propagates and the caller can decide whether to mask the original
+    exception that triggered teardown (matches the lifespan helper from
+    PR #404 / #406).
+    """
+    if resource is None:
+        return
+    stop = getattr(resource, "stop", None) or getattr(resource, "close", None)
+    if stop is None:
+        return
+    try:
+        await stop()
+    except asyncio.CancelledError:
+        logger.warning("Shutdown step '%s' cancelled", stage)
+        raise
+    except Exception:
+        logger.warning("Shutdown step '%s' failed", stage, exc_info=True)
 
 
 def _require_initialized(components: Components | None, attr: str) -> Components:
@@ -47,9 +77,6 @@ class AppContext:
     sessions (``initialize`` + ``tools/list``) don't trigger DB creation
     in ``~/.memtomem/``. See issue #399 for the full design.
 
-    Phase 1 keeps ``app_lifespan`` calling ``ensure_initialized`` eagerly,
-    so behavior is unchanged. Phase 3 will drop the eager call.
-
     ``_owns_components`` distinguishes two construction paths:
 
     * ``ensure_initialized`` — we created the ``Components`` ourselves, so
@@ -69,10 +96,17 @@ class AppContext:
     current_namespace: str | None = None
     current_session_id: str | None = None
     # Internal state — not part of the public ``__init__`` surface; populated
-    # by ``ensure_initialized`` / ``from_components`` / :meth:`set_health_watchdog`.
+    # by ``ensure_initialized`` / ``from_components``. The watcher /
+    # scheduler / policy_scheduler / health_watchdog handles are populated
+    # only via ``ensure_initialized`` (the lifespan path); ``from_components``
+    # leaves them ``None`` because CLI commands that build a context outside
+    # the MCP server don't run background loops.
     _components: Components | None = field(default=None, init=False, repr=False)
     _owns_components: bool = field(default=False, init=False, repr=False)
     _dedup_scanner: DedupScanner | None = field(default=None, init=False, repr=False)
+    _watcher: FileWatcher | None = field(default=None, init=False, repr=False)
+    _scheduler: object | None = field(default=None, init=False, repr=False)
+    _policy_scheduler: object | None = field(default=None, init=False, repr=False)
     _health_watchdog: object | None = field(default=None, init=False, repr=False)
     # per-session, scoped to AppContext lifetime. Gate to emit a dim-mismatch
     # hint only once per MCP session so repeated mem_add / mem_search calls
@@ -83,11 +117,11 @@ class AppContext:
 
     # ── component accessors ───────────────────────────────────────────────
     # These raise ``RuntimeError`` if accessed before ``ensure_initialized``
-    # has populated ``_components``. Tool handlers must call
-    # ``await app.ensure_initialized()`` before reading them (Phase 2). In
-    # Phase 1 the lifespan eagerly inits, so all handlers see populated
-    # state — the runtime check catches programming errors during the
-    # migration without disappearing under ``python -O``.
+    # has populated ``_components``. Tool handlers reach the context via
+    # ``_get_app_initialized`` (which awaits ``ensure_initialized``), so
+    # the guard catches programming errors — a handler accidentally going
+    # through ``_get_app`` and reading a property before init — without
+    # disappearing under ``python -O`` the way ``assert`` would.
 
     @property
     def storage(self) -> SqliteBackend:
@@ -127,15 +161,6 @@ class AppContext:
             return None
         return self._components.embedding_broken
 
-    def set_health_watchdog(self, watchdog: object) -> None:
-        """Stash the health-watchdog instance the lifespan has started.
-
-        Lifespan-owned, not context-owned — :meth:`close` does not stop it.
-        The indirection gives callers a typed seam instead of poking
-        ``ctx._health_watchdog`` across module boundaries.
-        """
-        self._health_watchdog = watchdog
-
     # ── lifecycle ─────────────────────────────────────────────────────────
 
     async def ensure_initialized(self) -> Components:
@@ -148,30 +173,88 @@ class AppContext:
         creation should not poison the context for the rest of the
         session).
 
-        If ``create_components`` succeeds but a post-factory step
-        (currently the ``DedupScanner`` construction) raises, the already-
-        built ``Components`` would otherwise leak its open sqlite handle
-        and embedder session. We explicitly tear it down before
-        re-raising.
+        After component construction this also wires up the request-path
+        background loops the MCP server depends on — file watcher,
+        consolidation/policy schedulers, health watchdog. Phase 3 of #399
+        moved these out of ``app_lifespan`` so handshake-only sessions
+        (``initialize`` + ``tools/list``) leave ``~/.memtomem/`` alone;
+        the trade-off is that an idle server with zero tool calls runs
+        no background maintenance — see the changelog entry for #399.
+
+        Failure cleanup tears down whatever has already started — any
+        background loops that reached ``start()``, then ``close_components``,
+        then resets ``_components`` so a retry sees fresh state. This
+        prevents leaking the sqlite handle, embedder session, or running
+        background tasks just because a later step failed.
         """
         if self._components is not None:
             return self._components
         async with self._init_lock:
             if self._components is not None:
                 return self._components
+            from memtomem.indexing.watcher import FileWatcher
             from memtomem.search.dedup import DedupScanner
             from memtomem.server.component_factory import close_components, create_components
 
             comp = await create_components(self.config)
-            try:
-                self._dedup_scanner = DedupScanner(storage=comp.storage, embedder=comp.embedder)
-            except Exception:
-                # Don't leak the sqlite/embedder handles the factory opened
-                # just because a post-factory step failed.
-                await close_components(comp)
-                raise
+            # Expose storage/embedder via the property accessors *before*
+            # constructing schedulers — they reach into ``ctx.storage`` etc.,
+            # and ``_require_initialized`` would raise without this. The
+            # except-block below rolls the flag back on failure so a retry
+            # isn't blocked by half-built state.
             self._components = comp
             self._owns_components = True
+
+            dedup: DedupScanner | None = None
+            watcher: FileWatcher | None = None
+            scheduler: object | None = None
+            policy_scheduler: object | None = None
+            watchdog: object | None = None
+            try:
+                dedup = DedupScanner(storage=comp.storage, embedder=comp.embedder)
+
+                # Skip background loops in degraded mode (issue #349) — the
+                # watcher/schedulers/watchdog walk the index or re-embed
+                # chunks and would crash on the missing ``chunks_vec`` table.
+                # Recovery happens via ``mem_embedding_reset``.
+                watcher = FileWatcher(comp.index_engine, self.config.indexing)
+                if comp.embedding_broken is None:
+                    await watcher.start()
+
+                degraded = comp.embedding_broken is not None
+
+                if self.config.consolidation_schedule.enabled and not degraded:
+                    from memtomem.server.scheduler import ConsolidationScheduler
+
+                    scheduler = ConsolidationScheduler(self, self.config.consolidation_schedule)
+                    await scheduler.start()
+
+                if self.config.policy.enabled and not degraded:
+                    from memtomem.server.scheduler import PolicyScheduler
+
+                    policy_scheduler = PolicyScheduler(self, self.config.policy)
+                    await policy_scheduler.start()
+
+                if self.config.health_watchdog.enabled and not degraded:
+                    from memtomem.server.health_watchdog import HealthWatchdog
+
+                    watchdog = HealthWatchdog(self, self.config.health_watchdog)
+                    await watchdog.start()
+            except BaseException:
+                await _stop_quietly(watchdog, "health_watchdog")
+                await _stop_quietly(policy_scheduler, "policy_scheduler")
+                await _stop_quietly(scheduler, "scheduler")
+                await _stop_quietly(watcher, "watcher")
+                await close_components(comp)
+                self._components = None
+                self._owns_components = False
+                raise
+
+            self._dedup_scanner = dedup
+            self._watcher = watcher
+            self._scheduler = scheduler
+            self._policy_scheduler = policy_scheduler
+            self._health_watchdog = watchdog
             return comp
 
     @classmethod
@@ -196,18 +279,38 @@ class AppContext:
     async def close(self) -> None:
         """Tear down components if this context owns them.
 
-        Webhook manager and health watchdog are owned by the lifespan, not
-        the context — they are not closed here. Components passed in via
-        :meth:`from_components` are also left alone (the supplier closes
-        them) — the ``_owns_components`` flag distinguishes the two paths.
+        Webhook manager is owned by the lifespan, not the context — it is
+        not closed here. Components passed in via :meth:`from_components`
+        are also left alone (the supplier closes them) — the
+        ``_owns_components`` flag distinguishes the two paths.
+
+        For lifespan-managed contexts this also stops the background
+        loops :meth:`ensure_initialized` started (file watcher, schedulers,
+        health watchdog) in reverse-allocation order so the loops drop
+        their references before the storage / embedder they hold gets
+        closed. Each step is wrapped via :func:`_stop_quietly` so a single
+        failure does not skip the rest of the teardown sequence.
+
+        Contexts built via :meth:`from_components` never started those
+        loops, so the corresponding fields are ``None`` and the stop
+        calls are no-ops.
         """
         from memtomem.server.component_factory import close_components
+
+        await _stop_quietly(self._health_watchdog, "health_watchdog")
+        await _stop_quietly(self._policy_scheduler, "policy_scheduler")
+        await _stop_quietly(self._scheduler, "scheduler")
+        await _stop_quietly(self._watcher, "watcher")
 
         if self._components is not None and self._owns_components:
             await close_components(self._components)
         self._components = None
         self._owns_components = False
         self._dedup_scanner = None
+        self._watcher = None
+        self._scheduler = None
+        self._policy_scheduler = None
+        self._health_watchdog = None
 
 
 CtxType = Context[ServerSession, AppContext] | None
@@ -228,12 +331,10 @@ async def _get_app_initialized(ctx: CtxType) -> AppContext:
     first use rather than at lifespan startup — that's the whole point of
     #399: an MCP handshake + ``tools/list`` leaves ``~/.memtomem/`` alone.
 
-    Phase 1 kept ``app_lifespan`` calling ``ensure_initialized`` eagerly,
-    so every handler currently sees populated components even via
-    ``_get_app``. Phase 3 drops the eager call — at that point any handler
-    still reaching through ``_get_app`` would hit the
-    ``_require_initialized`` guard on first property read. Migrating every
-    handler now (Phase 2) is what makes the Phase 3 flip safe.
+    After Phase 3 ``app_lifespan`` no longer calls ``ensure_initialized``,
+    so any handler still reaching through ``_get_app`` would hit the
+    ``_require_initialized`` guard on first property read. Phase 2 migrated
+    every handler to this helper to make that flip safe.
     """
     app = _get_app(ctx)
     await app.ensure_initialized()

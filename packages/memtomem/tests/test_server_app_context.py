@@ -1,20 +1,46 @@
-"""Tests for ``AppContext.ensure_initialized`` lock semantics (issue #399, Phase 1).
+"""Tests for ``AppContext.ensure_initialized`` lock semantics + ownership (issue #399).
 
-These cover the property/factory plumbing that lets the lifespan keep eager
-initialization today and lets handlers move to lazy initialization in
-Phase 2/3 without race conditions on first call.
+These cover the property/factory plumbing that lets handlers do lazy
+initialization without race conditions on first call. Phase 3 also moved
+watcher/scheduler/watchdog start into ``ensure_initialized``; the
+``_no_background_loops`` autouse fixture below stubs those classes out
+so unit tests focus on the lock + ownership logic without leaking real
+watchdog threads / asyncio tasks across tests. The end-to-end lazy-init
+behavior (handshake leaves DB absent, first tool call creates it) is
+covered separately in ``tests/test_lazy_init_acceptance.py``.
 """
 
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from memtomem.config import Mem2MemConfig
 from memtomem.server.component_factory import Components
 from memtomem.server.context import AppContext
+
+
+@pytest.fixture(autouse=True)
+def _no_background_loops(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub ``FileWatcher`` so ``ensure_initialized`` doesn't spin a real
+    watchdog Observer thread for every unit test in this file.
+
+    All scheduler enabled-flags default to ``False`` (see ``config.py``),
+    so ``ConsolidationScheduler`` / ``PolicyScheduler`` / ``HealthWatchdog``
+    are not even constructed under default config — only ``FileWatcher``
+    needs to be mocked.
+    """
+    from memtomem.indexing import watcher as watcher_mod
+
+    def _make_fake_watcher(*_args: object, **_kwargs: object) -> object:
+        fake = MagicMock()
+        fake.start = AsyncMock()
+        fake.stop = AsyncMock()
+        return fake
+
+    monkeypatch.setattr(watcher_mod, "FileWatcher", _make_fake_watcher)
 
 
 @pytest.fixture
@@ -235,12 +261,116 @@ async def test_close_after_ensure_initialized_closes_components(
     assert ctx._owns_components is False
 
 
-def test_set_health_watchdog_exposes_via_property() -> None:
-    """``ctx.set_health_watchdog(wd)`` is the lifespan seam — reader side
-    is the ``health_watchdog`` property, not ``_health_watchdog`` poking."""
-    ctx = AppContext(config=Mem2MemConfig())
-    sentinel = object()
+# ── Phase 3: background-loop ownership ────────────────────────────────
 
-    ctx.set_health_watchdog(sentinel)
 
-    assert ctx.health_watchdog is sentinel
+@pytest.mark.asyncio
+async def test_ensure_initialized_starts_file_watcher_under_default_config(
+    fake_components: Components,
+) -> None:
+    """Phase 3 moved ``FileWatcher.start`` from ``app_lifespan`` into
+    ``ensure_initialized``. Default config has all schedulers disabled,
+    so the watcher is the only thing that should start."""
+    ctx = AppContext(config=fake_components.config)
+
+    with patch(
+        "memtomem.server.component_factory.create_components",
+        return_value=fake_components,
+    ):
+        await ctx.ensure_initialized()
+
+    assert ctx._watcher is not None, "watcher should be allocated and stashed on ctx"
+    ctx._watcher.start.assert_awaited_once()  # type: ignore[attr-defined]
+    # Schedulers/watchdog stay None because the default config has them disabled.
+    assert ctx._scheduler is None
+    assert ctx._policy_scheduler is None
+    assert ctx._health_watchdog is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_initialized_skips_watcher_in_degraded_mode(
+    fake_components: Components,
+) -> None:
+    """When ``embedding_broken`` is set (issue #349 degraded mode), the
+    watcher is constructed but ``start()`` is skipped — same gate as the
+    pre-Phase-3 lifespan code, just relocated into ``ensure_initialized``.
+    This stops the watcher from crashing on the missing ``chunks_vec``
+    table; ``mem_embedding_reset`` recovers the install."""
+    fake_components.embedding_broken = {"reason": "dim_mismatch"}
+    ctx = AppContext(config=fake_components.config)
+
+    with patch(
+        "memtomem.server.component_factory.create_components",
+        return_value=fake_components,
+    ):
+        await ctx.ensure_initialized()
+
+    assert ctx._watcher is not None, "watcher allocated even in degraded mode"
+    ctx._watcher.start.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_close_stops_started_watcher(fake_components: Components) -> None:
+    """Phase 3 moved watcher ownership to ``AppContext``. ``close()`` must
+    therefore stop the watcher it started — otherwise the watchdog
+    Observer thread + asyncio processor task leak past lifespan
+    teardown."""
+    ctx = AppContext(config=fake_components.config)
+
+    with patch(
+        "memtomem.server.component_factory.create_components",
+        return_value=fake_components,
+    ):
+        await ctx.ensure_initialized()
+
+    started_watcher = ctx._watcher
+    assert started_watcher is not None
+
+    with patch("memtomem.server.component_factory.close_components"):
+        await ctx.close()
+
+    started_watcher.stop.assert_awaited_once()  # type: ignore[attr-defined]
+    assert ctx._watcher is None, "ctx must drop its watcher reference after close"
+
+
+@pytest.mark.asyncio
+async def test_ensure_initialized_rolls_back_components_when_watcher_start_fails(
+    fake_components: Components,
+) -> None:
+    """A ``watcher.start()`` failure must close the freshly-built
+    components and reset ``_components`` so the context isn't poisoned —
+    otherwise the sqlite handle the factory just opened leaks and a
+    retry hits a half-initialized state."""
+    from memtomem.indexing import watcher as watcher_mod
+
+    boom_watcher = MagicMock()
+    boom_watcher.start = AsyncMock(side_effect=RuntimeError("watcher boom"))
+    boom_watcher.stop = AsyncMock()
+
+    ctx = AppContext(config=fake_components.config)
+    close_calls: list[Components] = []
+
+    async def fake_close(comp: Components) -> None:
+        close_calls.append(comp)
+
+    with (
+        patch(
+            "memtomem.server.component_factory.create_components",
+            return_value=fake_components,
+        ),
+        patch("memtomem.server.component_factory.close_components", side_effect=fake_close),
+        patch.object(watcher_mod, "FileWatcher", lambda *a, **k: boom_watcher),
+        pytest.raises(RuntimeError, match="watcher boom"),
+    ):
+        await ctx.ensure_initialized()
+
+    # Watcher we constructed got the failed ``start()``; cleanup must
+    # invoke ``stop()`` so the partially-initialized resource does not
+    # leak its Observer thread.
+    boom_watcher.stop.assert_awaited_once()
+    # Components were torn down so the sqlite/embedder handles don't leak.
+    assert close_calls == [fake_components]
+    # And the context is back to a clean slate — a retry can re-init.
+    assert ctx._components is None
+    assert ctx._owns_components is False
+    assert ctx._watcher is None
