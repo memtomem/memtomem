@@ -31,6 +31,7 @@ from typing import Iterable
 
 import click
 
+from memtomem._runtime_paths import legacy_server_pid_path, server_pid_path
 from memtomem.cli.init_cmd import RuntimeProfile, _runtime_profile
 
 _DEFAULT_STATE_DIR = Path.home() / ".memtomem"
@@ -115,8 +116,8 @@ def _load_config_safely() -> tuple[Path, str | None]:
 # ---- server liveness probe -----------------------------------------------
 
 
-def _check_server_liveness(state_dir: Path) -> _ServerState:
-    """Probe ``state_dir/.server.pid`` via ``fcntl.flock``.
+def _probe_pid_file(pid_file: Path) -> _ServerState:
+    """Probe a single pid file via ``fcntl.flock``.
 
     ``server/__init__.py:main`` opens this file and holds an exclusive
     flock for the entire server lifetime. If we can acquire
@@ -130,7 +131,6 @@ def _check_server_liveness(state_dir: Path) -> _ServerState:
     kernel recycled the recorded PID to an unrelated process (issue
     #387). The PID inside the file is now read for display only.
     """
-    pid_file = state_dir / ".server.pid"
     if not pid_file.exists():
         return _ServerState(alive=False, pid=None, pid_file=None)
 
@@ -170,6 +170,27 @@ def _check_server_liveness(state_dir: Path) -> _ServerState:
         return _ServerState(alive=False, pid=pid, pid_file=pid_file)
     finally:
         fp.close()
+
+
+def _check_server_liveness(_state_dir: Path) -> _ServerState:
+    """Probe the server pid file at both the new and legacy locations.
+
+    As of #412 the server writes its pid / lock file under
+    ``$XDG_RUNTIME_DIR/memtomem/server.pid`` (see ``_runtime_paths``).
+    During the transition window we also probe the legacy
+    ``~/.memtomem/.server.pid`` so a mixed-version upgrade (pre-#412
+    server still running, new uninstall CLI) refuses correctly. First
+    live holder wins; if neither is held the state is dead.
+
+    ``_state_dir`` is kept as a parameter for call-site symmetry and
+    future use (other DB writers covered by #384 may register pid files
+    the same way), but both probes use canonical absolute paths today.
+    """
+    for pid_file in (server_pid_path(), legacy_server_pid_path()):
+        state = _probe_pid_file(pid_file)
+        if state.alive:
+            return state
+    return _ServerState(alive=False, pid=None, pid_file=None)
 
 
 # ---- inventory -----------------------------------------------------------
@@ -223,6 +244,13 @@ def _collect_inventory(db_path: Path) -> _Inventory:
         candidate = state_dir / name
         if candidate.exists():
             other.append(candidate)
+    # New-location pid file lives outside state_dir (#412: on
+    # ``$XDG_RUNTIME_DIR/memtomem/`` or a per-user temp subdir). Include
+    # it in the transient "other" group so it's cleaned with the legacy
+    # ``.server.pid`` and the user sees a single row per file.
+    runtime_pid = server_pid_path()
+    if runtime_pid.exists():
+        other.append(runtime_pid)
 
     return _Inventory(
         state_dir=state_dir,
@@ -484,6 +512,18 @@ def _delete_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) ->
         try:
             _DEFAULT_STATE_DIR.rmdir()
             completed.append("state dir")
+        except OSError:
+            pass
+
+    # Prune the runtime subdir (``$XDG_RUNTIME_DIR/memtomem`` or
+    # ``$TMPDIR/memtomem-{uid}``) if we emptied it. We don't own the
+    # parent (the kernel / OS does), so we only rmdir our own subdir.
+    from memtomem._runtime_paths import runtime_dir as _rd
+
+    rt = _rd()
+    if rt.exists() and rt.is_dir() and not any(rt.iterdir()):
+        try:
+            rt.rmdir()
         except OSError:
             pass
 

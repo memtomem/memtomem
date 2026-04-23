@@ -79,16 +79,19 @@ def test_sigterm_unlinks_pid_file_end_to_end(tmp_path: Path) -> None:
     point of #387 is the observable behavior on a live process, not the
     handler shape in isolation.
 
-    Isolation: ``HOME`` points at ``tmp_path`` so the server uses
-    ``tmp_path/.memtomem/`` for the pid file (matches the
-    ``Path("~/.memtomem")`` resolution in ``main()``).
+    Isolation: ``HOME`` + ``XDG_RUNTIME_DIR`` both point under
+    ``tmp_path`` so the server writes to
+    ``tmp_path/xdg_runtime/memtomem/server.pid`` (see #412).
     """
     home = tmp_path / "home"
     home.mkdir()
-    pid_file = home / ".memtomem" / ".server.pid"
+    xdg = tmp_path / "xdg_runtime"
+    xdg.mkdir()
+    pid_file = xdg / "memtomem" / "server.pid"
 
     env = os.environ.copy()
     env["HOME"] = str(home)
+    env["XDG_RUNTIME_DIR"] = str(xdg)
 
     # ``stdin=subprocess.PIPE`` (kept open) makes the stdio MCP loop block on
     # the JSON-RPC read — without this the server sees EOF immediately and

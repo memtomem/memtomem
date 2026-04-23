@@ -172,9 +172,13 @@ def main() -> None:
     import atexit
     import fcntl
 
-    pid_dir = Path("~/.memtomem").expanduser()
-    pid_dir.mkdir(parents=True, exist_ok=True)
-    pid_file = pid_dir / ".server.pid"
+    from memtomem._runtime_paths import ensure_runtime_dir
+
+    # Runtime files (pid / flock) live on ``$XDG_RUNTIME_DIR/memtomem``
+    # when the platform provides one, otherwise a per-user temp subdir.
+    # This keeps ``~/.memtomem/`` untouched during MCP handshake — it is
+    # created only when persistent storage is first written (#412).
+    pid_file = ensure_runtime_dir() / "server.pid"
 
     # Advisory lock — prevents multiple MCP servers from writing concurrently.
     # The lock is held for the lifetime of the process and auto-released on exit.
