@@ -86,6 +86,58 @@ def _load_dotenv() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _teardown_startup_resources(
+    *,
+    watchdog: object | None,
+    policy_scheduler: object | None,
+    scheduler: object | None,
+    webhook_mgr: object | None,
+    watcher: FileWatcher | None,
+    ctx: AppContext | None,
+) -> None:
+    """Tear down startup-allocated resources in reverse-allocation order.
+
+    Called from both the normal shutdown path (after ``yield``) and the
+    startup-failure path (before re-raising, #404). Each step swallows so
+    a later failure doesn't skip earlier ones — shutdown must always
+    complete whatever it can.
+
+    Allocation order in :func:`app_lifespan` is:
+    webhook_mgr → ctx/components → watcher → scheduler → policy_scheduler
+    → watchdog. Teardown is the reverse.
+    """
+    if watchdog is not None:
+        try:
+            await watchdog.stop()  # type: ignore[attr-defined]
+        except Exception:
+            logger.warning("Failed to stop health watchdog", exc_info=True)
+    if policy_scheduler is not None:
+        try:
+            await policy_scheduler.stop()  # type: ignore[attr-defined]
+        except Exception:
+            logger.warning("Failed to stop policy scheduler", exc_info=True)
+    if scheduler is not None:
+        try:
+            await scheduler.stop()  # type: ignore[attr-defined]
+        except Exception:
+            logger.warning("Failed to stop scheduler", exc_info=True)
+    if webhook_mgr is not None:
+        try:
+            await webhook_mgr.close()  # type: ignore[attr-defined]
+        except Exception:
+            logger.warning("Failed to close webhook manager", exc_info=True)
+    if watcher is not None:
+        try:
+            await watcher.stop()
+        except Exception:
+            logger.warning("Shutdown step 'watcher' failed", exc_info=True)
+    if ctx is not None:
+        try:
+            await ctx.close()
+        except Exception:
+            logger.warning("Shutdown step 'components' failed", exc_info=True)
+
+
 @asynccontextmanager
 async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
     _load_dotenv()
@@ -93,88 +145,87 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
 
     config = Mem2MemConfig()
 
-    # Webhook manager is storage-free; safe to construct before component init.
     webhook_mgr = None
-    if config.webhook.enabled and config.webhook.url:
-        from memtomem.server.webhooks import WebhookManager
-
-        webhook_mgr = WebhookManager(config.webhook)
-
-    ctx = AppContext(config=config, webhook_manager=webhook_mgr)
-
-    # Phase 1 of #399 keeps init eager: the rest of startup (watcher,
-    # schedulers, watchdog) needs storage/embedder ready. Phase 3 will move
-    # this call (and the watcher/scheduler startup below) into the first
-    # tool-call path.
-    comp = await ctx.ensure_initialized()
-
-    # When the server came up in degraded mode (embedding mismatch, see
-    # issue #349) don't start the file watcher — indexing goes through
-    # ``upsert_chunks`` which needs ``chunks_vec`` and would crash on
-    # every file change. Recovery happens via ``mem_embedding_reset``.
-    watcher = FileWatcher(comp.index_engine, config.indexing)
-    if comp.embedding_broken is None:
-        await watcher.start()
-
-    # Background schedulers are skipped in degraded mode (see issue #349) —
-    # they walk the index / re-embed chunks and would hit the same missing
-    # ``chunks_vec`` cascade as the watcher. They resume after a restart
-    # once ``mem_embedding_reset`` has fixed the DB.
-    degraded = comp.embedding_broken is not None
-
-    # Auto-consolidation scheduler
+    watcher: FileWatcher | None = None
     scheduler = None
-    if config.consolidation_schedule.enabled and not degraded:
-        from memtomem.server.scheduler import ConsolidationScheduler
-
-        scheduler = ConsolidationScheduler(ctx, config.consolidation_schedule)
-        await scheduler.start()
-
-    # Policy scheduler
     policy_scheduler = None
-    if config.policy.enabled and not degraded:
-        from memtomem.server.scheduler import PolicyScheduler
-
-        policy_scheduler = PolicyScheduler(ctx, config.policy)
-        await policy_scheduler.start()
-
-    # Health watchdog
     watchdog = None
-    if config.health_watchdog.enabled and not degraded:
-        from memtomem.server.health_watchdog import HealthWatchdog
+    ctx: AppContext | None = None
 
-        watchdog = HealthWatchdog(ctx, config.health_watchdog)
-        await watchdog.start()
-        ctx.set_health_watchdog(watchdog)
+    # Startup is wrapped in a single try/except so a failure at any stage
+    # tears down everything allocated so far (#404). ``ensure_initialized``
+    # has its own internal cleanup (PR #400) and leaves ``ctx._components``
+    # unset on failure, so ``ctx.close()`` from the teardown path is a
+    # safe no-op in that case.
+    try:
+        # Webhook manager is storage-free; safe to construct before component init.
+        if config.webhook.enabled and config.webhook.url:
+            from memtomem.server.webhooks import WebhookManager
+
+            webhook_mgr = WebhookManager(config.webhook)
+
+        ctx = AppContext(config=config, webhook_manager=webhook_mgr)
+
+        # Phase 1 of #399 keeps init eager: the rest of startup (watcher,
+        # schedulers, watchdog) needs storage/embedder ready. Phase 3 will move
+        # this call (and the watcher/scheduler startup below) into the first
+        # tool-call path.
+        comp = await ctx.ensure_initialized()
+
+        # When the server came up in degraded mode (embedding mismatch, see
+        # issue #349) don't start the file watcher — indexing goes through
+        # ``upsert_chunks`` which needs ``chunks_vec`` and would crash on
+        # every file change. Recovery happens via ``mem_embedding_reset``.
+        watcher = FileWatcher(comp.index_engine, config.indexing)
+        if comp.embedding_broken is None:
+            await watcher.start()
+
+        # Background schedulers are skipped in degraded mode (see issue #349) —
+        # they walk the index / re-embed chunks and would hit the same missing
+        # ``chunks_vec`` cascade as the watcher. They resume after a restart
+        # once ``mem_embedding_reset`` has fixed the DB.
+        degraded = comp.embedding_broken is not None
+
+        # Auto-consolidation scheduler
+        if config.consolidation_schedule.enabled and not degraded:
+            from memtomem.server.scheduler import ConsolidationScheduler
+
+            scheduler = ConsolidationScheduler(ctx, config.consolidation_schedule)
+            await scheduler.start()
+
+        # Policy scheduler
+        if config.policy.enabled and not degraded:
+            from memtomem.server.scheduler import PolicyScheduler
+
+            policy_scheduler = PolicyScheduler(ctx, config.policy)
+            await policy_scheduler.start()
+
+        # Health watchdog
+        if config.health_watchdog.enabled and not degraded:
+            from memtomem.server.health_watchdog import HealthWatchdog
+
+            watchdog = HealthWatchdog(ctx, config.health_watchdog)
+            await watchdog.start()
+            ctx.set_health_watchdog(watchdog)
+    except BaseException:
+        await _teardown_startup_resources(
+            watchdog=watchdog,
+            policy_scheduler=policy_scheduler,
+            scheduler=scheduler,
+            webhook_mgr=webhook_mgr,
+            watcher=watcher,
+            ctx=ctx,
+        )
+        raise
 
     try:
         yield ctx
     finally:
-        if watchdog:
-            try:
-                await watchdog.stop()
-            except Exception:
-                logger.warning("Failed to stop health watchdog", exc_info=True)
-        if policy_scheduler:
-            try:
-                await policy_scheduler.stop()
-            except Exception:
-                logger.warning("Failed to stop policy scheduler", exc_info=True)
-        if scheduler:
-            try:
-                await scheduler.stop()
-            except Exception:
-                logger.warning("Failed to stop scheduler", exc_info=True)
-        if webhook_mgr:
-            try:
-                await webhook_mgr.close()
-            except Exception:
-                logger.warning("Failed to close webhook manager", exc_info=True)
-        try:
-            await watcher.stop()
-        except Exception:
-            logger.warning("Shutdown step 'watcher' failed", exc_info=True)
-        try:
-            await ctx.close()
-        except Exception:
-            logger.warning("Shutdown step 'components' failed", exc_info=True)
+        await _teardown_startup_resources(
+            watchdog=watchdog,
+            policy_scheduler=policy_scheduler,
+            scheduler=scheduler,
+            webhook_mgr=webhook_mgr,
+            watcher=watcher,
+            ctx=ctx,
+        )
