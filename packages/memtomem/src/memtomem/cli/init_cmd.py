@@ -247,6 +247,20 @@ def _have_module(name: str) -> bool:
         return False
 
 
+def _y_refuse_hint(flag: str, extra: str) -> str:
+    """Wizard → ``-y`` discoverability bridge (#403).
+
+    Interactive wizard warns-and-saves when an extra is missing; ``mm init -y``
+    refuses with a non-zero exit (#396 / #402). A user who copies a wizard
+    choice into a scripted install gets an unexpected hard failure without
+    this hint. Surface the asymmetry at the wizard warning site.
+    """
+    return (
+        f"  Note: `mm init -y {flag}` refuses without `memtomem[{extra}]`; "
+        f"install first for scripted setups."
+    )
+
+
 # ── Step functions ────────────────────────────────────────────────────
 
 
@@ -284,6 +298,7 @@ def _step_embedding(state: dict) -> None:
             # as already surfaced so ``_collect_missing_extras`` skips it.
             click.echo(f"  Install with: {_extra_install_hint(['onnx'], state)}")
             click.echo("  Saving ONNX config now so you're ready after install.")
+            click.echo(_y_refuse_hint("--provider onnx", "onnx"))
             click.echo()
             state.setdefault("_extras_warned_inline", set()).add("onnx")
 
@@ -317,6 +332,7 @@ def _step_embedding(state: dict) -> None:
             click.secho("  Ollama not found.", fg="yellow")
             click.echo("  Install from https://ollama.com, then run 'mm index' to embed.")
             click.echo("  Saving Ollama config now so you're ready after install.")
+            click.echo(_y_refuse_hint("--provider ollama", "ollama"))
             click.echo()
             # Record intent — config is written, embedding runs when Ollama is available.
             model = "nomic-embed-text"
@@ -637,6 +653,7 @@ def _step_language(state: dict) -> None:
             click.secho("  kiwipiepy is installed.", fg="green")
         except ImportError:
             click.secho("  kiwipiepy not installed. Run: pip install kiwipiepy", fg="yellow")
+            click.echo(_y_refuse_hint("--tokenizer kiwipiepy", "korean"))
     state["tokenizer"] = tokenizer
     click.echo()
 

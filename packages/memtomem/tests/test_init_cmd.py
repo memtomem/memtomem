@@ -4834,3 +4834,48 @@ class TestNonInteractiveExtrasValidation:
         assert not memory_dir.exists(), (
             "memory_dir must not be created on refused -y runs (gate must precede mkdir)"
         )
+
+
+class TestYRefuseHintParity:
+    """#403 — wizard fallback paths must mention the ``-y`` refuse semantic.
+
+    #402 added a new axis: ``-y`` refuses non-zero while the interactive
+    wizard still warns-and-saves. A user who copies a wizard choice into a
+    scripted install gets an unexpected hard failure unless the wizard
+    warning surfaces the asymmetry. These tests pin:
+    (1) the helper's shape, and
+    (2) that each missing-extra fallback path actually calls it.
+    """
+
+    def test_y_refuse_hint_shape(self) -> None:
+        from memtomem.cli import init_cmd
+
+        hint = init_cmd._y_refuse_hint("--provider onnx", "onnx")
+        assert "mm init -y --provider onnx" in hint
+        assert "memtomem[onnx]" in hint
+        assert "refuses" in hint
+        assert "scripted" in hint
+
+    def test_wizard_fallback_paths_call_y_refuse_hint(self) -> None:
+        """Source-scan pin — each fallback branch must call ``_y_refuse_hint``.
+
+        Fragile by nature (a rename of the helper breaks the scan), but the
+        call pattern is specific enough that false positives are unlikely.
+        Rename → update test in the same PR, same seam.
+        """
+        import inspect
+
+        from memtomem.cli import init_cmd
+
+        embedding_src = inspect.getsource(init_cmd._step_embedding)
+        language_src = inspect.getsource(init_cmd._step_language)
+
+        assert '_y_refuse_hint("--provider onnx", "onnx")' in embedding_src, (
+            "ONNX fallback must surface -y refuse hint (#403)"
+        )
+        assert '_y_refuse_hint("--provider ollama", "ollama")' in embedding_src, (
+            "Ollama fallback must surface -y refuse hint (#403)"
+        )
+        assert '_y_refuse_hint("--tokenizer kiwipiepy", "korean")' in language_src, (
+            "kiwipiepy fallback must surface -y refuse hint (#403)"
+        )
