@@ -153,14 +153,21 @@ if _TOOL_MODE != "full":
             mcp._tool_manager.remove_tool(name)
 
 
-def _install_sigterm_handler(pid_file: Path) -> None:
-    """Install a SIGTERM handler that unlinks ``pid_file`` and hard-exits.
+def _install_sigterm_handler(*pid_files: Path) -> None:
+    """Install a SIGTERM handler that unlinks each ``pid_file`` and hard-exits.
 
     ``mcp.run()`` runs an asyncio event loop, and asyncio swallows
     ``SystemExit`` raised from a classic ``signal.signal`` handler — the
     integration test in ``test_server_sigterm.py`` is the live repro.
     So we can't rely on ``sys.exit(0)`` + ``atexit``: we unlink
     explicitly and call ``os._exit(0)`` to bypass the event loop.
+
+    Variadic because we track two pid files during the #412 transition
+    window: the new ``$XDG_RUNTIME_DIR/memtomem/server.pid`` AND the
+    legacy ``~/.memtomem/.server.pid`` (when ``_try_hold_legacy_flock``
+    succeeded). Both need the same teardown, or the next server hits
+    the "pre-0.1.25 install" abort branch on a stale legacy file
+    (issue #437).
 
     Only register after the flock succeeds, so we never unlink a pid
     file another primary owns. ``atexit`` still handles the normal
@@ -170,10 +177,11 @@ def _install_sigterm_handler(pid_file: Path) -> None:
     import signal
 
     def _handle(_signum: int, _frame: object) -> None:
-        try:
-            pid_file.unlink(missing_ok=True)
-        except OSError:
-            pass
+        for pid_file in pid_files:
+            try:
+                pid_file.unlink(missing_ok=True)
+            except OSError:
+                pass
         _os._exit(0)
 
     signal.signal(signal.SIGTERM, _handle)
@@ -244,9 +252,16 @@ def main() -> None:
     # Hold the legacy flock for the process lifetime so an old (pre-#412)
     # server running *now* is detected and a future one starting *after*
     # us also bails.
-    _legacy_lock_fp = _try_hold_legacy_flock(legacy_server_pid_path())
+    legacy_pid_file = legacy_server_pid_path()
+    _legacy_lock_fp = _try_hold_legacy_flock(legacy_pid_file)
     if _legacy_lock_fp is not None:
+        # LIFO: unlink must run before close so the file we delete is still
+        # the one we own the flock on. Without unlink the legacy path
+        # outlives the process and the next server's ``_try_hold_legacy_flock``
+        # can race against the stale file, reporting a phantom "pre-0.1.25
+        # install" holder (issue #437).
         atexit.register(lambda: _legacy_lock_fp.close())
+        atexit.register(lambda: legacy_pid_file.unlink(missing_ok=True))
 
     # Runtime files (pid / flock) live on ``$XDG_RUNTIME_DIR/memtomem``
     # when the platform provides one, otherwise a per-user temp subdir.
@@ -276,6 +291,9 @@ def main() -> None:
         _lock_fp.flush()
         atexit.register(lambda: _lock_fp.close())  # LIFO: runs second
         atexit.register(lambda: pid_file.unlink(missing_ok=True))  # LIFO: runs first
-        _install_sigterm_handler(pid_file)
+        sigterm_targets = [pid_file]
+        if _legacy_lock_fp is not None:
+            sigterm_targets.append(legacy_pid_file)
+        _install_sigterm_handler(*sigterm_targets)
 
     mcp.run()
