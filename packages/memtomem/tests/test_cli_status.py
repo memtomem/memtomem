@@ -129,10 +129,59 @@ class TestStatusOutput:
 
         result = runner.invoke(cli, ["status"])
         assert result.exit_code == 0, result.output
-        # Stable-schema keys monitoring probes / dashboards rely on.
+        # Pin the full ``Warnings`` block schema, not just `kind` / `fix` —
+        # the ``mem_status`` docstring advertises ``stored`` / ``configured``
+        # / ``doc`` as stable keys monitoring probes pattern-match on, so
+        # silent renames or dropped fields would break uptime dashboards
+        # without any test catching it.
         assert "Warnings" in result.output
         assert "kind:       embedding_dim_mismatch" in result.output
+        assert "stored:     ollama/bge-m3 (1024d)" in result.output
+        assert "configured: ollama/nomic (768d)" in result.output
         assert "fix:        uv run mm embedding-reset --mode apply-current" in result.output
+        assert "doc:        docs/guides/configuration.md#reset-flow" in result.output
+
+
+class TestStatusMcpParity:
+    """``mm status`` and the MCP ``mem_status`` tool must render identical text.
+
+    Both go through ``format_status_report`` today, but a future refactor
+    that wraps ``mem_status``'s response (e.g. JSON envelope, prefix line)
+    or that has the CLI ``.strip()`` the helper output would silently
+    diverge the two surfaces — and the README sells them as equivalent.
+    Cheap pin: invoke each path with the same mock components and compare
+    the rendered string.
+    """
+
+    def test_cli_output_matches_mem_status(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Sync test on purpose: the CLI spawns its own ``asyncio.run`` inside
+        # the click handler, so an ``async def`` test (asyncio AUTO mode)
+        # would nest event loops and fail with ``cannot be called from a
+        # running event loop``. Drive the MCP side with its own
+        # ``asyncio.run`` call instead.
+        import asyncio
+        from types import SimpleNamespace as NS
+
+        from memtomem.server.context import AppContext
+        from memtomem.server.tools.status_config import mem_status
+
+        comp = _mock_components(total_chunks=11, total_sources=4)
+
+        # MCP path: build a fake ``ctx`` whose ``request_context.lifespan_context``
+        # is the AppContext, then call ``mem_status`` directly. Same plumbing
+        # FastMCP uses at runtime; ``ensure_initialized`` is a no-op for
+        # ``from_components`` contexts (components already populated).
+        mcp_ctx = NS(request_context=NS(lifespan_context=AppContext.from_components(comp)))
+        mcp_text = asyncio.run(mem_status(mcp_ctx))
+
+        # CLI path: same mock components funneled through ``cli_components``.
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        runner = CliRunner()
+        cli_result = runner.invoke(cli, ["status"])
+        assert cli_result.exit_code == 0, cli_result.output
+
+        # ``click.echo`` appends a trailing newline; the MCP wrapper does not.
+        assert cli_result.output.rstrip("\n") == mcp_text
 
 
 class TestStatusUnconfigured:

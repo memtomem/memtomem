@@ -216,14 +216,32 @@ Ask the AI:
 Call the mem_status tool to show the current status
 ```
 
-Expected response example (keyword-only default — the embedding line
-changes depending on the provider picked in the wizard):
+Expected response (BM25 default — the `Embedding` and `Dimension`
+lines change depending on the provider picked in the wizard):
+
 ```
-memtomem status:
-  - Storage backend: SQLite
-  - Total chunks: 0 (not yet indexed)
-  - Embedding model: none (BM25 keyword search only)
+memtomem Status
+==============
+Storage:   sqlite
+DB path:   ~/.memtomem/memtomem.db
+Embedding: none /
+Dimension: 0
+Top-K:     10
+RRF k:     60
+
+Index stats
+-----------
+Total chunks:  0
+Source files:  0
+...
 ```
+
+The full report also includes an `Immutable fields` block (provider /
+model / tokenizer / backend echoed back as a "what can't be changed at
+runtime" reminder), and a `Warnings` block with stable schema keys
+(`kind` / `fix` / `doc` / `stored` / `configured`) when an embedding-
+dimension mismatch is detected. Run `mm status` from a terminal to see
+the exact output your install produces.
 
 ### From a terminal — `mm status`
 
