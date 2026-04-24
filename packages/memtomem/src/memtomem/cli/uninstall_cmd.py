@@ -25,7 +25,6 @@ Design notes:
 
 from __future__ import annotations
 
-import fcntl
 import shutil
 import sqlite3
 import sys
@@ -34,6 +33,12 @@ from pathlib import Path
 from typing import Iterable
 
 import click
+
+# ``fcntl`` is POSIX-only. A module-level import here crashed every ``mm``
+# command on Windows because ``cli/__init__.py:_register`` imports this
+# module unconditionally. It is now imported lazily inside
+# ``_probe_pid_file`` behind a ``sys.platform`` guard so the rest of the CLI
+# boots on Windows. See #448.
 
 from memtomem._runtime_paths import legacy_server_pid_path, runtime_dir, server_pid_path
 from memtomem.cli.init_cmd import RuntimeProfile, _runtime_profile
@@ -148,6 +153,10 @@ def _probe_pid_file(pid_file: Path) -> _ServerState:
     correct for stale-pid cases but produced false positives once the
     kernel recycled the recorded PID to an unrelated process (issue
     #387). The PID inside the file is now read for display only.
+
+    On Windows ``fcntl`` is unavailable; the probe falls back to
+    conservative "pid file exists → assume alive" and relies on
+    ``--force`` for override. See #448.
     """
     if not pid_file.exists():
         return _ServerState(alive=False, pid=None, pid_file=None)
@@ -160,6 +169,16 @@ def _probe_pid_file(pid_file: Path) -> _ServerState:
         # Unreadable / non-int — leave pid=None for the message; the lock
         # probe below still decides alive vs. dead independently.
         pid = None
+
+    if sys.platform == "win32":
+        # POSIX advisory flock is unavailable on Windows. Fall back to the
+        # same conservative treatment we use when the probe can't acquire
+        # the lock (unsupported filesystem branch below) — pid file exists,
+        # so assume a live writer and let the user pass ``--force`` to
+        # override. #448.
+        return _ServerState(alive=True, pid=pid, pid_file=pid_file)
+
+    import fcntl
 
     try:
         # Read-mode is enough; advisory flock works regardless of fd mode.
