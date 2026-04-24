@@ -109,6 +109,25 @@ async def mem_agent_search(
     return output
 
 
+_SHARED_FROM_TAG_PREFIX = "shared-from="
+
+
+def _build_shared_tags(source_tags: tuple[str, ...] | list[str], source_chunk_id: str) -> list[str]:
+    """Return the tag list to put on a ``mem_agent_share`` copy.
+
+    Strips any inherited ``shared-from=...`` entries (so a chain of
+    re-shares produces ``shared-from=<immediate-parent>`` only, not a
+    growing audit chain) and appends a single ``shared-from=<source>``
+    pointing at the immediate parent. Extracted as a top-level function
+    so the dedup contract can be unit-tested without spinning up MCP
+    components.
+    """
+
+    inherited = [t for t in source_tags if not t.startswith(_SHARED_FROM_TAG_PREFIX)]
+    inherited.append(f"{_SHARED_FROM_TAG_PREFIX}{source_chunk_id}")
+    return inherited
+
+
 @mcp.tool()
 @tool_handler
 @register("multi_agent")
@@ -117,14 +136,26 @@ async def mem_agent_share(
     target: str = SHARED_NAMESPACE,
     ctx: CtxType = None,
 ) -> str:
-    """Share a memory chunk with another agent or the shared namespace.
+    """Copy a memory chunk's content into another namespace.
 
-    Creates a copy of the chunk in the target namespace. The original
-    chunk remains in its source namespace.
+    Despite the name, this performs a content **copy** into ``target``,
+    not a reference link. The new chunk has a fresh UUID; deleting the
+    source does not delete the copy and updating the source does not
+    propagate. Source linkage is recorded only via a
+    ``shared-from=<source-uuid>`` tag on the new chunk so audit tools
+    can trace provenance. The function name is preserved for API
+    stability — true cross-reference / link semantics (no duplication,
+    bidirectional propagation) are tracked as a separate RFC follow-up.
+
+    Tags from the source chunk are carried over verbatim, with one
+    exception: any pre-existing ``shared-from=...`` tag is **dropped**
+    so a chain of re-shares produces ``shared-from=<immediate-parent>``
+    only, not a growing audit chain. Use the parent UUID to walk back
+    one hop at a time if needed.
 
     Args:
-        chunk_id: UUID of the chunk to share
-        target: Target namespace — 'shared' or 'agent-runtime:{agent_id}'
+        chunk_id: UUID of the chunk to copy
+        target: Target namespace — ``'shared'`` or ``'agent-runtime:{agent_id}'``
     """
     from uuid import UUID
 
@@ -139,14 +170,14 @@ async def mem_agent_share(
     if chunk is None:
         return f"Chunk {chunk_id} not found."
 
-    # Create a cross-reference link instead of copying
-    # This avoids data duplication while maintaining the relationship
+    inherited_tags = _build_shared_tags(chunk.metadata.tags, chunk_id)
+
     from memtomem.server.tools.memory_crud import mem_add
 
     result = await mem_add(
         content=chunk.content,
         title=f"Shared: {' > '.join(chunk.metadata.heading_hierarchy) if chunk.metadata.heading_hierarchy else 'memory'}",
-        tags=list(chunk.metadata.tags),
+        tags=inherited_tags,
         namespace=target,
         ctx=ctx,
     )
