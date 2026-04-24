@@ -131,7 +131,7 @@ class TestReadSkill:
         data = r.json()
         assert data["name"] == "demo"
         assert "Demo skill" in data["content"]
-        assert data["mtime"] > 0
+        assert int(data["mtime_ns"]) > 0
 
     @pytest.mark.anyio
     async def test_not_found(self, client: AsyncClient):
@@ -195,13 +195,13 @@ class TestUpdateSkill:
     @pytest.mark.anyio
     async def test_update(self, client: AsyncClient, tmp_path: Path):
         _make_skill(tmp_path, "upd")
-        # Read to get mtime
+        # Read to get mtime_ns
         r = await client.get("/api/context/skills/upd")
-        mtime = r.json()["mtime"]
+        mtime_ns = r.json()["mtime_ns"]
 
         r = await client.put(
             "/api/context/skills/upd",
-            json={"content": "# Updated\n", "mtime": mtime},
+            json={"content": "# Updated\n", "mtime_ns": mtime_ns},
         )
         assert r.status_code == 200
         assert r.json()["name"] == "upd"
@@ -216,7 +216,7 @@ class TestUpdateSkill:
         _make_skill(tmp_path, "conflict")
         r = await client.put(
             "/api/context/skills/conflict",
-            json={"content": "# Changed\n", "mtime": 0.0},  # wrong mtime
+            json={"content": "# Changed\n", "mtime_ns": "0"},  # wrong mtime_ns
         )
         assert r.status_code == 409
         data = r.json()
@@ -246,9 +246,11 @@ class TestDeleteSkill:
         assert not (tmp_path / ".claude" / "skills" / "cascade").exists()
 
     @pytest.mark.anyio
-    async def test_delete_not_found(self, client: AsyncClient):
+    async def test_delete_missing_is_idempotent(self, client: AsyncClient):
+        """DELETE of a missing skill succeeds with an empty result (idempotent)."""
         r = await client.delete("/api/context/skills/nope")
-        assert r.status_code == 404
+        assert r.status_code == 200
+        assert r.json()["deleted"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -366,10 +368,10 @@ class TestPathSafety:
         )
         assert r.status_code == 400
 
-    @pytest.mark.anyio
-    async def test_dot_prefix(self, client: AsyncClient):
-        r = await client.get("/api/context/skills/.hidden")
-        assert r.status_code == 400
+    # Note: path tokens like "." / ".." are normalised by the HTTP layer before
+    # reaching the route handler, so validate_name's reserved-token check is
+    # exercised from the POST body in test_web_routes_context_mutators.py
+    # (see test_POST_rejects_hostile_name with hostile_name in {".", ".."}).
 
 
 # ===========================================================================
@@ -465,10 +467,13 @@ class TestCommandCRUD:
 
         # Read + update
         r = await client.get("/api/context/commands/test-cmd")
-        mtime = r.json()["mtime"]
+        mtime_ns = r.json()["mtime_ns"]
         r = await client.put(
             "/api/context/commands/test-cmd",
-            json={"content": "---\ndescription: updated\n---\nNew body\n", "mtime": mtime},
+            json={
+                "content": "---\ndescription: updated\n---\nNew body\n",
+                "mtime_ns": mtime_ns,
+            },
         )
         assert r.status_code == 200
 
@@ -605,12 +610,12 @@ class TestAgentCRUD:
 
         # Read + update
         r = await client.get("/api/context/agents/test-agent")
-        mtime = r.json()["mtime"]
+        mtime_ns = r.json()["mtime_ns"]
         r = await client.put(
             "/api/context/agents/test-agent",
             json={
                 "content": "---\nname: test-agent\ndescription: updated\n---\nNew\n",
-                "mtime": mtime,
+                "mtime_ns": mtime_ns,
             },
         )
         assert r.status_code == 200

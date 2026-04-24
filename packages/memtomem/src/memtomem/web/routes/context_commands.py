@@ -10,6 +10,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from memtomem.context._atomic import atomic_write_text
+from memtomem.context._names import validate_name
 from memtomem.context.commands import (
     CANONICAL_COMMAND_ROOT,
     COMMAND_GENERATORS,
@@ -35,16 +37,17 @@ def _commands_root(project_root: Path) -> Path:
     return project_root / CANONICAL_COMMAND_ROOT
 
 
-def _validate_name(name: str, project_root: Path) -> Path | None:
-    if not name or "/" in name or "\\" in name or name.startswith("."):
-        return None
-    target = _commands_root(project_root) / f"{name}.md"
+def _canonical_command_path(project_root: Path, raw_name: str) -> Path:
+    """Validate the name via core and return the canonical command path."""
+    name = validate_name(raw_name, kind="command")
+    return _commands_root(project_root) / f"{name}.md"
+
+
+def _safe_rel(p: Path, project_root: Path) -> str:
     try:
-        if not target.resolve().is_relative_to(_commands_root(project_root).resolve()):
-            return None
-    except (ValueError, RuntimeError):
-        return None
-    return target
+        return str(p.relative_to(project_root))
+    except ValueError:
+        return str(p)
 
 
 # ── List ─────────────────────────────────────────────────────────────────
@@ -88,16 +91,14 @@ async def read_command(
     name: str,
     project_root: Path = Depends(get_project_root),
 ) -> dict:
-    cmd_path = _validate_name(name, project_root)
-    if cmd_path is None:
-        raise ValueError(f"Invalid command name: {name}")
+    cmd_path = _canonical_command_path(project_root, name)
     if not cmd_path.is_file():
         raise KeyError(name)
 
     content = cmd_path.read_text(encoding="utf-8")
-    mtime = cmd_path.stat().st_mtime
+    # mtime_ns serialized as string (JS bigint-unsafe).
+    mtime_ns = cmd_path.stat().st_mtime_ns
 
-    # Parse fields for display
     fields: dict = {}
     try:
         parsed = parse_canonical_command(cmd_path)
@@ -110,7 +111,7 @@ async def read_command(
     except CommandParseError:
         pass
 
-    return {"name": name, "content": content, "mtime": mtime, "fields": fields}
+    return {"name": name, "content": content, "mtime_ns": str(mtime_ns), "fields": fields}
 
 
 # ── Rendered (per-runtime output with dropped fields) ────────────────────
@@ -121,9 +122,7 @@ async def rendered_command(
     name: str,
     project_root: Path = Depends(get_project_root),
 ) -> JSONResponse:
-    cmd_path = _validate_name(name, project_root)
-    if cmd_path is None:
-        raise ValueError(f"Invalid command name: {name}")
+    cmd_path = _canonical_command_path(project_root, name)
     if not cmd_path.is_file():
         raise KeyError(name)
 
@@ -171,17 +170,14 @@ async def create_command(
     body: CommandCreateRequest,
     project_root: Path = Depends(get_project_root),
 ) -> dict:
-    cmd_path = _validate_name(body.name, project_root)
-    if cmd_path is None:
-        raise ValueError(f"Invalid command name: {body.name}")
+    cmd_path = _canonical_command_path(project_root, body.name)
 
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
                 if cmd_path.exists():
                     raise ValueError(f"Command '{body.name}' already exists")
-                cmd_path.parent.mkdir(parents=True, exist_ok=True)
-                cmd_path.write_text(body.content, encoding="utf-8")
+                atomic_write_text(cmd_path, body.content)
     except TimeoutError:
         raise HTTPException(503, "Command create timed out — another sync may be in progress")
     return {"name": body.name, "canonical_path": str(cmd_path.relative_to(project_root))}
@@ -192,7 +188,8 @@ async def create_command(
 
 class CommandUpdateRequest(BaseModel):
     content: str
-    mtime: float
+    # mtime_ns is transported as a string (JS bigint-unsafe); parsed to int in handler.
+    mtime_ns: str
 
 
 @router.put("/context/commands/{name}")
@@ -201,25 +198,33 @@ async def update_command(
     body: CommandUpdateRequest,
     project_root: Path = Depends(get_project_root),
 ) -> JSONResponse:
-    cmd_path = _validate_name(name, project_root)
-    if cmd_path is None:
-        raise ValueError(f"Invalid command name: {name}")
+    cmd_path = _canonical_command_path(project_root, name)
     if not cmd_path.is_file():
         raise KeyError(name)
 
-    current_mtime = cmd_path.stat().st_mtime
-    if current_mtime != body.mtime:
-        return JSONResponse(
-            status_code=409,
-            content={
-                "status": "aborted",
-                "reason": "File was modified by another process. Reload and retry.",
-                "mtime": current_mtime,
-            },
-        )
+    try:
+        body_mtime_ns = int(body.mtime_ns)
+    except ValueError:
+        raise HTTPException(422, f"Invalid mtime_ns: {body.mtime_ns!r}")
 
-    cmd_path.write_text(body.content, encoding="utf-8")
-    return JSONResponse(content={"name": name, "mtime": cmd_path.stat().st_mtime})
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                current_mtime_ns = cmd_path.stat().st_mtime_ns
+                if current_mtime_ns != body_mtime_ns:
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "status": "aborted",
+                            "reason": ("File was modified by another process. Reload and retry."),
+                            "mtime_ns": str(current_mtime_ns),
+                        },
+                    )
+                atomic_write_text(cmd_path, body.content)
+                new_mtime_ns = cmd_path.stat().st_mtime_ns
+    except TimeoutError:
+        raise HTTPException(503, "Command update timed out — another sync may be in progress")
+    return JSONResponse(content={"name": name, "mtime_ns": str(new_mtime_ns)})
 
 
 # ── Delete ───────────────────────────────────────────────────────────────
@@ -231,26 +236,39 @@ async def delete_command(
     cascade: bool = Query(False),
     project_root: Path = Depends(get_project_root),
 ) -> dict:
-    cmd_path = _validate_name(name, project_root)
-    if cmd_path is None:
-        raise ValueError(f"Invalid command name: {name}")
-    if not cmd_path.is_file():
-        raise KeyError(name)
+    cmd_path = _canonical_command_path(project_root, name)
 
-    cmd_path.unlink()
-    removed = [str(cmd_path.relative_to(project_root))]
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                removed: list[str] = []
+                skipped: list[dict[str, str]] = []
 
-    if cascade:
-        for gen in COMMAND_GENERATORS.values():
-            target = gen.target_file(project_root, name)
-            if target.is_file():
-                target.unlink()
-                try:
-                    removed.append(str(target.relative_to(project_root)))
-                except ValueError:
-                    removed.append(str(target))  # user-scope paths
+                if cmd_path.is_file():
+                    try:
+                        cmd_path.unlink()
+                        removed.append(_safe_rel(cmd_path, project_root))
+                    except OSError as e:
+                        skipped.append(
+                            {"path": _safe_rel(cmd_path, project_root), "reason": str(e)}
+                        )
 
-    return {"deleted": removed}
+                if cascade:
+                    for gen in COMMAND_GENERATORS.values():
+                        target = gen.target_file(project_root, name)
+                        if not target.is_file():
+                            continue
+                        try:
+                            target.unlink()
+                            removed.append(_safe_rel(target, project_root))
+                        except OSError as e:
+                            skipped.append(
+                                {"path": _safe_rel(target, project_root), "reason": str(e)}
+                            )
+    except TimeoutError:
+        raise HTTPException(503, "Command delete timed out — another sync may be in progress")
+
+    return {"deleted": removed, "skipped": skipped}
 
 
 # ── Diff ─────────────────────────────────────────────────────────────────
@@ -261,9 +279,7 @@ async def diff_command(
     name: str,
     project_root: Path = Depends(get_project_root),
 ) -> dict:
-    cmd_path = _validate_name(name, project_root)
-    if cmd_path is None:
-        raise ValueError(f"Invalid command name: {name}")
+    cmd_path = _canonical_command_path(project_root, name)
 
     canonical_content = None
     if cmd_path.is_file():
@@ -320,28 +336,13 @@ async def sync_commands(
         raise HTTPException(503, "Commands sync timed out — another sync may be in progress")
     return {
         "generated": [
-            {"runtime": rt, "path": str(p.relative_to(project_root))}
-            for rt, p in result.generated
-            if _is_relative(p, project_root)
-        ]
-        + [
-            {"runtime": rt, "path": str(p)}
-            for rt, p in result.generated
-            if not _is_relative(p, project_root)
+            {"runtime": rt, "path": _safe_rel(p, project_root)} for rt, p in result.generated
         ],
         "dropped": [
             {"runtime": rt, "name": name, "fields": fields} for rt, name, fields in result.dropped
         ],
         "skipped": [{"runtime": rt, "reason": reason} for rt, reason in result.skipped],
     }
-
-
-def _is_relative(p: Path, root: Path) -> bool:
-    try:
-        p.relative_to(root)
-        return True
-    except ValueError:
-        return False
 
 
 # ── Import ───────────────────────────────────────────────────────────────
