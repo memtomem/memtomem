@@ -136,6 +136,8 @@ def step_header(state: dict, title: str) -> None:
     if position is not None:
         current, _total = position
         click.secho(f"{current}. {title}", fg="yellow", bold=True)
+        nav_hint = "(b: back, q: quit)" if current > 1 else "(q: quit)"
     else:
         click.secho(title, fg="yellow", bold=True)
-    click.echo(click.style("  (b: back, q: quit)", dim=True))
+        nav_hint = "(b: back, q: quit)"
+    click.echo(click.style(f"  {nav_hint}", dim=True))
