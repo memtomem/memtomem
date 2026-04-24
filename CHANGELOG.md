@@ -23,6 +23,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `BaseStore` (`aput` / `aget` / `alist_namespaces`); that surface
   remains a follow-up.
 
+- **`mm agent` CLI: `register`, `list`, `share`, plus hidden `debug-resolve`.**
+  Mirrors the `mem_agent_*` MCP tools so operators don't have to spin up
+  an MCP client for one-off agent setup. `mm agent list [--json]` groups
+  registered agents (`agent-runtime:` namespaces) with the cross-agent
+  `shared` namespace; `mm agent share <chunk-id> [--target ...]`
+  performs the same content copy + `shared-from=<src>` audit tag as the
+  MCP tool. The hidden `mm agent debug-resolve` dumps the namespace
+  filter `mem_agent_search` would resolve given simulated
+  `current_agent_id` / `current_namespace` / `--include-shared` inputs,
+  as JSON — for use in multi-agent integration scripts so they can
+  assert namespace resolution without standing up an MCP client.
+
 - **`mem_import` gains `on_conflict` and `preserve_ids` (bundle schema v2).**
   Bundles now carry per-chunk `chunk_id` + `content_hash` so importers can
   dedup by content across instances. `on_conflict` accepts `"skip"`
