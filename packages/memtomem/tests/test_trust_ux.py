@@ -65,7 +65,9 @@ async def trust_components(tmp_path, monkeypatch):
     # non-zero so upsert_chunks works even though dense search itself is off.
     config.embedding.dimension = 1024
     config.search.enable_dense = False  # BM25 only — no embedder required
-    # Keep the default system prefix but spell it out for readability.
+    # Narrow to ``archive:`` only so the trust-UX fixture stays focused on the
+    # archive-hint path. The runtime default also includes ``agent-runtime:``,
+    # but multi-agent isolation is exercised by ``test_multi_agent`` instead.
     config.search.system_namespace_prefixes = ["archive:"]
 
     import memtomem.config as _cfg

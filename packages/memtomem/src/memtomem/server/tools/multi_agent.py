@@ -9,10 +9,6 @@ from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 from memtomem.storage.sqlite_namespace import sanitize_namespace_segment
 
-# Re-export for callers that previously imported the local-private symbol.
-# ``AGENT_NAMESPACE_PREFIX`` is the canonical source — see ``constants.py``.
-_AGENT_NAMESPACE_PREFIX = AGENT_NAMESPACE_PREFIX
-
 
 @mcp.tool()
 @tool_handler

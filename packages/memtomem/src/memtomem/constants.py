@@ -14,17 +14,13 @@ from typing import Final
 
 # Multi-agent buckets. The ``agent-runtime:<agent-id>`` namespace is a
 # *convenience* isolation boundary, not a security boundary — see the
-# multi-agent guide for the threat model.
+# multi-agent guide for the threat model. Provider-ingestion namespace
+# prefixes (``claude-memory:``, ``gemini-memory:``, ``codex-memory:``)
+# stay as locally-defined literals in ``cli/ingest_cmd.py`` for now;
+# promoting them here belongs in the same change that wires them up,
+# not this PR.
 AGENT_NAMESPACE_PREFIX: Final[str] = "agent-runtime:"
 SHARED_NAMESPACE: Final[str] = "shared"
-
-# Provider-ingestion buckets created by ``mm ingest claude-memory`` /
-# ``mm ingest gemini-memory`` / ``mm ingest codex-memory``. Re-exported so
-# downstream code can derive ``isinstance``-style checks without restating
-# the literal.
-CLAUDE_MEMORY_NAMESPACE_PREFIX: Final[str] = "claude-memory:"
-GEMINI_MEMORY_NAMESPACE_PREFIX: Final[str] = "gemini-memory:"
-CODEX_MEMORY_NAMESPACE_PREFIX: Final[str] = "codex-memory:"
 
 # Default ``system_namespace_prefixes`` — namespaces matching any of these
 # prefixes are excluded from default ``mem_search`` (``namespace=None``)
