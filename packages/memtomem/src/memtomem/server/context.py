@@ -95,6 +95,14 @@ class AppContext:
     webhook_manager: object | None = None
     current_namespace: str | None = None
     current_session_id: str | None = None
+    # Set by ``mem_session_start(agent_id=...)`` and reset by
+    # ``mem_session_end``. ``mem_agent_search(agent_id=None)`` falls back to
+    # this value before falling back to ``current_namespace`` — so an agent
+    # that started a session does not need to repeat its agent_id on every
+    # tool call. Lives on a separate ``_session_lock`` (not ``_config_lock``)
+    # because session state has a different lifetime / mutation cadence than
+    # config — mixing the two locks would entangle their contention paths.
+    current_agent_id: str | None = None
     # Internal state — not part of the public ``__init__`` surface; populated
     # by ``ensure_initialized`` / ``from_components``. The watcher /
     # scheduler / policy_scheduler / health_watchdog handles are populated
@@ -114,6 +122,10 @@ class AppContext:
     _dim_mismatch_announced: bool = False
     _config_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _init_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Guards mutations of ``current_session_id`` + ``current_agent_id``.
+    # Kept distinct from ``_config_lock`` so a long-running config write
+    # cannot block a session start, and vice versa.
+    _session_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     # ── component accessors ───────────────────────────────────────────────
     # These raise ``RuntimeError`` if accessed before ``ensure_initialized``

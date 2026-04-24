@@ -19,9 +19,18 @@ imports the constant directly (per ``feedback_pin_test_constant_over_source_scan
 ``shared-from=<source-uuid>`` tag on the copy. Re-sharing must not
 accumulate a chain of inherited ``shared-from=...`` tags — that's the
 dedup invariant unit-tested at the helper seam.
+
+``TestResolveAgentNamespace`` pins the priority order
+``mem_agent_search`` follows when ``agent_id`` is omitted:
+explicit arg > ``current_agent_id`` (set by the active session) >
+``current_namespace`` (legacy fallback). Drift here would break the
+"agent_id inherits via session context" promise documented on the
+multi-agent guide.
 """
 
 from __future__ import annotations
+
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,7 +42,11 @@ from memtomem.constants import (
     default_system_prefixes,
 )
 from memtomem.server.component_factory import close_components, create_components
-from memtomem.server.tools.multi_agent import _SHARED_FROM_TAG_PREFIX, _build_shared_tags
+from memtomem.server.tools.multi_agent import (
+    _SHARED_FROM_TAG_PREFIX,
+    _build_shared_tags,
+    _resolve_agent_namespace,
+)
 from memtomem.storage.sqlite_namespace import sanitize_namespace_segment
 
 from helpers import make_chunk
@@ -243,3 +256,43 @@ class TestSharedFromTags:
     def test_handles_empty_source_tags(self):
         out = _build_shared_tags((), "src-uuid")
         assert out == [f"{_SHARED_FROM_TAG_PREFIX}src-uuid"]
+
+
+class TestResolveAgentNamespace:
+    """Priority order for ``_resolve_agent_namespace``:
+
+    1. Explicit ``agent_id`` arg.
+    2. ``app.current_agent_id`` (set by ``mem_session_start``).
+    3. ``app.current_namespace`` (legacy fallback).
+
+    Returns ``None`` when none of the three resolves.
+    """
+
+    def _app(self, current_agent_id: str | None, current_namespace: str | None):
+        return SimpleNamespace(
+            current_agent_id=current_agent_id,
+            current_namespace=current_namespace,
+        )
+
+    def test_explicit_agent_id_wins(self):
+        app = self._app(current_agent_id="planner", current_namespace="archive:old")
+        assert _resolve_agent_namespace(app, "coder") == f"{AGENT_NAMESPACE_PREFIX}coder"
+
+    def test_falls_back_to_current_agent_id(self):
+        app = self._app(current_agent_id="planner", current_namespace="archive:old")
+        assert _resolve_agent_namespace(app, None) == f"{AGENT_NAMESPACE_PREFIX}planner"
+
+    def test_falls_back_to_current_namespace_when_no_session_agent(self):
+        """Legacy fallback for callers that don't use sessions yet."""
+        app = self._app(current_agent_id=None, current_namespace="legacy:project")
+        assert _resolve_agent_namespace(app, None) == "legacy:project"
+
+    def test_returns_none_when_nothing_resolves(self):
+        app = self._app(current_agent_id=None, current_namespace=None)
+        assert _resolve_agent_namespace(app, None) is None
+
+    def test_explicit_arg_overrides_even_when_session_active(self):
+        """Explicit ``agent_id`` is the strongest signal — agents can override
+        their own session context for a one-off cross-agent query."""
+        app = self._app(current_agent_id="planner", current_namespace="legacy:ns")
+        assert _resolve_agent_namespace(app, "coder") == f"{AGENT_NAMESPACE_PREFIX}coder"

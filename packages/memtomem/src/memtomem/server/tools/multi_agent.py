@@ -4,10 +4,34 @@ from __future__ import annotations
 
 from memtomem.constants import AGENT_NAMESPACE_PREFIX, SHARED_NAMESPACE
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app_initialized
+from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 from memtomem.storage.sqlite_namespace import sanitize_namespace_segment
+
+
+def _resolve_agent_namespace(app: AppContext, agent_id: str | None) -> str | None:
+    """Resolve the namespace ``mem_agent_search`` should query.
+
+    Priority order (each falls back to the next when ``None``):
+
+    1. Explicit ``agent_id`` argument — the caller wants to override the
+       session context for this single call.
+    2. ``app.current_agent_id`` — set by ``mem_session_start(agent_id=...)``;
+       lets agents avoid repeating their identity on every tool call.
+    3. ``app.current_namespace`` — pre-multi-agent legacy fallback. Kept
+       so workflows that pre-date session-driven agent inheritance keep
+       working unchanged.
+
+    Returns ``None`` if no source resolved a namespace, in which case
+    the caller treats the search as un-pinned.
+    """
+
+    if agent_id:
+        return f"{AGENT_NAMESPACE_PREFIX}{agent_id}"
+    if app.current_agent_id:
+        return f"{AGENT_NAMESPACE_PREFIX}{app.current_agent_id}"
+    return app.current_namespace
 
 
 @mcp.tool()
@@ -86,7 +110,7 @@ async def mem_agent_search(
     app = await _get_app_initialized(ctx)
     from memtomem.server.formatters import _format_results
 
-    agent_ns = f"{AGENT_NAMESPACE_PREFIX}{agent_id}" if agent_id else app.current_namespace
+    agent_ns = _resolve_agent_namespace(app, agent_id)
 
     # Build namespace filter
     if include_shared and agent_ns:

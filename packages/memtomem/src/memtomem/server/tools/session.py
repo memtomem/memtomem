@@ -2,12 +2,48 @@
 
 from __future__ import annotations
 
+import logging
 from uuid import uuid4
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app_initialized
+from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+
+logger = logging.getLogger(__name__)
+
+
+async def _end_active_session_inline(app: AppContext, reason: str) -> str | None:
+    """End the currently-active session without resetting ``current_*`` state.
+
+    Returns a one-line warning describing what was rolled forward, or
+    ``None`` when no session was active. Caller is responsible for
+    resetting ``current_session_id`` / ``current_agent_id`` afterwards
+    (typically by overwriting them as part of a fresh session start).
+    """
+
+    session_id = app.current_session_id
+    if not session_id:
+        return None
+
+    events = await app.storage.get_session_events(session_id)
+    event_counts: dict[str, int] = {}
+    for e in events:
+        event_counts[e["event_type"]] = event_counts.get(e["event_type"], 0) + 1
+
+    await app.storage.end_session(
+        session_id,
+        f"[auto-ended: {reason}]",
+        {"event_counts": event_counts, "auto_ended": True},
+    )
+    await app.storage.scratch_cleanup(session_id)
+    logger.warning(
+        "mem_session_start auto-ended previous session %s (%s events) — %s",
+        session_id,
+        len(events),
+        reason,
+    )
+    return f"(auto-ended previous session {session_id[:8]}... — {reason})"
 
 
 @mcp.tool()
@@ -21,8 +57,20 @@ async def mem_session_start(
 ) -> str:
     """Start a new episodic memory session.
 
-    Creates a session record and sets it as the current session.
-    All subsequent tool calls will be tracked as session events.
+    Creates a session record and sets it as the current session. All
+    subsequent tool calls will be tracked as session events. The
+    ``agent_id`` is recorded on ``AppContext.current_agent_id`` so that
+    multi-agent tools (``mem_agent_search`` and friends) can resolve the
+    active agent without the caller passing it on every call.
+
+    State transitions:
+
+    * No active session → records the new session, sets
+      ``current_session_id`` and ``current_agent_id``.
+    * Active session present → the previous session is **auto-ended**
+      (with a warning logged and an inline notice in the return string)
+      and the new session takes its place. The previous ``agent_id`` is
+      replaced by the new one — agents do not stack.
 
     Args:
         agent_id: Identifier for the agent starting the session
@@ -33,12 +81,21 @@ async def mem_session_start(
     session_id = str(uuid4())
     effective_ns = namespace or app.current_namespace or "default"
 
-    metadata = {"title": title} if title else {}
-    await app.storage.create_session(session_id, agent_id, effective_ns, metadata=metadata)
-    async with app._config_lock:
+    auto_end_notice: str | None = None
+    async with app._session_lock:
+        if app.current_session_id:
+            auto_end_notice = await _end_active_session_inline(
+                app, reason="superseded by new mem_session_start"
+            )
+
+        metadata = {"title": title} if title else {}
+        await app.storage.create_session(session_id, agent_id, effective_ns, metadata=metadata)
         app.current_session_id = session_id
+        app.current_agent_id = agent_id
 
     lines = [f"Session started: {session_id}"]
+    if auto_end_notice:
+        lines.append(auto_end_notice)
     if title:
         lines.append(f"- Title: {title}")
     lines.append(f"- Agent: {agent_id}")
@@ -55,8 +112,10 @@ async def mem_session_end(
 ) -> str:
     """End the current episodic memory session.
 
-    Closes the session, saves an optional summary, and records
-    event statistics. Working memory bound to this session is cleaned up.
+    Closes the session, saves an optional summary, and records event
+    statistics. Working memory bound to this session is cleaned up.
+    Resets both ``current_session_id`` and ``current_agent_id`` so the
+    next ``mem_agent_search`` falls back to ``current_namespace``.
 
     Args:
         summary: Optional summary of what was accomplished in this session
@@ -79,8 +138,9 @@ async def mem_session_end(
     # Cleanup session-bound working memory
     cleaned = await app.storage.scratch_cleanup(session_id)
 
-    async with app._config_lock:
+    async with app._session_lock:
         app.current_session_id = None
+        app.current_agent_id = None
 
     lines = [
         f"Session ended: {session_id}",

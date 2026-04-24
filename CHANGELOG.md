@@ -70,6 +70,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `shared-from=...` tag before appending so audit chains do not grow
   unbounded.
 
+- **`mem_session_start` now records `agent_id` so `mem_agent_search`
+  inherits it via session context.** Previously `mem_session_start`
+  only set `current_session_id`, while `mem_agent_search(agent_id=None)`
+  fell back to `current_namespace` — a different axis — so the
+  multi-agent guide's "agent_id is not auto-detected, but inherited via
+  session context" promise silently broke. New `current_agent_id` field
+  on `AppContext`, guarded by a dedicated `_session_lock` (kept distinct
+  from `_config_lock` so config writes can't block session updates and
+  vice versa). `_resolve_agent_namespace` helper documents the priority:
+  explicit `agent_id` arg > `current_agent_id` > `current_namespace`.
+  Calling `mem_session_start` while a session is already active now
+  auto-ends the previous session (warning log + inline notice in the
+  return string) instead of silently overwriting the pointer; the
+  storage row for the auto-ended session is closed with an
+  `auto_ended: true` metadata flag for audit. `mem_session_end` resets
+  both fields.
+
 ## [0.1.27] — 2026-04-24
 
 Hotfix release. Closes the multi-instance bug (#444): running
