@@ -50,6 +50,30 @@ from memtomem.server.tools.session import mem_session_end, mem_session_start
 
 from helpers import make_chunk
 
+# Developer ``MEMTOMEM_*`` env vars that would override the in-test
+# config and break hermeticity. Add new top-level config sections here
+# when they grow an env-var binding.
+_MEMTOMEM_ENV_VARS = (
+    "MEMTOMEM_EMBEDDING__PROVIDER",
+    "MEMTOMEM_EMBEDDING__MODEL",
+    "MEMTOMEM_EMBEDDING__DIMENSION",
+    "MEMTOMEM_STORAGE__SQLITE_PATH",
+    "MEMTOMEM_INDEXING__MEMORY_DIRS",
+)
+
+
+def _isolate_memtomem_env(monkeypatch) -> None:
+    """Strip ``MEMTOMEM_*`` env vars and stub out ``load_config_overrides``
+    so a freshly constructed ``Mem2MemConfig`` is not mutated by the
+    developer's ``~/.memtomem/config.json`` or shell environment.
+    """
+    for var in _MEMTOMEM_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+    import memtomem.config as _cfg
+
+    monkeypatch.setattr(_cfg, "load_config_overrides", lambda c: None)
+
 
 class _StubCtx:
     """Minimal stand-in for MCP ``Context`` so MCP tools can be invoked
@@ -78,24 +102,13 @@ async def integration_components(tmp_path, monkeypatch):
     mem_dir = tmp_path / "memories"
     mem_dir.mkdir()
 
-    for var in (
-        "MEMTOMEM_EMBEDDING__PROVIDER",
-        "MEMTOMEM_EMBEDDING__MODEL",
-        "MEMTOMEM_EMBEDDING__DIMENSION",
-        "MEMTOMEM_STORAGE__SQLITE_PATH",
-        "MEMTOMEM_INDEXING__MEMORY_DIRS",
-    ):
-        monkeypatch.delenv(var, raising=False)
+    _isolate_memtomem_env(monkeypatch)
 
     config = Mem2MemConfig()
     config.storage.sqlite_path = db_path
     config.indexing.memory_dirs = [mem_dir]
     config.embedding.dimension = 1024
     config.search.enable_dense = False  # BM25-only — no embedder needed
-
-    import memtomem.config as _cfg
-
-    monkeypatch.setattr(_cfg, "load_config_overrides", lambda c: None)
 
     comp = await create_components(config)
     try:
@@ -190,13 +203,15 @@ class TestCaseBShareTrail:
         await comp.storage.upsert_chunks([source])
         source_uuid = str(source.id)
 
-        share_out = await mem_agent_share(  # type: ignore[arg-type]
+        await mem_agent_share(  # type: ignore[arg-type]
             chunk_id=source_uuid, target=SHARED_NAMESPACE, ctx=ctx
         )
-        assert SHARED_NAMESPACE in share_out
 
         # Inspect the shared namespace directly: there should be a copy
-        # with the audit tag and original tags carried over.
+        # with the audit tag and original tags carried over. The strong
+        # check is the copy below; we deliberately don't pin the
+        # ``mem_agent_share`` return-string format so cosmetic phrasing
+        # changes don't break this test.
         shared_chunks = []
         for ns, _count in await comp.storage.list_namespaces():
             if ns == SHARED_NAMESPACE:
@@ -349,18 +364,7 @@ class TestCaseDLangGraphAdapter:
         mem_dir = tmp_path / "lg_memories"
         mem_dir.mkdir()
 
-        for var in (
-            "MEMTOMEM_EMBEDDING__PROVIDER",
-            "MEMTOMEM_EMBEDDING__MODEL",
-            "MEMTOMEM_EMBEDDING__DIMENSION",
-            "MEMTOMEM_STORAGE__SQLITE_PATH",
-            "MEMTOMEM_INDEXING__MEMORY_DIRS",
-        ):
-            monkeypatch.delenv(var, raising=False)
-
-        import memtomem.config as _cfg
-
-        monkeypatch.setattr(_cfg, "load_config_overrides", lambda c: None)
+        _isolate_memtomem_env(monkeypatch)
 
         store = MemtomemStore(
             config_overrides={
@@ -375,8 +379,11 @@ class TestCaseDLangGraphAdapter:
             assert store._current_agent_id == "planner"
 
             # Seed a competing agent's private chunk via raw storage so
-            # we can verify the search filter excludes it. Going through
-            # ``store.add`` would write to planner's namespace by default.
+            # we can verify the search filter excludes it. ``store.add``
+            # has no ``namespace=`` override that lets us write outside
+            # the bound agent's namespace from this side, so we reach
+            # through ``_ensure_init`` to the underlying components for
+            # this seeding step only.
             comp = await store._ensure_init()  # type: ignore[attr-defined]
             await comp.storage.upsert_chunks(
                 [
@@ -420,18 +427,7 @@ class TestCaseDLangGraphAdapter:
         mem_dir = tmp_path / "lg2_memories"
         mem_dir.mkdir()
 
-        for var in (
-            "MEMTOMEM_EMBEDDING__PROVIDER",
-            "MEMTOMEM_EMBEDDING__MODEL",
-            "MEMTOMEM_EMBEDDING__DIMENSION",
-            "MEMTOMEM_STORAGE__SQLITE_PATH",
-            "MEMTOMEM_INDEXING__MEMORY_DIRS",
-        ):
-            monkeypatch.delenv(var, raising=False)
-
-        import memtomem.config as _cfg
-
-        monkeypatch.setattr(_cfg, "load_config_overrides", lambda c: None)
+        _isolate_memtomem_env(monkeypatch)
 
         store = MemtomemStore(
             config_overrides={
