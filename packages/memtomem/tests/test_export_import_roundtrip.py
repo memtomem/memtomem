@@ -172,11 +172,13 @@ class TestRoundtripBaseline:
                 "postgres vacuum",
                 "쿠버네티스 모니터링",
             ]
+            topk_results: list[tuple[str, list[str], list[str]]] = []
             for q in queries:
                 ra, _ = await comp_a.search_pipeline.search(q, top_k=3)
                 rb, _ = await comp_b.search_pipeline.search(q, top_k=3)
                 ca = [r.chunk.content for r in ra]
                 cb = [r.chunk.content for r in rb]
+                topk_results.append((q, ca, cb))
                 overlap = len(set(ca) & set(cb))
                 print(
                     f"[BASELINE] top-3 '{q}' | overlap={overlap}/3 "
@@ -217,6 +219,24 @@ class TestRoundtripBaseline:
                 "content_hash set must match after roundtrip "
                 "(content preservation through JSON bundle)"
             )
+            # Metadata preserved per content_hash across roundtrip. Pairs were
+            # collected above; any diff in tags/namespace/heading_hierarchy/
+            # source_file means the bundle is losing metadata on the wire.
+            assert not meta_mismatches, (
+                f"metadata drift across roundtrip: {len(meta_mismatches)} field(s) "
+                f"mismatched. First 3: {meta_mismatches[:3]}"
+            )
+            # Top-k result sets must match on both sides. Both instances use the
+            # same ONNX model on identical content, so ranks are deterministic.
+            # Compare as sets (order-insensitive) to tolerate any tie-breaking
+            # difference; a set drift = imported chunks are not equivalent to
+            # the source for retrieval purposes.
+            for q, ca, cb in topk_results:
+                assert set(ca) == set(cb), (
+                    f"top-3 result set drift across roundtrip for {q!r}: "
+                    f"A_only={[c[:40] for c in set(ca) - set(cb)]} "
+                    f"B_only={[c[:40] for c in set(cb) - set(ca)]}"
+                )
         finally:
             await close_components(comp_a)
             await close_components(comp_b)
