@@ -187,6 +187,14 @@ class MarkdownChunker:
             if not text:
                 continue
 
+            # Per-entry metadata blockquote (``> created: ...`` / ``> tags:
+            # [...]``) is promoted to ``metadata.tags`` and stripped from
+            # the chunk content so it doesn't leak into BM25/embedding.
+            section_tags, text = self._extract_section_blockquote_tags(text)
+            if not text.strip():
+                continue
+            combined_tags = tuple(sorted(set(fm_tags) | set(section_tags)))
+
             hierarchy = section["hierarchy"]
             est_tokens = len(text) // _TOKEN_CHAR_RATIO
 
@@ -203,7 +211,7 @@ class MarkdownChunker:
                             chunk_type=ChunkType.MARKDOWN_SECTION,
                             start_line=section["start_line"],
                             end_line=section["end_line"],
-                            tags=tuple(fm_tags),
+                            tags=combined_tags,
                             parent_context=parent_ctx,
                             file_context=file_ctx,
                         ),
@@ -223,7 +231,7 @@ class MarkdownChunker:
                                 end_line=sc["end_line"],
                                 overlap_before=sc.get("overlap_before", 0),
                                 overlap_after=sc.get("overlap_after", 0),
-                                tags=tuple(fm_tags),
+                                tags=combined_tags,
                                 parent_context=parent_ctx,
                                 file_context=file_ctx,
                             ),
@@ -233,34 +241,125 @@ class MarkdownChunker:
         return chunks
 
     @staticmethod
-    def _extract_frontmatter_tags(content: str) -> list[str]:
+    def _parse_tags_value(value: str, trailing_lines: list[str]) -> list[str]:
+        """Parse a ``tags:`` value across the four shapes we accept.
+
+        - Inline list: ``["a", "b"]`` / ``['a', 'b']`` / ``[a, b]``
+        - Single bare value: ``mytag``
+        - Block list: empty ``value`` followed by ``- item`` lines in
+          ``trailing_lines`` (any leading ``> `` should already have been
+          stripped by the caller).
+
+        Returns ``[]`` when nothing parses.
+        """
+        value = value.strip()
+        if value.startswith("[") and value.endswith("]"):
+            return [t.strip().strip("'\"") for t in value[1:-1].split(",") if t.strip()]
+        if value:
+            return [value.strip("'\"")]
+        # Block list shape — walk trailing lines until a non-``- `` line.
+        tags: list[str] = []
+        for raw in trailing_lines:
+            ns = raw.strip()
+            if ns.startswith("- "):
+                tags.append(ns[2:].strip().strip("'\""))
+            elif ns and not ns.startswith("#"):
+                break
+        return tags
+
+    @classmethod
+    def _extract_frontmatter_tags(cls, content: str) -> list[str]:
         """Extract tags from YAML frontmatter if present."""
         match = _FRONT_MATTER_RE.match(content)
         if not match:
             return []
-        fm_text = match.group(1)
-        # Parse tags line: "tags: [a, b, c]" or "tags:\n  - a\n  - b"
-        for line in fm_text.splitlines():
+        fm_lines = match.group(1).splitlines()
+        for idx, line in enumerate(fm_lines):
             stripped = line.strip()
             if stripped.startswith("tags:"):
-                value = stripped[5:].strip()
-                if value.startswith("[") and value.endswith("]"):
-                    # Inline list: tags: [project, api, backend]
-                    return [t.strip().strip("'\"") for t in value[1:-1].split(",") if t.strip()]
-                elif value:
-                    # Single value: tags: sometag
-                    return [value.strip("'\"")]
-                else:
-                    # Block list: tags:\n  - a\n  - b
-                    tags = []
-                    for next_line in fm_text.splitlines()[fm_text.splitlines().index(line) + 1 :]:
-                        ns = next_line.strip()
-                        if ns.startswith("- "):
-                            tags.append(ns[2:].strip().strip("'\""))
-                        elif ns and not ns.startswith("#"):
-                            break
-                    return tags
+                return cls._parse_tags_value(stripped[5:], fm_lines[idx + 1 :])
         return []
+
+    @classmethod
+    def _extract_section_blockquote_tags(cls, text: str) -> tuple[list[str], str]:
+        """Detect a section-leading blockquote group, extract ``tags:`` from it.
+
+        ``mem_add`` writes per-entry metadata as a blockquote header
+        (``> created: ...`` plus an optional ``tags:`` line). The chunker
+        promotes that ``tags:`` value into ``ChunkMetadata.tags`` so
+        ``mem_search(tag_filter=...)`` can match. The header itself is
+        stripped from the returned text so it does not leak into BM25 or
+        embedding inputs.
+
+        Section-leading only: the blockquote must be the first non-blank
+        block in *text*. Blockquotes that appear mid-section (a quoted
+        paragraph in body prose) are left untouched, even if they happen
+        to contain a ``tags:`` line.
+
+        Recognises both shapes the writer has emitted:
+        - Canonical: every line starts with ``> `` (post-RFC writer).
+        - Legacy lazy-continuation: a ``> created:`` line followed by a
+          bare ``tags: [...]`` line (CommonMark glues them into one
+          blockquote at render time, and the ``tags`` line carries no
+          ``> `` prefix on disk).
+
+        Returns ``([], text)`` when there is no leading blockquote, or the
+        leading blockquote contains no ``tags:`` key. Returns
+        ``(tags, stripped_text)`` on a hit, with the entire blockquote
+        group plus any immediately-trailing blank lines removed from the
+        returned text.
+        """
+        lines = text.splitlines()
+        # Skip leading blank lines (text is usually .strip()ed already, but
+        # be defensive — _split_section can pass non-stripped chunks).
+        i = 0
+        while i < len(lines) and not lines[i].strip():
+            i += 1
+        if i == len(lines) or not lines[i].lstrip().startswith(">"):
+            return [], text
+
+        # Collect the contiguous blockquote group, including lazy-continuation
+        # lines: a non-blank, non-``>``-prefixed line that immediately follows
+        # a ``>``-prefixed line without an intervening blank line.
+        block_inner: list[str] = []
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.lstrip()
+            if not stripped:
+                break
+            if stripped.startswith(">"):
+                # Strip leading ``>`` and one optional space.
+                inner = stripped[1:]
+                if inner.startswith(" "):
+                    inner = inner[1:]
+                block_inner.append(inner)
+                i += 1
+                continue
+            # Non-blank, non-``>``: lazy continuation only if we already
+            # collected at least one ``>`` line. Otherwise this is body text
+            # that just happens to start the section, not a blockquote.
+            if block_inner:
+                block_inner.append(stripped)
+                i += 1
+                continue
+            break
+
+        # Find a ``tags:`` key inside the block (case-sensitive).
+        tags: list[str] = []
+        for idx, inner in enumerate(block_inner):
+            inner_stripped = inner.strip()
+            if inner_stripped.startswith("tags:"):
+                tags = cls._parse_tags_value(inner_stripped[5:], block_inner[idx + 1 :])
+                break
+
+        if not tags:
+            return [], text
+
+        # Strip the blockquote group plus immediately-trailing blank lines.
+        rest = lines[i:]
+        while rest and not rest[0].strip():
+            rest = rest[1:]
+        return tags, "\n".join(rest)
 
     def _split_section(self, text: str, section: dict) -> list[dict]:
         """Split an oversized section by paragraphs or sentences."""

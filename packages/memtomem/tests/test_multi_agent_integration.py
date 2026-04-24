@@ -226,16 +226,16 @@ class TestCaseBShareTrail:
         assert len(shared_chunks) >= 1, "expected at least one shared copy"
         copy = shared_chunks[0]
         assert copy.id != source.id, "share must produce a fresh UUID, not reuse the source"
-        # ``mem_add`` writes tags into the markdown blockquote header
-        # rather than promoting them to ``ChunkMetadata.tags`` — the
-        # indexer only extracts YAML frontmatter, not the ``> tags:
-        # [...]`` syntax. The audit trail therefore lives in the chunk
-        # *content* (still BM25-searchable). Promoting the blockquote
-        # header to first-class ``metadata.tags`` so ``tag_filter`` can
-        # match ``shared-from=<id>`` is tracked as a follow-up RFC.
-        assert f"{_SHARED_FROM_TAG_PREFIX}{source_uuid}" in copy.content
-        assert "cache" in copy.content
-        assert "decision" in copy.content
+        # The chunker now promotes the per-entry ``> tags: [...]``
+        # blockquote header into ``ChunkMetadata.tags`` and strips it
+        # from chunk content (so it does not leak into BM25 / embedding
+        # inputs). Both the inherited source tags and the
+        # ``shared-from=<src>`` audit tag therefore live in
+        # ``metadata.tags``; the chunk content carries only the body.
+        assert f"{_SHARED_FROM_TAG_PREFIX}{source_uuid}" in copy.metadata.tags
+        assert "cache" in copy.metadata.tags
+        assert "decision" in copy.metadata.tags
+        assert "cache strategy" in copy.content
 
     @pytest.mark.asyncio
     async def test_receiving_agent_sees_shared_copy(self, integration_components):
