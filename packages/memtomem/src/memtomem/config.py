@@ -10,6 +10,8 @@ from typing import Annotated, Literal, cast, get_args
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from memtomem.constants import default_system_prefixes
+
 
 @dataclass(frozen=True)
 class MergeStrategy:
@@ -82,11 +84,14 @@ class SearchConfig(BaseSettings):
     # *default* search (``namespace=None``) but remain retrievable with an
     # explicit namespace argument. Keeps system-generated buckets
     # (auto_archive targets, auto_consolidate ``archive:summary`` summaries)
-    # out of day-to-day results while preserving their audit trail.
-    # Set to an empty list to restore the pre-Phase-A.5 behavior where every
-    # namespace is searchable by default.
+    # *and* per-agent private buckets (``agent-runtime:<id>``) out of
+    # day-to-day results while preserving their audit trail. Set to an
+    # empty list to restore the pre-Phase-A.5 behavior where every
+    # namespace is searchable by default. The default list is sourced from
+    # ``memtomem.constants.default_system_prefixes`` so multi_agent and
+    # CLI code can derive the same prefix without re-declaring the literal.
     system_namespace_prefixes: Annotated[list[str], APPEND] = Field(
-        default_factory=lambda: ["archive:"]
+        default_factory=default_system_prefixes
     )
 
     @field_validator("default_top_k", "bm25_candidates", "dense_candidates", "rrf_k")

@@ -20,6 +20,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **`agent-runtime:` is now hidden from default `mem_search` (behavior
+  change).** ``search.system_namespace_prefixes`` default extended from
+  ``["archive:"]`` to ``["archive:", "agent-runtime:"]`` so per-agent
+  private chunks (created by ``mem_agent_register`` / ``mem_agent_search``)
+  no longer leak into ``namespace=None`` search results — restoring the
+  isolation guarantee advertised on the multi-agent guide. The hidden
+  count surfaces through the existing ``hidden_system_ns`` hint, and
+  ``mem_agent_search`` is unaffected because it pins ``namespace=``
+  explicitly. To restore the pre-change behaviour, override
+  ``search.system_namespace_prefixes: []`` in ``config.json`` (or drop
+  ``agent-runtime:`` from the list while keeping ``archive:``). New
+  ``memtomem.constants`` module exports ``AGENT_NAMESPACE_PREFIX``,
+  ``SHARED_NAMESPACE``, and ``default_system_prefixes`` so callers
+  derive the literal from a single source.
+
 - **Default import behaviour flipped to `on_conflict="skip"`.** Previously
   every record got a fresh UUID, so re-importing the same bundle doubled
   row counts and merging bundles with overlapping content produced silent

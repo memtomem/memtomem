@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+from memtomem.constants import AGENT_NAMESPACE_PREFIX, SHARED_NAMESPACE
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 from memtomem.storage.sqlite_namespace import sanitize_namespace_segment
 
-# Automatic namespace prefix for the multi-agent tool. Follows the
-# ``{bucket}-{kind}:`` convention used by the ingest pipeline
-# (``claude-memory:``, ``codex-memory:``) — see #318 for the rule.
-_AGENT_NAMESPACE_PREFIX = "agent-runtime:"
+# Re-export for callers that previously imported the local-private symbol.
+# ``AGENT_NAMESPACE_PREFIX`` is the canonical source — see ``constants.py``.
+_AGENT_NAMESPACE_PREFIX = AGENT_NAMESPACE_PREFIX
 
 
 @mcp.tool()
@@ -40,23 +40,23 @@ async def mem_agent_register(
     if not agent_id:
         return "Error: agent_id must contain at least one allowed character."
     app = await _get_app_initialized(ctx)
-    namespace = f"{_AGENT_NAMESPACE_PREFIX}{agent_id}"
+    namespace = f"{AGENT_NAMESPACE_PREFIX}{agent_id}"
 
     await app.storage.set_namespace_meta(namespace, description=description, color=color)
 
-    # Ensure "shared" namespace exists
-    shared_meta = await app.storage.get_namespace_meta("shared")
+    # Ensure shared namespace exists
+    shared_meta = await app.storage.get_namespace_meta(SHARED_NAMESPACE)
     if shared_meta is None:
         await app.storage.set_namespace_meta(
-            "shared", description="Shared knowledge base for all agents"
+            SHARED_NAMESPACE, description="Shared knowledge base for all agents"
         )
 
     return (
         f"Agent registered: {agent_id}\n"
         f"- Namespace: {namespace}\n"
-        f"- Shared namespace: shared\n"
+        f"- Shared namespace: {SHARED_NAMESPACE}\n"
         f"Use namespace='{namespace}' for agent-specific memories,\n"
-        f"or namespace='shared' for cross-agent knowledge."
+        f"or namespace='{SHARED_NAMESPACE}' for cross-agent knowledge."
     )
 
 
@@ -90,11 +90,11 @@ async def mem_agent_search(
     app = await _get_app_initialized(ctx)
     from memtomem.server.formatters import _format_results
 
-    agent_ns = f"{_AGENT_NAMESPACE_PREFIX}{agent_id}" if agent_id else app.current_namespace
+    agent_ns = f"{AGENT_NAMESPACE_PREFIX}{agent_id}" if agent_id else app.current_namespace
 
     # Build namespace filter
     if include_shared and agent_ns:
-        ns_filter = f"{agent_ns},shared"
+        ns_filter = f"{agent_ns},{SHARED_NAMESPACE}"
     elif agent_ns:
         ns_filter = agent_ns
     else:
@@ -118,7 +118,7 @@ async def mem_agent_search(
 @register("multi_agent")
 async def mem_agent_share(
     chunk_id: str,
-    target: str = "shared",
+    target: str = SHARED_NAMESPACE,
     ctx: CtxType = None,
 ) -> str:
     """Share a memory chunk with another agent or the shared namespace.

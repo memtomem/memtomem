@@ -7,11 +7,13 @@ from typing import TYPE_CHECKING
 
 import click
 
+from memtomem.constants import AGENT_NAMESPACE_PREFIX
+
 if TYPE_CHECKING:
     from memtomem.storage.sqlite_backend import SqliteBackend
 
 _LEGACY_PREFIX = "agent/"
-_CURRENT_PREFIX = "agent-runtime:"
+_CURRENT_PREFIX = AGENT_NAMESPACE_PREFIX
 
 
 @click.group()
