@@ -748,6 +748,12 @@ def _step_settings(state: dict) -> None:
 
 
 def _step_mcp(state: dict) -> None:
+    # #449: ``--mcp`` pre-sets ``state["mcp_choice"]`` via ``_override_from_flags``
+    # in the ``--preset`` branch. Skip the prompt so the flag isn't silently
+    # discarded. The ``-y`` branch omits this step entirely; the default picker
+    # branch applies overrides *after* ``run_steps`` so the key is absent here.
+    if "mcp_choice" in state:
+        return
     step_header(state, "Connect to AI Editor")
     click.echo("  How do you want to connect memtomem?")
     click.echo("    [1] Claude Code (run 'claude mcp add' automatically)")
