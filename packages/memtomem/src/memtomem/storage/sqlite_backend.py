@@ -813,6 +813,25 @@ class SqliteBackend(
         ).fetchall()
         return {row[0]: row[1] for row in rows}
 
+    async def get_chunk_ids_by_hashes(self, content_hashes: Sequence[str]) -> dict[str, UUID]:
+        """Return ``{content_hash: chunk_id}`` for hashes present in the DB.
+
+        Used by import to dedup by content across instances (cross-PC merge,
+        idempotent re-import). If the same hash appears on multiple rows,
+        one of them is returned — the caller must treat hash match as
+        "an equivalent chunk exists," not "the unique row."
+        """
+        if not content_hashes:
+            return {}
+        db = self._get_read_db()
+        unique = list(set(content_hashes))
+        rows = db.execute(
+            f"SELECT content_hash, id FROM chunks "
+            f"WHERE content_hash IN ({placeholders(len(unique))})",
+            unique,
+        ).fetchall()
+        return {row[0]: UUID(row[1]) for row in rows}
+
     async def get_stats(self) -> dict[str, int]:
         db = self._get_read_db()
         total = db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]

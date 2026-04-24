@@ -7,7 +7,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`mem_import` gains `on_conflict` and `preserve_ids` (bundle schema v2).**
+  Bundles now carry per-chunk `chunk_id` + `content_hash` so importers can
+  dedup by content across instances. `on_conflict` accepts `"skip"`
+  (default, idempotent re-import and cross-PC merge), `"update"` (overwrite
+  existing row's metadata while preserving UUID), or `"duplicate"` (pre-v2
+  row-duplication, kept for back-compat). `preserve_ids=True` reuses the
+  bundle's original UUIDs for new inserts in v2 bundles. v1 bundles still
+  import; hashes are derived from content on the fly. Exposed on the
+  `mem_import` MCP tool, `import_chunks()`, and `POST /api/export/import`
+  (`on_conflict` / `preserve_ids` multipart fields). (PR #451 follow-up)
+
 ### Changed
+
+- **Default import behaviour flipped to `on_conflict="skip"`.** Previously
+  every record got a fresh UUID, so re-importing the same bundle doubled
+  row counts and merging bundles with overlapping content produced silent
+  duplicates. Callers that relied on the old row-duplication behaviour
+  must pass `on_conflict="duplicate"` explicitly.
 
 ### Fixed
 

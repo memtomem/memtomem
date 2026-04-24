@@ -607,7 +607,7 @@ class TestExportImport:
         restored = ExportBundle.from_json(json_str)
         assert restored.total_chunks == 1
         assert restored.chunks[0]["content"] == "test"
-        assert restored.version == "1"
+        assert restored.version == "2"
 
     async def test_export_preserves_metadata(self, storage):
         chunk = _chunk(

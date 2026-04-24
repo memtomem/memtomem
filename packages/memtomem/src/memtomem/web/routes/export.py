@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 
 from memtomem.web.deps import get_embedder, get_storage
@@ -55,6 +55,8 @@ async def export_stats(
 @router.post("/import", response_model=ImportResponse)
 async def import_memories(
     file: UploadFile,
+    on_conflict: str = Form("skip"),
+    preserve_ids: bool = Form(False),
     storage=Depends(get_storage),
     embedder=Depends(get_embedder),
 ) -> ImportResponse:
@@ -62,10 +64,15 @@ async def import_memories(
     import tempfile
     from pathlib import Path
 
-    from memtomem.tools.export_import import import_chunks
+    from memtomem.tools.export_import import _VALID_ON_CONFLICT, import_chunks
 
     if not file.filename or not file.filename.endswith(".json"):
         raise HTTPException(status_code=422, detail="Only .json bundle files are accepted.")
+    if on_conflict not in _VALID_ON_CONFLICT:
+        raise HTTPException(
+            status_code=422,
+            detail=f"on_conflict must be one of {sorted(_VALID_ON_CONFLICT)}",
+        )
 
     # Limit upload size to 100 MB
     max_size = 100 * 1024 * 1024
@@ -77,7 +84,13 @@ async def import_memories(
         tmp_path = Path(tmp.name)
 
     try:
-        stats = await import_chunks(storage, embedder, tmp_path)
+        stats = await import_chunks(
+            storage,
+            embedder,
+            tmp_path,
+            on_conflict=on_conflict,  # type: ignore[arg-type]
+            preserve_ids=preserve_ids,
+        )
     finally:
         tmp_path.unlink(missing_ok=True)
 
@@ -86,4 +99,6 @@ async def import_memories(
         imported_chunks=stats.imported_chunks,
         skipped_chunks=stats.skipped_chunks,
         failed_chunks=stats.failed_chunks,
+        conflict_skipped_chunks=stats.conflict_skipped_chunks,
+        updated_chunks=stats.updated_chunks,
     )

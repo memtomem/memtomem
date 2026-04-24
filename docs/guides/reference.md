@@ -514,11 +514,29 @@ Exports chunks with content, metadata, tags, and embeddings as a JSON bundle.
 ### Restore
 
 ```
-mem_import(input_file="~/backup.json")
+mem_import(input_file="~/backup.json")                                # skip duplicates (default)
 mem_import(input_file="~/backup.json", namespace="imported")
+mem_import(input_file="~/backup.json", on_conflict="update")          # overwrite metadata
+mem_import(input_file="~/backup.json", on_conflict="duplicate")       # pre-v2 behaviour
+mem_import(input_file="~/backup.json", preserve_ids=True)             # keep bundle UUIDs
 ```
 
 Import re-embeds all chunks, so it works across different embedding models or machines.
+
+**Conflict resolution** (`on_conflict`, default `"skip"`):
+
+- `"skip"` — drops records whose content already exists in the DB. Re-importing
+  the same bundle is a no-op, and merging bundles with overlapping content
+  adds only the unique side. Recommended for cross-PC sync.
+- `"update"` — records matching an existing content hash overwrite that row's
+  metadata (tags, namespace, heading hierarchy, source_file). The existing
+  UUID is preserved.
+- `"duplicate"` — no hash check; every record is inserted with a fresh UUID.
+  Pre-v2 behaviour, produces row-level duplicates when re-importing.
+
+`preserve_ids=True` reuses the bundle's original chunk UUIDs for new inserts
+(v2 bundles only; UUID-identity across instances). Ignored in `"duplicate"`
+mode.
 
 ### Importing from Obsidian
 

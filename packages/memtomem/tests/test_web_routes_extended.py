@@ -1004,6 +1004,8 @@ class TestImport:
                 imported_chunks=4,
                 skipped_chunks=1,
                 failed_chunks=0,
+                conflict_skipped_chunks=0,
+                updated_chunks=0,
             )
             resp = await client.post(
                 "/api/export/import",

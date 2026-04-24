@@ -1,13 +1,12 @@
-"""Phase 1 baseline: mem_export -> mem_import cross-instance roundtrip.
+"""Cross-instance export -> import roundtrip tests.
 
-Question 1 from the mm export/import plan: if we export chunks from instance A
-and import into a fresh instance B (simulating two PCs), does B reconstitute A?
-
-This test does NOT assert full fidelity. It runs the roundtrip end-to-end with
-the hermetic ONNX embedder and prints the actual numbers (chunk counts,
-content_hash overlap, top-k search overlap, metadata preservation). Hard
-asserts only cover the things we already expect to hold today; everything
-else lands in stdout as the Phase 2 design input.
+Originally Phase 1 baselines; upgraded in Phase 2 to pin the new
+``on_conflict`` semantics. ``test_phase1_baseline`` now hard-asserts
+metadata and top-k fidelity; ``test_reimport_idempotency`` and
+``test_merge_with_content_collision`` assert the Phase 2 (default
+``on_conflict="skip"``) behaviour. The ``test_on_conflict_*`` tests pin
+the three modes individually, including explicit back-compat for
+``"duplicate"`` (the pre-v2 row-duplication behaviour).
 
 Run with: ``uv run pytest tests/test_export_import_roundtrip.py -s``
 (``-s`` to surface the [BASELINE] print lines).
@@ -15,6 +14,7 @@ Run with: ``uv run pytest tests/test_export_import_roundtrip.py -s``
 
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -242,11 +242,9 @@ class TestRoundtripBaseline:
             await close_components(comp_b)
 
     async def test_reimport_idempotency(self, tmp_path):
-        """Importing the same bundle twice into the same DB — duplicates?
-
-        upsert_chunks() dedupes by ``id`` (UUID); import assigns a fresh UUID
-        per record. So re-importing is expected to create duplicate rows with
-        identical content_hash. This records exactly how bad it is today.
+        """Re-importing the same bundle under default ``on_conflict="skip"``
+        must be a no-op: the second import contributes zero new rows and
+        reports every record as ``conflict_skipped``.
         """
         comp_a, mem_a = await _make_onnx_components(tmp_path, "pc_a_re")
         comp_b, _ = await _make_onnx_components(tmp_path, "pc_b_re")
@@ -263,32 +261,31 @@ class TestRoundtripBaseline:
             b2 = await comp_b.storage.recall_chunks(limit=10_000)
 
             hashes_unique_b2 = {c.content_hash for c in b2}
-            # Per-hash row counts reveal duplication factor
-            from collections import Counter
-
             dup_counter = Counter(c.content_hash for c in b2)
             max_dup = max(dup_counter.values()) if dup_counter else 0
 
             print(
-                f"\n[BASELINE] re-import | A={len(chunks_a)} "
+                f"\n[BASELINE] re-import skip | A={len(chunks_a)} "
                 f"after_1st={len(b1)} after_2nd={len(b2)} "
                 f"unique_hashes_B={len(hashes_unique_b2)} max_rows_per_hash={max_dup} "
-                f"s1.imported={s1.imported_chunks} s2.imported={s2.imported_chunks}"
+                f"s1.imported={s1.imported_chunks} s1.conflict_skipped={s1.conflict_skipped_chunks} "
+                f"s2.imported={s2.imported_chunks} s2.conflict_skipped={s2.conflict_skipped_chunks}"
             )
 
-            # Hard asserts on the claims we want to verify
             assert len(b1) == len(chunks_a), "first import should match source"
-            # We EXPECT duplication today — record the expected number so Phase 2
-            # regression-catches the fix (after fix, this should be == len(b1)).
-            assert len(b2) == 2 * len(chunks_a), (
-                f"BASELINE expects 2x duplication after re-import "
-                f"(fresh UUIDs per import). Got {len(b2)} rows for "
-                f"{len(chunks_a)} unique contents."
+            assert s1.imported_chunks == len(chunks_a)
+            assert s1.conflict_skipped_chunks == 0, "empty DB → no conflicts on first import"
+
+            # Phase 2: second import is fully idempotent under skip mode.
+            assert len(b2) == len(b1), (
+                f"re-import must be idempotent under on_conflict='skip': "
+                f"expected {len(b1)} rows, got {len(b2)}"
             )
-            assert len(hashes_unique_b2) == len(chunks_a), (
-                "unique content_hash count should equal original chunk count "
-                "(duplication is row-level, not content-level)"
+            assert s2.imported_chunks == 0, "no new rows on re-import"
+            assert s2.conflict_skipped_chunks == len(chunks_a), (
+                "every bundle record should be conflict-skipped on re-import"
             )
+            assert max_dup == 1, "no row-level duplication in skip mode"
         finally:
             await close_components(comp_a)
             await close_components(comp_b)
@@ -354,10 +351,10 @@ class TestRoundtripBaseline:
     async def test_merge_with_content_collision(self, tmp_path):
         """PC_B has one doc with content byte-identical to a PC_A doc.
 
-        content_hash has an index but NO UNIQUE constraint, and upsert dedupes
-        by UUID. So the expected baseline is: identical content → two rows,
-        same content_hash, different UUIDs. This documents that behaviour for
-        Phase 2 (which should add a content_hash-based skip/update path).
+        Under default ``on_conflict="skip"``, colliding records are dropped
+        and the result has exactly one row per unique content_hash: B's
+        native row survives, A's colliding record is not added. Only the
+        non-colliding A-records contribute new rows.
         """
         comp_a, mem_a = await _make_onnx_components(tmp_path, "pc_a_c")
         comp_b, mem_b = await _make_onnx_components(tmp_path, "pc_b_c")
@@ -379,30 +376,198 @@ class TestRoundtripBaseline:
             stats = await import_chunks(comp_b.storage, comp_b.embedder, bundle_path)
 
             b_after = await comp_b.storage.recall_chunks(limit=10_000)
-            from collections import Counter
-
             dup_counter = Counter(c.content_hash for c in b_after)
             duplicated = {h: n for h, n in dup_counter.items() if n > 1}
 
+            expected_added = len(chunks_a) - len(collision_hashes)
             print(
-                f"\n[BASELINE] merge-collision | A={len(chunks_a)} "
+                f"\n[BASELINE] merge-collision skip | A={len(chunks_a)} "
                 f"B_before={len(b_before)} B_after={len(b_after)} "
                 f"imported={stats.imported_chunks} "
+                f"conflict_skipped={stats.conflict_skipped_chunks} "
                 f"collision_hashes={len(collision_hashes)} "
-                f"rows_with_dup_hash={len(duplicated)} "
-                f"dup_pattern={sorted(duplicated.values())}"
+                f"expected_added={expected_added} "
+                f"rows_with_dup_hash={len(duplicated)}"
             )
 
-            # Baseline expectation: collision content is duplicated (2 rows, one hash)
             assert len(collision_hashes) >= 1, "precondition: at least one shared hash"
-            assert len(b_after) == len(b_before) + len(chunks_a), (
-                "current impl appends every imported row regardless of content_hash"
+            assert len(b_after) == len(b_before) + expected_added, (
+                f"skip mode should only append non-colliding rows: "
+                f"expected {len(b_before) + expected_added}, got {len(b_after)}"
             )
-            # For each collision hash, expect exactly 2 rows in B after merge
+            assert stats.imported_chunks == expected_added
+            assert stats.conflict_skipped_chunks == len(collision_hashes)
+            # Each collision hash should now have exactly 1 row (B's original).
             for h in collision_hashes:
-                assert dup_counter[h] == 2, (
-                    f"expected 2 rows for colliding hash {h[:10]}, got {dup_counter[h]}"
+                assert dup_counter[h] == 1, (
+                    f"expected 1 row for colliding hash {h[:10]} in skip mode, got {dup_counter[h]}"
                 )
+        finally:
+            await close_components(comp_a)
+            await close_components(comp_b)
+
+
+class TestOnConflictModes:
+    """Pin each ``on_conflict`` mode individually."""
+
+    async def test_duplicate_mode_backcompat(self, tmp_path):
+        """``on_conflict="duplicate"`` reproduces pre-v2 row-duplication."""
+        comp_a, mem_a = await _make_onnx_components(tmp_path, "pc_a_dup")
+        comp_b, _ = await _make_onnx_components(tmp_path, "pc_b_dup")
+        try:
+            await _index_corpus(comp_a, mem_a)
+            chunks_a = await comp_a.storage.recall_chunks(limit=10_000)
+
+            bundle_path = tmp_path / "bundle.json"
+            await export_chunks(comp_a.storage, output_path=bundle_path)
+
+            s1 = await import_chunks(
+                comp_b.storage, comp_b.embedder, bundle_path, on_conflict="duplicate"
+            )
+            s2 = await import_chunks(
+                comp_b.storage, comp_b.embedder, bundle_path, on_conflict="duplicate"
+            )
+            b2 = await comp_b.storage.recall_chunks(limit=10_000)
+            dup_counter = Counter(c.content_hash for c in b2)
+
+            assert s1.imported_chunks == len(chunks_a)
+            assert s2.imported_chunks == len(chunks_a)
+            assert s1.conflict_skipped_chunks == 0
+            assert s2.conflict_skipped_chunks == 0
+            assert len(b2) == 2 * len(chunks_a)
+            assert max(dup_counter.values()) == 2
+        finally:
+            await close_components(comp_a)
+            await close_components(comp_b)
+
+    async def test_update_mode_overwrites_metadata_and_preserves_uuid(self, tmp_path):
+        """``on_conflict="update"`` keeps the existing UUID and rewrites
+        metadata (tags/namespace) from the bundle record."""
+        comp_a, mem_a = await _make_onnx_components(tmp_path, "pc_a_upd")
+        comp_b, _ = await _make_onnx_components(tmp_path, "pc_b_upd")
+        try:
+            await _index_corpus(comp_a, mem_a)
+            bundle_path = tmp_path / "bundle.json"
+            await export_chunks(comp_a.storage, output_path=bundle_path)
+
+            # First import to B under "skip" (new DB, everything inserts).
+            await import_chunks(comp_b.storage, comp_b.embedder, bundle_path, on_conflict="skip")
+            b_first = await comp_b.storage.recall_chunks(limit=10_000)
+            first_ids_by_hash = {c.content_hash: c.id for c in b_first}
+
+            # Now re-import under "update" with a namespace override to prove
+            # the metadata path actually runs.
+            stats = await import_chunks(
+                comp_b.storage,
+                comp_b.embedder,
+                bundle_path,
+                namespace="overridden",
+                on_conflict="update",
+            )
+            b_second = await comp_b.storage.recall_chunks(limit=10_000)
+            second_ids_by_hash = {c.content_hash: c.id for c in b_second}
+
+            assert len(b_second) == len(b_first), "update must not add rows"
+            assert stats.updated_chunks == len(b_first)
+            assert stats.imported_chunks == 0
+            assert stats.conflict_skipped_chunks == 0
+
+            # UUID preservation: every row's UUID is stable across the update.
+            assert first_ids_by_hash == second_ids_by_hash
+            # Metadata rewrite: namespace override took effect.
+            assert all(c.metadata.namespace == "overridden" for c in b_second)
+        finally:
+            await close_components(comp_a)
+            await close_components(comp_b)
+
+    async def test_invalid_on_conflict_raises(self, tmp_path):
+        comp_a, mem_a = await _make_onnx_components(tmp_path, "pc_a_inv")
+        comp_b, _ = await _make_onnx_components(tmp_path, "pc_b_inv")
+        try:
+            await _index_corpus(comp_a, mem_a)
+            bundle_path = tmp_path / "bundle.json"
+            await export_chunks(comp_a.storage, output_path=bundle_path)
+
+            with pytest.raises(ValueError, match="on_conflict"):
+                await import_chunks(
+                    comp_b.storage,
+                    comp_b.embedder,
+                    bundle_path,
+                    on_conflict="bogus",  # type: ignore[arg-type]
+                )
+        finally:
+            await close_components(comp_a)
+            await close_components(comp_b)
+
+    async def test_v1_bundle_still_imports(self, tmp_path):
+        """A hand-written v1-shaped bundle (no chunk_id / content_hash fields)
+        must still import. Skip-mode dedup keeps working because hashes are
+        derived from content by ``Chunk.__post_init__``.
+        """
+        import json
+        from datetime import datetime, timezone
+
+        comp_b, _ = await _make_onnx_components(tmp_path, "pc_b_v1")
+        try:
+            v1_bundle = {
+                "version": "1",
+                "exported_at": datetime.now(timezone.utc).isoformat(),
+                "total_chunks": 1,
+                "chunks": [
+                    {
+                        "content": "Only legacy v1 record, no chunk_id or hash.",
+                        "source_file": "legacy.md",
+                        "heading_hierarchy": ["Legacy"],
+                        "chunk_type": "raw_text",
+                        "start_line": 1,
+                        "end_line": 1,
+                        "language": "en",
+                        "tags": ["legacy"],
+                        "namespace": "default",
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ],
+            }
+            bundle_path = tmp_path / "v1.json"
+            bundle_path.write_text(json.dumps(v1_bundle), encoding="utf-8")
+
+            s1 = await import_chunks(comp_b.storage, comp_b.embedder, bundle_path)
+            assert s1.imported_chunks == 1
+            assert s1.conflict_skipped_chunks == 0
+
+            # Re-import of the v1 bundle under default skip must dedup too.
+            s2 = await import_chunks(comp_b.storage, comp_b.embedder, bundle_path)
+            assert s2.imported_chunks == 0
+            assert s2.conflict_skipped_chunks == 1
+        finally:
+            await close_components(comp_b)
+
+    async def test_preserve_ids_across_instances(self, tmp_path):
+        """With ``preserve_ids=True`` on a v2 bundle, a fresh-DB import
+        reuses the bundle's original UUIDs — the "same chunk on two PCs"
+        identity guarantee.
+        """
+        comp_a, mem_a = await _make_onnx_components(tmp_path, "pc_a_pres")
+        comp_b, _ = await _make_onnx_components(tmp_path, "pc_b_pres")
+        try:
+            await _index_corpus(comp_a, mem_a)
+            chunks_a = await comp_a.storage.recall_chunks(limit=10_000)
+
+            bundle_path = tmp_path / "bundle.json"
+            await export_chunks(comp_a.storage, output_path=bundle_path)
+
+            await import_chunks(
+                comp_b.storage,
+                comp_b.embedder,
+                bundle_path,
+                on_conflict="skip",
+                preserve_ids=True,
+            )
+            chunks_b = await comp_b.storage.recall_chunks(limit=10_000)
+
+            ids_a = {c.id for c in chunks_a}
+            ids_b = {c.id for c in chunks_b}
+            assert ids_a == ids_b, "preserve_ids must yield UUID-equal rows across PCs"
         finally:
             await close_components(comp_a)
             await close_components(comp_b)

@@ -7,8 +7,8 @@ from pathlib import Path
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
-from memtomem.server.tool_registry import register
 from memtomem.server.helpers import _check_embedding_mismatch
+from memtomem.server.tool_registry import register
 
 
 @mcp.tool()
@@ -65,22 +65,35 @@ async def mem_export(
 async def mem_import(
     input_file: str,
     namespace: str | None = None,
+    on_conflict: str = "skip",
+    preserve_ids: bool = False,
     ctx: CtxType = None,
 ) -> str:
     """Import memory chunks from a JSON bundle file (produced by mem_export).
 
     Each chunk is re-embedded with the current embedder and upserted to storage.
-    Imported chunks receive new UUIDs to avoid collisions with existing entries.
 
     Args:
         input_file: Path to the JSON bundle file to import.
         namespace: Override the namespace for all imported chunks.
+        on_conflict: How to resolve content-hash collisions against the
+            existing DB. ``"skip"`` (default) drops records whose content
+            already exists (idempotent re-import). ``"update"`` overwrites
+            the existing row's metadata while preserving its UUID.
+            ``"duplicate"`` is the pre-v2 behaviour: every record gets a
+            fresh UUID, so re-imports and overlapping merges produce
+            duplicate rows.
+        preserve_ids: For non-conflicting records in a v2 bundle, reuse the
+            bundle's original chunk UUID (skipped if already claimed by
+            unrelated content). Ignored when ``on_conflict="duplicate"``.
     """
-    from memtomem.tools.export_import import import_chunks
+    from memtomem.tools.export_import import _VALID_ON_CONFLICT, import_chunks
 
     app = await _get_app_initialized(ctx)
 
-    # Block import if embedding config mismatches DB
+    if on_conflict not in _VALID_ON_CONFLICT:
+        return f"Invalid on_conflict={on_conflict!r}. Must be one of {sorted(_VALID_ON_CONFLICT)}."
+
     mismatch_msg = _check_embedding_mismatch(app)
     if mismatch_msg:
         return mismatch_msg
@@ -90,12 +103,21 @@ async def mem_import(
     if not source.exists():
         return f"File not found: {source}"
 
-    stats = await import_chunks(app.storage, app.embedder, source, namespace=namespace)
+    stats = await import_chunks(
+        app.storage,
+        app.embedder,
+        source,
+        namespace=namespace,
+        on_conflict=on_conflict,  # type: ignore[arg-type]
+        preserve_ids=preserve_ids,
+    )
 
     return (
-        f"Import complete:\n"
-        f"- Total in bundle: {stats.total_chunks}\n"
-        f"- Imported:        {stats.imported_chunks}\n"
-        f"- Skipped:         {stats.skipped_chunks}\n"
-        f"- Failed:          {stats.failed_chunks}"
+        f"Import complete ({on_conflict=}, {preserve_ids=}):\n"
+        f"- Total in bundle:  {stats.total_chunks}\n"
+        f"- Imported (new):   {stats.imported_chunks}\n"
+        f"- Updated:          {stats.updated_chunks}\n"
+        f"- Conflict skipped: {stats.conflict_skipped_chunks}\n"
+        f"- Malformed:        {stats.skipped_chunks}\n"
+        f"- Failed:           {stats.failed_chunks}"
     )

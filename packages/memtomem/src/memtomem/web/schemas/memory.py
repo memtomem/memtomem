@@ -38,6 +38,8 @@ class ImportResponse(BaseModel):
     imported_chunks: int
     skipped_chunks: int
     failed_chunks: int
+    conflict_skipped_chunks: int = 0
+    updated_chunks: int = 0
 
 
 class IndexRequest(BaseModel):
