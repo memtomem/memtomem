@@ -188,14 +188,32 @@ def _install_sigterm_handler(*pid_files: Path) -> None:
 
 
 def _try_hold_legacy_flock(legacy_pid: Path) -> object | None:
-    """Acquire a lifetime flock on the pre-#412 pid file, if present.
+    """Acquire a lifetime *shared* flock on the pre-#412 pid file, if present.
 
     During the transition window a user may still have a v0.1.24 or older
-    ``memtomem-server`` running — it holds ``fcntl.flock`` on
+    ``memtomem-server`` running — it holds ``fcntl.flock(LOCK_EX)`` on
     ``~/.memtomem/.server.pid``. The new server's own flock target lives
     on ``$XDG_RUNTIME_DIR``, so without this probe two servers could run
     concurrently against the same SQLite DB and corrupt the WAL (#412
     review B1).
+
+    Lock mode — **shared (``LOCK_SH``), not exclusive**:
+
+    Multiple 0.1.26+ instances can legitimately coexist (e.g. one MCP
+    server per Claude Code session across multiple projects — same
+    user, same DB, XDG path already warns-and-continues on contention).
+    Using ``LOCK_EX`` here would block that (#444). ``LOCK_SH``
+    composes with other ``LOCK_SH`` holders but still conflicts with
+    ``LOCK_EX``, which is exactly what we need:
+
+    - 0.1.26 ⋈ 0.1.26: both ``LOCK_SH`` → coexist.
+    - 0.1.26 after pre-0.1.25: pre-0.1.25 holds ``LOCK_EX``, our
+      ``LOCK_SH`` fails → we skip (caller proceeds with a warning).
+      The pre-0.1.25 side of the mutex is still enforced by the
+      pre-0.1.25 process's own ``LOCK_EX`` check.
+    - pre-0.1.25 after 0.1.26: pre-0.1.25 tries ``LOCK_EX``, our
+      ``LOCK_SH`` blocks it → pre-0.1.25 exits on its own concurrent-
+      detection path. ✓ cross-version protection preserved.
 
     Behavior:
 
@@ -204,19 +222,24 @@ def _try_hold_legacy_flock(legacy_pid: Path) -> object | None:
       directory that #412 specifically keeps out of handshake.
     - Otherwise, open the legacy path (``a+b`` creates it if missing; we
       are inside an already-existing ``~/.memtomem/`` so no new
-      pollution) and try ``LOCK_EX | LOCK_NB``.
-    - Lock held by another process → an old server is alive; print to
-      stderr and ``sys.exit(1)``. Two concurrent writers is strictly
-      worse than one missed MCP handshake.
+      pollution) and try ``LOCK_SH | LOCK_NB``.
+    - Lock held exclusively by another process (pre-0.1.25) → log a
+      warning and return ``None``. Don't ``sys.exit`` — the XDG path
+      below is the authoritative lock for the current generation;
+      refusing to start here would be strictly worse UX than a noisy
+      concurrent start.
     - Lock acquired → return the file handle; caller holds it for the
-      process lifetime so a *future* old server starting after us also
-      hits this lock and bails via its own concurrent-detection path.
+      process lifetime so any *future* pre-0.1.25 server starting after
+      us hits this shared lock and bails via its own ``LOCK_EX`` attempt.
 
-    Returns ``None`` on the skip paths (fresh install, open error). The
-    returned fd must stay referenced for the lock to persist.
+    Returns ``None`` on the skip paths (fresh install, open error,
+    shared-lock acquire failure). The returned fd must stay referenced
+    for the lock to persist.
     """
     import fcntl
-    import sys
+    import logging
+
+    log = logging.getLogger(__name__)
 
     legacy_state_dir = Path.home() / ".memtomem"
     if not legacy_state_dir.is_dir():
@@ -228,16 +251,17 @@ def _try_hold_legacy_flock(legacy_pid: Path) -> object | None:
         return None
 
     try:
-        fcntl.flock(legacy_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(legacy_fp, fcntl.LOCK_SH | fcntl.LOCK_NB)
     except (BlockingIOError, OSError):
-        print(
-            f"error: another memtomem-server holds a lock at {legacy_pid} "
-            f"(likely a pre-0.1.25 install). Stop it before starting a new "
-            f"server; `mm uninstall` will also refuse until it is gone.",
-            file=sys.stderr,
+        log.warning(
+            "Legacy flock at %s is held exclusively (likely a pre-0.1.25 "
+            "install). Continuing — if that holder is a pre-0.1.25 "
+            "server, concurrent writes may race on the WAL; upgrade all "
+            "instances to 0.1.26+.",
+            legacy_pid,
         )
         legacy_fp.close()
-        sys.exit(1)
+        return None
     return legacy_fp
 
 
