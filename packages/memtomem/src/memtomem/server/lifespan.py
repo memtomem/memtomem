@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import logging.config
 import os
+import signal
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -81,6 +83,78 @@ def _load_dotenv() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Parent-death watchdog (#440)
+# ---------------------------------------------------------------------------
+
+
+def _watchdog_enabled() -> bool:
+    """Gated by ``MEMTOMEM_PARENT_WATCHDOG`` env (default on).
+
+    Accepts ``off`` / ``0`` / ``false`` (case-insensitive) to disable.
+    Kept separate for testability — unit tests can monkey-patch the
+    environment without spawning a real subprocess."""
+    return os.environ.get("MEMTOMEM_PARENT_WATCHDOG", "on").lower() not in (
+        "off",
+        "0",
+        "false",
+    )
+
+
+def _watchdog_interval() -> float:
+    """Poll interval in seconds; ``MEMTOMEM_PARENT_WATCHDOG_INTERVAL`` override.
+
+    Default 10s — small enough that an orphan releases its pid flock
+    within seconds of the client exiting, large enough that idle CPU
+    overhead is negligible."""
+    try:
+        return float(os.environ.get("MEMTOMEM_PARENT_WATCHDOG_INTERVAL", "10"))
+    except ValueError:
+        return 10.0
+
+
+async def _watch_parent(original_ppid: int, poll_seconds: float) -> None:
+    """Exit the server when the MCP client parent process disappears.
+
+    Motivation — issue #440: Claude Code (and possibly other MCP stdio
+    clients) sometimes terminate without closing our stdio unix sockets
+    OR sending a signal, leaving ``memtomem-server`` alive as an orphan
+    holding ``~/.memtomem/.server.pid``. The next client start loses
+    the flock race against the zombie and reports "Failed to connect".
+
+    POSIX gives us a portable defense: when a child's parent exits, the
+    child is reparented (PID 1 on Linux, launchd on macOS). Polling
+    ``os.getppid()`` and exiting on change is:
+
+    - Client-agnostic: no dependency on stdio close, SIGTERM delivery,
+      or a JSON-RPC ``exit`` notification.
+    - False-positive-free: PPID changes only when the parent really
+      exited — POSIX semantics guarantee this.
+    - Works on macOS and Linux without PR_SET_PDEATHSIG (Linux-only).
+
+    Exit mechanism: self-``SIGTERM`` rather than ``os._exit`` so the
+    sigterm handler installed by ``server.main()`` fires, unlinking
+    every pid file we own (issue #437 / PR #439). Going directly to
+    ``os._exit`` would bypass ``atexit`` and re-create the stale-file
+    class of bugs #439 closed.
+    """
+    while True:
+        try:
+            await asyncio.sleep(poll_seconds)
+        except asyncio.CancelledError:
+            return
+        current_ppid = os.getppid()
+        if current_ppid != original_ppid:
+            logger.warning(
+                "Parent process %d exited (reparented to %d). Self-SIGTERM "
+                "to release MCP server state — issue #440.",
+                original_ppid,
+                current_ppid,
+            )
+            os.kill(os.getpid(), signal.SIGTERM)
+            return  # Signal handler will take over; nothing more for us to do.
+
+
+# ---------------------------------------------------------------------------
 # Main lifespan
 # ---------------------------------------------------------------------------
 
@@ -127,8 +201,24 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
         await _stop_quietly(webhook_mgr, "webhook_manager")
         raise
 
+    watchdog_task: asyncio.Task[None] | None = None
+    if _watchdog_enabled():
+        watchdog_task = asyncio.create_task(
+            _watch_parent(os.getppid(), _watchdog_interval()),
+            name="memtomem-parent-watchdog",
+        )
+
     try:
         yield ctx
     finally:
+        if watchdog_task is not None:
+            watchdog_task.cancel()
+            try:
+                await watchdog_task
+            except (asyncio.CancelledError, Exception):
+                # CancelledError is the expected path; any other exception
+                # during watchdog teardown is informational — don't let it
+                # mask the main lifespan cleanup below.
+                pass
         await _stop_quietly(webhook_mgr, "webhook_manager")
         await _stop_quietly(ctx, "app_context")

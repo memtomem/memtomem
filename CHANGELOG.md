@@ -7,6 +7,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Parent-death watchdog — `memtomem-server` self-SIGTERMs when its
+  MCP client parent process disappears.** Investigation in #440 showed
+  that Claude Code (and likely other MCP stdio clients) sometimes
+  terminate without closing our stdio unix sockets or sending a signal,
+  leaving `memtomem-server` alive as an orphan holding
+  `~/.memtomem/.server.pid`. The next client start then loses the
+  flock race and reports "Failed to connect". The server now polls
+  `os.getppid()` every 10s (configurable via
+  `MEMTOMEM_PARENT_WATCHDOG_INTERVAL`) and self-SIGTERMs when the
+  parent has been reparented — a POSIX-portable, client-agnostic
+  orphan signal. Self-SIGTERM (not `os._exit`) so the #439 sigterm
+  handler still fires and the pid files are unlinked cleanly. Can be
+  disabled with `MEMTOMEM_PARENT_WATCHDOG=off` for supervised /
+  daemonised deployments where reparenting is expected. (#440)
+
 ### Changed
 
 ### Fixed
