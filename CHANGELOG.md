@@ -9,6 +9,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+### Fixed
+
+## [0.1.27] — 2026-04-24
+
+Hotfix release. Closes the multi-instance bug (#444): running
+`memtomem-server` in one Claude Code session used to block every
+other session from connecting, because the legacy-flock probe took
+`LOCK_EX` and `sys.exit(1)`'d on contention. Multiple sessions across
+different projects can now coexist.
+
+### Changed
+
 - **Legacy flock downgraded to `LOCK_SH`; two 0.1.26+ servers can now
   coexist.** Previously `_try_hold_legacy_flock` took `LOCK_EX` and
   called `sys.exit(1)` on contention, which was intended as a
@@ -19,9 +31,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   exclusive, so pre-0.1.25's `LOCK_EX` still blocks us (and vice
   versa) — cross-version protection is preserved. On contention we
   now log a warning and fall through to the XDG path rather than
-  aborting. (#444)
-
-### Fixed
+  aborting. (#444, PR #445)
 
 ## [0.1.26] — 2026-04-24
 

@@ -818,7 +818,7 @@ wheels = [
 
 [[package]]
 name = "memtomem"
-version = "0.1.26"
+version = "0.1.27"
 source = { editable = "packages/memtomem" }
 dependencies = [
     { name = "click" },
