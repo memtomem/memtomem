@@ -2,6 +2,21 @@
 
 Export serialises chunks (without embeddings) to a JSON bundle.
 Import reads a bundle, re-embeds each chunk, and upserts to storage.
+
+Bundle schema versions
+----------------------
+- ``version="1"`` (legacy): minimal fields — no content_hash, no chunk_id.
+  Re-importing always created duplicate rows (fresh UUID each time) and
+  cross-PC merges with identical content left duplicated rows.
+- ``version="2"`` (current): each record additionally carries ``content_hash``
+  (sha256 of NFC content) and ``chunk_id`` (original UUID). ``import_chunks``
+  uses these for the ``on_conflict`` decision (``skip``/``update``/
+  ``duplicate``) so repeated imports are idempotent by default.
+
+v1 bundles still import. Missing ``content_hash`` is recomputed from content
+on the fly (Chunk.__post_init__); missing ``chunk_id`` falls back to a fresh
+UUID. ``on_conflict`` works either way — the hash comparison uses the
+recomputed value.
 """
 
 from __future__ import annotations
@@ -11,8 +26,8 @@ import logging
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
-from uuid import uuid4
+from typing import TYPE_CHECKING, Literal
+from uuid import UUID, uuid4
 
 from memtomem.models import Chunk, ChunkMetadata, ChunkType
 
@@ -26,7 +41,9 @@ logger = logging.getLogger(__name__)
 # Data types
 # ---------------------------------------------------------------------------
 
-_BUNDLE_VERSION = "1"
+_BUNDLE_VERSION = "2"
+
+OnConflict = Literal["skip", "update", "duplicate"]
 
 
 @dataclass
@@ -58,6 +75,8 @@ class ImportStats:
     imported_chunks: int
     skipped_chunks: int
     failed_chunks: int
+    skipped_duplicates: int = 0
+    updated_chunks: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +136,9 @@ async def export_chunks(
 def _chunk_to_dict(chunk: Chunk) -> dict:
     meta = chunk.metadata
     return {
+        "chunk_id": str(chunk.id),
         "content": chunk.content,
+        "content_hash": chunk.content_hash,
         "source_file": str(meta.source_file),
         "heading_hierarchy": list(meta.heading_hierarchy),
         "chunk_type": meta.chunk_type.value,
@@ -140,19 +161,32 @@ async def import_chunks(
     embedder: EmbeddingProvider,
     input_path: Path,
     namespace: str | None = None,
+    on_conflict: OnConflict = "skip",
 ) -> ImportStats:
     """Import chunks from a JSON bundle file.
 
-    Each chunk is re-embedded and upserted with a fresh UUID.
-    Chunks whose source file no longer exists on disk are imported as-is
-    (path is preserved in metadata for traceability).
+    Each surviving chunk is re-embedded and upserted.
 
     Args:
         storage: StorageBackend instance.
         embedder: EmbeddingProvider instance.
         input_path: Path to a JSON bundle produced by export_chunks().
+        namespace: If given, overrides the namespace of every imported chunk.
+        on_conflict: How to handle incoming chunks whose ``content_hash``
+            already exists in storage.
+
+            - ``"skip"`` *(default)*: drop the incoming chunk. Makes re-import
+              of the same bundle idempotent. UUID from the bundle (v2) is
+              preserved on inserted chunks.
+            - ``"update"``: reuse the existing row's UUID so the upsert
+              refreshes metadata/embedding for that content. Non-matching
+              chunks insert with bundle UUID (v2) or a fresh UUID (v1).
+            - ``"duplicate"``: v1 back-compat. Always assign a fresh UUID
+              and insert, even if content_hash collides. Produces duplicate
+              rows per identical content.
+
     Returns:
-        ImportStats with counts of imported / skipped / failed chunks.
+        ImportStats with per-record outcomes.
     """
     _MAX_IMPORT_BYTES = 100 * 1024 * 1024  # 100 MB
     file_size = input_path.stat().st_size
@@ -168,19 +202,62 @@ async def import_chunks(
     if not bundle.chunks:
         return ImportStats(0, 0, 0, 0)
 
-    imported = skipped = failed = 0
-    batch: list[Chunk] = []
-
+    skipped_malformed = 0
+    parsed: list[Chunk] = []
     for record in bundle.chunks:
         try:
-            chunk = _dict_to_chunk(record, namespace_override=namespace)
-            batch.append(chunk)
+            chunk = _dict_to_chunk(
+                record,
+                namespace_override=namespace,
+                preserve_uuid=(on_conflict != "duplicate"),
+            )
+            parsed.append(chunk)
         except Exception as exc:
             logger.warning("Skipping malformed record: %s", exc)
-            skipped += 1
+            skipped_malformed += 1
+
+    if not parsed:
+        return ImportStats(
+            total_chunks=len(bundle.chunks),
+            imported_chunks=0,
+            skipped_chunks=skipped_malformed,
+            failed_chunks=0,
+        )
+
+    skipped_duplicates = 0
+    updated = 0
+    batch: list[Chunk]
+
+    if on_conflict == "duplicate":
+        batch = parsed
+    else:
+        existing_hash_to_id = await storage.get_content_hash_to_id()
+        batch = []
+        seen_in_batch: set[str] = set()
+        for chunk in parsed:
+            h = chunk.content_hash
+            if h in existing_hash_to_id:
+                if on_conflict == "skip":
+                    skipped_duplicates += 1
+                    continue
+                # on_conflict == "update": reuse existing UUID so upsert UPDATEs
+                try:
+                    chunk.id = UUID(existing_hash_to_id[h])
+                except ValueError:
+                    pass
+                updated += 1
+                batch.append(chunk)
+            elif h in seen_in_batch:
+                # Duplicate content within the bundle itself — first wins.
+                skipped_duplicates += 1
+            else:
+                seen_in_batch.add(h)
+                batch.append(chunk)
+
+    imported = 0
+    failed = 0
 
     if batch:
-        # Embed in one shot for efficiency
         contents = [c.content for c in batch]
         try:
             embeddings = await embedder.embed_texts(contents)
@@ -191,26 +268,37 @@ async def import_chunks(
             return ImportStats(
                 total_chunks=len(bundle.chunks),
                 imported_chunks=0,
-                skipped_chunks=skipped,
+                skipped_chunks=skipped_malformed,
                 failed_chunks=len(batch),
+                skipped_duplicates=skipped_duplicates,
+                updated_chunks=0,
             )
 
         try:
             await storage.upsert_chunks(batch)
-            imported = len(batch)
+            imported = len(batch) - updated
         except Exception as exc:
             logger.error("Upsert failed during import: %s", exc)
             failed = len(batch)
+            imported = 0
+            updated = 0
 
     return ImportStats(
         total_chunks=len(bundle.chunks),
         imported_chunks=imported,
-        skipped_chunks=skipped,
+        skipped_chunks=skipped_malformed,
         failed_chunks=failed,
+        skipped_duplicates=skipped_duplicates,
+        updated_chunks=updated,
     )
 
 
-def _dict_to_chunk(record: dict, namespace_override: str | None = None) -> Chunk:
+def _dict_to_chunk(
+    record: dict,
+    namespace_override: str | None = None,
+    *,
+    preserve_uuid: bool = False,
+) -> Chunk:
     ns = namespace_override or record.get("namespace", "default")
     meta = ChunkMetadata(
         source_file=Path(record["source_file"]),
@@ -227,9 +315,23 @@ def _dict_to_chunk(record: dict, namespace_override: str | None = None) -> Chunk
         if "created_at" in record
         else datetime.now(timezone.utc)
     )
+
+    chunk_id: UUID
+    raw_id = record.get("chunk_id") if preserve_uuid else None
+    if raw_id:
+        try:
+            chunk_id = UUID(str(raw_id))
+        except (ValueError, TypeError):
+            chunk_id = uuid4()
+    else:
+        chunk_id = uuid4()
+
+    # content_hash is intentionally not propagated from the record — Chunk's
+    # __post_init__ recomputes it from content, which prevents a tampered
+    # bundle from smuggling a mismatched hash past the on_conflict check.
     return Chunk(
         content=record["content"],
         metadata=meta,
-        id=uuid4(),  # fresh ID -- avoid collision with existing chunks
+        id=chunk_id,
         created_at=created_at,
     )

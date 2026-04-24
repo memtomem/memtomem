@@ -813,6 +813,18 @@ class SqliteBackend(
         ).fetchall()
         return {row[0]: row[1] for row in rows}
 
+    async def get_content_hash_to_id(self) -> dict[str, str]:
+        """Return ``{content_hash: chunk_id}`` for every chunk in the DB.
+
+        Used by import's ``on_conflict`` logic to detect collisions before
+        upsert. When multiple rows share a hash (existing pre-v2 duplicates),
+        an arbitrary row id wins — callers treat this as "a UUID to reuse",
+        not a unique mapping.
+        """
+        db = self._get_read_db()
+        rows = db.execute("SELECT content_hash, id FROM chunks").fetchall()
+        return {row[0]: row[1] for row in rows}
+
     async def get_stats(self) -> dict[str, int]:
         db = self._get_read_db()
         total = db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
