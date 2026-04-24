@@ -12,6 +12,13 @@ default so one agent's private chunks do not leak into another agent's
 ``mem_search`` results. Removing the prefix would silently break the
 isolation contract advertised in the multi-agent guide, so the assertion
 imports the constant directly (per ``feedback_pin_test_constant_over_source_scan``).
+
+``TestSharedFromTags`` pins the audit-trail contract for
+``mem_agent_share``: the function copies content into a target namespace
+(it is *not* a reference link, despite the name) and stamps a single
+``shared-from=<source-uuid>`` tag on the copy. Re-sharing must not
+accumulate a chain of inherited ``shared-from=...`` tags — that's the
+dedup invariant unit-tested at the helper seam.
 """
 
 from __future__ import annotations
@@ -26,6 +33,7 @@ from memtomem.constants import (
     default_system_prefixes,
 )
 from memtomem.server.component_factory import close_components, create_components
+from memtomem.server.tools.multi_agent import _SHARED_FROM_TAG_PREFIX, _build_shared_tags
 from memtomem.storage.sqlite_namespace import sanitize_namespace_segment
 
 from helpers import make_chunk
@@ -180,3 +188,58 @@ class TestAgentRuntimeIsolationPipeline:
 
         results, _ = await comp.search_pipeline.search("knowledge", top_k=10)
         assert any(r.chunk.metadata.namespace == SHARED_NAMESPACE for r in results)
+
+
+class TestSharedFromTags:
+    """``_build_shared_tags`` is the seam where ``mem_agent_share`` decides
+    what tags land on the copy. The contract is:
+
+    * source tags carry over verbatim,
+    * a single ``shared-from=<source-uuid>`` is appended,
+    * any inherited ``shared-from=...`` is dropped before appending so a
+      chain of re-shares does not accumulate an audit chain.
+    """
+
+    def test_appends_shared_from_tag_for_fresh_chunk(self):
+        out = _build_shared_tags(("python", "decision"), "abc-123")
+        assert "python" in out
+        assert "decision" in out
+        assert f"{_SHARED_FROM_TAG_PREFIX}abc-123" in out
+
+    def test_preserves_source_tags_in_order(self):
+        """Carry-over keeps the source's ordering — share-from is appended at the end."""
+        out = _build_shared_tags(["alpha", "beta", "gamma"], "src-uuid")
+        assert out[:3] == ["alpha", "beta", "gamma"]
+        assert out[-1] == f"{_SHARED_FROM_TAG_PREFIX}src-uuid"
+
+    def test_drops_inherited_shared_from_on_reshare(self):
+        """Re-sharing a chunk that was itself shared must not chain the tag.
+
+        Source has ``shared-from=parent-uuid`` from a prior share; sharing
+        it again under a new chunk_id should yield a list with **only**
+        ``shared-from=new-uuid`` — pointing at the immediate parent.
+        """
+        source_tags = ("topic", f"{_SHARED_FROM_TAG_PREFIX}grandparent-uuid")
+        out = _build_shared_tags(source_tags, "new-uuid")
+
+        shared_from = [t for t in out if t.startswith(_SHARED_FROM_TAG_PREFIX)]
+        assert shared_from == [f"{_SHARED_FROM_TAG_PREFIX}new-uuid"]
+        assert "topic" in out
+        # No chain: the grandparent stamp is gone.
+        assert f"{_SHARED_FROM_TAG_PREFIX}grandparent-uuid" not in out
+
+    def test_drops_multiple_inherited_shared_from_tags(self):
+        """Defensive: should the source carry several shared-from tags
+        (e.g. from a buggy older version), drop them all."""
+        source_tags = (
+            "topic",
+            f"{_SHARED_FROM_TAG_PREFIX}gp1-uuid",
+            f"{_SHARED_FROM_TAG_PREFIX}gp2-uuid",
+        )
+        out = _build_shared_tags(source_tags, "new-uuid")
+        shared_from = [t for t in out if t.startswith(_SHARED_FROM_TAG_PREFIX)]
+        assert shared_from == [f"{_SHARED_FROM_TAG_PREFIX}new-uuid"]
+
+    def test_handles_empty_source_tags(self):
+        out = _build_shared_tags((), "src-uuid")
+        assert out == [f"{_SHARED_FROM_TAG_PREFIX}src-uuid"]

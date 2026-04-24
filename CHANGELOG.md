@@ -43,6 +43,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mem_agent_share` now stamps a `shared-from=<source-uuid>` audit
+  tag on the copy, with chain dedup.** The docstring previously
+  contradicted itself ("Creates a copy" / "cross-reference link instead
+  of copying" / actual implementation: a brand-new chunk via
+  `mem_add`). The new behaviour is a content **copy** with provenance
+  recorded only via the new tag — the function name is preserved for
+  API stability and true cross-reference / link semantics are tracked
+  as a follow-up RFC. Re-sharing strips any inherited
+  `shared-from=...` tag before appending so audit chains do not grow
+  unbounded.
+
 ## [0.1.27] — 2026-04-24
 
 Hotfix release. Closes the multi-instance bug (#444): running
