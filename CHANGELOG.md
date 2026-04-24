@@ -7,6 +7,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **`mem_add(tags=...)` now writes a canonical blockquote header.**
+  ``append_entry`` emits ``> tags: ["a", "b"]`` (explicit ``> `` prefix
+  on every line, JSON / double-quoted list) instead of the legacy
+  lazy-continuation ``tags: ['a', 'b']`` (Python ``repr()``). Old
+  files still parse — the chunker's section-leading parser accepts
+  both shapes — but a fresh ``mem_add`` no longer relies on
+  CommonMark lazy continuation for the metadata block.
+- **`mem_edit` preserves the per-entry header when editing a body.**
+  New ``replace_chunk_body`` helper keeps the heading line and the
+  section-leading ``> created:`` / ``> tags:`` blockquote intact when
+  the caller passes body-only ``new_content``. To override the
+  heading explicitly, prefix ``new_content`` with ``## `` and the call
+  reverts to a full replacement (preserving the pre-RFC semantic).
+
 - **`mem_add(tags=...)` now round-trips through `mem_search(tag_filter=...)`.**
   The markdown chunker promotes the per-entry blockquote header
   (``> created: ...`` / ``> tags: [...]`` / legacy lazy-continuation
