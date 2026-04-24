@@ -29,6 +29,182 @@ class TestMemtomemStoreInit:
         store = MemtomemStore()
         assert store._current_session_id is None
 
+    def test_agent_id_none_initially(self):
+        """``_current_agent_id`` is set by ``start_agent_session`` only —
+        a fresh ``MemtomemStore`` reports no bound agent.
+        """
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        store = MemtomemStore()
+        assert store._current_agent_id is None
+
+
+class TestResolveSearchNamespace:
+    """``_resolve_search_namespace`` encodes the 6-case ``include_shared``
+    table documented in ``MemtomemStore.search``. Drift here would let the
+    "include the shared slice of an agent's view" promise degrade to a
+    silent un-pinned search — exactly the kind of fallback the multi-agent
+    plan calls out.
+    """
+
+    def _store_with_agent(self, agent_id: str | None):
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        store = MemtomemStore()
+        store._current_agent_id = agent_id
+        return store
+
+    def test_auto_with_agent_includes_shared(self):
+        store = self._store_with_agent("planner")
+        assert (
+            store._resolve_search_namespace(namespace=None, include_shared=None)
+            == "agent-runtime:planner,shared"
+        )
+
+    def test_auto_without_agent_defers_to_caller_namespace(self):
+        store = self._store_with_agent(None)
+        assert store._resolve_search_namespace(namespace="archive:old", include_shared=None) == (
+            "archive:old"
+        )
+
+    def test_auto_without_agent_and_no_namespace_returns_none(self):
+        store = self._store_with_agent(None)
+        assert store._resolve_search_namespace(namespace=None, include_shared=None) is None
+
+    def test_explicit_true_with_agent_includes_shared(self):
+        store = self._store_with_agent("planner")
+        assert (
+            store._resolve_search_namespace(namespace=None, include_shared=True)
+            == "agent-runtime:planner,shared"
+        )
+
+    def test_explicit_true_without_agent_raises(self):
+        """Surface programming bugs immediately — silent fallback would let
+        a multi-agent caller leak into an un-pinned search.
+        """
+        store = self._store_with_agent(None)
+        with pytest.raises(ValueError, match="active agent session"):
+            store._resolve_search_namespace(namespace=None, include_shared=True)
+
+    def test_explicit_false_with_agent_excludes_shared(self):
+        store = self._store_with_agent("planner")
+        assert (
+            store._resolve_search_namespace(namespace=None, include_shared=False)
+            == "agent-runtime:planner"
+        )
+
+    def test_explicit_false_without_agent_passes_caller_namespace(self):
+        store = self._store_with_agent(None)
+        assert (
+            store._resolve_search_namespace(namespace="legacy:ns", include_shared=False)
+            == "legacy:ns"
+        )
+
+
+class TestResolveAddNamespace:
+    """``_resolve_add_namespace`` defaults to the bound agent's private
+    bucket when the caller omits ``namespace``. An explicit ``namespace=``
+    always wins so an agent can opt-in to writing to ``shared`` mid-session.
+    """
+
+    def _store_with_agent(self, agent_id: str | None):
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        store = MemtomemStore()
+        store._current_agent_id = agent_id
+        return store
+
+    def test_no_agent_no_namespace_returns_none(self):
+        store = self._store_with_agent(None)
+        assert store._resolve_add_namespace(None) is None
+
+    def test_no_agent_with_namespace_returns_namespace(self):
+        store = self._store_with_agent(None)
+        assert store._resolve_add_namespace("custom:ns") == "custom:ns"
+
+    def test_agent_no_namespace_defaults_to_agent_runtime(self):
+        store = self._store_with_agent("planner")
+        assert store._resolve_add_namespace(None) == "agent-runtime:planner"
+
+    def test_agent_with_explicit_namespace_wins(self):
+        """Explicit ``namespace="shared"`` lets a planner-bound session
+        publish into the shared bucket without re-binding the session.
+        """
+        store = self._store_with_agent("planner")
+        assert store._resolve_add_namespace("shared") == "shared"
+
+
+class TestStartAgentSession:
+    """``start_agent_session`` derives the namespace from the agent id and
+    binds ``_current_agent_id``. Uses an injected ``_components`` mock so
+    tests do not need to spin up storage / embedder.
+    """
+
+    def _stub_components(self):
+        comp = MagicMock()
+        comp.storage.create_session = AsyncMock(return_value=None)
+        return comp
+
+    @pytest.mark.asyncio
+    async def test_binds_agent_id_and_derives_namespace(self):
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        store = MemtomemStore()
+        store._components = self._stub_components()
+
+        sid = await store.start_agent_session("planner")
+
+        assert sid is not None
+        assert store._current_session_id == sid
+        assert store._current_agent_id == "planner"
+        # storage.create_session was called with the derived agent-runtime: namespace
+        args, _ = store._components.storage.create_session.call_args
+        assert args[1] == "planner"  # agent_id
+        assert args[2] == "agent-runtime:planner"  # namespace
+
+    @pytest.mark.asyncio
+    async def test_explicit_namespace_overrides_default(self):
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        store = MemtomemStore()
+        store._components = self._stub_components()
+
+        await store.start_agent_session("planner", namespace="custom:scope")
+
+        args, _ = store._components.storage.create_session.call_args
+        assert args[2] == "custom:scope"
+        # Agent binding still happens — caller wanted a custom namespace,
+        # not to skip the multi-agent semantic.
+        assert store._current_agent_id == "planner"
+
+    @pytest.mark.asyncio
+    async def test_empty_agent_id_raises(self):
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        store = MemtomemStore()
+        store._components = self._stub_components()
+
+        with pytest.raises(ValueError, match="non-empty"):
+            await store.start_agent_session("")
+
+    @pytest.mark.asyncio
+    async def test_end_session_resets_agent_id(self):
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        store = MemtomemStore()
+        comp = self._stub_components()
+        comp.storage.get_session_events = AsyncMock(return_value=[])
+        comp.storage.end_session = AsyncMock(return_value=None)
+        comp.storage.scratch_cleanup = AsyncMock(return_value=0)
+        store._components = comp
+
+        await store.start_agent_session("planner")
+        assert store._current_agent_id == "planner"
+
+        await store.end_session(summary="done")
+        assert store._current_session_id is None
+        assert store._current_agent_id is None
+
 
 class TestMemtomemStoreIndex:
     """Regression tests for MemtomemStore.index() — ensures it delegates to

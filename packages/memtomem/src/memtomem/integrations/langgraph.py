@@ -14,16 +14,34 @@ Usage::
     async def save_node(state):
         await store.add(state["findings"], tags=["research"])
         return state
+
+Multi-agent usage — bind a session to an agent identity once and let
+``search`` / ``add`` derive the namespace automatically::
+
+    await store.start_agent_session("planner")
+    await store.add("our cache strategy", tags=["arch"])  # → agent-runtime:planner
+    hits = await store.search("cache", include_shared=True)  # → planner + shared
+
+This adapter intentionally does **not** implement LangGraph's
+``BaseStore`` (``aput`` / ``aget`` / ``alist_namespaces``). Adding a
+full ``BaseStore`` with the same multi-agent awareness is tracked as a
+follow-up; for now the multi-agent helpers live on
+``start_agent_session`` and ``search(include_shared=...)`` only.
 """
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 from uuid import UUID, uuid4
 
 if TYPE_CHECKING:
     from memtomem.server.component_factory import Components
+
+
+_AGENT_NAMESPACE_PREFIX = "agent-runtime:"
+_SHARED_NAMESPACE = "shared"
 
 
 class MemtomemStore:
@@ -40,6 +58,8 @@ class MemtomemStore:
         self._components: Components | None = None
         self._config_overrides = config_overrides or {}
         self._current_session_id: str | None = None
+        self._current_agent_id: str | None = None
+        self._session_lock: asyncio.Lock = asyncio.Lock()
 
     async def _ensure_init(self) -> Components:
         """Initialize components on first call; return the cached instance."""
@@ -79,20 +99,42 @@ class MemtomemStore:
         tag_filter: str | None = None,
         bm25_weight: float | None = None,
         dense_weight: float | None = None,
+        include_shared: bool | None = None,
     ) -> list[dict]:
         """Search indexed memories.
 
         Returns list of dicts with keys: id, content, score, source, tags, namespace.
+
+        ``include_shared`` is the multi-agent semantic toggle. State table:
+
+        ============== ===================== =======================================
+        ``include_shared`` ``_current_agent_id``  Resulting ``namespace`` filter
+        ============== ===================== =======================================
+        ``None`` (auto) set ("planner")        ``"agent-runtime:planner,shared"``
+        ``None`` (auto) unset                  caller's ``namespace=`` (legacy)
+        ``True``        set ("planner")        ``"agent-runtime:planner,shared"``
+        ``True``        unset                  raises ``ValueError``
+        ``False``       set ("planner")        ``"agent-runtime:planner"`` (no shared)
+        ``False``       unset                  caller's ``namespace=``
+        ============== ===================== =======================================
+
+        ``True`` + no agent session is treated as a programming error
+        (the caller asked to include the *shared* slice of an agent's
+        view but never bound an agent) — raised explicitly so the bug
+        surfaces immediately rather than degrading to a silent
+        un-pinned search.
         """
         comp = await self._ensure_init()
         rrf_weights = None
         if bm25_weight is not None or dense_weight is not None:
             rrf_weights = [bm25_weight or 1.0, dense_weight or 1.0]
 
+        effective_namespace = self._resolve_search_namespace(namespace, include_shared)
+
         results, stats = await comp.search_pipeline.search(
             query=query,
             top_k=top_k,
-            namespace=namespace,
+            namespace=effective_namespace,
             source_filter=source_filter,
             tag_filter=tag_filter,
             rrf_weights=rrf_weights,
@@ -110,6 +152,44 @@ class MemtomemStore:
             for r in results
         ]
 
+    def _resolve_search_namespace(
+        self, namespace: str | None, include_shared: bool | None
+    ) -> str | None:
+        """Translate ``include_shared`` + bound agent into a namespace filter.
+
+        Public contract is documented in ``search``'s docstring; this helper
+        only encodes the lookup table so it can be unit-tested without
+        spinning up components.
+        """
+
+        if include_shared is True and self._current_agent_id is None:
+            raise ValueError(
+                "include_shared=True requires an active agent session. "
+                "Call start_agent_session(agent_id) first or set include_shared=False."
+            )
+        if include_shared is False and self._current_agent_id is not None:
+            return f"{_AGENT_NAMESPACE_PREFIX}{self._current_agent_id}"
+        if include_shared in (None, True) and self._current_agent_id is not None:
+            return f"{_AGENT_NAMESPACE_PREFIX}{self._current_agent_id},{_SHARED_NAMESPACE}"
+        # No agent bound and the caller did not force include_shared=True →
+        # fall back to whatever the caller passed (legacy behaviour).
+        return namespace
+
+    def _resolve_add_namespace(self, namespace: str | None) -> str | None:
+        """Default the ``add`` namespace to the bound agent's private bucket.
+
+        If the caller passes an explicit ``namespace`` it wins (escape hatch
+        for "I want to write to ``shared`` while my session is bound to
+        ``planner``"). Otherwise, when an agent session is active, writes
+        land in ``agent-runtime:<id>``.
+        """
+
+        if namespace is not None:
+            return namespace
+        if self._current_agent_id is not None:
+            return f"{_AGENT_NAMESPACE_PREFIX}{self._current_agent_id}"
+        return None
+
     # ── CRUD ──────────────────────────────────────────────────────────────
 
     async def add(
@@ -121,7 +201,13 @@ class MemtomemStore:
         namespace: str | None = None,
         template: str | None = None,
     ) -> dict:
-        """Add a memory entry. Returns dict with file path and chunk count."""
+        """Add a memory entry. Returns dict with file path and chunk count.
+
+        When an agent session is active (``start_agent_session`` was
+        called), ``namespace=None`` defaults to the agent's private
+        ``agent-runtime:<id>`` bucket. Pass an explicit ``namespace=`` to
+        override (e.g. ``"shared"``).
+        """
         comp = await self._ensure_init()
         from datetime import datetime, timezone
         from memtomem.tools.memory_writer import append_entry
@@ -141,8 +227,10 @@ class MemtomemStore:
             date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             target = base / f"{date_str}.md"
 
+        effective_namespace = self._resolve_add_namespace(namespace)
+
         append_entry(target, content, title=title, tags=tags)
-        stats = await comp.index_engine.index_file(target, namespace=namespace)
+        stats = await comp.index_engine.index_file(target, namespace=effective_namespace)
 
         return {
             "file": str(target),
@@ -172,16 +260,56 @@ class MemtomemStore:
     # ── Sessions (Episodic Memory) ────────────────────────────────────────
 
     async def start_session(self, agent_id: str = "default", namespace: str | None = None) -> str:
-        """Start an episodic memory session. Returns session_id."""
+        """Start an episodic memory session. Returns session_id.
+
+        Low-level escape hatch — for multi-agent scenarios prefer
+        :meth:`start_agent_session`, which derives the namespace from
+        ``agent-runtime:<id>`` and binds ``_current_agent_id`` so
+        :meth:`search` / :meth:`add` can default to the agent scope.
+        """
         comp = await self._ensure_init()
         session_id = str(uuid4())
         ns = namespace or "default"
         await comp.storage.create_session(session_id, agent_id, ns)
-        self._current_session_id = session_id
+        async with self._session_lock:
+            self._current_session_id = session_id
+        return session_id
+
+    async def start_agent_session(
+        self,
+        agent_id: str,
+        *,
+        namespace: str | None = None,
+    ) -> str:
+        """Start a multi-agent-aware episodic memory session.
+
+        Derives the namespace from ``agent-runtime:<agent_id>`` (override
+        with explicit ``namespace=``), records the session in storage, and
+        binds ``_current_agent_id`` so subsequent ``search`` /
+        ``add`` calls inherit the agent scope without the caller passing
+        ``namespace=`` on every call.
+
+        Returns the session id.
+        """
+        if not agent_id:
+            raise ValueError("agent_id must be a non-empty string")
+
+        comp = await self._ensure_init()
+        session_id = str(uuid4())
+        ns = namespace or f"{_AGENT_NAMESPACE_PREFIX}{agent_id}"
+        await comp.storage.create_session(session_id, agent_id, ns)
+        async with self._session_lock:
+            self._current_session_id = session_id
+            self._current_agent_id = agent_id
         return session_id
 
     async def end_session(self, summary: str | None = None) -> dict:
-        """End the current session. Returns session stats."""
+        """End the current session. Returns session stats.
+
+        Resets both ``_current_session_id`` and ``_current_agent_id``,
+        so subsequent ``search(include_shared=True)`` calls without a
+        new ``start_agent_session`` will raise.
+        """
         comp = await self._ensure_init()
         if not self._current_session_id:
             return {"error": "no active session"}
@@ -199,7 +327,9 @@ class MemtomemStore:
         await comp.storage.scratch_cleanup(session_id=self._current_session_id)
 
         sid = self._current_session_id
-        self._current_session_id = None
+        async with self._session_lock:
+            self._current_session_id = None
+            self._current_agent_id = None
         return {"session_id": sid, "events": len(events), "event_counts": event_counts}
 
     async def log_event(

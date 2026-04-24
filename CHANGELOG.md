@@ -7,6 +7,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **LangGraph adapter (`MemtomemStore`) gains multi-agent helpers.** New
+  `start_agent_session(agent_id)` derives the namespace from
+  `agent-runtime:<id>` and binds `_current_agent_id`; subsequent
+  `search()` / `add()` calls inherit the agent scope without the caller
+  passing `namespace=` on every call. `search(include_shared=...)` is a
+  3-state toggle: `None` (auto: include shared if an agent is bound),
+  `True` (force include — raises `ValueError` if no agent is bound,
+  surfacing programming errors instead of degrading to a silent
+  un-pinned search), `False` (private only). `add()` defaults
+  `namespace=None` to the bound agent's private bucket; pass an
+  explicit `namespace="shared"` to publish across agents. Existing
+  `start_session(agent_id, namespace)` is preserved as a low-level
+  escape hatch. The adapter still does not implement LangGraph's
+  `BaseStore` (`aput` / `aget` / `alist_namespaces`); that surface
+  remains a follow-up.
+
 - **`mem_import` gains `on_conflict` and `preserve_ids` (bundle schema v2).**
   Bundles now carry per-chunk `chunk_id` + `content_hash` so importers can
   dedup by content across instances. `on_conflict` accepts `"skip"`
