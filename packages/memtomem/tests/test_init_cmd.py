@@ -5467,3 +5467,141 @@ class TestStepHeaderPosition:
         # Old hardcoded values must not leak.
         assert "3. Memory Directory" not in out
         assert "10. Connect to AI Editor" not in out
+
+
+class TestPresetMcpFlagPreAnswer:
+    """(#449) ``mm init --preset <name> --mcp <mode>`` must honor ``--mcp``
+    without re-prompting.
+
+    Before the fix, ``_override_from_flags`` set ``state["mcp_choice"]`` from
+    the flag in the ``elif preset:`` branch, then ``run_steps`` invoked
+    ``_step_mcp`` which unconditionally overwrote that key with the prompt
+    default. The flag's value was silently discarded — the user had to type
+    the choice again (and was confused when their flag appeared to do
+    nothing). The fix makes ``_step_mcp`` respect a pre-set ``mcp_choice``
+    and return early.
+    """
+
+    def test_preset_with_mcp_skip_does_not_prompt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--preset minimal --mcp skip`` must reach Setup complete without
+        ever rendering the MCP menu. Inputs cover only memory_dir + create-y;
+        if the MCP prompt fires, stdin runs out and CliRunner aborts."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        runner = CliRunner()
+        memory_dir = tmp_path / "memories"
+        result = runner.invoke(
+            init,
+            ["--preset", "minimal", "--mcp", "skip"],
+            input=f"{memory_dir}\ny\n",
+        )
+        assert result.exit_code == 0, result.output
+
+        out = result.output
+        # The menu header must not appear — that's the whole point of the flag.
+        assert "Connect to AI Editor" not in out, (
+            "--mcp pre-answer must skip the MCP prompt entirely"
+        )
+        # And mcp_choice == 3 means no .mcp.json side effect and no
+        # "Claude Code:" / "MCP config:" lines.
+        assert "MCP config:" not in out
+        assert "Claude Code:" not in out
+        assert "Setup complete" in out
+
+    def test_preset_with_mcp_json_writes_mcp_json_without_prompt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--mcp json`` is mcp_choice=2 which writes ``.mcp.json`` to cwd.
+        The prompt must not fire, but the side effect must still happen."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        runner = CliRunner()
+        memory_dir = tmp_path / "memories"
+        result = runner.invoke(
+            init,
+            ["--preset", "minimal", "--mcp", "json"],
+            input=f"{memory_dir}\ny\n",
+        )
+        assert result.exit_code == 0, result.output
+
+        out = result.output
+        assert "Connect to AI Editor" not in out
+        # Side effect from mcp_choice=2 must still fire.
+        assert "MCP config: wrote ./.mcp.json" in out
+        assert (tmp_path / ".mcp.json").exists()
+
+    def test_preset_without_mcp_flag_still_prompts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Omitting ``--mcp`` keeps the interactive prompt — the flag's
+        absence must NOT regress into a silent skip. Pairs with
+        ``test_explicit_preset_flow_renumbers_from_memory_dir`` (which
+        covers the positional header) by specifically pinning that the menu
+        body is still rendered."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        runner = CliRunner()
+        memory_dir = tmp_path / "memories"
+        # Trailing "3" answers the MCP prompt with "skip".
+        result = runner.invoke(
+            init,
+            ["--preset", "minimal"],
+            input=f"{memory_dir}\ny\n3\n",
+        )
+        assert result.exit_code == 0, result.output
+
+        out = result.output
+        assert "Connect to AI Editor" in out
+        assert "Claude Code (run 'claude mcp add' automatically)" in out
+
+    def test_step_mcp_unit_skips_when_mcp_choice_preset(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Unit-level pin: ``_step_mcp`` with pre-set ``mcp_choice`` must not
+        call ``nav_prompt`` and must leave the key's value intact. Guards
+        against a future refactor that re-introduces an unconditional
+        assignment."""
+        from memtomem.cli.init_cmd import _step_mcp
+
+        def _explode(*a: object, **kw: object) -> int:
+            raise AssertionError("nav_prompt must not be called when mcp_choice is pre-set")
+
+        monkeypatch.setattr("memtomem.cli.init_cmd.nav_prompt", _explode)
+
+        state: dict = {"mcp_choice": 2}
+        _step_mcp(state)
+
+        assert state["mcp_choice"] == 2
+        out = capsys.readouterr().out
+        # No header, no menu lines — the step is a no-op in this branch.
+        assert out == ""
