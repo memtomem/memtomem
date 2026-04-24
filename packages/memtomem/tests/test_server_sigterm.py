@@ -267,14 +267,24 @@ def test_sigterm_unlinks_legacy_pid_file_end_to_end(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="server is POSIX-only")
-def test_server_refuses_when_legacy_lock_held(tmp_path: Path) -> None:
-    """B1 regression (PR #413 review): a pre-#412 server holding
-    ``~/.memtomem/.server.pid`` must block a post-#412 server from
-    starting, or two writers would race on the same DB.
+def test_server_warns_but_proceeds_when_legacy_lock_held_exclusively(
+    tmp_path: Path,
+) -> None:
+    """#444: legacy flock contention must NOT be a fatal exit.
 
-    We simulate the old server by holding ``fcntl.flock`` on the legacy
-    path from the test process, then spawn the new server and assert it
-    exits non-zero with a message pointing at the legacy pid file.
+    A pre-0.1.25 server (simulated here with ``LOCK_EX``) holds the
+    legacy pid file. The new 0.1.26+ server tries ``LOCK_SH`` on the
+    same file → fails → falls through to the XDG flock path and
+    continues. We assert the server reaches the pid-file-written state
+    (= past both flock gates) rather than exiting non-zero, because
+    the previous behavior (``sys.exit(1)``) also blocked two *current*
+    0.1.26 instances from coexisting, which is the ``#444`` bug.
+
+    Cross-version protection is still preserved by the pre-0.1.25
+    server's own ``LOCK_EX`` check — it fails when our ``LOCK_SH`` is
+    already held. That direction is pinned by
+    ``test_two_post_412_servers_coexist_with_shared_lock`` below
+    (inverted: we hold ``LOCK_SH``, ``LOCK_EX`` probe must fail).
     """
     import fcntl as _fcntl
 
@@ -287,6 +297,7 @@ def test_server_refuses_when_legacy_lock_held(tmp_path: Path) -> None:
     xdg = tmp_path / "xdg_runtime"
     xdg.mkdir()
     os.chmod(xdg, 0o700)
+    xdg_pid = xdg / "memtomem" / "server.pid"
 
     env = os.environ.copy()
     env["HOME"] = str(home)
@@ -297,19 +308,12 @@ def test_server_refuses_when_legacy_lock_held(tmp_path: Path) -> None:
         _fcntl.flock(holder, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
         proc = _spawn_server(env)
         try:
-            try:
-                rc = proc.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                pytest.fail(
-                    "Server did not exit within 15s despite legacy flock held — "
-                    "_try_hold_legacy_flock probably missing"
-                )
-            stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
-            assert rc != 0, (
-                f"server must exit non-zero when legacy flock is held; rc={rc} stderr={stderr!r}"
-            )
-            assert str(legacy_pid) in stderr, (
-                f"error message must point at the legacy pid file; stderr={stderr!r}"
+            _wait_for_pid_file(proc, xdg_pid)
+            # Server survived the legacy-flock contention and wrote its
+            # XDG pid file — exactly the behavior #444 requires.
+            assert proc.poll() is None, (
+                "server must stay alive when legacy flock is held exclusively "
+                "(#444); fatal exit would block multi-instance usage"
             )
         finally:
             _cleanup_proc(proc)
@@ -319,6 +323,95 @@ def test_server_refuses_when_legacy_lock_held(tmp_path: Path) -> None:
         except OSError:
             pass
         holder.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="server is POSIX-only")
+def test_two_post_412_servers_coexist_with_shared_lock(tmp_path: Path) -> None:
+    """#444 primary repro: two 0.1.26 servers must be able to run at
+    the same time (different projects / Claude Code sessions).
+
+    Both acquire ``LOCK_SH`` on the legacy pid file; neither blocks the
+    other. Previously (``LOCK_EX``) the second would ``sys.exit(1)``
+    — the whole motivation for this fix.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".memtomem").mkdir()
+
+    xdg1 = tmp_path / "xdg1"
+    xdg1.mkdir()
+    os.chmod(xdg1, 0o700)
+    pid1 = xdg1 / "memtomem" / "server.pid"
+
+    xdg2 = tmp_path / "xdg2"
+    xdg2.mkdir()
+    os.chmod(xdg2, 0o700)
+    pid2 = xdg2 / "memtomem" / "server.pid"
+
+    env1 = os.environ.copy()
+    env1["HOME"] = str(home)
+    env1["XDG_RUNTIME_DIR"] = str(xdg1)
+    env2 = os.environ.copy()
+    env2["HOME"] = str(home)
+    env2["XDG_RUNTIME_DIR"] = str(xdg2)
+
+    proc1 = _spawn_server(env1)
+    proc2 = None
+    try:
+        _wait_for_pid_file(proc1, pid1)
+        proc2 = _spawn_server(env2)
+        _wait_for_pid_file(proc2, pid2)
+
+        assert proc1.poll() is None, "first instance must stay alive"
+        assert proc2.poll() is None, (
+            "second instance must coexist with the first (#444); it used to "
+            "exit(1) on the legacy LOCK_EX guard"
+        )
+    finally:
+        _cleanup_proc(proc1)
+        if proc2 is not None:
+            _cleanup_proc(proc2)
+
+
+def test_legacy_lock_sh_allows_multiple_holders(tmp_path: Path) -> None:
+    """Unit-level pin for the core fcntl semantics the fix relies on.
+
+    Two `LOCK_SH | LOCK_NB` acquires on the same file from the same
+    process must both succeed. If a future Python / kernel quirk ever
+    breaks this, the coexistence integration tests above would stop
+    proving what they claim; this test catches that regression at the
+    primitive level.
+    """
+    import fcntl as _fcntl
+
+    path = tmp_path / "shared-lock.pid"
+    path.touch()
+
+    fp1 = open(path, "a+b")  # noqa: SIM115
+    fp2 = open(path, "a+b")  # noqa: SIM115
+    try:
+        _fcntl.flock(fp1, _fcntl.LOCK_SH | _fcntl.LOCK_NB)
+        # The second acquire on a different fd of the same file must succeed.
+        _fcntl.flock(fp2, _fcntl.LOCK_SH | _fcntl.LOCK_NB)
+        # And a LOCK_EX from a third handle must fail while both SH are held,
+        # which is how cross-version mutex stays intact.
+        fp3 = open(path, "a+b")  # noqa: SIM115
+        try:
+            with pytest.raises((BlockingIOError, OSError)):
+                _fcntl.flock(fp3, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        finally:
+            fp3.close()
+    finally:
+        try:
+            _fcntl.flock(fp1, _fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            _fcntl.flock(fp2, _fcntl.LOCK_UN)
+        except OSError:
+            pass
+        fp1.close()
+        fp2.close()
 
 
 def stat_mode(path: Path) -> int:

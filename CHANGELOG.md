@@ -9,6 +9,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **Legacy flock downgraded to `LOCK_SH`; two 0.1.26+ servers can now
+  coexist.** Previously `_try_hold_legacy_flock` took `LOCK_EX` and
+  called `sys.exit(1)` on contention, which was intended as a
+  cross-version mutex against pre-0.1.25 servers (#412 B1) but also
+  blocked two 0.1.26+ instances from running at the same time — e.g.
+  one MCP server per Claude Code session across multiple projects.
+  Shared locks compose with other shared locks but still conflict with
+  exclusive, so pre-0.1.25's `LOCK_EX` still blocks us (and vice
+  versa) — cross-version protection is preserved. On contention we
+  now log a warning and fall through to the XDG path rather than
+  aborting. (#444)
+
 ### Fixed
 
 ## [0.1.26] — 2026-04-24
