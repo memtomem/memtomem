@@ -11,6 +11,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from memtomem.context._atomic import atomic_write_text
+from memtomem.context._names import validate_name
 from memtomem.context.skills import (
     SKILL_GENERATORS,
     SKILL_MANIFEST,
@@ -31,17 +33,17 @@ router = APIRouter(tags=["context-skills"])
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
-def _validate_name(name: str, project_root: Path) -> Path | None:
-    """Return the canonical skill dir, or ``None`` if the name is invalid."""
-    if not name or "/" in name or "\\" in name or name.startswith("."):
-        return None
-    target = canonical_skills_root(project_root) / name
+def _canonical_skill_dir(project_root: Path, raw_name: str) -> Path:
+    """Validate the name via core and return the canonical skill directory."""
+    name = validate_name(raw_name, kind="skill")
+    return canonical_skills_root(project_root) / name
+
+
+def _safe_rel(p: Path, project_root: Path) -> str:
     try:
-        if not target.resolve().is_relative_to(canonical_skills_root(project_root).resolve()):
-            return None
-    except (ValueError, RuntimeError):
-        return None
-    return target
+        return str(p.relative_to(project_root))
+    except ValueError:
+        return str(p)
 
 
 # ── List ─────────────────────────────────────────────────────────────────
@@ -94,16 +96,15 @@ async def read_skill(
     project_root: Path = Depends(get_project_root),
 ) -> dict:
     """Read a canonical skill's SKILL.md content and list auxiliary files."""
-    skill_dir = _validate_name(name, project_root)
-    if skill_dir is None:
-        raise ValueError(f"Invalid skill name: {name}")
+    skill_dir = _canonical_skill_dir(project_root, name)
 
     manifest = skill_dir / SKILL_MANIFEST
     if not manifest.is_file():
         raise KeyError(name)
 
     content = manifest.read_text(encoding="utf-8")
-    mtime = manifest.stat().st_mtime
+    # mtime_ns serialized as string (JS bigint-unsafe).
+    mtime_ns = manifest.stat().st_mtime_ns
 
     # List auxiliary files
     files = []
@@ -116,7 +117,7 @@ async def read_skill(
                 }
             )
 
-    return {"name": name, "content": content, "mtime": mtime, "files": files}
+    return {"name": name, "content": content, "mtime_ns": str(mtime_ns), "files": files}
 
 
 # ── Create ───────────────────────────────────────────────────────────────
@@ -133,9 +134,7 @@ async def create_skill(
     project_root: Path = Depends(get_project_root),
 ) -> dict:
     """Create a new canonical skill."""
-    skill_dir = _validate_name(body.name, project_root)
-    if skill_dir is None:
-        raise ValueError(f"Invalid skill name: {body.name}")
+    skill_dir = _canonical_skill_dir(project_root, body.name)
 
     try:
         async with asyncio.timeout(60):
@@ -144,7 +143,7 @@ async def create_skill(
                     raise ValueError(f"Skill '{body.name}' already exists")
                 skill_dir.mkdir(parents=True)
                 manifest = skill_dir / SKILL_MANIFEST
-                manifest.write_text(body.content, encoding="utf-8")
+                atomic_write_text(manifest, body.content)
     except TimeoutError:
         raise HTTPException(503, "Skill create timed out — another sync may be in progress")
     return {"name": body.name, "canonical_path": str(skill_dir.relative_to(project_root))}
@@ -155,7 +154,8 @@ async def create_skill(
 
 class SkillUpdateRequest(BaseModel):
     content: str
-    mtime: float
+    # mtime_ns is transported as a string (JS bigint-unsafe); parsed to int in handler.
+    mtime_ns: str
 
 
 @router.put("/context/skills/{name}")
@@ -164,30 +164,35 @@ async def update_skill(
     body: SkillUpdateRequest,
     project_root: Path = Depends(get_project_root),
 ) -> JSONResponse:
-    """Update a canonical skill's SKILL.md (mtime-guarded)."""
-    skill_dir = _validate_name(name, project_root)
-    if skill_dir is None:
-        raise ValueError(f"Invalid skill name: {name}")
-
+    """Update a canonical skill's SKILL.md (mtime-guarded, atomic, locked)."""
+    skill_dir = _canonical_skill_dir(project_root, name)
     manifest = skill_dir / SKILL_MANIFEST
     if not manifest.is_file():
         raise KeyError(name)
 
-    # mtime guard
-    current_mtime = manifest.stat().st_mtime
-    if current_mtime != body.mtime:
-        return JSONResponse(
-            status_code=409,
-            content={
-                "status": "aborted",
-                "reason": "File was modified by another process. Reload and retry.",
-                "mtime": current_mtime,
-            },
-        )
+    try:
+        body_mtime_ns = int(body.mtime_ns)
+    except ValueError:
+        raise HTTPException(422, f"Invalid mtime_ns: {body.mtime_ns!r}")
 
-    manifest.write_text(body.content, encoding="utf-8")
-    new_mtime = manifest.stat().st_mtime
-    return JSONResponse(content={"name": name, "mtime": new_mtime})
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                current_mtime_ns = manifest.stat().st_mtime_ns
+                if current_mtime_ns != body_mtime_ns:
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "status": "aborted",
+                            "reason": ("File was modified by another process. Reload and retry."),
+                            "mtime_ns": str(current_mtime_ns),
+                        },
+                    )
+                atomic_write_text(manifest, body.content)
+                new_mtime_ns = manifest.stat().st_mtime_ns
+    except TimeoutError:
+        raise HTTPException(503, "Skill update timed out — another sync may be in progress")
+    return JSONResponse(content={"name": name, "mtime_ns": str(new_mtime_ns)})
 
 
 # ── Delete ───────────────────────────────────────────────────────────────
@@ -199,24 +204,43 @@ async def delete_skill(
     cascade: bool = Query(False),
     project_root: Path = Depends(get_project_root),
 ) -> dict:
-    """Delete a canonical skill, optionally cascading to runtime copies."""
-    skill_dir = _validate_name(name, project_root)
-    if skill_dir is None:
-        raise ValueError(f"Invalid skill name: {name}")
-    if not skill_dir.exists():
-        raise KeyError(name)
+    """Delete a canonical skill, optionally cascading to runtime copies.
 
-    shutil.rmtree(skill_dir)
-    removed = [str(skill_dir.relative_to(project_root))]
+    Idempotent: missing canonical directory returns ``deleted: []``.
+    """
+    skill_dir = _canonical_skill_dir(project_root, name)
 
-    if cascade:
-        for gen in SKILL_GENERATORS.values():
-            target = gen.target_dir(project_root, name)
-            if target.exists():
-                shutil.rmtree(target)
-                removed.append(str(target.relative_to(project_root)))
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                removed: list[str] = []
+                skipped: list[dict[str, str]] = []
 
-    return {"deleted": removed}
+                if skill_dir.exists():
+                    try:
+                        shutil.rmtree(skill_dir)
+                        removed.append(_safe_rel(skill_dir, project_root))
+                    except OSError as e:
+                        skipped.append(
+                            {"path": _safe_rel(skill_dir, project_root), "reason": str(e)}
+                        )
+
+                if cascade:
+                    for gen in SKILL_GENERATORS.values():
+                        target = gen.target_dir(project_root, name)
+                        if not target.exists():
+                            continue
+                        try:
+                            shutil.rmtree(target)
+                            removed.append(_safe_rel(target, project_root))
+                        except OSError as e:
+                            skipped.append(
+                                {"path": _safe_rel(target, project_root), "reason": str(e)}
+                            )
+    except TimeoutError:
+        raise HTTPException(503, "Skill delete timed out — another sync may be in progress")
+
+    return {"deleted": removed, "skipped": skipped}
 
 
 # ── Diff ─────────────────────────────────────────────────────────────────
@@ -228,9 +252,7 @@ async def diff_skill(
     project_root: Path = Depends(get_project_root),
 ) -> dict:
     """Per-runtime diff for a single skill (returns text content if out of sync)."""
-    skill_dir = _validate_name(name, project_root)
-    if skill_dir is None:
-        raise ValueError(f"Invalid skill name: {name}")
+    skill_dir = _canonical_skill_dir(project_root, name)
 
     canonical_manifest = skill_dir / SKILL_MANIFEST
     canonical_content = None
@@ -289,7 +311,7 @@ async def sync_skills(
         raise HTTPException(503, "Skills sync timed out — another sync may be in progress")
     return {
         "generated": [
-            {"runtime": rt, "path": str(p.relative_to(project_root))} for rt, p in result.generated
+            {"runtime": rt, "path": _safe_rel(p, project_root)} for rt, p in result.generated
         ],
         "skipped": [{"runtime": rt, "reason": reason} for rt, reason in result.skipped],
     }

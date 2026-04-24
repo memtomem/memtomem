@@ -10,6 +10,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from memtomem.context._atomic import atomic_write_text
+from memtomem.context._names import validate_name
 from memtomem.context.agents import (
     AGENT_GENERATORS,
     CANONICAL_AGENT_ROOT,
@@ -39,16 +41,14 @@ def _agents_root(project_root: Path) -> Path:
     return project_root / CANONICAL_AGENT_ROOT
 
 
-def _validate_name(name: str, project_root: Path) -> Path | None:
-    if not name or "/" in name or "\\" in name or name.startswith("."):
-        return None
-    target = _agents_root(project_root) / f"{name}.md"
-    try:
-        if not target.resolve().is_relative_to(_agents_root(project_root).resolve()):
-            return None
-    except (ValueError, RuntimeError):
-        return None
-    return target
+def _canonical_agent_path(project_root: Path, raw_name: str) -> Path:
+    """Validate the name via core and return the canonical agent path.
+
+    Raises ``InvalidNameError`` (subclass of ``ValueError`` → 400) when the
+    name fails the same checks applied in CLI/MCP write paths.
+    """
+    name = validate_name(raw_name, kind="agent")
+    return _agents_root(project_root) / f"{name}.md"
 
 
 def _agent_to_dict(agent: SubAgent) -> dict:
@@ -105,14 +105,14 @@ async def read_agent(
     name: str,
     project_root: Path = Depends(get_project_root),
 ) -> dict:
-    agent_path = _validate_name(name, project_root)
-    if agent_path is None:
-        raise ValueError(f"Invalid agent name: {name}")
+    agent_path = _canonical_agent_path(project_root, name)
     if not agent_path.is_file():
         raise KeyError(name)
 
     content = agent_path.read_text(encoding="utf-8")
-    mtime = agent_path.stat().st_mtime
+    # mtime_ns is serialized as a string because JavaScript Number cannot
+    # safely represent integers > 2^53; nanosecond epochs exceed that.
+    mtime_ns = agent_path.stat().st_mtime_ns
 
     fields: dict = {}
     try:
@@ -121,7 +121,7 @@ async def read_agent(
     except AgentParseError:
         pass
 
-    return {"name": name, "content": content, "mtime": mtime, "fields": fields}
+    return {"name": name, "content": content, "mtime_ns": str(mtime_ns), "fields": fields}
 
 
 # ── Rendered (per-runtime output with dropped fields + field map) ────────
@@ -132,9 +132,7 @@ async def rendered_agent(
     name: str,
     project_root: Path = Depends(get_project_root),
 ) -> JSONResponse:
-    agent_path = _validate_name(name, project_root)
-    if agent_path is None:
-        raise ValueError(f"Invalid agent name: {name}")
+    agent_path = _canonical_agent_path(project_root, name)
     if not agent_path.is_file():
         raise KeyError(name)
 
@@ -190,17 +188,14 @@ async def create_agent(
     body: AgentCreateRequest,
     project_root: Path = Depends(get_project_root),
 ) -> dict:
-    agent_path = _validate_name(body.name, project_root)
-    if agent_path is None:
-        raise ValueError(f"Invalid agent name: {body.name}")
+    agent_path = _canonical_agent_path(project_root, body.name)
 
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
                 if agent_path.exists():
                     raise ValueError(f"Agent '{body.name}' already exists")
-                agent_path.parent.mkdir(parents=True, exist_ok=True)
-                agent_path.write_text(body.content, encoding="utf-8")
+                atomic_write_text(agent_path, body.content)
     except TimeoutError:
         raise HTTPException(503, "Agent create timed out — another sync may be in progress")
     return {"name": body.name, "canonical_path": str(agent_path.relative_to(project_root))}
@@ -211,7 +206,8 @@ async def create_agent(
 
 class AgentUpdateRequest(BaseModel):
     content: str
-    mtime: float
+    # mtime_ns is transported as a string (JS bigint-unsafe); parsed to int in handler.
+    mtime_ns: str
 
 
 @router.put("/context/agents/{name}")
@@ -220,28 +216,43 @@ async def update_agent(
     body: AgentUpdateRequest,
     project_root: Path = Depends(get_project_root),
 ) -> JSONResponse:
-    agent_path = _validate_name(name, project_root)
-    if agent_path is None:
-        raise ValueError(f"Invalid agent name: {name}")
+    agent_path = _canonical_agent_path(project_root, name)
     if not agent_path.is_file():
         raise KeyError(name)
 
-    current_mtime = agent_path.stat().st_mtime
-    if current_mtime != body.mtime:
-        return JSONResponse(
-            status_code=409,
-            content={
-                "status": "aborted",
-                "reason": "File was modified by another process. Reload and retry.",
-                "mtime": current_mtime,
-            },
-        )
+    try:
+        body_mtime_ns = int(body.mtime_ns)
+    except ValueError:
+        raise HTTPException(422, f"Invalid mtime_ns: {body.mtime_ns!r}")
 
-    agent_path.write_text(body.content, encoding="utf-8")
-    return JSONResponse(content={"name": name, "mtime": agent_path.stat().st_mtime})
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                current_mtime_ns = agent_path.stat().st_mtime_ns
+                if current_mtime_ns != body_mtime_ns:
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "status": "aborted",
+                            "reason": ("File was modified by another process. Reload and retry."),
+                            "mtime_ns": str(current_mtime_ns),
+                        },
+                    )
+                atomic_write_text(agent_path, body.content)
+                new_mtime_ns = agent_path.stat().st_mtime_ns
+    except TimeoutError:
+        raise HTTPException(503, "Agent update timed out — another sync may be in progress")
+    return JSONResponse(content={"name": name, "mtime_ns": str(new_mtime_ns)})
 
 
 # ── Delete ───────────────────────────────────────────────────────────────
+
+
+def _safe_rel(p: Path, project_root: Path) -> str:
+    try:
+        return str(p.relative_to(project_root))
+    except ValueError:
+        return str(p)
 
 
 @router.delete("/context/agents/{name}")
@@ -250,26 +261,39 @@ async def delete_agent(
     cascade: bool = Query(False),
     project_root: Path = Depends(get_project_root),
 ) -> dict:
-    agent_path = _validate_name(name, project_root)
-    if agent_path is None:
-        raise ValueError(f"Invalid agent name: {name}")
-    if not agent_path.is_file():
-        raise KeyError(name)
+    agent_path = _canonical_agent_path(project_root, name)
 
-    agent_path.unlink()
-    removed = [str(agent_path.relative_to(project_root))]
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                removed: list[str] = []
+                skipped: list[dict[str, str]] = []
 
-    if cascade:
-        for gen in AGENT_GENERATORS.values():
-            target = gen.target_file(project_root, name)
-            if target.is_file():
-                target.unlink()
-                try:
-                    removed.append(str(target.relative_to(project_root)))
-                except ValueError:
-                    removed.append(str(target))
+                if agent_path.is_file():
+                    try:
+                        agent_path.unlink()
+                        removed.append(_safe_rel(agent_path, project_root))
+                    except OSError as e:
+                        skipped.append(
+                            {"path": _safe_rel(agent_path, project_root), "reason": str(e)}
+                        )
 
-    return {"deleted": removed}
+                if cascade:
+                    for gen in AGENT_GENERATORS.values():
+                        target = gen.target_file(project_root, name)
+                        if not target.is_file():
+                            continue
+                        try:
+                            target.unlink()
+                            removed.append(_safe_rel(target, project_root))
+                        except OSError as e:
+                            skipped.append(
+                                {"path": _safe_rel(target, project_root), "reason": str(e)}
+                            )
+    except TimeoutError:
+        raise HTTPException(503, "Agent delete timed out — another sync may be in progress")
+
+    return {"deleted": removed, "skipped": skipped}
 
 
 # ── Diff ─────────────────────────────────────────────────────────────────
@@ -280,9 +304,7 @@ async def diff_agent(
     name: str,
     project_root: Path = Depends(get_project_root),
 ) -> dict:
-    agent_path = _validate_name(name, project_root)
-    if agent_path is None:
-        raise ValueError(f"Invalid agent name: {name}")
+    agent_path = _canonical_agent_path(project_root, name)
 
     canonical_content = None
     if agent_path.is_file():
@@ -336,14 +358,10 @@ async def sync_agents(
     except TimeoutError:
         raise HTTPException(503, "Agents sync timed out — another sync may be in progress")
 
-    def _safe_rel(p: Path) -> str:
-        try:
-            return str(p.relative_to(project_root))
-        except ValueError:
-            return str(p)
-
     return {
-        "generated": [{"runtime": rt, "path": _safe_rel(p)} for rt, p in result.generated],
+        "generated": [
+            {"runtime": rt, "path": _safe_rel(p, project_root)} for rt, p in result.generated
+        ],
         "dropped": [
             {"runtime": rt, "name": name, "fields": fields} for rt, name, fields in result.dropped
         ],

@@ -250,7 +250,8 @@ async function loadCtxDetail(type, name) {
 
     html += '</div>';
     detailEl.innerHTML = html;
-    detailEl.dataset.mtime = data.mtime || '';
+    // mtime_ns is a string (JS Number can't safely represent ns epochs).
+    detailEl.dataset.mtimeNs = data.mtime_ns || '';
 
     // Tab switching
     detailEl.querySelectorAll('.ctx-detail-tab').forEach(tab => {
@@ -286,13 +287,13 @@ async function loadCtxDetail(type, name) {
     detailEl.querySelector('.ctx-edit-save')?.addEventListener('click', async () => {
       const btn = detailEl.querySelector('.ctx-edit-save');
       const content = detailEl.querySelector('#ctx-edit-content').value;
-      const mtime = parseFloat(detailEl.dataset.mtime) || 0;
+      const mtime_ns = detailEl.dataset.mtimeNs || '';
       btnLoading(btn, true);
       try {
         const r = await fetch(`/api/context/${type}/${encodeURIComponent(name)}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content, mtime }),
+          body: JSON.stringify({ content, mtime_ns }),
         });
         if (r.status === 409) {
           showToast(t('settings.ctx.mtime_conflict'), 'warning');
@@ -307,7 +308,7 @@ async function loadCtxDetail(type, name) {
         const result = await r.json();
         if (result.name) {
           showToast(t('settings.ctx.save_success', '"{name}" saved').replace('{name}', name));
-          detailEl.dataset.mtime = result.mtime || '';
+          detailEl.dataset.mtimeNs = result.mtime_ns || '';
           loadCtxDetail(type, name);
         }
       } catch (err) {
