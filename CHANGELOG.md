@@ -5,6 +5,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed
+
+- **`mem_add(tags=...)` now round-trips through `mem_search(tag_filter=...)`.**
+  The markdown chunker promotes the per-entry blockquote header
+  (``> created: ...`` / ``> tags: [...]`` / legacy lazy-continuation
+  ``tags: [...]``) to first-class `ChunkMetadata.tags`, and strips it
+  from chunk content so it no longer leaks into BM25 / embedding
+  inputs. File-level YAML frontmatter tags compose with per-section
+  blockquote tags via union. Mid-section blockquotes (a quoted
+  paragraph in body prose) are untouched. Multi-agent integration
+  test asserts on `metadata.tags` for `shared-from=<src>`. Reindex
+  to backfill tags onto memories added by older `mem_add` calls.
+
+  **Note: re-indexed chunks regenerate UUIDs.** Stripping the
+  blockquote header changes `content`, which changes
+  `content_hash = sha256(content)` (`models.py:97`), which the differ
+  treats as a new chunk and assigns a fresh `uuid4()`. After
+  reindex: any external pinning of `chunk_id` (notebooks, scripts,
+  cross-LTM references) will miss, and existing
+  `shared-from=<old-uuid>` audit-tag chains will reference UUIDs
+  that no longer exist. This is a one-time discontinuity the
+  upcoming `chunk_links` table will close permanently.
+
 ### Added
 
 - **LangGraph adapter (`MemtomemStore`) gains multi-agent helpers.** New
