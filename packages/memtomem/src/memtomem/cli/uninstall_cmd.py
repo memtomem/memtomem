@@ -691,16 +691,13 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
                 # during startup, or a pre-fix concurrent server start that
                 # truncated the file before bailing on the lock probe; see
                 # server/__init__.py for the open(..., "a+") rationale).
-                # Surface the lock path so the user can lsof against it.
-                lookup = (
-                    f"`lsof {server.pid_file}`"
-                    if server.pid_file is not None
-                    else "`ps aux | grep memtomem`"
-                )
+                # ``_probe_pid_file`` only returns alive=True with the
+                # ``pid_file`` field populated, so it is safe to dereference
+                # here without a fallback.
                 click.secho(
                     "Server still running (pid unknown — flock is held by an active "
                     "writer, but the recorded pid is missing). Refusing to delete "
-                    f"state. Find the holder with {lookup}.",
+                    f"state. Find the holder with `lsof {server.pid_file}`.",
                     fg="red",
                 )
             else:
