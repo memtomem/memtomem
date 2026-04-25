@@ -138,6 +138,24 @@ class SearchResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ChunkLink:
+    """Structured provenance link between two chunks.
+
+    Mirrors a row of the ``chunk_links`` SQL table (see
+    ``planning/mem-agent-share-chunk-links-rfc.md``). ``source_id`` is
+    ``None`` when the source chunk has been deleted — the FK is
+    ``ON DELETE SET NULL``, so the destination chunk and the link row
+    survive, but the structured pointer back to the source is gone.
+    """
+
+    target_id: UUID
+    link_type: str
+    namespace_target: str
+    created_at: datetime
+    source_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class IndexingStats:
     total_files: int
     total_chunks: int

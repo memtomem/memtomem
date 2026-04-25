@@ -36,6 +36,7 @@ from memtomem.storage.mixins import (
     RelationMixin,
     ScratchMixin,
     SessionMixin,
+    ShareLinkMixin,
 )
 from memtomem.storage.sqlite_schema import create_tables
 
@@ -66,6 +67,7 @@ class SqliteBackend(
     SessionMixin,
     ScratchMixin,
     RelationMixin,
+    ShareLinkMixin,
     AnalyticsMixin,
     HistoryMixin,
     EntityMixin,

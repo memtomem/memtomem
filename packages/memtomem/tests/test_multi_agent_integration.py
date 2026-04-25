@@ -254,6 +254,17 @@ class TestCaseBShareTrail:
         # shared scope of this query — verify it is filtered out.
         assert source.id not in filter_ids
 
+        # Structured provenance link (PR-2 of the chunk_links series).
+        # The markdown ``shared-from=`` tag above is preserved for
+        # humans + back-fill; the ``chunk_links`` row is what structured
+        # queries (fanout, provenance walk) use.
+        link = await comp.storage.get_chunk_link(copy.id)
+        assert link is not None, "mem_agent_share must record a chunk_links row"
+        assert link.source_id == source.id
+        assert link.target_id == copy.id
+        assert link.link_type == "shared"
+        assert link.namespace_target == SHARED_NAMESPACE
+
     @pytest.mark.asyncio
     async def test_receiving_agent_sees_shared_copy(self, integration_components):
         comp, _ = integration_components

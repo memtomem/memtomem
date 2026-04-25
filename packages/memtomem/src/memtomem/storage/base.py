@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Protocol, Sequence
 from uuid import UUID
 
-from memtomem.models import Chunk, NamespaceFilter, SearchResult
+from memtomem.models import Chunk, ChunkLink, NamespaceFilter, SearchResult
 
 
 class StorageBackend(Protocol):
@@ -80,6 +80,28 @@ class StorageBackend(Protocol):
     ) -> None: ...
     async def get_related(self, chunk_id: UUID) -> list[tuple[UUID, str]]: ...
     async def delete_relation(self, source_id: UUID, target_id: UUID) -> bool: ...
+
+    # Share lineage (chunk_links)
+    async def add_chunk_link(
+        self,
+        source_id: UUID | None,
+        target_id: UUID,
+        link_type: str,
+        namespace_target: str,
+    ) -> None: ...
+    async def get_chunk_link(
+        self, target_id: UUID, link_type: str = "shared"
+    ) -> ChunkLink | None: ...
+    async def get_chunks_shared_from(
+        self, source_id: UUID, link_type: str | None = None
+    ) -> list[ChunkLink]: ...
+    async def walk_share_chain(
+        self,
+        target_id: UUID,
+        *,
+        link_type: str = "shared",
+        max_depth: int = 100,
+    ) -> list[ChunkLink]: ...
 
     # Sessions (episodic memory)
     async def create_session(

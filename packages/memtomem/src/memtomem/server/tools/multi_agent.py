@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+
 from memtomem.constants import AGENT_NAMESPACE_PREFIX, SHARED_NAMESPACE
 from memtomem.server import mcp
 from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 from memtomem.storage.sqlite_namespace import sanitize_namespace_segment
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_agent_namespace(app: AppContext, agent_id: str | None) -> str | None:
@@ -196,14 +200,50 @@ async def mem_agent_share(
 
     inherited_tags = _build_shared_tags(chunk.metadata.tags, chunk_id)
 
-    from memtomem.server.tools.memory_crud import mem_add
+    from memtomem.server.tools.memory_crud import _mem_add_core
 
-    result = await mem_add(
+    result, stats = await _mem_add_core(
         content=chunk.content,
         title=f"Shared: {' > '.join(chunk.metadata.heading_hierarchy) if chunk.metadata.heading_hierarchy else 'memory'}",
         tags=inherited_tags,
+        file=None,
         namespace=target,
+        template=None,
         ctx=ctx,
     )
+
+    # Record the structured link (PR-2 of the chunk_links series). The
+    # markdown ``shared-from=`` audit tag is still written into content
+    # + metadata.tags for humans and for the back-fill of pre-RFC DBs,
+    # but structured queries (fanout / provenance walk / per-NS audit)
+    # use ``chunk_links`` because that's what has a covering index.
+    #
+    # ``stats.new_chunk_ids`` holds the UUIDs of chunks freshly upserted
+    # by this call. ``append_entry`` writes a single section so we
+    # normally see exactly one new chunk; the first entry is the section
+    # head and is the right representative if the chunker ever splits a
+    # big paste into multiple chunks. ``stats`` is ``None`` on the
+    # early-error paths of ``_mem_add_core`` (empty content, oversized,
+    # template failure) — those paths also return an error message so
+    # the copy did not happen and there is nothing to link.
+    if stats is not None and stats.new_chunk_ids:
+        try:
+            await app.storage.add_chunk_link(
+                source_id=uid,
+                target_id=stats.new_chunk_ids[0],
+                link_type="shared",
+                namespace_target=target,
+            )
+        except Exception:
+            # Link recording is best-effort — the copy itself is durable
+            # via the markdown file and ``shared-from=`` tag, so a writer
+            # failure here must not surface to the user or roll the copy
+            # back. Log for diagnostic use.
+            logger.warning("chunk_links writer failed for share copy", exc_info=True)
+    elif stats is not None:
+        logger.warning(
+            "mem_agent_share: no new chunk UUID from mem_add — "
+            "skipping chunk_links writer (content_hash collision?)"
+        )
 
     return f"Shared to namespace '{target}'.\n{result}"
