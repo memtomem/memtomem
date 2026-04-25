@@ -16,6 +16,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   post-index broadcast is removed; per-entry tags now stay attached to
   the entry that declared them, and pre-existing chunks in the same
   file are no longer retagged on a subsequent batch.
+- **Oversized sections with a per-entry blockquote header no longer
+  drift sub-chunks' file line numbers.** When the chunker stripped the
+  ``> created:`` / ``> tags:`` blockquote from section text before
+  paragraph-splitting, ``_split_section`` still seeded its line
+  counter from the heading line — so sub-chunks 2..N reported
+  ``start_line`` 3–5 lines earlier than the body they actually
+  covered. ``mem_edit`` of a non-first sub-chunk would then pull in
+  real body lines from the previous sub-chunk and silently drop them
+  on save. The chunker now tracks how many lines the strip consumed
+  and seeds the line counter accordingly; the first sub-chunk's
+  ``start_line`` still anchors at the heading (preserving
+  ``mem_edit``'s header-preservation contract for it). Single-chunk
+  sections and sections without a blockquote header are unchanged.
 
 ### Changed
 
