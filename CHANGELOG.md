@@ -5,7 +5,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.30] — 2026-04-26
+
 ### Fixed
+
+- **`mm uninstall` no longer reports `pid None` after a contended
+  server start.** The runtime pid file was opened with
+  `open(pid_file, "w")`, which truncates at open *before* the
+  `fcntl.flock(LOCK_EX | LOCK_NB)` probe decides ownership. When a
+  second `memtomem-server` started while the first was still
+  running (multiple Claude Code / Codex / Gemini MCP clients
+  spawning in parallel, or any restart race), the second process
+  zeroed out the live server's pid file, then bailed on the flock
+  probe — leaving `mm uninstall` with no recorded pid to surface.
+  Fixed by switching to `"a+"` (no open-time truncate) and
+  performing `seek(0); truncate(); write(pid)` only after the
+  flock is held. `mm uninstall` now distinguishes a `pid unknown`
+  branch (truncate-race fingerprint or a partial-write startup
+  crash) from `pid None` and points at `lsof <pidfile>` for
+  diagnosis. Latent since the pid lock was introduced; predates
+  the #412 runtime-dir relocation. (PR #476)
 
 - **`mem_agent_share` example in server `instructions=` had wrong
   parameter name.** The recipe shipped in #477 showed
