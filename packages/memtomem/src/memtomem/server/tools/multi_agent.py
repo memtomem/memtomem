@@ -220,12 +220,24 @@ async def mem_agent_share(
     #
     # ``stats.new_chunk_ids`` holds the UUIDs of chunks freshly upserted
     # by this call. ``append_entry`` writes a single section so we
-    # normally see exactly one new chunk; the first entry is the section
-    # head and is the right representative if the chunker ever splits a
-    # big paste into multiple chunks. ``stats`` is ``None`` on the
-    # early-error paths of ``_mem_add_core`` (empty content, oversized,
-    # template failure) — those paths also return an error message so
-    # the copy did not happen and there is nothing to link.
+    # normally see exactly one new chunk and ``[0]`` is the section head
+    # — the right representative for the share copy.
+    #
+    # Edge case the chunker can produce: ``_merge_short_chunks`` may
+    # fold a freshly-appended short entry *into* the previous trailing
+    # chunk of the daily file, in which case ``new_chunk_ids[0]`` is
+    # the re-merged chunk (old+new content) rather than a pure share
+    # copy. Same indexer behavior exposed by re-sharing into multiple
+    # namespaces on the same day; the link writer inherits it.
+    # Mitigating factors: the markdown ``shared-from=`` tag is still on
+    # the content so humans / tag-filter search still find it, and a
+    # future bump of ``_CHUNK_LINKS_BACKFILL_KEY`` (not done in this PR)
+    # would let a migration widen / re-derive links if we ever need to.
+    #
+    # ``stats`` is ``None`` on the early-error paths of ``_mem_add_core``
+    # (empty content, oversized, template failure) — those paths also
+    # return an error message so the copy did not happen and there is
+    # nothing to link.
     if stats is not None and stats.new_chunk_ids:
         try:
             await app.storage.add_chunk_link(

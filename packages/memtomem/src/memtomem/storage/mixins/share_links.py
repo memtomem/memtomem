@@ -38,8 +38,12 @@ def _parse_created_at(value: str) -> datetime:
 
 def _row_to_link(row: tuple) -> ChunkLink:
     source_id, target_id, link_type, namespace_target, created_at = row
+    # Strict ``is not None``: the schema uses ``TEXT`` which would accept
+    # an empty string, and the writer/back-fill never write one, so a
+    # truthy check would silently collapse a hypothetical empty-string
+    # source into ``None`` and hide the bad write. Surface it instead.
     return ChunkLink(
-        source_id=UUID(source_id) if source_id else None,
+        source_id=UUID(source_id) if source_id is not None else None,
         target_id=UUID(target_id),
         link_type=link_type,
         namespace_target=namespace_target,

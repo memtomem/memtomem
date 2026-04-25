@@ -241,6 +241,80 @@ class TestMemAgentShareWritesLink:
         fanout = await comp.storage.get_chunks_shared_from(source.id)
         assert [link.target_id for link in fanout] == [copy_id]
 
+
+class TestMemAgentShareWriterFailureNonFatal:
+    """Pin the "link writer failure must not roll back the share" contract.
+
+    The link is best-effort: the durable record is the markdown file and
+    the ``shared-from=`` tag, not the ``chunk_links`` row. A failing
+    writer must log and return the normal success string so callers (and
+    users) don't see a confusing error for what is, from their POV, a
+    completed share.
+    """
+
+    @pytest.mark.asyncio
+    async def test_writer_exception_is_swallowed_and_logged(
+        self, integration_components, monkeypatch, caplog
+    ):
+        comp, _ = integration_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_agent_register(agent_id="alpha", ctx=ctx)  # type: ignore[arg-type]
+
+        source = make_chunk(
+            "rollout plan for the next release",
+            namespace=f"{AGENT_NAMESPACE_PREFIX}alpha",
+        )
+        await comp.storage.upsert_chunks([source])
+
+        # Replace add_chunk_link on the storage instance with a stub that
+        # raises. Using monkeypatch.setattr binds to the live instance so
+        # the mem_agent_share code path picks it up at await time.
+        async def _boom(*_args, **_kwargs):
+            raise RuntimeError("simulated chunk_links writer failure")
+
+        monkeypatch.setattr(comp.storage, "add_chunk_link", _boom)
+
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.server.tools.multi_agent"):
+            result = await mem_agent_share(  # type: ignore[arg-type]
+                chunk_id=str(source.id), target=SHARED_NAMESPACE, ctx=ctx
+            )
+
+        # Contract 1: caller sees the normal success string, not an
+        # error surfaced by the link writer.
+        assert "Shared to namespace" in result
+        assert "Error" not in result.splitlines()[0]
+
+        # Contract 2: the warning is logged with exc_info so operators
+        # can find the root cause without the share itself failing.
+        assert any("chunk_links writer failed" in rec.message for rec in caplog.records), (
+            f"expected warning log; got: {[r.message for r in caplog.records]}"
+        )
+
+        # Contract 3: the share copy is still indexed (the markdown file
+        # was written before the link attempt; a writer failure must not
+        # undo the copy).
+        hits, _ = await comp.search_pipeline.search(
+            query="rollout plan",
+            top_k=10,
+            namespace=SHARED_NAMESPACE,
+            tag_filter=f"{_SHARED_FROM_TAG_PREFIX}{source.id}",
+        )
+        assert hits, "share copy must still be indexed after writer failure"
+
+        # Contract 4: no chunk_links row exists for the failed copy —
+        # the back-fill on the next schema-version bump can heal this.
+        copy_id = hits[0].chunk.id
+        # Restore a real getter by reaching through the monkeypatch'd
+        # instance — monkeypatch only replaced add_chunk_link, so
+        # get_chunk_link still works.
+        link = await comp.storage.get_chunk_link(copy_id)
+        assert link is None
+
+
 class TestMemAgentShareLinkSurvivesSourceDelete:
     """When the source chunk is deleted, the link row's ``source_id`` goes
     NULL but the destination chunk and the row survive — matches the
