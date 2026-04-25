@@ -53,7 +53,9 @@ class TestAppendEntry:
         append_entry(target, "content", title="T", tags=["alpha", "beta"])
 
         text = target.read_text(encoding="utf-8")
-        assert "tags: ['alpha', 'beta']" in text
+        # Canonical blockquote form: explicit ``> `` prefix + JSON array.
+        # Detailed pin lives in test_memory_writer_tag_format.py.
+        assert '> tags: ["alpha", "beta"]' in text
 
     def test_no_tags_line_when_tags_omitted(self, tmp_path):
         target = tmp_path / "notes.md"

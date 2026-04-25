@@ -126,3 +126,18 @@ class TestSectionBlockquoteTags:
         chunks_double = _chunk(content_double)
         assert set(chunks_single[0].metadata.tags) == {"x", "y"}
         assert set(chunks_double[0].metadata.tags) == {"x", "y"}
+
+    def test_block_list_shape_in_blockquote(self):
+        """``> tags:`` followed by ``> - a`` / ``> - b`` block-list lines.
+
+        The current writer never emits this shape, but the shared
+        ``_parse_tags_value`` helper supports it via the same code path
+        as YAML frontmatter block lists. Lock it in so reusing the
+        helper doesn't regress.
+        """
+        content = "## Block-list section\n\n> tags:\n> - alpha\n> - beta\n\nBody paragraph.\n"
+        chunks = _chunk(content)
+        assert len(chunks) == 1
+        assert set(chunks[0].metadata.tags) == {"alpha", "beta"}
+        assert "tags:" not in chunks[0].content
+        assert "Body paragraph." in chunks[0].content

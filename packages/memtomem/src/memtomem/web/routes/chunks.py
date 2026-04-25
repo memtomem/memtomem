@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from memtomem.tools.memory_writer import remove_lines, replace_lines
+from memtomem.tools.memory_writer import remove_lines, replace_chunk_body
 from memtomem.web.deps import get_embedder, get_index_engine, get_storage, require_indexed_source
 from memtomem.web.schemas.core import (
     ChunkOut,
@@ -60,7 +60,14 @@ async def edit_chunk(
     if meta.source_file.is_symlink():
         raise HTTPException(status_code=403, detail="Cannot edit chunks from symlinked files.")
     try:
-        replace_lines(meta.source_file, meta.start_line, meta.end_line, body.new_content)
+        # ``replace_chunk_body`` keeps the heading + section-leading
+        # blockquote header (``> created:`` / ``> tags:``) intact when the
+        # caller passes body-only ``new_content``. The Web UI editor
+        # surfaces ``chunk.content`` (already header-stripped by the
+        # chunker), so saving without preservation would silently erase
+        # the metadata header on disk. Prefix ``new_content`` with ``## ``
+        # to override the heading explicitly.
+        replace_chunk_body(meta.source_file, meta.start_line, meta.end_line, body.new_content)
         await index_engine.index_file(meta.source_file, force=True)
     except Exception as exc:
         logger.error("Chunk edit failed for %s: %s", chunk_id, exc, exc_info=True)

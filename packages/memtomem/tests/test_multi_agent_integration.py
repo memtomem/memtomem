@@ -237,6 +237,23 @@ class TestCaseBShareTrail:
         assert "decision" in copy.metadata.tags
         assert "cache strategy" in copy.content
 
+        # Forward direction of the round-trip: ``mem_search`` filtered by
+        # the audit tag must surface the share copy. ``tag_filter`` is set
+        # membership against ``metadata.tags`` (search/pipeline.py:365–366),
+        # so this exercises that the write path put the audit tag where
+        # the search path looks for it.
+        filter_results, _ = await comp.search_pipeline.search(
+            query="cache strategy",
+            top_k=10,
+            namespace=SHARED_NAMESPACE,
+            tag_filter=f"{_SHARED_FROM_TAG_PREFIX}{source_uuid}",
+        )
+        filter_ids = {r.chunk.id for r in filter_results}
+        assert copy.id in filter_ids, "tag_filter must return the share copy"
+        # Source lives in alpha's private namespace and is not in the
+        # shared scope of this query — verify it is filtered out.
+        assert source.id not in filter_ids
+
     @pytest.mark.asyncio
     async def test_receiving_agent_sees_shared_copy(self, integration_components):
         comp, _ = integration_components

@@ -197,17 +197,21 @@ async def mem_edit(
 ) -> str:
     """Edit an existing memory entry in its source markdown file.
 
-    Replaces the chunk's original line range in the file with new_content,
-    then re-indexes the file so the change is immediately searchable.
+    ``new_content`` is treated as body-only: the heading line and the
+    section-leading ``> created:`` / ``> tags:`` blockquote header are
+    preserved automatically. To override the heading explicitly,
+    prefix ``new_content`` with ``## `` and the call reverts to a
+    full replacement of the chunk's line range.
 
     Args:
         chunk_id: The UUID of the chunk to edit (shown in mem_search results)
-        new_content: The replacement content
+        new_content: The replacement body. Heading + per-entry metadata
+            blockquote are preserved unless the value starts with ``## ``.
     """
     if not new_content.strip():
         return "Error: new_content cannot be empty."
 
-    from memtomem.tools.memory_writer import replace_lines
+    from memtomem.tools.memory_writer import replace_chunk_body
 
     app = await _get_app_initialized(ctx)
     mismatch_msg = _check_embedding_mismatch(app)
@@ -227,8 +231,13 @@ async def mem_edit(
     # Backup for rollback on indexing failure
     original = await asyncio.to_thread(meta.source_file.read_text, encoding="utf-8")
     try:
+        # ``replace_chunk_body`` preserves the heading + section-leading
+        # blockquote header (``> created:`` / ``> tags:``) so that callers
+        # supplying body-only ``new_content`` don't accidentally erase the
+        # metadata. Pass a content prefixed with ``## `` to override the
+        # heading explicitly and bypass preservation.
         await asyncio.to_thread(
-            replace_lines, meta.source_file, meta.start_line, meta.end_line, new_content
+            replace_chunk_body, meta.source_file, meta.start_line, meta.end_line, new_content
         )
         stats = await app.index_engine.index_file(meta.source_file, force=True)
         app.search_pipeline.invalidate_cache()
