@@ -141,6 +141,7 @@ class TestNamespace:
         assert by_ns["empty-meta"]["description"] == "reg only"
         assert by_ns["chunks-only"]["chunk_count"] == 1
         assert by_ns["chunks-only"]["description"] == ""  # no metadata row
+        assert by_ns["chunks-only"]["color"] == ""  # COALESCE fallback symmetry
         assert by_ns["both"]["chunk_count"] == 2
         assert by_ns["both"]["description"] == "reg + chunks"
         assert by_ns["both"]["color"] == "#abc"

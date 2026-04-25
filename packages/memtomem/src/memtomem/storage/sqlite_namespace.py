@@ -204,7 +204,7 @@ class NamespaceOps:
             FROM (
                 SELECT namespace FROM namespace_metadata
                 UNION
-                SELECT DISTINCT namespace FROM chunks
+                SELECT namespace FROM chunks
             ) ns
             LEFT JOIN (
                 SELECT namespace, COUNT(*) AS chunk_count
