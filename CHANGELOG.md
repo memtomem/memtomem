@@ -5,6 +5,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.28] — 2026-04-25
+
+Multi-agent share provenance + per-entry tag round-trip release.
+Largest behavior change: the markdown chunker now promotes per-entry
+``> tags:`` blockquotes into ``ChunkMetadata.tags`` and strips the
+header from chunk content, so ``mem_add(tags=...)`` finally
+round-trips through ``mem_search(tag_filter=...)``. This regenerates
+chunk UUIDs on first reindex — a one-time discontinuity; the new
+``chunk_links`` table closes the structural gap for future shares,
+and a one-shot back-fill populates link rows from existing
+``shared-from=<uuid>`` audit tags so older audit chains resolve.
+
+Also flips ``agent-runtime:`` into ``system_namespace_prefixes`` by
+default (restores the isolation guarantee from the multi-agent
+guide), and defaults ``mem_import(on_conflict)`` to ``"skip"`` so
+re-imports become idempotent.
+
 ### Fixed
 
 - **`mem_batch_add` no longer over-applies tags across entries or onto
@@ -67,8 +84,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   reindex: any external pinning of `chunk_id` (notebooks, scripts,
   cross-LTM references) will miss, and existing
   `shared-from=<old-uuid>` audit-tag chains will reference UUIDs
-  that no longer exist. This is a one-time discontinuity the
-  upcoming `chunk_links` table will close permanently.
+  that no longer exist. This is a one-time discontinuity; the new
+  `chunk_links` table (see below) closes the structural gap for
+  future shares, and a one-shot back-fill in this release
+  best-effort recovers pre-existing chains from the
+  `shared-from=` tags.
 
 ### Added
 
@@ -99,6 +119,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `current_agent_id` / `current_namespace` / `--include-shared` inputs,
   as JSON — for use in multi-agent integration scripts so they can
   assert namespace resolution without standing up an MCP client.
+
+- **Structured share lineage via new `chunk_links` table.**
+  `mem_agent_share` now records a source→destination row in
+  `chunk_links` (indexed FK, `ON DELETE SET NULL` on `source_id`,
+  `ON DELETE CASCADE` on `target_id`) alongside the
+  `shared-from=<src>` audit tag it already writes into chunk
+  content. Tag-only provenance was a full-table
+  `LIKE '%shared-from=%'` scan with no index and broke on reindex
+  UUID churn; the structured link is an `O(fanout)` indexed lookup
+  and stays correct across source delete. New `Storage` Python API:
+  `add_chunk_link`, `get_chunk_link`, `get_chunks_shared_from`,
+  `walk_share_chain` (cycle defence + `max_depth`). Public MCP
+  surface is unchanged — `mem_agent_share`'s signature and
+  copy-on-share semantics are identical; the link is a storage
+  invariant. A one-shot back-fill on first 0.1.28 startup scans
+  pre-existing `shared-from=<uuid>` tags and populates link rows
+  so audit chains authored on older versions resolve
+  structurally; unresolvable source UUIDs store `source_id=NULL`.
+  (PR #469, PR #470)
 
 - **`mem_import` gains `on_conflict` and `preserve_ids` (bundle schema v2).**
   Bundles now carry per-chunk `chunk_id` + `content_hash` so importers can
