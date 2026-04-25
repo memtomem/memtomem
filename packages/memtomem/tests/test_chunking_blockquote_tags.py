@@ -141,3 +141,137 @@ class TestSectionBlockquoteTags:
         assert set(chunks[0].metadata.tags) == {"alpha", "beta"}
         assert "tags:" not in chunks[0].content
         assert "Body paragraph." in chunks[0].content
+
+
+class _SmallChunkConfig:
+    """Tiny token budget so any prose triggers `_split_section`."""
+
+    max_chunk_tokens = 30
+    chunk_overlap_tokens = 0
+    paragraph_split_threshold = 20
+
+
+class TestOversizeSectionLineDrift:
+    """Sub-chunks of an oversize section that begins with a blockquote
+    header must report ``start_line`` / ``end_line`` aligned with the
+    actual file lines they cover.
+
+    Pre-fix the chunker stripped the blockquote (~3 lines for
+    ``> created`` + ``> tags`` + trailing blank) before passing text to
+    ``_split_section`` while still seeding ``base_line`` from the
+    heading line. Sub-chunk 2..N's reported ``start_line`` therefore
+    pointed K lines earlier than the actual body — which silently
+    dropped K real body lines on a subsequent ``mem_edit`` of a non-
+    first sub-chunk. See ``planning/mem-add-tags-blockquote-promote-rfc.md``
+    §Follow-ups #2.
+    """
+
+    def test_blockquote_header_does_not_drag_sub_chunk_start_lines(self):
+        """Sub-chunk 2's start_line must land at or after the body."""
+        # Layout (line numbers in the source string):
+        # 1  ## Big section
+        # 2  (blank)
+        # 3  > created: 2026-04-25
+        # 4  > tags: ["alpha"]
+        # 5  (blank)
+        # 6  Para 1 ...           ← body actually starts here
+        # 7  (blank)
+        # 8  Para 2 ...
+        # 9  (blank)
+        # 10 Para 3 ...
+        para1 = ("First paragraph words " * 12).strip()
+        para2 = ("Second paragraph words " * 12).strip()
+        para3 = ("Third paragraph words " * 12).strip()
+        content = (
+            "## Big section\n"
+            "\n"
+            "> created: 2026-04-25\n"
+            '> tags: ["alpha"]\n'
+            "\n"
+            f"{para1}\n"
+            "\n"
+            f"{para2}\n"
+            "\n"
+            f"{para3}\n"
+        )
+        chunker = MarkdownChunker(indexing_config=_SmallChunkConfig())
+        chunks = chunker.chunk_file(Path("/test.md"), content)
+
+        assert len(chunks) >= 2, "test setup must trigger _split_section"
+        # All sub-chunks inherit the section's blockquote tag.
+        for c in chunks:
+            assert "alpha" in c.metadata.tags
+
+        # First sub-chunk anchors at the heading line — preserves
+        # mem_edit's existing convention (heading + header preserved
+        # via _find_body_start_index when editing).
+        assert chunks[0].metadata.start_line == 1
+
+        # Critical invariant: subsequent sub-chunks must NOT point into
+        # the blockquote header range (lines 1..5). Body starts at
+        # line 6.
+        for c in chunks[1:]:
+            assert c.metadata.start_line >= 6, (
+                f"sub-chunk start_line {c.metadata.start_line} drifted into the "
+                "stripped header range (heading + blockquote = lines 1..5); "
+                "mem_edit of this sub-chunk would consume real body lines."
+            )
+
+    def test_oversize_section_without_blockquote_unchanged(self):
+        """No header to strip → ``body_offset = 0``: pre-PR-A behavior."""
+        para1 = ("First paragraph words " * 12).strip()
+        para2 = ("Second paragraph words " * 12).strip()
+        # Layout:
+        # 1  ## Plain
+        # 2  (blank)
+        # 3  para1
+        # 4  (blank)
+        # 5  para2
+        content = f"## Plain\n\n{para1}\n\n{para2}\n"
+        chunker = MarkdownChunker(indexing_config=_SmallChunkConfig())
+        chunks = chunker.chunk_file(Path("/test.md"), content)
+        assert len(chunks) >= 2
+        # No tags promoted — there was no blockquote.
+        for c in chunks:
+            assert c.metadata.tags == ()
+        # First sub-chunk still anchored at heading.
+        assert chunks[0].metadata.start_line == 1
+
+    def test_oversize_section_with_no_tags_blockquote_keeps_header_inline(self):
+        """``> created:`` blockquote without ``tags:`` is left in place.
+
+        ``_extract_section_blockquote_tags`` short-circuits when no
+        ``tags:`` key is found and returns ``([], text, 0)`` — so the
+        blockquote stays in the chunk content, ``blockquote_strip_lines``
+        is 0, and ``body_offset`` reduces to ``1 + leading_strip_lines``.
+        Sub-chunks 2..N must still align with the file (no drift), and
+        the ``> created:`` line must stay in the first sub-chunk's
+        content so ``mem_edit`` can preserve it on a body-only edit.
+        """
+        para1 = ("First paragraph words " * 12).strip()
+        para2 = ("Second paragraph words " * 12).strip()
+        # Layout:
+        # 1  ## Note
+        # 2  (blank)
+        # 3  > created: 2026-04-25T12:00:00+00:00
+        # 4  (blank)
+        # 5  para1                          ← body starts here
+        # 6  (blank)
+        # 7  para2
+        content = f"## Note\n\n> created: 2026-04-25T12:00:00+00:00\n\n{para1}\n\n{para2}\n"
+        chunker = MarkdownChunker(indexing_config=_SmallChunkConfig())
+        chunks = chunker.chunk_file(Path("/test.md"), content)
+        assert len(chunks) >= 2
+        # No tags key → no promotion.
+        for c in chunks:
+            assert c.metadata.tags == ()
+        # First sub-chunk anchors at heading; ``> created:`` survives in
+        # its content because the no-tags branch leaves the blockquote
+        # alone (mem_edit's ``_find_body_start_index`` still recognises
+        # it on a body-only edit).
+        assert chunks[0].metadata.start_line == 1
+        assert "> created:" in chunks[0].content
+        # No drift: subsequent sub-chunks must land at or after the body
+        # (line 5), not inside the heading / blockquote / blank range.
+        for c in chunks[1:]:
+            assert c.metadata.start_line >= 5

@@ -183,14 +183,24 @@ class MarkdownChunker:
             file_ctx += " > " + " | ".join(unique)
 
         for section in sections:
-            text = section["text"].strip()
+            raw_section_text = section["text"]
+            text = raw_section_text.strip()
             if not text:
                 continue
+
+            # Track lines stripped from the front of section content while
+            # reaching the body. Used by ``_split_section`` so an oversized
+            # section's sub-chunks 2..N report ``start_line`` aligned with
+            # the actual file lines they cover, instead of pointing K lines
+            # too early (where K is the heading + blockquote header span).
+            leading_strip_lines = raw_section_text[
+                : len(raw_section_text) - len(raw_section_text.lstrip())
+            ].count("\n")
 
             # Per-entry metadata blockquote (``> created: ...`` / ``> tags:
             # [...]``) is promoted to ``metadata.tags`` and stripped from
             # the chunk content so it doesn't leak into BM25/embedding.
-            section_tags, text = self._extract_section_blockquote_tags(text)
+            section_tags, text, blockquote_strip_lines = self._extract_section_blockquote_tags(text)
             if not text.strip():
                 continue
             combined_tags = tuple(sorted(set(fm_tags) | set(section_tags)))
@@ -218,7 +228,13 @@ class MarkdownChunker:
                     )
                 )
             else:
-                sub_chunks = self._split_section(text, section)
+                # Body offset from the heading line: 1 (heading itself) +
+                # blank lines stripped by .strip() before the blockquote +
+                # blockquote group + trailing blanks. ``_split_section``
+                # uses this to seed its internal line counter so sub-chunk
+                # boundaries map back to real file lines.
+                body_offset = 1 + leading_strip_lines + blockquote_strip_lines
+                sub_chunks = self._split_section(text, section, body_offset=body_offset)
                 for sc in sub_chunks:
                     chunks.append(
                         Chunk(
@@ -281,7 +297,7 @@ class MarkdownChunker:
         return []
 
     @classmethod
-    def _extract_section_blockquote_tags(cls, text: str) -> tuple[list[str], str]:
+    def _extract_section_blockquote_tags(cls, text: str) -> tuple[list[str], str, int]:
         """Detect a section-leading blockquote group, extract ``tags:`` from it.
 
         ``mem_add`` writes per-entry metadata as a blockquote header
@@ -303,11 +319,17 @@ class MarkdownChunker:
           blockquote at render time, and the ``tags`` line carries no
           ``> `` prefix on disk).
 
-        Returns ``([], text)`` when there is no leading blockquote, or the
-        leading blockquote contains no ``tags:`` key. Returns
-        ``(tags, stripped_text)`` on a hit, with the entire blockquote
-        group plus any immediately-trailing blank lines removed from the
-        returned text.
+        Returns a triple ``(tags, text_after_strip, lines_consumed)``:
+
+        - On a no-hit case (no leading blockquote, or the blockquote
+          contains no ``tags:`` key) → ``([], text, 0)``: input unchanged.
+        - On a hit → ``(tags, stripped_text, n)`` where *n* is the count
+          of input lines that were stripped from the front of *text* to
+          reach *stripped_text* (blockquote group + trailing blank
+          lines). Callers that track file-line offsets — notably
+          ``chunk_file`` calling ``_split_section`` for an oversized
+          section — use *n* to keep sub-chunk ``start_line`` /
+          ``end_line`` aligned with the source file after the strip.
         """
         lines = text.splitlines()
         # Skip leading blank lines (text is usually .strip()ed already, but
@@ -316,7 +338,7 @@ class MarkdownChunker:
         while i < len(lines) and not lines[i].strip():
             i += 1
         if i == len(lines) or not lines[i].lstrip().startswith(">"):
-            return [], text
+            return [], text, 0
 
         # Collect the contiguous blockquote group, including lazy-continuation
         # lines: a non-blank, non-``>``-prefixed line that immediately follows
@@ -353,16 +375,25 @@ class MarkdownChunker:
                 break
 
         if not tags:
-            return [], text
+            return [], text, 0
 
         # Strip the blockquote group plus immediately-trailing blank lines.
-        rest = lines[i:]
-        while rest and not rest[0].strip():
-            rest = rest[1:]
-        return tags, "\n".join(rest)
+        rest_start = i
+        while rest_start < len(lines) and not lines[rest_start].strip():
+            rest_start += 1
+        return tags, "\n".join(lines[rest_start:]), rest_start
 
-    def _split_section(self, text: str, section: dict) -> list[dict]:
-        """Split an oversized section by paragraphs or sentences."""
+    def _split_section(self, text: str, section: dict, *, body_offset: int = 0) -> list[dict]:
+        """Split an oversized section by paragraphs or sentences.
+
+        ``body_offset`` is the number of file lines between
+        ``section["start_line"]`` (the heading) and the first line of
+        ``text``. Callers that strip a header (``> created:`` /
+        ``> tags:`` blockquote) from *text* before calling here pass the
+        stripped line count so ``start_line`` / ``end_line`` on the
+        emitted sub-chunks line up with the file. With ``body_offset=0``
+        the math reduces to the pre-strip behaviour.
+        """
         max_chars = self._max_tokens * _TOKEN_CHAR_RATIO
         overlap_chars = self._overlap_tokens * _TOKEN_CHAR_RATIO
         base_line = section["start_line"]
@@ -399,7 +430,12 @@ class MarkdownChunker:
         result: list[dict] = []
         current = ""
         current_start = base_line
-        line_offset = 0
+        # Seed the line counter with ``body_offset`` so file-line math is
+        # right after the caller stripped a header. Sub-chunk 1 keeps
+        # ``current_start = base_line`` (heading) until the first
+        # boundary; subsequent sub-chunks pick up
+        # ``base_line + line_offset`` and inherit the seed.
+        line_offset = body_offset
 
         for part in parts:
             if current and len(current) + len(part) + 2 > max_chars:
