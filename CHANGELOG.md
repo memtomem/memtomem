@@ -5,6 +5,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mem_batch_add` no longer over-applies tags across entries or onto
+  pre-existing chunks.** Pre-fix the tool collected the union of every
+  entry's tags after indexing and broadcast that union onto every chunk
+  the file produced — including chunks added in earlier sessions and
+  unrelated entries inside the same batch. With the chunker now
+  promoting per-entry blockquote tags directly (PR #463), the
+  post-index broadcast is removed; per-entry tags now stay attached to
+  the entry that declared them, and pre-existing chunks in the same
+  file are no longer retagged on a subsequent batch.
+
 ### Changed
 
 - **`mem_add(tags=...)` now writes a canonical blockquote header.**

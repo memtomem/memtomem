@@ -386,33 +386,9 @@ async def mem_batch_add(
             continue
         append_entry(target, value, title=key or None, tags=entry_tags)
 
-    # Collect all tags from entries for post-index application
-    all_tags: set[str] = set()
-    for entry in entries:
-        entry_tags = entry.get("tags")
-        if entry_tags:
-            all_tags.update(entry_tags)
-
     effective_ns = namespace or app.current_namespace
     stats = await app.index_engine.index_file(target, namespace=effective_ns)
     app.search_pipeline.invalidate_cache()
-
-    # Apply collected tags to indexed chunks
-    if all_tags and stats.indexed_chunks > 0:
-        chunks = await app.storage.list_chunks_by_source(target)
-        updated = []
-        for c in chunks:
-            merged = set(c.metadata.tags) | all_tags
-            if merged != set(c.metadata.tags):
-                c.metadata = c.metadata.__class__(
-                    **{
-                        **{f: getattr(c.metadata, f) for f in c.metadata.__dataclass_fields__},
-                        "tags": tuple(sorted(merged)),
-                    }
-                )
-                updated.append(c)
-        if updated:
-            await app.storage.upsert_chunks(updated)
 
     display_ns = effective_ns or app.config.namespace.default_namespace
     result = (
