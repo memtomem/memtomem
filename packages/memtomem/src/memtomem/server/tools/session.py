@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from uuid import uuid4
 
+from memtomem.constants import AGENT_NAMESPACE_PREFIX
 from memtomem.server import mcp
 from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -72,14 +73,37 @@ async def mem_session_start(
       and the new session takes its place. The previous ``agent_id`` is
       replaced by the new one — agents do not stack.
 
+    Namespace derivation priority (matches the LangGraph adapter
+    ``MemtomemStore.start_agent_session`` so MCP and Python entry points
+    behave the same):
+
+    1. Explicit ``namespace=`` argument (escape hatch — wins everything).
+    2. ``agent-runtime:<agent_id>`` when ``agent_id`` is non-default.
+       This is the common case for multi-agent workflows.
+    3. ``app.current_namespace`` (pre-multi-agent fallback).
+    4. ``"default"``.
+
+    Only the **session record's** namespace is derived; ``mem_add`` /
+    ``mem_search`` without explicit ``namespace=`` still consult
+    ``app.current_namespace`` as before. Namespace and agent_id remain
+    separate axes on ``AppContext``.
+
     Args:
         agent_id: Identifier for the agent starting the session
         title: Optional human-readable session title (e.g. "Sprint Planning")
-        namespace: Session namespace (default: current session namespace)
+        namespace: Session namespace. When omitted and ``agent_id`` is
+            non-default, defaults to ``agent-runtime:<agent_id>``.
     """
     app = await _get_app_initialized(ctx)
     session_id = str(uuid4())
-    effective_ns = namespace or app.current_namespace or "default"
+    if namespace:
+        effective_ns = namespace
+    elif agent_id and agent_id != "default":
+        effective_ns = f"{AGENT_NAMESPACE_PREFIX}{agent_id}"
+    elif app.current_namespace:
+        effective_ns = app.current_namespace
+    else:
+        effective_ns = "default"
 
     auto_end_notice: str | None = None
     async with app._session_lock:

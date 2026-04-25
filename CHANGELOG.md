@@ -5,6 +5,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed
+
+- **`mem_session_start(agent_id="<id>")` now derives the session
+  namespace from `agent_id` when the caller doesn't pass an
+  explicit `namespace=`.** Previously the session record's
+  namespace fell back to `app.current_namespace` or `"default"`,
+  ignoring the supplied `agent_id` even though the LangGraph
+  adapter `MemtomemStore.start_agent_session` already auto-derived
+  `agent-runtime:<id>`. The MCP tool now matches that semantic.
+  Priority order: explicit `namespace=` > `agent-runtime:<id>`
+  (when `agent_id != "default"`) > `app.current_namespace` >
+  `"default"`. Only the **session record's** namespace field
+  changes; `app.current_namespace` is untouched, so subsequent
+  `mem_add` / `mem_search` without explicit `namespace=` keep the
+  legacy fallback. Backward compat: callers passing explicit
+  `namespace=` are unaffected (priority 1); callers not passing
+  `agent_id` (defaults to `"default"`) are unaffected (priority 3
+  fallback). Caught while walking the multi-agent test scenarios
+  — `mem_session_start(agent_id="planner")` reported
+  `Namespace: default` even though `current_agent_id` was set to
+  `"planner"`, which the tester reasonably expected to flow into
+  the session row.
+
 ## [0.1.29] — 2026-04-25
 
 Hotfix release. `mm agent register <id>` now surfaces in

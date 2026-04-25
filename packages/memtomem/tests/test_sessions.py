@@ -148,3 +148,73 @@ class TestSessionAgentInheritance:
         """
         app = AppContext.from_components(components)
         assert app._session_lock is not app._config_lock
+
+
+class TestSessionNamespaceDerivation:
+    """``mem_session_start`` derives the session record's namespace from
+    ``agent_id`` when the caller doesn't pass an explicit ``namespace=``.
+    Mirrors the LangGraph adapter's ``MemtomemStore.start_agent_session``
+    so MCP and Python entry points agree.
+
+    Priority: explicit namespace > agent-runtime:<id> when agent_id is
+    non-default > app.current_namespace > "default".
+    """
+
+    @pytest.mark.asyncio
+    async def test_agent_id_auto_derives_namespace(self, components):
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        out = await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+
+        assert "- Namespace: agent-runtime:planner" in out
+        rows = await app.storage.list_sessions()
+        active = next(r for r in rows if r["id"] == app.current_session_id)
+        assert active["namespace"] == "agent-runtime:planner"
+
+    @pytest.mark.asyncio
+    async def test_explicit_namespace_wins_over_agent_id(self, components):
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        out = await mem_session_start(
+            agent_id="planner", namespace="custom-ns", ctx=ctx
+        )  # type: ignore[arg-type]
+
+        assert "- Namespace: custom-ns" in out
+        rows = await app.storage.list_sessions()
+        active = next(r for r in rows if r["id"] == app.current_session_id)
+        assert active["namespace"] == "custom-ns"
+
+    @pytest.mark.asyncio
+    async def test_default_agent_id_does_not_auto_derive(self, components):
+        """Backward compat: callers that don't pass ``agent_id`` (it
+        defaults to ``"default"``) keep the legacy namespace behavior so
+        pre-multi-agent workflows are unchanged.
+        """
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        out = await mem_session_start(ctx=ctx)  # type: ignore[arg-type]
+
+        assert "- Namespace: default" in out
+        rows = await app.storage.list_sessions()
+        active = next(r for r in rows if r["id"] == app.current_session_id)
+        assert active["namespace"] == "default"
+
+    @pytest.mark.asyncio
+    async def test_agent_id_beats_current_namespace(self, components):
+        """When both ``agent_id`` and ``app.current_namespace`` could
+        supply a value, ``agent_id`` (priority 2) wins over
+        ``current_namespace`` (priority 3).
+        """
+        app = AppContext.from_components(components)
+        app.current_namespace = "legacy-ns"
+        ctx = _StubCtx(app)
+
+        out = await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+
+        assert "- Namespace: agent-runtime:planner" in out
+        rows = await app.storage.list_sessions()
+        active = next(r for r in rows if r["id"] == app.current_session_id)
+        assert active["namespace"] == "agent-runtime:planner"
