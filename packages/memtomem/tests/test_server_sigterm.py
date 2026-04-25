@@ -414,6 +414,71 @@ def test_legacy_lock_sh_allows_multiple_holders(tmp_path: Path) -> None:
         fp2.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="server is POSIX-only")
+def test_contended_server_start_preserves_pid_file_content(tmp_path: Path) -> None:
+    """Regression: a contended server start must NOT truncate the live
+    server's pid file when the flock probe bails.
+
+    Pre-fix, ``main()`` opened the pid file with ``open(..., "w")`` which
+    truncates *before* ``fcntl.flock`` is checked. So a second server
+    starting while the first held the lock zeroed out the file content
+    even though the first server kept running. The user-visible symptom:
+    ``mm uninstall`` reports ``Server still running (pid None)`` and
+    ``lsof`` loses the recorded process identity, defeating the whole
+    point of writing the pid in the first place.
+
+    Repro: pre-create the pid file with known content and hold
+    ``LOCK_EX`` on it, spawn the server, and assert the recorded pid
+    survived. The fix uses ``open(..., "a+")`` + post-lock truncate so
+    contended starts leave the live file alone.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    xdg = tmp_path / "xdg_runtime"
+    xdg.mkdir()
+    os.chmod(xdg, 0o700)
+    sub = xdg / "memtomem"
+    sub.mkdir()
+    os.chmod(sub, 0o700)
+    pid_file = sub / "server.pid"
+    pid_file.write_text("12345")
+
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["XDG_RUNTIME_DIR"] = str(xdg)
+
+    import fcntl as _fcntl
+
+    holder = open(pid_file, "a+b")  # noqa: SIM115 — held for test scope
+    try:
+        _fcntl.flock(holder, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        proc = _spawn_server(env)
+        try:
+            # The open + flock + warning log runs synchronously at
+            # startup, well before mcp.run() spins up the asyncio loop.
+            # 1.5s is generous coverage for cold-start interpreter
+            # overhead while still failing fast on the regression.
+            time.sleep(1.5)
+            assert proc.poll() is None, (
+                "server must stay alive when another holder owns the flock; "
+                f"exited rc={proc.returncode}"
+            )
+            assert pid_file.read_text() == "12345", (
+                "contended server start truncated the live pid file — this "
+                "is the open(..., 'w') race the fix replaces with "
+                "open(..., 'a+') + post-lock truncate. Got: "
+                f"{pid_file.read_text()!r}"
+            )
+        finally:
+            _cleanup_proc(proc)
+    finally:
+        try:
+            _fcntl.flock(holder, _fcntl.LOCK_UN)
+        except OSError:
+            pass
+        holder.close()
+
+
 def stat_mode(path: Path) -> int:
     import stat as _stat
 

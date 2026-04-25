@@ -372,6 +372,37 @@ class TestServerAliveRefuses:
         assert result.exit_code == 0, result.output
         assert not state.exists()
 
+    def test_refuses_with_unknown_pid_branch_when_pid_file_empty(self, home):
+        """Empty pid file + flock held = the truncate-race fingerprint.
+
+        When a pre-fix concurrent server start truncated the live
+        server's pid file, the recorded pid is gone but the flock is
+        still held. The user-facing message must distinguish this from
+        the normal case so the user can run ``lsof <pidfile>`` to find
+        the holder — falling back to the generic ``pid None`` was
+        confusing enough to file in this PR.
+        """
+        from memtomem._runtime_paths import ensure_runtime_dir
+
+        _seed_state(home)
+        pid_file = ensure_runtime_dir() / "server.pid"
+        pid_file.write_text("", encoding="utf-8")  # empty content, exists
+
+        with _hold_pid_lock(pid_file):
+            result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 2
+        assert "pid unknown" in result.output, (
+            "empty pid + held flock must surface the 'pid unknown' branch, "
+            f"not the generic 'pid None' message; got: {result.output!r}"
+        )
+        assert "lsof" in result.output, (
+            "empty-pid branch must point at lsof so the user can identify "
+            "the flock holder without another diagnostic round-trip"
+        )
+        # Refusal still protects state — same WAL-corruption invariant.
+        assert (home / ".memtomem" / "memtomem.db").exists()
+
 
 class TestPidRecyclingDoesNotFalsePositive:
     """#387: a recorded PID that happens to point at a live unrelated process

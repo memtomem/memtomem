@@ -685,11 +685,30 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
     if (server.alive or db_lock.locked) and not force:
         click.echo("")
         if server.alive:
-            click.secho(
-                f"Server still running (pid {server.pid}). Refusing to delete state — "
-                "an active server holds the SQLite WAL and deleting it risks corruption.",
-                fg="red",
-            )
+            if server.pid is None:
+                # Empty pid file but flock IS held — a live writer exists,
+                # but the recorded pid was lost (typically a partial write
+                # during startup, or a pre-fix concurrent server start that
+                # truncated the file before bailing on the lock probe; see
+                # server/__init__.py for the open(..., "a+") rationale).
+                # Surface the lock path so the user can lsof against it.
+                lookup = (
+                    f"`lsof {server.pid_file}`"
+                    if server.pid_file is not None
+                    else "`ps aux | grep memtomem`"
+                )
+                click.secho(
+                    "Server still running (pid unknown — flock is held by an active "
+                    "writer, but the recorded pid is missing). Refusing to delete "
+                    f"state. Find the holder with {lookup}.",
+                    fg="red",
+                )
+            else:
+                click.secho(
+                    f"Server still running (pid {server.pid}). Refusing to delete state — "
+                    "an active server holds the SQLite WAL and deleting it risks corruption.",
+                    fg="red",
+                )
             click.secho("  Stop the server first, or pass --force to override.", fg="red")
         else:
             # db_lock.locked only — writer without .server.pid (mm web,

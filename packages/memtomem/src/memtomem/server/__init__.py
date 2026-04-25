@@ -301,7 +301,19 @@ def main() -> None:
 
     # Advisory lock — prevents multiple MCP servers from writing concurrently.
     # The lock is held for the lifetime of the process and auto-released on exit.
-    _lock_fp = open(pid_file, "w")  # noqa: SIM115
+    #
+    # Mode is ``a+`` (not ``w``): ``open(..., "w")`` truncates the file at
+    # open time, *before* we know whether ``flock`` will succeed. When a
+    # second server starts while the first is still running, that pre-flock
+    # truncate would zero out the live server's pid file — leaving an
+    # empty file on disk while the original flock holder keeps running.
+    # ``mm uninstall`` then sees ``pid file exists, content empty, flock
+    # held`` and reports ``Server still running (pid None)``, which loses
+    # the diagnostic value of the recorded pid (and broke ``lsof``-driven
+    # debugging). ``a+`` keeps the existing content readable until the lock
+    # decision is made; we ``truncate`` + write the pid only after acquiring
+    # the lock.
+    _lock_fp = open(pid_file, "a+")  # noqa: SIM115
     try:
         fcntl.flock(_lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -317,6 +329,8 @@ def main() -> None:
             pid_file,
         )
     else:
+        _lock_fp.seek(0)
+        _lock_fp.truncate()
         _lock_fp.write(str(os.getpid()))
         _lock_fp.flush()
         atexit.register(lambda: _lock_fp.close())  # LIFO: runs second
