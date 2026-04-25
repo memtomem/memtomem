@@ -2,14 +2,28 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import sqlite3
+from datetime import datetime, timezone
 
 from memtomem.errors import EmbeddingDimensionMismatchError
 from memtomem.storage.sqlite_meta import MetaManager
 
 logger = logging.getLogger(__name__)
+
+# ``chunk_links.link_type`` values recognised by the back-fill and (in PR-2)
+# the writer. Validation lives in Python so adding a new type is one PR not
+# two — see ``planning/mem-agent-share-chunk-links-rfc.md`` §Storage.
+_VALID_LINK_TYPES: frozenset[str] = frozenset({"shared"})
+
+# Bumping this key (e.g. ``..._v2``) triggers a re-run of the back-fill on
+# the next startup — used if a future release tightens what counts as a
+# share-tag (e.g. namespace prefix on the source UUID).
+_CHUNK_LINKS_BACKFILL_KEY = "chunk_links_backfill_v1"
+
+_SHARED_FROM_TAG_PREFIX = "shared-from="
 
 
 def create_tables(
@@ -335,6 +349,38 @@ def create_tables(
     db.execute("CREATE INDEX IF NOT EXISTS idx_relations_source ON chunk_relations(source_id)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_relations_target ON chunk_relations(target_id)")
 
+    # --- Cross-namespace share lineage ---
+    # Storage-layer FK + cascade replacement for the ``shared-from=<uuid>``
+    # audit tag previously written by ``mem_agent_share``. The tag survived
+    # in markdown, but tag-only provenance does not benefit from an index
+    # and breaks on UUID churn (reindex re-issues chunk ids). See
+    # ``planning/mem-agent-share-chunk-links-rfc.md``.
+    #
+    # ``ON DELETE SET NULL`` on ``source_id`` keeps the destination chunk
+    # alive when the source is deleted (matches existing copy-on-share
+    # durability). ``ON DELETE CASCADE`` on ``target_id`` drops the row
+    # when the destination chunk goes away.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS chunk_links (
+            source_id TEXT,
+            target_id TEXT NOT NULL,
+            link_type TEXT NOT NULL DEFAULT 'shared',
+            namespace_target TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (target_id, link_type),
+            FOREIGN KEY (source_id) REFERENCES chunks(id) ON DELETE SET NULL,
+            FOREIGN KEY (target_id) REFERENCES chunks(id) ON DELETE CASCADE
+        )
+    """)
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chunk_links_source ON chunk_links(source_id, link_type)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chunk_links_namespace ON chunk_links(namespace_target)"
+    )
+
+    _backfill_chunk_links(db, meta)
+
     # --- Entity extraction table ---
     db.execute("""
         CREATE TABLE IF NOT EXISTS chunk_entities (
@@ -388,3 +434,64 @@ def create_tables(
     db.commit()
 
     return dimension, dim_mismatch, model_mismatch
+
+
+def _backfill_chunk_links(db: sqlite3.Connection, meta: MetaManager) -> int:
+    """Populate ``chunk_links`` from pre-RFC ``shared-from=<uuid>`` tags.
+
+    ``mem_agent_share`` historically encoded provenance as a
+    ``shared-from=<source-uuid>`` audit tag on the destination chunk's
+    ``tags`` array. This one-shot pass walks those rows once per database
+    and inserts the equivalent ``chunk_links`` row so structured
+    provenance (FK + cascade + index) is available without waiting for
+    a re-share. Idempotent: completion is recorded in ``_memtomem_meta``
+    and re-runs are no-ops.
+
+    Sources whose UUID no longer resolves (already deleted) are stored
+    with ``source_id=NULL`` — same end-state as a post-RFC share whose
+    source was later deleted (``ON DELETE SET NULL``).
+
+    Returns the number of rows inserted on this call (0 once recorded).
+    """
+    if meta.get_meta(_CHUNK_LINKS_BACKFILL_KEY) == "done":
+        return 0
+
+    rows = db.execute(
+        "SELECT id, namespace, tags FROM chunks WHERE tags LIKE ?",
+        (f"%{_SHARED_FROM_TAG_PREFIX}%",),
+    ).fetchall()
+
+    inserted = 0
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for target_id, namespace, tags_json in rows:
+        try:
+            tags = json.loads(tags_json) if tags_json else []
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(tags, list):
+            continue
+        source_uuid: str | None = None
+        for tag in tags:
+            if not isinstance(tag, str) or not tag.startswith(_SHARED_FROM_TAG_PREFIX):
+                continue
+            value = tag[len(_SHARED_FROM_TAG_PREFIX) :].strip()
+            if value:
+                source_uuid = value
+                break
+        if source_uuid is None:
+            continue
+
+        src_exists = db.execute("SELECT 1 FROM chunks WHERE id = ?", (source_uuid,)).fetchone()
+        source_id_to_store = source_uuid if src_exists else None
+
+        cursor = db.execute(
+            "INSERT OR IGNORE INTO chunk_links "
+            "(source_id, target_id, link_type, namespace_target, created_at) "
+            "VALUES (?, ?, 'shared', ?, ?)",
+            (source_id_to_store, target_id, namespace, now),
+        )
+        if cursor.rowcount > 0:
+            inserted += 1
+
+    meta.set_meta(_CHUNK_LINKS_BACKFILL_KEY, "done")
+    return inserted
