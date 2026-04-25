@@ -91,6 +91,60 @@ class TestNamespace:
         assert meta["description"] == "desc"
         assert meta["color"] == "#fff"
 
+    async def test_list_namespace_meta_includes_registered_empty_namespace(self, storage):
+        """``mm agent register <id>`` followed by ``mm agent list`` must show
+        the agent even before any chunks land in its namespace.
+
+        Regression: ``list_namespace_meta`` previously sourced rows from
+        ``chunks`` only (LEFT JOIN ``namespace_metadata``), so a registered
+        namespace with zero chunks was invisible — the user-visible symptom
+        was that ``mm agent register planner && mm agent list`` printed
+        ``Agents: 0``. Both real-user testing on v0.1.28 and the
+        scenario-1 walkthrough hit this. Existing CLI tests stubbed the
+        storage so the SQL bug was never exercised
+        (``feedback_storage_artifact_false_pass.md``).
+        """
+        await storage.set_namespace_meta("agent-runtime:planner", description="planner")
+        await storage.set_namespace_meta("agent-runtime:coder")  # description default
+
+        meta = await storage.list_namespace_meta()
+        by_ns = {m["namespace"]: m for m in meta}
+
+        assert "agent-runtime:planner" in by_ns
+        assert by_ns["agent-runtime:planner"]["chunk_count"] == 0
+        assert by_ns["agent-runtime:planner"]["description"] == "planner"
+        assert "agent-runtime:coder" in by_ns
+        assert by_ns["agent-runtime:coder"]["chunk_count"] == 0
+
+    async def test_list_namespace_meta_unions_chunks_and_metadata(self, storage):
+        """Namespace appearing in either side of the union must surface.
+
+        Three states the listing must cover, all in one fixture:
+        - **metadata only** — registered but no chunks yet (``empty-meta``)
+        - **chunks only** — legacy / un-registered chunks (``chunks-only``)
+        - **both** — registered AND has chunks (``both``)
+        """
+        await storage.set_namespace_meta("empty-meta", description="reg only")
+        await storage.set_namespace_meta("both", description="reg + chunks", color="#abc")
+        await storage.upsert_chunks(
+            [
+                make_chunk(content="legacy", namespace="chunks-only"),
+                make_chunk(content="b1", namespace="both"),
+                make_chunk(content="b2", namespace="both"),
+            ]
+        )
+
+        meta = await storage.list_namespace_meta()
+        by_ns = {m["namespace"]: m for m in meta}
+
+        assert by_ns["empty-meta"]["chunk_count"] == 0
+        assert by_ns["empty-meta"]["description"] == "reg only"
+        assert by_ns["chunks-only"]["chunk_count"] == 1
+        assert by_ns["chunks-only"]["description"] == ""  # no metadata row
+        assert by_ns["both"]["chunk_count"] == 2
+        assert by_ns["both"]["description"] == "reg + chunks"
+        assert by_ns["both"]["color"] == "#abc"
+
     async def test_namespace_assign_via_upsert(self, storage):
         """Verify chunks in different namespaces are tracked independently."""
         c1 = make_chunk(content="alpha chunk", namespace="ns-a")

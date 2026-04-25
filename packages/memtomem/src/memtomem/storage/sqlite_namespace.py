@@ -186,15 +186,33 @@ class NamespaceOps:
         db.commit()
 
     async def list_namespace_meta(self) -> list[dict]:
+        # Source from BOTH ``namespace_metadata`` (registered namespaces,
+        # possibly with zero chunks) and ``chunks`` (namespaces that hold
+        # data but have no metadata row), unioned. Iterating only one side
+        # would hide the other — registering an agent before adding any
+        # chunks is a legitimate state (``mm agent register <id>`` followed
+        # by ``mm agent list`` should show the agent), and conversely a
+        # legacy chunk in a namespace without a metadata row should not
+        # disappear from the listing.
         db = self._get_db()
         rows = db.execute("""
-            SELECT c.namespace, COUNT(*) as chunk_count,
-                   COALESCE(m.description, '') as description,
-                   COALESCE(m.color, '') as color
-            FROM chunks c
-            LEFT JOIN namespace_metadata m ON c.namespace = m.namespace
-            GROUP BY c.namespace
-            ORDER BY c.namespace
+            SELECT
+                ns.namespace,
+                COALESCE(c.chunk_count, 0) AS chunk_count,
+                COALESCE(m.description, '') AS description,
+                COALESCE(m.color, '') AS color
+            FROM (
+                SELECT namespace FROM namespace_metadata
+                UNION
+                SELECT DISTINCT namespace FROM chunks
+            ) ns
+            LEFT JOIN (
+                SELECT namespace, COUNT(*) AS chunk_count
+                FROM chunks
+                GROUP BY namespace
+            ) c ON c.namespace = ns.namespace
+            LEFT JOIN namespace_metadata m ON m.namespace = ns.namespace
+            ORDER BY ns.namespace
         """).fetchall()
         return [
             {
