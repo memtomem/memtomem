@@ -17,6 +17,10 @@ chunk UUIDs on first reindex — a one-time discontinuity; the new
 and a one-shot back-fill populates link rows from existing
 ``shared-from=<uuid>`` audit tags so older audit chains resolve.
 
+See [ADR-0002](docs/adr/0002-mem-add-blockquote-tags.md) for the
+full reader/writer contract and the reasoning behind the on-disk
+blockquote format.
+
 Also flips ``agent-runtime:`` into ``system_namespace_prefixes`` by
 default (restores the isolation guarantee from the multi-agent
 guide), and defaults ``mem_import(on_conflict)`` to ``"skip"`` so

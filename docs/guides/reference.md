@@ -303,6 +303,12 @@ mem_add(content="New rate limit: 1000 req/min", file="api-notes.md", tags="api")
 mem_add(content="Sprint decision: use GraphQL", title="Sprint 12", namespace="work")
 ```
 
+Tags are persisted as a per-entry `> tags: [...]` blockquote header on the
+markdown entry and promoted to chunk metadata at index time so
+`mem_search(tag_filter=...)` can match. See
+[ADR-0002](../adr/0002-mem-add-blockquote-tags.md) for the on-disk format
+and reader/writer contract.
+
 #### Structured Templates
 
 Use `template` to create formatted entries:
