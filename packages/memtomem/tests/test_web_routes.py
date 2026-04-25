@@ -541,6 +541,57 @@ class TestEditChunk:
             )
             assert resp.status_code == 403
 
+    async def test_edit_chunk_preserves_blockquote_header(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        """Body-only PATCH must keep the per-entry ``> created:`` / ``> tags:``
+        blockquote and the heading. The Web UI editor surfaces ``chunk.content``
+        (already header-stripped by the chunker), so without preservation a
+        Save would silently erase metadata on disk.
+        """
+        source = tmp_path / "memory.md"
+        source.write_text(
+            "## Cache strategy\n"
+            "\n"
+            "> created: 2026-04-24T22:00:00+00:00\n"
+            '> tags: ["cache", "decision"]\n'
+            "\n"
+            "Old body line.\n",
+            encoding="utf-8",
+        )
+        chunk = _make_test_chunk(source=str(source))
+        # Chunk range covers the entire entry on disk.
+        chunk = chunk.__class__(
+            content=chunk.content,
+            metadata=chunk.metadata.__class__(
+                source_file=source,
+                heading_hierarchy=("## Cache strategy",),
+                tags=chunk.metadata.tags,
+                namespace=chunk.metadata.namespace,
+                start_line=1,
+                end_line=6,
+            ),
+            id=chunk.id,
+            content_hash=chunk.content_hash,
+            embedding=chunk.embedding,
+            created_at=chunk.created_at,
+            updated_at=chunk.updated_at,
+        )
+        app.state.storage.get_chunk.return_value = chunk
+
+        resp = await client.patch(
+            f"/api/chunks/{CHUNK_ID}",
+            json={"new_content": "Replaced body."},
+        )
+        assert resp.status_code == 200
+
+        on_disk = source.read_text(encoding="utf-8")
+        assert "## Cache strategy" in on_disk
+        assert "> created: 2026-04-24T22:00:00+00:00" in on_disk
+        assert '> tags: ["cache", "decision"]' in on_disk
+        assert "Replaced body." in on_disk
+        assert "Old body line." not in on_disk
+
 
 # ---------------------------------------------------------------------------
 # GET /api/sessions

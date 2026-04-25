@@ -197,12 +197,16 @@ async def mem_edit(
 ) -> str:
     """Edit an existing memory entry in its source markdown file.
 
-    Replaces the chunk's original line range in the file with new_content,
-    then re-indexes the file so the change is immediately searchable.
+    ``new_content`` is treated as body-only: the heading line and the
+    section-leading ``> created:`` / ``> tags:`` blockquote header are
+    preserved automatically. To override the heading explicitly,
+    prefix ``new_content`` with ``## `` and the call reverts to a
+    full replacement of the chunk's line range.
 
     Args:
         chunk_id: The UUID of the chunk to edit (shown in mem_search results)
-        new_content: The replacement content
+        new_content: The replacement body. Heading + per-entry metadata
+            blockquote are preserved unless the value starts with ``## ``.
     """
     if not new_content.strip():
         return "Error: new_content cannot be empty."

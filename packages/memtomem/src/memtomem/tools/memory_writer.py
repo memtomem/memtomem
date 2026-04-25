@@ -106,6 +106,9 @@ def replace_chunk_body(file_path: Path, start_line: int, end_line: int, new_cont
     _validate_line_range(start_line, end_line, len(lines))
 
     stripped_new = new_content.lstrip("\n")
+    # ``append_entry`` always emits H2 for entry headings; other heading
+    # levels in user input are treated as body content rather than a
+    # header override, so only ``## `` triggers full-replacement.
     if stripped_new.lstrip().startswith("## "):
         # Full replacement — caller is overriding heading + header explicitly.
         replacement = new_content.splitlines()
