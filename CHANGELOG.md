@@ -5,6 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mem_agent_share` example in server `instructions=` had wrong
+  parameter name.** The recipe shipped in #477 showed
+  `mem_agent_share(memory_id=...)` but the real signature is
+  `mem_agent_share(chunk_id=..., target=...)`. Weak LLMs (reproduced
+  on Claude Haiku 4.5) followed the example verbatim, hit a
+  parameter-name rejection, then `mem_do(action="help")`-recovered to
+  the correct args — burning an extra round trip per multi-agent
+  share. Stronger LLMs (Sonnet 4.5+) inferred past the typo. Fixed
+  the example and tightened `tests/test_server_instructions.py` with
+  a signature-parity check: any `tool(arg=...)` form in INSTRUCTIONS
+  is now cross-checked against `inspect.signature(...)`, so future
+  parameter renames force the example to follow.
+
 ### Added
 
 - **MCP `initialize` response now carries server-level `instructions`.**
