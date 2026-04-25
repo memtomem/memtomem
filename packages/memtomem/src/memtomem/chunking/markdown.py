@@ -439,11 +439,17 @@ class MarkdownChunker:
 
         for part in parts:
             if current and len(current) + len(part) + 2 > max_chars:
+                # ``line_offset`` was just incremented past the previous
+                # part *plus* its trailing ``\n\n`` separator (the ``+2``
+                # below). Subtract that separator so ``end_line`` lands
+                # on the part's last content line, not on the blank line
+                # between paragraphs — otherwise ``mem_edit``'s
+                # ``replace_chunk_body`` would absorb the gap on save.
                 result.append(
                     {
                         "text": current.strip(),
                         "start_line": current_start,
-                        "end_line": base_line + line_offset - 1,
+                        "end_line": base_line + line_offset - 2,
                     }
                 )
                 # Apply overlap

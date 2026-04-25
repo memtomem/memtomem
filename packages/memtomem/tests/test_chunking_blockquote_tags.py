@@ -275,3 +275,104 @@ class TestOversizeSectionLineDrift:
         # (line 5), not inside the heading / blockquote / blank range.
         for c in chunks[1:]:
             assert c.metadata.start_line >= 5
+
+
+class TestOversizeSectionParagraphGap:
+    """Closed-out sub-chunks (every chunk except the trailing one, which
+    inherits ``section['end_line']`` directly) must report ``end_line``
+    on the actual last content line of their paragraphs — not on the
+    blank separator that follows. See
+    ``planning/mem-add-tags-blockquote-promote-rfc.md`` §Follow-ups #5.
+
+    Pre-fix the line counter advanced by ``count('\\n') + 2`` per part
+    where the ``+2`` covered the ``\\n\\n`` join separator. When closing
+    a chunk the formula then read ``base_line + line_offset - 1``, which
+    landed one line past the paragraph (on the blank). ``mem_edit``'s
+    ``replace_chunk_body`` reads ``lines[start..end]`` inclusive, so the
+    overstated ``end_line`` pulled the next paragraph's blank separator
+    into the replacement on save — collapsing the paragraph gap.
+    Cosmetic, not data-loss.
+    """
+
+    def test_plain_section_sub_chunk_end_lines_skip_blank_separator(self):
+        """Three single-line paragraphs → three sub-chunks, exact lines.
+
+        Layout (line numbers in the source string):
+          1  ## Plain
+          2  (blank)
+          3  para1                ← chunk[0] body
+          4  (blank)
+          5  para2                ← chunk[1] body
+          6  (blank)
+          7  para3                ← chunk[2] body
+        """
+        para1 = ("First paragraph words " * 12).strip()
+        para2 = ("Second paragraph words " * 12).strip()
+        para3 = ("Third paragraph words " * 12).strip()
+        content = f"## Plain\n\n{para1}\n\n{para2}\n\n{para3}\n"
+        chunker = MarkdownChunker(indexing_config=_SmallChunkConfig())
+        chunks = chunker.chunk_file(Path("/test.md"), content)
+        assert len(chunks) == 3, "test setup must produce exactly 3 sub-chunks"
+
+        # chunk[0]: heading-anchored at line 1; body is para1 (line 3).
+        # end_line must be 3, not 4 — line 4 is the blank separator
+        # before para2 and belongs to no chunk.
+        assert chunks[0].metadata.start_line == 1
+        assert chunks[0].metadata.end_line == 3
+
+        # chunk[1]: para2 (line 5). end_line must be 5, not 6.
+        assert chunks[1].metadata.start_line == 5
+        assert chunks[1].metadata.end_line == 5
+
+        # chunk[2]: trailing sub-chunk inherits section["end_line"] (= 7),
+        # which is the last content line. Asserted for completeness.
+        assert chunks[2].metadata.start_line == 7
+        assert chunks[2].metadata.end_line == 7
+
+    def test_blockquote_section_sub_chunk_end_lines_skip_blank_separator(self):
+        """Same exact-alignment invariant when ``body_offset`` is non-zero.
+
+        Layout:
+          1  ## Big section
+          2  (blank)
+          3  > created: 2026-04-25
+          4  > tags: ["alpha"]
+          5  (blank)
+          6  para1               ← chunk[0] body (heading-anchored)
+          7  (blank)
+          8  para2               ← chunk[1] body
+          9  (blank)
+          10 para3               ← chunk[2] body
+        """
+        para1 = ("First paragraph words " * 12).strip()
+        para2 = ("Second paragraph words " * 12).strip()
+        para3 = ("Third paragraph words " * 12).strip()
+        content = (
+            "## Big section\n"
+            "\n"
+            "> created: 2026-04-25\n"
+            '> tags: ["alpha"]\n'
+            "\n"
+            f"{para1}\n"
+            "\n"
+            f"{para2}\n"
+            "\n"
+            f"{para3}\n"
+        )
+        chunker = MarkdownChunker(indexing_config=_SmallChunkConfig())
+        chunks = chunker.chunk_file(Path("/test.md"), content)
+        assert len(chunks) == 3
+
+        # chunk[0]: heading-anchored at 1; body para1 ends at line 6.
+        # end_line must be 6, not 7 (line 7 is the blank between para1
+        # and para2).
+        assert chunks[0].metadata.start_line == 1
+        assert chunks[0].metadata.end_line == 6
+
+        # chunk[1]: para2 at line 8. end_line must be 8, not 9.
+        assert chunks[1].metadata.start_line == 8
+        assert chunks[1].metadata.end_line == 8
+
+        # chunk[2]: trailing inherits section end (line 10).
+        assert chunks[2].metadata.start_line == 10
+        assert chunks[2].metadata.end_line == 10
