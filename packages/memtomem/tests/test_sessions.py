@@ -177,9 +177,7 @@ class TestSessionNamespaceDerivation:
         app = AppContext.from_components(components)
         ctx = _StubCtx(app)
 
-        out = await mem_session_start(
-            agent_id="planner", namespace="custom-ns", ctx=ctx
-        )  # type: ignore[arg-type]
+        out = await mem_session_start(agent_id="planner", namespace="custom-ns", ctx=ctx)  # type: ignore[arg-type]
 
         assert "- Namespace: custom-ns" in out
         rows = await app.storage.list_sessions()
