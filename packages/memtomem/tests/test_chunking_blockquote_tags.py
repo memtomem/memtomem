@@ -236,3 +236,42 @@ class TestOversizeSectionLineDrift:
             assert c.metadata.tags == ()
         # First sub-chunk still anchored at heading.
         assert chunks[0].metadata.start_line == 1
+
+    def test_oversize_section_with_no_tags_blockquote_keeps_header_inline(self):
+        """``> created:`` blockquote without ``tags:`` is left in place.
+
+        ``_extract_section_blockquote_tags`` short-circuits when no
+        ``tags:`` key is found and returns ``([], text, 0)`` — so the
+        blockquote stays in the chunk content, ``blockquote_strip_lines``
+        is 0, and ``body_offset`` reduces to ``1 + leading_strip_lines``.
+        Sub-chunks 2..N must still align with the file (no drift), and
+        the ``> created:`` line must stay in the first sub-chunk's
+        content so ``mem_edit`` can preserve it on a body-only edit.
+        """
+        para1 = ("First paragraph words " * 12).strip()
+        para2 = ("Second paragraph words " * 12).strip()
+        # Layout:
+        # 1  ## Note
+        # 2  (blank)
+        # 3  > created: 2026-04-25T12:00:00+00:00
+        # 4  (blank)
+        # 5  para1                          ← body starts here
+        # 6  (blank)
+        # 7  para2
+        content = f"## Note\n\n> created: 2026-04-25T12:00:00+00:00\n\n{para1}\n\n{para2}\n"
+        chunker = MarkdownChunker(indexing_config=_SmallChunkConfig())
+        chunks = chunker.chunk_file(Path("/test.md"), content)
+        assert len(chunks) >= 2
+        # No tags key → no promotion.
+        for c in chunks:
+            assert c.metadata.tags == ()
+        # First sub-chunk anchors at heading; ``> created:`` survives in
+        # its content because the no-tags branch leaves the blockquote
+        # alone (mem_edit's ``_find_body_start_index`` still recognises
+        # it on a body-only edit).
+        assert chunks[0].metadata.start_line == 1
+        assert "> created:" in chunks[0].content
+        # No drift: subsequent sub-chunks must land at or after the body
+        # (line 5), not inside the heading / blockquote / blank range.
+        for c in chunks[1:]:
+            assert c.metadata.start_line >= 5
