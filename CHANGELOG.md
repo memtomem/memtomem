@@ -5,6 +5,41 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.29] — 2026-04-25
+
+Hotfix release. `mm agent register <id>` now surfaces in
+`mm agent list` immediately, even before any chunks land in the
+agent's namespace. Caught during the first external walkthrough
+of the v0.1.28 multi-agent test scenarios — exactly the gap the
+walkthrough was designed to expose.
+
+### Fixed
+
+- **`mm agent list` no longer hides registered-but-empty agents.**
+  `list_namespace_meta` previously sourced rows from
+  `chunks LEFT JOIN namespace_metadata`, so a namespace with a
+  metadata row but zero chunks was filtered out by `GROUP BY
+  c.namespace`. After `mm agent register planner` the agent
+  stayed invisible until someone wrote into
+  `agent-runtime:planner`. The Web UI's `GET /namespaces`
+  response had the same blind spot through the same storage
+  method. Fixed by sourcing from the union of
+  `namespace_metadata.namespace` and `chunks.namespace`, then
+  joining for chunk count + description/color. Three states now
+  surface correctly: metadata only (registered, 0 chunks),
+  chunks only (legacy / un-registered), and both. Return shape
+  unchanged so callers (CLI, Web route) pick up the fix
+  transparently. (PR #473)
+
+### Docs
+
+- **ADR-0002 graduates to public.** The blockquote-tags
+  reader/writer contract shipped in v0.1.28 is now documented at
+  `docs/adr/0002-mem-add-blockquote-tags.md` with file:line
+  references against the v0.1.28 layout, an inbound link from
+  the `mem_add` section of the reference guide, and a reverse
+  cross-link from the v0.1.28 changelog entry. (PR #472)
+
 ## [0.1.28] — 2026-04-25
 
 Multi-agent share provenance + per-entry tag round-trip release.
