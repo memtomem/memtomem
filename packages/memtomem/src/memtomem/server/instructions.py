@@ -30,7 +30,7 @@ isolation or shared knowledge between agents):
    "agent-runtime:planner" — no explicit namespace= needed.
 3. Search / share inside the agent scope:
      mem_agent_search(query=..., include_shared=True)
-     mem_agent_share(memory_id=...)   # promote to "shared:"
+     mem_agent_share(chunk_id=..., target="shared")   # copy chunk to shared scope
 4. End the session: mem_session_end(summary=...)
 
 Namespace conventions:

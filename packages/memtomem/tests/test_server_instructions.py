@@ -22,17 +22,26 @@ Two layers, mirroring ``test_server_version_reporting.py``:
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any, Callable
 
 import pytest
 
 from memtomem.server import mcp
 from memtomem.server.instructions import INSTRUCTIONS
+from memtomem.server.tools.multi_agent import (
+    mem_agent_register,
+    mem_agent_search,
+    mem_agent_share,
+)
+from memtomem.server.tools.session import mem_session_end, mem_session_start
 
 REQUIRED_TOKENS: tuple[str, ...] = (
     # Single-agent quickstart — what 90% of users should reach for.
@@ -73,6 +82,46 @@ def test_instructions_mentions_workflow_token(token: str) -> None:
         f"workflow changed, update memtomem/server/instructions.py "
         f"and the REQUIRED_TOKENS tuple in lockstep."
     )
+
+
+# Tools whose ``foo(arg=...)`` example forms appear in INSTRUCTIONS. If a
+# parameter is renamed at the source, the example must move with it or the
+# string lies to the LLM (causes wrong-arg recovery round trips, observed
+# concretely on Haiku 4.5 in the v0.1.30-pre instructions where
+# ``mem_agent_share(memory_id=...)`` was shown but the real signature is
+# ``chunk_id``).
+_DOCUMENTED_TOOLS: tuple[Callable[..., Any], ...] = (
+    mem_agent_register,
+    mem_agent_search,
+    mem_agent_share,
+    mem_session_start,
+    mem_session_end,
+)
+
+
+@pytest.mark.parametrize("fn", _DOCUMENTED_TOOLS, ids=lambda fn: fn.__name__)
+def test_instructions_kwargs_match_signature(fn: Callable[..., Any]) -> None:
+    """Any ``tool_name(arg=...)`` example in INSTRUCTIONS must use a
+    real parameter name from the function's actual signature. The MCP
+    ``ctx`` parameter is excluded since it's framework-injected and
+    never appears in user-facing examples.
+    """
+    sig = inspect.signature(fn)
+    real_params = {p for p in sig.parameters if p != "ctx"}
+    name = fn.__name__
+
+    # Match each ``name(...)`` occurrence and pull out kwarg names.
+    # The pattern stops at the first ``)`` so multi-line examples need
+    # to fit on one line — which all current INSTRUCTIONS examples do.
+    for match in re.finditer(rf"{re.escape(name)}\(([^)]*)\)", INSTRUCTIONS):
+        arglist = match.group(1)
+        for kwarg in re.findall(r"(\w+)\s*=", arglist):
+            assert kwarg in real_params, (
+                f"INSTRUCTIONS shows {name}({kwarg}=...) but the real "
+                f"signature has parameters {sorted(real_params)}. Either "
+                f"fix the example in memtomem/server/instructions.py or "
+                f"rename the parameter on {fn.__module__}.{name}."
+            )
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="server is POSIX-only")
