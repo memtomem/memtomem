@@ -5,6 +5,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **MCP `initialize` response now carries server-level `instructions`.**
+  The MCP server passes a workflow-recipe string to
+  `FastMCP(instructions=...)`, which clients auto-inject into every
+  LLM session alongside the tool list. The string covers the
+  single-agent quickstart (`mem_add` / `mem_search`), the multi-agent
+  recipe (`mem_agent_register` → `mem_session_start` →
+  `mem_agent_search` / `mem_agent_share` → `mem_session_end`),
+  namespace conventions (`default` / `agent-runtime:<id>` / `shared:`),
+  and common pitfalls (e.g. `mem_add` without `namespace=` consults
+  `current_namespace`, not the session's `agent-runtime:*` scope).
+  Source of truth: `memtomem/server/instructions.py`; pinned by
+  `tests/test_server_instructions.py` so renames or convention drift
+  fail loud. Motivation: tool docstrings alone left LLMs guessing
+  which tool to call when users asked for "agent isolation" — clients
+  were silently falling back to `mem_add` instead of
+  `mem_agent_share`. The instructions field gives the LLM a workflow
+  hint without anyone having to paste a system snippet.
+
 ### Changed
 
 - **`mem_session_start(agent_id="<id>")` now derives the session

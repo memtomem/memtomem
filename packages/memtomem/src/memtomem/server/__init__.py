@@ -35,10 +35,16 @@ from memtomem.server.helpers import (
     _parse_recall_date as _parse_recall_date,
     _set_config_key as _set_config_key,
 )
+from memtomem.server.instructions import INSTRUCTIONS as _INSTRUCTIONS
 from memtomem.server.lifespan import app_lifespan
 
 # ── mcp instance — must be created before tool-module imports ──────────
-mcp = FastMCP("memtomem", lifespan=app_lifespan)
+# ``instructions=`` is auto-injected into every MCP client's session as
+# the ``initialize`` response's ``instructions`` field — the only
+# documentation surface most LLMs see before picking a tool. Source of
+# truth lives in ``memtomem/server/instructions.py``; pinned by
+# ``tests/test_server_instructions.py``.
+mcp = FastMCP("memtomem", instructions=_INSTRUCTIONS, lifespan=app_lifespan)
 
 # Pin ``serverInfo.version`` in the MCP ``initialize`` response to the
 # memtomem package version (#383). ``FastMCP.__init__`` has no ``version``
