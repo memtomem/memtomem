@@ -269,9 +269,12 @@ def test_app_js_pins_ui_mode_default_and_toast_copy() -> None:
     # settings_sync router stays dev-only — so the "Sync All" button and
     # the overview's settings card must self-gate, otherwise prod users
     # would see "Settings sync failed" after a successful artifact fanout.
+    # Both gates use the same predicate, so a count assertion catches a
+    # future refactor that drops one gate while leaving the other.
     cg_js = _read_static("context-gateway.js")
-    assert "STATE.uiMode === 'dev'" in cg_js, (
-        "context-gateway.js lost the dev-only gate around settings_sync"
+    assert cg_js.count("STATE.uiMode === 'dev'") >= 2, (
+        "context-gateway.js lost one of the two dev-only gates around "
+        "settings_sync (overview card push + Sync All settings hop)"
     )
     # And the locale entries themselves are pinned so a rename doesn't go
     # unnoticed by the i18n completeness check.
