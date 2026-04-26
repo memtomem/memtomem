@@ -36,12 +36,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 from uuid import UUID, uuid4
 
+from memtomem.constants import AGENT_NAMESPACE_PREFIX, SHARED_NAMESPACE, validate_agent_id
+
 if TYPE_CHECKING:
     from memtomem.server.component_factory import Components
-
-
-_AGENT_NAMESPACE_PREFIX = "agent-runtime:"
-_SHARED_NAMESPACE = "shared"
 
 
 class MemtomemStore:
@@ -168,9 +166,9 @@ class MemtomemStore:
                 "Call start_agent_session(agent_id) first or set include_shared=False."
             )
         if include_shared is False and self._current_agent_id is not None:
-            return f"{_AGENT_NAMESPACE_PREFIX}{self._current_agent_id}"
+            return f"{AGENT_NAMESPACE_PREFIX}{self._current_agent_id}"
         if include_shared in (None, True) and self._current_agent_id is not None:
-            return f"{_AGENT_NAMESPACE_PREFIX}{self._current_agent_id},{_SHARED_NAMESPACE}"
+            return f"{AGENT_NAMESPACE_PREFIX}{self._current_agent_id},{SHARED_NAMESPACE}"
         # No agent bound and the caller did not force include_shared=True →
         # fall back to whatever the caller passed (legacy behaviour).
         return namespace
@@ -187,7 +185,7 @@ class MemtomemStore:
         if namespace is not None:
             return namespace
         if self._current_agent_id is not None:
-            return f"{_AGENT_NAMESPACE_PREFIX}{self._current_agent_id}"
+            return f"{AGENT_NAMESPACE_PREFIX}{self._current_agent_id}"
         return None
 
     # ── CRUD ──────────────────────────────────────────────────────────────
@@ -290,13 +288,21 @@ class MemtomemStore:
         ``namespace=`` on every call.
 
         Returns the session id.
+
+        Raises:
+            InvalidNameError: ``agent_id`` is empty, contains ``:``, ``/``,
+                ``..``, whitespace, control characters, or anything outside
+                ``[A-Za-z0-9._-]`` — the same gate the MCP / CLI session
+                surfaces apply (see ``memtomem.constants.validate_agent_id``).
+                This blocks malformed values from concatenating into
+                ``agent-runtime:<agent_id>`` and round-tripping into
+                storage as ``"agent-runtime:foo:bar"``.
         """
-        if not agent_id:
-            raise ValueError("agent_id must be a non-empty string")
+        validate_agent_id(agent_id)
 
         comp = await self._ensure_init()
         session_id = str(uuid4())
-        ns = namespace or f"{_AGENT_NAMESPACE_PREFIX}{agent_id}"
+        ns = namespace or f"{AGENT_NAMESPACE_PREFIX}{agent_id}"
         await comp.storage.create_session(session_id, agent_id, ns)
         async with self._session_lock:
             self._current_session_id = session_id
