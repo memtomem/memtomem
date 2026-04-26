@@ -471,6 +471,42 @@ class TestOnnxEmbedder:
         await embedder.close()
         assert embedder._model is None
 
+    def test_threads_default_is_zero(self):
+        """Default preserves prior behavior — ORT picks all physical cores."""
+        assert _onnx_config().threads == 0
+
+    def test_threads_rejects_negative(self):
+        """Validator catches typos like -1 at config-load time."""
+        with pytest.raises(ValueError, match="non-negative"):
+            EmbeddingConfig(provider="onnx", model="bge-m3", dimension=1024, threads=-1)
+
+    @pytest.mark.anyio
+    async def test_threads_forwarded_to_fastembed(self):
+        """threads=N reaches fastembed.TextEmbedding(threads=N)."""
+        config = _onnx_config(threads=4)
+        embedder = OnnxEmbedder(config)
+        fake_model = _make_fake_embedding_model([[0.1, 0.2, 0.3]])
+        with (
+            patch("memtomem.embedding.onnx._register_custom_models_if_needed"),
+            patch("fastembed.TextEmbedding", return_value=fake_model) as mock_te,
+        ):
+            await embedder.embed_texts(["hi"])
+        mock_te.assert_called_once()
+        assert mock_te.call_args.kwargs["threads"] == 4
+
+    @pytest.mark.anyio
+    async def test_threads_zero_passes_none_to_fastembed(self):
+        """threads=0 → None so fastembed/ORT keeps its default behavior."""
+        config = _onnx_config(threads=0)
+        embedder = OnnxEmbedder(config)
+        fake_model = _make_fake_embedding_model([[0.1, 0.2, 0.3]])
+        with (
+            patch("memtomem.embedding.onnx._register_custom_models_if_needed"),
+            patch("fastembed.TextEmbedding", return_value=fake_model) as mock_te,
+        ):
+            await embedder.embed_texts(["hi"])
+        assert mock_te.call_args.kwargs["threads"] is None
+
 
 # ---------------------------------------------------------------------------
 # 4. create_embedder factory
