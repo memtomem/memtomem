@@ -224,3 +224,63 @@ class TestActivityLogJson:
         assert result.exit_code != 0
         assert isinstance(result.exception, json.JSONDecodeError)
         comp.storage.add_session_event.assert_not_awaited()
+
+
+class TestSessionStartNamespaceDerivation:
+    """``mm session start --agent-id <id>`` derives ``agent-runtime:<id>``,
+    mirroring ``mem_session_start`` MCP behavior (PR #475). Until this fix
+    the CLI silently lost ``--agent-id`` for namespace derivation, leaving
+    sessions in ``default`` despite the multi-agent contract advertised on
+    the public page."""
+
+    @staticmethod
+    def _comp_with_create_spy() -> tuple[SimpleNamespace, AsyncMock]:
+        create_session = AsyncMock(return_value=None)
+        comp = SimpleNamespace(storage=SimpleNamespace(create_session=create_session))
+        return comp, create_session
+
+    def test_default_agent_lands_in_default_ns(self, runner, monkeypatch):
+        comp, create_session = self._comp_with_create_spy()
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        monkeypatch.setattr(
+            "memtomem.cli.session_cmd._write_current_session", lambda _session_id: None
+        )
+
+        result = runner.invoke(cli, ["session", "start"])
+        assert result.exit_code == 0, result.output
+        create_session.assert_awaited_once()
+        _session_id, agent_id, ns, _metadata = create_session.await_args.args
+        assert agent_id == "default"
+        assert ns == "default"
+        assert "Namespace: default" in result.output
+
+    def test_agent_id_derives_agent_runtime_namespace(self, runner, monkeypatch):
+        comp, create_session = self._comp_with_create_spy()
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        monkeypatch.setattr(
+            "memtomem.cli.session_cmd._write_current_session", lambda _session_id: None
+        )
+
+        result = runner.invoke(cli, ["session", "start", "--agent-id", "planner"])
+        assert result.exit_code == 0, result.output
+        _session_id, agent_id, ns, _metadata = create_session.await_args.args
+        assert agent_id == "planner"
+        assert ns == "agent-runtime:planner"
+        assert "Namespace: agent-runtime:planner" in result.output
+
+    def test_explicit_namespace_overrides_agent_id(self, runner, monkeypatch):
+        comp, create_session = self._comp_with_create_spy()
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        monkeypatch.setattr(
+            "memtomem.cli.session_cmd._write_current_session", lambda _session_id: None
+        )
+
+        result = runner.invoke(
+            cli,
+            ["session", "start", "--agent-id", "planner", "--namespace", "custom"],
+        )
+        assert result.exit_code == 0, result.output
+        _session_id, agent_id, ns, _metadata = create_session.await_args.args
+        assert agent_id == "planner"
+        assert ns == "custom"
+        assert "Namespace: custom" in result.output

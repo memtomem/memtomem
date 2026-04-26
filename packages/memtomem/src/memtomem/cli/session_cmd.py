@@ -71,9 +71,15 @@ def start(agent_id: str, title: str | None, namespace: str | None) -> None:
 
 async def _start(agent_id: str, title: str | None, namespace: str | None) -> None:
     from memtomem.cli._bootstrap import cli_components
+    from memtomem.constants import AGENT_NAMESPACE_PREFIX
 
     session_id = str(uuid.uuid4())
-    ns = namespace or "default"
+    if namespace:
+        ns = namespace
+    elif agent_id and agent_id != "default":
+        ns = f"{AGENT_NAMESPACE_PREFIX}{agent_id}"
+    else:
+        ns = "default"
     metadata = {"title": title} if title else {}
 
     async with cli_components() as comp:
@@ -84,6 +90,7 @@ async def _start(agent_id: str, title: str | None, namespace: str | None) -> Non
     if title:
         click.echo(f"  Title: {title}")
     click.echo(f"  Agent: {agent_id}")
+    click.echo(f"  Namespace: {ns}")
 
 
 @session.command()

@@ -68,6 +68,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   preceding section; it now writes `## Copilot-Specific` like the
   other generators.
 
+- **`mm session start --agent-id <id>` now derives `agent-runtime:<id>`
+  namespace, mirroring the MCP `mem_session_start` behavior shipped in
+  PR #475.** Previously the CLI silently lost `--agent-id` for namespace
+  derivation, leaving sessions in the `default` namespace despite the
+  multi-agent contract the public page advertises (Persona-A trap from
+  the 2026-04-26 surface review, gap G2). The CLI now follows the same
+  3-step priority chain as MCP: explicit `--namespace` wins; otherwise
+  `agent-runtime:<agent-id>` for non-default agents; otherwise
+  `default`. `mm session start` also echoes the resolved namespace so
+  users can verify before continuing.
+
 ## [0.1.30] — 2026-04-26
 
 ### Fixed
