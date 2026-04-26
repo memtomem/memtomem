@@ -30,6 +30,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   canonical id matching the documented charset and re-register. The
   LangGraph adapter parity gap remains tracked separately. Closes #493.
 
+- **`MemtomemStore.start_agent_session` (LangGraph adapter) now
+  rejects the same hostile `agent_id` shapes via `validate_agent_id`
+  instead of the prior `if not agent_id` empty-only check.** Closes
+  the last in-process surface where a Python caller could land
+  `"agent-runtime:foo:bar"` in storage even though the MCP / CLI
+  surfaces refuse the same shape. The raised exception narrows from
+  the generic `ValueError("agent_id must be a non-empty string")` to
+  `InvalidNameError("invalid agent-id 'X': ...")` — `InvalidNameError`
+  is a `ValueError` subclass, so `except ValueError:` callers keep
+  working, but any code substring-matching the old message text will
+  break and should switch to matching `"invalid agent-id"`. Closes
+  #492.
+
 ## [0.1.31] — 2026-04-26
 
 ### Added
