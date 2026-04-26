@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Literal
 
 from memtomem.constants import (
     AGENT_NAMESPACE_PREFIX,
@@ -14,6 +13,7 @@ from memtomem.constants import (
 from memtomem.server import mcp
 from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
+from memtomem.server.formatters import OutputFormat, _VALID_OUTPUT_FORMATS
 from memtomem.server.tool_registry import register
 
 logger = logging.getLogger(__name__)
@@ -110,7 +110,7 @@ async def mem_agent_search(
     agent_id: str | None = None,
     include_shared: bool = True,
     top_k: int = 10,
-    output_format: Literal["compact", "verbose", "structured"] = "compact",
+    output_format: OutputFormat = "compact",
     ctx: CtxType = None,
 ) -> str:
     """Search memories with multi-agent scope awareness.
@@ -140,7 +140,7 @@ async def mem_agent_search(
     """
     if agent_id is not None:
         validate_agent_id(agent_id)
-    if output_format not in ("compact", "verbose", "structured"):
+    if output_format not in _VALID_OUTPUT_FORMATS:
         return f"Error: invalid output_format '{output_format}'."
     app = await _get_app_initialized(ctx)
     from memtomem.server.formatters import _format_results, _format_structured_results

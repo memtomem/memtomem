@@ -5,6 +5,20 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path, PurePosixPath
+from typing import Literal, get_args
+
+OutputFormat = Literal["compact", "verbose", "structured"]
+"""Format spec shared by ``mem_search`` and ``mem_agent_search``.
+
+``mem_recall`` uses a 2-format subset (``"compact" | "structured"``) and
+intentionally does not import this alias — its surface lacks a semantic
+equivalent for ``"verbose"``.
+"""
+
+# Membership set derived from OutputFormat so adding a 4th format only
+# requires editing the Literal — call-site validators pick it up via
+# get_args (drift prevention; see feedback_literal_drives_frozenset.md).
+_VALID_OUTPUT_FORMATS: frozenset[str] = frozenset(get_args(OutputFormat))
 
 
 def _display_path(path) -> str:

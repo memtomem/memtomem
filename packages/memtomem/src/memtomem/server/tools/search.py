@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Literal
 from uuid import UUID
 
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
-from memtomem.server.formatters import _display_path, _format_results, _format_structured_results
+from memtomem.server.formatters import (
+    OutputFormat,
+    _VALID_OUTPUT_FORMATS,
+    _display_path,
+    _format_results,
+    _format_structured_results,
+)
 from memtomem.server.helpers import _announce_dim_mismatch_once
 from memtomem.server.tool_registry import register
 from memtomem.config import MAX_CONTEXT_WINDOW_CHUNKS
@@ -32,7 +37,7 @@ async def mem_search(
     dense_weight: float | None = None,
     context_window: int = 0,
     verbose: bool = False,
-    output_format: Literal["compact", "verbose", "structured"] = "compact",
+    output_format: OutputFormat = "compact",
     ctx: CtxType = None,
 ) -> str:
     """Search across indexed memory files using hybrid BM25 + semantic search.
@@ -62,7 +67,7 @@ async def mem_search(
     effective_format = output_format
     if effective_format == "compact" and verbose:
         effective_format = "verbose"
-    if effective_format not in ("compact", "verbose", "structured"):
+    if effective_format not in _VALID_OUTPUT_FORMATS:
         return f"Error: invalid output_format '{output_format}'."
 
     app = await _get_app_initialized(ctx)
