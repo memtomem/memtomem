@@ -27,6 +27,12 @@ Cases:
   ``MemtomemStore.start_agent_session("planner")`` binds the agent
   scope so ``add()`` defaults to ``agent-runtime:planner`` and
   ``search(include_shared=True)`` returns planner+shared only.
+* **E — mem_add session inheritance** (G1, RFC option B):
+  After ``mem_session_start(agent_id="planner")``, plain
+  ``mem_add(content=...)`` writes to ``agent-runtime:planner``
+  (not ``default``), matching the contract the public page
+  advertises. Pre-multi-agent (no session) callers fall back to
+  ``app.current_namespace`` unchanged.
 """
 
 from __future__ import annotations
@@ -473,3 +479,113 @@ class TestCaseDLangGraphAdapter:
                 await store.search("anything", include_shared=True)
         finally:
             await store.close()
+
+
+# ── Case E — mem_add inherits agent_id from session (G1, RFC option B) ──
+
+
+class TestCaseEMemAddSessionInheritance:
+    """End-to-end: after ``mem_session_start(agent_id="planner")``, a
+    plain ``mem_add(content=...)`` writes to ``agent-runtime:planner``
+    instead of ``default``. This is the gap the public page advertised
+    but the MCP path didn't deliver before option B (G1 RFC).
+
+    The matching read path stays on ``mem_agent_search`` —
+    ``mem_search`` is intentionally out of scope for G1.
+    """
+
+    @pytest.mark.asyncio
+    async def test_mem_add_inherits_agent_id_from_session(self, integration_components):
+        from memtomem.server.tools.memory_crud import mem_add
+
+        comp, _ = integration_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_agent_register(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        try:
+            result = await mem_add(content="auth flow: JWT in cookie", ctx=ctx)  # type: ignore[arg-type]
+            # The resolved namespace is now visible to the caller —
+            # surfacing the resolution makes the new contract observable.
+            assert "agent-runtime:planner" in result
+
+            # And the chunks themselves landed in the agent's namespace,
+            # so a follow-up `mem_agent_search` reaches them.
+            out = await mem_agent_search(query="JWT", agent_id=None, ctx=ctx)  # type: ignore[arg-type]
+            assert "auth flow" in out
+        finally:
+            await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_mem_batch_add_inherits_agent_id_from_session(self, integration_components):
+        from memtomem.server.tools.memory_crud import mem_batch_add
+
+        comp, _ = integration_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_agent_register(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        try:
+            result = await mem_batch_add(
+                entries=[
+                    {"key": "Decision A", "value": "use cookie sessions"},
+                    {"key": "Decision B", "value": "rotate tokens daily"},
+                ],
+                ctx=ctx,  # type: ignore[arg-type]
+            )
+            assert "agent-runtime:planner" in result
+
+            out = await mem_agent_search(query="cookie", agent_id=None, ctx=ctx)  # type: ignore[arg-type]
+            assert "use cookie sessions" in out
+        finally:
+            await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_explicit_namespace_overrides_session_agent_id(self, integration_components):
+        """Explicit ``namespace=`` arg is the escape hatch — it wins
+        over the session-bound agent_id, matching the priority chain
+        documented on `_resolve_agent_namespace`.
+        """
+        from memtomem.server.tools.memory_crud import mem_add
+
+        comp, _ = integration_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_agent_register(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        try:
+            result = await mem_add(
+                content="cross-team architecture note",
+                namespace=SHARED_NAMESPACE,
+                ctx=ctx,  # type: ignore[arg-type]
+            )
+            assert SHARED_NAMESPACE in result
+            assert "agent-runtime:planner" not in result
+        finally:
+            await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_no_session_falls_back_to_current_namespace(self, integration_components):
+        """Pre-multi-agent users (no `mem_session_start`) keep their
+        legacy behavior: `mem_add` reads `app.current_namespace` (set
+        by `mem_ns_set` historically) and falls back to the config
+        default if neither is set. No regression against the old
+        `effective_ns = namespace or app.current_namespace` path.
+        """
+        from memtomem.server.tools.memory_crud import mem_add
+
+        comp, _ = integration_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        # No session started → current_agent_id is None.
+        assert app.current_agent_id is None
+        # current_namespace stays at its construction default.
+        app.current_namespace = "team-notes"
+
+        result = await mem_add(content="legacy path note", ctx=ctx)  # type: ignore[arg-type]
+        assert "team-notes" in result
+        assert "agent-runtime:" not in result

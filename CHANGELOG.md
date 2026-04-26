@@ -51,7 +51,44 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   alongside Claude/Gemini, so `mm context detect` and the Web UI
   Context Gateway list project-scope Codex agents in their inventory.
 
-### Fixed
+- **`mem_add` and `mem_batch_add` now inherit the agent scope from
+  `mem_session_start(agent_id="...")`.** Following gap G1 of the
+  2026-04-26 multi-agent surface review, the MCP write tools join
+  the same priority chain `mem_agent_search` already uses:
+
+  1. explicit `namespace=` argument (escape hatch — wins everything),
+  2. `app.current_agent_id` → `agent-runtime:<id>` (set by
+     `mem_session_start`),
+  3. `app.current_namespace` (legacy `mem_ns_set` path),
+  4. config default.
+
+  Previously `mem_add` consulted only step 3, so calling
+  `mem_session_start(agent_id="planner")` followed by
+  `mem_add(content=...)` silently wrote to `default` instead of
+  `agent-runtime:planner`, contradicting the multi-agent contract
+  the public page advertises. The change is now symmetric with the
+  LangGraph adapter (which has had this semantic since PR #460) and
+  with `mem_agent_search`'s read-side resolution.
+
+  **Who is affected:**
+  - **Pre-multi-agent users** (no `mem_session_start` call): no
+    change. `current_agent_id` stays `None`; resolution falls
+    through to step 3 / step 4 exactly as before.
+  - **Multi-agent users using only `mem_session_start`**:
+    `mem_add` writes now land in the agent's namespace — the
+    documented behavior, finally honored. The 940-line e2e guide's
+    workaround (passing `namespace="agent-runtime:<id>"` on every
+    `mem_add`) is no longer required.
+  - **Rare combination — both `mem_ns_set` and
+    `mem_session_start` set in the same session**: write target
+    changes from the `mem_ns_set` namespace to the agent's namespace.
+    Pass `namespace="<old-ns>"` explicitly on the call to keep the
+    old destination, or call `mem_session_end()` before writing.
+
+  `mem_add` and `mem_batch_add` now also echo the resolved
+  `Namespace:` line in their confirmation output, so the resolution
+  is observable on the first call. `mem_search` is unchanged in this
+  release — symmetric search-side support is tracked separately.
 
 - **`mm context` round-trip no longer silently drops `## <Agent>-Specific`
   sections.** `extract_sections_from_agent_file` mapped agent-override

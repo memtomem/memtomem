@@ -13,6 +13,7 @@ from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.helpers import _announce_dim_mismatch_once, _check_embedding_mismatch
 from memtomem.server.tool_registry import register
+from memtomem.server.tools.multi_agent import _resolve_agent_namespace
 from memtomem.server.validation import MAX_CONTENT_LENGTH
 from memtomem.server.webhooks import webhook_error_cb
 
@@ -104,14 +105,20 @@ async def _mem_add_core(
     assert target is not None
     await asyncio.to_thread(append_entry, target, content, title=title, tags=tags)
 
-    effective_ns = namespace or app.current_namespace
+    effective_ns = namespace or _resolve_agent_namespace(app, None)
 
     # Re-index the whole file via the standard pipeline so the watcher
     # (which also calls index_file) produces identical hashes → no duplicates.
     stats = await app.index_engine.index_file(target, namespace=effective_ns)
     app.search_pipeline.invalidate_cache()
 
-    result = f"Memory added to {target}\n- Chunks indexed: {stats.indexed_chunks}\n- File: {target}"
+    display_ns = effective_ns or app.config.namespace.default_namespace
+    result = (
+        f"Memory added to {target}\n"
+        f"- Namespace: {display_ns}\n"
+        f"- Chunks indexed: {stats.indexed_chunks}\n"
+        f"- File: {target}"
+    )
 
     # Semantic duplicate check: warn if very similar content already exists
     try:
@@ -386,7 +393,7 @@ async def mem_batch_add(
             continue
         append_entry(target, value, title=key or None, tags=entry_tags)
 
-    effective_ns = namespace or app.current_namespace
+    effective_ns = namespace or _resolve_agent_namespace(app, None)
     stats = await app.index_engine.index_file(target, namespace=effective_ns)
     app.search_pipeline.invalidate_cache()
 

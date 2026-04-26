@@ -39,14 +39,19 @@ Namespace conventions:
   shared:                 cross-agent shared scope
 Pass explicit namespace= only when overriding the derived value.
 
+Session-bound write contract:
+- After mem_session_start(agent_id="..."), subsequent mem_add and
+  mem_batch_add calls without an explicit namespace= argument
+  automatically write to "agent-runtime:<id>" — the session's
+  agent scope. Pass namespace= explicitly to write somewhere
+  else (e.g. namespace="shared").
+- mem_search still reads from current_namespace by default;
+  use mem_agent_search to read inside the agent scope.
+  (Symmetric search-side support is tracked separately.)
+
 Common pitfalls:
 - mem_session_start() without agent_id falls back to the "default"
   namespace — pass agent_id whenever you want isolation.
-- agent_id and current_namespace are separate axes; mem_add /
-  mem_search without explicit namespace= still consult
-  current_namespace, not the session's "agent-runtime:*" scope.
-  Use mem_agent_search / mem_agent_share to act inside the
-  agent scope.
 - mem_agent_search needs an active session (or current_agent_id);
   call mem_session_start first.
 
