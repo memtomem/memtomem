@@ -138,7 +138,11 @@ def _iter_tool_functions() -> list[tuple[str, ast.AsyncFunctionDef | ast.Functio
     for path in sorted(_TOOLS_DIR.glob("*.py")):
         if path.name == "__init__.py":
             continue
-        tree = ast.parse(path.read_text())
+        # Pin UTF-8 explicitly — Python 3.15 makes UTF-8 the default for
+        # ``read_text`` but py312 still resolves it from the locale, so the
+        # guard would otherwise be environment-dependent on a non-UTF-8
+        # CI runner. Tool files are ASCII today; this is forward-shielding.
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
                 out.append((path.name, node))
@@ -155,22 +159,42 @@ def _ns_params(node: ast.AsyncFunctionDef | ast.FunctionDef) -> list[str]:
 
 def _calls_validate_namespace_on(node: ast.AsyncFunctionDef | ast.FunctionDef, param: str) -> bool:
     """Return True iff the function body contains a call shaped like
-    ``validate_namespace(<param>)`` — either as a bare statement or as
-    an expression whose first positional arg is ``Name(id=<param>)``.
+    ``validate_namespace(<param>)`` — the callee is named exactly
+    ``validate_namespace`` (bare ``validate_namespace(...)`` or an
+    attribute access ``mod.validate_namespace(...)``) and the first
+    positional argument is ``Name(id=<param>)``.
 
-    Deliberately structural: an ``if param is not None:
-    validate_namespace(param)`` pattern (used by ``mem_ns_assign`` for
-    the optional ``old_namespace`` arg) still matches, because the test
-    is checking the call exists with the right argument name, not the
-    surrounding control flow.
+    The match is deliberately *strict* on the call form — the project
+    convention is ``validate_namespace(<param>)`` written exactly that
+    way, and the guard depends on that convention being unambiguous.
+    The following intentionally do **not** match; if you need any of
+    them, the guard registry in this file should be updated to reflect
+    the new convention rather than the matcher relaxed:
+
+    * Keyword form: ``validate_namespace(value=namespace)``
+    * Renamed local: ``local = namespace; validate_namespace(local)``
+    * Aliased import: ``from memtomem.constants import
+      validate_namespace as vn; vn(namespace)``
+
+    What still matches (the patterns the guarded surfaces actually
+    use today):
+
+    * Conditional gate: ``if old_namespace is not None:
+      validate_namespace(old_namespace)`` — the matcher walks the
+      function body, so any nested call site counts. Used by
+      ``mem_ns_assign`` for the optional ``old_namespace`` arg.
+    * Attribute access on a module: ``constants.validate_namespace(
+      namespace)`` — the matcher checks ``func.attr`` for
+      ``ast.Attribute`` nodes.
     """
     for sub in ast.walk(node):
         if not isinstance(sub, ast.Call):
             continue
         func = sub.func
-        # Match bare ``validate_namespace(...)`` and aliased imports
-        # (``from memtomem.constants import validate_namespace as vn``)
-        # by checking the attribute / name component only.
+        # Accept either ``validate_namespace(...)`` (Name) or
+        # ``mod.validate_namespace(...)`` (Attribute). Aliased imports
+        # rebind the Name's id and intentionally fail to match — see
+        # the docstring above.
         callee = (
             func.attr
             if isinstance(func, ast.Attribute)
