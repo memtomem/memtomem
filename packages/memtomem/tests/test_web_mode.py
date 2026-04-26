@@ -265,6 +265,17 @@ def test_app_js_pins_ui_mode_default_and_toast_copy() -> None:
     assert "const devMode = STATE.uiMode === 'dev'" in js, (
         "Home dashboard lost its dev-only fetch gate"
     )
+    # The Context Gateway (Artifact Sync) tab graduated to prod, but the
+    # settings_sync router stays dev-only — so the "Sync All" button and
+    # the overview's settings card must self-gate, otherwise prod users
+    # would see "Settings sync failed" after a successful artifact fanout.
+    # Both gates use the same predicate, so a count assertion catches a
+    # future refactor that drops one gate while leaving the other.
+    cg_js = _read_static("context-gateway.js")
+    assert cg_js.count("STATE.uiMode === 'dev'") >= 2, (
+        "context-gateway.js lost one of the two dev-only gates around "
+        "settings_sync (overview card push + Sync All settings hop)"
+    )
     # And the locale entries themselves are pinned so a rename doesn't go
     # unnoticed by the i18n completeness check.
     en = _read_static("locales/en.json")

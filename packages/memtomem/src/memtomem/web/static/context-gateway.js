@@ -74,12 +74,17 @@ async function loadCtxOverview() {
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Failed to load overview');
     const data = await res.json();
 
+    // The settings (hooks-sync) card links into a dev-only section and its
+    // sync endpoint lives on the dev-only ``settings_sync`` router. Skip it
+    // in prod so users don't see a card that navigates nowhere.
     const types = [
       { key: 'skills',   label: t('settings.ctx.skills_title', 'Skills'),   section: 'ctx-skills' },
       { key: 'commands', label: t('settings.ctx.commands_title', 'Commands'), section: 'ctx-commands' },
       { key: 'agents',   label: t('settings.ctx.agents_title', 'Agents'),   section: 'ctx-agents' },
-      { key: 'settings', label: t('settings.hooks.title', 'Settings'),      section: 'hooks-sync' },
     ];
+    if (STATE.uiMode === 'dev') {
+      types.push({ key: 'settings', label: t('settings.hooks.title', 'Settings'), section: 'hooks-sync' });
+    }
 
     let html = '<div class="ctx-overview-grid">';
     for (const typ of types) {
@@ -124,9 +129,14 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
       const resp = await fetch(`/api/context/${typ}/sync`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
       if (!resp.ok) throw new Error(`Sync ${typ} failed`);
     }
-    // Settings hooks sync (additive merge)
-    const settingsResp = await fetch('/api/context/settings/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
-    if (!settingsResp.ok) throw new Error('Settings sync failed');
+    // Settings hooks sync (additive merge) — the ``settings_sync`` router
+    // stays dev-only, so the endpoint returns 404 in prod and the user has
+    // no Settings tab to drive a manual sync from. Skip it here so "Sync
+    // All" doesn't fail with the artifact fanout already complete.
+    if (STATE.uiMode === 'dev') {
+      const settingsResp = await fetch('/api/context/settings/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+      if (!settingsResp.ok) throw new Error('Settings sync failed');
+    }
     showToast(t('settings.ctx.sync_success', 'Sync completed'));
     loadCtxOverview();
   } catch (err) {
