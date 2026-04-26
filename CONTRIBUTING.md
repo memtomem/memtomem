@@ -42,6 +42,36 @@ The STM proxy gateway lives in a separate repository: [memtomem/memtomem-stm](ht
 6. Write a clear commit message describing the "why"
 7. Sign the CLA on your first pull request (see below)
 
+## Maintainer response expectations
+
+memtomem is maintained by a small team. We aim for the following
+**best-effort** windows on contributions — these are targets, not legal
+commitments:
+
+| Event | Target |
+|-------|--------|
+| First response on a new issue or PR | within 5 business days |
+| Decision on a PR (merge / changes-requested / close) | within 14 business days of the first response |
+| Security report (see [`SECURITY.md`](SECURITY.md)) | acknowledgement within 2 business days |
+
+If a PR sits without contributor activity for 30 days the [stale
+bot](.github/workflows/stale.yml) marks it `stale`; another 30 days of
+silence closes it. A single comment or push clears the label — closure is
+never a judgement on the change, just queue hygiene. Re-opening is always
+welcome.
+
+Labels that affect triage:
+
+- `do-not-stale`, `pinned`, `release`, `security`, `needs-maintainer-decision`
+  — exempt from the stale sweep.
+- `needs-cla` — CLA Assistant has not yet recorded a signature; merge is
+  blocked until the bot re-checks (see CLA section below).
+- `good-first-issue` — scoped to ≤3 files and no public API changes; check
+  the comments for an existing claim before starting work.
+
+If your PR is time-sensitive (security, regression on `main`, release
+blocker) call it out in the description so we route it ahead of the queue.
+
 ## MCP Tool Error Response Contract
 
 All MCP tool handlers use `@tool_handler` (`server/error_handler.py`) which
