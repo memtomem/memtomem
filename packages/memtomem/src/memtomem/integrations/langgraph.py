@@ -273,6 +273,16 @@ class MemtomemStore:
         :meth:`start_agent_session`, which derives the namespace from
         ``agent-runtime:<id>`` and binds ``_current_agent_id`` so
         :meth:`search` / :meth:`add` can default to the agent scope.
+
+        ``agent_id`` is **not** run through ``validate_agent_id`` here:
+        this method does not concatenate it into ``AGENT_NAMESPACE_PREFIX``,
+        so a malformed value cannot produce an ``"agent-runtime:foo:bar"``
+        namespace string. The id still lands in the sessions row as
+        metadata; downstream code that reads it back must not feed it
+        into a namespace concat without validating first. New paths that
+        derive a namespace from ``agent_id`` should use
+        :meth:`start_agent_session` (or call ``validate_agent_id``
+        directly) so the gate isn't reintroduced as a regression.
         """
         comp = await self._ensure_init()
         session_id = str(uuid4())
