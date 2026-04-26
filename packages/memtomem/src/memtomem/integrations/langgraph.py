@@ -158,6 +158,11 @@ class MemtomemStore:
         Public contract is documented in ``search``'s docstring; this helper
         only encodes the lookup table so it can be unit-tested without
         spinning up components.
+
+        ``self._current_agent_id`` is concatenated into ``AGENT_NAMESPACE_PREFIX``
+        without re-validation here: ``start_agent_session`` is the sole writer
+        of that field and runs ``validate_agent_id`` before binding, so any
+        value that reaches this point is already gate-checked.
         """
 
         if include_shared is True and self._current_agent_id is None:
@@ -180,6 +185,10 @@ class MemtomemStore:
         for "I want to write to ``shared`` while my session is bound to
         ``planner``"). Otherwise, when an agent session is active, writes
         land in ``agent-runtime:<id>``.
+
+        ``self._current_agent_id`` reaches the concat path pre-validated —
+        ``start_agent_session`` is the only writer and runs ``validate_agent_id``
+        before binding (same invariant as ``_resolve_search_namespace``).
         """
 
         if namespace is not None:
