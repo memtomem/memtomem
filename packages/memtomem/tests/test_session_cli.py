@@ -31,6 +31,25 @@ def _patched_cli_components(comp):
     return fake
 
 
+def _create_session_call_args(mock: AsyncMock) -> tuple:
+    """Return ``create_session`` positional args, tolerating future kwargs.
+
+    The storage signature is ``create_session(session_id, agent_id,
+    namespace, metadata)``. If the call site ever switches any field to a
+    keyword, this helper merges kwargs back into the positional tuple so
+    tests stay aligned with the contract instead of crashing on unpacking.
+    """
+    call = mock.await_args
+    if call is None:  # pragma: no cover — defensive
+        raise AssertionError("create_session was not awaited")
+    keys = ("session_id", "agent_id", "namespace", "metadata")
+    merged = list(call.args) + [None] * (len(keys) - len(call.args))
+    for idx, key in enumerate(keys):
+        if key in call.kwargs:
+            merged[idx] = call.kwargs[key]
+    return tuple(merged)
+
+
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()
@@ -249,7 +268,8 @@ class TestSessionStartNamespaceDerivation:
         result = runner.invoke(cli, ["session", "start"])
         assert result.exit_code == 0, result.output
         create_session.assert_awaited_once()
-        _session_id, agent_id, ns, _metadata = create_session.await_args.args
+        call_args = _create_session_call_args(create_session)
+        agent_id, ns = call_args[1], call_args[2]
         assert agent_id == "default"
         assert ns == "default"
         assert "Namespace: default" in result.output
@@ -263,7 +283,8 @@ class TestSessionStartNamespaceDerivation:
 
         result = runner.invoke(cli, ["session", "start", "--agent-id", "planner"])
         assert result.exit_code == 0, result.output
-        _session_id, agent_id, ns, _metadata = create_session.await_args.args
+        call_args = _create_session_call_args(create_session)
+        agent_id, ns = call_args[1], call_args[2]
         assert agent_id == "planner"
         assert ns == "agent-runtime:planner"
         assert "Namespace: agent-runtime:planner" in result.output
@@ -280,7 +301,76 @@ class TestSessionStartNamespaceDerivation:
             ["session", "start", "--agent-id", "planner", "--namespace", "custom"],
         )
         assert result.exit_code == 0, result.output
-        _session_id, agent_id, ns, _metadata = create_session.await_args.args
+        call_args = _create_session_call_args(create_session)
+        agent_id, ns = call_args[1], call_args[2]
         assert agent_id == "planner"
         assert ns == "custom"
         assert "Namespace: custom" in result.output
+
+
+class TestSessionWrapNamespaceDerivation:
+    """``mm session wrap --agent-id <id>`` derives the same
+    ``agent-runtime:<id>`` namespace as ``mm session start``. Without this,
+    the CLI fix would close half of gap G2 — `wrap` is the headless surface
+    most users hit when invoking sub-agents (`mm session wrap -- claude -p
+    "..."`), and it had a hard-coded ``"default"`` namespace regardless of
+    ``--agent-id``."""
+
+    @staticmethod
+    def _comp_with_storage_spies() -> tuple[SimpleNamespace, AsyncMock]:
+        create_session = AsyncMock(return_value=None)
+        end_session = AsyncMock(return_value=None)
+        get_session_events = AsyncMock(return_value=[])
+        comp = SimpleNamespace(
+            storage=SimpleNamespace(
+                create_session=create_session,
+                end_session=end_session,
+                get_session_events=get_session_events,
+            )
+        )
+        return comp, create_session
+
+    @staticmethod
+    def _patch_runtime(monkeypatch, comp):
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        monkeypatch.setattr("memtomem.cli.session_cmd._write_current_session", lambda _id: None)
+        monkeypatch.setattr("memtomem.cli.session_cmd._clear_current_session", lambda: None)
+        # Avoid spawning the wrapped subprocess.
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+        )
+
+    def test_wrap_default_headless_derives_agent_runtime_namespace(self, runner, monkeypatch):
+        comp, create_session = self._comp_with_storage_spies()
+        self._patch_runtime(monkeypatch, comp)
+
+        result = runner.invoke(cli, ["session", "wrap", "--", "true"])
+        assert result.exit_code == 0, result.output
+        call_args = _create_session_call_args(create_session)
+        assert call_args[1] == "headless"
+        assert call_args[2] == "agent-runtime:headless"
+
+    def test_wrap_explicit_agent_id_derives_namespace(self, runner, monkeypatch):
+        comp, create_session = self._comp_with_storage_spies()
+        self._patch_runtime(monkeypatch, comp)
+
+        result = runner.invoke(cli, ["session", "wrap", "--agent-id", "planner", "--", "true"])
+        assert result.exit_code == 0, result.output
+        call_args = _create_session_call_args(create_session)
+        assert call_args[1] == "planner"
+        assert call_args[2] == "agent-runtime:planner"
+
+    def test_wrap_default_token_lands_in_default_ns(self, runner, monkeypatch):
+        """Edge case: explicit ``--agent-id default`` (the legacy reserved
+        token) falls through to the ``default`` namespace, matching the
+        contract on `mem_session_start` (only non-default agent_ids derive
+        ``agent-runtime:*``)."""
+        comp, create_session = self._comp_with_storage_spies()
+        self._patch_runtime(monkeypatch, comp)
+
+        result = runner.invoke(cli, ["session", "wrap", "--agent-id", "default", "--", "true"])
+        assert result.exit_code == 0, result.output
+        call_args = _create_session_call_args(create_session)
+        assert call_args[1] == "default"
+        assert call_args[2] == "default"

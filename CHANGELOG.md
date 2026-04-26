@@ -68,13 +68,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   preceding section; it now writes `## Copilot-Specific` like the
   other generators.
 
-- **`mm session start --agent-id <id>` now derives `agent-runtime:<id>`
-  namespace, mirroring the MCP `mem_session_start` behavior shipped in
-  PR #475.** Previously the CLI silently lost `--agent-id` for namespace
-  derivation, leaving sessions in the `default` namespace despite the
-  multi-agent contract the public page advertises (Persona-A trap from
-  the 2026-04-26 surface review, gap G2). The CLI now follows the same
-  3-step priority chain as MCP: explicit `--namespace` wins; otherwise
+- **`mm session start` and `mm session wrap` now derive
+  `agent-runtime:<id>` namespace from `--agent-id`, mirroring the MCP
+  `mem_session_start` behavior shipped in PR #475.** Previously both
+  CLI surfaces silently lost `--agent-id` for namespace derivation,
+  leaving sessions in the `default` namespace despite the multi-agent
+  contract the public page advertises (Persona-A trap from the
+  2026-04-26 surface review, gap G2). `mm session wrap` was the more
+  consequential half — its default `--agent-id headless` meant every
+  `mm session wrap -- claude -p ...` invocation also landed in
+  `default` regardless of the wrapped command. Both surfaces now use a
+  shared `_derive_session_namespace` helper with the same priority
+  chain as MCP: explicit `--namespace` wins; otherwise
   `agent-runtime:<agent-id>` for non-default agents; otherwise
   `default`. `mm session start` also echoes the resolved namespace so
   users can verify before continuing.
