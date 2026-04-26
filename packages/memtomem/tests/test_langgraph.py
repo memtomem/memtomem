@@ -179,13 +179,49 @@ class TestStartAgentSession:
 
     @pytest.mark.asyncio
     async def test_empty_agent_id_raises(self):
+        from memtomem.constants import InvalidNameError
         from memtomem.integrations.langgraph import MemtomemStore
 
         store = MemtomemStore()
-        store._components = self._stub_components()
+        comp = self._stub_components()
+        store._components = comp
 
-        with pytest.raises(ValueError, match="non-empty"):
+        with pytest.raises(InvalidNameError, match="invalid agent-id"):
             await store.start_agent_session("")
+        comp.storage.create_session.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "agent_id",
+        [
+            "foo:bar",  # collides with the namespace separator
+            "../etc",  # path traversal
+            "a/b",  # path separator
+            "a b",  # internal whitespace
+            "-leading-dash",
+        ],
+    )
+    async def test_hostile_agent_id_blocked_before_storage(self, agent_id):
+        """Regression pin (#492 / PR #491 follow-up): the LangGraph adapter
+        must apply the same ``validate_agent_id`` gate as the MCP / CLI
+        surfaces, so a malformed namespace like ``"agent-runtime:foo:bar"``
+        cannot reach storage from the in-process Python entry point.
+        """
+        from memtomem.constants import InvalidNameError
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        store = MemtomemStore()
+        comp = self._stub_components()
+        store._components = comp
+
+        with pytest.raises(InvalidNameError, match="invalid agent-id"):
+            await store.start_agent_session(agent_id)
+
+        comp.storage.create_session.assert_not_awaited()
+        # Binding state stays clean — a rejected start_agent_session
+        # must not leave _current_agent_id pointing at the hostile value.
+        assert store._current_session_id is None
+        assert store._current_agent_id is None
 
     @pytest.mark.asyncio
     async def test_end_session_resets_agent_id(self):
