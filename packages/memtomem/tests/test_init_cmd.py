@@ -1430,6 +1430,35 @@ class TestRuntimeProfile:
         assert profile.cwd_install_type == "project"
         assert profile.cwd_install_dir == tmp_path
 
+    def test_project_install_via_legacy_uv_dev_dependencies(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """memtomem listed in legacy ``[tool.uv] dev-dependencies`` (the
+        pre-PEP 735 location ``uv`` used for dev deps) → project install.
+        Older ``uv`` setups that haven't migrated to ``[dependency-groups]``
+        keep declaring memtomem here; the dep check has to recognize the
+        legacy location too or those users fall through to ``pypi`` and
+        get a ``uv tool install`` hint instead of the workspace
+        ``uv sync`` hint they actually need."""
+        from memtomem.cli import init_cmd
+
+        (tmp_path / "pyproject.toml").write_text(
+            "[project]\n"
+            "name='userproj'\n"
+            "dependencies = ['click>=8']\n"
+            "\n"
+            "[tool.uv]\n"
+            "dev-dependencies = ['memtomem>=0.1', 'pytest']\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
+        monkeypatch.setattr(init_cmd.sys, "prefix", "/usr/local")
+
+        profile = init_cmd._runtime_profile()
+        assert profile.cwd_install_type == "project"
+        assert profile.cwd_install_dir == tmp_path
+
     def test_project_install_canonical_name_match(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

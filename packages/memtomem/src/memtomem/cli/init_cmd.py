@@ -112,9 +112,11 @@ def _pyproject_depends_on_memtomem(pyproject: Path) -> bool:
     """True iff ``pyproject.toml`` declares ``memtomem`` as a dependency.
 
     Checks PEP 621 ``[project] dependencies`` and ``[project] optional-
-    dependencies``, plus PEP 735 ``[dependency-groups]``. Names are
-    normalized per PEP 503 before comparison so ``memtomem[all]>=0.1``,
-    ``Memtomem``, and ``memtomem @ git+…`` all match.
+    dependencies``, PEP 735 ``[dependency-groups]``, and the legacy
+    ``[tool.uv] dev-dependencies`` (predates PEP 735; older ``uv`` setups
+    that haven't migrated still use it). Names are normalized per PEP 503
+    before comparison so ``memtomem[all]>=0.1``, ``Memtomem``, and
+    ``memtomem @ git+…`` all match.
 
     Returns ``False`` when the file is unreadable or has malformed TOML —
     classification falls through to ``pypi`` in that case, which is the
@@ -161,6 +163,11 @@ def _pyproject_depends_on_memtomem(pyproject: Path) -> bool:
         for deps in groups.values():
             if _list_has_memtomem(deps):
                 return True
+    tool = data.get("tool")
+    if isinstance(tool, dict):
+        uv_section = tool.get("uv")
+        if isinstance(uv_section, dict) and _list_has_memtomem(uv_section.get("dev-dependencies")):
+            return True
     return False
 
 
