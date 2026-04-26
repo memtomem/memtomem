@@ -181,3 +181,45 @@ Some content here.
 """
         sections = extract_sections_from_agent_file(content)
         assert "Custom Section" in sections
+
+
+class TestSpecificSectionRoundTrip:
+    """`## <Agent>-Specific` sections must survive extract → generate.
+
+    Regression: prior to alias addition, `extract_sections_from_agent_file`
+    stored `## Claude-Specific` content under the literal key
+    `Claude-Specific`, but the generator looks for the canonical key
+    `Claude` — so the override section was silently dropped on round-trip.
+    """
+
+    @pytest.mark.parametrize(
+        "agent,heading",
+        [
+            ("claude", "Claude-Specific"),
+            ("cursor", "Cursor-Specific"),
+            ("gemini", "Gemini-Specific"),
+            ("codex", "Codex-Specific"),
+            ("copilot", "Copilot-Specific"),
+        ],
+    )
+    def test_specific_section_roundtrip(self, agent, heading):
+        marker = "this content must survive round-trip"
+        original = f"""# AGENT_FILE
+
+## What is this project?
+
+- Name: foo
+
+## {heading}
+
+{marker}
+"""
+        sections = extract_sections_from_agent_file(original)
+        # Canonical key is the agent name with capital first letter.
+        canonical = heading.split("-", 1)[0]
+        assert canonical in sections
+        assert marker in sections[canonical]
+
+        regenerated = generate_for_agent(agent, sections)
+        assert heading in regenerated
+        assert marker in regenerated

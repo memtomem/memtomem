@@ -5,6 +5,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mm context` round-trip no longer silently drops `## <Agent>-Specific`
+  sections.** `extract_sections_from_agent_file` mapped agent-override
+  headings (`## Claude-Specific`, `## Cursor-Specific`,
+  `## Gemini-Specific`, `## Codex-Specific`, `## Copilot-Specific`) to
+  their literal heading strings, but the generators look for canonical
+  keys (`Claude`, `Cursor`, …). On `mm context init` (extract-existing)
+  followed by `mm context generate`, the override section was discarded
+  and `mm context diff` showed `[in sync]` because both sides had the
+  same loss — masking the data loss. Added the five aliases to the
+  reverse-extract map so override sections survive the round-trip.
+  Separately, `CopilotGenerator` emitted the override content without
+  any `##` heading, so a second round-trip absorbed it into the
+  preceding section; it now writes `## Copilot-Specific` like the
+  other generators.
+
 ## [0.1.30] — 2026-04-26
 
 ### Fixed

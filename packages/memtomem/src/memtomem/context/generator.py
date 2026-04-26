@@ -216,6 +216,7 @@ class CopilotGenerator:
             lines.append(sections["Commands"])
             lines.append("")
         if "Copilot" in sections:
+            lines.append("## Copilot-Specific\n")
             lines.append(sections["Copilot"])
             lines.append("")
         return "\n".join(lines)
@@ -258,6 +259,13 @@ def extract_sections_from_agent_file(content: str) -> dict[str, str]:
         "coding rules": "Rules",
         "rules": "Rules",
         "style": "Style",
+        # Agent-specific override sections — must round-trip through
+        # generate() which emits "## <Agent>-Specific" headings.
+        "claude-specific": "Claude",
+        "cursor-specific": "Cursor",
+        "gemini-specific": "Gemini",
+        "codex-specific": "Codex",
+        "copilot-specific": "Copilot",
     }
 
     sections: dict[str, str] = {}
