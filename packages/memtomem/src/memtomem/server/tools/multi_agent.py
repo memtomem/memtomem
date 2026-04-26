@@ -15,6 +15,7 @@ from memtomem.server import mcp
 from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.formatters import OutputFormat, _VALID_OUTPUT_FORMATS
+from memtomem.server.helpers import _announce_dim_mismatch_once
 from memtomem.server.tool_registry import register
 
 logger = logging.getLogger(__name__)
@@ -162,13 +163,29 @@ async def mem_agent_search(
         namespace=ns_filter,
     )
 
+    # Mirror mem_search trust-UX hints so structured payloads from the two
+    # tools have parity in semantic content, not just shape. The archive
+    # hint engages only when no namespace was pinned (the pipeline's
+    # system_namespace_prefixes filter is gated on that) — for
+    # mem_agent_search this means agent_id was None AND no session/legacy
+    # binding resolved.
+    hints: list[str] = []
+    if ns_filter is None and stats.hidden_system_ns > 0:
+        hints.append(
+            f"{stats.hidden_system_ns} result(s) hidden in system namespaces "
+            f'(pass namespace="archive:..." to include them).'
+        )
+    dim_notice = await _announce_dim_mismatch_once(app)
+    if dim_notice:
+        hints.append(dim_notice)
+
     if not results:
         if output_format == "structured":
-            return _format_structured_results([], hints=None)
+            return _format_structured_results([], hints=hints or None)
         return f"No results found for agent '{agent_id or 'current'}'."
 
     if output_format == "structured":
-        return _format_structured_results(results, hints=None)
+        return _format_structured_results(results, hints=hints or None)
     return _format_results(results, verbose=output_format == "verbose")
 
 
