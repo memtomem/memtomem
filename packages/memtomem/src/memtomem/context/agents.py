@@ -7,7 +7,13 @@ canonical source we fan out to:
 
 * ``.claude/agents/<name>.md`` — Claude Code (project-scope)
 * ``.gemini/agents/<name>.md`` — Gemini CLI (project-scope; experimental in 2026-03)
-* ``~/.codex/agents/<name>.toml`` — OpenAI Codex CLI (**user-scope only**)
+* ``.codex/agents/<name>.toml`` — OpenAI Codex CLI (project-scope)
+
+Codex CLI accepts both ``~/.codex/agents/`` (user-scope) and ``.codex/agents/``
+(project-scope) per the official subagents docs. memtomem fans out to the
+project-scope path so a single repository's `.memtomem/agents/` source tree
+stays contained within the project — no host-home pollution, worktrees isolate
+naturally, and the layout matches Claude / Gemini.
 
 Unlike Phase 1 skills, sub-agents have genuine format divergence:
 
@@ -412,15 +418,10 @@ class GeminiAgentsGenerator:
 @dataclass
 class CodexAgentsGenerator:
     name: str = "codex_agents"
-    # Display-only — Codex is user-scope, so the real path is resolved from
-    # ``Path.home()`` inside ``target_file``. We keep a visible root string for
-    # CLI / MCP output consistency.
-    output_root: str = "~/.codex/agents"
+    output_root: str = ".codex/agents"
 
     def target_file(self, project_root: Path, agent_name: str) -> Path:
-        # project_root is intentionally ignored — Codex stores custom agents
-        # under the user's home directory.
-        return Path.home() / ".codex/agents" / f"{agent_name}.toml"
+        return project_root / self.output_root / f"{agent_name}.toml"
 
     def render(self, agent: SubAgent) -> tuple[str, list[str]]:
         return _subagent_to_codex_toml(agent)
@@ -577,7 +578,7 @@ def extract_agents_to_canonical(
 
 def _runtime_agent_names(gen_name: str, project_root: Path) -> set[str]:
     if gen_name == "codex_agents":
-        runtime_root = Path.home() / ".codex/agents"
+        runtime_root = project_root / ".codex/agents"
         suffix = ".toml"
     elif gen_name == "claude_agents":
         runtime_root = project_root / ".claude/agents"

@@ -5,6 +5,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed (BREAKING)
+
+- **`mm context sync` now writes Codex sub-agents to project-scope
+  `.codex/agents/<name>.toml` instead of user-scope
+  `~/.codex/agents/<name>.toml`.** Previously every `mm context sync`
+  wrote into the user's home directory regardless of which project the
+  command ran from, so two projects with same-named canonical agents
+  silently overwrote each other in `~/.codex/agents/`, and any
+  `mm context sync` from a worktree leaked onto the real host home —
+  defeating worktree isolation. The OpenAI Codex CLI [supports both
+  scopes](https://developers.openai.com/codex/subagents) ("standalone
+  TOML files under `~/.codex/agents/` for personal agents or
+  `.codex/agents/` for project-scoped agents"), and project scope is
+  the right default for a per-repo canonical source. This makes
+  `codex_agents` symmetric with `claude_agents` (`.claude/agents/`)
+  and `gemini_agents` (`.gemini/agents/`).
+
+  **Migration:** if you relied on the old user-scope output, copy any
+  agents you want to keep with
+  `cp ~/.codex/agents/*.toml <project>/.codex/agents/`, or restore
+  user-scope behavior on a future `mm context sync` once `--scope=user`
+  ships (tracked separately). Existing `~/.codex/agents/` files are
+  left in place; memtomem just stops writing there.
+
+  `detect_agent_dirs` now also picks up `.codex/agents/<name>.toml`
+  alongside Claude/Gemini, so `mm context detect` and the Web UI
+  Context Gateway list project-scope Codex agents in their inventory.
+
 ### Fixed
 
 - **`mm context` round-trip no longer silently drops `## <Agent>-Specific`

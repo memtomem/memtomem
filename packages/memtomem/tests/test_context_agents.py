@@ -46,7 +46,14 @@ Help with things.
 
 @pytest.fixture
 def codex_home(tmp_path, monkeypatch):
-    """Redirect HOME so Codex TOML writes don't touch the real ``~/.codex/agents/``."""
+    """Redirect HOME as a defensive guard.
+
+    Codex agents are now project-scope (``<project>/.codex/agents/``), so this
+    fixture's primary job — keeping writes off the real ``~/.codex/agents/`` —
+    is largely moot for the agents pipeline. It's kept on a few tests so that
+    any code path that still calls ``Path.home()`` (e.g. user-scope settings,
+    or a future regression) cannot leak onto the real host home.
+    """
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     monkeypatch.setenv("HOME", str(fake_home))
@@ -189,8 +196,10 @@ class TestCodexRendering:
     def test_writes_valid_toml(self, tmp_path, codex_home):
         _make_canonical_agent(tmp_path, "full", SAMPLE_FULL_AGENT)
         generate_all_agents(tmp_path, runtimes=["codex_agents"])
-        toml_path = codex_home / ".codex/agents/code-reviewer.toml"
+        toml_path = tmp_path / ".codex/agents/code-reviewer.toml"
         assert toml_path.is_file()
+        # Defensive: nothing should have leaked into HOME.
+        assert not (codex_home / ".codex/agents/code-reviewer.toml").exists()
         parsed = tomllib.loads(toml_path.read_text(encoding="utf-8"))
         assert parsed["name"] == "code-reviewer"
         assert "quality" in parsed["description"]
@@ -211,7 +220,7 @@ class TestCodexRendering:
         _make_canonical_agent(tmp_path, "helper", SAMPLE_MINIMAL_AGENT)
         result = generate_all_agents(tmp_path, runtimes=["codex_agents"])
         assert result.dropped == []
-        toml_path = codex_home / ".codex/agents/helper.toml"
+        toml_path = tmp_path / ".codex/agents/helper.toml"
         parsed = tomllib.loads(toml_path.read_text(encoding="utf-8"))
         assert parsed["name"] == "helper"
         assert parsed["description"] == "Generic helper"
@@ -219,7 +228,7 @@ class TestCodexRendering:
     def test_multiline_body_roundtrips_through_tomllib(self, tmp_path, codex_home):
         _make_canonical_agent(tmp_path, "helper", SAMPLE_MINIMAL_AGENT)
         generate_all_agents(tmp_path, runtimes=["codex_agents"])
-        toml_path = codex_home / ".codex/agents/helper.toml"
+        toml_path = tmp_path / ".codex/agents/helper.toml"
         parsed = tomllib.loads(toml_path.read_text(encoding="utf-8"))
         assert "Help with things." in parsed["developer_instructions"]
 
@@ -231,7 +240,9 @@ class TestGenerateAllAgents:
         assert len(result.generated) == 3
         assert (tmp_path / ".claude/agents/helper.md").is_file()
         assert (tmp_path / ".gemini/agents/helper.md").is_file()
-        assert (codex_home / ".codex/agents/helper.toml").is_file()
+        assert (tmp_path / ".codex/agents/helper.toml").is_file()
+        # Defensive: nothing leaked into HOME.
+        assert not (codex_home / ".codex/agents").exists()
 
     def test_no_canonical_no_op(self, tmp_path):
         result = generate_all_agents(tmp_path)
@@ -307,10 +318,12 @@ class TestExtractAgentsToCanonical:
         assert len(result.imported) == 1
         assert "UPDATED" in canonical.read_text(encoding="utf-8")
 
-    def test_ignores_codex_toml(self, tmp_path, codex_home):
+    def test_ignores_codex_toml(self, tmp_path):
         # Even when a Codex TOML exists, extract does not try to import it.
-        (codex_home / ".codex/agents").mkdir(parents=True)
-        (codex_home / ".codex/agents/helper.toml").write_text('name = "helper"\n', encoding="utf-8")
+        # The TOML format is too lossy to round-trip without reconstructing
+        # fields we dropped on the way out (tools, skills, isolation, etc.).
+        (tmp_path / ".codex/agents").mkdir(parents=True)
+        (tmp_path / ".codex/agents/helper.toml").write_text('name = "helper"\n', encoding="utf-8")
         result = extract_agents_to_canonical(tmp_path)
         assert result.imported == []
 
@@ -390,7 +403,16 @@ class TestDetectAgentDirs:
         found = detect_agent_dirs(tmp_path)
         assert found[0].agent == "gemini_agents"
 
+    def test_detects_codex_project_scope(self, tmp_path):
+        d = tmp_path / ".codex/agents"
+        d.mkdir(parents=True)
+        (d / "helper.toml").write_text('name = "helper"\n', encoding="utf-8")
+        found = detect_agent_dirs(tmp_path)
+        assert any(f.agent == "codex_agents" and f.path.name == "helper.toml" for f in found)
+
     def test_codex_user_scope_not_in_project_detect(self, tmp_path, codex_home):
+        """Codex user-scope (~/.codex/agents/) is intentionally outside the
+        project detect surface — only the project-scope path is scanned."""
         (codex_home / ".codex/agents").mkdir(parents=True)
         (codex_home / ".codex/agents/helper.toml").write_text('name = "helper"\n', encoding="utf-8")
         found = detect_agent_dirs(tmp_path)
@@ -532,7 +554,7 @@ class TestCodexTomlControlChars:
         p.write_text(body)
 
         generate_all_agents(tmp_path, runtimes=["codex_agents"])
-        toml_path = codex_home / ".codex/agents/odd-body.toml"
+        toml_path = tmp_path / ".codex/agents/odd-body.toml"
         parsed = tomllib.loads(toml_path.read_text())
         # Control chars survive the round-trip through tomllib.
         assert "\x00" in parsed["developer_instructions"]
@@ -551,7 +573,7 @@ class TestCodexTomlControlChars:
         p.write_text(body)
 
         generate_all_agents(tmp_path, runtimes=["codex_agents"])
-        toml_path = codex_home / ".codex/agents/triple.toml"
+        toml_path = tmp_path / ".codex/agents/triple.toml"
         parsed = tomllib.loads(toml_path.read_text())
         assert '"""' in parsed["developer_instructions"]
 

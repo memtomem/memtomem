@@ -2,7 +2,7 @@
 
 The canonical ``name:`` frontmatter on agents and commands, and the directory
 name of a canonical skill, are interpolated into a target path such as
-``.claude/agents/<name>.md`` or ``~/.codex/agents/<name>.toml``. Without
+``.claude/agents/<name>.md`` or ``.codex/agents/<name>.toml``. Without
 validation, ``name: ../../etc/passwd`` would escape the target root. The same
 field is also emitted to log lines, so CR/LF injection is a log-injection
 vector.
