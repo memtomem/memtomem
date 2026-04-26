@@ -12,6 +12,9 @@ from __future__ import annotations
 
 from typing import Final
 
+from memtomem.context._names import InvalidNameError as InvalidNameError
+from memtomem.context._names import validate_name
+
 # Multi-agent buckets. The ``agent-runtime:<agent-id>`` namespace is a
 # *convenience* isolation boundary, not a security boundary — see the
 # multi-agent guide for the threat model. Provider-ingestion namespace
@@ -19,8 +22,45 @@ from typing import Final
 # stay as locally-defined literals in ``cli/ingest_cmd.py`` for now;
 # promoting them here belongs in the same change that wires them up,
 # not this PR.
+#
+# ``agent_id`` is interpolated directly into ``AGENT_NAMESPACE_PREFIX``
+# without further escaping, so every entry point that builds an
+# agent-runtime namespace MUST first run ``validate_agent_id`` on the
+# user-provided id. Accepted charset: ``[A-Za-z0-9._-]`` (1–64 chars,
+# no leading dash, not ``"."`` / ``".."``). Rejecting ``:``, ``/``,
+# ``..``, whitespace, and control characters keeps malformed-but-stored
+# values like ``"agent-runtime:foo:bar"`` from round-tripping into
+# storage and search.
 AGENT_NAMESPACE_PREFIX: Final[str] = "agent-runtime:"
 SHARED_NAMESPACE: Final[str] = "shared"
+
+
+def validate_agent_id(value: object) -> str:
+    """Return *value* unchanged if it is a valid agent identifier.
+
+    Applied at the MCP + CLI session-start surfaces that build an
+    ``agent-runtime:<agent_id>`` namespace from caller input —
+    ``mem_session_start``, ``mm session start``, ``mm session wrap``.
+    Raises :class:`InvalidNameError` (a ``ValueError`` subclass,
+    surfaced by ``tool_handler`` as ``"Error: ..."`` on the MCP path
+    and as a ``ClickException`` on the CLI path) when the id contains
+    ``:``, ``/``, ``..``, whitespace, control characters, or anything
+    outside the canonical ``[A-Za-z0-9._-]`` charset documented above.
+
+    Not yet applied at:
+
+    * the LangGraph adapter
+      (``integrations.langgraph.MemtomemStore.start_agent_session`` and
+      ``MemtomemCheckpointer.namespace_for``), which currently trusts
+      in-process callers — see the issue tracker for the parity
+      follow-up;
+    * the ``mem_agent_register`` / ``mem_agent_search`` tools, which
+      still ``sanitize_namespace_segment`` rather than validate. Same
+      tracker.
+    """
+
+    return validate_name(value, kind="agent-id")
+
 
 # Default ``system_namespace_prefixes`` — namespaces matching any of these
 # prefixes are excluded from default ``mem_search`` (``namespace=None``)
