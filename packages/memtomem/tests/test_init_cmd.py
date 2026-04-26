@@ -1514,6 +1514,40 @@ class TestRuntimeProfile:
         assert profile.workspace_venv_path is None
         assert profile.runtime_matches_workspace is False
 
+    def test_source_install_takes_precedence_over_foreign_nested_pyproject(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Outer ancestor with the source workspace markers
+        (``pyproject.toml`` + ``packages/``) wins over a closer ancestor
+        carrying a foreign ``pyproject.toml``. Locks the source-first /
+        project-second invariant the dep-check fix relies on: a
+        sub-package layout inside the memtomem monorepo
+        (``packages/foo/pyproject.toml``) classifies as ``source``
+        regardless of what the nested pyproject declares as deps.
+        ``_detect_project_install`` itself returns ``None`` because its
+        walk skips ancestors with ``packages/`` and the nested pyproject
+        has no memtomem dep — making the source-takes-precedence
+        outcome a property of both the routing AND the underlying
+        function, not just one or the other."""
+        from memtomem.cli import init_cmd
+
+        outer = tmp_path / "monorepo"
+        nested = outer / "packages" / "foo"
+        nested.mkdir(parents=True)
+        (outer / "pyproject.toml").write_text("[project]\nname='monorepo'\n", encoding="utf-8")
+        (nested / "pyproject.toml").write_text(
+            "[project]\nname='foo'\ndependencies = ['click']\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(nested)
+        monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
+        monkeypatch.setattr(init_cmd.sys, "prefix", "/usr/local")
+
+        profile = init_cmd._runtime_profile()
+        assert profile.cwd_install_type == "source"
+        assert profile.cwd_install_dir == outer
+        assert init_cmd._detect_project_install() is None
+
 
 class TestMmBinaryOriginDetection:
     """Issue #363 Phase 3 — first-class ``mm_binary_origin`` heuristic.
