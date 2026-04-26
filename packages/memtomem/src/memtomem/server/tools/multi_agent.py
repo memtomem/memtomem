@@ -158,6 +158,35 @@ async def mem_agent_search(
 
 
 _SHARED_FROM_TAG_PREFIX = "shared-from="
+_SHARED_TITLE_PREFIX = "Shared: "
+
+
+def _build_shared_title(heading_hierarchy: tuple[str, ...] | list[str]) -> str:
+    """Return the ``mem_agent_share`` copy's title.
+
+    Strips any leading ``Shared: `` prefixes from each heading entry
+    before re-prepending a single one. Without this, a chain of re-shares
+    would produce ``Shared: Shared: Shared: ...`` because the source
+    chunk's heading already includes the ``Shared: `` prefix from the
+    previous share, and the naive ``f"Shared: {join}"`` doubles up on
+    every hop. Mirrors the audit-tag chain in :func:`_build_shared_tags`
+    which also collapses re-share history (immediate parent only).
+    """
+
+    if not heading_hierarchy:
+        return f"{_SHARED_TITLE_PREFIX}memory"
+
+    cleaned: list[str] = []
+    for heading in heading_hierarchy:
+        # Strip every leading ``Shared: `` so an N-hop chain — even one
+        # that already accumulated to ``Shared: Shared: Cache ...`` under
+        # the pre-fix code — collapses to a single prefix on the next
+        # share.
+        stripped = heading
+        while stripped.startswith(_SHARED_TITLE_PREFIX):
+            stripped = stripped[len(_SHARED_TITLE_PREFIX) :]
+        cleaned.append(stripped)
+    return f"{_SHARED_TITLE_PREFIX}{' > '.join(cleaned)}"
 
 
 def _build_shared_tags(source_tags: tuple[str, ...] | list[str], source_chunk_id: str) -> list[str]:
@@ -232,7 +261,7 @@ async def mem_agent_share(
 
     result, stats = await _mem_add_core(
         content=chunk.content,
-        title=f"Shared: {' > '.join(chunk.metadata.heading_hierarchy) if chunk.metadata.heading_hierarchy else 'memory'}",
+        title=_build_shared_title(chunk.metadata.heading_hierarchy),
         tags=inherited_tags,
         file=None,
         namespace=target,

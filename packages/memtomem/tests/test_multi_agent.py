@@ -49,6 +49,7 @@ from memtomem.server.component_factory import close_components, create_component
 from memtomem.server.tools.multi_agent import (
     _SHARED_FROM_TAG_PREFIX,
     _build_shared_tags,
+    _build_shared_title,
     _resolve_agent_namespace,
 )
 from memtomem.storage.sqlite_namespace import sanitize_namespace_segment
@@ -260,6 +261,75 @@ class TestSharedFromTags:
     def test_handles_empty_source_tags(self):
         out = _build_shared_tags((), "src-uuid")
         assert out == [f"{_SHARED_FROM_TAG_PREFIX}src-uuid"]
+
+
+class TestBuildSharedTitle:
+    """``_build_shared_title`` is the seam where ``mem_agent_share``
+    composes the copy's heading. The contract mirrors
+    :class:`Test_BuildSharedTags`: every re-share collapses any prior
+    ``Shared: `` prefix and re-applies a single one, so a chain of N
+    shares produces a heading with **exactly one** ``Shared: `` regardless
+    of the chain depth.
+
+    Without the prefix collapse, the source chunk's heading already
+    contains ``Shared: `` from the previous share — a naive
+    ``f"Shared: {join}"`` would compound the prefix on every hop and
+    produce ``Shared: Shared: Shared: ...`` (observed during the
+    2026-04-26 multi-agent test scenario rehearsal).
+    """
+
+    def test_empty_hierarchy_falls_back_to_memory(self):
+        assert _build_shared_title(()) == "Shared: memory"
+        assert _build_shared_title([]) == "Shared: memory"
+
+    def test_single_heading_gets_prefix_once(self):
+        assert (
+            _build_shared_title(("Cache strategy decision",)) == "Shared: Cache strategy decision"
+        )
+
+    def test_multi_level_hierarchy_joined_with_arrow(self):
+        assert (
+            _build_shared_title(("Top level", "Sub heading")) == "Shared: Top level > Sub heading"
+        )
+
+    def test_strips_leading_shared_prefix_to_avoid_doubling(self):
+        # 1-hop: source heading already has "Shared: ..." from the prior
+        # share. Re-share must not double up.
+        assert (
+            _build_shared_title(("Shared: Cache strategy decision",))
+            == "Shared: Cache strategy decision"
+        )
+
+    def test_collapses_n_hop_accumulated_prefix(self):
+        # 3-hop simulation: a chunk that already accumulated
+        # ``Shared: Shared: ...`` under the pre-fix code should be cleaned
+        # back to a single prefix on the next share. Mirrors the
+        # ``_build_shared_tags`` semantics where multiple inherited
+        # ``shared-from=...`` entries are dropped (defensive backfill).
+        assert (
+            _build_shared_title(("Shared: Shared: Cache strategy decision",))
+            == "Shared: Cache strategy decision"
+        )
+        assert (
+            _build_shared_title(("Shared: Shared: Shared: Cache strategy decision",))
+            == "Shared: Cache strategy decision"
+        )
+
+    def test_strips_at_each_hierarchy_level(self):
+        # If the source chunk's heading_hierarchy itself has multiple
+        # entries that each picked up a prefix, every level is cleaned.
+        assert (
+            _build_shared_title(("Shared: Top level", "Shared: Sub heading"))
+            == "Shared: Top level > Sub heading"
+        )
+
+    def test_does_not_strip_non_leading_shared(self):
+        # ``Shared: `` only matters as a leading prefix — substring
+        # matches inside the heading must not be touched.
+        assert (
+            _build_shared_title(("Notes on Shared: behaviour",))
+            == "Shared: Notes on Shared: behaviour"
+        )
 
 
 class TestResolveAgentNamespace:
