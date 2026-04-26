@@ -696,6 +696,69 @@ class TestSettingsSync:
         assert resp.status_code == 200
         assert "results" in resp.json()
 
+    async def test_post_refuses_host_write_by_default(
+        self, app, client: AsyncClient, tmp_path, monkeypatch
+    ):
+        """``POST /api/settings-sync`` without a body refuses host writes by
+        default — review item 1 on PR #484. Library-level gate threading."""
+        # Isolate HOME so the test cannot edit the real ~/.claude/settings.json.
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        (fake_home / ".claude").mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setenv("USERPROFILE", str(fake_home))
+
+        # Project lives in a sibling dir so the Claude target is a host write.
+        project = tmp_path / "proj"
+        project.mkdir()
+        canonical = project / ".memtomem" / "settings.json"
+        canonical.parent.mkdir(parents=True)
+        canonical.write_text(
+            json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo")]}}),
+            encoding="utf-8",
+        )
+        app.state.project_root = project
+
+        resp = await client.post(
+            "/api/settings-sync",
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 200
+        results = resp.json()["results"]
+        claude = next(r for r in results if r["name"] == "claude_settings")
+        assert claude["status"] == "needs_confirmation"
+        assert "outside the project root" in claude["reason"]
+        assert not (fake_home / ".claude" / "settings.json").exists()
+
+    async def test_post_proceeds_with_allow_host_writes_true(
+        self, app, client: AsyncClient, tmp_path, monkeypatch
+    ):
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        (fake_home / ".claude").mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setenv("USERPROFILE", str(fake_home))
+
+        project = tmp_path / "proj"
+        project.mkdir()
+        canonical = project / ".memtomem" / "settings.json"
+        canonical.parent.mkdir(parents=True)
+        canonical.write_text(
+            json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo")]}}),
+            encoding="utf-8",
+        )
+        app.state.project_root = project
+
+        resp = await client.post(
+            "/api/settings-sync",
+            json={"allow_host_writes": True},
+        )
+        assert resp.status_code == 200
+        results = resp.json()["results"]
+        claude = next(r for r in results if r["name"] == "claude_settings")
+        assert claude["status"] == "ok"
+        assert (fake_home / ".claude" / "settings.json").is_file()
+
     async def test_alias_post_context_settings_resolve(self, app, client: AsyncClient, tmp_path):
         """POST /api/context/settings/resolve resolves a hook conflict."""
         canonical_rule = self._rule("Edit", "echo v2")

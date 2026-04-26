@@ -133,6 +133,7 @@ async def mem_context_generate(
     agent: str = "all",
     include: str = "",
     strict: bool = False,
+    allow_host_writes: bool = False,
     ctx: CtxType = None,
 ) -> str:
     """Generate agent configuration files from .memtomem/context.md.
@@ -140,9 +141,15 @@ async def mem_context_generate(
     Args:
         agent: Agent name (claude, cursor, gemini, codex, copilot) or "all".
         include: Comma-separated extra artifact kinds
-            (``skills``, ``agents``, ``commands``).
+            (``skills``, ``agents``, ``commands``, ``settings``).
         strict: Promote dropped-field warnings to errors when converting
             sub-agents or slash commands.
+        allow_host_writes: When ``include="settings"`` writes a settings
+            file outside the project root (today only
+            ``~/.claude/settings.json``), refuse with a
+            ``needs confirmation`` line unless this is ``True``. Re-call
+            with ``allow_host_writes=True`` after surfacing the host
+            paths to the user.
     """
     from memtomem.context.agents import StrictDropError, generate_all_agents
     from memtomem.context.commands import (
@@ -232,7 +239,7 @@ async def mem_context_generate(
     if "settings" in inc:
         from memtomem.context.settings import generate_all_settings
 
-        settings_results = generate_all_settings(root)
+        settings_results = generate_all_settings(root, allow_host_writes=allow_host_writes)
         for sname, sr in settings_results.items():
             if sr.status == "ok":
                 results.append(f"\nSettings: {sname} → {sr.target}")
@@ -240,6 +247,8 @@ async def mem_context_generate(
                     results.append(f"  warning: {w}")
             elif sr.status == "skipped":
                 results.append(f"  skipped {sname}: {sr.reason}")
+            elif sr.status == "needs_confirmation":
+                results.append(f"  needs confirmation {sname}: {sr.reason}")
             elif sr.status in ("error", "aborted"):
                 results.append(f"  {sr.status} {sname}: {sr.reason}")
 
@@ -351,14 +360,22 @@ async def mem_context_diff(
 async def mem_context_sync(
     include: str = "",
     strict: bool = False,
+    allow_host_writes: bool = False,
     ctx: CtxType = None,
 ) -> str:
     """Sync .memtomem/context.md to all detected agent files.
 
-    Pass ``include="skills,agents,commands"`` to also fan out
-    ``.memtomem/skills/``, ``.memtomem/agents/``, and ``.memtomem/commands/``
-    to their runtime targets (Claude Code, Gemini CLI, Codex CLI).
-    ``strict=True`` turns dropped sub-agent / command fields into errors.
+    Pass ``include="skills,agents,commands,settings"`` to also fan out
+    ``.memtomem/skills/``, ``.memtomem/agents/``, ``.memtomem/commands/``,
+    and ``.memtomem/settings.json`` to their runtime targets (Claude Code,
+    Gemini CLI, Codex CLI).  ``strict=True`` turns dropped sub-agent /
+    command fields into errors.
+
+    ``allow_host_writes`` defaults to ``False``: when ``include="settings"``
+    would write to a file outside the project root (today only
+    ``~/.claude/settings.json``), the tool returns a ``needs confirmation``
+    line listing the host path instead of writing. Surface that to the
+    user, then re-call with ``allow_host_writes=True`` to proceed.
     """
     from memtomem.context.agents import StrictDropError, generate_all_agents
     from memtomem.context.commands import (
@@ -455,7 +472,7 @@ async def mem_context_sync(
     if "settings" in inc:
         from memtomem.context.settings import generate_all_settings
 
-        settings_results = generate_all_settings(root)
+        settings_results = generate_all_settings(root, allow_host_writes=allow_host_writes)
         for sname, sr in settings_results.items():
             if sr.status == "ok":
                 if results:
@@ -465,6 +482,10 @@ async def mem_context_sync(
                     results.append(f"  warning: {w}")
             elif sr.status == "skipped":
                 results.append(f"  skipped {sname}: {sr.reason}")
+            elif sr.status == "needs_confirmation":
+                if results:
+                    results.append("")
+                results.append(f"  needs confirmation {sname}: {sr.reason}")
             elif sr.status in ("error", "aborted"):
                 results.append(f"  {sr.status} {sname}: {sr.reason}")
 

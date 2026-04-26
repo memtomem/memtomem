@@ -34,6 +34,7 @@ from memtomem.context.parser import CONTEXT_FILENAME, parse_context, sections_to
 from memtomem.context.settings import (
     diff_settings,
     generate_all_settings,
+    host_write_targets,
 )
 from memtomem.context.skills import (
     diff_skills,
@@ -272,8 +273,31 @@ def _print_settings_detect() -> None:
         click.echo(f"    {f.agent:17s}  {f.path}  {status}")
 
 
-def _print_settings_generate(root: Path) -> None:
-    results = generate_all_settings(root)
+def _confirm_settings_host_writes(root: Path, *, yes: bool) -> bool:
+    """Prompt before mutating settings files outside the project root.
+
+    Returns ``True`` when the caller may pass ``allow_host_writes=True``
+    to :func:`generate_all_settings` (no host writes pending, ``--yes``
+    supplied, or user confirmed at the prompt). Returns ``False`` when
+    the user declines, in which case the caller should not invoke
+    settings sync at all.
+    """
+    pending = host_write_targets(root)
+    if not pending:
+        return True
+    if yes:
+        return True
+    click.secho(
+        "Settings sync will modify the following files outside this project:",
+        fg="yellow",
+    )
+    for p in pending:
+        click.echo(f"  {p}")
+    return click.confirm("Continue?", default=False)
+
+
+def _print_settings_generate(root: Path, *, allow_host_writes: bool) -> None:
+    results = generate_all_settings(root, allow_host_writes=allow_host_writes)
     for name, r in results.items():
         if r.status == "ok":
             click.secho(f"  Settings: {name} → {r.target}", fg="green")
@@ -281,6 +305,10 @@ def _print_settings_generate(root: Path) -> None:
                 click.secho(f"    warning: {w}", fg="yellow")
         elif r.status == "skipped":
             click.secho(f"  skipped {name}: {r.reason}", fg="yellow")
+        elif r.status == "needs_confirmation":
+            # Defense in depth: should not normally reach here because the CLI
+            # caller already gated on ``_confirm_settings_host_writes``.
+            click.secho(f"  needs confirmation {name}: {r.reason}", fg="yellow")
         elif r.status in ("error", "aborted"):
             click.secho(f"  {r.status} {name}: {r.reason}", fg="red")
 
@@ -421,7 +449,16 @@ def init_cmd(include: tuple[str, ...], overwrite: bool) -> None:
     default="ignore",
     help="Severity when fields are dropped: ignore (default), warn, or error.",
 )
-def generate_cmd(agent: str, include: tuple[str, ...], strict: bool, on_drop: str) -> None:
+@click.option(
+    "--yes",
+    "-y",
+    "yes",
+    is_flag=True,
+    help="Skip confirmation prompts before writing settings files outside this project.",
+)
+def generate_cmd(
+    agent: str, include: tuple[str, ...], strict: bool, on_drop: str, yes: bool
+) -> None:
     """Generate agent files from .memtomem/context.md."""
     inc = _parse_include(include)
     root = _find_project_root()
@@ -468,7 +505,10 @@ def generate_cmd(agent: str, include: tuple[str, ...], strict: bool, on_drop: st
 
     if "settings" in inc:
         click.echo("")
-        _print_settings_generate(root)
+        if _confirm_settings_host_writes(root, yes=yes):
+            _print_settings_generate(root, allow_host_writes=True)
+        else:
+            click.secho("  Skipped settings sync (declined).", fg="yellow")
 
     click.secho("Done.", fg="green")
 
@@ -537,7 +577,14 @@ def diff_cmd(include: tuple[str, ...]) -> None:
     default="ignore",
     help="Severity when fields are dropped: ignore (default), warn, or error.",
 )
-def sync_cmd(include: tuple[str, ...], strict: bool, on_drop: str) -> None:
+@click.option(
+    "--yes",
+    "-y",
+    "yes",
+    is_flag=True,
+    help="Skip confirmation prompts before writing settings files outside this project.",
+)
+def sync_cmd(include: tuple[str, ...], strict: bool, on_drop: str, yes: bool) -> None:
     """Sync context.md to all detected agent files."""
     inc = _parse_include(include)
     root = _find_project_root()
@@ -583,6 +630,9 @@ def sync_cmd(include: tuple[str, ...], strict: bool, on_drop: str) -> None:
 
     if "settings" in inc:
         click.echo("")
-        _print_settings_generate(root)
+        if _confirm_settings_host_writes(root, yes=yes):
+            _print_settings_generate(root, allow_host_writes=True)
+        else:
+            click.secho("  Skipped settings sync (declined).", fg="yellow")
 
     click.secho("Synced.", fg="green")
