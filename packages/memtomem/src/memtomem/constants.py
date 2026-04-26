@@ -38,10 +38,12 @@ SHARED_NAMESPACE: Final[str] = "shared"
 def validate_agent_id(value: object) -> str:
     """Return *value* unchanged if it is a valid agent identifier.
 
-    Applied at every MCP + CLI surface that concatenates
-    ``AGENT_NAMESPACE_PREFIX`` with caller input. Session-start:
-    ``mem_session_start`` (MCP), ``mm session start`` /
-    ``mm session wrap`` (CLI). Multi-agent registration / search:
+    Applied at every MCP + CLI + Python-adapter surface that
+    concatenates ``AGENT_NAMESPACE_PREFIX`` with caller input.
+    Session-start: ``mem_session_start`` (MCP), ``mm session start`` /
+    ``mm session wrap`` (CLI),
+    ``integrations.langgraph.MemtomemStore.start_agent_session``
+    (Python adapter). Multi-agent registration / search:
     ``mem_agent_register`` / ``mem_agent_search`` (MCP), ``mm agent
     register`` (CLI).
 
@@ -51,19 +53,16 @@ def validate_agent_id(value: object) -> str:
     ``:``, ``/``, ``..``, whitespace, control characters, or anything
     outside the canonical ``[A-Za-z0-9._-]`` charset documented above.
 
-    The read/write contract is symmetric across the MCP + CLI surfaces
-    listed above: an id either works on every surface or fails on
-    every surface. Pre-#493 the multi-agent surfaces silently called
+    The read/write contract is symmetric across all surfaces listed
+    above: an id either works on every surface or fails on every
+    surface. Pre-#493 the multi-agent surfaces silently called
     ``sanitize_namespace_segment`` instead, which let hostile shapes
     round-trip into storage under a rewritten namespace while
-    ``mem_session_start`` rejected the same shape — see the
-    ``Changed (BREAKING)`` entry in ``CHANGELOG.md`` (Unreleased) and
-    issue #493 for the migration note.
-
-    Not yet applied at the LangGraph adapter
-    (``integrations.langgraph.MemtomemStore.start_agent_session`` and
-    the agent-runtime concat sites in ``MemtomemStore``), which still
-    trusts in-process callers — tracked as issue #492.
+    ``mem_session_start`` rejected the same shape; pre-#492 the
+    LangGraph adapter applied only an ``if not agent_id`` empty-check
+    and likewise let malformed values through. See the
+    ``Changed (BREAKING)`` entries in ``CHANGELOG.md`` (Unreleased) and
+    issues #492 / #493 for the migration notes.
     """
 
     return validate_name(value, kind="agent-id")
