@@ -901,9 +901,9 @@ mm web --dev                   # adds opt-in maintainer pages
 mm web --mode {prod,dev}       # explicit mode (mutually exclusive with --dev)
 ```
 
-`mm web` defaults to the polished page set: Home, Search, Sources, Index, Tags, Timeline, and Settings (Config, Dedup, Age-out, Export/Import, Reset Database). `mm web --dev` — or setting `MEMTOMEM_WEB__MODE=dev` in your shell profile — extends the surface with maintainer pages (Namespaces, Sessions, Working Memory, Procedures, Health Report, Artifact Sync, Hook Files, Skills/Commands/Agents).
+`mm web` defaults to the polished page set: Home, Search, Sources, Index, Tags, Timeline, and Settings (Config, Artifact Sync, Skills/Commands/Agents, Dedup, Age-out, Export/Import, Reset Database). `mm web --dev` — or setting `MEMTOMEM_WEB__MODE=dev` in your shell profile — extends the surface with maintainer pages (Namespaces, Sessions, Working Memory, Procedures, Health Report, Hook Files).
 
-Tab classification changes over time — run `mm web --dev` against your installed version to see the complete surface. The API endpoints backing dev-only pages return 404 in `prod` mode; scripts that hit `/api/sessions`, `/api/scratch`, `/api/namespaces`, `/api/context/*`, etc. need `dev` mode.
+Tab classification changes over time — run `mm web --dev` against your installed version to see the complete surface. The API endpoints backing dev-only pages return 404 in `prod` mode; scripts that hit `/api/sessions`, `/api/scratch`, `/api/namespaces`, etc. need `dev` mode.
 
 ---
 
