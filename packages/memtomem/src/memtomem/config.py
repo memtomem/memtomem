@@ -50,7 +50,14 @@ class EmbeddingConfig(BaseSettings):
     # 0 = use ORT's default (typically all physical CPU cores). Set to a
     # small integer (e.g. 4) to keep seeding from monopolising the machine.
     # Forwarded to ``fastembed.TextEmbedding(threads=...)``; ignored by the
-    # network-bound providers (Ollama, OpenAI).
+    # network-bound providers (Ollama, OpenAI). Bounds ORT's intra-op pool
+    # only — does not affect numpy/scipy thread pools (use OMP_NUM_THREADS
+    # for those).
+    #
+    # Restart-required, intentionally excluded from ``MUTABLE_FIELDS``: the
+    # ``TextEmbedding`` instance is cached on first use, so a runtime change
+    # would not take effect until restart anyway. Same precedent as
+    # ``rerank.provider``/``model``/``api_key`` below.
     threads: int = 0
 
     @field_validator("dimension")
