@@ -136,13 +136,17 @@ class TestAgentRegister:
         assert comp.storage.set_namespace_meta.await_args_list[0].args[0] == "agent-runtime:coder"
 
     def test_register_rejects_empty_agent_id(self, monkeypatch):
+        # Whitespace-only ids fail at ``validate_agent_id`` with the
+        # same shared error vocabulary as ``mem_session_start`` and
+        # ``mm session start`` (issue #493 — read/write parity).
         comp = _registry_components()
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
 
         result = CliRunner().invoke(cli, ["agent", "register", "   "])
 
         assert result.exit_code != 0
-        assert "non-empty" in result.output
+        assert "invalid agent-id" in result.output
+        comp.storage.set_namespace_meta.assert_not_called()
 
 
 class TestAgentList:

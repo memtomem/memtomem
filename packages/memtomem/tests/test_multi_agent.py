@@ -1,10 +1,14 @@
 """Tests for multi-agent namespace helpers (``mem_agent_*``).
 
-The sanitizer used by ``mem_agent_register`` / ``mem_agent_search`` lives in
-``storage/sqlite_namespace.py`` as ``sanitize_namespace_segment`` — shared
-with the ingest pipeline. These tests pin the behavior the multi-agent tool
-relies on (single-segment `agent_id` sanitization so the generated
-``agent-runtime:{id}`` namespace stays at depth 1).
+``TestSanitizeNamespaceSegment`` pins the behavior of the shared
+``sanitize_namespace_segment`` helper in ``storage/sqlite_namespace.py``,
+which the ingest pipeline still uses for permissively rewriting
+namespace segments derived from filesystem / provider state. As of
+issue #493 the multi-agent tools (``mem_agent_register`` /
+``mem_agent_search`` / ``mm agent register``) no longer route through
+this helper — they call ``validate_agent_id`` instead and reject
+hostile shapes loudly. Wiring for that gate is pinned in
+``test_validate_agent_id.py``; the helper itself is exercised here.
 
 ``TestDefaultIsolation`` pins the multi-agent default search isolation
 behaviour: ``agent-runtime:`` lives in ``system_namespace_prefixes`` by

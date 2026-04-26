@@ -8,7 +8,12 @@ from typing import TYPE_CHECKING
 
 import click
 
-from memtomem.constants import AGENT_NAMESPACE_PREFIX, SHARED_NAMESPACE
+from memtomem.constants import (
+    AGENT_NAMESPACE_PREFIX,
+    SHARED_NAMESPACE,
+    InvalidNameError,
+    validate_agent_id,
+)
 
 if TYPE_CHECKING:
     from memtomem.storage.sqlite_backend import SqliteBackend
@@ -97,28 +102,30 @@ def register(agent_id: str, description: str | None, color: str | None) -> None:
     Mirrors the ``mem_agent_register`` MCP tool so operators don't have to
     spin up an MCP client for one-off agent setup. Also ensures the
     cross-agent ``shared`` namespace exists.
+
+    ``agent_id`` is validated against the canonical ``[A-Za-z0-9._-]``
+    charset (same gate as ``mm session start``); hostile shapes like
+    ``foo:bar`` or ``../x`` are rejected loudly rather than silently
+    sanitised.
     """
+    try:
+        validate_agent_id(agent_id)
+    except InvalidNameError as e:
+        raise click.ClickException(str(e)) from e
     asyncio.run(_run_register(agent_id, description, color))
 
 
 async def _run_register(agent_id: str, description: str | None, color: str | None) -> None:
     from memtomem.cli._bootstrap import cli_components
-    from memtomem.storage.sqlite_namespace import sanitize_namespace_segment
 
-    if not agent_id or not agent_id.strip():
-        raise click.ClickException("agent_id must be non-empty.")
-    sanitized = sanitize_namespace_segment(agent_id)
-    if not sanitized:
-        raise click.ClickException("agent_id must contain at least one allowed character.")
-
-    namespace = f"{_CURRENT_PREFIX}{sanitized}"
+    namespace = f"{_CURRENT_PREFIX}{agent_id}"
     async with cli_components() as comp:
         await comp.storage.set_namespace_meta(namespace, description=description, color=color)
         if await comp.storage.get_namespace_meta(SHARED_NAMESPACE) is None:
             await comp.storage.set_namespace_meta(
                 SHARED_NAMESPACE, description="Shared knowledge base for all agents"
             )
-    click.echo(f"Agent registered: {sanitized}")
+    click.echo(f"Agent registered: {agent_id}")
     click.echo(f"- Namespace: {namespace}")
     click.echo(f"- Shared namespace: {SHARED_NAMESPACE}")
 

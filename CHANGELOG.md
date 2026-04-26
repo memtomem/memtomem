@@ -5,6 +5,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed (BREAKING)
+
+- **`mem_agent_register`, `mem_agent_search`, and `mm agent register`
+  now reject malformed `agent_id` values loudly instead of silently
+  rewriting them.** PR #491 had wired `validate_agent_id` into the
+  three session-start surfaces (`mem_session_start` / `mm session
+  start` / `mm session wrap`) so a hostile shape like `"foo:bar"` or
+  `"../x"` raised
+  `Error: invalid agent-id 'foo:bar': must match [A-Za-z0-9._-]+ ...`.
+  The matching multi-agent registration / search surfaces still ran
+  `sanitize_namespace_segment`, so the same input produced two UX
+  outcomes depending on which tool the caller hit first — registering
+  an agent rewrote the id in place under `agent-runtime:foo_bar`,
+  while starting a session for that same id rejected it. The read /
+  write contract is now symmetric: an `agent_id` either works on
+  every surface or fails on every surface, with the same
+  `invalid agent-id 'X'` error fragment regardless of entry point.
+
+  **Migration:** callers passing values that were previously rewritten
+  (anything containing `:`, `/`, `..`, whitespace, or characters
+  outside `[A-Za-z0-9._-]`) will now see a hard error. Those callers
+  were already storing memories under unexpected namespaces — pick a
+  canonical id matching the documented charset and re-register. The
+  LangGraph adapter parity gap remains tracked separately. Closes #493.
+
 ## [0.1.31] — 2026-04-26
 
 ### Added

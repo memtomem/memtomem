@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import logging
 
-from memtomem.constants import AGENT_NAMESPACE_PREFIX, SHARED_NAMESPACE
+from memtomem.constants import AGENT_NAMESPACE_PREFIX, SHARED_NAMESPACE, validate_agent_id
 from memtomem.server import mcp
 from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
-from memtomem.storage.sqlite_namespace import sanitize_namespace_segment
 
 logger = logging.getLogger(__name__)
 
@@ -63,16 +62,19 @@ async def mem_agent_register(
     optionally registers metadata. If the agent is already registered,
     updates metadata.
 
+    ``agent_id`` must match the canonical ``[A-Za-z0-9._-]`` charset used
+    everywhere else that builds an ``agent-runtime:`` namespace; hostile
+    shapes like ``"foo:bar"`` or ``"../x"`` are rejected loudly rather
+    than silently sanitised. This keeps the read/write contract symmetric
+    with ``mem_session_start`` so the same id either works on every
+    surface or fails on every surface.
+
     Args:
         agent_id: Unique identifier for the agent
         description: Optional description of the agent's role
         color: Optional color hex code for UI display
     """
-    if not agent_id or not agent_id.strip():
-        return "Error: agent_id must be non-empty."
-    agent_id = sanitize_namespace_segment(agent_id)
-    if not agent_id:
-        return "Error: agent_id must contain at least one allowed character."
+    validate_agent_id(agent_id)
     app = await _get_app_initialized(ctx)
     namespace = f"{AGENT_NAMESPACE_PREFIX}{agent_id}"
 
@@ -109,18 +111,21 @@ async def mem_agent_search(
     Searches the agent's private namespace and optionally the shared
     namespace, merging results by relevance.
 
+    When ``agent_id`` is supplied it must match the canonical
+    ``[A-Za-z0-9._-]`` charset enforced at registration / session start;
+    hostile shapes are rejected loudly so a typoed lookup can't quietly
+    fall back to "search everything". Pass ``None`` to use the active
+    session's agent (set by ``mem_session_start``) or the legacy
+    ``current_namespace`` fallback.
+
     Args:
         query: Search query
         agent_id: Agent ID to search (omit for current agent)
         include_shared: Also search the shared namespace (default True)
         top_k: Maximum results to return
     """
-    if agent_id is not None and not agent_id.strip():
-        return "Error: agent_id must be non-empty if provided."
     if agent_id is not None:
-        agent_id = sanitize_namespace_segment(agent_id)
-        if not agent_id:
-            return "Error: agent_id must contain at least one allowed character."
+        validate_agent_id(agent_id)
     app = await _get_app_initialized(ctx)
     from memtomem.server.formatters import _format_results
 

@@ -27,6 +27,7 @@ from click.testing import CliRunner
 from memtomem.cli import cli
 from memtomem.constants import InvalidNameError, validate_agent_id
 from memtomem.server.context import AppContext
+from memtomem.server.tools.multi_agent import mem_agent_register, mem_agent_search
 from memtomem.server.tools.session import mem_session_start
 
 # Hostile-shaped values that must be rejected at every boundary. Each
@@ -231,6 +232,143 @@ class TestCliBoundary:
 
 
 # ---------------------------------------------------------------------------
+# MCP boundary — mem_agent_register / mem_agent_search (issue #493)
+# ---------------------------------------------------------------------------
+
+
+class TestMcpMultiAgentBoundary:
+    """``mem_agent_register`` and ``mem_agent_search`` must reject the same
+    hostile shapes as ``mem_session_start`` so the read/write contract
+    stays symmetric (issue #493).
+    """
+
+    @pytest.mark.asyncio
+    async def test_register_colon_in_agent_id_returns_error_string(self, components):
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        out = await mem_agent_register(agent_id="foo:bar", ctx=ctx)  # type: ignore[arg-type]
+
+        assert out.startswith("Error: invalid agent-id")
+        assert "'foo:bar'" in out
+
+    @pytest.mark.asyncio
+    async def test_register_malformed_namespace_never_reaches_storage(self, components):
+        """Regression pin: ``agent-runtime:foo:bar`` must not appear as a
+        namespace meta row even if validation regresses to a warning.
+        """
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_agent_register(agent_id="foo:bar", ctx=ctx)  # type: ignore[arg-type]
+
+        rows = await app.storage.list_namespace_meta()
+        assert not any("agent-runtime:foo:bar" in (r.get("namespace") or "") for r in rows)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("agent_id", HOSTILE_AGENT_IDS)
+    async def test_register_hostile_agent_ids_all_rejected(self, components, agent_id):
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        out = await mem_agent_register(agent_id=agent_id, ctx=ctx)  # type: ignore[arg-type]
+
+        assert out.startswith("Error: invalid agent-id")
+
+    @pytest.mark.asyncio
+    async def test_register_valid_agent_id_still_succeeds(self, components):
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        out = await mem_agent_register(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+
+        assert "Agent registered: planner" in out
+        assert "agent-runtime:planner" in out
+
+    @pytest.mark.asyncio
+    async def test_search_colon_in_agent_id_returns_error_string(self, components):
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        out = await mem_agent_search(query="hello", agent_id="foo:bar", ctx=ctx)  # type: ignore[arg-type]
+
+        assert out.startswith("Error: invalid agent-id")
+        assert "'foo:bar'" in out
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("agent_id", HOSTILE_AGENT_IDS)
+    async def test_search_hostile_agent_ids_all_rejected(self, components, agent_id):
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        out = await mem_agent_search(query="hello", agent_id=agent_id, ctx=ctx)  # type: ignore[arg-type]
+
+        assert out.startswith("Error: invalid agent-id")
+
+    @pytest.mark.asyncio
+    async def test_search_omitted_agent_id_unaffected(self, components):
+        """``agent_id=None`` is the documented "use session / legacy NS"
+        path — must not trip the validator.
+        """
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        out = await mem_agent_search(query="nothing-here", agent_id=None, ctx=ctx)  # type: ignore[arg-type]
+
+        # Either "No results found" or a real result list — must NOT be a
+        # validation error. The empty-DB fixture yields no hits.
+        assert not out.startswith("Error:")
+
+
+# ---------------------------------------------------------------------------
+# CLI boundary — mm agent register (issue #493)
+# ---------------------------------------------------------------------------
+
+
+class TestCliAgentRegisterBoundary:
+    @pytest.fixture
+    def agent_storage_mock(self):
+        """Mock storage that fails loudly if any namespace-creating call
+        lands on the rejection path.
+        """
+        return SimpleNamespace(
+            set_namespace_meta=AsyncMock(),
+            get_namespace_meta=AsyncMock(return_value=None),
+        )
+
+    def test_register_rejects_colon(self, runner, monkeypatch, agent_storage_mock):
+        comp = SimpleNamespace(storage=agent_storage_mock)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["agent", "register", "foo:bar"])
+
+        assert result.exit_code != 0
+        assert "invalid agent-id" in result.output
+        assert "'foo:bar'" in result.output
+        agent_storage_mock.set_namespace_meta.assert_not_called()
+
+    def test_register_rejects_path_traversal(self, runner, monkeypatch, agent_storage_mock):
+        comp = SimpleNamespace(storage=agent_storage_mock)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["agent", "register", "../etc"])
+
+        assert result.exit_code != 0
+        assert "invalid agent-id" in result.output
+        agent_storage_mock.set_namespace_meta.assert_not_called()
+
+    def test_register_accepts_valid_agent_id(self, runner, monkeypatch, agent_storage_mock):
+        comp = SimpleNamespace(storage=agent_storage_mock)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["agent", "register", "planner"])
+
+        assert result.exit_code == 0, result.output
+        assert "Agent registered: planner" in result.output
+        agent_storage_mock.set_namespace_meta.assert_awaited()
+
+
+# ---------------------------------------------------------------------------
 # Cross-surface error parity
 # ---------------------------------------------------------------------------
 
@@ -255,3 +393,25 @@ async def test_cli_and_mcp_share_core_error_text(components, monkeypatch):
     core = "invalid agent-id 'foo:bar'"
     assert core in mcp_out
     assert core in cli_result.output
+
+
+@pytest.mark.asyncio
+async def test_session_and_multi_agent_surfaces_share_core_error_text(components):
+    """Issue #493 parity pin: ``mem_session_start``, ``mem_agent_register``,
+    and ``mem_agent_search`` all emit the same identifying error fragment
+    for the same hostile id. Without this, a caller that types ``foo:bar``
+    at the registration tool would have seen a sanitised success while
+    the same string at session-start would loudly reject — the asymmetry
+    that issue #493 was filed to close.
+    """
+    app = AppContext.from_components(components)
+    ctx = _StubCtx(app)
+
+    session_out = await mem_session_start(agent_id="foo:bar", ctx=ctx)  # type: ignore[arg-type]
+    register_out = await mem_agent_register(agent_id="foo:bar", ctx=ctx)  # type: ignore[arg-type]
+    search_out = await mem_agent_search(query="x", agent_id="foo:bar", ctx=ctx)  # type: ignore[arg-type]
+
+    core = "invalid agent-id 'foo:bar'"
+    assert core in session_out
+    assert core in register_out
+    assert core in search_out
