@@ -835,3 +835,62 @@ class TestCaseFOutputFormat:
             "dim-mismatch hint repeated on second call — one-shot gate failed"
         )
         assert app._dim_mismatch_announced is True
+
+    @pytest.mark.asyncio
+    async def test_archive_hint_byte_identical_to_mem_search(self, integration_components):
+        """Pin: when both tools hit the un-pinned-archive path, the
+        archive-filter hint they emit must be byte-identical so structured
+        consumers parsing ``payload["hints"]`` can dedup by string identity
+        across siblings. Punctuation drift (``"include them"`` vs
+        ``"include them."``) breaks the aggregation contract.
+
+        Scope note — the rule applies to the ``"search results"`` family
+        (``mem_search`` / ``mem_agent_search``). ``mem_recall`` lives in a
+        separate ``"memories recalled"`` family and intentionally uses
+        ``X memory/memories`` rather than ``X result(s)``; that carveout
+        is documented in ``feedback_hint_prose_parity_siblings.md``.
+        """
+        import json
+
+        comp, _ = integration_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        archived = make_chunk(
+            "archived note about pipelines",
+            namespace="archive:old",
+        )
+        await comp.storage.upsert_chunks([archived])
+
+        search_out = await mem_search(  # type: ignore[arg-type]
+            query="pipelines",
+            output_format="structured",
+            ctx=ctx,
+        )
+        agent_out = await mem_agent_search(  # type: ignore[arg-type]
+            query="pipelines",
+            output_format="structured",
+            ctx=ctx,
+        )
+
+        search_hints = [
+            h
+            for h in (json.loads(search_out).get("hints") or [])
+            if "hidden in system namespaces" in h
+        ]
+        agent_hints = [
+            h
+            for h in (json.loads(agent_out).get("hints") or [])
+            if "hidden in system namespaces" in h
+        ]
+
+        assert search_hints and agent_hints, (
+            "archive hint missing from one of the tools — fixture mis-setup "
+            "or system_namespace_prefixes regression?"
+        )
+        assert search_hints[0] == agent_hints[0], (
+            f"archive hint prose drift between siblings:\n"
+            f"  mem_search:        {search_hints[0]!r}\n"
+            f"  mem_agent_search:  {agent_hints[0]!r}\n"
+            f"See feedback_hint_prose_parity_siblings.md"
+        )
