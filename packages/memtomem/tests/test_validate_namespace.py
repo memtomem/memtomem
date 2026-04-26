@@ -491,6 +491,135 @@ class TestMemAgentShareTargetOverride:
 
 
 # ---------------------------------------------------------------------------
+# CLI boundary — mm agent share --target
+# ---------------------------------------------------------------------------
+
+
+class TestCliAgentShareTargetOverride:
+    """``mm agent share --target`` is the CLI sibling of the MCP gap
+    closed by PR #499 (#496) — issue #497 flagged that the CLI
+    subcommand forwards ``--target`` straight into
+    ``index_engine.index_file(..., namespace=target)`` without
+    validation, so a caller could land an ``agent-runtime:foo:bar`` row
+    even though the equivalent ``mem_agent_share`` MCP / session-start
+    surfaces refuse the same shape. Defense-in-depth tests mirror
+    ``TestCliSessionStartNamespaceOverride`` so a regression on either
+    surface surfaces as a single failing parametrize.
+    """
+
+    @pytest.fixture
+    def share_storage_mock(self):
+        """Mock storage that returns ``None`` for any chunk lookup —
+        on the rejection path we assert ``get_chunk`` was never even
+        called, on the happy path we let the chunk-not-found
+        ``ClickException`` after validation confirm the gate passed.
+
+        Load-bearing: the happy-path tests below pin gate-passed by
+        asserting ``get_chunk.assert_awaited_once()``, which assumes
+        ``_run_share`` reaches ``get_chunk`` as its first storage
+        interaction (agent_cmd.py:238). If a future change inserts a
+        pre-storage step (config check, etc.) before ``get_chunk``,
+        those happy-path checks could regress to false-pass on the
+        gate's behavior — extend the mock to cover the new step at
+        that point.
+        """
+        return SimpleNamespace(get_chunk=AsyncMock(return_value=None))
+
+    @pytest.mark.parametrize("target", CLI_HOSTILE_NAMESPACES)
+    def test_hostile_targets_all_rejected(self, runner, monkeypatch, share_storage_mock, target):
+        comp = SimpleNamespace(storage=share_storage_mock)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(
+            cli,
+            [
+                "agent",
+                "share",
+                "00000000-0000-0000-0000-000000000000",
+                "--target",
+                target,
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "invalid namespace" in result.output
+        # Regression pin: storage never received a malformed namespace.
+        share_storage_mock.get_chunk.assert_not_called()
+
+    def test_rejects_agent_runtime_foo_bar_with_quoted_value(
+        self, runner, monkeypatch, share_storage_mock
+    ):
+        """Canonical issue-#497 shape pinned separately from the
+        parametrize so failures here surface the bypass directly rather
+        than under one of N parametrized IDs.
+        """
+        comp = SimpleNamespace(storage=share_storage_mock)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(
+            cli,
+            [
+                "agent",
+                "share",
+                "00000000-0000-0000-0000-000000000000",
+                "--target",
+                "agent-runtime:foo:bar",
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "invalid namespace" in result.output
+        assert "'agent-runtime:foo:bar'" in result.output
+        share_storage_mock.get_chunk.assert_not_called()
+
+    def test_accepts_canonical_agent_runtime(self, runner, monkeypatch, share_storage_mock):
+        """``agent-runtime:planner`` is the dominant non-default share
+        target — must continue to round-trip the validator. We don't
+        assert ``exit_code == 0`` because the chunk-not-found exit comes
+        after validation; asserting on the validator-error fragment
+        keeps the test focused on the gate's contract.
+        """
+        comp = SimpleNamespace(storage=share_storage_mock)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(
+            cli,
+            [
+                "agent",
+                "share",
+                "00000000-0000-0000-0000-000000000000",
+                "--target",
+                "agent-runtime:planner",
+            ],
+        )
+
+        assert "invalid namespace" not in result.output
+        share_storage_mock.get_chunk.assert_awaited_once()
+
+    def test_accepts_default_shared(self, runner, monkeypatch, share_storage_mock):
+        """The ``--target`` default of ``shared`` must round-trip the
+        validator unchanged — the gate's whole point is to reject
+        hostile shapes without touching the documented in-tree ones.
+        """
+        comp = SimpleNamespace(storage=share_storage_mock)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(
+            cli,
+            [
+                "agent",
+                "share",
+                "00000000-0000-0000-0000-000000000000",
+                # ``--target`` omitted on purpose so this also pins the
+                # default value's continued acceptance.
+            ],
+        )
+
+        assert "invalid namespace" not in result.output
+        share_storage_mock.get_chunk.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
 # Cross-surface error parity
 # ---------------------------------------------------------------------------
 
@@ -521,6 +650,43 @@ async def test_mcp_and_cli_share_core_namespace_error_text(components, monkeypat
             "--agent-id",
             "planner",
             "--namespace",
+            "agent-runtime:foo:bar",
+        ],
+    )
+
+    core = "invalid namespace 'agent-runtime:foo:bar'"
+    assert core in mcp_out
+    assert core in cli_result.output
+
+
+@pytest.mark.asyncio
+async def test_mcp_and_cli_agent_share_target_core_error_text(components, monkeypatch):
+    """The ``mem_agent_share(target=...)`` MCP path and the
+    ``mm agent share --target`` CLI path must emit the same
+    identifying namespace-error fragment so the issue-#497 closure is
+    symmetric across surfaces. Sibling of the session-start parity
+    test above.
+    """
+    from memtomem.server.tools.multi_agent import mem_agent_share
+
+    app = AppContext.from_components(components)
+    ctx = _StubCtx(app)
+    mcp_out = await mem_agent_share(
+        chunk_id="00000000-0000-0000-0000-000000000000",
+        target="agent-runtime:foo:bar",
+        ctx=ctx,  # type: ignore[arg-type]
+    )
+
+    storage = SimpleNamespace(get_chunk=AsyncMock(return_value=None))
+    comp = SimpleNamespace(storage=storage)
+    monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+    cli_result = CliRunner().invoke(
+        cli,
+        [
+            "agent",
+            "share",
+            "00000000-0000-0000-0000-000000000000",
+            "--target",
             "agent-runtime:foo:bar",
         ],
     )

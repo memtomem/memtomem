@@ -18,11 +18,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   now runs at `mem_session_start(namespace=)` (MCP),
   `mm session start --namespace` (CLI),
   `MemtomemStore.start_agent_session(namespace=)` and
-  `MemtomemStore.start_session(namespace=)` (Python adapter), and
-  `mem_agent_share(target=)` (MCP). `agent-runtime:<seg>` overrides
-  re-route the trailing segment through `validate_agent_id` so the
-  override path can't widen the contract that the direct `agent_id=`
-  path enforces.
+  `MemtomemStore.start_session(namespace=)` (Python adapter),
+  `mem_agent_share(target=)` (MCP), and `mm agent share --target`
+  (CLI — closes #497, the kin gap PR #499 review flagged on the share
+  surface). `agent-runtime:<seg>` overrides re-route the trailing
+  segment through `validate_agent_id` so the override path can't widen
+  the contract that the direct `agent_id=` path enforces.
 
   **Migration:** callers passing structured-but-unsupported namespace
   shapes (anything containing slashes, whitespace, comma, control
@@ -36,7 +37,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   now — it shadows the multi-agent prefix and the strict-arity rule
   requires exactly one trailing segment after the prefix. Anyone
   holding such a namespace should rename it via `mem_ns_rename` before
-  running session-start with the override. Closes #496.
+  running session-start with the override. Closes #496 and #497.
 
 - **`mem_agent_register`, `mem_agent_search`, and `mm agent register`
   now reject malformed `agent_id` values loudly instead of silently
