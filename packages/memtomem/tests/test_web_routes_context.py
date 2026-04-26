@@ -549,7 +549,8 @@ class TestListAgents:
     async def test_empty(self, client: AsyncClient):
         r = await client.get("/api/context/agents")
         assert r.status_code == 200
-        # May include user-scope Codex agents from ~/.codex/agents/
+        # Filter to canonical entries; runtime-only agents (e.g. orphan files
+        # under .claude/agents) may still appear without a canonical_path.
         canonicals = [a for a in r.json()["agents"] if a["canonical_path"] is not None]
         assert canonicals == []
 

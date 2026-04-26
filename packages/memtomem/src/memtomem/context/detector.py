@@ -43,13 +43,29 @@ SKILL_DIRS: dict[str, list[str]] = {
     "codex_skills": [".agents/skills"],
 }
 
-# Sub-agent-runtime name → project-scope directories containing ``<name>.md`` sub-agent
-# files. Codex sub-agents are user-scope only (``~/.codex/agents/``) so they are not
-# discoverable via the project root and intentionally omitted here.
+# Sub-agent-runtime name → project-scope directories containing sub-agent files.
+# Claude / Gemini use Markdown (``<name>.md``); Codex uses TOML (``<name>.toml``).
+# ``detect_agent_dirs`` is responsible for matching the right suffix per runtime.
 AGENT_DIRS: dict[str, list[str]] = {
     "claude_agents": [".claude/agents"],
     "gemini_agents": [".gemini/agents"],
+    "codex_agents": [".codex/agents"],
 }
+
+# Per-runtime suffix used by ``detect_agent_dirs`` when scanning ``AGENT_DIRS``.
+AGENT_FILE_SUFFIX: dict[str, str] = {
+    "claude_agents": ".md",
+    "gemini_agents": ".md",
+    "codex_agents": ".toml",
+}
+
+# Lock the two dicts to the same key set so a future runtime added to
+# ``AGENT_DIRS`` without a matching ``AGENT_FILE_SUFFIX`` entry fails loudly at
+# import instead of silently being treated as Markdown by ``detect_agent_dirs``.
+assert AGENT_FILE_SUFFIX.keys() == AGENT_DIRS.keys(), (
+    "AGENT_FILE_SUFFIX and AGENT_DIRS must have identical keys; "
+    f"diff: {AGENT_FILE_SUFFIX.keys() ^ AGENT_DIRS.keys()}"
+)
 
 # Custom-command-runtime name → project-scope directories containing command files.
 # Claude uses ``.md`` files, Gemini uses ``.toml`` — the detector reports both so
@@ -129,27 +145,31 @@ def detect_skill_dirs(project_root: Path) -> list[DetectedFile]:
 def detect_agent_dirs(project_root: Path) -> list[DetectedFile]:
     """Scan project root for runtime-specific sub-agent files.
 
-    Each discovered ``<name>.md`` file under a registered ``AGENT_DIRS`` entry
-    is reported as a ``DetectedFile`` with ``kind="agent_file"``. Codex
-    sub-agents live in ``~/.codex/agents/`` (user-scope) and are therefore
-    **not** discoverable here — use :func:`memtomem.context.agents.diff_agents`
-    for the Codex side.
+    Each discovered file under a registered ``AGENT_DIRS`` entry is reported as
+    a ``DetectedFile`` with ``kind="agent_file"``. The expected suffix is per
+    runtime (``.md`` for Claude / Gemini, ``.toml`` for Codex) — see
+    ``AGENT_FILE_SUFFIX``.
+
+    Codex CLI also accepts ``~/.codex/agents/`` (user-scope), but memtomem
+    intentionally only fans out to and scans the project-scope path so that
+    a project's canonical agents stay contained within the repository.
     """
     found: list[DetectedFile] = []
 
     for agent, paths in AGENT_DIRS.items():
+        suffix = AGENT_FILE_SUFFIX[agent]
         for rel_path in paths:
             root = project_root / rel_path
             if not root.is_dir():
                 continue
-            for md_file in sorted(root.glob("*.md")):
-                if not md_file.is_file():
+            for agent_file in sorted(root.glob(f"*{suffix}")):
+                if not agent_file.is_file():
                     continue
                 found.append(
                     DetectedFile(
                         agent=agent,
-                        path=md_file,
-                        size=md_file.stat().st_size,
+                        path=agent_file,
+                        size=agent_file.stat().st_size,
                         kind="agent_file",
                     )
                 )

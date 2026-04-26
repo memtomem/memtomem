@@ -18,9 +18,11 @@ traversal order:
 | Skills     | `claude_skills` → `gemini_skills` → `codex_skills` (detector order) |
 | Commands   | `.claude/commands` → `.gemini/commands` |
 
-Codex agents and prompts are user-scope (`~/.codex/`) and are **never**
-imported — they are one-way (canonical → Codex) to avoid cross-project
-leakage.
+Codex agents fan out to project-scope `<project>/.codex/agents/` (symmetric
+with Claude/Gemini); Codex prompts remain user-scope (`~/.codex/prompts/`,
+no project-scope equivalent). Both are **never** imported — fan-out is
+one-way (canonical → Codex) so the canonical entry stays the single source
+of truth.
 
 **Why this order:** Claude Code is the primary authoring surface in most
 memtomem workflows.  Gemini CLI is experimental and Codex is
