@@ -81,8 +81,15 @@ class OnnxEmbedder:
 
         _register_custom_models_if_needed()
         model_id = _resolve_model(self._config.model)
-        logger.info("Loading ONNX embedding model %s …", model_id)
-        self._model = TextEmbedding(model_name=model_id)
+        # threads=0 → leave ORT default (all physical cores); threads>0 caps
+        # the intra-op pool so seeding doesn't saturate the machine.
+        threads = self._config.threads or None
+        logger.info(
+            "Loading ONNX embedding model %s (threads=%s) …",
+            model_id,
+            threads if threads is not None else "ORT default",
+        )
+        self._model = TextEmbedding(model_name=model_id, threads=threads)
         return self._model
 
     @property

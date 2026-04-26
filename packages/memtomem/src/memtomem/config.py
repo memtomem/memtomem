@@ -46,6 +46,19 @@ class EmbeddingConfig(BaseSettings):
     api_key: str = ""
     batch_size: int = 64
     max_concurrent_batches: int = 4
+    # ONNX Runtime intra-op thread cap for the local fastembed provider.
+    # 0 = use ORT's default (typically all physical CPU cores). Set to a
+    # small integer (e.g. 4) to keep seeding from monopolising the machine.
+    # Forwarded to ``fastembed.TextEmbedding(threads=...)``; ignored by the
+    # network-bound providers (Ollama, OpenAI). Bounds ORT's intra-op pool
+    # only — does not affect numpy/scipy thread pools (use OMP_NUM_THREADS
+    # for those).
+    #
+    # Restart-required, intentionally excluded from ``MUTABLE_FIELDS``: the
+    # ``TextEmbedding`` instance is cached on first use, so a runtime change
+    # would not take effect until restart anyway. Same precedent as
+    # ``rerank.provider``/``model``/``api_key`` below.
+    threads: int = 0
 
     @field_validator("dimension")
     @classmethod
@@ -59,6 +72,13 @@ class EmbeddingConfig(BaseSettings):
     def must_be_positive(cls, v: int, info: ValidationInfo) -> int:
         if v <= 0:
             raise ValueError(f"{info.field_name} must be positive, got {v}")
+        return v
+
+    @field_validator("threads")
+    @classmethod
+    def threads_non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("threads must be non-negative (0 = ORT default)")
         return v
 
 
