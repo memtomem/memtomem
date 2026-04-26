@@ -13,6 +13,7 @@ from memtomem.constants import (
     SHARED_NAMESPACE,
     InvalidNameError,
     validate_agent_id,
+    validate_namespace,
 )
 
 if TYPE_CHECKING:
@@ -220,7 +221,17 @@ def share(chunk_id: str, target: str) -> None:
     UUID; this command does *not* create a true cross-reference link.
     See the multi-agent guide for the exact semantics and the ongoing
     RFC for true link support.
+
+    ``target`` is run through :func:`validate_namespace` before any
+    storage write — same gate the MCP path closes on issue #496 / PR
+    #499. Hostile shapes like ``agent-runtime:foo:bar`` are rejected
+    loudly so the CLI cannot smuggle a row past the contract that the
+    direct ``agent_id`` and ``mem_agent_share`` MCP surfaces enforce.
     """
+    try:
+        validate_namespace(target)
+    except InvalidNameError as e:
+        raise click.ClickException(str(e)) from e
     asyncio.run(_run_share(chunk_id, target))
 
 
