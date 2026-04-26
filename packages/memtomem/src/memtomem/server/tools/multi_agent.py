@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
 from memtomem.constants import (
     AGENT_NAMESPACE_PREFIX,
@@ -109,6 +110,7 @@ async def mem_agent_search(
     agent_id: str | None = None,
     include_shared: bool = True,
     top_k: int = 10,
+    output_format: Literal["compact", "verbose", "structured"] = "compact",
     ctx: CtxType = None,
 ) -> str:
     """Search memories with multi-agent scope awareness.
@@ -128,11 +130,20 @@ async def mem_agent_search(
         agent_id: Agent ID to search (omit for current agent)
         include_shared: Also search the shared namespace (default True)
         top_k: Maximum results to return
+        output_format: Output format — ``"compact"`` (default,
+            human-readable), ``"verbose"`` (full details with UUID), or
+            ``"structured"`` (JSON for machine parsing — exposes
+            ``chunk_id`` directly so callers can capture UUIDs without
+            scraping). Mirrors the same option on ``mem_search`` /
+            ``mem_recall`` so callers don't have to switch tools to get
+            structured output.
     """
     if agent_id is not None:
         validate_agent_id(agent_id)
+    if output_format not in ("compact", "verbose", "structured"):
+        return f"Error: invalid output_format '{output_format}'."
     app = await _get_app_initialized(ctx)
-    from memtomem.server.formatters import _format_results
+    from memtomem.server.formatters import _format_results, _format_structured_results
 
     agent_ns = _resolve_agent_namespace(app, agent_id)
 
@@ -151,10 +162,13 @@ async def mem_agent_search(
     )
 
     if not results:
+        if output_format == "structured":
+            return _format_structured_results([], hints=None)
         return f"No results found for agent '{agent_id or 'current'}'."
 
-    output = _format_results(results)
-    return output
+    if output_format == "structured":
+        return _format_structured_results(results, hints=None)
+    return _format_results(results, verbose=output_format == "verbose")
 
 
 _SHARED_FROM_TAG_PREFIX = "shared-from="

@@ -619,3 +619,131 @@ class TestCaseEMemAddSessionInheritance:
             assert "team-notes" not in result
         finally:
             await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+
+# ── Case F — mem_agent_search output_format parity with mem_search ───
+class TestCaseFOutputFormat:
+    """``mem_agent_search`` must accept the same ``output_format`` knob
+    that ``mem_search`` / ``mem_recall`` already expose, so a caller can
+    capture ``chunk_id`` from a multi-agent search without round-tripping
+    through ``mem_search(namespace=...)``.
+
+    Pre-fix the parameter was missing, which forced agents to retry with
+    ``output_format``/``verbose`` kwargs and trip ``InvalidParameter``
+    before falling back. Surfaced during the 2026-04-26 multi-agent test
+    scenario rehearsal (memtomem-docs#17).
+    """
+
+    @pytest.mark.asyncio
+    async def test_structured_output_returns_json_with_chunk_id(self, integration_components):
+        """``output_format="structured"`` returns parseable JSON whose
+        result objects expose the ``chunk_id`` field directly — the
+        contract callers need to capture UUIDs without scraping
+        compact-format text."""
+        import json
+
+        comp, _ = integration_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await comp.storage.upsert_chunks(
+            [
+                make_chunk(
+                    "alpha private structured probe",
+                    namespace=f"{AGENT_NAMESPACE_PREFIX}alpha",
+                ),
+            ]
+        )
+
+        out = await mem_agent_search(  # type: ignore[arg-type]
+            query="structured probe",
+            agent_id="alpha",
+            output_format="structured",
+            ctx=ctx,
+        )
+
+        # Must parse as JSON and surface chunk_id on each result.
+        payload = json.loads(out)
+        assert "results" in payload
+        assert len(payload["results"]) >= 1
+        assert "chunk_id" in payload["results"][0]
+        # Empty-result branch also returns valid JSON shape for the
+        # structured path (consumers can rely on the schema).
+        empty = await mem_agent_search(  # type: ignore[arg-type]
+            query="no-such-query-zzz",
+            agent_id="alpha",
+            output_format="structured",
+            ctx=ctx,
+        )
+        empty_payload = json.loads(empty)
+        assert empty_payload["results"] == []
+
+    @pytest.mark.asyncio
+    async def test_verbose_output_includes_full_uuid(self, integration_components):
+        """``output_format="verbose"`` puts the full chunk UUID in the
+        rendered text — the human-readable counterpart to ``structured``."""
+        comp, _ = integration_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        chunk = make_chunk(
+            "alpha verbose probe",
+            namespace=f"{AGENT_NAMESPACE_PREFIX}alpha",
+        )
+        await comp.storage.upsert_chunks([chunk])
+
+        out = await mem_agent_search(  # type: ignore[arg-type]
+            query="verbose probe",
+            agent_id="alpha",
+            output_format="verbose",
+            ctx=ctx,
+        )
+
+        # Verbose format embeds the full UUID alongside score/path.
+        assert str(chunk.id) in out
+
+    @pytest.mark.asyncio
+    async def test_compact_default_unchanged(self, integration_components):
+        """The default ``"compact"`` form keeps the pre-fix behaviour:
+        no UUID in the output, ``Found N results`` header. Pinned so a
+        future change to the default doesn't quietly break callers that
+        relied on the compact shape."""
+        comp, _ = integration_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        chunk = make_chunk(
+            "alpha compact probe",
+            namespace=f"{AGENT_NAMESPACE_PREFIX}alpha",
+        )
+        await comp.storage.upsert_chunks([chunk])
+
+        out = await mem_agent_search(  # type: ignore[arg-type]
+            query="compact probe",
+            agent_id="alpha",
+            ctx=ctx,
+        )
+
+        assert "Found" in out and "results" in out
+        # Compact form must NOT leak the UUID — that's the contract that
+        # makes ``structured``/``verbose`` opt-in rather than the default.
+        assert str(chunk.id) not in out
+
+    @pytest.mark.asyncio
+    async def test_invalid_output_format_returns_error(self, integration_components):
+        """Out-of-set values short-circuit before any storage read so a
+        typo in the kwarg cannot silently fall back to compact and hide
+        the mistake. Mirrors ``mem_search``'s validation at
+        ``search.py:65-66``."""
+        comp, _ = integration_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        out = await mem_agent_search(  # type: ignore[arg-type]
+            query="anything",
+            agent_id="alpha",
+            output_format="json",  # type: ignore[arg-type]
+            ctx=ctx,
+        )
+
+        assert "Error" in out and "invalid output_format" in out
