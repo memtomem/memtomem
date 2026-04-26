@@ -41,7 +41,7 @@ HOSTILE_AGENT_IDS = [
     "a\\b",  # windows-style separator
     "  spaces  ",  # surrounding whitespace
     "a b",  # internal whitespace
-    "a​b",  # zero-width space
+    "a\u200bb",  # zero-width space — escape sequence so it isn't an invisible source artifact
     "a\x00b",  # null byte
     "a\nb",  # newline
     "-leading-dash",  # collides with click flag parsing
@@ -195,14 +195,22 @@ class TestCliBoundary:
         otherwise an invalid agent_id leaves a half-set state file plus a
         rogue child process, and the user only sees a Warning.
         """
+        import subprocess
+        from unittest.mock import MagicMock
+
         comp = SimpleNamespace(storage=storage_mock)
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
 
-        # Use ``--`` to hand the rest to the wrapped command. ``echo`` is
-        # benign but if it ever runs, the test would still pass — what we
-        # actually pin is that storage never saw the malformed namespace
-        # AND the exit code is non-zero (Click's ClickException, not the
-        # subprocess's exit code).
+        # Pin the contract directly: ``subprocess.run`` is not invoked
+        # on the rejection path. Without this, we'd only be observing
+        # that storage stayed clean — subprocess could still launch and
+        # leave a rogue child plus the half-set state file the docstring
+        # warns about. ``mm session wrap`` does ``import subprocess``
+        # inside the function, so patching the module attribute lands
+        # before the lazy import resolves it.
+        run_mock = MagicMock()
+        monkeypatch.setattr(subprocess, "run", run_mock)
+
         result = runner.invoke(
             cli, ["session", "wrap", "--agent-id", "foo:bar", "--", "echo", "hi"]
         )
@@ -210,6 +218,7 @@ class TestCliBoundary:
         assert result.exit_code != 0
         assert "invalid agent-id" in result.output
         storage_mock.create_session.assert_not_called()
+        run_mock.assert_not_called()
 
     def test_session_start_accepts_valid_agent_id(self, runner, monkeypatch, storage_mock):
         comp = SimpleNamespace(storage=storage_mock)
