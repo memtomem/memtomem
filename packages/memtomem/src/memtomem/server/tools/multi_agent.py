@@ -15,12 +15,20 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_agent_namespace(app: AppContext, agent_id: str | None) -> str | None:
-    """Resolve the namespace ``mem_agent_search`` should query.
+    """Resolve the namespace a session-aware MCP tool should target.
+
+    Used by both the read path (``mem_agent_search``,
+    ``mem_agent_share``) and the write path (``mem_add``,
+    ``mem_batch_add``, ``mem_index``, ``mem_fetch``) so the
+    "session bound writes go to the agent scope" contract holds
+    across the entire MCP surface — see G1 in
+    ``memtomem-docs/memtomem/planning/multi-agent-public-surface-review-2026-04-26.md``.
 
     Priority order (each falls back to the next when ``None``):
 
     1. Explicit ``agent_id`` argument — the caller wants to override the
-       session context for this single call.
+       session context for this single call. Only the read tools take
+       an ``agent_id`` arg today; write tools always pass ``None``.
     2. ``app.current_agent_id`` — set by ``mem_session_start(agent_id=...)``;
        lets agents avoid repeating their identity on every tool call.
     3. ``app.current_namespace`` — pre-multi-agent legacy fallback. Kept
@@ -28,7 +36,9 @@ def _resolve_agent_namespace(app: AppContext, agent_id: str | None) -> str | Non
        working unchanged.
 
     Returns ``None`` if no source resolved a namespace, in which case
-    the caller treats the search as un-pinned.
+    the caller treats the operation as un-pinned (read tools search
+    everything; write tools defer to the indexing engine's auto-NS
+    rules and config default).
     """
 
     if agent_id:

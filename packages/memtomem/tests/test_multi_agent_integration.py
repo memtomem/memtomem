@@ -589,3 +589,33 @@ class TestCaseEMemAddSessionInheritance:
         result = await mem_add(content="legacy path note", ctx=ctx)  # type: ignore[arg-type]
         assert "team-notes" in result
         assert "agent-runtime:" not in result
+
+    @pytest.mark.asyncio
+    async def test_session_agent_id_overrides_legacy_current_namespace(
+        self, integration_components
+    ):
+        """G1 BREAKING case: when both ``mem_ns_set`` (current_namespace)
+        and ``mem_session_start`` (current_agent_id) are set in the same
+        session, the agent_id wins. CHANGELOG documents this as the only
+        behavior change for the rare combination of legacy and
+        multi-agent state; this test pins the contract so a future
+        refactor of the priority chain cannot silently revert it."""
+        from memtomem.server.tools.memory_crud import mem_add
+
+        comp, _ = integration_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        # Legacy axis: mem_ns_set-style binding from a pre-multi-agent
+        # workflow that the user has continued to keep around.
+        app.current_namespace = "team-notes"
+
+        await mem_agent_register(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        try:
+            result = await mem_add(content="design decision", ctx=ctx)  # type: ignore[arg-type]
+            # Agent scope wins over the legacy current_namespace.
+            assert "agent-runtime:planner" in result
+            assert "team-notes" not in result
+        finally:
+            await mem_session_end(ctx=ctx)  # type: ignore[arg-type]

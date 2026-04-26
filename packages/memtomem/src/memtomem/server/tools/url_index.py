@@ -8,6 +8,7 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.tools.multi_agent import _resolve_agent_namespace
 
 
 @mcp.tool()
@@ -47,7 +48,7 @@ async def mem_fetch(
         return f"Error fetching URL: {exc}"
 
     # Index the fetched file
-    effective_ns = namespace or app.current_namespace
+    effective_ns = namespace or _resolve_agent_namespace(app, None)
     stats = await app.index_engine.index_file(file_path, namespace=effective_ns)
 
     # Apply tags if provided

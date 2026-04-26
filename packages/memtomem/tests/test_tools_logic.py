@@ -1245,6 +1245,7 @@ def _fake_ctx(components):
         index_engine=components.index_engine,
         search_pipeline=components.search_pipeline,
         current_namespace=None,
+        current_agent_id=None,
         webhook_manager=None,
         ensure_initialized=AsyncMock(),
     )

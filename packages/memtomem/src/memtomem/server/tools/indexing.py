@@ -8,6 +8,7 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.helpers import _check_embedding_mismatch
+from memtomem.server.tools.multi_agent import _resolve_agent_namespace
 
 
 @mcp.tool()
@@ -37,7 +38,7 @@ async def mem_index(
         return mismatch_msg
 
     target = Path(path).resolve()
-    effective_ns = namespace or app.current_namespace
+    effective_ns = namespace or _resolve_agent_namespace(app, None)
 
     stats = await app.index_engine.index_path(
         target,
