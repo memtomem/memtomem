@@ -32,6 +32,7 @@ from memtomem.context.generator import (
 )
 from memtomem.context.parser import CONTEXT_FILENAME, parse_context, sections_to_markdown
 from memtomem.context.settings import (
+    SETTINGS_GENERATORS,
     diff_settings,
     generate_all_settings,
 )
@@ -272,6 +273,48 @@ def _print_settings_detect() -> None:
         click.echo(f"    {f.agent:17s}  {f.path}  {status}")
 
 
+def _settings_host_writes_pending(root: Path) -> list[Path]:
+    """Target files that settings sync would write *outside* the project root.
+
+    A target counts as a "host write" when its path is not under ``root`` —
+    e.g. ``~/.claude/settings.json`` for ``ClaudeSettingsGenerator``. Used to
+    gate user-scope mutations behind a confirmation prompt so a stray
+    ``mm context sync --include=settings`` from a worktree does not silently
+    edit the real home directory.
+    """
+    pending: list[Path] = []
+    for gen in SETTINGS_GENERATORS.values():
+        if not gen.is_available():
+            continue
+        if not gen.canonical_source(root).exists():
+            continue
+        target = gen.target_file(root)
+        if not target.is_relative_to(root):
+            pending.append(target)
+    return pending
+
+
+def _confirm_settings_host_writes(root: Path, *, yes: bool) -> bool:
+    """Prompt before mutating settings files outside the project root.
+
+    Returns ``True`` when the caller may proceed (no host writes pending,
+    ``--yes`` supplied, or user confirmed at the prompt). Returns ``False``
+    when the user declines, in which case the caller must skip the write.
+    """
+    pending = _settings_host_writes_pending(root)
+    if not pending:
+        return True
+    if yes:
+        return True
+    click.secho(
+        "Settings sync will modify the following files outside this project:",
+        fg="yellow",
+    )
+    for p in pending:
+        click.echo(f"  {p}")
+    return click.confirm("Continue?", default=False)
+
+
 def _print_settings_generate(root: Path) -> None:
     results = generate_all_settings(root)
     for name, r in results.items():
@@ -421,7 +464,16 @@ def init_cmd(include: tuple[str, ...], overwrite: bool) -> None:
     default="ignore",
     help="Severity when fields are dropped: ignore (default), warn, or error.",
 )
-def generate_cmd(agent: str, include: tuple[str, ...], strict: bool, on_drop: str) -> None:
+@click.option(
+    "--yes",
+    "-y",
+    "yes",
+    is_flag=True,
+    help="Skip confirmation prompts (e.g. settings sync writing under ~/.claude/).",
+)
+def generate_cmd(
+    agent: str, include: tuple[str, ...], strict: bool, on_drop: str, yes: bool
+) -> None:
     """Generate agent files from .memtomem/context.md."""
     inc = _parse_include(include)
     root = _find_project_root()
@@ -468,7 +520,10 @@ def generate_cmd(agent: str, include: tuple[str, ...], strict: bool, on_drop: st
 
     if "settings" in inc:
         click.echo("")
-        _print_settings_generate(root)
+        if _confirm_settings_host_writes(root, yes=yes):
+            _print_settings_generate(root)
+        else:
+            click.secho("  Skipped settings sync (declined).", fg="yellow")
 
     click.secho("Done.", fg="green")
 
@@ -537,7 +592,14 @@ def diff_cmd(include: tuple[str, ...]) -> None:
     default="ignore",
     help="Severity when fields are dropped: ignore (default), warn, or error.",
 )
-def sync_cmd(include: tuple[str, ...], strict: bool, on_drop: str) -> None:
+@click.option(
+    "--yes",
+    "-y",
+    "yes",
+    is_flag=True,
+    help="Skip confirmation prompts (e.g. settings sync writing under ~/.claude/).",
+)
+def sync_cmd(include: tuple[str, ...], strict: bool, on_drop: str, yes: bool) -> None:
     """Sync context.md to all detected agent files."""
     inc = _parse_include(include)
     root = _find_project_root()
@@ -583,6 +645,9 @@ def sync_cmd(include: tuple[str, ...], strict: bool, on_drop: str) -> None:
 
     if "settings" in inc:
         click.echo("")
-        _print_settings_generate(root)
+        if _confirm_settings_host_writes(root, yes=yes):
+            _print_settings_generate(root)
+        else:
+            click.secho("  Skipped settings sync (declined).", fg="yellow")
 
     click.secho("Synced.", fg="green")

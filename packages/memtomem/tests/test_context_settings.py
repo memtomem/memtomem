@@ -404,3 +404,125 @@ class TestClaudeSettingsCliInclude:
         result = runner.invoke(context, ["generate", "--include=bogus"])
         assert result.exit_code != 0
         assert "Unknown" in result.output or "bogus" in result.output
+
+
+class TestClaudeSettingsHostWritePrompt:
+    """``mm context {generate,sync} --include=settings`` confirms before
+    mutating files outside the project root (e.g. ``~/.claude/settings.json``).
+    Without confirmation users couldn't tell that running the command from a
+    worktree silently edited their real home directory.
+
+    The default ``claude_home`` fixture places fake $HOME *inside* tmp_path,
+    which would defeat the ``is_relative_to(root)`` check; these tests use a
+    sibling project dir so the project and the fake home don't overlap.
+    """
+
+    def _setup(self, tmp_path):
+        project = tmp_path / "proj"
+        project.mkdir()
+        (project / ".git").mkdir()
+        _make_canonical_settings(
+            project,
+            {"hooks": {"PostToolUse": [_rule("Write", "echo test")]}},
+        )
+        return project
+
+    def test_sync_prompts_before_host_write(self, claude_home, tmp_path, monkeypatch):
+        project = self._setup(tmp_path)
+        monkeypatch.chdir(project)
+
+        from memtomem.cli.context_cmd import context
+
+        runner = CliRunner()
+        # Decline the prompt → no file written.
+        result = runner.invoke(context, ["sync", "--include=settings"], input="n\n")
+        assert result.exit_code == 0
+        assert "modify the following files outside this project" in result.output
+        assert str(claude_home / ".claude" / "settings.json") in result.output
+        assert "Skipped settings sync (declined)" in result.output
+        assert not (claude_home / ".claude" / "settings.json").exists()
+
+    def test_sync_proceeds_when_user_confirms(self, claude_home, tmp_path, monkeypatch):
+        project = self._setup(tmp_path)
+        monkeypatch.chdir(project)
+
+        from memtomem.cli.context_cmd import context
+
+        runner = CliRunner()
+        result = runner.invoke(context, ["sync", "--include=settings"], input="y\n")
+        assert result.exit_code == 0
+        target = claude_home / ".claude" / "settings.json"
+        assert target.is_file()
+        written = json.loads(target.read_text(encoding="utf-8"))
+        assert "PostToolUse" in written["hooks"]
+
+    def test_sync_yes_flag_bypasses_prompt(self, claude_home, tmp_path, monkeypatch):
+        project = self._setup(tmp_path)
+        monkeypatch.chdir(project)
+
+        from memtomem.cli.context_cmd import context
+
+        runner = CliRunner()
+        # No stdin input — would block on prompt without --yes.
+        result = runner.invoke(context, ["sync", "--include=settings", "--yes"])
+        assert result.exit_code == 0
+        assert "modify the following files outside this project" not in result.output
+        assert (claude_home / ".claude" / "settings.json").is_file()
+
+    def test_generate_prompts_before_host_write(self, claude_home, tmp_path, monkeypatch):
+        project = self._setup(tmp_path)
+        monkeypatch.chdir(project)
+
+        from memtomem.cli.context_cmd import context
+
+        runner = CliRunner()
+        result = runner.invoke(context, ["generate", "--include=settings"], input="n\n")
+        assert result.exit_code == 0
+        assert "modify the following files outside this project" in result.output
+        assert "Skipped settings sync (declined)" in result.output
+        assert not (claude_home / ".claude" / "settings.json").exists()
+
+    def test_generate_yes_flag_bypasses_prompt(self, claude_home, tmp_path, monkeypatch):
+        project = self._setup(tmp_path)
+        monkeypatch.chdir(project)
+
+        from memtomem.cli.context_cmd import context
+
+        runner = CliRunner()
+        result = runner.invoke(context, ["generate", "--include=settings", "-y"])
+        assert result.exit_code == 0
+        assert "modify the following files outside this project" not in result.output
+        assert (claude_home / ".claude" / "settings.json").is_file()
+
+    def test_no_prompt_when_canonical_missing(self, claude_home, tmp_path, monkeypatch):
+        """No canonical settings → nothing to write → no prompt, no error."""
+        project = tmp_path / "proj"
+        project.mkdir()
+        (project / ".git").mkdir()
+        monkeypatch.chdir(project)
+
+        from memtomem.context.parser import CONTEXT_FILENAME
+
+        (project / ".memtomem").mkdir(exist_ok=True)
+        (project / CONTEXT_FILENAME).write_text("# Project\n", encoding="utf-8")
+
+        from memtomem.cli.context_cmd import context
+
+        runner = CliRunner()
+        # No input — would deadlock if a prompt fired.
+        result = runner.invoke(context, ["sync", "--include=settings"])
+        assert result.exit_code == 0
+        assert "modify the following files outside this project" not in result.output
+        assert not (claude_home / ".claude" / "settings.json").exists()
+
+    def test_no_prompt_when_runtime_unavailable(self, claude_home_missing, tmp_path, monkeypatch):
+        """Runtime not installed → generator skips → no prompt."""
+        project = self._setup(tmp_path)
+        monkeypatch.chdir(project)
+
+        from memtomem.cli.context_cmd import context
+
+        runner = CliRunner()
+        result = runner.invoke(context, ["sync", "--include=settings"])
+        assert result.exit_code == 0
+        assert "modify the following files outside this project" not in result.output
