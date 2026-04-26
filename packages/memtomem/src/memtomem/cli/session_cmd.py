@@ -10,7 +10,24 @@ from pathlib import Path
 
 import click
 
+from memtomem.constants import AGENT_NAMESPACE_PREFIX
+
 logger = logging.getLogger(__name__)
+
+
+def _derive_session_namespace(agent_id: str, namespace: str | None) -> str:
+    """Resolve the namespace stored on a CLI-created session record.
+
+    Mirrors the priority chain documented on ``mem_session_start``
+    (``server/tools/session.py:76-95``), with the ``app.current_namespace``
+    step omitted: each ``mm`` invocation is a fresh process and has no
+    cross-call session state to consult.
+    """
+    if namespace:
+        return namespace
+    if agent_id and agent_id != "default":
+        return f"{AGENT_NAMESPACE_PREFIX}{agent_id}"
+    return "default"
 
 
 # Session state file — stores active session UUID.
@@ -73,7 +90,7 @@ async def _start(agent_id: str, title: str | None, namespace: str | None) -> Non
     from memtomem.cli._bootstrap import cli_components
 
     session_id = str(uuid.uuid4())
-    ns = namespace or "default"
+    ns = _derive_session_namespace(agent_id, namespace)
     metadata = {"title": title} if title else {}
 
     async with cli_components() as comp:
@@ -84,6 +101,7 @@ async def _start(agent_id: str, title: str | None, namespace: str | None) -> Non
     if title:
         click.echo(f"  Title: {title}")
     click.echo(f"  Agent: {agent_id}")
+    click.echo(f"  Namespace: {ns}")
 
 
 @session.command()
@@ -356,8 +374,9 @@ def wrap(agent_id: str, title: str | None, command: tuple[str, ...]) -> None:
 async def _wrap_start(session_id: str, agent_id: str, title: str) -> None:
     from memtomem.cli._bootstrap import cli_components
 
+    ns = _derive_session_namespace(agent_id, None)
     async with cli_components() as comp:
-        await comp.storage.create_session(session_id, agent_id, "default", {"title": title})
+        await comp.storage.create_session(session_id, agent_id, ns, {"title": title})
 
 
 async def _wrap_end(session_id: str, summary: str, exit_code: int) -> None:
