@@ -27,7 +27,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `cp ~/.codex/agents/*.toml <project>/.codex/agents/`, or restore
   user-scope behavior on a future `mm context sync` once `--scope=user`
   ships (tracked separately). Existing `~/.codex/agents/` files are
-  left in place; memtomem just stops writing there.
+  left in place; memtomem just stops writing there. After copying the
+  ones you want to keep, delete the originals (`rm ~/.codex/agents/*.toml`)
+  — Codex CLI still loads them, but memtomem no longer manages them, so
+  any future edits in the canonical source won't reach the user-scope
+  copy and the two will drift silently.
 
   `detect_agent_dirs` now also picks up `.codex/agents/<name>.toml`
   alongside Claude/Gemini, so `mm context detect` and the Web UI

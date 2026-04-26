@@ -59,6 +59,14 @@ AGENT_FILE_SUFFIX: dict[str, str] = {
     "codex_agents": ".toml",
 }
 
+# Lock the two dicts to the same key set so a future runtime added to
+# ``AGENT_DIRS`` without a matching ``AGENT_FILE_SUFFIX`` entry fails loudly at
+# import instead of silently being treated as Markdown by ``detect_agent_dirs``.
+assert AGENT_FILE_SUFFIX.keys() == AGENT_DIRS.keys(), (
+    "AGENT_FILE_SUFFIX and AGENT_DIRS must have identical keys; "
+    f"diff: {AGENT_FILE_SUFFIX.keys() ^ AGENT_DIRS.keys()}"
+)
+
 # Custom-command-runtime name → project-scope directories containing command files.
 # Claude uses ``.md`` files, Gemini uses ``.toml`` — the detector reports both so
 # context/commands.py can reverse-import whichever is present. Codex commands live
@@ -149,7 +157,7 @@ def detect_agent_dirs(project_root: Path) -> list[DetectedFile]:
     found: list[DetectedFile] = []
 
     for agent, paths in AGENT_DIRS.items():
-        suffix = AGENT_FILE_SUFFIX.get(agent, ".md")
+        suffix = AGENT_FILE_SUFFIX[agent]
         for rel_path in paths:
             root = project_root / rel_path
             if not root.is_dir():

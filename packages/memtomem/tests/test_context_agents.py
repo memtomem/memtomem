@@ -10,6 +10,7 @@ from memtomem.context.agents import (
     CANONICAL_AGENT_ROOT,
     AgentParseError,
     StrictDropError,
+    _runtime_agent_names,
     _toml_escape_basic_string,
     _toml_escape_multiline_string,
     diff_agents,
@@ -380,6 +381,51 @@ class TestDiffAgents:
         (claude_dir / "runtime-only.md").write_text(SAMPLE_MINIMAL_AGENT, encoding="utf-8")
         rows = diff_agents(tmp_path)
         assert any(status == "missing canonical" for _, _, status in rows)
+
+
+class TestRuntimeAgentNames:
+    """Pin the runtime-name lookup contract directly so a future revert of the
+    Codex project-scope path can't sneak past via the end-to-end fan-out
+    tests alone."""
+
+    def test_codex_reads_project_scope_toml(self, tmp_path, codex_home):
+        rt_dir = tmp_path / ".codex/agents"
+        rt_dir.mkdir(parents=True)
+        (rt_dir / "helper.toml").write_text('name = "helper"\n', encoding="utf-8")
+        (rt_dir / "reviewer.toml").write_text('name = "reviewer"\n', encoding="utf-8")
+        # Markdown with the wrong suffix must be ignored.
+        (rt_dir / "ignored.md").write_text("# wrong suffix\n", encoding="utf-8")
+
+        # User-scope copies must not leak in.
+        (codex_home / ".codex/agents").mkdir(parents=True)
+        (codex_home / ".codex/agents" / "user-scope.toml").write_text(
+            'name = "user-scope"\n', encoding="utf-8"
+        )
+
+        names = _runtime_agent_names("codex_agents", tmp_path)
+        assert names == {"helper", "reviewer"}
+
+    def test_claude_reads_project_scope_md(self, tmp_path):
+        rt_dir = tmp_path / ".claude/agents"
+        rt_dir.mkdir(parents=True)
+        (rt_dir / "alice.md").write_text(SAMPLE_MINIMAL_AGENT, encoding="utf-8")
+        (rt_dir / "wrong-suffix.toml").write_text("# ignored\n", encoding="utf-8")
+
+        assert _runtime_agent_names("claude_agents", tmp_path) == {"alice"}
+
+    def test_gemini_reads_project_scope_md(self, tmp_path):
+        rt_dir = tmp_path / ".gemini/agents"
+        rt_dir.mkdir(parents=True)
+        (rt_dir / "bob.md").write_text(SAMPLE_MINIMAL_AGENT, encoding="utf-8")
+
+        assert _runtime_agent_names("gemini_agents", tmp_path) == {"bob"}
+
+    def test_unknown_runtime_returns_empty(self, tmp_path):
+        assert _runtime_agent_names("nope_agents", tmp_path) == set()
+
+    def test_missing_dir_returns_empty(self, tmp_path):
+        # No `.codex/agents` directory at all.
+        assert _runtime_agent_names("codex_agents", tmp_path) == set()
 
 
 class TestDetectAgentDirs:

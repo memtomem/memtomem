@@ -347,7 +347,7 @@ If you also use Gemini CLI or Codex CLI on the same repo, treat `.memtomem/` as 
 # Mirror .memtomem/skills/<name>/SKILL.md to .claude/skills/, .gemini/skills/, .agents/skills/
 mm context sync --include=skills
 
-# Fan out .memtomem/agents/<name>.md to .claude/agents/, .gemini/agents/, ~/.codex/agents/
+# Fan out .memtomem/agents/<name>.md to .claude/agents/, .gemini/agents/, .codex/agents/
 mm context sync --include=agents
 
 # Fan out .memtomem/commands/<name>.md to .claude/commands/*.md, .gemini/commands/*.toml, and ~/.codex/prompts/*.md

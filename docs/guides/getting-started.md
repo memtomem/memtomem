@@ -409,7 +409,7 @@ mm context sync                         # update all after editing context.md
 # Also mirror .memtomem/skills/  → .claude/skills/, .gemini/skills/, .agents/skills/
 mm context sync --include=skills
 
-# Also fan out .memtomem/agents/  → .claude/agents/, .gemini/agents/, ~/.codex/agents/
+# Also fan out .memtomem/agents/  → .claude/agents/, .gemini/agents/, .codex/agents/
 # (reports dropped fields per runtime; add --strict to fail on any drop)
 mm context sync --include=agents
 
