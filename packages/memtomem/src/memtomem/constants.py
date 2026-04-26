@@ -167,7 +167,19 @@ def validate_namespace(value: object) -> str:
                 f"requires exactly one trailing segment "
                 f"(``{runtime_prefix}:<agent_id>``); got {len(segments) - 1}"
             )
-        validate_agent_id(segments[1])
+        try:
+            validate_agent_id(segments[1])
+        except InvalidNameError as e:
+            # Wrap so log scrapers grepping ``"invalid namespace"`` catch
+            # this path too — without the wrap, the user passes
+            # ``namespace=agent-runtime:<X>`` but sees ``"invalid agent-id
+            # ..."``, which splits the alerting surface across two
+            # fragments. ``__cause__`` preserves the agent_id detail for
+            # anyone debugging the underlying contract violation.
+            raise InvalidNameError(
+                f"invalid namespace {value!r}: {runtime_prefix} segment {segments[1]!r} "
+                f"failed agent-id contract — {e}"
+            ) from e
 
     return value
 

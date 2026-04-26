@@ -31,7 +31,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `Error: invalid namespace 'X': ...` instead of the prior silent
   store. Existing in-tree shapes (`default`, `shared`,
   `archive:summary`, `claude-memory:project-x`,
-  `agent-runtime:planner`, `custom:scope`) are unchanged. Closes #496.
+  `agent-runtime:planner`, `custom:scope`) are unchanged. The bare
+  single-segment `"agent-runtime"` (no trailing colon) is also rejected
+  now — it shadows the multi-agent prefix and the strict-arity rule
+  requires exactly one trailing segment after the prefix. Anyone
+  holding such a namespace should rename it via `mem_ns_rename` before
+  running session-start with the override. Closes #496.
 
 - **`mem_agent_register`, `mem_agent_search`, and `mm agent register`
   now reject malformed `agent_id` values loudly instead of silently

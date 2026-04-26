@@ -117,15 +117,29 @@ def test_agent_runtime_prefix_routes_through_validate_agent_id() -> None:
     stricter agent_id gate. Without this, the override path would widen
     the contract that the direct ``agent_id=`` path enforces — exactly
     the shape issue #496 was filed to close.
+
+    The outer error fragment must say ``"invalid namespace"`` so log
+    scrapers grepping for that string at the namespace boundary catch
+    every rejection path, including the agent_id-derived one. The
+    underlying agent_id contract violation is preserved on
+    ``__cause__`` for anyone debugging the wrapped error.
     """
 
-    # Length cap: validate_namespace allows segments up to 64 chars
-    # (matching agent_id), so 65 is rejected. Pinned via the agent_id
-    # path so a future relaxation of the namespace segment cap doesn't
-    # silently widen the agent_id contract.
+    # Length cap: ``agent-runtime:`` segments inherit agent_id's 64-char
+    # cap (``validate_agent_id``); other namespace shapes get the broader
+    # 256-char total budget. Pinned via the agent_id path so a future
+    # relaxation of the agent_id cap doesn't silently widen the
+    # agent-runtime contract.
     overlong_id = "a" * 65
-    with pytest.raises(InvalidNameError, match="invalid agent-id"):
+    with pytest.raises(InvalidNameError) as excinfo:
         validate_namespace(f"agent-runtime:{overlong_id}")
+
+    # Outer message — what user / log scraper sees.
+    assert "invalid namespace" in str(excinfo.value)
+    assert "agent-runtime" in str(excinfo.value)
+    # __cause__ — preserved agent_id detail.
+    assert isinstance(excinfo.value.__cause__, InvalidNameError)
+    assert "invalid agent-id" in str(excinfo.value.__cause__)
 
 
 # ---------------------------------------------------------------------------
@@ -246,8 +260,49 @@ def storage_mock():
     )
 
 
+# CLI-safe subset of ``HOSTILE_NAMESPACES``: drops the leading-dash
+# variants because Click parses ``--namespace -leading-dash`` as a
+# missing-option-value error before our validator sees the input. The
+# dash-rejection contract is still pinned at the LangGraph / MCP /
+# unit-validator boundaries, so dropping it here is defense-in-depth
+# without losing coverage. ``CliRunner.invoke`` passes the args list
+# straight through (no shell), so control chars / whitespace / null
+# bytes survive untouched.
+CLI_HOSTILE_NAMESPACES = [v for v in HOSTILE_NAMESPACES if not v.startswith("-")]
+
+
 class TestCliSessionStartNamespaceOverride:
-    def test_rejects_agent_runtime_foo_bar(self, runner, monkeypatch, storage_mock):
+    @pytest.mark.parametrize("namespace", CLI_HOSTILE_NAMESPACES)
+    def test_hostile_namespaces_all_rejected(self, runner, monkeypatch, storage_mock, namespace):
+        """Defense-in-depth: every hostile shape pinned at the validator
+        must produce a CLI-side ``ClickException`` before storage is
+        touched. Without the parametrize, a future regression that lets
+        only one shape (say, ``foo,bar``) through the CLI gate while
+        the validator still rejects it would slip past — the CLI is the
+        thinnest layer over the validator and the easiest place for a
+        ``try/except`` swallow to be reintroduced.
+        """
+        comp = SimpleNamespace(storage=storage_mock)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(
+            cli,
+            ["session", "start", "--agent-id", "planner", "--namespace", namespace],
+        )
+
+        assert result.exit_code != 0
+        assert "invalid namespace" in result.output
+        # Regression pin: storage never received a malformed namespace.
+        storage_mock.create_session.assert_not_called()
+
+    def test_rejects_agent_runtime_foo_bar_with_quoted_value(
+        self, runner, monkeypatch, storage_mock
+    ):
+        """Pin the canonical issue-#496 shape with the exact error
+        fragment a log scraper would grep for. Kept as a separate test
+        from the parametrize so failures here surface the bypass
+        directly rather than under one of N parametrised IDs.
+        """
         comp = SimpleNamespace(storage=storage_mock)
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
 
@@ -266,20 +321,6 @@ class TestCliSessionStartNamespaceOverride:
         assert result.exit_code != 0
         assert "invalid namespace" in result.output
         assert "'agent-runtime:foo:bar'" in result.output
-        # Regression pin: storage never received a malformed namespace.
-        storage_mock.create_session.assert_not_called()
-
-    def test_rejects_path_traversal(self, runner, monkeypatch, storage_mock):
-        comp = SimpleNamespace(storage=storage_mock)
-        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
-
-        result = runner.invoke(
-            cli,
-            ["session", "start", "--agent-id", "planner", "--namespace", "../etc"],
-        )
-
-        assert result.exit_code != 0
-        assert "invalid namespace" in result.output
         storage_mock.create_session.assert_not_called()
 
     def test_accepts_explicit_shared(self, runner, monkeypatch, storage_mock):
