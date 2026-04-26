@@ -751,3 +751,146 @@ class TestCaseFOutputFormat:
         )
 
         assert "Error" in out and INVALID_OUTPUT_FORMAT_PREFIX in out
+
+    @pytest.mark.asyncio
+    async def test_structured_surfaces_archive_hint_when_unbound(self, integration_components):
+        """Structured payload must include the archive-filter hint when the
+        caller hits the un-pinned path (no agent_id, no session, no legacy
+        ``current_namespace``). Without this wire-in ``mem_agent_search``
+        would silently drop hints that ``mem_search`` surfaces — breaking
+        semantic parity between the two structured outputs.
+        """
+        import json
+
+        comp, _ = integration_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        archived = make_chunk(
+            "archived note about pipelines",
+            namespace="archive:old",
+        )
+        await comp.storage.upsert_chunks([archived])
+
+        # No agent_id, no session, no current_namespace — ns_filter
+        # resolves to None and the pipeline's system_namespace_prefixes
+        # filter engages. Mirrors the un-pinned-search shape that
+        # mem_search exercises in test_trust_ux.
+        out = await mem_agent_search(  # type: ignore[arg-type]
+            query="pipelines",
+            output_format="structured",
+            ctx=ctx,
+        )
+
+        payload = json.loads(out)
+        assert "hints" in payload, "archive hint missing from structured payload"
+        assert any("hidden in system namespaces" in h for h in payload["hints"])
+
+    @pytest.mark.asyncio
+    async def test_structured_surfaces_dim_mismatch_hint_once(self, integration_components):
+        """The dim-mismatch hint must surface on the first structured call
+        and stay quiet on subsequent ones — same one-shot semantics
+        ``mem_search`` uses via ``_announce_dim_mismatch_once``. Pin the
+        AppContext announce flag explicitly and re-issue the search to
+        catch a regression where the gate stops sticking.
+        """
+        import json
+
+        comp, _ = integration_components
+        # Install a dim/model mismatch on the storage backend; the
+        # ``embedding_mismatch`` property derives from these two attrs
+        # (``_install_mismatch`` in test_trust_ux uses the same shape).
+        comp.storage._dim_mismatch = (384, 1024)
+        comp.storage._model_mismatch = ("onnx", "bge-small-en-v1.5", "onnx", "bge-m3")
+
+        app = AppContext.from_components(comp)
+        assert app._dim_mismatch_announced is False  # fresh AppContext default
+        ctx = _StubCtx(app)
+
+        chunk = make_chunk(
+            "alpha probe",
+            namespace=f"{AGENT_NAMESPACE_PREFIX}alpha",
+        )
+        await comp.storage.upsert_chunks([chunk])
+
+        first = await mem_agent_search(  # type: ignore[arg-type]
+            query="probe",
+            agent_id="alpha",
+            output_format="structured",
+            ctx=ctx,
+        )
+        second = await mem_agent_search(  # type: ignore[arg-type]
+            query="probe",
+            agent_id="alpha",
+            output_format="structured",
+            ctx=ctx,
+        )
+
+        first_hints = json.loads(first).get("hints", [])
+        second_hints = json.loads(second).get("hints", [])
+        assert any("embedding-reset" in h for h in first_hints), (
+            "dim-mismatch hint missing from first structured call"
+        )
+        assert not any("embedding-reset" in h for h in second_hints), (
+            "dim-mismatch hint repeated on second call — one-shot gate failed"
+        )
+        assert app._dim_mismatch_announced is True
+
+    @pytest.mark.asyncio
+    async def test_archive_hint_byte_identical_to_mem_search(self, integration_components):
+        """Pin: when both tools hit the un-pinned-archive path, the
+        archive-filter hint they emit must be byte-identical so structured
+        consumers parsing ``payload["hints"]`` can dedup by string identity
+        across siblings. Punctuation drift (``"include them"`` vs
+        ``"include them."``) breaks the aggregation contract.
+
+        Scope note — the rule applies to the ``"search results"`` family
+        (``mem_search`` / ``mem_agent_search``). ``mem_recall`` lives in a
+        separate ``"memories recalled"`` family and intentionally uses
+        ``X memory/memories`` rather than ``X result(s)``; that carveout
+        is documented in ``feedback_hint_prose_parity_siblings.md``.
+        """
+        import json
+
+        comp, _ = integration_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        archived = make_chunk(
+            "archived note about pipelines",
+            namespace="archive:old",
+        )
+        await comp.storage.upsert_chunks([archived])
+
+        search_out = await mem_search(  # type: ignore[arg-type]
+            query="pipelines",
+            output_format="structured",
+            ctx=ctx,
+        )
+        agent_out = await mem_agent_search(  # type: ignore[arg-type]
+            query="pipelines",
+            output_format="structured",
+            ctx=ctx,
+        )
+
+        search_hints = [
+            h
+            for h in (json.loads(search_out).get("hints") or [])
+            if "hidden in system namespaces" in h
+        ]
+        agent_hints = [
+            h
+            for h in (json.loads(agent_out).get("hints") or [])
+            if "hidden in system namespaces" in h
+        ]
+
+        assert search_hints and agent_hints, (
+            "archive hint missing from one of the tools — fixture mis-setup "
+            "or system_namespace_prefixes regression?"
+        )
+        assert search_hints[0] == agent_hints[0], (
+            f"archive hint prose drift between siblings:\n"
+            f"  mem_search:        {search_hints[0]!r}\n"
+            f"  mem_agent_search:  {agent_hints[0]!r}\n"
+            f"See feedback_hint_prose_parity_siblings.md"
+        )
