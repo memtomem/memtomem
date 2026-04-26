@@ -4,6 +4,7 @@ mem_ns_update.
 
 from __future__ import annotations
 
+from memtomem.constants import validate_namespace
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -44,8 +45,7 @@ async def mem_ns_delete(
     Args:
         namespace: The namespace to delete.
     """
-    if not namespace.strip():
-        return "Error: namespace must be non-empty."
+    validate_namespace(namespace)
     app = await _get_app_initialized(ctx)
     deleted = await app.storage.delete_by_namespace(namespace)
     return f"Deleted {deleted} chunks from namespace '{namespace}'"
@@ -60,16 +60,25 @@ async def mem_ns_set(
 ) -> str:
     """Set the session-default namespace. Subsequent search/add/recall use this unless overridden.
 
+    ``namespace`` is run through :func:`validate_namespace` before the
+    write, mirroring ``mem_session_start(namespace=...)``. Without the
+    gate, an attacker who controls the value reaching ``mem_ns_set`` could
+    write a hostile-shaped string into ``app.current_namespace`` — and a
+    later ``mem_session_start(agent_id="default")`` would land that string
+    in the ``sessions`` row via the ``current_namespace`` fallback,
+    re-opening the bypass issue #496 closed at the explicit
+    ``namespace=`` surface. See issue #500 for the transitive-bypass
+    write-up.
+
     Examples::
         mem_ns_set(namespace="work")
         mem_ns_set(namespace="project:myapp")
     """
-    if not namespace.strip():
-        return "Error: namespace must be non-empty."
+    validate_namespace(namespace)
     app = await _get_app_initialized(ctx)
     async with app._config_lock:
-        app.current_namespace = namespace.strip()
-    return f"Session namespace set to '{namespace.strip()}'"
+        app.current_namespace = namespace
+    return f"Session namespace set to '{namespace}'"
 
 
 @mcp.tool()
@@ -96,14 +105,18 @@ async def mem_ns_rename(
 ) -> str:
     """Rename a namespace (SQL UPDATE, no re-indexing needed).
 
+    Both ``old`` and ``new`` are run through :func:`validate_namespace`
+    so a hostile-shaped string cannot land verbatim in the chunks /
+    namespace_metadata rows via the rename path. See issue #500.
+
     Examples::
         mem_ns_rename(old="project:v1", new="project:v2")
     """
-    if not old.strip() or not new.strip():
-        return "Error: both old and new namespace names must be non-empty."
+    validate_namespace(old)
+    validate_namespace(new)
     app = await _get_app_initialized(ctx)
-    count = await app.storage.rename_namespace(old.strip(), new.strip())
-    return f"Renamed namespace '{old.strip()}' -> '{new.strip()}' ({count} chunks updated)"
+    count = await app.storage.rename_namespace(old, new)
+    return f"Renamed namespace '{old}' -> '{new}' ({count} chunks updated)"
 
 
 @mcp.tool()
@@ -117,11 +130,16 @@ async def mem_ns_update(
 ) -> str:
     """Update namespace metadata (description and/or color).
 
+    ``namespace`` is run through :func:`validate_namespace` so the lookup
+    key cannot carry a hostile shape into the ``namespace_metadata``
+    write. See issue #500.
+
     Args:
         namespace: The namespace to update
         description: Optional description text
         color: Optional color hex code (e.g. "#6c5ce7")
     """
+    validate_namespace(namespace)
     app = await _get_app_initialized(ctx)
     await app.storage.set_namespace_meta(namespace, description=description, color=color)
     return f"Updated metadata for namespace '{namespace}'"
@@ -141,18 +159,23 @@ async def mem_ns_assign(
     Filter chunks by source path and/or current namespace, then move them
     to the target namespace. This is a SQL UPDATE — fast and non-destructive.
 
+    Both ``namespace`` and ``old_namespace`` (when provided) are run
+    through :func:`validate_namespace` so a hostile-shaped target cannot
+    land verbatim in the chunks rows via the assign path. See issue #500.
+
     Args:
         namespace: Target namespace to assign chunks to
         source_filter: Only assign chunks from sources containing this substring
         old_namespace: Only assign chunks currently in this namespace
     """
-    if not namespace.strip():
-        return "Error: namespace must be non-empty."
+    validate_namespace(namespace)
+    if old_namespace is not None:
+        validate_namespace(old_namespace)
     if not source_filter and not old_namespace:
         return "Error: at least one filter (source_filter or old_namespace) is required."
     app = await _get_app_initialized(ctx)
     count = await app.storage.assign_namespace(
-        namespace.strip(), source_filter=source_filter, old_namespace=old_namespace
+        namespace, source_filter=source_filter, old_namespace=old_namespace
     )
     filters = []
     if source_filter:
