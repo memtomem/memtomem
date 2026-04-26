@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.31] — 2026-04-26
+
 ### Added
 
 - **Web UI Context Gateway tabs (Artifact Sync, Skills, Commands,
@@ -116,6 +118,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
     rather than the session scope, since their value is tagging
     ingested content by source.
 
+### Fixed
+
 - **`mm context` round-trip no longer silently drops `## <Agent>-Specific`
   sections.** `extract_sections_from_agent_file` mapped agent-override
   headings (`## Claude-Specific`, `## Cursor-Specific`,
@@ -146,6 +150,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `agent-runtime:<agent-id>` for non-default agents; otherwise
   `default`. `mm session start` also echoes the resolved namespace so
   users can verify before continuing.
+
+- **`mm web` Sync All button no longer toasts "Settings sync failed"
+  in `prod` mode.** Follow-up to the #488 Context Gateway tabs prod
+  graduation. The "Sync All" overview button fanned out to
+  `/api/context/settings/sync` (the settings-hook merge), but that
+  router intentionally stays dev-only; in `prod` the hop returned 404
+  and the whole button toasted failure even though the artifact
+  fanout (skills / commands / agents) succeeded — making the prod
+  surface look broken. The same shape hit the overview's 4th
+  "Settings" card, which deep-linked into the dev-only `hooks-sync`
+  section, so clicking the card landed on a dead tab. Both code
+  paths now self-gate on `STATE.uiMode === 'dev'` (matching the Home
+  dashboard pattern); prod gets a clean 3-card overview and a Sync
+  All that completes silently for the artifacts it actually has a UI
+  for. JS pin tightened to count both gate sites so a future
+  refactor can't silently drop one. (PR #489)
 
 ## [0.1.30] — 2026-04-26
 
