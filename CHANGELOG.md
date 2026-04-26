@@ -7,6 +7,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Web UI Context Gateway tabs (Artifact Sync, Skills, Commands,
+  Agents) graduate from `--dev` to the polished prod surface.** The
+  hardening that landed in #482 (round-trip `## *-Specific`
+  preservation), #483 (project-scope `codex_agents` default), and
+  #484 (settings-sync host-write confirm) closed the rough edges that
+  justified hiding these from `mm web` users by default. The four
+  `/api/context/*` routers and matching settings nav buttons now
+  mount in `prod`; dev-only stays dev-only for `Namespaces`,
+  `Sessions`, `Working Memory`, `Procedures`, `Health Report`, and
+  `Hook Files`. Trust boundary unchanged — the loopback + single-user
+  Tier 1 deployment shape from `feedback_tier2_web_gating_deferred.md`
+  is still the only supported one, and these are the first
+  mutator-heavy endpoints to ship in the prod surface, so a future
+  Tier 2 hardening pass starts here.
 - **`mm context {generate,sync} --include=settings` now confirms before
   writing settings files outside the project root** (today only
   `~/.claude/settings.json`); pass `--yes` / `-y` to skip the prompt.

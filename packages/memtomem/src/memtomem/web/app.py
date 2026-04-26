@@ -67,6 +67,10 @@ _PROD_ROUTERS: list[ModuleType] = [
     decay,
     export,
     timeline,
+    context_gateway,
+    context_skills,
+    context_commands,
+    context_agents,
 ]
 _DEV_ONLY_ROUTERS: list[ModuleType] = [
     namespaces,
@@ -76,10 +80,6 @@ _DEV_ONLY_ROUTERS: list[ModuleType] = [
     evaluation,
     watchdog,
     settings_sync,
-    context_gateway,
-    context_skills,
-    context_commands,
-    context_agents,
 ]
 
 
