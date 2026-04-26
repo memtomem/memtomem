@@ -32,9 +32,9 @@ from memtomem.context.generator import (
 )
 from memtomem.context.parser import CONTEXT_FILENAME, parse_context, sections_to_markdown
 from memtomem.context.settings import (
-    SETTINGS_GENERATORS,
     diff_settings,
     generate_all_settings,
+    host_write_targets,
 )
 from memtomem.context.skills import (
     diff_skills,
@@ -273,35 +273,16 @@ def _print_settings_detect() -> None:
         click.echo(f"    {f.agent:17s}  {f.path}  {status}")
 
 
-def _settings_host_writes_pending(root: Path) -> list[Path]:
-    """Target files that settings sync would write *outside* the project root.
-
-    A target counts as a "host write" when its path is not under ``root`` —
-    e.g. ``~/.claude/settings.json`` for ``ClaudeSettingsGenerator``. Used to
-    gate user-scope mutations behind a confirmation prompt so a stray
-    ``mm context sync --include=settings`` from a worktree does not silently
-    edit the real home directory.
-    """
-    pending: list[Path] = []
-    for gen in SETTINGS_GENERATORS.values():
-        if not gen.is_available():
-            continue
-        if not gen.canonical_source(root).exists():
-            continue
-        target = gen.target_file(root)
-        if not target.is_relative_to(root):
-            pending.append(target)
-    return pending
-
-
 def _confirm_settings_host_writes(root: Path, *, yes: bool) -> bool:
     """Prompt before mutating settings files outside the project root.
 
-    Returns ``True`` when the caller may proceed (no host writes pending,
-    ``--yes`` supplied, or user confirmed at the prompt). Returns ``False``
-    when the user declines, in which case the caller must skip the write.
+    Returns ``True`` when the caller may pass ``allow_host_writes=True``
+    to :func:`generate_all_settings` (no host writes pending, ``--yes``
+    supplied, or user confirmed at the prompt). Returns ``False`` when
+    the user declines, in which case the caller should not invoke
+    settings sync at all.
     """
-    pending = _settings_host_writes_pending(root)
+    pending = host_write_targets(root)
     if not pending:
         return True
     if yes:
@@ -315,8 +296,8 @@ def _confirm_settings_host_writes(root: Path, *, yes: bool) -> bool:
     return click.confirm("Continue?", default=False)
 
 
-def _print_settings_generate(root: Path) -> None:
-    results = generate_all_settings(root)
+def _print_settings_generate(root: Path, *, allow_host_writes: bool) -> None:
+    results = generate_all_settings(root, allow_host_writes=allow_host_writes)
     for name, r in results.items():
         if r.status == "ok":
             click.secho(f"  Settings: {name} → {r.target}", fg="green")
@@ -324,6 +305,10 @@ def _print_settings_generate(root: Path) -> None:
                 click.secho(f"    warning: {w}", fg="yellow")
         elif r.status == "skipped":
             click.secho(f"  skipped {name}: {r.reason}", fg="yellow")
+        elif r.status == "needs_confirmation":
+            # Defense in depth: should not normally reach here because the CLI
+            # caller already gated on ``_confirm_settings_host_writes``.
+            click.secho(f"  needs confirmation {name}: {r.reason}", fg="yellow")
         elif r.status in ("error", "aborted"):
             click.secho(f"  {r.status} {name}: {r.reason}", fg="red")
 
@@ -469,7 +454,7 @@ def init_cmd(include: tuple[str, ...], overwrite: bool) -> None:
     "-y",
     "yes",
     is_flag=True,
-    help="Skip confirmation prompts (e.g. settings sync writing under ~/.claude/).",
+    help="Skip confirmation prompts before writing settings files outside this project.",
 )
 def generate_cmd(
     agent: str, include: tuple[str, ...], strict: bool, on_drop: str, yes: bool
@@ -521,7 +506,7 @@ def generate_cmd(
     if "settings" in inc:
         click.echo("")
         if _confirm_settings_host_writes(root, yes=yes):
-            _print_settings_generate(root)
+            _print_settings_generate(root, allow_host_writes=True)
         else:
             click.secho("  Skipped settings sync (declined).", fg="yellow")
 
@@ -597,7 +582,7 @@ def diff_cmd(include: tuple[str, ...]) -> None:
     "-y",
     "yes",
     is_flag=True,
-    help="Skip confirmation prompts (e.g. settings sync writing under ~/.claude/).",
+    help="Skip confirmation prompts before writing settings files outside this project.",
 )
 def sync_cmd(include: tuple[str, ...], strict: bool, on_drop: str, yes: bool) -> None:
     """Sync context.md to all detected agent files."""
@@ -646,7 +631,7 @@ def sync_cmd(include: tuple[str, ...], strict: bool, on_drop: str, yes: bool) ->
     if "settings" in inc:
         click.echo("")
         if _confirm_settings_host_writes(root, yes=yes):
-            _print_settings_generate(root)
+            _print_settings_generate(root, allow_host_writes=True)
         else:
             click.secho("  Skipped settings sync (declined).", fg="yellow")
 

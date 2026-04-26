@@ -143,16 +143,37 @@ async def get_settings_sync(
     return _compare_hooks(canonical_path, target_path)
 
 
+class ApplySettingsSyncRequest(BaseModel):
+    """Body for ``POST /settings-sync``.
+
+    ``allow_host_writes`` mirrors :func:`generate_all_settings`. The default
+    (``False``) makes the route refuse writes outside the project root so a
+    UI built on top must surface the host paths and re-post with the flag
+    set to true after the user confirms — the same gate the CLI confirms
+    interactively.
+    """
+
+    allow_host_writes: bool = False
+
+
 @router.post("/settings-sync")
 @router.post("/context/settings/sync")
 async def apply_settings_sync(
+    body: ApplySettingsSyncRequest | None = None,
     project_root: Path = Depends(get_project_root),
 ) -> dict:
-    """Run the full settings merge (generate_all_settings)."""
+    """Run the full settings merge (generate_all_settings).
+
+    Default ``allow_host_writes=False`` returns ``needs_confirmation`` for
+    any generator whose target lives outside the project root. The UI is
+    expected to display those targets and re-post with
+    ``{"allow_host_writes": true}`` once the user has confirmed.
+    """
+    allow_host_writes = body.allow_host_writes if body else False
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                results = generate_all_settings(project_root)
+                results = generate_all_settings(project_root, allow_host_writes=allow_host_writes)
     except TimeoutError:
         raise HTTPException(503, "Settings sync timed out — another sync may be in progress")
     out: list[dict] = []

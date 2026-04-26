@@ -184,6 +184,48 @@ _register(ClaudeSettingsGenerator())
 # ── Helpers ─────────────────────────────────────────────────────────
 
 
+def _is_under_project_root(target: Path, project_root: Path) -> bool:
+    """``True`` when *target* would write under *project_root*.
+
+    Uses ``resolve(strict=False)`` so a symlink at ``<project>/.claude``
+    pointing into ``~/.claude/`` is treated as the host path it actually
+    refers to (review item 4 on PR #484). ``strict=False`` keeps the call
+    cheap when the target does not exist yet.
+    """
+    try:
+        resolved_target = target.resolve(strict=False)
+        resolved_root = project_root.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return False
+    return resolved_target.is_relative_to(resolved_root)
+
+
+def host_write_targets(project_root: Path) -> list[Path]:
+    """Target paths a settings sync would write *outside* the project root.
+
+    A target counts as a "host write" when its resolved path is not under
+    the resolved project root — e.g. ``~/.claude/settings.json`` for the
+    ``ClaudeSettingsGenerator``. Used to gate user-scope mutations behind
+    confirmation in every front-end (CLI, MCP, Web): a stray
+    ``mm context sync --include=settings`` from a worktree must not silently
+    edit the real home directory.
+
+    Generators whose runtime is unavailable (``is_available()`` is False) or
+    that have no canonical source are skipped, so the list mirrors what
+    :func:`generate_all_settings` would actually try to write.
+    """
+    pending: list[Path] = []
+    for gen in SETTINGS_GENERATORS.values():
+        if not gen.is_available():
+            continue
+        if not gen.canonical_source(project_root).exists():
+            continue
+        target = gen.target_file(project_root)
+        if not _is_under_project_root(target, project_root):
+            pending.append(target)
+    return pending
+
+
 def _safe_load_json(path: Path) -> dict | object:
     """Load JSON from *path*, returning :data:`_MALFORMED` on parse error."""
     try:
@@ -218,8 +260,21 @@ def _write_json(path: Path, data: dict) -> None:
 
 def generate_all_settings(
     project_root: Path,
+    *,
+    allow_host_writes: bool = False,
 ) -> dict[str, SettingsSyncResult]:
-    """Fan out ``.memtomem/settings.json`` to registered runtimes."""
+    """Fan out ``.memtomem/settings.json`` to registered runtimes.
+
+    ``allow_host_writes`` defaults to ``False`` so any caller — CLI, MCP
+    server, or Web route — that does not first prompt the user is
+    automatically refused for targets that resolve outside *project_root*
+    (e.g. ``~/.claude/settings.json``). Refused generators come back with
+    ``status="needs_confirmation"`` and ``reason`` containing the host
+    path; callers decide how to surface that. Passing
+    ``allow_host_writes=True`` after acknowledgement (CLI ``--yes``,
+    MCP ``allow_host_writes=True``, Web confirmation modal) restores the
+    previous behavior. Project-scope generators are written unconditionally.
+    """
     results: dict[str, SettingsSyncResult] = {}
 
     for name, gen in SETTINGS_GENERATORS.items():
@@ -248,6 +303,16 @@ def generate_all_settings(
         contributions: dict = raw  # type: ignore[assignment]
 
         target_path = gen.target_file(project_root)
+        if not allow_host_writes and not _is_under_project_root(target_path, project_root):
+            results[name] = SettingsSyncResult(
+                status="needs_confirmation",
+                reason=(
+                    f"{target_path} is outside the project root; pass "
+                    f"allow_host_writes=True after confirming with the user."
+                ),
+                target=target_path,
+            )
+            continue
 
         # Step 1: read existing + capture mtime (ns)
         existing_raw, existing_mtime_ns = _read_with_mtime(target_path)
@@ -359,5 +424,6 @@ __all__ = [
     "SettingsSyncResult",
     "diff_settings",
     "generate_all_settings",
+    "host_write_targets",
     "sync_all_settings",
 ]

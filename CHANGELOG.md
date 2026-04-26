@@ -5,6 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **`mm context {generate,sync} --include=settings` now confirms before
+  writing settings files outside the project root** (today only
+  `~/.claude/settings.json`); pass `--yes` / `-y` to skip the prompt.
+  The same gate is enforced inside `generate_all_settings`, so callers
+  that bypass the CLI — `mem_context_generate` / `mem_context_sync`
+  (MCP) and `POST /settings-sync` (Web) — also refuse host writes
+  unless they pass `allow_host_writes=true`. Closes one of the
+  2026-04-26 audit P0 items: a stray sync from a worktree no longer
+  silently edits the real home directory regardless of which front-end
+  drove it. Symlink-aware (`Path.resolve()` both sides) so a
+  symlinked `.claude` cannot smuggle a host write past the gate.
+
 ### Changed (BREAKING)
 
 - **`mm context sync` now writes Codex sub-agents to project-scope

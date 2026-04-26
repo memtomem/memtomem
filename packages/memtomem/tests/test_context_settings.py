@@ -15,6 +15,7 @@ from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
     diff_settings,
     generate_all_settings,
+    host_write_targets,
 )
 
 
@@ -526,3 +527,94 @@ class TestClaudeSettingsHostWritePrompt:
         result = runner.invoke(context, ["sync", "--include=settings"])
         assert result.exit_code == 0
         assert "modify the following files outside this project" not in result.output
+
+
+class TestGenerateAllSettingsHostWriteGate:
+    """``generate_all_settings(allow_host_writes=False)`` — the library-level
+    gate every front-end (CLI, MCP, Web) routes through. Without this gate
+    living inside the I/O boundary the CLI confirm could be bypassed by any
+    caller that imports the function directly (audit P0 review item 1)."""
+
+    def _setup(self, tmp_path):
+        project = tmp_path / "proj"
+        project.mkdir()
+        canonical = project / CANONICAL_SETTINGS_FILE
+        canonical.parent.mkdir(parents=True, exist_ok=True)
+        canonical.write_text(
+            json.dumps({"hooks": {"PostToolUse": [_rule("Write", "echo test")]}}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return project
+
+    def test_default_refuses_host_write(self, claude_home, tmp_path):
+        """Default ``allow_host_writes=False`` → status=needs_confirmation,
+        no file written."""
+        project = self._setup(tmp_path)
+        results = generate_all_settings(project)
+        r = results["claude_settings"]
+        assert r.status == "needs_confirmation"
+        target = claude_home / ".claude" / "settings.json"
+        assert str(target) in r.reason
+        assert r.target == target
+        assert not target.exists()
+
+    def test_allow_host_writes_true_proceeds(self, claude_home, tmp_path):
+        """``allow_host_writes=True`` → previous behavior, file written."""
+        project = self._setup(tmp_path)
+        results = generate_all_settings(project, allow_host_writes=True)
+        r = results["claude_settings"]
+        assert r.status == "ok"
+        target = claude_home / ".claude" / "settings.json"
+        assert target.is_file()
+        written = json.loads(target.read_text(encoding="utf-8"))
+        assert "PostToolUse" in written["hooks"]
+
+    def test_diff_unaffected_by_gate(self, claude_home, tmp_path):
+        """``diff_settings`` is read-only — host-write gate must not make it
+        report ``needs_confirmation``."""
+        project = self._setup(tmp_path)
+        results = diff_settings(project)
+        assert results["claude_settings"].status in {"in sync", "out of sync", "missing target"}
+
+    def test_no_runtime_installed_skips_not_needs_confirmation(self, claude_home_missing, tmp_path):
+        project = self._setup(tmp_path)
+        results = generate_all_settings(project)
+        assert results["claude_settings"].status == "skipped"
+
+    def test_no_canonical_skips_not_needs_confirmation(self, claude_home, tmp_path):
+        project = tmp_path / "proj"
+        project.mkdir()
+        results = generate_all_settings(project)
+        assert results["claude_settings"].status == "skipped"
+
+    def test_host_write_targets_lists_pending_paths(self, claude_home, tmp_path):
+        """``host_write_targets()`` mirrors what ``generate_all_settings``
+        would refuse — used by every front-end to surface the pending
+        paths to the user."""
+        project = self._setup(tmp_path)
+        pending = host_write_targets(project)
+        target = claude_home / ".claude" / "settings.json"
+        assert pending == [target]
+
+    def test_host_write_targets_empty_when_no_canonical(self, claude_home, tmp_path):
+        project = tmp_path / "proj"
+        project.mkdir()
+        assert host_write_targets(project) == []
+
+    def test_host_write_targets_empty_when_runtime_missing(self, claude_home_missing, tmp_path):
+        project = self._setup(tmp_path)
+        assert host_write_targets(project) == []
+
+    def test_symlink_target_is_treated_as_host_write(self, claude_home, tmp_path):
+        """A symlink whose project-relative path *appears* under the project
+        root must be classified by the resolved location (review item 4):
+        ``Path.resolve()`` follows the symlink, so the gate still trips."""
+        project = self._setup(tmp_path)
+        # Symlink <project>/.claude → claude_home/.claude
+        (claude_home / ".claude").mkdir(exist_ok=True)
+        (project / ".claude").symlink_to(claude_home / ".claude")
+
+        # The generator's target_file still computes Path.home() / .claude /
+        # settings.json (the host path), and that resolves outside ``project``.
+        results = generate_all_settings(project)
+        assert results["claude_settings"].status == "needs_confirmation"
