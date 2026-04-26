@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from uuid import uuid4
 
-from memtomem.constants import AGENT_NAMESPACE_PREFIX
+from memtomem.constants import AGENT_NAMESPACE_PREFIX, validate_agent_id
 from memtomem.server import mcp
 from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -94,6 +94,7 @@ async def mem_session_start(
         namespace: Session namespace. When omitted and ``agent_id`` is
             non-default, defaults to ``agent-runtime:<agent_id>``.
     """
+    validate_agent_id(agent_id)
     app = await _get_app_initialized(ctx)
     session_id = str(uuid4())
     if namespace:

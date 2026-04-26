@@ -10,7 +10,7 @@ from pathlib import Path
 
 import click
 
-from memtomem.constants import AGENT_NAMESPACE_PREFIX
+from memtomem.constants import AGENT_NAMESPACE_PREFIX, InvalidNameError, validate_agent_id
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +78,10 @@ def session() -> None:
 @click.option("--namespace", "-n", default=None, help="Namespace for session")
 def start(agent_id: str, title: str | None, namespace: str | None) -> None:
     """Start a new session and save its ID to ~/.memtomem/.current_session."""
+    try:
+        validate_agent_id(agent_id)
+    except InvalidNameError as e:
+        raise click.ClickException(str(e)) from e
     try:
         asyncio.run(_start(agent_id, title, namespace))
     except click.ClickException:
@@ -337,6 +341,11 @@ def wrap(agent_id: str, title: str | None, command: tuple[str, ...]) -> None:
     """
     import subprocess
     import sys
+
+    try:
+        validate_agent_id(agent_id)
+    except InvalidNameError as e:
+        raise click.ClickException(str(e)) from e
 
     # Start session
     session_id = str(uuid.uuid4())
