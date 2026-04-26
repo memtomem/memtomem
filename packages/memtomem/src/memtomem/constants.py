@@ -127,6 +127,14 @@ def validate_namespace(value: object) -> str:
     the broader 256-char total budget so legitimate long project ids
     don't trip this gate.
 
+    See also :func:`memtomem.storage.sqlite_namespace._is_valid_ns_chars`
+    — the storage-layer charset companion (a broader bool check at the
+    SQLite row write boundary). The two are intentionally separate:
+    the charset gate accepts shapes this gate rejects (``foo:bar:baz``,
+    ``ns@org``, …) because the legacy row contract has always allowed
+    them. This function is the strict public-surface shape gate; that
+    one is the row-write charset gate.
+
     Raises :class:`InvalidNameError` (a ``ValueError`` subclass) on
     rejection, mirroring the ``agent_id`` gate's UX so error scrapers
     see one shape across surfaces.
