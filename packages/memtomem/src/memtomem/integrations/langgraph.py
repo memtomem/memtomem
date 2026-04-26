@@ -36,7 +36,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 from uuid import UUID, uuid4
 
-from memtomem.constants import AGENT_NAMESPACE_PREFIX, SHARED_NAMESPACE, validate_agent_id
+from memtomem.constants import (
+    AGENT_NAMESPACE_PREFIX,
+    SHARED_NAMESPACE,
+    validate_agent_id,
+    validate_namespace,
+)
 
 if TYPE_CHECKING:
     from memtomem.server.component_factory import Components
@@ -283,8 +288,16 @@ class MemtomemStore:
         derive a namespace from ``agent_id`` should use
         :meth:`start_agent_session` (or call ``validate_agent_id``
         directly) so the gate isn't reintroduced as a regression.
+
+        ``namespace`` *is* run through :func:`validate_namespace` because
+        an explicit override lands verbatim in the session row — without
+        the gate a Python caller could write ``"agent-runtime:foo:bar"``
+        through this entry point even though the equivalent
+        ``start_agent_session`` path now refuses it (issue #496).
         """
         comp = await self._ensure_init()
+        if namespace is not None:
+            validate_namespace(namespace)
         session_id = str(uuid4())
         ns = namespace or "default"
         await comp.storage.create_session(session_id, agent_id, ns)
@@ -316,8 +329,17 @@ class MemtomemStore:
                 This blocks malformed values from concatenating into
                 ``agent-runtime:<agent_id>`` and round-tripping into
                 storage as ``"agent-runtime:foo:bar"``.
+
+                Or ``namespace`` is supplied with a malformed value (see
+                ``memtomem.constants.validate_namespace``). The override is
+                an escape hatch but not a bypass: a Python caller cannot
+                land ``"agent-runtime:foo:bar"`` in the session row even
+                though ``agent_id`` itself was clean (issue #496 — closes
+                the kin gap to the ``agent_id`` work in #486 / #492).
         """
         validate_agent_id(agent_id)
+        if namespace is not None:
+            validate_namespace(namespace)
 
         comp = await self._ensure_init()
         session_id = str(uuid4())

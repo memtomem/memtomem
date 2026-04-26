@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import logging
 
-from memtomem.constants import AGENT_NAMESPACE_PREFIX, SHARED_NAMESPACE, validate_agent_id
+from memtomem.constants import (
+    AGENT_NAMESPACE_PREFIX,
+    SHARED_NAMESPACE,
+    validate_agent_id,
+    validate_namespace,
+)
 from memtomem.server import mcp
 from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -196,12 +201,20 @@ async def mem_agent_share(
     only, not a growing audit chain. Use the parent UUID to walk back
     one hop at a time if needed.
 
+    ``target`` is run through :func:`validate_namespace` before any
+    storage write — it is the same caller-supplied bypass shape that
+    issue #496 closes on the session-start surfaces. Without the gate a
+    caller could land a ``"shared:foo:bar"`` or ``"agent-runtime:foo:bar"``
+    chunk_links row even though the equivalent ``mem_session_start`` and
+    ``mem_agent_register`` paths refuse the same shape.
+
     Args:
         chunk_id: UUID of the chunk to copy
         target: Target namespace — ``'shared'`` or ``'agent-runtime:{agent_id}'``
     """
     from uuid import UUID
 
+    validate_namespace(target)
     app = await _get_app_initialized(ctx)
 
     try:

@@ -10,6 +10,7 @@ re-declaring the string.
 
 from __future__ import annotations
 
+import re
 from typing import Final
 
 from memtomem.context._names import InvalidNameError as InvalidNameError
@@ -66,6 +67,109 @@ def validate_agent_id(value: object) -> str:
     """
 
     return validate_name(value, kind="agent-id")
+
+
+# Namespace charset for caller-supplied ``namespace=`` / ``target=``
+# overrides on session-start and ``mem_agent_share``. Covers the existing
+# in-tree shapes (``default``, ``shared``, ``archive:summary``,
+# ``claude-memory:project-x``, ``agent-runtime:planner``) without adding
+# anything that would let an untrusted ``agent_id`` smuggle through the
+# override gate. ``,`` is **not** in the charset — comma-joined namespace
+# lists are a search-time filter shape, not a storable namespace value;
+# letting one through would silently widen scope at write time.
+_NAMESPACE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_MAX_NAMESPACE_LEN: Final[int] = 256
+
+
+def validate_namespace(value: object) -> str:
+    """Return *value* unchanged if it is a storable namespace string.
+
+    Applied to every public surface that accepts a user-supplied
+    ``namespace=`` or ``target=`` argument before storage / search ever
+    sees it: ``mem_session_start(namespace=...)`` (MCP),
+    ``mm session start --namespace`` (CLI),
+    ``MemtomemStore.start_session`` /
+    ``MemtomemStore.start_agent_session(namespace=...)`` (Python
+    adapter), and ``mem_agent_share(target=...)`` (MCP).
+
+    Internally-derived namespaces (``f"{AGENT_NAMESPACE_PREFIX}{agent_id}"``
+    after ``validate_agent_id`` succeeded, ``"default"``,
+    ``SHARED_NAMESPACE``) are safe by construction and skip this gate —
+    re-validating them is dead weight and would tie the agent_id charset
+    to the namespace charset for no benefit. The gate is a forward shield
+    on caller input, not a tripwire on internal derivation.
+
+    Accepted shape: one or more ``:``-separated segments where each
+    segment is non-empty, matches ``[A-Za-z0-9._-]+``, and is neither
+    ``"."``, ``".."``, nor a leading-``-``. Total length capped at 256
+    (well above any in-tree namespace today, narrow enough to bound
+    storage rows). When the first segment is the bare ``agent-runtime``
+    prefix, exactly one further segment is required and that segment is
+    re-validated through :func:`validate_agent_id` (which adds the
+    1–64-char cap and the rest of the agent_id contract). This is the
+    bypass issue #496 was filed to close: a Python / MCP / CLI caller
+    could otherwise smuggle ``"agent-runtime:foo:bar"`` into a session
+    row even though ``agent_id`` itself is gated.
+
+    The per-segment length cap is intentionally NOT applied uniformly —
+    only the ``agent-runtime:`` segment inherits agent_id's 64-char cap.
+    Other namespace shapes (``claude-memory:<long-project-id>``) retain
+    the broader 256-char total budget so legitimate long project ids
+    don't trip this gate.
+
+    Raises :class:`InvalidNameError` (a ``ValueError`` subclass) on
+    rejection, mirroring the ``agent_id`` gate's UX so error scrapers
+    see one shape across surfaces.
+    """
+
+    if not isinstance(value, str):
+        raise InvalidNameError(f"invalid namespace: expected str, got {type(value).__name__}")
+    if not value or not value.strip():
+        raise InvalidNameError(f"invalid namespace {value!r}: empty")
+    if len(value) > _MAX_NAMESPACE_LEN:
+        raise InvalidNameError(
+            f"invalid namespace {value!r}: length {len(value)} exceeds {_MAX_NAMESPACE_LEN}"
+        )
+
+    segments = value.split(":")
+    for seg in segments:
+        if not seg:
+            raise InvalidNameError(
+                f"invalid namespace {value!r}: empty segment (leading / trailing / consecutive ':')"
+            )
+        if seg in (".", ".."):
+            raise InvalidNameError(
+                f"invalid namespace {value!r}: segment {seg!r} is a reserved path token"
+            )
+        if seg.startswith("-"):
+            raise InvalidNameError(
+                f"invalid namespace {value!r}: segment {seg!r} has a leading dash"
+            )
+        if not _NAMESPACE_SEGMENT_RE.fullmatch(seg):
+            raise InvalidNameError(
+                f"invalid namespace {value!r}: segment {seg!r} must match "
+                f"[A-Za-z0-9._-]+ (no slash / backslash / whitespace / control chars)"
+            )
+
+    # ``agent-runtime:<agent_id>`` is the one prefix where the second
+    # segment is interpolated *back into* an agent_id-shaped storage row
+    # — the bypass shape #491 / #494 / #498 closed on the agent_id side.
+    # Re-route the segment through ``validate_agent_id`` so the override
+    # path can't widen the contract that the direct ``agent_id=`` path
+    # already enforces. ``agent-runtime:foo:bar`` lands here as 3
+    # segments and trips the strict-arity check before any agent-id
+    # validation — that's the canonical shape this gate exists for.
+    runtime_prefix = AGENT_NAMESPACE_PREFIX.rstrip(":")
+    if segments[0] == runtime_prefix:
+        if len(segments) != 2:
+            raise InvalidNameError(
+                f"invalid namespace {value!r}: ``{runtime_prefix}:`` prefix "
+                f"requires exactly one trailing segment "
+                f"(``{runtime_prefix}:<agent_id>``); got {len(segments) - 1}"
+            )
+        validate_agent_id(segments[1])
+
+    return value
 
 
 # Default ``system_namespace_prefixes`` — namespaces matching any of these

@@ -7,6 +7,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed (BREAKING)
 
+- **Caller-supplied `namespace=` / `target=` overrides on every
+  session-start entry point and `mem_agent_share` now reject malformed
+  shapes via a new `validate_namespace` gate.** PR #491 / #494 / #498
+  closed the bypass on `agent_id` itself, but each session-start surface
+  also accepted an explicit `namespace=` argument that landed verbatim
+  in storage — a Python / MCP / CLI caller could write
+  `"agent-runtime:foo:bar"` even though `agent_id` was clean (the
+  bypass shape PR #495 review flagged as Concern 3). The new validator
+  now runs at `mem_session_start(namespace=)` (MCP),
+  `mm session start --namespace` (CLI),
+  `MemtomemStore.start_agent_session(namespace=)` and
+  `MemtomemStore.start_session(namespace=)` (Python adapter), and
+  `mem_agent_share(target=)` (MCP). `agent-runtime:<seg>` overrides
+  re-route the trailing segment through `validate_agent_id` so the
+  override path can't widen the contract that the direct `agent_id=`
+  path enforces.
+
+  **Migration:** callers passing structured-but-unsupported namespace
+  shapes (anything containing slashes, whitespace, comma, control
+  characters, leading dash, or more than one colon under the
+  `agent-runtime:` prefix) will now see
+  `Error: invalid namespace 'X': ...` instead of the prior silent
+  store. Existing in-tree shapes (`default`, `shared`,
+  `archive:summary`, `claude-memory:project-x`,
+  `agent-runtime:planner`, `custom:scope`) are unchanged. Closes #496.
+
 - **`mem_agent_register`, `mem_agent_search`, and `mm agent register`
   now reject malformed `agent_id` values loudly instead of silently
   rewriting them.** PR #491 had wired `validate_agent_id` into the

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from uuid import uuid4
 
-from memtomem.constants import AGENT_NAMESPACE_PREFIX, validate_agent_id
+from memtomem.constants import AGENT_NAMESPACE_PREFIX, validate_agent_id, validate_namespace
 from memtomem.server import mcp
 from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -78,6 +78,9 @@ async def mem_session_start(
     behave the same):
 
     1. Explicit ``namespace=`` argument (escape hatch — wins everything).
+       Run through :func:`validate_namespace` so a hostile-shaped string
+       like ``"agent-runtime:foo:bar"`` cannot smuggle past the
+       ``agent_id`` gate via the override; see issue #496.
     2. ``agent-runtime:<agent_id>`` when ``agent_id`` is non-default.
        This is the common case for multi-agent workflows.
     3. ``app.current_namespace`` (pre-multi-agent fallback).
@@ -95,6 +98,8 @@ async def mem_session_start(
             non-default, defaults to ``agent-runtime:<agent_id>``.
     """
     validate_agent_id(agent_id)
+    if namespace is not None:
+        validate_namespace(namespace)
     app = await _get_app_initialized(ctx)
     session_id = str(uuid4())
     if namespace:

@@ -10,7 +10,12 @@ from pathlib import Path
 
 import click
 
-from memtomem.constants import AGENT_NAMESPACE_PREFIX, InvalidNameError, validate_agent_id
+from memtomem.constants import (
+    AGENT_NAMESPACE_PREFIX,
+    InvalidNameError,
+    validate_agent_id,
+    validate_namespace,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +85,8 @@ def start(agent_id: str, title: str | None, namespace: str | None) -> None:
     """Start a new session and save its ID to ~/.memtomem/.current_session."""
     try:
         validate_agent_id(agent_id)
+        if namespace is not None:
+            validate_namespace(namespace)
     except InvalidNameError as e:
         raise click.ClickException(str(e)) from e
     try:
