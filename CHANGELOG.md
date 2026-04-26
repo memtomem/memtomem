@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.32] — 2026-04-26
+
 ### Changed (BREAKING)
 
 - **Caller-supplied `namespace=` / `target=` overrides on every
