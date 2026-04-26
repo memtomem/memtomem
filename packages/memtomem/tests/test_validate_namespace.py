@@ -513,6 +513,15 @@ class TestCliAgentShareTargetOverride:
         on the rejection path we assert ``get_chunk`` was never even
         called, on the happy path we let the chunk-not-found
         ``ClickException`` after validation confirm the gate passed.
+
+        Load-bearing: the happy-path tests below pin gate-passed by
+        asserting ``get_chunk.assert_awaited_once()``, which assumes
+        ``_run_share`` reaches ``get_chunk`` as its first storage
+        interaction (agent_cmd.py:238). If a future change inserts a
+        pre-storage step (config check, etc.) before ``get_chunk``,
+        those happy-path checks could regress to false-pass on the
+        gate's behavior — extend the mock to cover the new step at
+        that point.
         """
         return SimpleNamespace(get_chunk=AsyncMock(return_value=None))
 
