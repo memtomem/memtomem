@@ -21,11 +21,21 @@ _NS_NAME_RE = re.compile(r"^[\w\-.:@ ]{1,255}$", re.UNICODE)
 _SEGMENT_SAFE_RE = re.compile(r"[^\w\-.:@ ]")
 
 
-def validate_namespace(name: str) -> bool:
-    """Check whether *name* is a valid namespace identifier.
+def _is_valid_ns_chars(name: str) -> bool:
+    """Check whether *name* satisfies the storage-layer namespace charset.
 
     Valid names contain word characters, hyphens, dots, colons, @, and spaces,
-    with a maximum length of 255.
+    with a maximum length of 255. This is the legacy SQLite-row charset
+    guard — broader than the strict caller-input validator in
+    :func:`memtomem.constants.validate_namespace`, which is what every
+    public surface (``mem_session_start``, ``mem_agent_share``,
+    ``mem_ns_*``, etc.) calls before a value reaches storage. The two are
+    deliberately different shapes; this one trips only on values that
+    would break the SQLite row contract (e.g. control characters), while
+    the constants validator additionally rejects shapes that are storable
+    but semantically suspect (``agent-runtime:foo:bar``, comma-joined
+    namespace lists, …). Kept private to ``sqlite_namespace`` so callers
+    don't accidentally use it as a substitute for the public gate.
     """
     return bool(_NS_NAME_RE.match(name))
 
@@ -42,8 +52,8 @@ def sanitize_namespace_segment(name: str) -> str:
 
 
 def _ensure_valid_namespace(name: str) -> None:
-    """Raise ``StorageError`` if *name* fails :func:`validate_namespace`."""
-    if not validate_namespace(name):
+    """Raise ``StorageError`` if *name* fails :func:`_is_valid_ns_chars`."""
+    if not _is_valid_ns_chars(name):
         raise StorageError(
             f"Invalid namespace: {name!r} (allowed characters: word, -, ., :, @, space; max 255)"
         )

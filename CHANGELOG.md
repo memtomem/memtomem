@@ -74,6 +74,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   break and should switch to matching `"invalid agent-id"`. Closes
   #492.
 
+### Internal
+
+- Renamed the legacy storage-layer helper
+  `memtomem.storage.sqlite_namespace.validate_namespace(name) -> bool`
+  to `_is_valid_ns_chars` and removed it from
+  `memtomem.storage.sqlite_backend.__all__`. Disambiguates from the
+  strict caller-input validator
+  `memtomem.constants.validate_namespace(value) -> str` introduced in
+  PR #491–#503, which raises `InvalidNameError`. The two had the same
+  name but different signatures and contracts (charset-only bool vs.
+  shape-aware raises), which made debugging harder when a stack trace
+  pointed at "validate_namespace". The storage helper has no in-tree
+  callers outside its sibling `_ensure_valid_namespace` wrapper, so
+  the rename is internal-only — it was nominally exported via
+  `__all__`, but a repo-wide grep showed zero external imports.
+
 ## [0.1.31] — 2026-04-26
 
 ### Added

@@ -27,7 +27,7 @@ from memtomem.storage.sqlite_helpers import (
     serialize_f32,
 )
 from memtomem.storage.sqlite_meta import MetaManager
-from memtomem.storage.sqlite_namespace import NamespaceOps, validate_namespace
+from memtomem.storage.sqlite_namespace import NamespaceOps
 from memtomem.storage.mixins import (
     AnalyticsMixin,
     EntityMixin,
@@ -42,7 +42,7 @@ from memtomem.storage.sqlite_schema import create_tables
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["SqliteBackend", "validate_namespace"]
+__all__ = ["SqliteBackend"]
 
 
 # Batch size for streaming rebuild_fts — bounds peak memory regardless of
