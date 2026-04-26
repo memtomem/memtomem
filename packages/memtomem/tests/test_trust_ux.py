@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from memtomem.config import Mem2MemConfig
+from memtomem.constants import INVALID_OUTPUT_FORMAT_PREFIX
 from memtomem.models import Chunk, ChunkMetadata
 from memtomem.server.component_factory import close_components, create_components
 from memtomem.server.formatters import _format_structured_results
@@ -341,6 +342,7 @@ class TestArchiveHint:
         out = await mem_recall(limit=10, output_format="verbose", ctx=ctx)
 
         assert out.startswith("Error:")
+        assert INVALID_OUTPUT_FORMAT_PREFIX in out
         assert "verbose" in out
         assert "Supported: compact, structured" in out
 

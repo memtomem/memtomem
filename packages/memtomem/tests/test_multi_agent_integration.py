@@ -42,7 +42,11 @@ from pathlib import Path
 import pytest
 
 from memtomem.config import Mem2MemConfig
-from memtomem.constants import AGENT_NAMESPACE_PREFIX, SHARED_NAMESPACE
+from memtomem.constants import (
+    AGENT_NAMESPACE_PREFIX,
+    INVALID_OUTPUT_FORMAT_PREFIX,
+    SHARED_NAMESPACE,
+)
 from memtomem.server.component_factory import close_components, create_components
 from memtomem.server.context import AppContext
 from memtomem.server.tools.multi_agent import (
@@ -746,4 +750,4 @@ class TestCaseFOutputFormat:
             ctx=ctx,
         )
 
-        assert "Error" in out and "invalid output_format" in out
+        assert "Error" in out and INVALID_OUTPUT_FORMAT_PREFIX in out

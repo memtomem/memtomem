@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
+from memtomem.constants import INVALID_OUTPUT_FORMAT_PREFIX
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -47,7 +48,10 @@ async def mem_recall(
     if not 1 <= limit <= 500:
         return f"Error: limit must be between 1 and 500, got {limit}."
     if output_format not in ("compact", "structured"):
-        return f"Error: invalid output_format '{output_format}'. Supported: compact, structured."
+        return (
+            f"Error: {INVALID_OUTPUT_FORMAT_PREFIX} '{output_format}'. "
+            "Supported: compact, structured."
+        )
 
     from memtomem.models import NamespaceFilter
 

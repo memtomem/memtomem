@@ -6,6 +6,7 @@ import asyncio
 import logging
 from uuid import UUID
 
+from memtomem.constants import INVALID_OUTPUT_FORMAT_PREFIX
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -68,7 +69,7 @@ async def mem_search(
     if effective_format == "compact" and verbose:
         effective_format = "verbose"
     if effective_format not in _VALID_OUTPUT_FORMATS:
-        return f"Error: invalid output_format '{output_format}'."
+        return f"Error: {INVALID_OUTPUT_FORMAT_PREFIX} '{output_format}'."
 
     app = await _get_app_initialized(ctx)
     effective_ns = namespace or app.current_namespace

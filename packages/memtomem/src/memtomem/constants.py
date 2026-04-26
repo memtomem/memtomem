@@ -90,6 +90,14 @@ _MAX_NAMESPACE_LEN: Final[int] = 256
 # private formatting choices.
 INVALID_NAMESPACE_MESSAGE_PREFIX: Final[str] = "invalid namespace"
 
+# Companion to ``INVALID_NAMESPACE_MESSAGE_PREFIX`` for the ``output_format``
+# validator shared by ``mem_search``, ``mem_agent_search``, and
+# ``mem_recall``. The three call sites format slightly different suffixes
+# (``mem_recall`` appends ``Supported: compact, structured.`` because its
+# subset omits ``verbose``) but the rejection prefix is one shape so a
+# single grep / assertion covers all three surfaces.
+INVALID_OUTPUT_FORMAT_PREFIX: Final[str] = "invalid output_format"
+
 
 def validate_namespace(value: object) -> str:
     """Return *value* unchanged if it is a storable namespace string.

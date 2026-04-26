@@ -6,6 +6,7 @@ import logging
 
 from memtomem.constants import (
     AGENT_NAMESPACE_PREFIX,
+    INVALID_OUTPUT_FORMAT_PREFIX,
     SHARED_NAMESPACE,
     validate_agent_id,
     validate_namespace,
@@ -141,7 +142,7 @@ async def mem_agent_search(
     if agent_id is not None:
         validate_agent_id(agent_id)
     if output_format not in _VALID_OUTPUT_FORMATS:
-        return f"Error: invalid output_format '{output_format}'."
+        return f"Error: {INVALID_OUTPUT_FORMAT_PREFIX} '{output_format}'."
     app = await _get_app_initialized(ctx)
     from memtomem.server.formatters import _format_results, _format_structured_results
 
