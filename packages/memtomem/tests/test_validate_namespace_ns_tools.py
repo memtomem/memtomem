@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import pytest
 
+from memtomem.constants import INVALID_NAMESPACE_MESSAGE_PREFIX, InvalidNameError
 from memtomem.server.context import AppContext
 from memtomem.server.tools.namespace import (
     mem_ns_assign,
@@ -42,6 +43,68 @@ from memtomem.server.tools.namespace import (
 from memtomem.server.tools.session import mem_session_start
 
 from test_validate_namespace import HOSTILE_NAMESPACES, _StubCtx
+
+_ERROR_PREFIX = f"Error: {INVALID_NAMESPACE_MESSAGE_PREFIX}"
+
+
+# ---------------------------------------------------------------------------
+# AppContext.current_namespace property — defense-in-depth setter
+# ---------------------------------------------------------------------------
+
+
+class TestAppContextCurrentNamespaceSetter:
+    """The setter on ``AppContext.current_namespace`` re-validates every
+    write to app state, even ones that bypass ``mem_ns_set``. This
+    catches the regression class where a future tool (or test code, or
+    a Python-level adapter) mutates ``app.current_namespace`` directly
+    without remembering to import ``validate_namespace`` — the same
+    "forgot to gate" pattern the multi-agent series (#491 → #500) hit
+    one PR at a time.
+
+    These tests are at the Python attribute level, not the MCP boundary
+    — the ``mem_ns_set`` tests above already pin the boundary contract.
+    """
+
+    def test_assigning_hostile_value_raises(self, components):
+        app = AppContext.from_components(components)
+        with pytest.raises(InvalidNameError, match=INVALID_NAMESPACE_MESSAGE_PREFIX):
+            app.current_namespace = "agent-runtime:foo:bar"
+
+    @pytest.mark.parametrize("hostile", HOSTILE_NAMESPACES)
+    def test_setter_rejects_every_hostile_shape(self, components, hostile):
+        app = AppContext.from_components(components)
+        with pytest.raises(InvalidNameError, match=INVALID_NAMESPACE_MESSAGE_PREFIX):
+            app.current_namespace = hostile
+
+    def test_rejected_assignment_leaves_attribute_unchanged(self, components):
+        app = AppContext.from_components(components)
+        app.current_namespace = "legacy-ns"  # known-good
+        assert app.current_namespace == "legacy-ns"
+
+        with pytest.raises(InvalidNameError):
+            app.current_namespace = "agent-runtime:foo:bar"
+
+        # Backing store is untouched on the rejected path — the bad value
+        # never reaches ``_current_namespace``.
+        assert app.current_namespace == "legacy-ns"
+
+    def test_assigning_none_passes_through(self, components):
+        """``mem_session_end`` writes ``current_session_id = None`` (a
+        sibling field), and a future caller may want to clear the
+        namespace fallback the same way. ``None`` is the documented
+        cleared state and must not trip the validator.
+        """
+        app = AppContext.from_components(components)
+        app.current_namespace = "shared"
+        app.current_namespace = None
+        assert app.current_namespace is None
+
+    def test_assigning_accepted_shape_succeeds(self, components):
+        app = AppContext.from_components(components)
+        app.current_namespace = "shared"
+        assert app.current_namespace == "shared"
+        app.current_namespace = "claude-memory:project-x"
+        assert app.current_namespace == "claude-memory:project-x"
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +131,7 @@ class TestMemNsSetValidatesNamespace:
             ctx=ctx,  # type: ignore[arg-type]
         )
 
-        assert out.startswith("Error: invalid namespace")
+        assert out.startswith(_ERROR_PREFIX)
         assert "'agent-runtime:foo:bar'" in out
 
     @pytest.mark.asyncio
@@ -82,7 +145,7 @@ class TestMemNsSetValidatesNamespace:
             ctx=ctx,  # type: ignore[arg-type]
         )
 
-        assert out.startswith("Error: invalid namespace")
+        assert out.startswith(_ERROR_PREFIX)
 
     @pytest.mark.asyncio
     async def test_rejection_does_not_mutate_current_namespace(self, components):
@@ -100,7 +163,7 @@ class TestMemNsSetValidatesNamespace:
             ctx=ctx,  # type: ignore[arg-type]
         )
 
-        assert out.startswith("Error: invalid namespace")
+        assert out.startswith(_ERROR_PREFIX)
         assert app.current_namespace == before
 
     @pytest.mark.asyncio
@@ -148,7 +211,7 @@ class TestTransitiveBypassClosed:
             namespace="agent-runtime:foo:bar",
             ctx=ctx,  # type: ignore[arg-type]
         )
-        assert rejected.startswith("Error: invalid namespace")
+        assert rejected.startswith(_ERROR_PREFIX)
 
         out = await mem_session_start(
             agent_id="default",
@@ -176,7 +239,7 @@ class TestMemNsDeleteValidatesNamespace:
             ctx=ctx,  # type: ignore[arg-type]
         )
 
-        assert out.startswith("Error: invalid namespace")
+        assert out.startswith(_ERROR_PREFIX)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("namespace", HOSTILE_NAMESPACES)
@@ -189,7 +252,7 @@ class TestMemNsDeleteValidatesNamespace:
             ctx=ctx,  # type: ignore[arg-type]
         )
 
-        assert out.startswith("Error: invalid namespace")
+        assert out.startswith(_ERROR_PREFIX)
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +272,7 @@ class TestMemNsRenameValidatesNamespace:
             ctx=ctx,  # type: ignore[arg-type]
         )
 
-        assert out.startswith("Error: invalid namespace")
+        assert out.startswith(_ERROR_PREFIX)
 
     @pytest.mark.asyncio
     async def test_hostile_new_returns_error(self, components):
@@ -222,7 +285,7 @@ class TestMemNsRenameValidatesNamespace:
             ctx=ctx,  # type: ignore[arg-type]
         )
 
-        assert out.startswith("Error: invalid namespace")
+        assert out.startswith(_ERROR_PREFIX)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("hostile", HOSTILE_NAMESPACES)
@@ -242,8 +305,8 @@ class TestMemNsRenameValidatesNamespace:
             ctx=ctx,  # type: ignore[arg-type]
         )
 
-        assert out_old.startswith("Error: invalid namespace")
-        assert out_new.startswith("Error: invalid namespace")
+        assert out_old.startswith(_ERROR_PREFIX)
+        assert out_new.startswith(_ERROR_PREFIX)
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +326,7 @@ class TestMemNsAssignValidatesNamespace:
             ctx=ctx,  # type: ignore[arg-type]
         )
 
-        assert out.startswith("Error: invalid namespace")
+        assert out.startswith(_ERROR_PREFIX)
 
     @pytest.mark.asyncio
     async def test_hostile_old_namespace_returns_error(self, components):
@@ -276,7 +339,7 @@ class TestMemNsAssignValidatesNamespace:
             ctx=ctx,  # type: ignore[arg-type]
         )
 
-        assert out.startswith("Error: invalid namespace")
+        assert out.startswith(_ERROR_PREFIX)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("hostile", HOSTILE_NAMESPACES)
@@ -295,8 +358,8 @@ class TestMemNsAssignValidatesNamespace:
             ctx=ctx,  # type: ignore[arg-type]
         )
 
-        assert out_target.startswith("Error: invalid namespace")
-        assert out_old.startswith("Error: invalid namespace")
+        assert out_target.startswith(_ERROR_PREFIX)
+        assert out_old.startswith(_ERROR_PREFIX)
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +379,7 @@ class TestMemNsUpdateValidatesNamespace:
             ctx=ctx,  # type: ignore[arg-type]
         )
 
-        assert out.startswith("Error: invalid namespace")
+        assert out.startswith(_ERROR_PREFIX)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("namespace", HOSTILE_NAMESPACES)
@@ -330,4 +393,4 @@ class TestMemNsUpdateValidatesNamespace:
             ctx=ctx,  # type: ignore[arg-type]
         )
 
-        assert out.startswith("Error: invalid namespace")
+        assert out.startswith(_ERROR_PREFIX)

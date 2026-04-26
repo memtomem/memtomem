@@ -11,6 +11,7 @@ from mcp.server.fastmcp import Context
 from mcp.server.session import ServerSession
 
 from memtomem.config import Mem2MemConfig
+from memtomem.constants import validate_namespace
 
 if TYPE_CHECKING:
     from memtomem.embedding.base import EmbeddingProvider
@@ -93,7 +94,14 @@ class AppContext:
 
     config: Mem2MemConfig
     webhook_manager: object | None = None
-    current_namespace: str | None = None
+    # Backing field for the ``current_namespace`` property below. Kept off
+    # ``__init__`` so callers go through the setter (which validates) and
+    # cannot smuggle a hostile shape via ``AppContext(current_namespace=
+    # "agent-runtime:foo:bar")``. See issue #500 for the transitive bypass
+    # this property closes — direct attribute writes (Python-level bypass
+    # of ``mem_ns_set``) are caught here even if a future tool were added
+    # that mutates app state without re-running ``validate_namespace``.
+    _current_namespace: str | None = field(default=None, init=False, repr=False)
     current_session_id: str | None = None
     # Set by ``mem_session_start(agent_id=...)`` and reset by
     # ``mem_session_end``. ``mem_agent_search(agent_id=None)`` falls back to
@@ -126,6 +134,32 @@ class AppContext:
     # Kept distinct from ``_config_lock`` so a long-running config write
     # cannot block a session start, and vice versa.
     _session_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    # ── current_namespace (validated) ─────────────────────────────────────
+    # Property + setter pair so every write — whether via ``mem_ns_set``,
+    # a future tool we forget to gate, or a bare ``app.current_namespace =
+    # X`` from test code or a Python adapter — runs through
+    # :func:`validate_namespace`. ``mem_session_start``'s priority chain
+    # (priority 3) reads this back as a fallback, so a hostile string here
+    # round-trips into the ``sessions`` row — exactly the bypass issue
+    # #500 was filed to close.
+    #
+    # Defense-in-depth on top of the input gates at every public surface
+    # (``mem_ns_set``, ``mem_session_start(namespace=)``,
+    # ``mem_agent_share(target=)`` …). The forward-shield contract of
+    # :func:`validate_namespace` (constants.py:96-100) still holds: this
+    # property only re-validates **caller-supplied** writes that reach app
+    # state. Internal callers that read the value back never re-validate.
+
+    @property
+    def current_namespace(self) -> str | None:
+        return self._current_namespace
+
+    @current_namespace.setter
+    def current_namespace(self, value: str | None) -> None:
+        if value is not None:
+            validate_namespace(value)
+        self._current_namespace = value
 
     # ── component accessors ───────────────────────────────────────────────
     # These raise ``RuntimeError`` if accessed before ``ensure_initialized``

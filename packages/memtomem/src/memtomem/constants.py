@@ -80,6 +80,16 @@ def validate_agent_id(value: object) -> str:
 _NAMESPACE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _MAX_NAMESPACE_LEN: Final[int] = 256
 
+# Single source of truth for the user-facing namespace-rejection prefix.
+# Every error raised by :func:`validate_namespace` starts with this string
+# so log scrapers / alert rules / test assertions can grep for one shape
+# across surfaces. Per-PR-#501 review (Concern: "메시지 형식이 사실상
+# public API 의 일부"): centralising the literal here lets a future tweak
+# stay one change point — sibling tests should import this constant
+# rather than re-typing ``"invalid namespace"`` against the validator's
+# private formatting choices.
+INVALID_NAMESPACE_MESSAGE_PREFIX: Final[str] = "invalid namespace"
+
 
 def validate_namespace(value: object) -> str:
     """Return *value* unchanged if it is a storable namespace string.
@@ -122,32 +132,29 @@ def validate_namespace(value: object) -> str:
     see one shape across surfaces.
     """
 
+    prefix = INVALID_NAMESPACE_MESSAGE_PREFIX
     if not isinstance(value, str):
-        raise InvalidNameError(f"invalid namespace: expected str, got {type(value).__name__}")
+        raise InvalidNameError(f"{prefix}: expected str, got {type(value).__name__}")
     if not value or not value.strip():
-        raise InvalidNameError(f"invalid namespace {value!r}: empty")
+        raise InvalidNameError(f"{prefix} {value!r}: empty")
     if len(value) > _MAX_NAMESPACE_LEN:
         raise InvalidNameError(
-            f"invalid namespace {value!r}: length {len(value)} exceeds {_MAX_NAMESPACE_LEN}"
+            f"{prefix} {value!r}: length {len(value)} exceeds {_MAX_NAMESPACE_LEN}"
         )
 
     segments = value.split(":")
     for seg in segments:
         if not seg:
             raise InvalidNameError(
-                f"invalid namespace {value!r}: empty segment (leading / trailing / consecutive ':')"
+                f"{prefix} {value!r}: empty segment (leading / trailing / consecutive ':')"
             )
         if seg in (".", ".."):
-            raise InvalidNameError(
-                f"invalid namespace {value!r}: segment {seg!r} is a reserved path token"
-            )
+            raise InvalidNameError(f"{prefix} {value!r}: segment {seg!r} is a reserved path token")
         if seg.startswith("-"):
-            raise InvalidNameError(
-                f"invalid namespace {value!r}: segment {seg!r} has a leading dash"
-            )
+            raise InvalidNameError(f"{prefix} {value!r}: segment {seg!r} has a leading dash")
         if not _NAMESPACE_SEGMENT_RE.fullmatch(seg):
             raise InvalidNameError(
-                f"invalid namespace {value!r}: segment {seg!r} must match "
+                f"{prefix} {value!r}: segment {seg!r} must match "
                 f"[A-Za-z0-9._-]+ (no slash / backslash / whitespace / control chars)"
             )
 
@@ -177,7 +184,7 @@ def validate_namespace(value: object) -> str:
             # fragments. ``__cause__`` preserves the agent_id detail for
             # anyone debugging the underlying contract violation.
             raise InvalidNameError(
-                f"invalid namespace {value!r}: {runtime_prefix} segment {segments[1]!r} "
+                f"{prefix} {value!r}: {runtime_prefix} segment {segments[1]!r} "
                 f"failed agent-id contract — {e}"
             ) from e
 
