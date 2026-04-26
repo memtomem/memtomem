@@ -163,7 +163,6 @@ def test_dev_routes_extend_prod_routes() -> None:
         ("/api/scratch", "GET"),
         ("/api/namespaces", "GET"),
         ("/api/procedures", "GET"),
-        ("/api/context/overview", "GET"),
         ("/api/watchdog/status", "GET"),
         ("/api/settings-sync", "GET"),
         ("/api/eval", "GET"),
@@ -200,7 +199,16 @@ async def test_dev_only_routes_blocked_in_prod_but_exposed_in_dev(path: str, met
 def test_prod_keeps_polished_routes_mounted() -> None:
     """Sanity: the dev-only move mustn't brick the polished surface."""
     prod_paths = _api_paths(create_app(mode="prod"))
-    for expected in ("/api/search", "/api/sources", "/api/stats", "/api/config"):
+    for expected in (
+        "/api/search",
+        "/api/sources",
+        "/api/stats",
+        "/api/config",
+        "/api/context/overview",
+        "/api/context/skills",
+        "/api/context/commands",
+        "/api/context/agents",
+    ):
         assert expected in prod_paths, (
             f"{expected} is missing from prod — reclassify or the router list"
         )
@@ -289,10 +297,6 @@ def test_html_classification_matches_router_lists() -> None:
     # router lists must also update the HTML, and this test enforces it.
     expected_dev = {
         "namespaces",
-        "ctx-overview",
-        "ctx-skills",
-        "ctx-commands",
-        "ctx-agents",
         "hooks-sync",
         "harness-sessions",
         "harness-scratch",
