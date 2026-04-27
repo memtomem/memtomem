@@ -202,6 +202,18 @@ Restart Gemini CLI after configuration.
 > Antigravity does not support the `${workspaceFolder}` variable — use absolute paths.
 > Restart the Agent session after changing settings.
 
+> **Two MCP config locations inside Antigravity.** The steps above register
+> memtomem with the **built-in Gemini agent**, which reads
+> `~/.gemini/antigravity/mcp_config.json` (key `mcpServers`). VS Code-side
+> integrations inside Antigravity — the MCP panel, Copilot Chat, Cline,
+> Claude extension, etc. — read a separate file at
+> `~/Library/Application Support/Antigravity/User/mcp.json` (key `servers`,
+> VS Code's standard MCP schema). Antigravity does **not** inherit MCP
+> entries from a sibling VS Code install; each fork keeps its own
+> `Application Support/<AppName>/User/` directory. Register memtomem in
+> whichever file matches the agent you plan to call it from — or both, if
+> you use both.
+
 ---
 
 ## 7. Verifying Your Connection
