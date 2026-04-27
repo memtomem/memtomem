@@ -5571,6 +5571,47 @@ class TestStepHeaderPosition:
         assert "1. Memory Directory" not in result.output
         assert "2. Memory Directory" not in result.output
 
+    def test_step_header_first_step_omits_back_hint(self) -> None:
+        """(#422) On the first step of a ``run_steps`` call, ``b`` has
+        nothing to return to -- the hint must only advertise ``q: quit``.
+        The preset-flag path (``mm init --preset <name>``) goes straight
+        to ``_step_memory_dir`` as step 0 of a fresh ``run_steps`` list,
+        so the old unconditional ``(b: back, q: quit)`` was misleading."""
+        import click
+        from click.testing import CliRunner
+
+        from memtomem.cli.wizard import step_header
+
+        @click.command()
+        def cmd() -> None:
+            state = {"_wizard_position": (1, 3)}
+            step_header(state, "Memory Directory")
+
+        result = CliRunner().invoke(cmd, [])
+        assert result.exit_code == 0
+        assert "1. Memory Directory" in result.output
+        assert "(q: quit)" in result.output
+        assert "b: back" not in result.output
+
+    def test_step_header_later_step_shows_back_hint(self) -> None:
+        """Regression guard: any step after the first (e.g. memory-dir
+        following the interactive preset picker) must still show
+        ``(b: back, q: quit)`` because ``b`` has a real destination."""
+        import click
+        from click.testing import CliRunner
+
+        from memtomem.cli.wizard import step_header
+
+        @click.command()
+        def cmd() -> None:
+            state = {"_wizard_position": (2, 4)}
+            step_header(state, "Memory Directory")
+
+        result = CliRunner().invoke(cmd, [])
+        assert result.exit_code == 0
+        assert "2. Memory Directory" in result.output
+        assert "(b: back, q: quit)" in result.output
+
     def test_advanced_flow_shows_numbers_1_through_10(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
