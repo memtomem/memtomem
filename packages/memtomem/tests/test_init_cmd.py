@@ -4077,6 +4077,65 @@ class TestPresetWizardBackNav:
         # No dead write, no preset application — just the exception.
         assert "raised preset_choice=None applied=None sentinel=untouched" in result.output
 
+class TestPresetBackHintNavHint:
+    """(#422) ``mm init --preset <name>`` must not advertise ``(b: back)`` on
+    the memory-dir step because there is no picker to return to in that flow.
+    The default interactive path must still advertise ``(b: back)`` on the
+    memory-dir step (regression guard for #418)."""
+
+    def test_preset_cli_flag_omits_back_hint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``mm init --preset korean`` must show ``(q: quit)`` and not
+        ``(b: back, q: quit)`` on the Memory Directory step."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        memory_dir = tmp_path / "memories"
+        result = CliRunner().invoke(
+            init,
+            ["--preset", "korean"],
+            input=f"{memory_dir}\ny\n3\n",
+        )
+        assert result.exit_code == 0, result.output
+        # The memory-dir step is first in this flow — back hint must be absent there.
+        memory_dir_section = result.output.split("Memory Directory")[1].split("\n")[1]
+        assert "(q: quit)" in memory_dir_section
+        assert "(b: back, q: quit)" not in memory_dir_section
+
+    def test_interactive_path_keeps_back_hint_at_memory_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Default interactive path must still show ``(b: back, q: quit)`` on
+        the Memory Directory step — regression guard for #418."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        memory_dir = tmp_path / "memories"
+        # 1) picker: "3" (korean)  2) memory_dir: proceed  3) mcp: skip
+        result = CliRunner().invoke(
+            init,
+            [],
+            input=f"3\n{memory_dir}\ny\n3\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert "(b: back, q: quit)" in result.output
 
 class TestReinstallEmbeddingReconciliation:
     """mm init must detect and offer to fix embedding mismatches left by a
