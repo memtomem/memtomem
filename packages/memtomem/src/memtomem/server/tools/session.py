@@ -170,6 +170,9 @@ async def mem_session_end(
         return "No active session."
 
     session_id = app.current_session_id
+    # Capture before end_session and the lock-guarded reset below; the
+    # archive helper runs after end_session, so any later state
+    # mutation could clobber the tag we want to record.
     agent_id = app.current_agent_id
 
     # Gather session stats
@@ -233,23 +236,30 @@ async def _persist_session_summary_chunk(
     a default system namespace, so the chunk is hidden from
     ``mem_search`` unless the caller passes an explicit
     ``namespace_filter``. Returns a single-line status for the tool
-    response, or ``None`` when no memory directory is configured.
+    response, or ``None`` when no memory directory is configured or
+    when the indexer rejected the file (zero chunks).
     """
     memory_dirs = app.config.indexing.memory_dirs
     if not memory_dirs:
         return None
 
-    base = Path(memory_dirs[0]).expanduser().resolve()
-    now = datetime.now(timezone.utc)
-    target = base / "sessions" / now.strftime("%Y-%m") / f"{session_id}.md"
+    # Validate the derived namespace before doing any I/O so an invalid
+    # session_id (defensive — uuid4 is safe in practice) can't leave a
+    # half-written file behind.
     namespace = f"archive:session:{session_id}"
     validate_namespace(namespace)
 
-    agent_label = agent_id or "default"
+    # Primary memory dir: when multiple are configured, summaries land
+    # under the first one. Keeps the location predictable across runs;
+    # users with multi-dir setups can re-home via memory_dirs ordering.
+    base = Path(memory_dirs[0]).expanduser().resolve()
+    now = datetime.now(timezone.utc)
+    target = base / "sessions" / now.strftime("%Y-%m") / f"{session_id}.md"
+
     event_total = sum(event_counts.values())
     content = _format_session_summary(
         session_id=session_id,
-        agent_id=agent_label,
+        agent_id=agent_id,
         ended_at=now,
         event_total=event_total,
         summary=summary,
@@ -261,13 +271,25 @@ async def _persist_session_summary_chunk(
     stats = await app.index_engine.index_file(target, namespace=namespace)
     app.search_pipeline.invalidate_cache()
 
+    if not stats.indexed_chunks:
+        # File written but indexer produced no chunks (empty body, dedup
+        # collision, or a chunker reject). Surface the path so an
+        # operator can investigate; suppress the misleading "0 chunks"
+        # status line in the tool response.
+        logger.warning(
+            "session_summary_chunk_indexed_zero session_id=%s path=%s",
+            session_id,
+            target,
+        )
+        return None
+
     return f"- Summary chunk: {namespace} ({stats.indexed_chunks} chunks)"
 
 
 def _format_session_summary(
     *,
     session_id: str,
-    agent_id: str,
+    agent_id: str | None,
     ended_at: datetime,
     event_total: int,
     summary: str,
@@ -276,18 +298,27 @@ def _format_session_summary(
 
     Layout: YAML frontmatter (session_id / agent_id / ended_at /
     event_count) → ``## Session summary: <id>`` heading → blockquote
-    tags (``session-summary``, ``agent=<id>``) → summary body. Matches
-    the chunker's expected entry shape (heading + blockquote group +
-    body) so frontmatter and per-section tags both promote cleanly to
-    ``ChunkMetadata.tags``.
+    tags (``session-summary`` plus ``agent=<id>`` when an agent owned
+    the session) → summary body. Matches the chunker's expected entry
+    shape (heading + blockquote group + body) so both frontmatter and
+    per-section tags promote cleanly to ``ChunkMetadata.tags``.
+
+    ``agent_id`` is preserved as ``None`` rather than coerced to
+    ``"default"``: collapsing to a literal would mask sessions that
+    truly had no agent owner behind the legitimate ``default`` agent
+    convention.
     """
     iso_ts = ended_at.isoformat(timespec="seconds")
-    tags_json = json.dumps(["session-summary", f"agent={agent_id}"])
+    tag_list = ["session-summary"]
+    if agent_id:
+        tag_list.append(f"agent={agent_id}")
+    tags_json = json.dumps(tag_list)
+    fm_agent = agent_id if agent_id else "null"
     body = summary.strip()
     return (
         f"---\n"
         f"session_id: {session_id}\n"
-        f"agent_id: {agent_id}\n"
+        f"agent_id: {fm_agent}\n"
         f"ended_at: {iso_ts}\n"
         f"event_count: {event_total}\n"
         f"---\n"
