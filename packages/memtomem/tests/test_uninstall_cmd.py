@@ -9,10 +9,10 @@ loud and immediate (MEDIUM 6 mitigation).
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import os
 import sqlite3
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -28,7 +28,13 @@ def _hold_pid_lock(pid_file: Path) -> Iterator[None]:
 
     Mirrors what ``server/__init__.py:main`` does at runtime so the
     flock-based liveness probe (#387) sees a live writer.
+
+    POSIX-only — ``fcntl`` is imported lazily so the module collects on
+    Windows. Tests that depend on this helper are gated with
+    ``skipif(sys.platform == "win32", ...)``.
     """
+    import fcntl
+
     fp = open(pid_file, "rb+")
     try:
         fcntl.flock(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -322,6 +328,10 @@ class TestRuntimeProfileImportPin:
 # -------------------------------------------------------------------- 12
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="flock-based liveness probe is POSIX-only (#448 follow-up)",
+)
 class TestServerAliveRefuses:
     def test_refuses_when_server_alive_at_legacy_path(self, home):
         """Pre-#412 servers still write ``~/.memtomem/.server.pid``. The
