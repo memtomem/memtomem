@@ -911,6 +911,16 @@ loop that powers `mem_watchdog` — set
 `MEMTOMEM_SCHEDULER__ENABLED=true` on top of the watchdog config to
 enable dispatch.
 
+> **Dispatch requires the MCP server, not `mm web`.** The watchdog (and
+> therefore the schedule dispatcher) is wired into the MCP server
+> lifespan only — it is not started by `mm web`. Schedules registered
+> through `mm schedule add` while only `mm web` is running will sit
+> idle (`mm schedule list` shows `last=never (—)`) until an MCP server
+> session
+> (e.g. a connected Claude Code / Claude Desktop client) is also
+> active. Use `mm schedule run-now <id>` for one-off out-of-band
+> execution that does not depend on the watchdog tick.
+
 ```bash
 mm schedule add --cron "0 3 * * 0" --job compaction
 mm schedule list
