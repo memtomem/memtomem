@@ -133,8 +133,17 @@ class SearchResult:
     chunk: Chunk
     score: float
     rank: int
-    source: str  # "bm25", "dense", "fused", "reranked"
+    source: str  # "bm25", "dense", "fused", "reranked", "session_rescue"
     context: ContextInfo | None = None
+    # True when this chunk surfaced (at least in part) via the
+    # Stage-1 session-summary rescue leg — i.e. an
+    # ``archive:session:*`` summary above threshold pointed at this
+    # chunk's source file. Preserved by fusion / dedup / decay / MMR /
+    # access / importance via OR semantics: if any leg of fusion (or
+    # any pre-stage candidate) carried the flag, the merged result
+    # carries it too. Surfaced in ``output_format="structured"``
+    # payloads only — irrelevant to compact/verbose text formats.
+    via_session_summary: bool = False
 
 
 @dataclass(frozen=True, slots=True)

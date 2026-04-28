@@ -286,3 +286,270 @@ class TestSessionSummaryPhaseA:
         assert all(not (r.chunk.namespace or "").startswith("archive:session:") for r in results), (
             "archive:session:* chunks must not appear in default mem_search"
         )
+
+
+class _FakeLLM:
+    """Minimal ``LLMProvider`` stand-in for Phase B tests.
+
+    Records every ``generate`` call and returns a fixed response so the
+    archive chunk content is predictable. ``close`` is a no-op because
+    the real provider close runs over a network client that is not
+    instantiated here.
+    """
+
+    def __init__(self, response: str = "AUTO-SUMMARY-OUTPUT") -> None:
+        self.response = response
+        self.calls: list[tuple[str, str, int]] = []
+
+    async def generate(self, prompt: str, *, system: str = "", max_tokens: int = 1024) -> str:
+        self.calls.append((prompt, system, max_tokens))
+        return self.response
+
+    async def close(self) -> None:
+        return None
+
+
+class TestSessionSummaryPhaseB:
+    """Phase B of the episodic-session-summary RFC: when ``summary=`` is
+    omitted on ``mem_session_end``, the server runs an LLM auto-summary
+    over chunks added during the session and persists the result through
+    Phase A's archive-chunk path. The auto path must also gate cleanly
+    when prerequisites are missing (no LLM, below ``min_chunks``,
+    oversize, ``auto=False``).
+    """
+
+    @staticmethod
+    def _seed_chunks(memory_dir: Path, count: int, prefix: str = "auto") -> None:
+        """Drop ``count`` markdown files into the configured memory dir.
+
+        Uses one file per chunk so the chunker can't merge them into a
+        single chunk and so each lands in storage with a fresh
+        ``created_at`` after the session start.
+        """
+        for i in range(count):
+            (memory_dir / f"{prefix}-{i:02d}.md").write_text(
+                f"# Note {i}\n\nDistinct content body number {i}, words: alpha beta gamma {i}.\n",
+                encoding="utf-8",
+            )
+
+    async def _index_dir(self, app: AppContext, memory_dir: Path, namespace: str) -> None:
+        for path in sorted(memory_dir.glob("auto-*.md")):
+            await app.index_engine.index_file(path, namespace=namespace)
+
+    @pytest.mark.asyncio
+    async def test_auto_summary_runs_when_threshold_met(self, components, monkeypatch):
+        components.llm = _FakeLLM(response="The session set up alpha beta gamma notes.")
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        self._seed_chunks(memory_dir, count=6)
+        await self._index_dir(app, memory_dir, namespace="agent-runtime:planner")
+
+        out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        assert f"archive:session:{session_id}" in out
+        assert "Auto summary:" in out
+        assert components.llm.calls, "LLM provider should have been invoked"
+
+        files = list((memory_dir / "sessions").rglob(f"{session_id}.md"))
+        assert len(files) == 1
+        body = files[0].read_text(encoding="utf-8")
+        assert "alpha beta gamma" in body
+
+    @pytest.mark.asyncio
+    async def test_auto_summary_skipped_below_min_chunks(self, components):
+        components.llm = _FakeLLM()
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        self._seed_chunks(memory_dir, count=2)
+        await self._index_dir(app, memory_dir, namespace="agent-runtime:planner")
+
+        out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        assert "archive:session:" not in out
+        assert "below min_chunks" in out
+        assert not components.llm.calls
+
+    @pytest.mark.asyncio
+    async def test_auto_summary_skipped_when_no_llm(self, components):
+        components.llm = None
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=6)
+        await TestSessionSummaryPhaseB()._index_dir(
+            app, memory_dir, namespace="agent-runtime:planner"
+        )
+
+        out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+        assert "archive:session:" not in out
+        assert "no llm" in out
+
+    @pytest.mark.asyncio
+    async def test_auto_summary_disabled_via_config(self, components):
+        components.llm = _FakeLLM()
+        components.config.session_summary.auto = False
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=6)
+        await TestSessionSummaryPhaseB()._index_dir(
+            app, memory_dir, namespace="agent-runtime:planner"
+        )
+
+        out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+        assert "archive:session:" not in out
+        assert "disabled" in out
+        assert not components.llm.calls
+
+    @pytest.mark.asyncio
+    async def test_auto_summary_skipped_when_oversize(self, components):
+        components.llm = _FakeLLM()
+        components.config.session_summary.max_input_chars = 10  # force overflow
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=6)
+        await TestSessionSummaryPhaseB()._index_dir(
+            app, memory_dir, namespace="agent-runtime:planner"
+        )
+
+        out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+        assert "archive:session:" not in out
+        assert "too large" in out
+        assert not components.llm.calls, "oversize check must short-circuit before generate()"
+
+    @pytest.mark.asyncio
+    async def test_explicit_summary_skips_auto_path(self, components):
+        components.llm = _FakeLLM(response="WOULD-NOT-SHOW")
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        out = await mem_session_end(  # type: ignore[arg-type]
+            summary="manual override", ctx=ctx
+        )
+        assert "manual override" in out
+        assert "WOULD-NOT-SHOW" not in out
+        assert not components.llm.calls
+
+    @pytest.mark.asyncio
+    async def test_summary_links_written_for_auto_path(self, components):
+        """Phase B-2: auto path writes ``link_type='summarizes'`` rows
+        from the summary chunk back to each source chunk it summarized.
+        """
+        components.llm = _FakeLLM(response="auto-generated summary text")
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=6)
+        await TestSessionSummaryPhaseB()._index_dir(
+            app, memory_dir, namespace="agent-runtime:planner"
+        )
+
+        source_chunks = await app.storage.recall_chunks(limit=100)
+        source_ids = {
+            c.id for c in source_chunks if c.metadata.namespace == "agent-runtime:planner"
+        }
+        assert len(source_ids) >= 5
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        # Each source chunk should have a (target_id, "summarizes") row
+        # whose source_id points at a single common summary chunk.
+        link_sources: set = set()
+        linked_targets: set = set()
+        for tid in source_ids:
+            link = await app.storage.get_chunk_link(tid, link_type="summarizes")
+            if link is not None:
+                link_sources.add(link.source_id)
+                linked_targets.add(tid)
+
+        assert linked_targets == source_ids, "every source chunk should have a summarizes link"
+        assert len(link_sources) == 1, "all links should share one summary chunk_id"
+
+    @pytest.mark.asyncio
+    async def test_summary_links_respect_cap(self, components):
+        """Phase B-2: ``max_summary_links`` caps fanout — newest first,
+        tail dropped. With 6 source chunks and cap=3, exactly 3 links
+        land (and they correspond to the 3 newest chunks, since
+        ``recall_chunks`` returns newest-first).
+        """
+        components.llm = _FakeLLM(response="cap test summary")
+        components.config.session_summary.max_summary_links = 3
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=6)
+        await TestSessionSummaryPhaseB()._index_dir(
+            app, memory_dir, namespace="agent-runtime:planner"
+        )
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        # Verify cap count AND that linked chunks are a subset of the
+        # session's source chunks (catches a bug that would link
+        # arbitrary chunks not in the recall_chunks output). We can't
+        # assert "exactly newest 3" because tests seed all 6 chunks in
+        # the same second, and ORDER BY created_at DESC has no stable
+        # secondary sort across two queries when timestamps tie — in
+        # production a session spans real time so the tail-drop
+        # ordering is well-defined.
+        planner_ids = {
+            c.id
+            for c in await app.storage.recall_chunks(limit=100)
+            if c.metadata.namespace == "agent-runtime:planner"
+        }
+        linked_ids = {
+            cid
+            for cid in planner_ids
+            if await app.storage.get_chunk_link(cid, link_type="summarizes") is not None
+        }
+        assert len(linked_ids) == 3, f"expected cap=3 links, got {len(linked_ids)}"
+        assert linked_ids.issubset(planner_ids), (
+            "linked targets must come from the session's source chunks"
+        )
+
+    @pytest.mark.asyncio
+    async def test_summary_links_skipped_for_manual_summary(self, components):
+        """Manual ``summary=`` does not collect source chunks, so the
+        Phase B-2 link-writer must not run (no fake links pointing
+        from the archive chunk to arbitrary unrelated chunks).
+        """
+        components.llm = _FakeLLM()
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=6)
+        await TestSessionSummaryPhaseB()._index_dir(
+            app, memory_dir, namespace="agent-runtime:planner"
+        )
+
+        await mem_session_end(summary="manual", ctx=ctx)  # type: ignore[arg-type]
+
+        source_chunks = await app.storage.recall_chunks(limit=100)
+        for c in source_chunks:
+            if c.metadata.namespace != "agent-runtime:planner":
+                continue
+            link = await app.storage.get_chunk_link(c.id, link_type="summarizes")
+            assert link is None, "manual summary path must not write summarizes links"

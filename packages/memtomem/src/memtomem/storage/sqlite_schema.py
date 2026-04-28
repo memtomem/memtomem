@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # ``chunk_links.link_type`` values recognised by the back-fill and (in PR-2)
 # the writer. Validation lives in Python so adding a new type is one PR not
 # two — see ``planning/mem-agent-share-chunk-links-rfc.md`` §Storage.
-_VALID_LINK_TYPES: frozenset[str] = frozenset({"shared"})
+_VALID_LINK_TYPES: frozenset[str] = frozenset({"shared", "summarizes"})
 
 # Bumping this key (e.g. ``..._v2``) triggers a re-run of the back-fill on
 # the next startup — used if a future release tightens what counts as a
@@ -430,6 +430,25 @@ def create_tables(
         "CREATE INDEX IF NOT EXISTS idx_health_snap_name "
         "ON health_snapshots(check_name, created_at)"
     )
+
+    # --- Scheduled lifecycle jobs (P2 Phase A) ---
+    # Phase A interprets ``cron_expr`` in UTC; ``last_run_at`` and
+    # ``created_at`` are UTC ISO strings. ``list_due`` semantics are
+    # at-most-once catch-up — see ``ScheduleMixin.schedule_list_due``.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS schedules (
+            id              TEXT PRIMARY KEY,
+            cron_expr       TEXT NOT NULL,
+            job_kind        TEXT NOT NULL,
+            params_json     TEXT NOT NULL DEFAULT '{}',
+            enabled         INTEGER NOT NULL DEFAULT 1,
+            created_at      TEXT NOT NULL,
+            last_run_at     TEXT,
+            last_run_status TEXT,
+            last_run_error  TEXT
+        )
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_schedules_enabled ON schedules(enabled)")
 
     db.commit()
 

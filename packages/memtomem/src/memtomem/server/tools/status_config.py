@@ -283,6 +283,7 @@ def _revert_to_stored(app: AppContext) -> str:
         access_config=config.access,
         context_window_config=config.context_window,
         llm_provider=app.llm_provider,
+        session_summary_config=config.session_summary,
     )
     comp.index_engine = IndexEngine(
         storage=storage,

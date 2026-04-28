@@ -8,6 +8,7 @@ from memtomem.storage.mixins.analytics import AnalyticsMixin
 from memtomem.storage.mixins.history import HistoryMixin
 from memtomem.storage.mixins.entities import EntityMixin
 from memtomem.storage.mixins.policies import PolicyMixin
+from memtomem.storage.mixins.schedules import ScheduleMixin
 
 __all__ = [
     "SessionMixin",
@@ -18,4 +19,5 @@ __all__ = [
     "HistoryMixin",
     "EntityMixin",
     "PolicyMixin",
+    "ScheduleMixin",
 ]

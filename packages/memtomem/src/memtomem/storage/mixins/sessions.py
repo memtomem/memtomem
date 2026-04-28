@@ -91,6 +91,32 @@ class SessionMixin:
             for r in rows
         ]
 
+    async def get_session(self, session_id: str) -> dict | None:
+        """Return a single session row by id, or ``None`` if not found.
+
+        Added for the Phase B auto-summary path which needs the
+        session's ``started_at`` and ``namespace`` to scope the
+        recall_chunks lookup. Mirrors the column shape returned by
+        ``list_sessions``.
+        """
+        db = self._get_db()
+        row = db.execute(
+            "SELECT id, agent_id, started_at, ended_at, summary, namespace, metadata"
+            " FROM sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row[0],
+            "agent_id": row[1],
+            "started_at": row[2],
+            "ended_at": row[3],
+            "summary": row[4],
+            "namespace": row[5],
+            "metadata": row[6],
+        }
+
     async def get_session_events(self, session_id: str) -> list[dict]:
         db = self._get_db()
         rows = db.execute(

@@ -131,17 +131,21 @@ def _format_structured_results(results: list, hints: list[str] | None = None) ->
     for r in results:
         meta = r.chunk.metadata
         hierarchy = " > ".join(meta.heading_hierarchy) if meta.heading_hierarchy else ""
-        out.append(
-            {
-                "rank": r.rank,
-                "score": round(r.score, 4),
-                "source": _short_path(meta.source_file),
-                "hierarchy": hierarchy,
-                "namespace": meta.namespace,
-                "chunk_id": str(r.chunk.id),
-                "content": r.chunk.content,
-            }
-        )
+        entry: dict[str, object] = {
+            "rank": r.rank,
+            "score": round(r.score, 4),
+            "source": _short_path(meta.source_file),
+            "hierarchy": hierarchy,
+            "namespace": meta.namespace,
+            "chunk_id": str(r.chunk.id),
+            "content": r.chunk.content,
+        }
+        # RFC P1 Phase C: surface session-summary rescue provenance only
+        # when set, so the common case (organic hit) keeps a stable
+        # narrow shape and consumers can branch on key presence.
+        if getattr(r, "via_session_summary", False):
+            entry["via_session_summary"] = True
+        out.append(entry)
     payload: dict[str, object] = {"results": out}
     if hints:
         payload["hints"] = list(hints)

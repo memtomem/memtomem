@@ -164,6 +164,7 @@ async def create_components(config: Mem2MemConfig | None = None) -> Components:
         importance_config=config.importance,
         context_window_config=config.context_window,
         llm_provider=llm,
+        session_summary_config=config.session_summary,
     )
 
     return Components(

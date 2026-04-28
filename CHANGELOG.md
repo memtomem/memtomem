@@ -5,6 +5,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **`chunk_links` provenance from session summary → source chunks**
+  (RFC P1 Phase B-2). When the auto-summary path runs on
+  `mem_session_end`, the server now writes `link_type="summarizes"`
+  rows from the new `archive:session:<id>` chunk back to each source
+  chunk it summarized, bounded by `session_summary.max_summary_links`
+  (default 50, newest first, tail dropped per RFC Open-Question-1).
+  Manual `summary=` callers do not collect source chunks and so do
+  not write links. Each row is best-effort: a single `add_chunk_link`
+  failure is logged and skipped rather than aborting `mem_session_end`.
+- **Auto LLM session summary on `mem_session_end`** (RFC P1 Phase B-1).
+  When `mem_session_end` is called without `summary=` and an LLM
+  provider is configured, the server summarizes chunks added during
+  the session and persists the result through Phase A's
+  `archive:session:<id>` chunk path. New `session_summary` config
+  block (`auto`, `min_chunks=5`, `max_summary_tokens=500`,
+  `max_input_chars=60000`) gates the behavior; skip reasons
+  (`disabled`, `no llm`, `below min_chunks`, `too large`,
+  `empty output`, `llm error`) surface in the tool response. See
+  [Session Summary](docs/guides/configuration.md#session-summary).
+
 ## [0.1.32] — 2026-04-26
 
 ### Changed (BREAKING)
