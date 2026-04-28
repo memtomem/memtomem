@@ -9,6 +9,9 @@ from typing import TYPE_CHECKING
 
 from dataclasses import dataclass
 
+from dataclasses import replace as dataclass_replace
+from uuid import UUID
+
 from memtomem.config import (
     MAX_CONTEXT_WINDOW_CHUNKS,
     AccessConfig,
@@ -17,6 +20,7 @@ from memtomem.config import (
     MMRConfig,
     RerankConfig,
     SearchConfig,
+    SessionSummaryConfig,
 )
 from memtomem.models import ContextInfo, NamespaceFilter, SearchResult
 from memtomem.search.fusion import reciprocal_rank_fusion
@@ -80,6 +84,7 @@ class SearchPipeline:
         importance_config: object | None = None,
         context_window_config: ContextWindowConfig | None = None,
         llm_provider: LLMProvider | None = None,
+        session_summary_config: SessionSummaryConfig | None = None,
     ) -> None:
         self._storage = storage
         self._embedder = embedder
@@ -93,6 +98,7 @@ class SearchPipeline:
         self._importance_config = importance_config
         self._context_window_config = context_window_config
         self._llm_provider = llm_provider
+        self._session_summary_config = session_summary_config
 
         # Search result TTL cache (per-instance) with version counter
         self._search_cache: dict[str, tuple[float, int, list[SearchResult], RetrievalStats]] = {}
@@ -146,6 +152,129 @@ class SearchPipeline:
         if cfg and cfg.enabled:
             return max(0, min(cfg.window_size, MAX_CONTEXT_WINDOW_CHUNKS))
         return 0
+
+    async def _session_summary_boost_sources(self, query: str) -> set[str]:
+        """Stage-1 enrichment lookup against ``archive:session:*``.
+
+        Runs a small BM25 lookup against the session-summary namespace
+        (top-k = ``expansion_lookup_top_k``) and, for each hit above
+        ``expansion_score_threshold``, follows ``chunk_links`` of type
+        ``"summarizes"`` from the summary chunk back to the source
+        chunks it summarized. The set of source files spanned by those
+        chunks becomes the boost-sources list.
+
+        Returns an empty set when the feature is disabled, the lookup
+        fails, no summary scores above threshold, or no surviving
+        ``summarizes`` link points at any source. The caller treats an
+        empty set as "skip the rescue leg".
+        """
+        cfg = self._session_summary_config
+        if cfg is None or cfg.expansion_lookup_top_k <= 0:
+            return set()
+
+        archive_filter = NamespaceFilter(pattern="archive:session:*")
+        try:
+            summary_hits = await self._storage.bm25_search(
+                query, top_k=cfg.expansion_lookup_top_k, namespace_filter=archive_filter
+            )
+        except Exception:
+            logger.debug("session-summary lookup failed; skipping rescue", exc_info=True)
+            return set()
+
+        threshold = cfg.expansion_score_threshold
+        candidate_summaries = [r for r in summary_hits if r.score >= threshold]
+        if not candidate_summaries:
+            return set()
+
+        # For each above-threshold summary, walk chunk_links(summarizes)
+        # to reach the original source chunks, then collect their
+        # source_file paths. Failures on any one summary are logged and
+        # skipped — we never let a single bad summary mute the rescue.
+        target_chunk_ids: list[UUID] = []
+        for r in candidate_summaries:
+            try:
+                links = await self._storage.get_chunks_shared_from(
+                    r.chunk.id, link_type="summarizes"
+                )
+            except Exception:
+                logger.debug(
+                    "get_chunks_shared_from failed for summary %s", r.chunk.id, exc_info=True
+                )
+                continue
+            for link in links:
+                target_chunk_ids.append(link.target_id)
+
+        if not target_chunk_ids:
+            return set()
+
+        try:
+            chunks_map = await self._storage.get_chunks_batch(target_chunk_ids)
+        except Exception:
+            logger.debug("get_chunks_batch failed for rescue targets", exc_info=True)
+            return set()
+
+        return {str(c.metadata.source_file) for c in chunks_map.values()}
+
+    async def _rescue_retrieval(
+        self,
+        query: str,
+        query_embedding: list[float],
+        top_k: int,
+        boost_sources: set[str],
+        use_bm25: bool,
+        use_dense: bool,
+    ) -> list[SearchResult]:
+        """Parallel BM25+dense retrieval restricted to boost_sources.
+
+        Runs unrestricted retrievals and post-filters by source_file
+        membership rather than threading a new parameter through the
+        storage primitives — keeps ``bm25_search`` / ``dense_search``
+        signatures clean. The leg is merged into RRF as a third input
+        list, weighted by ``expansion_rescue_weight``.
+        """
+        if not boost_sources:
+            return []
+        # Cast a slightly wider net so source filtering still leaves a
+        # useful candidate pool. Bounded by existing candidate caps.
+        oversample = max(top_k, self._config.bm25_candidates)
+
+        async def _bm25_leg() -> list[SearchResult]:
+            if not use_bm25:
+                return []
+            try:
+                hits = await self._storage.bm25_search(
+                    query, top_k=oversample, namespace_filter=None
+                )
+            except Exception:
+                logger.debug("rescue bm25 leg failed", exc_info=True)
+                return []
+            return [r for r in hits if str(r.chunk.metadata.source_file) in boost_sources]
+
+        async def _dense_leg() -> list[SearchResult]:
+            if not use_dense or not query_embedding:
+                return []
+            try:
+                hits = await self._storage.dense_search(
+                    query_embedding, top_k=oversample, namespace_filter=None
+                )
+            except Exception:
+                logger.debug("rescue dense leg failed", exc_info=True)
+                return []
+            return [r for r in hits if str(r.chunk.metadata.source_file) in boost_sources]
+
+        bm25_rescue, dense_rescue = await asyncio.gather(_bm25_leg(), _dense_leg())
+
+        # Merge the rescue leg's BM25 + dense candidates into a single
+        # ranked list (keep best rank across the two legs) so we feed
+        # one rescue list into the outer RRF rather than two — this
+        # matches the RFC's "third input list" framing and avoids
+        # over-weighting rescue when it dominates both legs.
+        seen: dict[UUID, SearchResult] = {}
+        for r in bm25_rescue + dense_rescue:
+            existing = seen.get(r.chunk.id)
+            if existing is None or r.score > existing.score:
+                seen[r.chunk.id] = r
+        return sorted(seen.values(), key=lambda r: r.score, reverse=True)[:oversample]
 
     async def _expand_context(self, results: list[SearchResult], window: int) -> list[SearchResult]:
         """Attach ±window adjacent chunks to each result (batch, single DB call)."""
@@ -313,6 +442,39 @@ class SearchPipeline:
             hidden_system_ns=hidden_system_ns,
         )
 
+        # Stage 1 enrichment (RFC P1 Phase C): session-summary rescue.
+        # When an above-threshold past-session summary's chunk_links
+        # point at source files relevant to this query, run a parallel
+        # BM25+dense retrieval restricted to those files and merge the
+        # result as a third RRF input. This brings past-session chunks
+        # into ranking contention without changing the retrieval
+        # primitives' signatures — keeping ``bm25_search`` /
+        # ``dense_search`` archive-agnostic. (Pure post-fusion score
+        # multiplier was rejected: it can only re-rank candidates that
+        # already surfaced organically; "ranking contention" requires
+        # injection.)
+        rescue_results: list[SearchResult] = []
+        rescue_chunk_ids: set[UUID] = set()
+        if (
+            namespace is None
+            and self._session_summary_config is not None
+            and self._session_summary_config.expansion_lookup_top_k > 0
+        ):
+            try:
+                boost_sources = await self._session_summary_boost_sources(query)
+                if boost_sources:
+                    rescue_results = await self._rescue_retrieval(
+                        query,
+                        query_embedding,
+                        top_k=top_k,
+                        boost_sources=boost_sources,
+                        use_bm25=use_bm25,
+                        use_dense=use_dense,
+                    )
+                    rescue_chunk_ids = {r.chunk.id for r in rescue_results}
+            except Exception:
+                logger.debug("session-summary rescue leg failed", exc_info=True)
+
         # Stage 3: fusion (or single-retriever passthrough)
         # When reranking is active, widen the candidate pool so the
         # cross-encoder can rescue items RRF ranked just outside top_k.
@@ -329,17 +491,64 @@ class SearchPipeline:
         else:
             rerank_pool = top_k
 
+        # Mark rescue-leg results so fusion can OR-propagate the flag.
+        if rescue_results:
+            rescue_results = [
+                dataclass_replace(r, via_session_summary=True) for r in rescue_results
+            ]
+
         if use_bm25 and use_dense:
+            fusion_lists = [bm25_results, dense_results]
+            fusion_weights = list(effective_weights)
+            fusion_labels = ["bm25", "dense"]
+            if rescue_results:
+                fusion_lists.append(rescue_results)
+                rescue_w = (
+                    self._session_summary_config.expansion_rescue_weight
+                    if self._session_summary_config is not None
+                    else 0.5
+                )
+                fusion_weights.append(rescue_w)
+                fusion_labels.append("session_rescue")
             fused = reciprocal_rank_fusion(
-                [bm25_results, dense_results],
+                fusion_lists,
                 k=self._config.rrf_k,
                 top_k=rerank_pool,
-                weights=effective_weights,
+                weights=fusion_weights,
+                list_labels=fusion_labels,
             )
         elif use_bm25:
-            fused = bm25_results[:rerank_pool]
+            if rescue_results:
+                rescue_w = (
+                    self._session_summary_config.expansion_rescue_weight
+                    if self._session_summary_config is not None
+                    else 0.5
+                )
+                fused = reciprocal_rank_fusion(
+                    [bm25_results, rescue_results],
+                    k=self._config.rrf_k,
+                    top_k=rerank_pool,
+                    weights=[effective_weights[0], rescue_w],
+                    list_labels=["bm25", "session_rescue"],
+                )
+            else:
+                fused = bm25_results[:rerank_pool]
         elif use_dense:
-            fused = dense_results[:rerank_pool]
+            if rescue_results:
+                rescue_w = (
+                    self._session_summary_config.expansion_rescue_weight
+                    if self._session_summary_config is not None
+                    else 0.5
+                )
+                fused = reciprocal_rank_fusion(
+                    [dense_results, rescue_results],
+                    k=self._config.rrf_k,
+                    top_k=rerank_pool,
+                    weights=[effective_weights[1] if len(effective_weights) > 1 else 1.0, rescue_w],
+                    list_labels=["dense", "session_rescue"],
+                )
+            else:
+                fused = dense_results[:rerank_pool]
         else:
             fused = []
         stats.fused_total = len(fused)
@@ -409,6 +618,21 @@ class SearchPipeline:
         ctx_win = self._resolve_context_window(context_window)
         if ctx_win > 0 and fused:
             fused = await self._expand_context(fused, ctx_win)
+
+        # Re-stamp ``via_session_summary`` for any chunk that came in
+        # via the rescue leg. Downstream stages (decay, MMR, access,
+        # importance, reranker, context expansion) construct fresh
+        # ``SearchResult`` instances with default field values and so
+        # silently drop the flag — restoring here at the boundary keeps
+        # propagation a single-source-of-truth concern of the pipeline
+        # rather than leaking the obligation into every stage.
+        if rescue_chunk_ids:
+            fused = [
+                dataclass_replace(r, via_session_summary=True)
+                if r.chunk.id in rescue_chunk_ids
+                else r
+                for r in fused
+            ]
 
         stats.final_total = len(fused)
 

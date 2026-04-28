@@ -559,6 +559,19 @@ class SessionSummaryConfig(BaseSettings):
     # sessions otherwise emit one row per chunk; we keep the newest
     # ``max_summary_links`` (chunks arrive newest first, tail dropped).
     max_summary_links: int = 50
+    # Phase C — Stage-1 query-expansion enrichment. After standard
+    # expansion, the pipeline runs a small lookup against
+    # ``archive:session:*`` and, for any summary chunk scoring above
+    # ``expansion_score_threshold``, follows ``chunk_links`` of type
+    # ``summarizes`` back to the source files of the summarized session.
+    # Those files become a "rescue leg" — a parallel BM25+dense retrieval
+    # restricted to those source paths and merged into RRF as a third
+    # input list weighted by ``expansion_rescue_weight``. This brings
+    # past-session chunks into ranking contention without changing the
+    # storage primitive signatures.
+    expansion_lookup_top_k: int = 3
+    expansion_score_threshold: float = 0.3
+    expansion_rescue_weight: float = 0.5
 
     @field_validator("min_chunks")
     @classmethod
@@ -567,11 +580,23 @@ class SessionSummaryConfig(BaseSettings):
             raise ValueError(f"{info.field_name} must be positive, got {v}")
         return v
 
-    @field_validator("max_summary_tokens", "max_input_chars", "max_summary_links")
+    @field_validator(
+        "max_summary_tokens",
+        "max_input_chars",
+        "max_summary_links",
+        "expansion_lookup_top_k",
+    )
     @classmethod
     def positive_int(cls, v: int, info: ValidationInfo) -> int:
         if v <= 0:
             raise ValueError(f"{info.field_name} must be positive, got {v}")
+        return v
+
+    @field_validator("expansion_score_threshold", "expansion_rescue_weight")
+    @classmethod
+    def non_negative_float(cls, v: float, info: ValidationInfo) -> float:
+        if v < 0:
+            raise ValueError(f"{info.field_name} must be non-negative, got {v}")
         return v
 
 
