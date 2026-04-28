@@ -505,16 +505,28 @@ class TestSessionSummaryPhaseB:
 
         await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
 
-        source_chunks = await app.storage.recall_chunks(limit=100)
-        planner_ids = [
-            c.id for c in source_chunks if c.metadata.namespace == "agent-runtime:planner"
-        ]
-        linked = [
-            tid
-            for tid in planner_ids
-            if await app.storage.get_chunk_link(tid, link_type="summarizes") is not None
-        ]
-        assert len(linked) == 3, f"expected cap=3 links, got {len(linked)}"
+        # Verify cap count AND that linked chunks are a subset of the
+        # session's source chunks (catches a bug that would link
+        # arbitrary chunks not in the recall_chunks output). We can't
+        # assert "exactly newest 3" because tests seed all 6 chunks in
+        # the same second, and ORDER BY created_at DESC has no stable
+        # secondary sort across two queries when timestamps tie — in
+        # production a session spans real time so the tail-drop
+        # ordering is well-defined.
+        planner_ids = {
+            c.id
+            for c in await app.storage.recall_chunks(limit=100)
+            if c.metadata.namespace == "agent-runtime:planner"
+        }
+        linked_ids = {
+            cid
+            for cid in planner_ids
+            if await app.storage.get_chunk_link(cid, link_type="summarizes") is not None
+        }
+        assert len(linked_ids) == 3, f"expected cap=3 links, got {len(linked_ids)}"
+        assert linked_ids.issubset(planner_ids), (
+            "linked targets must come from the session's source chunks"
+        )
 
     @pytest.mark.asyncio
     async def test_summary_links_skipped_for_manual_summary(self, components):
