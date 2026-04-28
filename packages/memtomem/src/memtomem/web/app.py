@@ -257,6 +257,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             "scheduler.enabled=True but ``mm web`` does not dispatch schedules — "
             "run ``memtomem-server`` (MCP) for the watchdog tick that fires registered jobs"
         )
+    if comp.config.policy.enabled:
+        logger.warning(
+            "policy.enabled=True but ``mm web`` does not run the policy scheduler — "
+            "run ``memtomem-server`` (MCP) for the lifespan that starts PolicyScheduler"
+        )
 
     try:
         yield

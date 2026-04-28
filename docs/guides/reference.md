@@ -872,6 +872,13 @@ When enabled, the scheduler runs all enabled policies periodically. The
 atomically. Policies can always be run on-demand via `mem_policy_run`
 regardless of this setting.
 
+> **`PolicyScheduler` requires the MCP server, not `mm web`.** Like the
+> cron scheduler in §9, the policy scheduler is wired into the MCP server
+> lifespan only — `mm web` logs a warning at startup if
+> `policy.enabled=true` but does not actually run policies. Run
+> `memtomem-server` (or connect a Claude Code / Claude Desktop MCP
+> session) for periodic dispatch; `mem_policy_run` works regardless.
+
 ### Combining policies
 
 A common pattern is pairing auto_archive with auto_promote:
