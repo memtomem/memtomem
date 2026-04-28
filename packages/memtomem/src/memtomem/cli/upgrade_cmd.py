@@ -23,11 +23,12 @@ import signal
 import subprocess
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 import click
 
-from memtomem.cli._liveness import ServerState, check_server_liveness
+from memtomem.cli._liveness import ServerState, check_server_liveness, probe_pid_file
 
 
 def _isatty() -> bool:
@@ -86,37 +87,102 @@ def _stop_server(state: ServerState, grace: float) -> tuple[list[int], list[Path
             if not _pid_alive(pid):
                 break
             time.sleep(0.1)
-        else:
-            if pid is not None and _pid_alive(pid):
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                # Brief settle so the kernel actually reaps it before we
-                # try to unlink the lock file.
-                time.sleep(0.5)
+        if pid is not None and _pid_alive(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            # Brief settle so the kernel actually reaps it before we
+            # try to unlink the lock file.
+            time.sleep(0.5)
 
-    # Unconditionally clean stale pid file. Clean SIGTERM teardown usually
-    # removes it itself, but the SIGKILL path leaves it behind, and an
-    # empty/locked file blocks a fresh post-upgrade server.
+    # Clean the stale pid file. Clean SIGTERM teardown usually removes it
+    # itself, but the SIGKILL path leaves it behind. Re-probe immediately
+    # before unlink so we don't accidentally delete a fresh lockfile that
+    # an MCP client just respawned at the same path during the SIGKILL
+    # settle window.
     if state.pid_file is not None:
-        try:
-            state.pid_file.unlink(missing_ok=True)
-            removed.append(state.pid_file)
-        except OSError as exc:
-            raise click.ClickException(
-                f"failed to remove stale pid file {state.pid_file}: {exc}"
-            ) from exc
+        recheck = probe_pid_file(state.pid_file)
+        if recheck.alive:
+            click.secho(
+                f"  Skipping pid-file unlink — {state.pid_file} is now held by a "
+                "freshly started writer (likely an auto-restart from your MCP "
+                "client). Leaving it alone.",
+                fg="yellow",
+            )
+        else:
+            try:
+                state.pid_file.unlink(missing_ok=True)
+                removed.append(state.pid_file)
+            except OSError as exc:
+                raise click.ClickException(
+                    f"failed to remove stale pid file {state.pid_file}: {exc}"
+                ) from exc
 
     return killed, removed
 
 
-def _build_install_cmd(version: str | None) -> list[str]:
-    pkg = "memtomem" if not version else f"memtomem=={version}"
+def _detect_installed_extras() -> list[str]:
+    """Best-effort: read uv's tool receipt to preserve extras on reinstall.
+
+    ``uv tool install 'memtomem[all]'`` records the install spec in
+    ``<uv tool dir>/memtomem/uv-receipt.toml`` as
+    ``[tool].requirements = [{ name = "memtomem", extras = ["all"] }]``.
+    Without re-passing the same extras, ``uv tool install --reinstall
+    memtomem`` would silently fall back to the bare BM25-only install,
+    dropping ONNX dense embeddings, the Web UI, etc. (review feedback).
+
+    Returns ``[]`` on any failure (uv unavailable, receipt missing or
+    malformed) — callers fall back to no extras and can override with
+    ``--extras``.
+    """
+    try:
+        result = subprocess.run(["uv", "tool", "dir"], capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            return []
+        tools_dir = Path(result.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    receipt = tools_dir / "memtomem" / "uv-receipt.toml"
+    if not receipt.exists():
+        return []
+    try:
+        data = tomllib.loads(receipt.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+    for req in data.get("tool", {}).get("requirements", []):
+        if req.get("name") == "memtomem":
+            extras = req.get("extras") or []
+            return [str(e) for e in extras]
+    return []
+
+
+def _build_install_cmd(version: str | None, extras: list[str]) -> list[str]:
+    pkg = "memtomem"
+    if extras:
+        pkg = f"memtomem[{','.join(extras)}]"
+    if version:
+        pkg = f"{pkg}=={version}"
     # ``--refresh`` invalidates uv's cached PyPI index so a freshly
     # released version isn't masked by the cached resolver result
     # (memo: feedback_uv_index_cache_lag.md).
     return ["uv", "tool", "install", "--refresh", "--reinstall", pkg]
+
+
+def _resolve_extras(extras_flag: str | None) -> tuple[list[str], bool]:
+    """Resolve ``--extras`` value to a concrete list + ``auto_detected`` flag.
+
+    ``None`` (flag omitted) → auto-detect from receipt.
+    ``"none"`` / empty → explicit bare install.
+    Anything else → split on ``,`` and strip.
+    """
+    if extras_flag is None:
+        return _detect_installed_extras(), True
+    cleaned = extras_flag.strip().lower()
+    if cleaned in ("", "none"):
+        return [], False
+    return [e.strip() for e in extras_flag.split(",") if e.strip()], False
 
 
 @click.command("upgrade")
@@ -134,6 +200,17 @@ def _build_install_cmd(version: str | None) -> list[str]:
     show_default=True,
     help="Seconds to wait after SIGTERM before escalating to SIGKILL.",
 )
+@click.option(
+    "--extras",
+    "extras_flag",
+    default=None,
+    metavar="LIST",
+    help=(
+        "Extras to install (e.g. 'all' or 'onnx,web'). "
+        "Default: auto-detect from the current uv-tool install so a "
+        "memtomem[all] user keeps [all]. Pass 'none' for a bare install."
+    ),
+)
 @click.option("-y", "--yes", is_flag=True, help="Skip the confirmation prompt.")
 @click.option("--json", "json_out", is_flag=True, help="Emit a structured JSON result.")
 @click.option(
@@ -142,6 +219,7 @@ def _build_install_cmd(version: str | None) -> list[str]:
 def upgrade(
     version: str | None,
     grace: float,
+    extras_flag: str | None,
     yes: bool,
     json_out: bool,
     dry_run: bool,
@@ -155,7 +233,8 @@ def upgrade(
     """
     is_windows = sys.platform == "win32"
     state = check_server_liveness()
-    install_cmd = _build_install_cmd(version)
+    extras, extras_auto = _resolve_extras(extras_flag)
+    install_cmd = _build_install_cmd(version, extras)
     pkg_target = install_cmd[-1]
 
     # ----- plan -----
@@ -176,6 +255,11 @@ def upgrade(
             click.echo(f"  Remove stale {pid_file_repr}")
         else:
             click.echo("  No running server detected — reinstall only")
+        if extras:
+            source = "auto-detected from uv tool receipt" if extras_auto else "from --extras"
+            click.echo(f"  Extras: [{','.join(extras)}] ({source})")
+        elif extras_auto:
+            click.echo("  Extras: none detected (bare install)")
         click.echo(f"  Reinstall: {' '.join(install_cmd)}")
 
     if dry_run:
@@ -190,6 +274,7 @@ def upgrade(
                             [str(state.pid_file)] if (state.alive and state.pid_file) else []
                         ),
                         "would_install": install_cmd,
+                        "extras": extras,
                         "version": version,
                     }
                 )
@@ -206,8 +291,12 @@ def upgrade(
             click.secho(msg, fg="red")
             raise click.Abort()
         if not click.confirm("\nProceed with upgrade?", default=True):
-            click.echo("Cancelled — nothing was changed.")
-            sys.exit(1)
+            # Voluntary cancel → exit 0; keep JSON schema consistent.
+            if json_out:
+                click.echo(_json.dumps({"ok": True, "cancelled": True}))
+            else:
+                click.echo("Cancelled — nothing was changed.")
+            return
 
     # ----- stop -----
     killed: list[int] = []
@@ -266,6 +355,7 @@ def upgrade(
                     "killed": killed,
                     "removed": [str(p) for p in removed],
                     "reinstalled": pkg_target,
+                    "extras": extras,
                     "version": version,
                 }
             )

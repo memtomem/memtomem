@@ -128,8 +128,9 @@ def _load_config_safely() -> tuple[Path, str | None]:
 # ---- server liveness probe -----------------------------------------------
 #
 # Liveness helpers live in ``memtomem.cli._liveness`` so ``mm upgrade`` can
-# share them. They're re-imported above as ``_check_server_liveness`` /
-# ``_probe_pid_file`` / ``_ServerState`` to keep the existing test seams.
+# share them. They're re-imported above as ``_check_server_liveness`` and
+# ``_probe_pid_file`` to keep the existing test seams; the ``ServerState``
+# dataclass is consumed via duck-typing so no alias is needed.
 
 
 def _check_db_lock(db_path: Path) -> _DbLockState:

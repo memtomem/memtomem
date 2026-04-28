@@ -17,6 +17,16 @@ def force_tty(monkeypatch):
     monkeypatch.setattr(upgrade_cmd, "_isatty", lambda: True)
 
 
+@pytest.fixture(autouse=True)
+def _no_extras_by_default(monkeypatch):
+    """Default tests assume the auto-detect probe finds nothing.
+
+    Individual tests opt in to a non-empty receipt by re-patching
+    ``_detect_installed_extras``.
+    """
+    monkeypatch.setattr(upgrade_cmd, "_detect_installed_extras", lambda: [])
+
+
 @pytest.fixture
 def fake_uv(monkeypatch):
     """Capture subprocess.run invocations and return scripted results."""
@@ -181,6 +191,82 @@ def test_non_tty_without_yes_aborts(monkeypatch, fake_uv):
 
     result = CliRunner().invoke(cli, ["upgrade"])
     assert result.exit_code != 0
+    assert calls == []
+
+
+def test_extras_auto_detected_from_receipt(monkeypatch, fake_uv, force_tty):
+    calls, _configure = fake_uv
+    _patch_liveness(monkeypatch, ServerState(alive=False, pid=None, pid_file=None))
+    monkeypatch.setattr(upgrade_cmd, "_detect_installed_extras", lambda: ["all"])
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y"])
+    assert result.exit_code == 0, result.output
+    assert calls == [["uv", "tool", "install", "--refresh", "--reinstall", "memtomem[all]"]]
+    assert "auto-detected" in result.output
+
+
+def test_extras_flag_overrides_detection(monkeypatch, fake_uv, force_tty):
+    calls, _configure = fake_uv
+    _patch_liveness(monkeypatch, ServerState(alive=False, pid=None, pid_file=None))
+    monkeypatch.setattr(upgrade_cmd, "_detect_installed_extras", lambda: ["all"])
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--extras", "onnx,web"])
+    assert result.exit_code == 0, result.output
+    assert calls == [["uv", "tool", "install", "--refresh", "--reinstall", "memtomem[onnx,web]"]]
+
+
+def test_extras_none_suppresses(monkeypatch, fake_uv, force_tty):
+    calls, _configure = fake_uv
+    _patch_liveness(monkeypatch, ServerState(alive=False, pid=None, pid_file=None))
+    monkeypatch.setattr(upgrade_cmd, "_detect_installed_extras", lambda: ["all"])
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--extras", "none"])
+    assert result.exit_code == 0, result.output
+    assert calls == [["uv", "tool", "install", "--refresh", "--reinstall", "memtomem"]]
+
+
+def test_extras_combined_with_version_pin(monkeypatch, fake_uv, force_tty):
+    calls, _configure = fake_uv
+    _patch_liveness(monkeypatch, ServerState(alive=False, pid=None, pid_file=None))
+    monkeypatch.setattr(upgrade_cmd, "_detect_installed_extras", lambda: ["all"])
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--version", "0.1.32"])
+    assert result.exit_code == 0, result.output
+    assert calls == [["uv", "tool", "install", "--refresh", "--reinstall", "memtomem[all]==0.1.32"]]
+
+
+def test_pid_file_unlink_skipped_if_respawned(monkeypatch, tmp_path, fake_uv, force_tty):
+    """SIGKILL path: a fresh server respawns at the same pid file path
+    inside the settle window. We must NOT delete its lockfile."""
+    _calls, _configure = fake_uv
+    pid_file = tmp_path / "server.pid"
+    pid_file.write_text("12345")
+    _patch_liveness(monkeypatch, ServerState(alive=True, pid=12345, pid_file=pid_file))
+    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: None)
+    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda pid: False)
+
+    # Re-probe at unlink time sees a live writer (the respawn).
+    monkeypatch.setattr(
+        upgrade_cmd,
+        "probe_pid_file",
+        lambda p: ServerState(alive=True, pid=99999, pid_file=p),
+    )
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--grace", "0.1"])
+    assert result.exit_code == 0, result.output
+    assert pid_file.exists()
+    assert "freshly started writer" in result.output
+
+
+def test_cancel_exits_zero_and_json_consistent(monkeypatch, fake_uv, force_tty):
+    calls, _configure = fake_uv
+    _patch_liveness(monkeypatch, ServerState(alive=False, pid=None, pid_file=None))
+
+    # Decline confirmation by feeding "n" to click.confirm.
+    result = CliRunner().invoke(cli, ["upgrade", "--json"], input="n\n")
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output.strip().splitlines()[-1])
+    assert payload == {"ok": True, "cancelled": True}
     assert calls == []
 
 
