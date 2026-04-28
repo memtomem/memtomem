@@ -27,7 +27,9 @@ MmBinaryOrigin = Literal["uv-tool", "uvx", "venv-relative", "system", "unknown"]
 def _run(cmd: list[str], timeout: int = 30, output: bool = True) -> subprocess.CompletedProcess:
     """Run a command and return the result."""
     if not output:
-        return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
+        return subprocess.run(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout
+        )
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
