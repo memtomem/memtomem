@@ -5818,3 +5818,114 @@ class TestPresetMcpFlagPreAnswer:
         out = capsys.readouterr().out
         # No header, no menu lines — the step is a no-op in this branch.
         assert out == ""
+
+
+class TestOllamaWindowsHangFix:
+    """Tests for the Windows pipe-inheritance hang fix and startup polling loop.
+
+    On Windows, ``ollama list`` auto-spawns the Ollama server process, which
+    inherits the stdout/stderr pipe handles created by
+    ``subprocess.run(capture_output=True)``. After ``ollama list`` is killed
+    by the 5-second timeout, Python blocks forever trying to drain the pipes
+    (the server keeps them open). The fix uses DEVNULL on win32 so no pipes
+    are ever created. A polling loop then waits for the server to become ready
+    before proceeding.
+    """
+
+    def test_ollama_running_uses_devnull_on_win32(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """On win32, _ollama_running must pass DEVNULL for stdout/stderr and
+        must NOT use capture_output — otherwise the spawned Ollama server
+        inherits the pipe handles and blocks pipe-drain indefinitely."""
+        import subprocess as _sp
+
+        from memtomem.cli import init_cmd
+
+        captured: dict = {}
+
+        def _fake_run(cmd: list, **kw: object) -> _sp.CompletedProcess:
+            captured.update(kw)
+            return _sp.CompletedProcess(cmd, returncode=0)
+
+        monkeypatch.setattr("memtomem.cli.init_cmd.sys.platform", "win32")
+        monkeypatch.setattr(init_cmd.subprocess, "run", _fake_run)
+
+        result = init_cmd._ollama_running()
+
+        assert result is True
+        assert captured.get("stdout") is _sp.DEVNULL
+        assert captured.get("stderr") is _sp.DEVNULL
+        assert not captured.get("capture_output")
+
+    def test_ollama_running_uses_capture_output_on_non_win32(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On non-Windows, _ollama_running must go through _run() which sets
+        capture_output=True — preserving the existing macOS/Linux behaviour."""
+        import subprocess as _sp
+
+        from memtomem.cli import init_cmd
+
+        captured: dict = {}
+
+        def _fake_run(cmd: list, **kw: object) -> _sp.CompletedProcess:
+            captured.update(kw)
+            return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr("memtomem.cli.init_cmd.sys.platform", "darwin")
+        monkeypatch.setattr(init_cmd.subprocess, "run", _fake_run)
+
+        init_cmd._ollama_running()
+
+        assert captured.get("capture_output") is True
+
+    def test_win32_polling_succeeds_before_timeout(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Polling loop exits with 'Ollama is ready.' when _ollama_running
+        returns True before exhausting all 12 retries."""
+        from memtomem.cli import init_cmd
+
+        # First call (the guard check) → False; two loop misses → False; then ready
+        calls = iter([False, False, False, True])
+        monkeypatch.setattr("memtomem.cli.init_cmd.sys.platform", "win32")
+        monkeypatch.setattr(init_cmd, "_ollama_running", lambda: next(calls, True))
+        monkeypatch.setattr(init_cmd, "_ollama_available", lambda: True)
+        monkeypatch.setattr(init_cmd, "_have_module", lambda _: True)
+        monkeypatch.setattr(init_cmd, "_ollama_has_model", lambda _: True)
+        monkeypatch.setattr(init_cmd, "step_header", lambda *a, **kw: None)
+        monkeypatch.setattr(init_cmd.time, "sleep", lambda _: None)
+
+        nav_answers = iter([3, 1])  # 3=Ollama provider, 1=nomic-embed-text
+        monkeypatch.setattr(init_cmd, "nav_prompt", lambda *a, **kw: next(nav_answers))
+
+        state: dict = {}
+        init_cmd._step_embedding(state)
+
+        out = capsys.readouterr().out
+        assert "Ollama is ready." in out
+        assert "did not start in time" not in out
+
+    def test_win32_polling_times_out_when_ollama_never_starts(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Polling loop prints failure message when _ollama_running never
+        returns True within the 12-iteration window."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr("memtomem.cli.init_cmd.sys.platform", "win32")
+        monkeypatch.setattr(init_cmd, "_ollama_running", lambda: False)
+        monkeypatch.setattr(init_cmd, "_ollama_available", lambda: True)
+        monkeypatch.setattr(init_cmd, "_have_module", lambda _: True)
+        monkeypatch.setattr(init_cmd, "_ollama_has_model", lambda _: True)
+        monkeypatch.setattr(init_cmd, "step_header", lambda *a, **kw: None)
+        monkeypatch.setattr(init_cmd.time, "sleep", lambda _: None)
+
+        nav_answers = iter([3, 1])  # 3=Ollama provider, 1=nomic-embed-text
+        monkeypatch.setattr(init_cmd, "nav_prompt", lambda *a, **kw: next(nav_answers))
+
+        state: dict = {}
+        init_cmd._step_embedding(state)
+
+        out = capsys.readouterr().out
+        assert "Ollama did not start in time." in out
+        assert "Ollama is ready." not in out
