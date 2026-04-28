@@ -94,6 +94,20 @@ class ShareLinkMixin:
         )
         db.commit()
 
+    async def delete_dangling_chunk_links(self) -> int:
+        """Delete ``chunk_links`` rows whose source chunk has been removed.
+
+        ``source_id`` is declared ``ON DELETE SET NULL``, so deleting the
+        source chunk leaves a dangling row that no longer carries useful
+        provenance. Returns the number of rows deleted. Used by the
+        ``dead_chunk_link_cleanup`` scheduled job (P2 cron Phase A).
+        """
+        db = self._get_db()
+        cur = db.execute("DELETE FROM chunk_links WHERE source_id IS NULL")
+        deleted = cur.rowcount
+        db.commit()
+        return deleted
+
     async def get_chunk_link(
         self,
         target_id: UUID,

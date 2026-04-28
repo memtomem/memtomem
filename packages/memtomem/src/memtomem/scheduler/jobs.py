@@ -24,6 +24,10 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
 from pydantic import BaseModel, Field
 
+# expire_chunks lives in the search package; importing at module top is
+# safe — there is no scheduler ↔ search cycle.
+from memtomem.search.decay import expire_chunks
+
 if TYPE_CHECKING:
     from memtomem.server.context import AppContext
 
@@ -75,11 +79,15 @@ class DedupScanParams(BaseModel):
 
 
 async def _run_compaction(app: AppContext) -> JobResult:
-    """Delete orphan chunks (chunks whose source file no longer exists)."""
-    from pathlib import Path
+    """Delete orphan chunks (chunks whose source file no longer exists).
 
+    Loops orphans one-by-one rather than batching: orphan counts are
+    typically small, and ``delete_by_source`` already handles its own
+    invalidation. If this turns into a bottleneck, add a bulk
+    ``delete_by_sources`` to the storage layer (follow-up).
+    """
     sources = await app.storage.get_all_source_files()
-    orphaned: list[Path] = [sf for sf in sources if not sf.exists()]
+    orphaned = [sf for sf in sources if not sf.exists()]
     deleted = 0
     for sf in orphaned:
         deleted += await app.storage.delete_by_source(sf)
@@ -98,8 +106,6 @@ async def _run_importance_decay(
     source_filter: str | None = None,
 ) -> JobResult:
     """Expire (delete) chunks older than ``max_age_days``."""
-    from memtomem.search.decay import expire_chunks
-
     stats = await expire_chunks(
         app.storage,
         max_age_days=max_age_days,
@@ -123,10 +129,7 @@ async def _run_dead_chunk_link_cleanup(app: AppContext) -> JobResult:
     These rows are no longer useful for provenance walks (PR-A1's
     rescue leg) and accumulate over time.
     """
-    db = app.storage._get_db()
-    cur = db.execute("DELETE FROM chunk_links WHERE source_id IS NULL")
-    deleted = cur.rowcount
-    db.commit()
+    deleted = await app.storage.delete_dangling_chunk_links()
     return {"dead_links_deleted": deleted}
 
 
@@ -143,6 +146,10 @@ async def _run_dedup_scan(
     should run ``mem_dedup_merge`` explicitly after reviewing.
     """
     if app.dedup_scanner is None:
+        # Returning a normal result (not raising) — the dispatcher in
+        # PR-A3 should map this to status="ok" and surface the
+        # ``skipped_reason`` via ``last_run_error``. A missing scanner
+        # is a config state, not a runtime failure.
         return {"candidates": 0, "skipped_reason": "dedup_scanner_not_initialized"}
     candidates = await app.dedup_scanner.scan(threshold=threshold, limit=limit, max_scan=max_scan)
     return {"candidates": len(candidates), "threshold": threshold}

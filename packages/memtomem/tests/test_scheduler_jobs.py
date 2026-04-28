@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from memtomem.scheduler import JOB_KINDS, JobSpec
 from memtomem.server.context import AppContext
@@ -58,7 +59,7 @@ class TestRunners:
     @pytest.mark.asyncio
     async def test_importance_decay_validates_params(self):
         spec = JOB_KINDS["importance_decay"]
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             spec.params_model.model_validate({"max_age_days": -1})
 
     @pytest.mark.asyncio
@@ -77,7 +78,7 @@ class TestRunners:
     @pytest.mark.asyncio
     async def test_dedup_scan_validates_threshold(self):
         spec = JOB_KINDS["dedup_scan"]
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             spec.params_model.model_validate({"threshold": 1.5})
 
 
