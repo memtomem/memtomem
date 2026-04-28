@@ -7,7 +7,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from memtomem.constants import AGENT_NAMESPACE_PREFIX, validate_agent_id, validate_namespace
 from memtomem.models import NamespaceFilter
@@ -205,17 +205,23 @@ async def mem_session_end(
 
     effective_summary = summary
     auto_summary_skip_reason: str | None = None
+    auto_source_chunks: list = []
     if not summary:
-        effective_summary, auto_summary_skip_reason = await _maybe_auto_summarize(
+        (
+            effective_summary,
+            auto_summary_skip_reason,
+            auto_source_chunks,
+        ) = await _maybe_auto_summarize(
             app,
             session_id=session_id,
             session_row=session_row,
         )
 
     summary_chunk_line: str | None = None
+    summary_chunk_id = None
     if effective_summary:
         try:
-            summary_chunk_line = await _persist_session_summary_chunk(
+            summary_chunk_line, summary_chunk_id = await _persist_session_summary_chunk(
                 app,
                 session_id=session_id,
                 agent_id=agent_id,
@@ -225,6 +231,26 @@ async def mem_session_end(
         except Exception:
             logger.warning(
                 "session_summary_chunk_persist_failed session_id=%s",
+                session_id,
+                exc_info=True,
+            )
+
+    # Phase B-2: link the summary chunk back to the source chunks it
+    # summarized. Only runs on the auto path (manual ``summary=`` did
+    # not collect source chunks). Failures are best-effort: a broken
+    # link writer must not roll back the session-end DB write or the
+    # archive chunk that already landed.
+    if summary_chunk_id is not None and auto_source_chunks:
+        try:
+            await _write_summary_links(
+                app,
+                summary_chunk_id=summary_chunk_id,
+                source_chunks=auto_source_chunks,
+                cap=app.config.session_summary.max_summary_links,
+            )
+        except Exception:
+            logger.warning(
+                "session_summary_links_failed session_id=%s",
                 session_id,
                 exc_info=True,
             )
@@ -257,16 +283,18 @@ async def _maybe_auto_summarize(
     *,
     session_id: str,
     session_row: dict | None,
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, list]:
     """Run the Phase B auto-summary path when prerequisites are met.
 
-    Returns ``(summary_text, skip_reason)``. When the auto path
-    produced text, ``skip_reason`` is ``None``. When the path was
-    skipped, ``summary_text`` is ``None`` and ``skip_reason`` carries
-    a short label suitable for the tool response (``"disabled"``,
+    Returns ``(summary_text, skip_reason, source_chunks)``. When the
+    auto path produced text, ``skip_reason`` is ``None`` and
+    ``source_chunks`` carries the chunks fed to the LLM (newest first)
+    so the caller can write Phase B-2 ``chunk_links`` rows. When the
+    path was skipped, ``summary_text`` is ``None``, ``skip_reason``
+    carries a short label suitable for the tool response (``"disabled"``,
     ``"no llm"``, ``"no session row"``, ``"no started_at"``,
     ``"below min_chunks"``, ``"too large"``, ``"empty output"``, or
-    ``"llm error"``).
+    ``"llm error"``), and ``source_chunks`` is an empty list.
 
     Failures inside the LLM call are caught and surfaced as
     ``"llm error"`` so a misconfigured provider does not block
@@ -274,19 +302,19 @@ async def _maybe_auto_summarize(
     """
     cfg = app.config.session_summary
     if not cfg.auto:
-        return None, "disabled"
+        return None, "disabled", []
 
     llm = app.llm_provider
     if llm is None:
-        return None, "no llm"
+        return None, "no llm", []
 
     if session_row is None:
-        return None, "no session row"
+        return None, "no session row", []
 
     started_at_str = session_row.get("started_at")
     namespace = session_row.get("namespace") or "default"
     if not started_at_str:
-        return None, "no started_at"
+        return None, "no started_at", []
 
     try:
         started_at = datetime.fromisoformat(started_at_str)
@@ -296,7 +324,7 @@ async def _maybe_auto_summarize(
             session_id,
             started_at_str,
         )
-        return None, "no started_at"
+        return None, "no started_at", []
     if started_at.tzinfo is None:
         started_at = started_at.replace(tzinfo=timezone.utc)
 
@@ -307,7 +335,7 @@ async def _maybe_auto_summarize(
         limit=max(cfg.min_chunks * 4, 200),
     )
     if len(chunks) < cfg.min_chunks:
-        return None, "below min_chunks"
+        return None, "below min_chunks", []
 
     try:
         summary = await summarize_session(
@@ -319,18 +347,18 @@ async def _maybe_auto_summarize(
         )
     except SessionTooLargeError as exc:
         logger.info("auto_summary_skipped session_id=%s reason=%s", session_id, exc)
-        return None, "too large"
+        return None, "too large", []
     except Exception:
         logger.warning(
             "auto_summary_llm_failed session_id=%s",
             session_id,
             exc_info=True,
         )
-        return None, "llm error"
+        return None, "llm error", []
 
     if not summary:
-        return None, "empty output"
-    return summary, None
+        return None, "empty output", []
+    return summary, None, chunks
 
 
 async def _persist_session_summary_chunk(
@@ -340,7 +368,7 @@ async def _persist_session_summary_chunk(
     agent_id: str | None,
     summary: str,
     event_counts: dict[str, int],
-) -> str | None:
+) -> tuple[str | None, UUID | None]:
     """Promote a session summary to a first-class chunk.
 
     Writes the markdown file at
@@ -348,13 +376,16 @@ async def _persist_session_summary_chunk(
     under ``archive:session:<session_id>``. The ``archive:`` prefix is
     a default system namespace, so the chunk is hidden from
     ``mem_search`` unless the caller passes an explicit
-    ``namespace_filter``. Returns a single-line status for the tool
-    response, or ``None`` when no memory directory is configured or
-    when the indexer rejected the file (zero chunks).
+    ``namespace_filter``. Returns ``(status_line, summary_chunk_id)``;
+    both are ``None`` when no memory directory is configured or when
+    the indexer rejected the file (zero chunks). When the summary
+    body landed as multiple chunks (uncommon for a short narrative),
+    the returned id is the first one — Phase B-2's link writer attaches
+    its rows to that anchor.
     """
     memory_dirs = app.config.indexing.memory_dirs
     if not memory_dirs:
-        return None
+        return None, None
 
     # Validate the derived namespace before doing any I/O so an invalid
     # session_id (defensive — uuid4 is safe in practice) can't leave a
@@ -394,9 +425,46 @@ async def _persist_session_summary_chunk(
             session_id,
             target,
         )
-        return None
+        return None, None
 
-    return f"- Summary chunk: {namespace} ({stats.indexed_chunks} chunks)"
+    summary_chunk_id = stats.new_chunk_ids[0] if stats.new_chunk_ids else None
+    return f"- Summary chunk: {namespace} ({stats.indexed_chunks} chunks)", summary_chunk_id
+
+
+async def _write_summary_links(
+    app: AppContext,
+    *,
+    summary_chunk_id: UUID,
+    source_chunks: list,
+    cap: int,
+) -> None:
+    """Write ``link_type="summarizes"`` rows from the summary back to sources.
+
+    One row per source chunk capped to ``cap`` (RFC Open-Question-1).
+    ``source_chunks`` arrives newest-first from ``recall_chunks`` so
+    truncating with ``[:cap]`` keeps the most recent activity and drops
+    the tail — the design choice the RFC settled on. Each row is
+    independently best-effort: a single ``add_chunk_link`` failure
+    (validation, primary-key collision under concurrent re-summary,
+    etc.) is logged and skipped rather than aborting the rest.
+    """
+    if cap <= 0 or not source_chunks:
+        return
+    for source_chunk in source_chunks[:cap]:
+        try:
+            await app.storage.add_chunk_link(
+                source_id=summary_chunk_id,
+                target_id=source_chunk.id,
+                link_type="summarizes",
+                namespace_target=source_chunk.metadata.namespace or "default",
+            )
+        except Exception:
+            logger.warning(
+                "summary_link_write_failed summary=%s target=%s",
+                summary_chunk_id,
+                source_chunk.id,
+                exc_info=True,
+            )
 
 
 def _format_session_summary(

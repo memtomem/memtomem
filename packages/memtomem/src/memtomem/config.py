@@ -554,6 +554,11 @@ class SessionSummaryConfig(BaseSettings):
     min_chunks: int = 5
     max_summary_tokens: int = 500
     max_input_chars: int = 60_000
+    # Cap on ``chunk_links`` rows written from the summary chunk back
+    # to the source chunks it summarized (RFC Open-Question-1). Long
+    # sessions otherwise emit one row per chunk; we keep the newest
+    # ``max_summary_links`` (chunks arrive newest first, tail dropped).
+    max_summary_links: int = 50
 
     @field_validator("min_chunks")
     @classmethod
@@ -562,7 +567,7 @@ class SessionSummaryConfig(BaseSettings):
             raise ValueError(f"{info.field_name} must be positive, got {v}")
         return v
 
-    @field_validator("max_summary_tokens", "max_input_chars")
+    @field_validator("max_summary_tokens", "max_input_chars", "max_summary_links")
     @classmethod
     def positive_int(cls, v: int, info: ValidationInfo) -> int:
         if v <= 0:
