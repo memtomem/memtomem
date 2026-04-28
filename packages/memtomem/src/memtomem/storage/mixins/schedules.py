@@ -10,11 +10,14 @@ schedule fires exactly once on the next dispatcher tick (no backfill).
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from croniter import croniter
+from croniter import CroniterBadCronError, CroniterBadDateError, croniter
+
+logger = logging.getLogger(__name__)
 
 
 def _utcnow_iso() -> str:
@@ -110,8 +113,18 @@ class ScheduleMixin:
             base = _parse_iso_utc(base_iso)
             try:
                 next_fire = croniter(sched["cron_expr"], base).get_next(datetime)
-            except (ValueError, KeyError):
+            except (CroniterBadCronError, CroniterBadDateError) as exc:
                 # Invalid cron stored — skip rather than crash dispatcher.
+                # Loud (warning, not debug) per feedback_silent_except_log_level:
+                # this is the most-likely operational footgun (downgrade /
+                # bad migration leaving a phantom row), and silent skips
+                # would be invisible in production.
+                logger.warning(
+                    "schedule %s has invalid cron_expr %r; skipping (%s)",
+                    sched["id"],
+                    sched["cron_expr"],
+                    exc,
+                )
                 continue
             if next_fire.tzinfo is None:
                 next_fire = next_fire.replace(tzinfo=timezone.utc)
