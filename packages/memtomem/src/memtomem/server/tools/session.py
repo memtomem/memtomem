@@ -10,10 +10,12 @@ from pathlib import Path
 from uuid import uuid4
 
 from memtomem.constants import AGENT_NAMESPACE_PREFIX, validate_agent_id, validate_namespace
+from memtomem.models import NamespaceFilter
 from memtomem.server import mcp
 from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.summarization import SessionTooLargeError, summarize_session
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +161,16 @@ async def mem_session_end(
     chunk is best-effort: a failure is logged but does not roll back
     the session-end DB write.
 
+    When ``summary`` is omitted, Phase B's auto path runs: if the
+    server has an LLM provider configured, ``session_summary.auto`` is
+    True, and the session collected at least
+    ``session_summary.min_chunks`` chunks in its namespace since
+    ``started_at``, the server asks the LLM for a short narrative
+    summary and persists it through the same archive-chunk path.
+    Sessions whose serialized chunk body exceeds
+    ``session_summary.max_input_chars`` skip the auto path with a
+    log warning (callers can pass an explicit ``summary=`` instead).
+
     Args:
         summary: Optional summary of what was accomplished in this
             session. When provided, also written as a chunk under
@@ -181,16 +193,33 @@ async def mem_session_end(
     for e in events:
         event_counts[e["event_type"]] = event_counts.get(e["event_type"], 0) + 1
 
+    # Read the session row before end_session writes ended_at — we need
+    # ``started_at`` and ``namespace`` for the Phase B auto-summary
+    # chunk lookup. Tolerate missing rows defensively (the row was
+    # created in mem_session_start, so absence indicates external
+    # tampering or a backend bug; either way, fall back to skipping
+    # auto-summary rather than crashing the close path).
+    session_row = await app.storage.get_session(session_id)
+
     await app.storage.end_session(session_id, summary, {"event_counts": event_counts})
 
+    effective_summary = summary
+    auto_summary_skip_reason: str | None = None
+    if not summary:
+        effective_summary, auto_summary_skip_reason = await _maybe_auto_summarize(
+            app,
+            session_id=session_id,
+            session_row=session_row,
+        )
+
     summary_chunk_line: str | None = None
-    if summary:
+    if effective_summary:
         try:
             summary_chunk_line = await _persist_session_summary_chunk(
                 app,
                 session_id=session_id,
                 agent_id=agent_id,
-                summary=summary,
+                summary=effective_summary,
                 event_counts=event_counts,
             )
         except Exception:
@@ -211,13 +240,96 @@ async def mem_session_end(
         f"Session ended: {session_id}",
         f"- Events: {len(events)} ({', '.join(f'{k}:{v}' for k, v in event_counts.items())})",
     ]
-    if summary:
-        lines.append(f"- Summary: {summary[:100]}...")
+    if effective_summary:
+        prefix = "Summary" if summary else "Auto summary"
+        lines.append(f"- {prefix}: {effective_summary[:100]}...")
+    elif auto_summary_skip_reason:
+        lines.append(f"- Auto summary: skipped ({auto_summary_skip_reason})")
     if summary_chunk_line:
         lines.append(summary_chunk_line)
     if cleaned:
         lines.append(f"- Working memory cleaned: {cleaned} entries")
     return "\n".join(lines)
+
+
+async def _maybe_auto_summarize(
+    app: AppContext,
+    *,
+    session_id: str,
+    session_row: dict | None,
+) -> tuple[str | None, str | None]:
+    """Run the Phase B auto-summary path when prerequisites are met.
+
+    Returns ``(summary_text, skip_reason)``. When the auto path
+    produced text, ``skip_reason`` is ``None``. When the path was
+    skipped, ``summary_text`` is ``None`` and ``skip_reason`` carries
+    a short label suitable for the tool response (``"disabled"``,
+    ``"no llm"``, ``"below min_chunks"``, ``"too large"``,
+    ``"empty output"``, or ``"llm error"``).
+
+    Failures inside the LLM call are caught and surfaced as
+    ``"llm error"`` so a misconfigured provider does not block
+    ``mem_session_end`` from completing.
+    """
+    cfg = app.config.session_summary
+    if not cfg.auto:
+        return None, "disabled"
+
+    llm = app.llm_provider
+    if llm is None:
+        return None, "no llm"
+
+    if session_row is None:
+        return None, "no session row"
+
+    started_at_str = session_row.get("started_at")
+    namespace = session_row.get("namespace") or "default"
+    if not started_at_str:
+        return None, "no started_at"
+
+    try:
+        started_at = datetime.fromisoformat(started_at_str)
+    except ValueError:
+        logger.warning(
+            "auto_summary_invalid_started_at session_id=%s value=%r",
+            session_id,
+            started_at_str,
+        )
+        return None, "no started_at"
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+
+    ns_filter = NamespaceFilter(namespaces=(namespace,))
+    chunks = await app.storage.recall_chunks(
+        since=started_at,
+        namespace_filter=ns_filter,
+        limit=max(cfg.min_chunks * 4, 200),
+    )
+    if len(chunks) < cfg.min_chunks:
+        return None, "below min_chunks"
+
+    try:
+        summary = await summarize_session(
+            session_id,
+            chunks,
+            llm=llm,
+            max_tokens=cfg.max_summary_tokens,
+            max_input_chars=cfg.max_input_chars,
+        )
+    except SessionTooLargeError as exc:
+        logger.info("auto_summary_skipped session_id=%s reason=%s", session_id, exc)
+        return None, "too large"
+    except Exception:
+        logger.warning(
+            "auto_summary_llm_failed session_id=%s",
+            session_id,
+            exc_info=True,
+        )
+        return None, "llm error"
+
+    if not summary:
+        return None, "empty output"
+    return summary, None
 
 
 async def _persist_session_summary_chunk(

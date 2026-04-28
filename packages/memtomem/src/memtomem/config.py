@@ -539,6 +539,37 @@ class LLMConfig(BaseSettings):
         return v
 
 
+class SessionSummaryConfig(BaseSettings):
+    """Auto LLM summary on ``mem_session_end`` (RFC P1 Phase B).
+
+    When ``auto`` is True and the closing session has at least
+    ``min_chunks`` chunks added during its lifetime, the server
+    generates an LLM summary and Phase A's persistence helper promotes
+    it to ``archive:session:<id>``. Sessions whose serialized chunk
+    body would exceed ``max_input_chars`` are skipped (the caller can
+    pass an explicit ``summary=`` instead).
+    """
+
+    auto: bool = True
+    min_chunks: int = 5
+    max_summary_tokens: int = 500
+    max_input_chars: int = 60_000
+
+    @field_validator("min_chunks")
+    @classmethod
+    def min_chunks_positive(cls, v: int, info: ValidationInfo) -> int:
+        if v <= 0:
+            raise ValueError(f"{info.field_name} must be positive, got {v}")
+        return v
+
+    @field_validator("max_summary_tokens", "max_input_chars")
+    @classmethod
+    def positive_int(cls, v: int, info: ValidationInfo) -> int:
+        if v <= 0:
+            raise ValueError(f"{info.field_name} must be positive, got {v}")
+        return v
+
+
 class Mem2MemConfig(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="MEMTOMEM_",
@@ -565,6 +596,7 @@ class Mem2MemConfig(BaseSettings):
     context_window: ContextWindowConfig = Field(default_factory=ContextWindowConfig)
     health_watchdog: HealthWatchdogConfig = Field(default_factory=HealthWatchdogConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    session_summary: SessionSummaryConfig = Field(default_factory=SessionSummaryConfig)
 
 
 # ---------------------------------------------------------------------------
