@@ -515,6 +515,40 @@ class HealthWatchdogConfig(BaseSettings):
     auto_maintenance: bool = True
 
 
+class SchedulerConfig(BaseSettings):
+    """Cron scheduler for memory lifecycle jobs (P2 Phase A).
+
+    Dispatch cadence is the health watchdog loop — this config has no
+    own tick interval. Both ``scheduler.enabled`` AND
+    ``health_watchdog.enabled`` must be true for schedules to fire; the
+    watchdog gate wins because the dispatcher rides its loop.
+
+    Phase A is UTC-only: ``default_timezone`` is accepted but only the
+    value ``"utc"`` is honored. Other values log a warning at startup
+    and fall back to UTC. Per-schedule timezone overrides are deferred
+    to Phase C (RFC Open-Q-1).
+    """
+
+    enabled: bool = False
+    max_concurrent_jobs: int = 1
+    default_timezone: str = "utc"
+    runner_timeout_seconds: float = 300.0
+
+    @field_validator("max_concurrent_jobs")
+    @classmethod
+    def _max_concurrent_positive(cls, v: int, info: ValidationInfo) -> int:
+        if v < 1:
+            raise ValueError(f"{info.field_name} must be >= 1, got {v}")
+        return v
+
+    @field_validator("runner_timeout_seconds")
+    @classmethod
+    def _runner_timeout_positive(cls, v: float, info: ValidationInfo) -> float:
+        if v <= 0:
+            raise ValueError(f"{info.field_name} must be positive, got {v}")
+        return v
+
+
 class LLMConfig(BaseSettings):
     enabled: bool = False
     provider: str = "ollama"
@@ -625,6 +659,7 @@ class Mem2MemConfig(BaseSettings):
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
     context_window: ContextWindowConfig = Field(default_factory=ContextWindowConfig)
     health_watchdog: HealthWatchdogConfig = Field(default_factory=HealthWatchdogConfig)
+    scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     session_summary: SessionSummaryConfig = Field(default_factory=SessionSummaryConfig)
 
