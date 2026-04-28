@@ -489,3 +489,4 @@ rm -rf ~/.memtomem
 - [Embeddings](embeddings.md) — ONNX, Ollama, OpenAI providers
 - [LLM Providers](llm-providers.md) — Ollama, OpenAI, and compatible endpoints
 - [MCP Client Setup](mcp-clients.md) — editor-specific configuration
+- [Scheduled jobs](reference.md#9-scheduled-jobs--mm-schedule-schedule_) — `mm schedule` for cron-driven compaction, dedup, decay, and reflect runs
