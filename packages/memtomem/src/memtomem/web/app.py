@@ -247,6 +247,17 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     for d in comp.config.indexing.memory_dirs:
         Path(d).expanduser().resolve().mkdir(parents=True, exist_ok=True)
 
+    # P2 cron Phase A footgun: ``mm web`` does not run the schedule
+    # dispatcher (HealthWatchdog is wired only in the MCP server lifespan,
+    # see server/context.py). Mirror the warning emitted there so users who
+    # register schedules against a web-only entry get a loud signal at
+    # startup instead of silently null ``last_run_status``.
+    if comp.config.scheduler.enabled:
+        logger.warning(
+            "scheduler.enabled=True but ``mm web`` does not dispatch schedules — "
+            "run ``memtomem-server`` (MCP) for the watchdog tick that fires registered jobs"
+        )
+
     try:
         yield
     finally:
