@@ -892,6 +892,48 @@ on promotion prevents the chunk from being immediately re-archived.
 
 ---
 
+## 9. Scheduled jobs — `mm schedule`, `schedule_*`
+
+Phase A of the cron scheduler ships **direct-cron** registration for the
+maintenance jobs the watchdog already runs. Each schedule is a 5-field
+cron expression interpreted in **UTC**, paired with one of the
+whitelisted `JOB_KINDS`:
+
+| `job_kind`                | Effect                                                      |
+|---------------------------|-------------------------------------------------------------|
+| `compaction`              | Delete chunks whose source files no longer exist on disk    |
+| `importance_decay`        | Delete chunks older than `max_age_days` (TTL-based decay)   |
+| `dead_chunk_link_cleanup` | Remove `chunk_links` rows whose source chunk is gone        |
+| `dedup_scan`              | Surface duplicate-chunk candidates (no auto-merge)          |
+
+Schedules are stored in SQLite and dispatched by the same watchdog tick
+loop that powers `mem_watchdog` — set
+`MEMTOMEM_SCHEDULER__ENABLED=true` on top of the watchdog config to
+enable dispatch.
+
+```bash
+mm schedule add --cron "0 3 * * 0" --job compaction
+mm schedule list
+mm schedule run-now <id>           # out-of-band run; same timeout as dispatcher
+mm schedule delete <id>
+```
+
+The same actions are reachable through `mem_do`:
+
+```
+mem_do(action="schedule_register",
+       params={"cron": "0 3 * * 0", "job_kind": "compaction"})
+mem_do(action="schedule_list")
+mem_do(action="schedule_run_now", params={"id": "<id>"})
+mem_do(action="schedule_delete", params={"id": "<id>"})
+```
+
+> Phase A is direct-cron only. Natural-language schedules
+> (`spec="every Sunday 3am"`) and `disable`/`enable` commands arrive in
+> Phase B and Phase C respectively.
+
+---
+
 ## Web UI
 
 ```bash

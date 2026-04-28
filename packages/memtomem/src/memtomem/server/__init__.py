@@ -121,6 +121,12 @@ from memtomem.server.tools.context import (
 )  # noqa: E402, F401
 from memtomem.server.tools.ingest import mem_ingest  # noqa: E402, F401  — no @mcp.tool; import triggers @register("ingest") for mem_do routing
 from memtomem.server.tools.watchdog import mem_watchdog  # noqa: E402, F401
+from memtomem.server.tools.schedule import (  # noqa: E402, F401
+    mem_schedule_delete,
+    mem_schedule_list,
+    mem_schedule_register,
+    mem_schedule_run_now,
+)
 from memtomem.server.tools.meta import mem_do  # noqa: E402, F401
 import memtomem.server.resources  # noqa: E402, F401  — register MCP resources
 
@@ -148,7 +154,15 @@ if _TOOL_MODE != "full":
     if _TOOL_MODE == "standard":
         from memtomem.server.tool_registry import ACTIONS
 
-        _standard_packs = {"crud", "namespace", "tags", "sessions", "scratch", "relations"}
+        _standard_packs = {
+            "crud",
+            "namespace",
+            "tags",
+            "sessions",
+            "scratch",
+            "relations",
+            "schedule",
+        }
         _allowed = _CORE_TOOLS | {
             f"mem_{name}" for name, info in ACTIONS.items() if info.category in _standard_packs
         }
