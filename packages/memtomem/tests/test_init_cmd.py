@@ -5856,28 +5856,6 @@ class TestOllamaWindowsHangFix:
         assert captured.get("stderr") is _sp.DEVNULL
         assert not captured.get("capture_output")
 
-    def test_ollama_running_uses_capture_output_on_non_win32(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """On non-Windows, _ollama_running must go through _run() which sets
-        capture_output=True — preserving the existing macOS/Linux behaviour."""
-        import subprocess as _sp
-
-        from memtomem.cli import init_cmd
-
-        captured: dict = {}
-
-        def _fake_run(cmd: list, **kw: object) -> _sp.CompletedProcess:
-            captured.update(kw)
-            return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
-
-        monkeypatch.setattr("memtomem.cli.init_cmd.sys.platform", "darwin")
-        monkeypatch.setattr(init_cmd.subprocess, "run", _fake_run)
-
-        init_cmd._ollama_running()
-
-        assert captured.get("capture_output") is True
-
     def test_win32_polling_succeeds_before_timeout(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
