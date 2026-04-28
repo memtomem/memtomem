@@ -100,6 +100,40 @@ def memory_dir(components: Components):
 
 
 @pytest.fixture
+async def bm25_only_components(tmp_path, monkeypatch):
+    """Real BM25-only component stack with a tmp DB + memory_dir.
+
+    Hermetic against ``~/.memtomem/config.json`` and developer
+    ``MEMTOMEM_*`` env vars. Dense search is off so we don't pull an
+    embedder; ``chunks_vec`` still needs a non-zero dimension to satisfy
+    ``upsert_chunks``. Yields ``(components, memory_dir)``.
+
+    Shared between MCP-tool integration tests that need real storage but
+    no embedding model — see ``test_multi_agent_integration.py`` and
+    ``test_batch_add_tag_isolation.py``.
+    """
+    db_path = tmp_path / "bm25.db"
+    mem_dir = tmp_path / "memories"
+    mem_dir.mkdir()
+
+    from helpers import isolate_memtomem_env
+
+    isolate_memtomem_env(monkeypatch)
+
+    config = Mem2MemConfig()
+    config.storage.sqlite_path = db_path
+    config.indexing.memory_dirs = [mem_dir]
+    config.embedding.dimension = 1024
+    config.search.enable_dense = False  # BM25-only — no embedder needed
+
+    comp = await create_components(config)
+    try:
+        yield comp, mem_dir
+    finally:
+        await close_components(comp)
+
+
+@pytest.fixture
 async def onnx_components(tmp_path, monkeypatch):
     """Component stack with ONNX multilingual MiniLM-L12 against a tmp DB.
 

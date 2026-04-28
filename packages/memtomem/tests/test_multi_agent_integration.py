@@ -41,13 +41,11 @@ from pathlib import Path
 
 import pytest
 
-from memtomem.config import Mem2MemConfig
 from memtomem.constants import (
     AGENT_NAMESPACE_PREFIX,
     INVALID_OUTPUT_FORMAT_PREFIX,
     SHARED_NAMESPACE,
 )
-from memtomem.server.component_factory import close_components, create_components
 from memtomem.server.context import AppContext
 from memtomem.server.tools.multi_agent import (
     _SHARED_FROM_TAG_PREFIX,
@@ -58,73 +56,7 @@ from memtomem.server.tools.multi_agent import (
 from memtomem.server.tools.search import mem_search
 from memtomem.server.tools.session import mem_session_end, mem_session_start
 
-from helpers import make_chunk
-
-# Developer ``MEMTOMEM_*`` env vars that would override the in-test
-# config and break hermeticity. Add new top-level config sections here
-# when they grow an env-var binding.
-_MEMTOMEM_ENV_VARS = (
-    "MEMTOMEM_EMBEDDING__PROVIDER",
-    "MEMTOMEM_EMBEDDING__MODEL",
-    "MEMTOMEM_EMBEDDING__DIMENSION",
-    "MEMTOMEM_STORAGE__SQLITE_PATH",
-    "MEMTOMEM_INDEXING__MEMORY_DIRS",
-)
-
-
-def _isolate_memtomem_env(monkeypatch) -> None:
-    """Strip ``MEMTOMEM_*`` env vars and stub out ``load_config_overrides``
-    so a freshly constructed ``Mem2MemConfig`` is not mutated by the
-    developer's ``~/.memtomem/config.json`` or shell environment.
-    """
-    for var in _MEMTOMEM_ENV_VARS:
-        monkeypatch.delenv(var, raising=False)
-
-    import memtomem.config as _cfg
-
-    monkeypatch.setattr(_cfg, "load_config_overrides", lambda c: None)
-
-
-class _StubCtx:
-    """Minimal stand-in for MCP ``Context`` so MCP tools can be invoked
-    directly. Mirrors the helper in ``test_sessions`` /
-    ``test_server_degraded_mode``.
-    """
-
-    def __init__(self, app: AppContext) -> None:
-        class _RC:
-            pass
-
-        self.request_context = _RC()
-        self.request_context.lifespan_context = app
-
-
-@pytest.fixture
-async def integration_components(tmp_path, monkeypatch):
-    """Real BM25-only component stack with a tmp DB + memory_dir.
-
-    Bypasses ``~/.memtomem/config.json`` and any developer ``MEMTOMEM_*``
-    env vars so the test is hermetic. Dense search is off so we don't
-    pull an embedder; ``chunks_vec`` still needs a non-zero dimension
-    to satisfy ``upsert_chunks``.
-    """
-    db_path = tmp_path / "integration.db"
-    mem_dir = tmp_path / "memories"
-    mem_dir.mkdir()
-
-    _isolate_memtomem_env(monkeypatch)
-
-    config = Mem2MemConfig()
-    config.storage.sqlite_path = db_path
-    config.indexing.memory_dirs = [mem_dir]
-    config.embedding.dimension = 1024
-    config.search.enable_dense = False  # BM25-only — no embedder needed
-
-    comp = await create_components(config)
-    try:
-        yield comp, mem_dir
-    finally:
-        await close_components(comp)
+from helpers import StubCtx, isolate_memtomem_env, make_chunk
 
 
 # ── Case A — namespace isolation (PR-1) ─────────────────────────────────
@@ -138,10 +70,10 @@ class TestCaseAIsolation:
     """
 
     @pytest.mark.asyncio
-    async def test_default_search_hides_other_agents_private_chunks(self, integration_components):
-        comp, _ = integration_components
+    async def test_default_search_hides_other_agents_private_chunks(self, bm25_only_components):
+        comp, _ = bm25_only_components
         app = AppContext.from_components(comp)
-        ctx = _StubCtx(app)
+        ctx = StubCtx(app)
 
         await mem_agent_register(agent_id="alpha", description="planner role", ctx=ctx)  # type: ignore[arg-type]
         await mem_agent_register(agent_id="beta", description="coder role", ctx=ctx)  # type: ignore[arg-type]
@@ -165,10 +97,10 @@ class TestCaseAIsolation:
         assert "alpha private secret" not in out
 
     @pytest.mark.asyncio
-    async def test_explicit_agent_search_reaches_private_chunks(self, integration_components):
-        comp, _ = integration_components
+    async def test_explicit_agent_search_reaches_private_chunks(self, bm25_only_components):
+        comp, _ = bm25_only_components
         app = AppContext.from_components(comp)
-        ctx = _StubCtx(app)
+        ctx = StubCtx(app)
 
         await mem_agent_register(agent_id="alpha", ctx=ctx)  # type: ignore[arg-type]
         await comp.storage.upsert_chunks(
@@ -196,10 +128,10 @@ class TestCaseBShareTrail:
     """
 
     @pytest.mark.asyncio
-    async def test_share_copies_chunk_with_audit_tag(self, integration_components):
-        comp, _ = integration_components
+    async def test_share_copies_chunk_with_audit_tag(self, bm25_only_components):
+        comp, _ = bm25_only_components
         app = AppContext.from_components(comp)
-        ctx = _StubCtx(app)
+        ctx = StubCtx(app)
 
         await mem_agent_register(agent_id="alpha", ctx=ctx)  # type: ignore[arg-type]
         await mem_agent_register(agent_id="beta", ctx=ctx)  # type: ignore[arg-type]
@@ -276,10 +208,10 @@ class TestCaseBShareTrail:
         assert link.namespace_target == SHARED_NAMESPACE
 
     @pytest.mark.asyncio
-    async def test_receiving_agent_sees_shared_copy(self, integration_components):
-        comp, _ = integration_components
+    async def test_receiving_agent_sees_shared_copy(self, bm25_only_components):
+        comp, _ = bm25_only_components
         app = AppContext.from_components(comp)
-        ctx = _StubCtx(app)
+        ctx = StubCtx(app)
 
         await mem_agent_register(agent_id="alpha", ctx=ctx)  # type: ignore[arg-type]
         await mem_agent_register(agent_id="beta", ctx=ctx)  # type: ignore[arg-type]
@@ -318,10 +250,10 @@ class TestCaseCSessionInheritance:
     """
 
     @pytest.mark.asyncio
-    async def test_search_inherits_agent_id_from_session(self, integration_components):
-        comp, _ = integration_components
+    async def test_search_inherits_agent_id_from_session(self, bm25_only_components):
+        comp, _ = bm25_only_components
         app = AppContext.from_components(comp)
-        ctx = _StubCtx(app)
+        ctx = StubCtx(app)
 
         await mem_agent_register(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
 
@@ -356,11 +288,11 @@ class TestCaseCSessionInheritance:
         assert app.current_agent_id is None
 
     @pytest.mark.asyncio
-    async def test_explicit_agent_id_overrides_session_binding(self, integration_components):
+    async def test_explicit_agent_id_overrides_session_binding(self, bm25_only_components):
         """Explicit ``agent_id`` arg wins over the session-bound id."""
-        comp, _ = integration_components
+        comp, _ = bm25_only_components
         app = AppContext.from_components(comp)
-        ctx = _StubCtx(app)
+        ctx = StubCtx(app)
 
         await mem_agent_register(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
         await mem_agent_register(agent_id="coder", ctx=ctx)  # type: ignore[arg-type]
@@ -402,7 +334,7 @@ class TestCaseDLangGraphAdapter:
         mem_dir = tmp_path / "lg_memories"
         mem_dir.mkdir()
 
-        _isolate_memtomem_env(monkeypatch)
+        isolate_memtomem_env(monkeypatch)
 
         store = MemtomemStore(
             config_overrides={
@@ -465,7 +397,7 @@ class TestCaseDLangGraphAdapter:
         mem_dir = tmp_path / "lg2_memories"
         mem_dir.mkdir()
 
-        _isolate_memtomem_env(monkeypatch)
+        isolate_memtomem_env(monkeypatch)
 
         store = MemtomemStore(
             config_overrides={
@@ -499,12 +431,12 @@ class TestCaseEMemAddSessionInheritance:
     """
 
     @pytest.mark.asyncio
-    async def test_mem_add_inherits_agent_id_from_session(self, integration_components):
+    async def test_mem_add_inherits_agent_id_from_session(self, bm25_only_components):
         from memtomem.server.tools.memory_crud import mem_add
 
-        comp, _ = integration_components
+        comp, _ = bm25_only_components
         app = AppContext.from_components(comp)
-        ctx = _StubCtx(app)
+        ctx = StubCtx(app)
 
         await mem_agent_register(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
         await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
@@ -522,12 +454,12 @@ class TestCaseEMemAddSessionInheritance:
             await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
 
     @pytest.mark.asyncio
-    async def test_mem_batch_add_inherits_agent_id_from_session(self, integration_components):
+    async def test_mem_batch_add_inherits_agent_id_from_session(self, bm25_only_components):
         from memtomem.server.tools.memory_crud import mem_batch_add
 
-        comp, _ = integration_components
+        comp, _ = bm25_only_components
         app = AppContext.from_components(comp)
-        ctx = _StubCtx(app)
+        ctx = StubCtx(app)
 
         await mem_agent_register(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
         await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
@@ -547,16 +479,16 @@ class TestCaseEMemAddSessionInheritance:
             await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
 
     @pytest.mark.asyncio
-    async def test_explicit_namespace_overrides_session_agent_id(self, integration_components):
+    async def test_explicit_namespace_overrides_session_agent_id(self, bm25_only_components):
         """Explicit ``namespace=`` arg is the escape hatch — it wins
         over the session-bound agent_id, matching the priority chain
         documented on `_resolve_agent_namespace`.
         """
         from memtomem.server.tools.memory_crud import mem_add
 
-        comp, _ = integration_components
+        comp, _ = bm25_only_components
         app = AppContext.from_components(comp)
-        ctx = _StubCtx(app)
+        ctx = StubCtx(app)
 
         await mem_agent_register(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
         await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
@@ -572,7 +504,7 @@ class TestCaseEMemAddSessionInheritance:
             await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
 
     @pytest.mark.asyncio
-    async def test_no_session_falls_back_to_current_namespace(self, integration_components):
+    async def test_no_session_falls_back_to_current_namespace(self, bm25_only_components):
         """Pre-multi-agent users (no `mem_session_start`) keep their
         legacy behavior: `mem_add` reads `app.current_namespace` (set
         by `mem_ns_set` historically) and falls back to the config
@@ -581,9 +513,9 @@ class TestCaseEMemAddSessionInheritance:
         """
         from memtomem.server.tools.memory_crud import mem_add
 
-        comp, _ = integration_components
+        comp, _ = bm25_only_components
         app = AppContext.from_components(comp)
-        ctx = _StubCtx(app)
+        ctx = StubCtx(app)
 
         # No session started → current_agent_id is None.
         assert app.current_agent_id is None
@@ -595,9 +527,7 @@ class TestCaseEMemAddSessionInheritance:
         assert "agent-runtime:" not in result
 
     @pytest.mark.asyncio
-    async def test_session_agent_id_overrides_legacy_current_namespace(
-        self, integration_components
-    ):
+    async def test_session_agent_id_overrides_legacy_current_namespace(self, bm25_only_components):
         """G1 BREAKING case: when both ``mem_ns_set`` (current_namespace)
         and ``mem_session_start`` (current_agent_id) are set in the same
         session, the agent_id wins. CHANGELOG documents this as the only
@@ -606,9 +536,9 @@ class TestCaseEMemAddSessionInheritance:
         refactor of the priority chain cannot silently revert it."""
         from memtomem.server.tools.memory_crud import mem_add
 
-        comp, _ = integration_components
+        comp, _ = bm25_only_components
         app = AppContext.from_components(comp)
-        ctx = _StubCtx(app)
+        ctx = StubCtx(app)
 
         # Legacy axis: mem_ns_set-style binding from a pre-multi-agent
         # workflow that the user has continued to keep around.
@@ -639,16 +569,16 @@ class TestCaseFOutputFormat:
     """
 
     @pytest.mark.asyncio
-    async def test_structured_output_returns_json_with_chunk_id(self, integration_components):
+    async def test_structured_output_returns_json_with_chunk_id(self, bm25_only_components):
         """``output_format="structured"`` returns parseable JSON whose
         result objects expose the ``chunk_id`` field directly — the
         contract callers need to capture UUIDs without scraping
         compact-format text."""
         import json
 
-        comp, _ = integration_components
+        comp, _ = bm25_only_components
         app = AppContext.from_components(comp)
-        ctx = _StubCtx(app)
+        ctx = StubCtx(app)
 
         await comp.storage.upsert_chunks(
             [
@@ -683,12 +613,12 @@ class TestCaseFOutputFormat:
         assert empty_payload["results"] == []
 
     @pytest.mark.asyncio
-    async def test_verbose_output_includes_full_uuid(self, integration_components):
+    async def test_verbose_output_includes_full_uuid(self, bm25_only_components):
         """``output_format="verbose"`` puts the full chunk UUID in the
         rendered text — the human-readable counterpart to ``structured``."""
-        comp, _ = integration_components
+        comp, _ = bm25_only_components
         app = AppContext.from_components(comp)
-        ctx = _StubCtx(app)
+        ctx = StubCtx(app)
 
         chunk = make_chunk(
             "alpha verbose probe",
@@ -707,14 +637,14 @@ class TestCaseFOutputFormat:
         assert str(chunk.id) in out
 
     @pytest.mark.asyncio
-    async def test_compact_default_unchanged(self, integration_components):
+    async def test_compact_default_unchanged(self, bm25_only_components):
         """The default ``"compact"`` form keeps the pre-fix behaviour:
         no UUID in the output, ``Found N results`` header. Pinned so a
         future change to the default doesn't quietly break callers that
         relied on the compact shape."""
-        comp, _ = integration_components
+        comp, _ = bm25_only_components
         app = AppContext.from_components(comp)
-        ctx = _StubCtx(app)
+        ctx = StubCtx(app)
 
         chunk = make_chunk(
             "alpha compact probe",
@@ -734,14 +664,14 @@ class TestCaseFOutputFormat:
         assert str(chunk.id) not in out
 
     @pytest.mark.asyncio
-    async def test_invalid_output_format_returns_error(self, integration_components):
+    async def test_invalid_output_format_returns_error(self, bm25_only_components):
         """Out-of-set values short-circuit before any storage read so a
         typo in the kwarg cannot silently fall back to compact and hide
         the mistake. Mirrors ``mem_search``'s validation at
         ``search.py:65-66``."""
-        comp, _ = integration_components
+        comp, _ = bm25_only_components
         app = AppContext.from_components(comp)
-        ctx = _StubCtx(app)
+        ctx = StubCtx(app)
 
         out = await mem_agent_search(  # type: ignore[arg-type]
             query="anything",
@@ -753,7 +683,7 @@ class TestCaseFOutputFormat:
         assert "Error" in out and INVALID_OUTPUT_FORMAT_PREFIX in out
 
     @pytest.mark.asyncio
-    async def test_structured_surfaces_archive_hint_when_unbound(self, integration_components):
+    async def test_structured_surfaces_archive_hint_when_unbound(self, bm25_only_components):
         """Structured payload must include the archive-filter hint when the
         caller hits the un-pinned path (no agent_id, no session, no legacy
         ``current_namespace``). Without this wire-in ``mem_agent_search``
@@ -762,9 +692,9 @@ class TestCaseFOutputFormat:
         """
         import json
 
-        comp, _ = integration_components
+        comp, _ = bm25_only_components
         app = AppContext.from_components(comp)
-        ctx = _StubCtx(app)
+        ctx = StubCtx(app)
 
         archived = make_chunk(
             "archived note about pipelines",
@@ -787,7 +717,7 @@ class TestCaseFOutputFormat:
         assert any("hidden in system namespaces" in h for h in payload["hints"])
 
     @pytest.mark.asyncio
-    async def test_structured_surfaces_dim_mismatch_hint_once(self, integration_components):
+    async def test_structured_surfaces_dim_mismatch_hint_once(self, bm25_only_components):
         """The dim-mismatch hint must surface on the first structured call
         and stay quiet on subsequent ones — same one-shot semantics
         ``mem_search`` uses via ``_announce_dim_mismatch_once``. Pin the
@@ -796,7 +726,7 @@ class TestCaseFOutputFormat:
         """
         import json
 
-        comp, _ = integration_components
+        comp, _ = bm25_only_components
         # Install a dim/model mismatch on the storage backend; the
         # ``embedding_mismatch`` property derives from these two attrs
         # (``_install_mismatch`` in test_trust_ux uses the same shape).
@@ -805,7 +735,7 @@ class TestCaseFOutputFormat:
 
         app = AppContext.from_components(comp)
         assert app._dim_mismatch_announced is False  # fresh AppContext default
-        ctx = _StubCtx(app)
+        ctx = StubCtx(app)
 
         chunk = make_chunk(
             "alpha probe",
@@ -837,7 +767,7 @@ class TestCaseFOutputFormat:
         assert app._dim_mismatch_announced is True
 
     @pytest.mark.asyncio
-    async def test_archive_hint_byte_identical_to_mem_search(self, integration_components):
+    async def test_archive_hint_byte_identical_to_mem_search(self, bm25_only_components):
         """Pin: when both tools hit the un-pinned-archive path, the
         archive-filter hint they emit must be byte-identical so structured
         consumers parsing ``payload["hints"]`` can dedup by string identity
@@ -852,9 +782,9 @@ class TestCaseFOutputFormat:
         """
         import json
 
-        comp, _ = integration_components
+        comp, _ = bm25_only_components
         app = AppContext.from_components(comp)
-        ctx = _StubCtx(app)
+        ctx = StubCtx(app)
 
         archived = make_chunk(
             "archived note about pipelines",
