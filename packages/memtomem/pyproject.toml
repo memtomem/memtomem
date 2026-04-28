@@ -29,6 +29,7 @@ dependencies = [
     "watchdog>=6.0",
     "click>=8.1",
     "pathspec>=0.12",
+    "croniter>=2.0",
 ]
 
 [project.optional-dependencies]

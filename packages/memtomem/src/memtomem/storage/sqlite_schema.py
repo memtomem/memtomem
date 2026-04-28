@@ -431,6 +431,25 @@ def create_tables(
         "ON health_snapshots(check_name, created_at)"
     )
 
+    # --- Scheduled lifecycle jobs (P2 Phase A) ---
+    # Phase A interprets ``cron_expr`` in UTC; ``last_run_at`` and
+    # ``created_at`` are UTC ISO strings. ``list_due`` semantics are
+    # at-most-once catch-up — see ``ScheduleMixin.schedule_list_due``.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS schedules (
+            id              TEXT PRIMARY KEY,
+            cron_expr       TEXT NOT NULL,
+            job_kind        TEXT NOT NULL,
+            params_json     TEXT NOT NULL DEFAULT '{}',
+            enabled         INTEGER NOT NULL DEFAULT 1,
+            created_at      TEXT NOT NULL,
+            last_run_at     TEXT,
+            last_run_status TEXT,
+            last_run_error  TEXT
+        )
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_schedules_enabled ON schedules(enabled)")
+
     db.commit()
 
     return dimension, dim_mismatch, model_mismatch

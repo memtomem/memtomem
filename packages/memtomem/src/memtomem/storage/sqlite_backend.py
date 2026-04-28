@@ -34,6 +34,7 @@ from memtomem.storage.mixins import (
     HistoryMixin,
     PolicyMixin,
     RelationMixin,
+    ScheduleMixin,
     ScratchMixin,
     SessionMixin,
     ShareLinkMixin,
@@ -72,6 +73,7 @@ class SqliteBackend(
     HistoryMixin,
     EntityMixin,
     PolicyMixin,
+    ScheduleMixin,
 ):
     def __init__(
         self,
