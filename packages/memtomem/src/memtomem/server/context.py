@@ -295,9 +295,7 @@ class AppContext:
                 # means schedules will silently never fire. Loud at startup
                 # (warning, not debug) per feedback_silent_except_log_level.
                 if self.config.scheduler.enabled and not self.config.health_watchdog.enabled:
-                    import logging as _logging
-
-                    _logging.getLogger(__name__).warning(
+                    logger.warning(
                         "scheduler.enabled=True but health_watchdog.enabled=False — "
                         "schedules will not dispatch (scheduler rides the watchdog tick)"
                     )
@@ -305,9 +303,7 @@ class AppContext:
                     self.config.scheduler.enabled
                     and self.config.scheduler.default_timezone.lower() != "utc"
                 ):
-                    import logging as _logging
-
-                    _logging.getLogger(__name__).warning(
+                    logger.warning(
                         "scheduler.default_timezone=%r — Phase A only honors 'utc'; "
                         "falling back to UTC",
                         self.config.scheduler.default_timezone,

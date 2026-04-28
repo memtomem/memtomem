@@ -6,8 +6,10 @@ import asyncio
 import logging
 import time
 from contextlib import suppress
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from memtomem.scheduler.jobs import JOB_KINDS
 from memtomem.server.health_checks import (
     DEEP_CHECKS,
     DIAGNOSTIC_CHECKS,
@@ -41,9 +43,6 @@ class HealthWatchdog:
         self._store: HealthStore | None = None
         self._maintenance: MaintenanceExecutor | None = None
         self._task: asyncio.Task | None = None
-        self._dispatch_semaphore: asyncio.Semaphore | None = None
-        if scheduler_config is not None and scheduler_config.enabled:
-            self._dispatch_semaphore = asyncio.Semaphore(scheduler_config.max_concurrent_jobs)
 
     async def start(self) -> None:
         if not self._config.enabled:
@@ -114,14 +113,17 @@ class HealthWatchdog:
 
         Catch-up is at-most-once (see ``ScheduleMixin.schedule_list_due``).
         Each runner is wrapped in ``asyncio.wait_for`` with the configured
-        timeout so a hung job cannot stall the watchdog loop, and capped
-        at ``max_concurrent_jobs`` via a Semaphore.
+        timeout so a hung job cannot stall the watchdog loop.
+
+        Phase A runs schedules sequentially per tick — at-most-once means
+        the queue per tick is small, sqlite ``schedule_mark_run`` writes
+        contend if parallelized, and ``max_concurrent_jobs`` is fixed at
+        1 in the default config. The field is kept on ``SchedulerConfig``
+        so Phase C can lift this limit by switching to a Semaphore-gated
+        ``asyncio.gather`` here without a config-shape change.
         """
         if self._scheduler_config is None or not self._scheduler_config.enabled:
             return
-        from datetime import datetime, timezone
-
-        from memtomem.scheduler.jobs import JOB_KINDS
 
         try:
             due = await self._app.storage.schedule_list_due(datetime.now(timezone.utc))
@@ -129,77 +131,61 @@ class HealthWatchdog:
             logger.error("schedule_list_due failed", exc_info=True)
             return
 
-        if not due:
+        timeout = self._scheduler_config.runner_timeout_seconds
+        for sched in due:
+            await self._run_schedule(sched, timeout)
+
+    async def _run_schedule(self, sched: dict, timeout: float) -> None:
+        spec = JOB_KINDS.get(sched["job_kind"])
+        if spec is None:
+            logger.warning(
+                "schedule %s references unknown job_kind %r; marking error",
+                sched["id"],
+                sched["job_kind"],
+            )
+            await self._app.storage.schedule_mark_run(
+                sched["id"], "error", error=f"unknown job_kind: {sched['job_kind']}"
+            )
+            return
+        try:
+            params = spec.params_model.model_validate(sched.get("params") or {})
+        except Exception as exc:
+            logger.warning(
+                "schedule %s params invalid for %s: %s",
+                sched["id"],
+                sched["job_kind"],
+                exc,
+            )
+            await self._app.storage.schedule_mark_run(
+                sched["id"], "error", error=f"invalid params: {exc}"
+            )
             return
 
-        sem = self._dispatch_semaphore
-        timeout = self._scheduler_config.runner_timeout_seconds
-
-        async def _run_one(sched: dict) -> None:
-            spec = JOB_KINDS.get(sched["job_kind"])
-            if spec is None:
-                logger.warning(
-                    "schedule %s references unknown job_kind %r; marking error",
-                    sched["id"],
-                    sched["job_kind"],
-                )
-                await self._app.storage.schedule_mark_run(
-                    sched["id"], "error", error=f"unknown job_kind: {sched['job_kind']}"
-                )
-                return
-            try:
-                params = spec.params_model.model_validate(sched.get("params") or {})
-            except Exception as exc:
-                logger.warning(
-                    "schedule %s params invalid for %s: %s",
-                    sched["id"],
-                    sched["job_kind"],
-                    exc,
-                )
-                await self._app.storage.schedule_mark_run(
-                    sched["id"], "error", error=f"invalid params: {exc}"
-                )
-                return
-
-            async def _invoke() -> None:
-                if sem is not None:
-                    async with sem:
-                        await asyncio.wait_for(
-                            spec.runner(self._app, **params.model_dump()),
-                            timeout=timeout,
-                        )
-                else:
-                    await asyncio.wait_for(
-                        spec.runner(self._app, **params.model_dump()),
-                        timeout=timeout,
-                    )
-
-            try:
-                await _invoke()
-                await self._app.storage.schedule_mark_run(sched["id"], "ok")
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "schedule %s (%s) exceeded %.1fs timeout",
-                    sched["id"],
-                    sched["job_kind"],
-                    timeout,
-                )
-                await self._app.storage.schedule_mark_run(
-                    sched["id"], "timeout", error=f"exceeded {timeout}s"
-                )
-            except Exception as exc:
-                logger.error(
-                    "schedule %s (%s) raised: %s",
-                    sched["id"],
-                    sched["job_kind"],
-                    exc,
-                    exc_info=True,
-                )
-                await self._app.storage.schedule_mark_run(sched["id"], "error", error=str(exc))
-
-        # Serialize via the semaphore even at the gather level — sequential
-        # is fine since at-most-once means few schedules per tick.
-        await asyncio.gather(*(_run_one(s) for s in due), return_exceptions=False)
+        try:
+            await asyncio.wait_for(
+                spec.runner(self._app, **params.model_dump()),
+                timeout=timeout,
+            )
+            await self._app.storage.schedule_mark_run(sched["id"], "ok")
+        except asyncio.TimeoutError:
+            logger.warning(
+                "schedule %s (%s) exceeded %.1fs timeout",
+                sched["id"],
+                sched["job_kind"],
+                timeout,
+            )
+            await self._app.storage.schedule_mark_run(
+                sched["id"], "timeout", error=f"exceeded {timeout}s"
+            )
+        except Exception as exc:
+            logger.error(
+                "schedule %s (%s) raised: %s",
+                sched["id"],
+                sched["job_kind"],
+                exc,
+                exc_info=True,
+            )
+            await self._app.storage.schedule_mark_run(sched["id"], "error", error=str(exc))
 
     async def _run_tier(self, tier: str, checks: list) -> None:
         for check_fn in checks:
