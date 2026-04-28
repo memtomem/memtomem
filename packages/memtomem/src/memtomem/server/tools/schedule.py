@@ -28,11 +28,24 @@ from memtomem.server.tool_registry import register
 logger = logging.getLogger(__name__)
 
 
-# Match the dispatcher's per-job timeout default (PR-A3
-# ``SchedulerConfig.runner_timeout_seconds``). ``schedule_run_now`` uses
-# the live config when available and falls back to this when the
-# scheduler block is unset.
-_FALLBACK_RUN_NOW_TIMEOUT_SECONDS = 60.0
+def _run_now_timeout(app) -> float:
+    """Resolve the per-run timeout, mirroring the dispatcher exactly.
+
+    ``schedule_run_now`` and the watchdog dispatcher (PR-A3) must agree
+    on the timeout — otherwise the same schedule fires for 60s under
+    ``mm schedule run-now`` but 300s under auto-dispatch (review
+    feedback PR #522). When the scheduler block is unset (callers
+    constructing ``Mem2MemConfig()`` without overrides), fall back to
+    ``SchedulerConfig().runner_timeout_seconds`` so the default tracks
+    whatever PR-A3 ships.
+    """
+    cfg = getattr(app, "config", None)
+    sched_cfg = getattr(cfg, "scheduler", None) if cfg is not None else None
+    if sched_cfg is not None:
+        return float(sched_cfg.runner_timeout_seconds)
+    from memtomem.config import SchedulerConfig
+
+    return float(SchedulerConfig().runner_timeout_seconds)
 
 
 @mcp.tool()
@@ -111,12 +124,14 @@ async def mem_schedule_run_now(id: str, ctx: CtxType = None) -> str:
         await app.storage.schedule_mark_run(id, "error", error=reason)
         return json.dumps({"ok": False, "reason": reason})
 
-    timeout = _FALLBACK_RUN_NOW_TIMEOUT_SECONDS
-    cfg = getattr(app, "config", None)
-    sched_cfg = getattr(cfg, "scheduler", None) if cfg is not None else None
-    if sched_cfg is not None:
-        timeout = float(getattr(sched_cfg, "runner_timeout_seconds", timeout))
+    timeout = _run_now_timeout(app)
 
+    # Race note: ``run_now`` and the watchdog dispatcher can both fire
+    # the same schedule (different ticks). The current JOB_KINDS are
+    # idempotent maintenance jobs so this is a known, accepted limit
+    # for Phase A; non-idempotent jobs added later (e.g.
+    # ``embedding_rebuild``) need a per-schedule lock here. Tracked for
+    # Phase C alongside disable/enable.
     try:
         result = await asyncio.wait_for(
             spec.runner(app, **validated.model_dump()),

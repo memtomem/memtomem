@@ -48,13 +48,7 @@ def schedule_add(cron_expr: str, job_kind: str, params_json: str | None) -> None
     except Exception as exc:
         raise click.ClickException(f"invalid params: {exc}") from exc
 
-    try:
-        sched_id = asyncio.run(_insert(cron_expr, job_kind, params))
-    except click.ClickException:
-        raise
-    except Exception as exc:
-        raise click.ClickException(str(exc)) from exc
-
+    sched_id = asyncio.run(_insert(cron_expr, job_kind, params))
     click.echo(f"Registered {sched_id}  {cron_expr}  {job_kind}")
 
 
@@ -62,10 +56,7 @@ def schedule_add(cron_expr: str, job_kind: str, params_json: str | None) -> None
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 def schedule_list(as_json: bool) -> None:
     """List all registered schedules."""
-    try:
-        rows = asyncio.run(_list_all())
-    except Exception as exc:
-        raise click.ClickException(str(exc)) from exc
+    rows = asyncio.run(_list_all())
 
     if as_json:
         click.echo(json.dumps(rows, indent=2, default=str))
@@ -89,11 +80,7 @@ def schedule_list(as_json: bool) -> None:
 @click.argument("sched_id")
 def schedule_run_now(sched_id: str) -> None:
     """Run a scheduled job synchronously (out-of-band)."""
-    try:
-        result = asyncio.run(_run_now(sched_id))
-    except Exception as exc:
-        raise click.ClickException(str(exc)) from exc
-
+    result = asyncio.run(_run_now(sched_id))
     if not result["ok"]:
         raise click.ClickException(result["reason"])
     click.echo(f"OK  {sched_id}  {json.dumps(result.get('result', {}))}")
@@ -103,10 +90,7 @@ def schedule_run_now(sched_id: str) -> None:
 @click.argument("sched_id")
 def schedule_delete(sched_id: str) -> None:
     """Delete a schedule by id."""
-    try:
-        deleted = asyncio.run(_delete(sched_id))
-    except Exception as exc:
-        raise click.ClickException(str(exc)) from exc
+    deleted = asyncio.run(_delete(sched_id))
     if not deleted:
         raise click.ClickException(f"schedule {sched_id!r} not found")
     click.echo(f"Deleted {sched_id}")
@@ -167,10 +151,9 @@ async def _run_now(sched_id: str) -> dict:
             await app.storage.schedule_mark_run(sched_id, "error", error=reason)
             return {"ok": False, "reason": reason}
 
-        timeout = 60.0
-        sched_cfg = getattr(comp.config, "scheduler", None)
-        if sched_cfg is not None:
-            timeout = float(getattr(sched_cfg, "runner_timeout_seconds", timeout))
+        from memtomem.server.tools.schedule import _run_now_timeout
+
+        timeout = _run_now_timeout(app)
 
         try:
             result = await asyncio.wait_for(

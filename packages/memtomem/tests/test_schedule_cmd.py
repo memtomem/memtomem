@@ -143,3 +143,30 @@ class TestScheduleDelete:
         result = runner.invoke(cli, ["schedule", "delete", "nope"])
         assert result.exit_code != 0
         assert "not found" in result.output.lower()
+
+
+class TestScheduleCliIntegration:
+    """End-to-end CLI ↔ real SQLite storage smoke (per
+    ``feedback_mocked_storage_hides_sql_bugs``)."""
+
+    def test_add_list_delete_roundtrip(self, runner, components, monkeypatch):
+        monkeypatch.setattr(
+            "memtomem.cli._bootstrap.cli_components", _patched_cli_components(components)
+        )
+
+        added = runner.invoke(
+            cli, ["schedule", "add", "--cron", "0 3 * * 0", "--job", "compaction"]
+        )
+        assert added.exit_code == 0, added.output
+        sched_id = added.output.strip().split()[1]
+
+        listed = runner.invoke(cli, ["schedule", "list", "--json"])
+        assert listed.exit_code == 0
+        rows = json.loads(listed.output)
+        assert any(r["id"] == sched_id and r["job_kind"] == "compaction" for r in rows)
+
+        deleted = runner.invoke(cli, ["schedule", "delete", sched_id])
+        assert deleted.exit_code == 0
+
+        after = runner.invoke(cli, ["schedule", "list", "--json"])
+        assert all(r["id"] != sched_id for r in json.loads(after.output))
