@@ -276,7 +276,7 @@ uses, so the output is identical. Useful as a sanity check between
 | **Browse** | `mem_list` (indexed sources), `mem_read` (chunk by UUID) |
 | **CRUD** | `mem_add`, `mem_edit`, `mem_delete`, `mem_batch_add` |
 | **Indexing** | `mem_index` (file/directory indexing, optional `auto_tag`) |
-| **Meta** | `mem_do` (routes to all registered actions, supports aliases) |
+| **Meta** | `mem_do` (routes to all registered actions, supports aliases — including `schedule_register`, `schedule_list`, `schedule_run_now`, `schedule_delete` for cron jobs) |
 | **Ask** | `mem_ask` (natural-language Q&A over indexed memories) |
 | **Namespace** | `mem_ns_list`, `mem_ns_set`, `mem_ns_get`, `mem_ns_assign`, `mem_ns_update`, `mem_ns_rename`, `mem_ns_delete` |
 | **Tags** | `mem_tag_list`, `mem_tag_rename`, `mem_tag_delete`, `mem_auto_tag` |

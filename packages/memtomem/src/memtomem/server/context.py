@@ -284,8 +284,30 @@ class AppContext:
                 if self.config.health_watchdog.enabled and not degraded:
                     from memtomem.server.health_watchdog import HealthWatchdog
 
-                    watchdog = HealthWatchdog(self, self.config.health_watchdog)
+                    watchdog = HealthWatchdog(
+                        self,
+                        self.config.health_watchdog,
+                        self.config.scheduler,
+                    )
                     await watchdog.start()
+
+                # P2 cron Phase A footgun: scheduler enabled without watchdog
+                # means schedules will silently never fire. Loud at startup
+                # (warning, not debug) per feedback_silent_except_log_level.
+                if self.config.scheduler.enabled and not self.config.health_watchdog.enabled:
+                    logger.warning(
+                        "scheduler.enabled=True but health_watchdog.enabled=False — "
+                        "schedules will not dispatch (scheduler rides the watchdog tick)"
+                    )
+                if (
+                    self.config.scheduler.enabled
+                    and self.config.scheduler.default_timezone.lower() != "utc"
+                ):
+                    logger.warning(
+                        "scheduler.default_timezone=%r — Phase A only honors 'utc'; "
+                        "falling back to UTC",
+                        self.config.scheduler.default_timezone,
+                    )
             except BaseException:
                 await _stop_quietly(watchdog, "health_watchdog")
                 await _stop_quietly(policy_scheduler, "policy_scheduler")

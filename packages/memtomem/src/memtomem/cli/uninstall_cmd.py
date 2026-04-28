@@ -34,13 +34,9 @@ from typing import Iterable
 
 import click
 
-# ``fcntl`` is POSIX-only. A module-level import here crashed every ``mm``
-# command on Windows because ``cli/__init__.py:_register`` imports this
-# module unconditionally. It is now imported lazily inside
-# ``_probe_pid_file`` behind a ``sys.platform`` guard so the rest of the CLI
-# boots on Windows. See #448.
-
-from memtomem._runtime_paths import legacy_server_pid_path, runtime_dir, server_pid_path
+from memtomem._runtime_paths import runtime_dir, server_pid_path
+from memtomem.cli._liveness import check_server_liveness as _check_server_liveness
+from memtomem.cli._liveness import probe_pid_file as _probe_pid_file  # noqa: F401  (test seam)
 from memtomem.cli.init_cmd import RuntimeProfile, _runtime_profile
 
 _DEFAULT_STATE_DIR = Path.home() / ".memtomem"
@@ -87,13 +83,6 @@ class _Inventory:
 
 
 @dataclass(frozen=True)
-class _ServerState:
-    alive: bool
-    pid: int | None
-    pid_file: Path | None
-
-
-@dataclass(frozen=True)
 class _DbLockState:
     """Result of probing the SQLite DB for an active writer.
 
@@ -137,99 +126,11 @@ def _load_config_safely() -> tuple[Path, str | None]:
 
 
 # ---- server liveness probe -----------------------------------------------
-
-
-def _probe_pid_file(pid_file: Path) -> _ServerState:
-    """Probe a single pid file via ``fcntl.flock``.
-
-    ``server/__init__.py:main`` opens this file and holds an exclusive
-    flock for the entire server lifetime. If we can acquire
-    ``LOCK_EX | LOCK_NB`` on it, no live writer is holding it (the file
-    is a stale leftover, or fresh and unowned). If we cannot, a writer
-    is alive — *regardless* of whether the recorded PID is still valid,
-    has been recycled to an unrelated process, or was never set at all.
-
-    This replaces the previous ``os.kill(pid, 0)`` probe, which was
-    correct for stale-pid cases but produced false positives once the
-    kernel recycled the recorded PID to an unrelated process (issue
-    #387). The PID inside the file is now read for display only.
-
-    On Windows ``fcntl`` is unavailable; the probe falls back to
-    conservative "pid file exists → assume alive" and relies on
-    ``--force`` for override. See #448.
-    """
-    if not pid_file.exists():
-        return _ServerState(alive=False, pid=None, pid_file=None)
-
-    pid: int | None
-    try:
-        pid_text = pid_file.read_text().strip()
-        pid = int(pid_text)
-    except (OSError, ValueError):
-        # Unreadable / non-int — leave pid=None for the message; the lock
-        # probe below still decides alive vs. dead independently.
-        pid = None
-
-    if sys.platform == "win32":
-        # POSIX advisory flock is unavailable on Windows. Fall back to the
-        # same conservative treatment we use when the probe can't acquire
-        # the lock (unsupported filesystem branch below) — pid file exists,
-        # so assume a live writer and let the user pass ``--force`` to
-        # override. #448.
-        return _ServerState(alive=True, pid=pid, pid_file=pid_file)
-
-    import fcntl
-
-    try:
-        # Read-mode is enough; advisory flock works regardless of fd mode.
-        # Probing ``rb`` rather than ``rb+`` avoids any chance of accidental
-        # truncation on an exotic filesystem if we later abort.
-        fp = open(pid_file, "rb")
-    except OSError:
-        # Conservative — couldn't even open the file (permissions, race
-        # with deletion). Treat as alive so the user explicitly --forces.
-        return _ServerState(alive=True, pid=pid, pid_file=pid_file)
-
-    try:
-        try:
-            fcntl.flock(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            # Another process is holding the lock → live writer.
-            return _ServerState(alive=True, pid=pid, pid_file=pid_file)
-        except OSError:
-            # Unsupported filesystem (some NFS configurations, FUSE) or
-            # other unknown error — be conservative.
-            return _ServerState(alive=True, pid=pid, pid_file=pid_file)
-        # Got the lock. Release immediately — we don't want to hold it,
-        # only probe; holding would block a server starting in the gap
-        # between this probe and the eventual unlink.
-        fcntl.flock(fp, fcntl.LOCK_UN)
-        return _ServerState(alive=False, pid=pid, pid_file=pid_file)
-    finally:
-        fp.close()
-
-
-def _check_server_liveness() -> _ServerState:
-    """Probe the server pid file at both the new and legacy locations.
-
-    As of #412 the server writes its pid / lock file under
-    ``$XDG_RUNTIME_DIR/memtomem/server.pid`` (see ``_runtime_paths``).
-    During the transition window we also probe the legacy
-    ``~/.memtomem/.server.pid`` so a mixed-version upgrade (pre-#412
-    server still running, new uninstall CLI) refuses correctly. First
-    live holder wins; if neither is held the state is dead.
-
-    No ``state_dir`` parameter — both probes use canonical absolute
-    paths from :mod:`memtomem._runtime_paths`. When #384 expands the
-    scheme to cover other writers (``mm web``, ``mm watchdog``) the
-    glob will still live inside :func:`_runtime_paths.runtime_dir`,
-    not under the persistent state dir.
-    """
-    for pid_file in (server_pid_path(), legacy_server_pid_path()):
-        state = _probe_pid_file(pid_file)
-        if state.alive:
-            return state
-    return _ServerState(alive=False, pid=None, pid_file=None)
+#
+# Liveness helpers live in ``memtomem.cli._liveness`` so ``mm upgrade`` can
+# share them. They're re-imported above as ``_check_server_liveness`` and
+# ``_probe_pid_file`` to keep the existing test seams; the ``ServerState``
+# dataclass is consumed via duck-typing so no alias is needed.
 
 
 def _check_db_lock(db_path: Path) -> _DbLockState:

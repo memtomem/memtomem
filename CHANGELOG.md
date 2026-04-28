@@ -7,6 +7,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`mm upgrade` CLI** (#443) — wraps `uv tool install --refresh
+  --reinstall memtomem` with process-level hygiene so an in-memory
+  pre-upgrade `memtomem-server` can't keep running the old code next
+  to the freshly written disk bytes (the v0.1.25 → v0.1.26 stale
+  `.server.pid` repro that motivated this command). Probes the server
+  pid lock, sends `SIGTERM`, escalates to `SIGKILL` after `--grace`
+  seconds (default 5), unlinks the stale pid file, then runs the
+  reinstall. **Extras are preserved automatically** by reading the
+  current `uv tool` receipt — a `memtomem[all]` install stays `[all]`
+  across upgrades instead of silently regressing to a BM25-only base;
+  override with `--extras onnx,web` or suppress with `--extras none`.
+  `--version X.Y.Z` pins a release; `--dry-run` prints the plan;
+  `--json` emits a structured result. On Windows the kill stage is
+  skipped automatically (POSIX advisory flock + signals are
+  unavailable) and the reinstall runs alone with a warning.
 - **`chunk_links` provenance from session summary → source chunks**
   (RFC P1 Phase B-2). When the auto-summary path runs on
   `mem_session_end`, the server now writes `link_type="summarizes"`

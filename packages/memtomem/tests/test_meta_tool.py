@@ -32,6 +32,7 @@ class TestToolRegistry:
             "advanced",
             "context",
             "search",
+            "schedule",
         }
         assert categories == expected
 
@@ -88,6 +89,24 @@ class TestMemDoRouting:
         """Verify fuzzy matching would find similar actions."""
         similar = [k for k in ACTIONS if "tag" in k]
         assert len(similar) >= 2  # tag_list, tag_rename, tag_delete, auto_tag
+
+
+class TestScheduleActions:
+    """P2 Phase A: schedule_register/list/run_now/delete via mem_do registry."""
+
+    def test_schedule_actions_registered(self):
+        for name in ("schedule_register", "schedule_list", "schedule_run_now", "schedule_delete"):
+            assert name in ACTIONS, f"{name} missing from ACTIONS"
+            assert ACTIONS[name].category == "schedule"
+
+    def test_schedule_register_param_shape(self):
+        info = ACTIONS["schedule_register"]
+        # The plumbing-level contract: callers must provide cron + job_kind
+        # by keyword, params is optional. Pin so Phase B doesn't silently
+        # drop cron= when the spec= field is added.
+        assert "cron" in info.params
+        assert "job_kind" in info.params
+        assert "params" in info.params
 
 
 class TestMemVersion:

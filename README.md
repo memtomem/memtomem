@@ -127,6 +127,7 @@ See [MCP Client Setup](docs/guides/mcp-clients.md) for Cursor / Windsurf / Claud
 - **Maintenance** — near-duplicate detection, time-based decay, TTL expiration, auto-tagging
 - **Web UI** — visual dashboard for search, sources, tags, timeline, dedup, and more (`mm web --dev` for the full maintainer surface)
 - **MCP tools** — `mem_do` meta-tool routes all non-core actions in `core` mode for minimal context usage
+- **Scheduled jobs** — `mm schedule add/list/run-now/delete` (or `mem_do(action="schedule_*")`) for cron-driven compaction, importance decay, dead-link cleanup, and dedup scans
 
 ---
 

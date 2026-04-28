@@ -872,6 +872,13 @@ When enabled, the scheduler runs all enabled policies periodically. The
 atomically. Policies can always be run on-demand via `mem_policy_run`
 regardless of this setting.
 
+> **`PolicyScheduler` requires the MCP server, not `mm web`.** Like the
+> cron scheduler in §9, the policy scheduler is wired into the MCP server
+> lifespan only — `mm web` logs a warning at startup if
+> `policy.enabled=true` but does not actually run policies. Run
+> `memtomem-server` (or connect a Claude Code / Claude Desktop MCP
+> session) for periodic dispatch; `mem_policy_run` works regardless.
+
 ### Combining policies
 
 A common pattern is pairing auto_archive with auto_promote:
@@ -889,6 +896,58 @@ This creates a lifecycle where old unused memories move to categorized
 archive buckets, but any archived chunk that gets accessed 5+ times in the
 last 14 days is automatically promoted back. The `last_accessed_at` reset
 on promotion prevents the chunk from being immediately re-archived.
+
+---
+
+## 9. Scheduled jobs — `mm schedule`, `schedule_*`
+
+Phase A of the cron scheduler ships **direct-cron** registration for the
+maintenance jobs the watchdog already runs. Each schedule is a 5-field
+cron expression interpreted in **UTC**, paired with one of the
+whitelisted `JOB_KINDS`:
+
+| `job_kind`                | Effect                                                      |
+|---------------------------|-------------------------------------------------------------|
+| `compaction`              | Delete chunks whose source files no longer exist on disk    |
+| `importance_decay`        | Delete chunks older than `max_age_days` (TTL-based decay)   |
+| `dead_chunk_link_cleanup` | Remove `chunk_links` rows whose source chunk is gone        |
+| `dedup_scan`              | Surface duplicate-chunk candidates (no auto-merge)          |
+
+Schedules are stored in SQLite and dispatched by the same watchdog tick
+loop that powers `mem_watchdog` — set
+`MEMTOMEM_SCHEDULER__ENABLED=true` on top of the watchdog config to
+enable dispatch.
+
+> **Dispatch requires the MCP server, not `mm web`.** The watchdog (and
+> therefore the schedule dispatcher) is wired into the MCP server
+> lifespan only — it is not started by `mm web`. Schedules registered
+> through `mm schedule add` while only `mm web` is running will sit
+> idle (`mm schedule list` shows `last=never (—)`) until an MCP server
+> session
+> (e.g. a connected Claude Code / Claude Desktop client) is also
+> active. Use `mm schedule run-now <id>` for one-off out-of-band
+> execution that does not depend on the watchdog tick.
+
+```bash
+mm schedule add --cron "0 3 * * 0" --job compaction
+mm schedule list
+mm schedule run-now <id>           # out-of-band run; same timeout as dispatcher
+mm schedule delete <id>
+```
+
+The same actions are reachable through `mem_do`:
+
+```
+mem_do(action="schedule_register",
+       params={"cron": "0 3 * * 0", "job_kind": "compaction"})
+mem_do(action="schedule_list")
+mem_do(action="schedule_run_now", params={"id": "<id>"})
+mem_do(action="schedule_delete", params={"id": "<id>"})
+```
+
+> Phase A is direct-cron only. Natural-language schedules
+> (`spec="every Sunday 3am"`) and `disable`/`enable` commands arrive in
+> Phase B and Phase C respectively.
 
 ---
 

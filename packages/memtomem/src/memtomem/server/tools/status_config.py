@@ -124,12 +124,18 @@ async def format_status_report(app: AppContext) -> str:
     )
 
     mismatch = getattr(app.storage, "embedding_mismatch", None)
-    if mismatch is not None:
-        stored_info = mismatch["stored"]
-        cfg = mismatch["configured"]
+    scheduler_misconfig = config.scheduler.enabled and not config.health_watchdog.enabled
+    if mismatch is not None or scheduler_misconfig:
         lines.append("")
         lines.append("Warnings")
         lines.append("--------")
+    if scheduler_misconfig:
+        lines.append("- kind:       scheduler_watchdog_disabled")
+        lines.append("  detail:     scheduler.enabled=True but health_watchdog.enabled=False")
+        lines.append("  fix:        set health_watchdog.enabled=True (scheduler rides its tick)")
+    if mismatch is not None:
+        stored_info = mismatch["stored"]
+        cfg = mismatch["configured"]
         lines.append("- kind:       embedding_dim_mismatch")
         lines.append(
             f"  stored:     {stored_info['provider']}/{stored_info['model']} "

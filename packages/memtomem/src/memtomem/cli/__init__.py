@@ -37,12 +37,14 @@ def _register() -> None:
     from memtomem.cli.memory import add, recall
     from memtomem.cli.purge_cmd import purge
     from memtomem.cli.reset_cmd import reset
+    from memtomem.cli.schedule_cmd import schedule
     from memtomem.cli.search import search
     from memtomem.cli.init_cmd import init
     from memtomem.cli.session_cmd import activity, session
     from memtomem.cli.shell import shell
     from memtomem.cli.status_cmd import status
     from memtomem.cli.uninstall_cmd import uninstall
+    from memtomem.cli.upgrade_cmd import upgrade
     from memtomem.cli.watchdog_cmd import watchdog
     from memtomem.cli.web import web
 
@@ -61,10 +63,12 @@ def _register() -> None:
     cli.add_command(activity)
     cli.add_command(status)
     cli.add_command(watchdog)
+    cli.add_command(schedule)
     cli.add_command(web)
     cli.add_command(shell)
     cli.add_command(agent)
     cli.add_command(uninstall)
+    cli.add_command(upgrade)
 
 
 _register()
