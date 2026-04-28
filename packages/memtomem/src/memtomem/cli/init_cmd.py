@@ -48,7 +48,16 @@ def _ollama_available() -> bool:
 
 def _ollama_running() -> bool:
     try:
-        return _run(["ollama", "list"], timeout=5).returncode == 0
+        if sys.platform == "win32":
+            result = subprocess.run(
+                ["ollama", "list"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        else:
+            result = _run(["ollama", "list"], timeout=5)
+        return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
@@ -464,9 +473,21 @@ def _step_embedding(state: dict) -> None:
                 click.echo()
                 state.setdefault("_extras_warned_inline", set()).add("ollama")
             if not _ollama_running():
-                click.secho("  Ollama not running. Starting 'ollama serve'...", fg="yellow")
-                click.echo("  Run 'ollama serve' in another terminal if this fails.")
-                click.echo()
+                if sys.platform == "win32":
+                    click.secho("  Ollama not running. Waiting for it to start...", fg="yellow")
+                    for _ in range(12):  # 최대 ~24초 대기
+                        time.sleep(2)
+                        if _ollama_running():
+                            click.secho("  Ollama is ready.", fg="green")
+                            break
+                    else:
+                        click.secho("  Ollama did not start in time.", fg="red")
+                        click.echo("  Start Ollama manually, then re-run 'mm init'.")
+                        click.echo()
+                else:
+                    click.secho("  Ollama not running. Starting 'ollama serve'...", fg="yellow")
+                    click.echo("  Run 'ollama serve' in another terminal if this fails.")
+                    click.echo()
 
             click.echo("  Available models:")
             click.echo("    [1] nomic-embed-text — English, fast (768d)")
