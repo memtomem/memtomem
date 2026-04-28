@@ -39,9 +39,7 @@ def runner() -> CliRunner:
 class TestScheduleAdd:
     def test_happy_path(self, runner, monkeypatch):
         comp = _mock_components(insert_id="sch-001")
-        monkeypatch.setattr(
-            "memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp)
-        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
         result = runner.invoke(
             cli, ["schedule", "add", "--cron", "0 3 * * 0", "--job", "compaction"]
         )
@@ -51,9 +49,7 @@ class TestScheduleAdd:
 
     def test_invalid_cron_rejected(self, runner, monkeypatch):
         comp = _mock_components()
-        monkeypatch.setattr(
-            "memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp)
-        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
         result = runner.invoke(
             cli, ["schedule", "add", "--cron", "not a cron", "--job", "compaction"]
         )
@@ -71,9 +67,7 @@ class TestScheduleAdd:
 
     def test_invalid_params_json_rejected(self, runner, monkeypatch):
         comp = _mock_components()
-        monkeypatch.setattr(
-            "memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp)
-        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
         result = runner.invoke(
             cli,
             [
@@ -94,9 +88,7 @@ class TestScheduleAdd:
 class TestScheduleList:
     def test_empty(self, runner, monkeypatch):
         comp = _mock_components(schedules=[])
-        monkeypatch.setattr(
-            "memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp)
-        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
         result = runner.invoke(cli, ["schedule", "list"])
         assert result.exit_code == 0
         assert "No schedules" in result.output
@@ -116,9 +108,7 @@ class TestScheduleList:
             }
         ]
         comp = _mock_components(schedules=rows)
-        monkeypatch.setattr(
-            "memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp)
-        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
         result = runner.invoke(cli, ["schedule", "list", "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -128,18 +118,14 @@ class TestScheduleList:
 class TestScheduleDelete:
     def test_happy_path(self, runner, monkeypatch):
         comp = _mock_components(delete_ok=True)
-        monkeypatch.setattr(
-            "memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp)
-        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
         result = runner.invoke(cli, ["schedule", "delete", "s1"])
         assert result.exit_code == 0
         comp.storage.schedule_delete.assert_awaited_once_with("s1")
 
     def test_not_found(self, runner, monkeypatch):
         comp = _mock_components(delete_ok=False)
-        monkeypatch.setattr(
-            "memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp)
-        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
         result = runner.invoke(cli, ["schedule", "delete", "nope"])
         assert result.exit_code != 0
         assert "not found" in result.output.lower()
