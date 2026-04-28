@@ -16,8 +16,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
-from uuid import UUID, uuid4
-
 import pytest
 
 from memtomem.config import SearchConfig, SessionSummaryConfig
@@ -39,9 +37,7 @@ def _chunk(content: str = "x", source: str = "a.md", namespace: str = "default")
 
 
 def _sr(chunk: Chunk, score: float, rank: int, source: str = "bm25", *, via=False) -> SearchResult:
-    return SearchResult(
-        chunk=chunk, score=score, rank=rank, source=source, via_session_summary=via
-    )
+    return SearchResult(chunk=chunk, score=score, rank=rank, source=source, via_session_summary=via)
 
 
 # ---------------------------------------------------------------------------
@@ -140,9 +136,7 @@ class TestBoostSourcesHelper:
 
     @pytest.mark.asyncio
     async def test_threshold_filters_low_score_summary(self):
-        cfg = SessionSummaryConfig(
-            expansion_lookup_top_k=3, expansion_score_threshold=0.5
-        )
+        cfg = SessionSummaryConfig(expansion_lookup_top_k=3, expansion_score_threshold=0.5)
         summary_chunk = _chunk("summary", namespace="archive:session:abc")
         storage = _async_storage()
         # Below threshold → no rescue
@@ -155,9 +149,7 @@ class TestBoostSourcesHelper:
 
     @pytest.mark.asyncio
     async def test_above_threshold_walks_chunk_links_to_source_files(self):
-        cfg = SessionSummaryConfig(
-            expansion_lookup_top_k=3, expansion_score_threshold=0.3
-        )
+        cfg = SessionSummaryConfig(expansion_lookup_top_k=3, expansion_score_threshold=0.3)
         summary_chunk = _chunk("summary", namespace="archive:session:abc")
         target1 = _chunk("c1", source="src/a.md")
         target2 = _chunk("c2", source="src/b.md")
@@ -220,9 +212,7 @@ class TestPipelineEndToEndRescue:
         set via the rescue leg (RFC ``ranking contention``) and carry
         ``via_session_summary=True`` through the final pipeline output.
         """
-        cfg = SessionSummaryConfig(
-            expansion_lookup_top_k=3, expansion_score_threshold=0.3
-        )
+        cfg = SessionSummaryConfig(expansion_lookup_top_k=3, expansion_score_threshold=0.3)
         summary_chunk = _chunk("summary body", namespace="archive:session:abc")
         rescued = _chunk("rescued chunk", source="src/old_session.md")
         organic = _chunk("organic chunk", source="src/today.md")
@@ -269,9 +259,7 @@ class TestPipelineEndToEndRescue:
     async def test_no_rescue_when_no_summary_above_threshold(self):
         """Common case: no past summary above threshold → rescue leg
         skipped (no extra retrieval round-trip)."""
-        cfg = SessionSummaryConfig(
-            expansion_lookup_top_k=3, expansion_score_threshold=0.5
-        )
+        cfg = SessionSummaryConfig(expansion_lookup_top_k=3, expansion_score_threshold=0.5)
         organic = _chunk("organic chunk")
 
         storage = _async_storage()
