@@ -64,6 +64,8 @@ uv tool install memtomem            # BM25 only — dense search, Web UI, Korean
 
 You can opt in to individual features later with `uv tool install --reinstall 'memtomem[onnx,web]'` or any combination from the extras table in [Option C](#option-c-from-source-for-development-or-testing).
 
+> **Upgrading an installed memtomem**: prefer `mm upgrade` over a bare `uv tool install --reinstall memtomem`. The latter only swaps the on-disk bytes, so any `memtomem-server` already running under your MCP client keeps executing the previous version until it exits. `mm upgrade` stops the server first (SIGTERM → SIGKILL after `--grace`), clears the stale pid lock, then runs the reinstall with `--refresh` so a freshly released version isn't masked by uv's cached resolver result. Pass `--version X.Y.Z` to pin or `--dry-run` to preview the plan.
+
 > **If `mm --version` shows an older release**: `uv` caches PyPI metadata per package, and a fresh install can resolve to the cached entry for a short window after a new release. Re-run with `uv tool install 'memtomem[all]' --refresh`, or clear the cache first: `uv cache clean memtomem`. Check the [latest release](https://github.com/memtomem/memtomem/releases) for the expected version.
 
 > **If you see `mm: command not found`**: `uv tool install` writes the `mm` shim to `~/.local/bin` (macOS/Linux default), but that directory isn't on `$PATH` in a fresh shell profile. Run `uv tool update-shell` once, then open a new shell and re-run `mm --version`. (`uv` prints a one-line hint on first-ever tool install, but it's easy to miss.)
