@@ -17,7 +17,7 @@ came up clean (``embedding_broken is None``) so the recovery banner +
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -51,11 +51,7 @@ class _FakeSchedulerCfg:
 class _FakeConfig:
     embedding: _FakeEmbeddingCfg
     indexing: _FakeIndexingCfg
-    scheduler: _FakeSchedulerCfg = None  # type: ignore[assignment]
-
-    def __post_init__(self) -> None:
-        if self.scheduler is None:
-            self.scheduler = _FakeSchedulerCfg()
+    scheduler: _FakeSchedulerCfg = field(default_factory=_FakeSchedulerCfg)
 
 
 def _make_components(
