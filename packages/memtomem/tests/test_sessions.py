@@ -446,3 +446,98 @@ class TestSessionSummaryPhaseB:
         assert "manual override" in out
         assert "WOULD-NOT-SHOW" not in out
         assert not components.llm.calls
+
+    @pytest.mark.asyncio
+    async def test_summary_links_written_for_auto_path(self, components):
+        """Phase B-2: auto path writes ``link_type='summarizes'`` rows
+        from the summary chunk back to each source chunk it summarized.
+        """
+        components.llm = _FakeLLM(response="auto-generated summary text")
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=6)
+        await TestSessionSummaryPhaseB()._index_dir(
+            app, memory_dir, namespace="agent-runtime:planner"
+        )
+
+        source_chunks = await app.storage.recall_chunks(limit=100)
+        source_ids = {
+            c.id for c in source_chunks if c.metadata.namespace == "agent-runtime:planner"
+        }
+        assert len(source_ids) >= 5
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        # Each source chunk should have a (target_id, "summarizes") row
+        # whose source_id points at a single common summary chunk.
+        link_sources: set = set()
+        linked_targets: set = set()
+        for tid in source_ids:
+            link = await app.storage.get_chunk_link(tid, link_type="summarizes")
+            if link is not None:
+                link_sources.add(link.source_id)
+                linked_targets.add(tid)
+
+        assert linked_targets == source_ids, "every source chunk should have a summarizes link"
+        assert len(link_sources) == 1, "all links should share one summary chunk_id"
+
+    @pytest.mark.asyncio
+    async def test_summary_links_respect_cap(self, components):
+        """Phase B-2: ``max_summary_links`` caps fanout — newest first,
+        tail dropped. With 6 source chunks and cap=3, exactly 3 links
+        land (and they correspond to the 3 newest chunks, since
+        ``recall_chunks`` returns newest-first).
+        """
+        components.llm = _FakeLLM(response="cap test summary")
+        components.config.session_summary.max_summary_links = 3
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=6)
+        await TestSessionSummaryPhaseB()._index_dir(
+            app, memory_dir, namespace="agent-runtime:planner"
+        )
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        source_chunks = await app.storage.recall_chunks(limit=100)
+        planner_ids = [
+            c.id for c in source_chunks if c.metadata.namespace == "agent-runtime:planner"
+        ]
+        linked = [
+            tid
+            for tid in planner_ids
+            if await app.storage.get_chunk_link(tid, link_type="summarizes") is not None
+        ]
+        assert len(linked) == 3, f"expected cap=3 links, got {len(linked)}"
+
+    @pytest.mark.asyncio
+    async def test_summary_links_skipped_for_manual_summary(self, components):
+        """Manual ``summary=`` does not collect source chunks, so the
+        Phase B-2 link-writer must not run (no fake links pointing
+        from the archive chunk to arbitrary unrelated chunks).
+        """
+        components.llm = _FakeLLM()
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=6)
+        await TestSessionSummaryPhaseB()._index_dir(
+            app, memory_dir, namespace="agent-runtime:planner"
+        )
+
+        await mem_session_end(summary="manual", ctx=ctx)  # type: ignore[arg-type]
+
+        source_chunks = await app.storage.recall_chunks(limit=100)
+        for c in source_chunks:
+            if c.metadata.namespace != "agent-runtime:planner":
+                continue
+            link = await app.storage.get_chunk_link(c.id, link_type="summarizes")
+            assert link is None, "manual summary path must not write summarizes links"

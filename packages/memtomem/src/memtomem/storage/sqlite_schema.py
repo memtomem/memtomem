@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # ``chunk_links.link_type`` values recognised by the back-fill and (in PR-2)
 # the writer. Validation lives in Python so adding a new type is one PR not
 # two — see ``planning/mem-agent-share-chunk-links-rfc.md`` §Storage.
-_VALID_LINK_TYPES: frozenset[str] = frozenset({"shared"})
+_VALID_LINK_TYPES: frozenset[str] = frozenset({"shared", "summarizes"})
 
 # Bumping this key (e.g. ``..._v2``) triggers a re-run of the back-fill on
 # the next startup — used if a future release tightens what counts as a
