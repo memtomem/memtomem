@@ -196,7 +196,7 @@ async def test_scheduler_enabled_warns_in_web_lifespan(caplog):
         await _run_lifespan(comp)
 
     assert any(
-        "scheduler.enabled=True" in r.message and "mm web" in r.message for r in caplog.records
+        "scheduler.enabled=true" in r.message and "mm web" in r.message for r in caplog.records
     ), [r.message for r in caplog.records]
 
 
@@ -233,7 +233,7 @@ async def test_policy_enabled_warns_in_web_lifespan(caplog):
         await _run_lifespan(comp)
 
     assert any(
-        "policy.enabled=True" in r.message and "mm web" in r.message for r in caplog.records
+        "policy.enabled=true" in r.message and "mm web" in r.message for r in caplog.records
     ), [r.message for r in caplog.records]
 
 

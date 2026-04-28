@@ -254,12 +254,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # startup instead of silently null ``last_run_status``.
     if comp.config.scheduler.enabled:
         logger.warning(
-            "scheduler.enabled=True but ``mm web`` does not dispatch schedules — "
+            "scheduler.enabled=true but ``mm web`` does not dispatch schedules — "
             "run ``memtomem-server`` (MCP) for the watchdog tick that fires registered jobs"
         )
     if comp.config.policy.enabled:
         logger.warning(
-            "policy.enabled=True but ``mm web`` does not run the policy scheduler — "
+            "policy.enabled=true but ``mm web`` does not run the policy scheduler — "
             "run ``memtomem-server`` (MCP) for the lifespan that starts PolicyScheduler"
         )
 
