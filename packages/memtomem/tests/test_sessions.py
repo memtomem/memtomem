@@ -1,5 +1,7 @@
 """Tests for episodic memory (sessions)."""
 
+from pathlib import Path
+
 import pytest
 
 from memtomem.server.context import AppContext
@@ -216,3 +218,71 @@ class TestSessionNamespaceDerivation:
         rows = await app.storage.list_sessions()
         active = next(r for r in rows if r["id"] == app.current_session_id)
         assert active["namespace"] == "agent-runtime:planner"
+
+
+class TestSessionSummaryPhaseA:
+    """Phase A of the episodic-session-summary RFC: an explicit
+    ``summary=`` argument to ``mem_session_end`` is promoted to a
+    first-class chunk under ``archive:session:<session_id>``. The
+    chunk is hidden from default ``mem_search`` via the ``archive:``
+    system prefix; LLM auto-summarization is Phase B and not exercised
+    here.
+    """
+
+    @pytest.mark.asyncio
+    async def test_summary_persists_archive_chunk(self, components):
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        out = await mem_session_end(  # type: ignore[arg-type]
+            summary="explored the auth flow", ctx=ctx
+        )
+
+        assert f"archive:session:{session_id}" in out
+
+        base = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        files = list((base / "sessions").rglob(f"{session_id}.md"))
+        assert len(files) == 1
+        body = files[0].read_text(encoding="utf-8")
+        assert "explored the auth flow" in body
+        assert "session-summary" in body
+        assert session_id in body
+
+    @pytest.mark.asyncio
+    async def test_no_summary_skips_chunk(self, components):
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+        assert "archive:session:" not in out
+
+        base = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        sessions_dir = base / "sessions"
+        if sessions_dir.exists():
+            files = list(sessions_dir.rglob(f"{session_id}.md"))
+            assert not files
+
+    @pytest.mark.asyncio
+    async def test_summary_chunk_hidden_from_default_search(self, components):
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+
+        await mem_session_end(  # type: ignore[arg-type]
+            summary="distinctive phrase for archive search filter test",
+            ctx=ctx,
+        )
+
+        results, _ = await app.search_pipeline.search("distinctive phrase", top_k=10)
+        assert all(not (r.chunk.namespace or "").startswith("archive:session:") for r in results), (
+            "archive:session:* chunks must not appear in default mem_search"
+        )

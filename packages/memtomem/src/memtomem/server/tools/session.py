@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 from memtomem.constants import AGENT_NAMESPACE_PREFIX, validate_agent_id, validate_namespace
@@ -147,8 +151,18 @@ async def mem_session_end(
     Resets both ``current_session_id`` and ``current_agent_id`` so the
     next ``mem_agent_search`` falls back to ``current_namespace``.
 
+    When ``summary`` is provided, the text is also promoted to a
+    first-class chunk under ``archive:session:<session_id>`` (Phase A
+    of the episodic-session-summary RFC). The chunk is hidden from
+    default ``mem_search`` via the ``archive:`` system prefix and
+    surfaces only under explicit ``namespace_filter``. Persisting the
+    chunk is best-effort: a failure is logged but does not roll back
+    the session-end DB write.
+
     Args:
-        summary: Optional summary of what was accomplished in this session
+        summary: Optional summary of what was accomplished in this
+            session. When provided, also written as a chunk under
+            ``<memory_dir>/sessions/<YYYY-MM>/<session_id>.md``.
     """
     app = await _get_app_initialized(ctx)
 
@@ -156,6 +170,7 @@ async def mem_session_end(
         return "No active session."
 
     session_id = app.current_session_id
+    agent_id = app.current_agent_id
 
     # Gather session stats
     events = await app.storage.get_session_events(session_id)
@@ -164,6 +179,23 @@ async def mem_session_end(
         event_counts[e["event_type"]] = event_counts.get(e["event_type"], 0) + 1
 
     await app.storage.end_session(session_id, summary, {"event_counts": event_counts})
+
+    summary_chunk_line: str | None = None
+    if summary:
+        try:
+            summary_chunk_line = await _persist_session_summary_chunk(
+                app,
+                session_id=session_id,
+                agent_id=agent_id,
+                summary=summary,
+                event_counts=event_counts,
+            )
+        except Exception:
+            logger.warning(
+                "session_summary_chunk_persist_failed session_id=%s",
+                session_id,
+                exc_info=True,
+            )
 
     # Cleanup session-bound working memory
     cleaned = await app.storage.scratch_cleanup(session_id)
@@ -178,9 +210,94 @@ async def mem_session_end(
     ]
     if summary:
         lines.append(f"- Summary: {summary[:100]}...")
+    if summary_chunk_line:
+        lines.append(summary_chunk_line)
     if cleaned:
         lines.append(f"- Working memory cleaned: {cleaned} entries")
     return "\n".join(lines)
+
+
+async def _persist_session_summary_chunk(
+    app: AppContext,
+    *,
+    session_id: str,
+    agent_id: str | None,
+    summary: str,
+    event_counts: dict[str, int],
+) -> str | None:
+    """Promote a session summary to a first-class chunk.
+
+    Writes the markdown file at
+    ``<memory_dir>/sessions/<YYYY-MM>/<session_id>.md`` and indexes it
+    under ``archive:session:<session_id>``. The ``archive:`` prefix is
+    a default system namespace, so the chunk is hidden from
+    ``mem_search`` unless the caller passes an explicit
+    ``namespace_filter``. Returns a single-line status for the tool
+    response, or ``None`` when no memory directory is configured.
+    """
+    memory_dirs = app.config.indexing.memory_dirs
+    if not memory_dirs:
+        return None
+
+    base = Path(memory_dirs[0]).expanduser().resolve()
+    now = datetime.now(timezone.utc)
+    target = base / "sessions" / now.strftime("%Y-%m") / f"{session_id}.md"
+    namespace = f"archive:session:{session_id}"
+    validate_namespace(namespace)
+
+    agent_label = agent_id or "default"
+    event_total = sum(event_counts.values())
+    content = _format_session_summary(
+        session_id=session_id,
+        agent_id=agent_label,
+        ended_at=now,
+        event_total=event_total,
+        summary=summary,
+    )
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(target.write_text, content, "utf-8")
+
+    stats = await app.index_engine.index_file(target, namespace=namespace)
+    app.search_pipeline.invalidate_cache()
+
+    return f"- Summary chunk: {namespace} ({stats.indexed_chunks} chunks)"
+
+
+def _format_session_summary(
+    *,
+    session_id: str,
+    agent_id: str,
+    ended_at: datetime,
+    event_total: int,
+    summary: str,
+) -> str:
+    """Render the session-summary markdown body.
+
+    Layout: YAML frontmatter (session_id / agent_id / ended_at /
+    event_count) → ``## Session summary: <id>`` heading → blockquote
+    tags (``session-summary``, ``agent=<id>``) → summary body. Matches
+    the chunker's expected entry shape (heading + blockquote group +
+    body) so frontmatter and per-section tags both promote cleanly to
+    ``ChunkMetadata.tags``.
+    """
+    iso_ts = ended_at.isoformat(timespec="seconds")
+    tags_json = json.dumps(["session-summary", f"agent={agent_id}"])
+    body = summary.strip()
+    return (
+        f"---\n"
+        f"session_id: {session_id}\n"
+        f"agent_id: {agent_id}\n"
+        f"ended_at: {iso_ts}\n"
+        f"event_count: {event_total}\n"
+        f"---\n"
+        f"\n"
+        f"## Session summary: {session_id}\n"
+        f"\n"
+        f"> tags: {tags_json}\n"
+        f"\n"
+        f"{body}\n"
+    )
 
 
 @mcp.tool()
