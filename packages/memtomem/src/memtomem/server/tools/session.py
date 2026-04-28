@@ -264,8 +264,9 @@ async def _maybe_auto_summarize(
     produced text, ``skip_reason`` is ``None``. When the path was
     skipped, ``summary_text`` is ``None`` and ``skip_reason`` carries
     a short label suitable for the tool response (``"disabled"``,
-    ``"no llm"``, ``"below min_chunks"``, ``"too large"``,
-    ``"empty output"``, or ``"llm error"``).
+    ``"no llm"``, ``"no session row"``, ``"no started_at"``,
+    ``"below min_chunks"``, ``"too large"``, ``"empty output"``, or
+    ``"llm error"``).
 
     Failures inside the LLM call are caught and surfaced as
     ``"llm error"`` so a misconfigured provider does not block
