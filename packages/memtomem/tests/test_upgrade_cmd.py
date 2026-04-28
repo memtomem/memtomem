@@ -258,6 +258,25 @@ def test_pid_file_unlink_skipped_if_respawned(monkeypatch, tmp_path, fake_uv, fo
     assert "freshly started writer" in result.output
 
 
+def test_version_specifier_rejected(monkeypatch, fake_uv, force_tty):
+    calls, _configure = fake_uv
+    _patch_liveness(monkeypatch, ServerState(alive=False, pid=None, pid_file=None))
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--version", ">=0.1.30"])
+    assert result.exit_code != 0
+    assert "not a bare PEP 440 release" in result.output
+    assert calls == []
+
+
+def test_version_prerelease_accepted(monkeypatch, fake_uv, force_tty):
+    calls, _configure = fake_uv
+    _patch_liveness(monkeypatch, ServerState(alive=False, pid=None, pid_file=None))
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--version", "0.1.30rc1"])
+    assert result.exit_code == 0, result.output
+    assert calls == [["uv", "tool", "install", "--refresh", "--reinstall", "memtomem==0.1.30rc1"]]
+
+
 def test_cancel_exits_zero_and_json_consistent(monkeypatch, fake_uv, force_tty):
     calls, _configure = fake_uv
     _patch_liveness(monkeypatch, ServerState(alive=False, pid=None, pid_file=None))

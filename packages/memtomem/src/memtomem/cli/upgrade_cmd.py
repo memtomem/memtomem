@@ -22,6 +22,7 @@ import os
 import signal
 import subprocess
 import sys
+import re
 import time
 import tomllib
 from pathlib import Path
@@ -29,6 +30,21 @@ from pathlib import Path
 import click
 
 from memtomem.cli._liveness import ServerState, check_server_liveness, probe_pid_file
+
+# Bare PEP 440 release identifier — no operators, no whitespace. We pin
+# with ``memtomem==<version>``, so accepting a specifier like ``>=0.1.30``
+# would compose to ``memtomem==>=0.1.30`` and uv would reject it with a
+# less obvious parser error. Pre/post/dev releases (``0.1.30rc1``,
+# ``0.1.30.post1``, ``0.1.30.dev0``, ``0.1.30+local``) stay allowed.
+_VERSION_PATTERN = re.compile(
+    r"^[0-9]+(?:\.[0-9]+)*"  # release segment: 1, 1.2, 1.2.3, ...
+    r"(?:(?:a|b|rc)[0-9]+)?"  # pre-release: a1, b2, rc3
+    r"(?:\.post[0-9]+)?"  # post-release
+    r"(?:\.dev[0-9]+)?"  # dev release
+    r"(?:\+[a-z0-9]+(?:[._-][a-z0-9]+)*)?"  # local version segment
+    r"$",
+    re.IGNORECASE,
+)
 
 
 def _isatty() -> bool:
@@ -163,6 +179,12 @@ def _build_install_cmd(version: str | None, extras: list[str]) -> list[str]:
     if extras:
         pkg = f"memtomem[{','.join(extras)}]"
     if version:
+        if not _VERSION_PATTERN.match(version):
+            raise click.BadParameter(
+                f"{version!r} is not a bare PEP 440 release (e.g. 0.1.30, 0.1.30rc1). "
+                "Pass a literal version, not a specifier like '>=0.1.30'.",
+                param_hint="--version",
+            )
         pkg = f"{pkg}=={version}"
     # ``--refresh`` invalidates uv's cached PyPI index so a freshly
     # released version isn't masked by the cached resolver result
