@@ -468,7 +468,14 @@ function showConfirm({
 // Tab navigation
 // ---------------------------------------------------------------------------
 
-function activateTab(tabName) {
+function activateTab(tabName, opts = {}) {
+  // ``fromKeyboard`` flips two behaviors that would otherwise fight the
+  // ARIA tabs arrow-nav contract:
+  //   * panel auto-focus is skipped so focus stays on the tab button (the
+  //     user keeps ArrowRight'ing through siblings)
+  //   * history mutation uses replaceState so cycling N tabs does not push
+  //     N entries the user has to press Back through to escape
+  const fromKeyboard = opts.fromKeyboard === true;
   // In prod mode, hide dev-only tabs by redirecting to the first visible
   // main tab instead of showing a dev panel the polished surface doesn't
   // expose.
@@ -477,7 +484,7 @@ function activateTab(tabName) {
     const visible = _visibleMainTabs();
     showToast(t('toast.dev_only_section'), 'info');
     if (visible.length && visible[0] !== tabName) {
-      activateTab(visible[0]);
+      activateTab(visible[0], opts);
     }
     return;
   }
@@ -508,14 +515,24 @@ function activateTab(tabName) {
   if (panel) {
     panel.hidden = false;
     panel.classList.add('active');
-    // Focus first focusable element in new panel
-    const focusable = panel.querySelector('input:not([hidden]):not([disabled]), button:not([hidden]):not([disabled]), [tabindex="0"]');
-    if (focusable) focusable.focus();
+    // Focus first focusable element in new panel — but only on click /
+    // direct activation. Arrow-nav must keep focus on the tab button so
+    // subsequent ArrowRight presses still cycle the tablist.
+    if (!fromKeyboard) {
+      const focusable = panel.querySelector('input:not([hidden]):not([disabled]), button:not([hidden]):not([disabled]), [tabindex="0"]');
+      if (focusable) focusable.focus();
+    }
   }
 
-  // History API — enable back button and deep linking
+  // History API — enable back button and deep linking. Arrow-nav uses
+  // replaceState so a cycle through siblings produces one history entry
+  // instead of N (otherwise Back becomes unusable).
   if (location.hash !== `#${tabName}`) {
-    history.pushState({ tab: tabName }, '', `#${tabName}`);
+    if (fromKeyboard) {
+      history.replaceState({ tab: tabName }, '', `#${tabName}`);
+    } else {
+      history.pushState({ tab: tabName }, '', `#${tabName}`);
+    }
   }
 
   // Tab-specific loads
@@ -693,7 +710,7 @@ document.querySelector('.tab-nav')?.addEventListener('keydown', (e) => {
   e.preventDefault();
   const next = buttons[nextIdx];
   next.focus();
-  if (next.dataset.tab) activateTab(next.dataset.tab);
+  if (next.dataset.tab) activateTab(next.dataset.tab, { fromKeyboard: true });
 });
 
 // ── E1: ARIA init ──
