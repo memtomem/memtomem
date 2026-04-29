@@ -26,6 +26,11 @@ from memtomem.context.detector import COMMAND_DIRS
 from memtomem.web.deps import get_project_root
 from memtomem.web.routes._locks import _gateway_lock
 
+# Flat list of project-relative runtime scan paths reported on list / import
+# responses so the web UI's empty-state hint can name the exact directories
+# the detector inspects without hardcoding them client-side.
+_COMMAND_SCAN_DIRS: list[str] = [rel for rel, _suffix in COMMAND_DIRS.values()]
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["context-commands"])
@@ -81,7 +86,11 @@ async def list_commands(
         if cmd_name not in canonical_names:
             commands.append({"name": cmd_name, "canonical_path": None, "runtimes": runtimes})
 
-    return {"commands": commands}
+    return {
+        "commands": commands,
+        "canonical_root": CANONICAL_COMMAND_ROOT,
+        "scanned_dirs": _COMMAND_SCAN_DIRS,
+    }
 
 
 # ── Read ─────────────────────────────────────────────────────────────────
@@ -379,5 +388,5 @@ async def import_commands(
             for name, reason, code in result.skipped
         ],
         "project_root": str(project_root),
-        "scanned_dirs": [rel for rel, _suffix in COMMAND_DIRS.values()],
+        "scanned_dirs": _COMMAND_SCAN_DIRS,
     }

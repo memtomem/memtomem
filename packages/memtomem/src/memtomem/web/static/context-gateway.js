@@ -158,16 +158,13 @@ document.getElementById('ctx-detect-btn')?.addEventListener('click', async () =>
 
 let _ctxCurrentDetail = { type: null, name: null };
 
-// Per-type fallback metadata for the empty-state hint. Values mirror the
-// canonical roots in memtomem.context.{skills,commands,agents} and the
-// runtime scan dirs in memtomem.context.detector. Kept here because the
-// list endpoint is intentionally light-weight; if we ever surface these on
-// the wire (PR2), prefer that over the static fallback.
-const _CTX_EMPTY_HINT_META = {
-  skills:   { canonical: '.memtomem/skills',   scan_dirs: '.claude/skills, .gemini/skills, .agents/skills' },
-  commands: { canonical: '.memtomem/commands', scan_dirs: '.claude/commands, .gemini/commands' },
-  agents:   { canonical: '.memtomem/agents',   scan_dirs: '.claude/agents, .gemini/agents, .codex/agents' },
-};
+// POSIX basename, JS-side. Used to keep absolute project_root paths out
+// of the toast copy — the wire still carries the absolute path so the
+// reverse-proxy / debug case stays self-describing.
+function _ctxBasename(p) {
+  if (!p) return '';
+  return String(p).replace(/\/$/, '').split('/').pop() || String(p);
+}
 
 async function loadCtxList(type) {
   const listEl = qs(`ctx-${type}-list`);
@@ -185,12 +182,17 @@ async function loadCtxList(type) {
     const items = data[type] || [];
 
     if (!items.length) {
-      const meta = _CTX_EMPTY_HINT_META[type] || { canonical: '.memtomem/' + type, scan_dirs: '' };
+      // Wire-sourced canonical_root + scanned_dirs (added in this PR).
+      // Falls back to a derived value only if the response predates the
+      // contract — keeps the hint accurate without re-encoding the
+      // detector layout client-side.
+      const canonical = data.canonical_root || `.memtomem/${type}`;
+      const scanDirs = (data.scanned_dirs || []).join(', ');
       const hint = t('settings.ctx.empty_hint',
         'Place {type} under {canonical}/<name>/ then click Sync, or click Import to pull existing {type} from {scan_dirs} within this project.')
         .replace(/\{type\}/g, type)
-        .replace('{canonical}', meta.canonical)
-        .replace('{scan_dirs}', meta.scan_dirs);
+        .replace('{canonical}', canonical)
+        .replace('{scan_dirs}', scanDirs);
       listEl.innerHTML = emptyState(
         '',
         t('settings.ctx.no_artifacts', 'No {type} found').replace('{type}', type),
@@ -493,11 +495,14 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
       if (importedCount === 0 && skippedCount === 0) {
         // Nothing in any scanned runtime dir — give the user the actual
         // paths we looked in so they can drop a SKILL.md / *.md / etc.
+        // Render basename(project_root) so a long absolute path doesn't
+        // crowd the toast; scanned_dirs already gives full orientation.
         const scanList = (data.scanned_dirs || []).join(', ') || '—';
+        const rootLabel = _ctxBasename(data.project_root) || '.';
         const msg = t('settings.ctx.import_no_runtimes',
           'No runtime {type} found in {root}. Scanned: {scan_dirs}.')
           .replace('{type}', type)
-          .replace('{root}', data.project_root || '.')
+          .replace('{root}', rootLabel)
           .replace('{scan_dirs}', scanList);
         showToast(msg, 'info');
       } else if (importedCount + skippedCount > 0) {

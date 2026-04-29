@@ -94,7 +94,15 @@ class TestListSkills:
     async def test_empty(self, client: AsyncClient):
         r = await client.get("/api/context/skills")
         assert r.status_code == 200
-        assert r.json()["skills"] == []
+        data = r.json()
+        assert data["skills"] == []
+        # GET also surfaces canonical_root + scanned_dirs so the empty-state
+        # hint can pull from the wire instead of hardcoding the detector
+        # layout client-side.
+        assert data["canonical_root"] == ".memtomem/skills"
+        assert ".claude/skills" in data["scanned_dirs"]
+        assert ".gemini/skills" in data["scanned_dirs"]
+        assert ".agents/skills" in data["scanned_dirs"]
 
     @pytest.mark.anyio
     async def test_with_items(self, client: AsyncClient, tmp_path: Path):
@@ -441,9 +449,14 @@ class TestListCommands:
     async def test_empty(self, client: AsyncClient):
         r = await client.get("/api/context/commands")
         assert r.status_code == 200
+        data = r.json()
         # May include user-scope Codex prompts from ~/.codex/prompts/
-        canonicals = [c for c in r.json()["commands"] if c["canonical_path"] is not None]
+        canonicals = [c for c in data["commands"] if c["canonical_path"] is not None]
         assert canonicals == []
+        # GET surfaces canonical_root + scanned_dirs (PR1 review #1).
+        assert data["canonical_root"] == ".memtomem/commands"
+        assert ".claude/commands" in data["scanned_dirs"]
+        assert ".gemini/commands" in data["scanned_dirs"]
 
     @pytest.mark.anyio
     async def test_with_items(self, client: AsyncClient, tmp_path: Path):
@@ -596,10 +609,16 @@ class TestListAgents:
     async def test_empty(self, client: AsyncClient):
         r = await client.get("/api/context/agents")
         assert r.status_code == 200
+        data = r.json()
         # Filter to canonical entries; runtime-only agents (e.g. orphan files
         # under .claude/agents) may still appear without a canonical_path.
-        canonicals = [a for a in r.json()["agents"] if a["canonical_path"] is not None]
+        canonicals = [a for a in data["agents"] if a["canonical_path"] is not None]
         assert canonicals == []
+        # GET surfaces canonical_root + scanned_dirs (PR1 review #1).
+        assert data["canonical_root"] == ".memtomem/agents"
+        assert ".claude/agents" in data["scanned_dirs"]
+        assert ".gemini/agents" in data["scanned_dirs"]
+        assert ".codex/agents" in data["scanned_dirs"]
 
     @pytest.mark.anyio
     async def test_with_items(self, client: AsyncClient, tmp_path: Path):
