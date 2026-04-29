@@ -34,6 +34,10 @@ class ChunkMetadata:
     overlap_after: int = 0  # chars of overlap with next chunk
     parent_context: str = ""  # parent heading or document title
     file_context: str = ""  # filename + heading outline
+    # Validity window from frontmatter (RFC: temporal-validity).
+    # NULL means unbounded on that side; both NULL means always-valid.
+    valid_from_unix: int | None = None
+    valid_to_unix: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

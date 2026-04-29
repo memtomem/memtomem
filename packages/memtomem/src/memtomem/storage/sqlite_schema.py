@@ -112,6 +112,20 @@ def create_tables(
         if "duplicate column" not in str(e).lower():
             raise
 
+    # Idempotent migration: temporal-validity window columns (RFC: temporal-validity).
+    # NULL on either side means "no bound on this side"; both NULL means
+    # always-valid (RFC §Goal 4 — chunks without frontmatter validity fields
+    # stay backward-compatible).
+    for col_sql in (
+        "ALTER TABLE chunks ADD COLUMN valid_from_unix INTEGER",
+        "ALTER TABLE chunks ADD COLUMN valid_to_unix INTEGER",
+    ):
+        try:
+            db.execute(col_sql)
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
+
     db.execute("""
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts
         USING fts5(content, source_file, tokenize='unicode61')

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from memtomem.models import Chunk, ChunkMetadata, ChunkType
@@ -11,10 +12,60 @@ from memtomem.models import Chunk, ChunkMetadata, ChunkType
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 _FRONT_MATTER_RE = re.compile(r"^---\n(.*?)\n---\n?", re.DOTALL)
 _WIKILINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]")
+# Temporal-validity frontmatter formats (RFC: temporal-validity).
+# Date-only ``YYYY-MM-DD`` and quarter ``YYYY-QN`` (N in 1-4). Anything else
+# parses to ``None`` and the bound is treated as unset (no exception raised —
+# the chunker stays liberal so a typo doesn't break indexing).
+_VALIDITY_DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+_VALIDITY_QUARTER_RE = re.compile(r"^(\d{4})-Q([1-4])$")
 # Code fence opener/closer: up to 3 leading spaces, then ``` or ~~~ (length is
 # the matched run). Language tag after opener is allowed; closer must be the
 # same character and at least as long (CommonMark §4.5).
 _FENCE_OPEN_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
+
+
+def _parse_validity_bound(value: str, *, upper: bool) -> int | None:
+    """Parse a ``valid_from`` / ``valid_to`` value to a unix-second bound.
+
+    ``upper`` selects which edge of the calendar unit to return:
+    - ``upper=False`` (lower bound): start of day / start of quarter (00:00:00 UTC).
+    - ``upper=True`` (upper bound): end of day / end of quarter (23:59:59 UTC of
+      the unit's last day) — inclusive, per RFC §Frontmatter shape.
+
+    Returns ``None`` for malformed input (e.g. ``2025-13-45``, ``2025-Q5``) so
+    one bad bound does not prevent the other from being used and indexing is
+    not aborted by a single typo.
+    """
+    m = _VALIDITY_DATE_RE.match(value)
+    if m:
+        try:
+            year, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            start = datetime(year, month, day, 0, 0, 0, tzinfo=timezone.utc)
+        except ValueError:
+            return None
+        if not upper:
+            return int(start.timestamp())
+        end = start + timedelta(days=1) - timedelta(seconds=1)
+        return int(end.timestamp())
+
+    m = _VALIDITY_QUARTER_RE.match(value)
+    if m:
+        year, quarter = int(m.group(1)), int(m.group(2))
+        first_month = (quarter - 1) * 3 + 1  # Q1=1, Q2=4, Q3=7, Q4=10
+        try:
+            q_start = datetime(year, first_month, 1, 0, 0, 0, tzinfo=timezone.utc)
+        except ValueError:
+            return None
+        if not upper:
+            return int(q_start.timestamp())
+        # End of quarter = (start of next quarter) - 1 second.
+        if first_month == 10:
+            next_q_start = datetime(year + 1, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        else:
+            next_q_start = datetime(year, first_month + 3, 1, 0, 0, 0, tzinfo=timezone.utc)
+        return int((next_q_start - timedelta(seconds=1)).timestamp())
+
+    return None
 
 
 _TOKEN_CHAR_RATIO = 4  # rough chars-per-token estimate (English-oriented)
@@ -169,6 +220,11 @@ class MarkdownChunker:
         # Extract tags from YAML frontmatter
         fm_tags = self._extract_frontmatter_tags(content)
 
+        # Extract validity window from frontmatter (RFC: temporal-validity).
+        # The window is file-level — every chunk produced from this file
+        # carries the same (valid_from_unix, valid_to_unix) pair.
+        valid_from_unix, valid_to_unix = self._extract_validity_window(content)
+
         # Resolve wikilinks: [[target|alias]] → alias, [[target]] → target
         content = _WIKILINK_RE.sub(lambda m: m.group(2) or m.group(1), content)
 
@@ -224,6 +280,8 @@ class MarkdownChunker:
                             tags=combined_tags,
                             parent_context=parent_ctx,
                             file_context=file_ctx,
+                            valid_from_unix=valid_from_unix,
+                            valid_to_unix=valid_to_unix,
                         ),
                     )
                 )
@@ -249,6 +307,8 @@ class MarkdownChunker:
                                 overlap_after=sc.get("overlap_after", 0),
                                 tags=combined_tags,
                                 parent_context=parent_ctx,
+                                valid_from_unix=valid_from_unix,
+                                valid_to_unix=valid_to_unix,
                                 file_context=file_ctx,
                             ),
                         )
@@ -295,6 +355,34 @@ class MarkdownChunker:
             if stripped.startswith("tags:"):
                 return cls._parse_tags_value(stripped[5:], fm_lines[idx + 1 :])
         return []
+
+    @classmethod
+    def _extract_validity_window(cls, content: str) -> tuple[int | None, int | None]:
+        """Extract ``(valid_from_unix, valid_to_unix)`` from YAML frontmatter.
+
+        Each field is independent — either, both, or neither may be present.
+        Missing or malformed values return ``None`` for that side, leaving the
+        bound unset (semantically: that side of the window is unbounded).
+
+        Accepted formats per side: ``YYYY-MM-DD`` (date) or ``YYYY-QN`` with
+        ``N`` in 1–4 (quarter). Lower bound uses the unit's start (00:00:00
+        UTC); upper bound uses the unit's last day end (23:59:59 UTC). See
+        ``_parse_validity_bound`` for the per-format specifics.
+        """
+        match = _FRONT_MATTER_RE.match(content)
+        if not match:
+            return None, None
+        from_value: str | None = None
+        to_value: str | None = None
+        for line in match.group(1).splitlines():
+            stripped = line.strip()
+            if stripped.startswith("valid_from:"):
+                from_value = stripped[len("valid_from:") :].strip().strip("'\"")
+            elif stripped.startswith("valid_to:"):
+                to_value = stripped[len("valid_to:") :].strip().strip("'\"")
+        vfrom = _parse_validity_bound(from_value, upper=False) if from_value else None
+        vto = _parse_validity_bound(to_value, upper=True) if to_value else None
+        return vfrom, vto
 
     @classmethod
     def _extract_section_blockquote_tags(cls, text: str) -> tuple[list[str], str, int]:

@@ -406,7 +406,8 @@ class SqliteBackend(
                 db.executemany(
                     """UPDATE chunks SET content=?, content_hash=?, source_file=?,
                        heading_hierarchy=?, chunk_type=?, start_line=?, end_line=?,
-                       language=?, tags=?, namespace=?, updated_at=?
+                       language=?, tags=?, namespace=?, updated_at=?,
+                       valid_from_unix=?, valid_to_unix=?
                        WHERE id=?""",
                     [
                         (
@@ -421,6 +422,8 @@ class SqliteBackend(
                             json.dumps(list(c.metadata.tags)),
                             c.metadata.namespace,
                             c.updated_at.isoformat(timespec="seconds"),
+                            c.metadata.valid_from_unix,
+                            c.metadata.valid_to_unix,
                             str(c.id),
                         )
                         for c, _ in to_update
@@ -450,8 +453,9 @@ class SqliteBackend(
                        (id, content, content_hash, source_file, heading_hierarchy,
                         chunk_type, start_line, end_line, language, tags,
                         namespace, created_at, updated_at,
-                        overlap_before, overlap_after)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        overlap_before, overlap_after,
+                        valid_from_unix, valid_to_unix)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     [
                         (
                             str(c.id),
@@ -469,6 +473,8 @@ class SqliteBackend(
                             c.updated_at.isoformat(timespec="seconds"),
                             c.metadata.overlap_before,
                             c.metadata.overlap_after,
+                            c.metadata.valid_from_unix,
+                            c.metadata.valid_to_unix,
                         )
                         for c in to_insert
                     ],
@@ -1113,6 +1119,14 @@ class SqliteBackend(
             ob = row[16] or 0
             oa = row[17] or 0
 
+        # Validity-window columns (may not exist in older DBs) — columns 19,20
+        # after importance_score (18). NULL → unbounded on that side.
+        vfrom: int | None = None
+        vto: int | None = None
+        if len(row) >= 21:
+            vfrom = row[19]
+            vto = row[20]
+
         metadata = ChunkMetadata(
             source_file=Path(source_file),
             heading_hierarchy=hh,
@@ -1124,6 +1138,8 @@ class SqliteBackend(
             namespace=namespace,
             overlap_before=ob,
             overlap_after=oa,
+            valid_from_unix=vfrom,
+            valid_to_unix=vto,
         )
 
         # --- timestamps (always timezone-aware) ---
