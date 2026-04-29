@@ -598,12 +598,15 @@ function _buildMemoryDirsPanel(initialDirs) {
 
     function _aggregateStatus(entries) {
       // ``file_count`` is the disk truth (matches the per-row badge);
-      // ``source_file_count`` is the indexed-only count, which would
-      // make the group total disagree with the sum of the row badges
-      // — confusing when most rows are unindexed (group says "7 files"
-      // while the rows clearly show 803 .md on disk).
+      // ``source_file_count`` is the indexed subset. Showing both in
+      // the group label (``{indexed}/{files}``) lets users tell at a
+      // glance how much of a memory_dir cluster has been indexed vs
+      // still on disk waiting — without it, "27 files" was ambiguous
+      // (was that "27 on disk" or "27 indexed"?) and disagreed with
+      // the row sum when most dirs were unindexed.
       let chunks = 0;
       let files = 0;
+      let indexed = 0;
       let any = false;
       for (const path of entries) {
         const st = statusByPath[path];
@@ -611,9 +614,10 @@ function _buildMemoryDirsPanel(initialDirs) {
           any = true;
           chunks += st.chunk_count || 0;
           files += (typeof st.file_count === 'number') ? st.file_count : 0;
+          indexed += st.source_file_count || 0;
         }
       }
-      return { chunks, files, any };
+      return { chunks, files, indexed, any };
     }
 
     function _buildStatusBadge(aggregate) {
@@ -622,7 +626,11 @@ function _buildMemoryDirsPanel(initialDirs) {
       if (aggregate.chunks === 0) badge.classList.add('empty');
       badge.textContent = t(
         'sources.memory_dirs.status_group',
-        { files: aggregate.files, chunks: aggregate.chunks },
+        {
+          files: aggregate.files,
+          indexed: aggregate.indexed,
+          chunks: aggregate.chunks,
+        },
       );
       return badge;
     }

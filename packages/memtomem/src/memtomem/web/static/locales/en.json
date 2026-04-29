@@ -580,7 +580,7 @@
   "sources.memory_dirs.status_empty": "not indexed",
   "sources.memory_dirs.status_missing": "missing",
   "sources.memory_dirs.status_chunks": "{count} chunks",
-  "sources.memory_dirs.status_group": "{files} files · {chunks} chunks",
+  "sources.memory_dirs.status_group": "{indexed}/{files} files · {chunks} chunks",
   "sources.memory_dirs.status_files_only": "{count} files",
   "sources.memory_dirs.sort_label": "Sort by",
   "sources.memory_dirs.sort.created_desc": "Newest first",

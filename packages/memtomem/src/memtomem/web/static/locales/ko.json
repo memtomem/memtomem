@@ -580,7 +580,7 @@
   "sources.memory_dirs.status_empty": "인덱싱 안 됨",
   "sources.memory_dirs.status_missing": "경로 없음",
   "sources.memory_dirs.status_chunks": "청크 {count}",
-  "sources.memory_dirs.status_group": "파일 {files} · 청크 {chunks}",
+  "sources.memory_dirs.status_group": "파일 {indexed}/{files} · 청크 {chunks}",
   "sources.memory_dirs.status_files_only": "파일 {count}",
   "sources.memory_dirs.sort_label": "정렬",
   "sources.memory_dirs.sort.created_desc": "최근 생성순",
