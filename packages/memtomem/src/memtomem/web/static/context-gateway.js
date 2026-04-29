@@ -242,7 +242,15 @@ function _ctxRenderItemsHtml(items, type, projectRoot, { clickable }) {
   const cardClass = clickable ? 'ctx-card' : 'ctx-card ctx-card--readonly';
   let html = '';
   for (const item of items) {
-    html += `<div class="${cardClass}" data-name="${escapeHtml(item.name)}">
+    // ``data-canonical-path`` is read by the click handler to choose between
+    // the canonical detail GET (which 404s for runtime-only items, since the
+    // wire endpoint only resolves canonical paths) and the runtime-only diff
+    // path. Empty string when the item is runtime-only — readers test for
+    // truthiness so the absence/empty distinction is irrelevant.
+    const canonAttr = item.canonical_path
+      ? ` data-canonical-path="${escapeHtml(item.canonical_path)}"`
+      : ' data-canonical-path=""';
+    html += `<div class="${cardClass}" data-name="${escapeHtml(item.name)}"${canonAttr}>
       <div class="ctx-card-header">
         <div>
           <div class="ctx-card-name">${escapeHtml(item.name)}</div>
@@ -279,7 +287,15 @@ async function _loadScopeGroupItems(type, scope, container) {
         card.addEventListener('click', () => {
           listEl.querySelectorAll('.ctx-card').forEach(c => c.classList.remove('active'));
           card.classList.add('active');
-          loadCtxDetail(type, card.dataset.name);
+          // Runtime-only items have no canonical file; calling the GET detail
+          // endpoint returns 404. Branch into the diff-backed renderer so the
+          // user sees the actual runtime contents instead of a "not found".
+          if (card.dataset.canonicalPath) {
+            loadCtxDetail(type, card.dataset.name);
+          } else {
+            const detailEl = qs(`ctx-${type}-detail`);
+            _ctxLoadRuntimeOnlyDetail(type, card.dataset.name, detailEl);
+          }
         });
       });
     }
@@ -603,6 +619,64 @@ async function _ctxLoadDiff(type, name, detailEl) {
     pane.innerHTML = html;
   } catch (err) {
     pane.innerHTML = `<div class="text-muted">Diff failed: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+// Render a detail panel for runtime-only items (no canonical file yet). The
+// canonical detail GET 404s for these by design; the diff endpoint already
+// returns ``runtime_content`` for each runtime, so we reuse it as the
+// preview source and surface an "Import all" CTA so the user can pull every
+// runtime-only artifact in one click.
+async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl) {
+  detailEl.hidden = false;
+  _ctxCurrentDetail = { type, name };
+  panelLoading(detailEl);
+
+  try {
+    const res = await fetch(`/api/context/${type}/${encodeURIComponent(name)}/diff`);
+    if (!res.ok) {
+      throw new Error((await res.json().catch(() => ({}))).detail || `Failed to load ${name}`);
+    }
+    const data = await res.json();
+
+    let html = '<div class="ctx-detail">';
+    html += `<div class="ctx-detail-header">
+      <strong>${escapeHtml(name)}</strong>
+      ${_ctxBadge('missing canonical')}
+    </div>`;
+    html += `<div class="text-muted" style="margin:6px 0 12px">${t('settings.ctx.runtime_only_detail_hint', 'Runtime preview — not yet in .memtomem/.')}</div>`;
+
+    if (!data.runtimes || !data.runtimes.length) {
+      html += `<div class="text-muted">${t('settings.ctx.no_artifacts_hint', 'Create one or import from existing runtimes.')}</div>`;
+    } else {
+      for (const rt of data.runtimes) {
+        html += `<div style="margin-bottom:12px">`;
+        html += `<strong>${escapeHtml(rt.runtime)}</strong> ${_ctxBadge(rt.status)}`;
+        if (rt.runtime_content != null) {
+          html += `<pre class="ctx-content-pre" style="margin-top:6px">${escapeHtml(rt.runtime_content)}</pre>`;
+        }
+        html += '</div>';
+      }
+    }
+
+    html += `<div class="ctx-edit-actions" style="margin-top:12px">
+      <button class="btn-primary ctx-runtime-only-import" data-type="${escapeHtml(type)}">
+        ${t('settings.ctx.import_all_includes_this', 'Import all {type} (includes this)').replace('{type}', type)}
+      </button>
+    </div>`;
+
+    html += '</div>';
+    detailEl.innerHTML = html;
+
+    detailEl.querySelector('.ctx-runtime-only-import')?.addEventListener('click', () => {
+      // No single-name import API exists yet, so dispatch a click to the
+      // section-level Import button. When a single-name endpoint lands,
+      // swap this for a direct fetch and refine the CTA copy.
+      const importBtn = document.querySelector(`.ctx-import-btn[data-type="${type}"]`);
+      if (importBtn) importBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+  } catch (err) {
+    detailEl.innerHTML = emptyState('', 'Failed to load detail', err.message);
   }
 }
 
