@@ -3041,6 +3041,66 @@ class TestCategorizeMemoryDir:
         assert PROVIDER_DIR_CATEGORIES == tuple(cat for cat, _ in _PROVIDER_CATEGORY_PATTERNS)
 
 
+class TestMemoryDirKind:
+    """Two-bucket classifier (``memory`` vs ``general``) layered on top
+    of :func:`categorize_memory_dir`. Drives the Web UI Sources page
+    sub-toggle so users can see agent/user memory separately from
+    arbitrary indexed RAG folders."""
+
+    def test_known_provider_layouts_are_memory(self) -> None:
+        from memtomem.config import memory_dir_kind
+
+        assert memory_dir_kind("/home/alice/.claude/projects/p/memory") == "memory"
+        assert memory_dir_kind("/home/alice/.claude/plans") == "memory"
+        assert memory_dir_kind("/home/alice/.codex/memories") == "memory"
+
+    def test_user_dir_with_memory_segment_is_memory(self) -> None:
+        from memtomem.config import memory_dir_kind
+
+        # Common layout — user curates a top-level memory folder.
+        assert memory_dir_kind("/Users/alice/memories") == "memory"
+        assert memory_dir_kind("/Users/alice/Documents/memory") == "memory"
+
+    def test_user_dir_without_memory_segment_is_general(self) -> None:
+        from memtomem.config import memory_dir_kind
+
+        # The common case — arbitrary RAG-style folder added by the user.
+        assert memory_dir_kind("/Users/alice/work/docs") == "general"
+        assert memory_dir_kind("/Users/alice/projects/notes") == "general"
+        assert memory_dir_kind("/srv/shared/planning") == "general"
+
+    def test_compound_word_segment_does_not_match(self) -> None:
+        """The heuristic compares whole path segments, not substrings —
+        ``memory-game`` is not the segment ``memory`` and stays general.
+        Documents the heuristic boundary so future tweaks don't regress."""
+        from memtomem.config import memory_dir_kind
+
+        assert memory_dir_kind("/code/memory-game") == "general"
+        assert memory_dir_kind("/code/in-memory-cache") == "general"
+        assert memory_dir_kind("/code/memorial") == "general"
+
+    def test_heuristic_is_aggressive_for_segment_matches(self) -> None:
+        """Documented limitation: any path with an exact ``memory`` /
+        ``memories`` segment lands in the Memory bucket, even when the
+        intent is clearly not agent memory. A future PR can add an
+        explicit per-dir override; until then these classify as memory."""
+        from memtomem.config import memory_dir_kind
+
+        # App cache happens to use a ``memory`` segment.
+        assert memory_dir_kind("/Users/alice/Library/Caches/some-app/memory") == "memory"
+        # Code repo with a folder happening to be named ``memory``.
+        assert memory_dir_kind("/Users/alice/projects/foo/memory") == "memory"
+        # Photo archive named ``memories`` — not a RAG corpus, but the
+        # heuristic can't tell.
+        assert memory_dir_kind("/Users/alice/Documents/memories/photos") == "memory"
+
+    def test_pathlib_input(self) -> None:
+        from memtomem.config import memory_dir_kind
+
+        assert memory_dir_kind(Path("/u/.codex/memories")) == "memory"
+        assert memory_dir_kind(Path("/u/work/notes")) == "general"
+
+
 class TestDetectProviderDirsRoundtrip:
     """Drift guard: every path ``_detect_provider_dirs`` returns must
     classify back to the same category via ``categorize_memory_dir``.

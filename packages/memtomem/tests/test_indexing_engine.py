@@ -1550,6 +1550,33 @@ class TestMemoryDirStats:
         # Belt-and-suspenders: no entry should be missing ``provider``.
         assert all("provider" in r for r in result)
 
+    async def test_kind_field_splits_memory_vs_general(self, tmp_path):
+        """``kind`` is the single source of truth for the Web UI's
+        Memory / General sub-toggle on the Sources page. Provider
+        layouts and user-memory folders are ``"memory"``; arbitrary
+        user-added RAG folders are ``"general"``. Without this field
+        the frontend would have to re-derive the heuristic on its own
+        and drift from the server."""
+        from memtomem.indexing.engine import memory_dir_stats
+
+        notes = tmp_path / "work" / "docs"
+        memories = tmp_path / "memories"
+        codex = tmp_path / ".codex" / "memories"
+        claude_mem = tmp_path / ".claude" / "projects" / "demo" / "memory"
+        for d in (notes, memories, codex, claude_mem):
+            d.mkdir(parents=True)
+
+        storage = _FakeStorageForStats([])
+        result = await memory_dir_stats(storage, [notes, memories, codex, claude_mem])
+        by_path = {r["path"]: r["kind"] for r in result}
+        assert by_path[str(notes)] == "general"
+        assert by_path[str(memories)] == "memory"
+        assert by_path[str(codex)] == "memory"
+        assert by_path[str(claude_mem)] == "memory"
+        # Defensive: every row must carry ``kind`` so the Web UI never
+        # has to guess.
+        assert all("kind" in r for r in result)
+
     async def test_dir_with_indexed_files_is_aggregated(self, tmp_path):
         from memtomem.indexing.engine import memory_dir_stats
 
@@ -1740,3 +1767,84 @@ class TestMemoryDirStats:
         result = await memory_dir_stats(storage, [gone], supported_extensions=frozenset({".md"}))
         assert result[0]["exists"] is False
         assert result[0]["file_count"] == 0
+
+
+# ===========================================================================
+# 12. resolve_owning_memory_dir — source → owning dir lookup
+# ===========================================================================
+
+
+class TestResolveOwningMemoryDir:
+    """Inverse of :func:`memory_dir_stats`'s bucketing: given a single
+    indexed source path, find which configured memory_dir owns it.
+    Drives the Web UI's per-source ``memory_dir`` / ``kind`` fields on
+    ``GET /api/sources``."""
+
+    def test_source_under_single_dir(self, tmp_path):
+        from memtomem.indexing.engine import resolve_owning_memory_dir
+
+        d = tmp_path / "notes"
+        d.mkdir()
+        f = d / "a.md"
+        f.write_text("#")
+        owner = resolve_owning_memory_dir(f, [d])
+        assert owner == d
+
+    def test_orphan_returns_none(self, tmp_path):
+        """A source that isn't under any configured dir is orphan —
+        typical after the user removes a dir without purging chunks.
+        ``None`` lets the route surface them in the General view rather
+        than dropping them silently."""
+        from memtomem.indexing.engine import resolve_owning_memory_dir
+
+        d = tmp_path / "registered"
+        d.mkdir()
+        elsewhere = tmp_path / "unregistered" / "stray.md"
+        elsewhere.parent.mkdir()
+        elsewhere.write_text("#")
+        assert resolve_owning_memory_dir(elsewhere, [d]) is None
+
+    def test_longest_prefix_wins_for_nested_dirs(self, tmp_path):
+        """When a parent dir and one of its children are both registered
+        (uncommon but legal — e.g. broad RAG corpus + curated subset),
+        the deeper match wins so the source is attributed to the more
+        specific group the user explicitly opted into."""
+        from memtomem.indexing.engine import resolve_owning_memory_dir
+
+        parent = tmp_path / "corpus"
+        child = parent / "curated"
+        child.mkdir(parents=True)
+        f = child / "doc.md"
+        f.write_text("#")
+
+        assert resolve_owning_memory_dir(f, [parent, child]) == child
+        # Order in the configured list must not change the answer.
+        assert resolve_owning_memory_dir(f, [child, parent]) == child
+
+    def test_sibling_with_shared_prefix_does_not_match(self, tmp_path):
+        """``/foo`` must not claim files under ``/foo-bar/...`` — the
+        trailing-slash normalisation in :func:`_norm_dir_prefix` is what
+        prevents this. Pin the behaviour."""
+        from memtomem.indexing.engine import resolve_owning_memory_dir
+
+        foo = tmp_path / "foo"
+        foo_bar = tmp_path / "foo-bar"
+        foo.mkdir()
+        foo_bar.mkdir()
+        sibling_file = foo_bar / "x.md"
+        sibling_file.write_text("#")
+        assert resolve_owning_memory_dir(sibling_file, [foo]) is None
+
+    def test_tilde_input_is_expanded(self, tmp_path, monkeypatch):
+        """The route hands ``config.indexing.memory_dirs`` through
+        verbatim (entries may be ``~/...`` form). The helper must
+        expand both sides before comparing, otherwise tilde-prefixed
+        configured dirs would never match concrete source paths."""
+        from memtomem.indexing.engine import resolve_owning_memory_dir
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / "memories").mkdir()
+        f = tmp_path / "memories" / "note.md"
+        f.write_text("#")
+        owner = resolve_owning_memory_dir(f, ["~/memories"])
+        assert owner == (tmp_path / "memories")

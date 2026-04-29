@@ -442,6 +442,10 @@ class TestSources:
         src = data["sources"][0]
         assert src["chunk_count"] == 5
         assert "path" in src
+        # ``kind`` / ``memory_dir`` are always present so the Web UI's
+        # Sources-mode toggle can partition without re-deriving anything.
+        assert "kind" in src
+        assert "memory_dir" in src
 
     async def test_list_sources_pagination(self, client: AsyncClient):
         resp = await client.get("/api/sources", params={"limit": 1, "offset": 0})
@@ -449,6 +453,72 @@ class TestSources:
         data = resp.json()
         assert data["limit"] == 1
         assert data["offset"] == 0
+
+    async def test_orphan_source_kind_is_null(self, app, client: AsyncClient):
+        """Indexed sources whose owning dir is no longer in
+        ``memory_dirs`` are orphans — they must surface with
+        ``kind=null`` / ``memory_dir=null`` so the Web UI can show them
+        in the General view rather than dropping them entirely. This
+        is the most error-prone path because the natural code shape is
+        to filter them out."""
+        # Default fixture: source ``/tmp/test.md`` is NOT under any
+        # configured memory_dir (only ``/tmp/memories`` is registered).
+        resp = await client.get("/api/sources")
+        assert resp.status_code == 200
+        src = resp.json()["sources"][0]
+        assert src["kind"] is None
+        assert src["memory_dir"] is None
+
+    async def test_kind_memory_filter_excludes_orphans(self, app, client: AsyncClient):
+        """``?kind=memory`` is the strict filter — orphans (``kind=null``)
+        are excluded so the Memory view only shows sources the user
+        explicitly registered as memory. Pin the asymmetry against the
+        General filter."""
+        resp = await client.get("/api/sources", params={"kind": "memory"})
+        assert resp.status_code == 200
+        # Default fixture's lone source is orphan → empty under
+        # ``kind=memory``.
+        assert resp.json()["total"] == 0
+
+    async def test_kind_general_filter_includes_orphans(self, app, client: AsyncClient):
+        """``?kind=general`` is the catch-all that surfaces orphans.
+        Without this contract, users who removed a memory_dir without
+        purging chunks would lose the ability to find them in the UI
+        until the underlying files were re-registered or deleted."""
+        resp = await client.get("/api/sources", params={"kind": "general"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["sources"][0]["kind"] is None
+
+    async def test_kind_set_when_source_under_memory_dir(self, app, client: AsyncClient):
+        """Sources whose owning dir is registered carry a concrete
+        ``kind``. Use a path under the existing ``/tmp/memories`` dir
+        (which classifies as ``memory`` thanks to the ``memories``
+        segment) so the kind/memory_dir wiring is end-to-end exercised."""
+        app.state.storage.get_source_files_with_counts.return_value = [
+            (
+                Path("/tmp/memories/note.md"),
+                3,
+                "2026-04-29T10:00:00",
+                "default",
+                100,
+                50,
+                200,
+            )
+        ]
+        resp = await client.get("/api/sources")
+        assert resp.status_code == 200
+        src = resp.json()["sources"][0]
+        assert src["kind"] == "memory"
+        assert src["memory_dir"] == str(Path("/tmp/memories"))
+
+        # Same source must round-trip through the kind=memory filter and
+        # be excluded by kind=general.
+        resp_mem = await client.get("/api/sources", params={"kind": "memory"})
+        assert resp_mem.json()["total"] == 1
+        resp_gen = await client.get("/api/sources", params={"kind": "general"})
+        assert resp_gen.json()["total"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -952,6 +1022,40 @@ class TestUnicodePaths:
         assert resp.status_code == 200, resp.text
         assert resp.json()["message"] == "Already in memory_dirs"
         assert len(app.state.config.indexing.memory_dirs) == 1
+
+    async def test_add_memory_dir_returns_kind(self, app, client: AsyncClient, tmp_path):
+        """The add response carries ``kind`` for the resolved dir so the
+        Web UI can show "Added to {kind} view — Switch?" toast when the
+        user adds a path that lands in the opposite Sources sub-toggle.
+        Cover both branches: newly added + already-in dedupe."""
+        general_dir = tmp_path / "work" / "docs"
+        general_dir.mkdir(parents=True)
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+        app.state.config.indexing.memory_dirs = [general_dir]
+
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            # ``general_dir`` is already in ``memory_dirs`` → exercise
+            # the dedupe branch and confirm ``kind`` rides on it.
+            resp = await client.post(
+                "/api/memory-dirs/add",
+                json={"path": str(general_dir)},
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["message"] == "Already in memory_dirs"
+            assert body["kind"] == "general"
+
+            # Newly added dir with a ``memories`` segment → exercise the
+            # add branch and confirm ``kind=memory``.
+            resp = await client.post(
+                "/api/memory-dirs/add",
+                json={"path": str(memory_dir)},
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["kind"] == "memory"
+            assert body["message"].startswith("Added ")
 
     async def test_remove_memory_dir_matches_nfd_and_nfc(self, app, client: AsyncClient, tmp_path):
         # Config has the target dir in NFD form plus a second entry (the

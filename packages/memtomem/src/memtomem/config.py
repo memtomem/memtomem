@@ -1205,6 +1205,22 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False) -> None:
 ProviderCategory = Literal["user", "claude-memory", "claude-plans", "codex"]
 ProviderName = Literal["user", "claude", "openai"]
 
+# Two-bucket classification on top of ``ProviderCategory`` so the Web UI's
+# Sources page can split entries between agent/user memory and arbitrary
+# RAG-style folders. ``categorize_memory_dir`` already separates known
+# provider layouts from the catch-all ``"user"`` bucket; this further
+# splits ``"user"`` by a path-segment heuristic so a folder named
+# ``~/memories/`` or ``~/Documents/memory/`` lands with the agent memory
+# instead of the general indexed folders. Heuristic — pattern-only, no
+# persisted override.
+MemoryDirKind = Literal["memory", "general"]
+
+# Path segments that, when present anywhere in a ``user``-category dir,
+# flip its kind to ``"memory"``. Frozen so the test fixture and runtime
+# both walk the same set. Edits here are user-visible classification
+# changes — bump the unit-test coverage at the same time.
+_USER_MEMORY_SEGMENTS: frozenset[str] = frozenset({"memory", "memories"})
+
 # Single source of truth for provider-dir classification. Each row ties a
 # category name to the regex that recognises paths in that category. The
 # Web UI's ``/api/memory-dirs/status`` response carries the resulting
@@ -1304,6 +1320,32 @@ def categorize_memory_dir(path: str | Path) -> ProviderCategory:
         if pat.search(s):
             return cat
     return "user"
+
+
+def memory_dir_kind(path: str | Path) -> MemoryDirKind:
+    """Classify a ``memory_dir`` as ``"memory"`` vs ``"general"``.
+
+    Splits the configured dir list into two semantic buckets so the Web
+    UI Sources page can show agent/user memory and arbitrary indexed
+    folders in separate views without persisting a side table. Layered
+    on top of :func:`categorize_memory_dir`:
+
+    - Any non-``"user"`` category (claude-memory, claude-plans, codex…)
+      is unambiguously memory.
+    - A ``"user"``-category dir flips to memory when any path segment is
+      ``"memory"`` or ``"memories"`` — covers the common
+      ``~/memories/`` layout. Heuristic, so it intentionally over-includes
+      paths like ``~/Library/Caches/<app>/memory/`` or
+      ``~/projects/foo/memory/``; the cost is showing them in the Memory
+      view instead of General. Future PR can add an explicit
+      ``memory_dirs[i].kind`` override on top.
+    """
+    if categorize_memory_dir(path) != "user":
+        return "memory"
+    parts = Path(str(path)).parts
+    if any(p in _USER_MEMORY_SEGMENTS for p in parts):
+        return "memory"
+    return "general"
 
 
 def _detect_provider_dirs() -> dict[str, list[Path]]:

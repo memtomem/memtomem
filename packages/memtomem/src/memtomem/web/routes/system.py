@@ -18,6 +18,7 @@ from memtomem.config import (
     MUTABLE_FIELDS,
     build_comparand,
     coerce_and_validate,
+    memory_dir_kind,
     save_config_overrides,
 )
 from memtomem.storage.sqlite_helpers import norm_path
@@ -411,11 +412,17 @@ async def add_memory_dir(
                 config = request.app.state.config
 
                 current = [Path(p).expanduser().resolve() for p in config.indexing.memory_dirs]
+                # ``kind`` of the just-added dir lets the Web UI's
+                # Sources page show a "Switch view" toast when the user
+                # adds a path that lands in the opposite sub-toggle (e.g.
+                # they're on General sources and add ``~/memories``).
+                kind = memory_dir_kind(resolved)
                 if norm_path(resolved) in {norm_path(p) for p in current}:
                     return {
                         "ok": True,
                         "message": "Already in memory_dirs",
                         "memory_dirs": [str(p) for p in current],
+                        "kind": kind,
                     }
 
                 config.indexing.memory_dirs.append(resolved)
@@ -427,6 +434,7 @@ async def add_memory_dir(
                     "memory_dirs": [
                         str(Path(p).expanduser().resolve()) for p in config.indexing.memory_dirs
                     ],
+                    "kind": kind,
                 }
     except TimeoutError:
         raise HTTPException(503, "memory-dirs/add timed out — another update may be in progress")

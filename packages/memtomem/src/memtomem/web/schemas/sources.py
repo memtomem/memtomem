@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -18,6 +19,16 @@ class SourceOut(BaseModel):
     avg_tokens: int = 0
     min_tokens: int = 0
     max_tokens: int = 0
+    # The configured ``memory_dir`` that contains this source, expanded
+    # to an absolute path. ``None`` for orphan sources whose owning dir
+    # was unregistered after indexing — they still appear in the General
+    # view so users can prune or re-register them.
+    memory_dir: str | None = None
+    # ``"memory"`` for agent / user-memory dirs (auto-classified by path
+    # pattern) and ``"general"`` for arbitrary indexed folders. ``None``
+    # for orphans (no owning dir to classify). Drives the Sources page's
+    # Memory / General sub-toggle.
+    kind: Literal["memory", "general"] | None = None
 
 
 class SourcesResponse(BaseModel):

@@ -22,6 +22,7 @@ from memtomem.config import (
     NamespaceConfig,
     NamespacePolicyRule,
     categorize_memory_dir,
+    memory_dir_kind,
     provider_for_category,
 )
 from memtomem.indexing.differ import compute_diff
@@ -118,6 +119,61 @@ def _dir_creation_time_iso(p: Path) -> str | None:
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
 
+def _norm_dir_prefix(d: str | Path) -> str:
+    """Return the directory path normalized for ``str.startswith`` matching.
+
+    Adds a trailing slash so a configured dir ``/foo`` does not falsely
+    claim files under ``/foo-bar/...``. Always runs through
+    :func:`~memtomem.storage.sqlite_helpers.norm_path` (which resolves
+    symlinks and applies Unicode NFC) so the prefix shape matches the
+    source-side normalisation regardless of whether the dir currently
+    exists on disk — the chunks table holds resolved paths, and a
+    configured-but-missing dir would otherwise compare in raw ``/tmp``
+    form against resolved ``/private/tmp`` source paths on macOS.
+
+    Used by both :func:`memory_dir_stats` (which buckets chunks per
+    configured dir) and :func:`resolve_owning_memory_dir` (which goes
+    the other way — given a source, find the owning dir). Keeping the
+    normalisation in one place ensures the two views stay consistent
+    when the prefix rules evolve.
+    """
+    from memtomem.storage.sqlite_helpers import norm_path
+
+    p = Path(d).expanduser()
+    base = norm_path(p)
+    if not base.endswith("/"):
+        base += "/"
+    return base
+
+
+def resolve_owning_memory_dir(
+    source_path: str | Path,
+    configured_dirs: Iterable[str | Path],
+) -> Path | None:
+    """Return the configured ``memory_dir`` that contains ``source_path``.
+
+    Returns ``None`` for orphan sources — files indexed in the past but
+    whose owning dir is no longer in the configured list (typical after
+    a user removes a dir without purging its chunks). The Web UI surfaces
+    these in the General view so they don't disappear.
+
+    When configured dirs are nested (e.g. ``~/work`` and
+    ``~/work/notes``), the longest-matching prefix wins so the source is
+    attributed to the most specific grouping the user explicitly added.
+    """
+    from memtomem.storage.sqlite_helpers import norm_path
+
+    target = norm_path(Path(source_path).expanduser())
+    best: tuple[int, Path] | None = None
+    for d in configured_dirs:
+        prefix = _norm_dir_prefix(d)
+        if target.startswith(prefix):
+            length = len(prefix)
+            if best is None or length > best[0]:
+                best = (length, Path(d).expanduser())
+    return best[1] if best else None
+
+
 def _count_files_on_disk(p: Path, extensions: frozenset[str]) -> int:
     """Count regular files under ``p`` whose suffix is in ``extensions``.
 
@@ -143,8 +199,8 @@ async def memory_dir_stats(
     """Return per-dir index status for each configured ``memory_dir``.
 
     Shape: ``[{path, chunk_count, source_file_count, file_count, exists,
-    category, provider, created_at, last_indexed}]`` in the same order
-    as ``memory_dirs``. Drives the web UI's "(N chunks)" / "(not
+    category, provider, kind, created_at, last_indexed}]`` in the same
+    order as ``memory_dirs``. Drives the web UI's "(N chunks)" / "(not
     indexed)" badges so users can see which dirs need a manual reindex
     (the running watcher only reacts to fs events, so files that landed
     while the server was down stay invisible until a forced re-walk;
@@ -172,7 +228,10 @@ async def memory_dir_stats(
 
     Aggregation: one ``get_source_files_with_counts()`` call over the
     whole ``chunks`` table, bucketed in Python by normalised-path prefix
-    — avoids N LIKE queries for large dir lists.
+    — avoids N LIKE queries for large dir lists. ``kind`` is provided
+    by :func:`~memtomem.config.memory_dir_kind` so the Web UI can split
+    the Sources page into Memory and General views from the same
+    response shape.
     """
     from memtomem.storage.sqlite_helpers import norm_path
 
@@ -200,9 +259,7 @@ async def memory_dir_stats(
     for d, file_count in zip(dir_list, file_counts):
         dir_path = Path(d).expanduser()
         exists = dir_path.exists()
-        prefix = norm_path(dir_path) if exists else str(dir_path)
-        if not prefix.endswith("/"):
-            prefix = prefix + "/"
+        prefix = _norm_dir_prefix(d)
 
         chunk_count = 0
         source_file_count = 0
@@ -235,6 +292,7 @@ async def memory_dir_stats(
                 "exists": exists,
                 "category": category,
                 "provider": provider_for_category(category),
+                "kind": memory_dir_kind(d),
                 "created_at": _dir_creation_time_iso(dir_path) if exists else None,
                 "last_indexed": max_last_updated,
             }
