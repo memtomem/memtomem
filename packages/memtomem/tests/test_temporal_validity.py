@@ -1,17 +1,17 @@
-"""Frontmatter validity-window parsing, schema, and indexer-level threading.
+"""Frontmatter validity-window parsing, schema, indexer threading, and pipeline filter.
 
-Covers Goals 1+2+3 of the temporal-validity RFC: the frontmatter parser
+Covers Goals 1+2+3+4 of the temporal-validity RFC: the frontmatter parser
 (``_parse_validity_bound`` / ``_extract_validity_window``), the
 ``ChunkMetadata.valid_from_unix`` / ``valid_to_unix`` fields, the schema
-migration that adds the two SQLite columns, and the chunker→metadata wiring.
-The pipeline filter, ``mem_search(as_of=...)``, and CLI/Web surfaces are
-covered by later RFC PRs.
+migration that adds the two SQLite columns, the chunker→metadata wiring,
+and the ``_apply_validity_filter`` pipeline stage with its
+``SearchPipeline.search(as_of_unix=...)`` plumbing. The
+``mem_search(as_of=...)`` MCP/CLI/Web surfaces are covered by later RFC PRs.
 
-The search round-trip tests at the end of the file lock in the fix for
-PR #533 review feedback — bm25_search / dense_search must carry the new
-columns through ``_row_to_chunk`` so the upcoming validity_filter stage
-can rely on chunks emerging from the search path with their windows
-intact.
+The search round-trip tests in the middle of the file lock in the fix
+for PR #533 review feedback — bm25_search / dense_search must carry the
+new columns through ``_row_to_chunk`` so the validity_filter stage can
+rely on chunks emerging from the search path with their windows intact.
 """
 
 from __future__ import annotations
@@ -21,10 +21,11 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
 import sqlite_vec
 
 from memtomem.chunking.markdown import MarkdownChunker, _parse_validity_bound
-from memtomem.models import Chunk, ChunkMetadata
+from memtomem.models import Chunk, ChunkMetadata, SearchResult
 from memtomem.storage.sqlite_meta import MetaManager
 from memtomem.storage.sqlite_schema import create_tables
 
@@ -297,3 +298,265 @@ class TestSearchRoundTrip:
         assert results
         assert results[0].chunk.metadata.valid_from_unix is None
         assert results[0].chunk.metadata.valid_to_unix is None
+
+
+# ── Goal 4: pipeline-level validity_filter ─────────────────────────────
+
+
+def _result_with_window(vfrom: int | None, vto: int | None, *, marker: str = "x") -> SearchResult:
+    """Build a minimal SearchResult carrying a validity window for filter tests."""
+    chunk = Chunk(
+        content=f"chunk-{marker}",
+        metadata=ChunkMetadata(
+            source_file=Path(f"/tmp/{marker}.md"),
+            valid_from_unix=vfrom,
+            valid_to_unix=vto,
+        ),
+        id=uuid.uuid4(),
+        embedding=[],
+    )
+    return SearchResult(chunk=chunk, score=1.0, rank=1, source="fused")
+
+
+class TestApplyValidityFilter:
+    """Unit tests for the pure ``_apply_validity_filter`` helper.
+
+    Locks the RFC §Design semantics: inclusive both ends, ``None`` =
+    unbounded on that side, ``(None, None)`` = always-valid (opt-in
+    default), order preservation.
+    """
+
+    def _filter(self, results, as_of_unix):
+        from memtomem.search.pipeline import _apply_validity_filter
+
+        return _apply_validity_filter(results, as_of_unix)
+
+    def test_inside_window_passes(self) -> None:
+        r = _result_with_window(_ts(2025, 1, 1), _ts(2025, 12, 31, 23, 59, 59))
+        assert self._filter([r], _ts(2025, 6, 15)) == [r]
+
+    def test_before_window_excluded(self) -> None:
+        r = _result_with_window(_ts(2025, 1, 1), _ts(2025, 12, 31, 23, 59, 59))
+        assert self._filter([r], _ts(2024, 12, 31)) == []
+
+    def test_after_window_excluded(self) -> None:
+        r = _result_with_window(_ts(2025, 1, 1), _ts(2025, 12, 31, 23, 59, 59))
+        assert self._filter([r], _ts(2026, 1, 1)) == []
+
+    def test_boundary_lower_inclusive(self) -> None:
+        """``as_of == valid_from`` is inside (RFC §Comparison semantics)."""
+        vfrom = _ts(2025, 1, 1)
+        r = _result_with_window(vfrom, _ts(2025, 12, 31, 23, 59, 59))
+        assert self._filter([r], vfrom) == [r]
+
+    def test_boundary_upper_inclusive(self) -> None:
+        """``as_of == valid_to`` is inside (RFC §Comparison semantics)."""
+        vto = _ts(2025, 12, 31, 23, 59, 59)
+        r = _result_with_window(_ts(2025, 1, 1), vto)
+        assert self._filter([r], vto) == [r]
+
+    def test_half_bounded_lower_only(self) -> None:
+        """``valid_from`` only — passes for any ``as_of >= valid_from``."""
+        vfrom = _ts(2025, 1, 1)
+        r = _result_with_window(vfrom, None)
+        assert self._filter([r], vfrom) == [r]
+        assert self._filter([r], _ts(2099, 1, 1)) == [r]
+        assert self._filter([r], _ts(2024, 12, 31)) == []
+
+    def test_half_bounded_upper_only(self) -> None:
+        """``valid_to`` only — passes for any ``as_of <= valid_to``."""
+        vto = _ts(2025, 12, 31, 23, 59, 59)
+        r = _result_with_window(None, vto)
+        assert self._filter([r], vto) == [r]
+        assert self._filter([r], _ts(1970, 1, 1)) == [r]
+        assert self._filter([r], _ts(2026, 1, 1)) == []
+
+    def test_always_valid_passes(self) -> None:
+        """``(None, None)`` is the opt-in default — always retained."""
+        r = _result_with_window(None, None)
+        # Both a "now" and a "long-ago" as_of must keep it.
+        assert self._filter([r], _ts(2025, 6, 15)) == [r]
+        assert self._filter([r], _ts(1970, 1, 1)) == [r]
+
+    def test_order_preserved(self) -> None:
+        """Filter must not reorder survivors — downstream stages depend on rank order."""
+        r1 = _result_with_window(_ts(2024, 1, 1), _ts(2026, 1, 1), marker="a")
+        r2 = _result_with_window(None, None, marker="b")
+        r3 = _result_with_window(_ts(2024, 1, 1), _ts(2026, 1, 1), marker="c")
+        out = self._filter([r1, r2, r3], _ts(2025, 6, 15))
+        assert [r.chunk.content for r in out] == ["chunk-a", "chunk-b", "chunk-c"]
+
+    def test_excluded_chunks_removed_in_mixed_input(self) -> None:
+        """Survivors and rejects mixed in one pass; rejects drop, survivors keep order."""
+        keep1 = _result_with_window(_ts(2025, 1, 1), _ts(2025, 12, 31, 23, 59, 59), marker="k1")
+        drop = _result_with_window(_ts(2020, 1, 1), _ts(2020, 12, 31, 23, 59, 59), marker="d")
+        keep2 = _result_with_window(None, None, marker="k2")
+        out = self._filter([keep1, drop, keep2], _ts(2025, 6, 15))
+        assert [r.chunk.content for r in out] == ["chunk-k1", "chunk-k2"]
+
+
+# ── Goal 4: pipeline wiring (as_of_unix plumbing + cache semantics) ────
+
+
+def _make_validity_pipeline(bm25_results):
+    """SearchPipeline wired around AsyncMock storage with controllable BM25 hits.
+
+    Mirrors the fixture pattern in ``tests/test_pipeline.py`` — the
+    pipeline is exercised end-to-end so the filter wiring (call site,
+    cache gating) is verified against the real ``SearchPipeline.search``
+    code path, not a re-implemented stub.
+    """
+    from unittest.mock import AsyncMock
+
+    from memtomem.config import SearchConfig
+    from memtomem.search.pipeline import SearchPipeline
+
+    storage = AsyncMock()
+    storage.bm25_search = AsyncMock(return_value=bm25_results)
+    storage.dense_search = AsyncMock(return_value=[])
+    storage.increment_access = AsyncMock()
+    storage.save_query_history = AsyncMock()
+    storage.get_access_counts = AsyncMock(return_value={})
+    storage.get_embeddings_for_chunks = AsyncMock(return_value={})
+    storage.get_importance_scores = AsyncMock(return_value={})
+    storage.count_chunks_by_ns_prefix = AsyncMock(return_value=0)
+
+    embedder = AsyncMock()
+    embedder.embed_query = AsyncMock(return_value=[0.1] * 8)
+
+    return SearchPipeline(
+        storage=storage,
+        embedder=embedder,
+        config=SearchConfig(enable_bm25=True, enable_dense=False),
+    )
+
+
+class TestValidityFilterPipelineWiring:
+    """Integration tests for ``as_of_unix`` plumbing through ``SearchPipeline.search``."""
+
+    @pytest.mark.asyncio
+    async def test_default_uses_current_time(self, monkeypatch) -> None:
+        """``as_of_unix=None`` falls back to ``int(time.time())`` at call site.
+
+        Pin time to 2025-06-15 via monkeypatch and seed one chunk valid for
+        2024–2025 and one valid for 2030 only — only the 2024–2025 chunk
+        should survive.
+        """
+        import memtomem.search.pipeline as pipeline_mod
+
+        in_window = _result_with_window(
+            _ts(2024, 1, 1), _ts(2025, 12, 31, 23, 59, 59), marker="now"
+        )
+        future = _result_with_window(_ts(2030, 1, 1), _ts(2030, 12, 31, 23, 59, 59), marker="fut")
+
+        pipe = _make_validity_pipeline([in_window, future])
+        # Patch the module-level ``time`` import that ``search()`` uses.
+        # ``search`` calls ``import time; time.time()`` so we patch
+        # ``time.time`` directly inside that module's import cache.
+        import time as _time
+
+        monkeypatch.setattr(_time, "time", lambda: float(_ts(2025, 6, 15)))
+
+        results, _stats = await pipe.search("anything", top_k=5)
+        assert [r.chunk.content for r in results] == ["chunk-now"]
+        # Sanity: confirm we didn't accidentally short-circuit the filter.
+        assert pipeline_mod._apply_validity_filter is not None
+
+    @pytest.mark.asyncio
+    async def test_explicit_as_of_unix_filters_window(self) -> None:
+        """Explicit historical ``as_of_unix`` retains chunks valid at that instant."""
+        in_2024 = _result_with_window(_ts(2024, 1, 1), _ts(2024, 12, 31, 23, 59, 59), marker="2024")
+        in_2025 = _result_with_window(_ts(2025, 1, 1), _ts(2025, 12, 31, 23, 59, 59), marker="2025")
+
+        pipe = _make_validity_pipeline([in_2024, in_2025])
+
+        results, _stats = await pipe.search("anything", top_k=5, as_of_unix=_ts(2024, 6, 15))
+        assert [r.chunk.content for r in results] == ["chunk-2024"]
+
+    @pytest.mark.asyncio
+    async def test_and_with_source_filter(self) -> None:
+        """Validity AND source filter — chunk must pass both to survive."""
+        # Rebuild with explicit source paths so source_filter discriminates them.
+
+        def _make(marker, source, vfrom, vto):
+            chunk = Chunk(
+                content=f"chunk-{marker}",
+                metadata=ChunkMetadata(
+                    source_file=Path(source),
+                    valid_from_unix=vfrom,
+                    valid_to_unix=vto,
+                ),
+                id=uuid.uuid4(),
+                embedding=[],
+            )
+            return SearchResult(chunk=chunk, score=1.0, rank=1, source="fused")
+
+        keeps_both = _make(
+            "ok", "/tmp/keep/policy.md", _ts(2025, 1, 1), _ts(2025, 12, 31, 23, 59, 59)
+        )
+        passes_validity_fails_source = _make(
+            "src-fail", "/tmp/other/policy.md", _ts(2025, 1, 1), _ts(2025, 12, 31, 23, 59, 59)
+        )
+        passes_source_fails_validity = _make(
+            "val-fail", "/tmp/keep/expired.md", _ts(2020, 1, 1), _ts(2020, 12, 31, 23, 59, 59)
+        )
+
+        pipe = _make_validity_pipeline(
+            [keeps_both, passes_validity_fails_source, passes_source_fails_validity]
+        )
+        results, _stats = await pipe.search(
+            "anything", top_k=5, source_filter="/tmp/keep/", as_of_unix=_ts(2025, 6, 15)
+        )
+        assert [r.chunk.content for r in results] == ["chunk-ok"]
+
+    @pytest.mark.asyncio
+    async def test_default_path_caches_filtered_result(self, monkeypatch) -> None:
+        """Two default-path calls — second hits cache (BM25 only invoked once)."""
+        import time as _time
+
+        monkeypatch.setattr(_time, "time", lambda: float(_ts(2025, 6, 15)))
+
+        in_window = _result_with_window(
+            _ts(2024, 1, 1), _ts(2025, 12, 31, 23, 59, 59), marker="cached"
+        )
+        pipe = _make_validity_pipeline([in_window])
+
+        first, _ = await pipe.search("same query", top_k=5)
+        second, _ = await pipe.search("same query", top_k=5)
+
+        assert [r.chunk.content for r in first] == ["chunk-cached"]
+        assert [r.chunk.content for r in second] == ["chunk-cached"]
+        # BM25 storage call invoked exactly once across two searches.
+        assert pipe._storage.bm25_search.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_explicit_as_of_bypasses_cache_read_and_write(self) -> None:
+        """Explicit ``as_of_unix`` bypasses both cache read and cache write.
+
+        Read bypass: an explicit call must not be served from a previously
+        cached default-path result.
+        Write bypass: an explicit call must not poison the default-path
+        slot — a subsequent default call still runs the retrieval.
+        """
+        in_window = _result_with_window(
+            _ts(2024, 1, 1), _ts(2025, 12, 31, 23, 59, 59), marker="hot"
+        )
+        pipe = _make_validity_pipeline([in_window])
+
+        # 1) Explicit-only call — must not write to cache.
+        await pipe.search("q", top_k=5, as_of_unix=_ts(2024, 6, 15))
+        assert pipe._search_cache == {}, "explicit as_of must not populate cache"
+
+        # 2) Default call following an explicit call — must still hit storage.
+        before = pipe._storage.bm25_search.await_count
+        await pipe.search("q", top_k=5)
+        assert pipe._storage.bm25_search.await_count == before + 1
+        assert pipe._search_cache, "default-path call must populate cache"
+
+        # 3) Default-path cache populated; an explicit call must bypass read
+        #    (storage hit again, not served from default-path slot).
+        before = pipe._storage.bm25_search.await_count
+        await pipe.search("q", top_k=5, as_of_unix=_ts(2024, 6, 15))
+        assert pipe._storage.bm25_search.await_count == before + 1, (
+            "explicit as_of must bypass cache read"
+        )

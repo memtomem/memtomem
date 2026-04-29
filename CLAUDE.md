@@ -34,8 +34,8 @@ for `memtomem` and both resolve to `memtomem.cli:cli`.
   in sync, don't diverge behavior or add flags to only one name.
 - **Search pipeline order is fixed**: query expansion → BM25 + dense (parallel)
   → RRF fusion → cross-encoder rerank (optional) → source/tag filter →
-  time-decay → MMR → access-freq boost → importance boost → context-window
-  expansion. Don't reorder stages in
+  validity filter → time-decay → MMR → access-freq boost → importance boost →
+  context-window expansion. Don't reorder stages in
   `packages/memtomem/src/memtomem/search/pipeline.py` without updating the
   Stage comments in that file.
 - **MCP tools go through the registry.** New tools use `@register` from

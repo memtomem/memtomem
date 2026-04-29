@@ -44,6 +44,38 @@ def _match_source(filter_str: str, source_path: str) -> bool:
     return filter_str in source_path
 
 
+def _apply_validity_filter(results: list[SearchResult], as_of_unix: int) -> list[SearchResult]:
+    """Drop chunks whose temporal-validity window excludes ``as_of_unix``.
+
+    Inclusive on both ends (``valid_from <= as_of <= valid_to``); ``None`` on
+    a bound means unbounded on that side; both ``None`` means always-valid
+    (RFC §Comparison semantics — opt-in default for chunks without a window).
+
+    Order is preserved. The function returns a new list so callers can
+    chain it after source/tag filter without mutating the input.
+
+    Granularity note: when the pipeline falls back to the default
+    ``int(time.time())``, results may be served from the search-result TTL
+    cache for up to ``cache_ttl`` seconds. A chunk whose window expires at
+    midnight can therefore continue to surface for the cache-TTL window
+    after expiry. This is acceptable because the RFC's date-only bounds
+    already operate at 24h granularity; sub-minute drift is invisible at
+    that resolution.
+    """
+    filtered: list[SearchResult] = []
+    for r in results:
+        vfrom = r.chunk.metadata.valid_from_unix
+        vto = r.chunk.metadata.valid_to_unix
+        if vfrom is None and vto is None:
+            filtered.append(r)
+            continue
+        lower = vfrom if vfrom is not None else float("-inf")
+        upper = vto if vto is not None else float("inf")
+        if lower <= as_of_unix <= upper:
+            filtered.append(r)
+    return filtered
+
+
 @dataclass
 class RetrievalStats:
     bm25_candidates: int = 0
@@ -331,6 +363,7 @@ class SearchPipeline:
         namespace: str | list[str] | None = None,
         rrf_weights: list[float] | None = None,
         context_window: int | None = None,
+        as_of_unix: int | None = None,
     ) -> tuple[list[SearchResult], RetrievalStats]:
         top_k = self._config.default_top_k if top_k is None else top_k
         effective_weights = rrf_weights or self._config.rrf_weights
@@ -338,12 +371,18 @@ class SearchPipeline:
         # Check TTL cache for identical queries
         import time
 
+        # ``as_of_unix`` is intentionally excluded from ``cache_key`` and
+        # bypasses the cache entirely when explicit. Default-path (None)
+        # callers fall through to ``int(time.time())`` below and reuse
+        # cached results within ``cache_ttl`` — accepting up-to-TTL
+        # staleness near a date boundary, which the RFC's date-only
+        # bounds already absorb.
         cache_key = self._cache_key(
             query, top_k, source_filter, tag_filter, namespace, context_window
         )
         version_at_start = self._cache_version
         ttl_snapshot = self._cache_ttl
-        if cache_key in self._search_cache:
+        if as_of_unix is None and cache_key in self._search_cache:
             ts, ver, cached_results, cached_stats = self._search_cache[cache_key]
             if ver == self._cache_version and time.time() - ts < ttl_snapshot:
                 return cached_results, cached_stats
@@ -574,6 +613,15 @@ class SearchPipeline:
             required = {t.strip() for t in tag_filter.split(",") if t.strip()}
             fused = [r for r in fused if required & set(r.chunk.metadata.tags)]
 
+        # Stage β': temporal-validity filter (RFC §Pipeline integration).
+        # AND-combined with source/tag filter via sequential application —
+        # a chunk must pass both to survive. Default ``as_of`` is the
+        # current wall-clock; explicit values bypass the result cache so
+        # historical queries don't poison default-path cache slots.
+        effective_as_of = as_of_unix if as_of_unix is not None else int(time.time())
+        if fused:
+            fused = _apply_validity_filter(fused, effective_as_of)
+
         # Stage 4: Time decay (re-score older chunks lower)
         if self._decay_config.enabled and fused:
             from memtomem.search.decay import apply_score_decay
@@ -662,8 +710,12 @@ class SearchPipeline:
         self._bg_tasks.add(t2)
         t2.add_done_callback(self._bg_tasks.discard)
 
-        # Store in TTL cache only if version hasn't changed during search
-        if self._cache_version == version_at_start:
+        # Store in TTL cache only if version hasn't changed during search.
+        # Skip the write when ``as_of_unix`` was explicit so that a
+        # historical-query result never overwrites the default-path slot
+        # (next default caller would otherwise be served a past-snapshot
+        # filtering of the same query).
+        if as_of_unix is None and self._cache_version == version_at_start:
             self._search_cache[cache_key] = (time.time(), version_at_start, fused, stats)
             # Evict old entries (keep max 50)
             if len(self._search_cache) > 50:
