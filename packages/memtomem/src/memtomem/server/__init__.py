@@ -61,7 +61,13 @@ mcp._mcp_server.version = _memtomem_version
 # ── Register ALL tools (decorators bind to `mcp` on import) ───────────
 from memtomem.server.tools.ask import mem_ask  # noqa: E402, F401
 from memtomem.server.tools.indexing import mem_index  # noqa: E402, F401
-from memtomem.server.tools.memory_crud import mem_add, mem_batch_add, mem_delete, mem_edit  # noqa: E402, F401
+from memtomem.server.tools.memory_crud import (  # noqa: E402, F401
+    mem_add,
+    mem_add_redaction_stats,
+    mem_batch_add,
+    mem_delete,
+    mem_edit,
+)
 from memtomem.server.tools.recall import mem_recall  # noqa: E402, F401
 from memtomem.server.tools.search import mem_search, mem_expand  # noqa: E402, F401
 from memtomem.server.tools.status_config import (

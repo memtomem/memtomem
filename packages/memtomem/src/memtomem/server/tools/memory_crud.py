@@ -52,6 +52,7 @@ async def _mem_add_core(
     namespace: str | None,
     template: str | None,
     ctx: CtxType,
+    force_unsafe: bool = False,
 ) -> tuple[str, "IndexingStats | None"]:
     """Core logic for ``mem_add`` — also usable from internal callers that
     need the ``IndexingStats`` (e.g. ``mem_consolidate_apply`` linking new
@@ -59,13 +60,35 @@ async def _mem_add_core(
 
     Returns:
         Tuple of ``(user_facing_message, stats)``. ``stats`` is ``None``
-        for early error returns (empty content, oversized content, template
-        failure, invalid path) so callers must tolerate ``None``.
+        for early error returns (empty content, oversized content,
+        redaction-guard hit without ``force_unsafe``, template failure,
+        invalid path) so callers must tolerate ``None``.
     """
     if not content.strip():
         return ("Error: content cannot be empty.", None)
     if len(content) > MAX_CONTENT_LENGTH:
         return ("Error: content too large (max 100,000 characters).", None)
+
+    # Trust-boundary redaction guard — see ``memtomem.privacy`` module
+    # docstring for the rationale and the cross-repo sync rule. Runs
+    # before any filesystem write so a flagged write leaves no on-disk
+    # trace to clean up.
+    from memtomem import privacy
+
+    hits = privacy.scan(content)
+    if hits:
+        if force_unsafe:
+            privacy.record("bypassed", "mem_add")
+        else:
+            privacy.record("blocked", "mem_add")
+            return (
+                f"Error: content matches {len(hits)} privacy pattern(s); "
+                "write rejected. Retry with force_unsafe=True to bypass "
+                "(audit-logged).",
+                None,
+            )
+    else:
+        privacy.record("pass", "mem_add")
 
     from datetime import datetime, timezone
 
@@ -161,6 +184,7 @@ async def mem_add(
     file: str | None = None,
     namespace: str | None = None,
     template: str | None = None,
+    force_unsafe: bool = False,
     ctx: CtxType = None,
 ) -> str:
     """Add a new memory entry to a markdown file and immediately index it.
@@ -168,6 +192,13 @@ async def mem_add(
     The entry is appended to the target file (or a new timestamped file is
     created in the first configured memory directory). The file is then
     re-indexed so the entry is immediately searchable.
+
+    Content passes through a trust-boundary redaction guard before any
+    filesystem write. If the content matches a known secret pattern
+    (provider tokens, API keys, PEM headers, etc.) the write is rejected.
+    Set ``force_unsafe=True`` to bypass after manual review; bypass events
+    are recorded with a ``bypassed`` outcome label so guard effectiveness
+    and bypass usage stay observable. See ``mem_add_redaction_stats``.
 
     Args:
         content: The memory content to store
@@ -178,6 +209,10 @@ async def mem_add(
         namespace: Assign indexed chunks to this namespace (default: config default)
         template: Use a built-in template (adr, meeting, debug, decision,
                   procedure). Content can be JSON with field values or plain text.
+        force_unsafe: When True, bypass the redaction guard for this call
+                      even when content matches a secret pattern. Use only
+                      when matches are known false positives (e.g.,
+                      documenting an example credential schema).
 
     Returns a confirmation message. If highly similar memories already exist
     (≥90% match), a duplicate warning is appended to the output.
@@ -189,6 +224,7 @@ async def mem_add(
         file=file,
         namespace=namespace,
         template=template,
+        force_unsafe=force_unsafe,
         ctx=ctx,
     )
     return message
@@ -347,6 +383,7 @@ async def mem_batch_add(
     entries: list[dict],
     namespace: str | None = None,
     file: str | None = None,
+    force_unsafe: bool = False,
     ctx: CtxType = None,
 ) -> str:
     """Add multiple memory entries in one call (KV batch).
@@ -355,13 +392,55 @@ async def mem_batch_add(
     optionally "tags" (list[str]).  All entries are appended to the same file
     and indexed once.
 
+    Each entry's content passes through the same trust-boundary redaction
+    guard as ``mem_add``. If any entry matches a secret pattern, the whole
+    batch is rejected — partial-success on a flagged batch would leak the
+    transactional contract callers rely on. Pass ``force_unsafe=True`` to
+    bypass for the whole batch (each hit item is recorded with a
+    ``bypassed`` outcome label per audit).
+
     Args:
         entries: List of {"key": "title", "value": "content", "tags": [...]}
         namespace: Namespace for all entries (default: config default)
         file: Target .md file.  If omitted, a timestamped file is created.
+        force_unsafe: When True, bypass the redaction guard for any flagged
+                      entries. Bypass events are recorded per item.
     """
     if len(entries) > 500:
         return f"Error: batch too large (max 500 entries, got {len(entries)})."
+
+    # Trust-boundary redaction guard. Pre-scan every entry before any
+    # filesystem write so a flagged batch leaves no on-disk residue
+    # regardless of which entry tripped the pattern. See
+    # ``memtomem.privacy`` for the cross-repo sync rule.
+    from memtomem import privacy
+
+    hit_indices: list[int] = []
+    for idx, entry in enumerate(entries):
+        value = entry.get("value") or entry.get("content", "")
+        if not value:
+            continue
+        if privacy.scan(value):
+            hit_indices.append(idx)
+
+    if hit_indices and not force_unsafe:
+        for _ in hit_indices:
+            privacy.record("blocked", "mem_batch_add")
+        return (
+            f"Error: items at indices {hit_indices} match privacy patterns; "
+            "whole batch rejected. Resubmit with hit items removed, or pass "
+            "force_unsafe=True to bypass (audit-logged)."
+        )
+
+    hit_set = set(hit_indices)
+    for idx, entry in enumerate(entries):
+        value = entry.get("value") or entry.get("content", "")
+        if not value:
+            continue
+        if idx in hit_set:
+            privacy.record("bypassed", "mem_batch_add")
+        else:
+            privacy.record("pass", "mem_batch_add")
 
     from datetime import datetime, timezone
 
@@ -406,3 +485,26 @@ async def mem_batch_add(
     if skipped:
         result += f"\n- Skipped: {skipped} entries (empty content)"
     return result
+
+
+@mcp.tool()
+@tool_handler
+@register("crud")
+async def mem_add_redaction_stats(
+    ctx: CtxType = None,
+) -> str:
+    """Return a JSON snapshot of redaction-guard outcomes since process start.
+
+    Outcome labels:
+        blocked  — write rejected because content matched a privacy pattern.
+        pass     — write proceeded; content matched no patterns.
+        bypassed — write proceeded with ``force_unsafe=True`` despite a match.
+
+    The ``by_tool`` map breaks the same outcomes down by ingress tool
+    (``mem_add``, ``mem_batch_add``).
+    """
+    import json
+
+    from memtomem import privacy
+
+    return json.dumps(privacy.snapshot(), indent=2)
