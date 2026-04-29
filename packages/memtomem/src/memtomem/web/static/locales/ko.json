@@ -132,7 +132,6 @@
 
   "sources.help": "인덱싱된 소스 파일. 파일을 클릭하여 청크를 탐색. 구분선을 드래그하여 크기 조절. 이름, 청크, 크기, 최근순으로 정렬.",
   "sources.title": "소스",
-  "sources.refresh": "새로고침",
   "sources.filter_placeholder": "경로로 필터… 예: .md, src/, utils",
   "sources.filter_title": "부분 경로 매칭으로 소스 목록 필터",
   "sources.sort_name": "이름",
@@ -141,10 +140,10 @@
   "sources.sort_recent": "최근",
   "sources.empty_icon": "📄",
   "sources.empty_text": "소스를 선택하면 청크를 탐색할 수 있습니다",
-  "sources.mode.memory": "Memory",
-  "sources.mode.general": "일반 소스",
-  "sources.toast.added_to_other_view": "{path} 가 {view} 에 추가됨",
-  "sources.toast.switch_view": "이동",
+  "sources.discovered_label": "발견됨",
+  "sources.empty_vendor_placeholder": "{vendor} 메모리 없음",
+  "sources.add_manually_btn": "+ 수동 추가",
+  "sources.default_pill": "기본",
 
   "index.help": "memtomem 에 파일을 인덱싱합니다. 경로를 입력해 스캔하거나, 파일을 드롭해 업로드하거나, 직접 기억을 작성하세요. 강제 재인덱스로 기존 청크를 다시 생성할 수 있습니다.",
   "index.title": "파일 인덱싱",

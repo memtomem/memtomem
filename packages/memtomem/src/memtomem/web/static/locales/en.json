@@ -132,7 +132,6 @@
 
   "sources.help": "Indexed source files. Click a file to browse chunks. Drag the divider to resize. Sort by name, chunks, size, or recency.",
   "sources.title": "Sources",
-  "sources.refresh": "Refresh",
   "sources.filter_placeholder": "Type to filter by path… e.g. .md, src/, utils",
   "sources.filter_title": "Filters source list by partial path match",
   "sources.sort_name": "Name",
@@ -141,10 +140,10 @@
   "sources.sort_recent": "Recent",
   "sources.empty_icon": "📄",
   "sources.empty_text": "Select a source to browse its chunks",
-  "sources.mode.memory": "Memory",
-  "sources.mode.general": "General sources",
-  "sources.toast.added_to_other_view": "{path} added to {view}",
-  "sources.toast.switch_view": "Switch",
+  "sources.discovered_label": "Discovered",
+  "sources.empty_vendor_placeholder": "{vendor} memory not found",
+  "sources.add_manually_btn": "+ Add manually",
+  "sources.default_pill": "default",
 
   "index.help": "Index files into memtomem. Type a path to scan, drop files to upload, or write a memory directly. Toggle Force re-index to rebuild existing chunks.",
   "index.title": "Index Files",

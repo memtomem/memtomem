@@ -539,11 +539,10 @@ function activateTab(tabName, opts = {}) {
   if (tabName === 'home') { STATE.homeStale = false; loadDashboard(); renderPinnedSection(); }
   if (tabName === 'sources') {
     STATE.sourcesBrowserStale = false;
-    // ``setSourcesMode`` drives the loaders for whichever sub-toggle the
-    // user last left active (memory → memory-dirs panel; general →
-    // ``loadSources()``). Avoids the previous double-fetch pattern that
-    // hit the server even for the view that wasn't visible.
-    setSourcesMode(getSourcesMode());
+    // Single Sources panel: pull memory-dirs status + indexed sources
+    // in one round trip. Vendor grouping is the only classification
+    // axis now, so there's no mode to restore.
+    loadSources();
   }
   if (tabName === 'index') loadStats();
   if (tabName === 'tags') { STATE.tagsTabStale = false; loadTags(); }
@@ -1821,12 +1820,23 @@ function _setDetailMode(mode) {
 })();
 
 // ── B2: Resizable sources sidebar divider ──
+const _SOURCES_WIDTH_LS_KEY = 'memtomem.sources_width';
 (function initSourcesDivider() {
   const divider = qs('sources-divider');
   if (!divider) return;
   const layout = document.querySelector('.sources-layout');
   const sidebar = document.querySelector('.sources-sidebar');
   let startX = 0, startW = 0;
+  let lastW = 0;
+
+  // Restore persisted width on load so the user's preferred sidebar size
+  // sticks across tab switches and reloads.
+  try {
+    const stored = parseInt(localStorage.getItem(_SOURCES_WIDTH_LS_KEY) || '', 10);
+    if (Number.isFinite(stored) && stored >= 200) {
+      layout.style.setProperty('--sources-width', stored + 'px');
+    }
+  } catch (_err) { /* private mode */ }
 
   divider.addEventListener('mousedown', e => {
     e.preventDefault();
@@ -1840,12 +1850,17 @@ function _setDetailMode(mode) {
   function onMove(e) {
     const newW = Math.max(200, Math.min(startW + (e.clientX - startX), window.innerWidth * 0.6));
     layout.style.setProperty('--sources-width', newW + 'px');
+    lastW = newW;
   }
 
   function onUp() {
     divider.classList.remove('dragging');
     document.removeEventListener('mousemove', onMove);
     document.removeEventListener('mouseup', onUp);
+    if (lastW) {
+      try { localStorage.setItem(_SOURCES_WIDTH_LS_KEY, String(Math.round(lastW))); }
+      catch (_err) { /* ignore */ }
+    }
   }
 })();
 
@@ -2056,79 +2071,7 @@ function navigateToSourcesByNs(nsName) {
   activateTab('sources');
 }
 
-qs('refresh-sources-btn').addEventListener('click', () => loadSources('general'));
 qs('sources-filter').addEventListener('input', () => renderSourceTree(_getFilteredSorted()));
-
-// ── Sources sub-toggle: Memory ↔ General ──
-// memory_dirs config lumps two distinct user intents together — agent
-// memory dirs (auto-discovered) vs arbitrary RAG folders. The sub-toggle
-// gives each its own data slice but they now share one ``.sources-layout``
-// (sidebar + chunks-browser) so the view feels coherent: vendor groups
-// only appear when ``mode === 'memory'``, header actions swap between
-// the two modes, and clicking a file opens chunks in the same right pane.
-const SOURCES_MODE_LS_KEY = 'memtomem.sources_mode';
-
-function getSourcesMode() {
-  try {
-    const stored = localStorage.getItem(SOURCES_MODE_LS_KEY);
-    if (stored === 'memory' || stored === 'general') return stored;
-  } catch (_err) { /* private mode */ }
-  return 'memory';
-}
-
-function setSourcesMode(mode) {
-  if (mode !== 'memory' && mode !== 'general') mode = 'memory';
-  STATE.sourcesMode = mode;
-  try { localStorage.setItem(SOURCES_MODE_LS_KEY, mode); } catch (_err) { /* ignore */ }
-
-  const memBtn = qs('sources-mode-memory');
-  const genBtn = qs('sources-mode-general');
-  if (!memBtn || !genBtn) return;
-  if (mode === 'memory') {
-    memBtn.classList.add('btn-active');
-    memBtn.setAttribute('aria-selected', 'true');
-    memBtn.setAttribute('tabindex', '0');
-    genBtn.classList.remove('btn-active');
-    genBtn.setAttribute('aria-selected', 'false');
-    genBtn.setAttribute('tabindex', '-1');
-  } else {
-    genBtn.classList.add('btn-active');
-    genBtn.setAttribute('aria-selected', 'true');
-    genBtn.setAttribute('tabindex', '0');
-    memBtn.classList.remove('btn-active');
-    memBtn.setAttribute('aria-selected', 'false');
-    memBtn.setAttribute('tabindex', '-1');
-  }
-
-  // Header action groups swap with the mode. The add-path inline row
-  // is a Memory-only affordance — closing it on every mode switch keeps
-  // it from surviving as a stuck-open input under General mode.
-  const memActs = qs('sources-actions-memory');
-  const genActs = qs('sources-actions-general');
-  if (memActs) memActs.hidden = mode !== 'memory';
-  if (genActs) genActs.hidden = mode !== 'general';
-  const addRow = qs('memory-add-row');
-  if (addRow) addRow.hidden = true;
-
-  hideBrowser();
-  loadSources(mode);
-}
-
-qs('sources-mode-memory').addEventListener('click', () => setSourcesMode('memory'));
-qs('sources-mode-general').addEventListener('click', () => setSourcesMode('general'));
-
-// Mirror the main tablist's keyboard nav onto the Sources sub-toggle.
-document.querySelector('.sources-mode-toggle')?.addEventListener('keydown', (e) => {
-  if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
-  const buttons = Array.from(document.querySelectorAll('.sources-mode-toggle [role="tab"]'));
-  const currentIdx = buttons.indexOf(document.activeElement);
-  const nextIdx = _arrowNavIndex(buttons.length, currentIdx === -1 ? 0 : currentIdx, e.key);
-  if (nextIdx < 0) return;
-  e.preventDefault();
-  const next = buttons[nextIdx];
-  next.focus();
-  if (next.dataset.mode) setSourcesMode(next.dataset.mode);
-});
 
 document.querySelectorAll('.sources-sort-btn').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -2181,34 +2124,26 @@ document.querySelectorAll('.sources-sort-btn').forEach(btn => {
   }
 })();
 
-async function loadSources(mode) {
-  if (mode !== 'memory' && mode !== 'general') mode = STATE.sourcesMode || 'memory';
-  STATE.sourcesMode = mode;
+async function loadSources() {
+  // Single-panel Sources: vendor grouping (사용자 / Claude / Codex) is the
+  // only classification axis. We pull every memory_dir's status and every
+  // indexed source file regardless of backend ``kind`` so user-added dirs
+  // that classify as ``general`` still surface their file rows under their
+  // vendor group.
   const list = qs('sources-list');
   panelLoading(list);
   try {
-    if (mode === 'memory') {
-      // Memory mode joins two endpoints: ``/api/memory-dirs/status`` for
-      // per-directory metadata (vendor / category / counts / timestamps)
-      // and ``/api/sources?kind=memory`` for the file rows under those
-      // directories. ``limit=10000`` matches the route's hard cap.
-      const [statusResp, sourcesResp] = await Promise.all([
-        api('GET', '/api/memory-dirs/status'),
-        api('GET', '/api/sources?kind=memory&limit=10000'),
-      ]);
-      const statusByPath = {};
-      for (const entry of (statusResp && statusResp.dirs) || []) {
-        if (entry && typeof entry.path === 'string') statusByPath[entry.path] = entry;
-      }
-      STATE.memoryStatusByPath = statusByPath;
-      STATE.memoryDirs = (STATE.serverConfig?.indexing?.memory_dirs) || Object.keys(statusByPath);
-      STATE.allSources = (sourcesResp && sourcesResp.sources) || [];
-    } else {
-      // The General view always asks the server for the ``general`` bucket
-      // (orphans tag along server-side so they remain visible).
-      const data = await api('GET', '/api/sources?kind=general');
-      STATE.allSources = data.sources;
+    const [statusResp, sourcesResp] = await Promise.all([
+      api('GET', '/api/memory-dirs/status'),
+      api('GET', '/api/sources?limit=10000'),
+    ]);
+    const statusByPath = {};
+    for (const entry of (statusResp && statusResp.dirs) || []) {
+      if (entry && typeof entry.path === 'string') statusByPath[entry.path] = entry;
     }
+    STATE.memoryStatusByPath = statusByPath;
+    STATE.memoryDirs = (STATE.serverConfig?.indexing?.memory_dirs) || Object.keys(statusByPath);
+    STATE.allSources = (sourcesResp && sourcesResp.sources) || [];
     _renderSourcesNsChip();
     renderSourceTree(_getFilteredSorted());
   } catch (err) {
@@ -2218,131 +2153,32 @@ async function loadSources(mode) {
 
 function renderSourceTree(sources) {
   const list = qs('sources-list');
-  const mode = STATE.sourcesMode || 'memory';
 
-  // C. Summary stats bar
+  // Top summary sums the *indexed* portion of each memory_dir so the
+  // figure matches what the user can actually click into below \u2014 and
+  // avoids inflating the count with unindexed read-only-discovered dirs
+  // whose ``file_count`` reflects disk-only files. Per-dir badges also
+  // surface the ``indexed/files`` split, so this number lines up with
+  // the left side of those badges.
   const statsEl = qs('sources-stats');
-  if (sources.length) {
-    const totalChunks = sources.reduce((sum, s) => sum + (s.chunk_count || 0), 0);
-    const totalSize = sources.reduce((sum, s) => sum + (s.file_size || 0), 0);
-    statsEl.textContent = `${sources.length} files \u00b7 ${totalChunks.toLocaleString()} chunks \u00b7 ${formatBytes(totalSize)}`;
+  const statusByPath = STATE.memoryStatusByPath || {};
+  let indexedFiles = 0;
+  let totalChunks = 0;
+  for (const s of Object.values(statusByPath)) {
+    if (!s || s.exists === false) continue;
+    indexedFiles += s.source_file_count || 0;
+    totalChunks += s.chunk_count || 0;
+  }
+  if (indexedFiles || totalChunks) {
+    statsEl.textContent = `${indexedFiles} files \u00b7 ${totalChunks.toLocaleString()} chunks`;
     statsEl.hidden = false;
   } else {
     statsEl.hidden = true;
   }
 
-  // Memory mode: vendor → memory_dir → file cards. Even with zero
-  // sources the panel still renders so configured-but-empty memory dirs
-  // stay visible (with their reindex/remove actions reachable).
-  if (mode === 'memory') {
-    _renderMemorySourceTree(sources, list);
-    return;
-  }
-
-  if (!sources.length) {
-    list.innerHTML = '<div class="empty-state">' + emptyState('📁', 'No indexed sources', 'Index files from the Index tab') + '</div>';
-    return;
-  }
-  list.innerHTML = '';
-
-  // G. Max chunks for mini bar
-  const maxChunks = Math.max(1, ...sources.map(s => s.chunk_count || 0));
-
-  // Group by parent directory
-  const groups = {};
-  sources.forEach(s => {
-    const parts = s.path.split('/');
-    const dir = parts.slice(0, -1).join('/') || '/';
-    if (!groups[dir]) groups[dir] = [];
-    groups[dir].push(s);
-  });
-
-  Object.entries(groups).forEach(([dir, items]) => {
-    const group = document.createElement('div');
-    group.className = 'source-group';
-
-    // D. Collapsible group header
-    const header = document.createElement('div');
-    header.className = 'source-group-header';
-    header.title = dir;
-    header.innerHTML = `<span class="source-group-chevron">\u25BC</span><span class="source-group-dir">${escapeHtml(shortDir(dir))}</span><span class="source-group-count">${items.length}</span>`;
-    header.setAttribute('aria-expanded', 'true');
-    header.addEventListener('click', () => {
-      group.classList.toggle('collapsed');
-      header.setAttribute('aria-expanded', !group.classList.contains('collapsed'));
-    });
-    group.appendChild(header);
-
-    items.forEach(s => {
-      const filename = s.path.split('/').pop() || s.path;
-      const item = document.createElement('div');
-      item.className = 'source-item';
-      item.title = s.path;
-
-      // A+B. 2-row layout with color dot
-      const size = s.file_size != null ? formatBytes(s.file_size) : '';
-      const age = s.last_indexed_at ? relativeTime(s.last_indexed_at) : '';
-      const barPct = Math.round(((s.chunk_count || 0) / maxChunks) * 100);
-
-      // F. Namespace badges (exclude "default")
-      const nsBadges = (s.namespaces || [])
-        .filter(ns => ns !== 'default')
-        .map(ns => `<span class="badge badge-ns source-ns-badge">${escapeHtml(ns)}</span>`)
-        .join('');
-
-      item.innerHTML = `
-        <div class="source-item-row1">
-          <span class="source-type-dot" style="background:${fileTypeColor(s.path)}"></span>
-          <span class="source-name">${escapeHtml(filename)}</span>
-          ${nsBadges}
-          <button class="source-del-btn remove-btn" data-path="${escapeAttr(s.path)}">✕</button>
-        </div>
-        <div class="source-item-row2">
-          ${s.chunk_count ?? '?'} chunks${size ? ' \u00b7 ' + size : ''}${s.avg_tokens ? ' \u00b7 avg ' + s.avg_tokens + ' tok' : ''}${age ? ' \u00b7 ' + age : ''}
-        </div>
-        <div class="source-chunk-bar">
-          <div class="source-chunk-bar-fill" style="width:${barPct}%"></div>
-        </div>
-      `;
-      item.setAttribute('tabindex', '0');
-      item.addEventListener('click', (e) => {
-        if (e.target.classList.contains('remove-btn')) return;
-        document.querySelectorAll('.source-item').forEach(el => el.classList.remove('active'));
-        item.classList.add('active');
-        browseSource(s.path);
-      });
-      item.addEventListener('keydown', e => {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); item.click(); }
-      });
-      item.querySelector('.remove-btn').addEventListener('click', async (e) => {
-        e.stopPropagation();
-        const ok = await showConfirm({
-          title: t('confirm.source_delete_title'),
-          message: t('confirm.source_delete_msg', { path: s.path }),
-          confirmText: t('common.delete'),
-        });
-        if (!ok) return;
-        try {
-          await api('DELETE', `/api/sources?path=${encodeURIComponent(s.path)}`);
-          showToast(t('toast.source_deleted'), 'success');
-          STATE.allSources = STATE.allSources.filter(x => x.path !== s.path);
-          renderSourceTree(_getFilteredSorted());
-          hideBrowser();
-          STATE.lastResults = STATE.lastResults.filter(r => r.chunk.source_file !== s.path);
-          renderResults(STATE.lastResults);
-          _markDataStale();
-          loadSourceFilter();
-          loadStats();
-        } catch (err) {
-          showToast(t('toast.delete_failed', { error: err.message }), 'error');
-        }
-      });
-      group.appendChild(item);
-    });
-
-    list.appendChild(group);
-  });
+  _renderMemorySourceTree(sources, list);
 }
+
 
 function hideBrowser() {
   hide(qs('chunks-browser-content'));
@@ -2414,34 +2250,79 @@ function _renderMemorySourceTree(sources, list) {
   list.innerHTML = '';
   const maxChunks = Math.max(1, ...sources.map(s => s.chunk_count || 0));
 
+  // "Discovered" = memory dirs that are configured (or auto-detected)
+  // but have no chunks yet — the user hasn't indexed them. We group
+  // these as a collapsed sub-section under their vendor so the indexed
+  // cards stay primary and the candidates read as "ready to index", not
+  // "errors". A dir with ``exists === false`` stays in the main list as
+  // ``.missing`` (a real error).
+  const isDiscovered = (path) => {
+    const st = statusByPath[path];
+    if (!st || st.exists === false) return false;
+    const chunks = st.chunk_count || 0;
+    const files = (typeof st.file_count === 'number') ? st.file_count : 0;
+    return chunks === 0 && files > 0;
+  };
+
+  // For the "user" vendor, the first entry in ``memory_dirs`` config is
+  // the conventional primary memory dir — pin it to the top so the most
+  // common destination doesn't get sorted under a longer alphabetical
+  // sibling.
+  const defaultDir = (STATE.serverConfig?.indexing?.memory_dirs || [])[0];
+  const sortUserDirs = (dirs) => {
+    if (!defaultDir) return dirs;
+    const idx = dirs.indexOf(defaultDir);
+    if (idx <= 0) return dirs;
+    const out = dirs.slice();
+    out.splice(idx, 1);
+    out.unshift(defaultDir);
+    return out;
+  };
+
+  // Build a vendor card whether or not it has any dirs — empty vendors
+  // collapse with a "not found · Add manually" placeholder so users know
+  // the slot exists without it taking up screen space.
   let renderedFiles = 0;
   for (const provider of PROVIDER_ORDER) {
     const bucket = byProvider[provider];
-    if (!bucket.order.length) continue;
 
-    const categories = CATEGORY_ORDER.filter(c => bucket.byCategory[c]);
-    // Drop dirs with no visible files when a filter is active.
-    const visibleCats = filterActive
-      ? categories
+    const categoriesAll = CATEGORY_ORDER.filter(c => bucket.byCategory[c]);
+    const visibleCatsRaw = filterActive
+      ? categoriesAll
           .map(cat => [cat, bucket.byCategory[cat].filter(d => (sourcesByDir[d] || []).length > 0)])
           .filter(([, dirs]) => dirs.length > 0)
-      : categories.map(cat => [cat, bucket.byCategory[cat]]);
-    if (!visibleCats.length) continue;
+      : categoriesAll.map(cat => [cat, bucket.byCategory[cat]]);
+
+    // Partition each category's dirs into indexed (default first for user
+    // provider) and discovered (kind=read-only, rendered as a collapsed
+    // sub-section).
+    const visibleCats = visibleCatsRaw.map(([cat, dirs]) => {
+      const indexed = dirs.filter(d => !isDiscovered(d));
+      const discovered = dirs.filter(d => isDiscovered(d));
+      const indexedSorted = (provider === 'user') ? sortUserDirs(indexed) : indexed;
+      return [cat, indexedSorted, discovered];
+    });
+
+    const isEmptyVendor = !visibleCats.some(([, indexed, discovered]) => indexed.length || discovered.length);
+    if (filterActive && isEmptyVendor) continue;
 
     const totalFiles = visibleCats.reduce(
-      (sum, [, dirs]) => sum + dirs.reduce((s, d) => s + (sourcesByDir[d] || []).length, 0),
+      (sum, [, indexed]) => sum + indexed.reduce((s, d) => s + (sourcesByDir[d] || []).length, 0),
       0,
     );
-    const isSingleLeaf = visibleCats.length === 1;
+    const totalDiscovered = visibleCats.reduce((sum, [, , discovered]) => sum + discovered.length, 0);
+    const visibleIndexedCats = visibleCats.filter(([, indexed]) => indexed.length);
+    const isSingleLeaf = visibleIndexedCats.length === 1 || (visibleIndexedCats.length === 0 && visibleCats.length === 1);
 
     const group = document.createElement('details');
     group.className = 'source-vendor-group';
-    if (!PROVIDER_COLLAPSED.has(provider) || filterActive) group.open = true;
+    if (isEmptyVendor) group.classList.add('source-vendor-empty');
+    if ((!PROVIDER_COLLAPSED.has(provider) || filterActive) && !isEmptyVendor) group.open = true;
     group.dataset.provider = provider;
 
     const summary = document.createElement('summary');
     summary.className = 'source-vendor-summary';
-    const labelKey = isSingleLeaf
+    const labelKey = isSingleLeaf && visibleCats.length
       ? (CATEGORY_LABEL_KEY[visibleCats[0][0]] || PROVIDER_LABEL_KEY[provider] || provider)
       : (PROVIDER_LABEL_KEY[provider] || provider);
     const label = document.createElement('span');
@@ -2456,14 +2337,64 @@ function _renderMemorySourceTree(sources, list) {
 
     group.appendChild(summary);
 
-    if (isSingleLeaf) {
-      for (const dir of visibleCats[0][1]) {
-        group.appendChild(_renderMemoryDirGroup(dir, sourcesByDir[dir] || [], statusByPath[dir], maxChunks));
-      }
+    const renderDir = (dir) => _renderMemoryDirGroup(
+      dir,
+      sourcesByDir[dir] || [],
+      statusByPath[dir],
+      maxChunks,
+      { isDefault: dir === defaultDir },
+    );
+
+    const renderDiscoveredBlock = (dirs) => {
+      if (!dirs.length) return null;
+      const det = document.createElement('details');
+      det.className = 'source-vendor-discovered';
+      const sum = document.createElement('summary');
+      sum.className = 'source-vendor-discovered-summary';
+      const lbl = document.createElement('span');
+      lbl.className = 'source-vendor-discovered-label';
+      lbl.textContent = (typeof t === 'function') ? t('sources.discovered_label') : 'Discovered';
+      sum.appendChild(lbl);
+      const cnt = document.createElement('span');
+      cnt.className = 'source-vendor-count';
+      cnt.textContent = String(dirs.length);
+      sum.appendChild(cnt);
+      det.appendChild(sum);
+      for (const d of dirs) det.appendChild(renderDir(d));
+      return det;
+    };
+
+    if (isEmptyVendor) {
+      const placeholder = document.createElement('div');
+      placeholder.className = 'source-vendor-placeholder';
+      const msg = document.createElement('span');
+      msg.className = 'source-vendor-placeholder-msg';
+      const vendorName = (typeof t === 'function') ? t(PROVIDER_LABEL_KEY[provider] || provider) : provider;
+      msg.textContent = (typeof t === 'function')
+        ? t('sources.empty_vendor_placeholder', { vendor: vendorName })
+        : `${vendorName} memory not found`;
+      placeholder.appendChild(msg);
+      const cta = document.createElement('button');
+      cta.type = 'button';
+      cta.className = 'btn-ghost btn-xs source-vendor-add-cta';
+      cta.textContent = (typeof t === 'function') ? t('sources.add_manually_btn') : '+ Add manually';
+      cta.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const addBtn = qs('memory-add-path-btn');
+        if (addBtn) addBtn.click();
+      });
+      placeholder.appendChild(cta);
+      group.appendChild(placeholder);
+    } else if (isSingleLeaf) {
+      const sole = visibleIndexedCats[0] || visibleCats[0];
+      for (const dir of sole[1]) group.appendChild(renderDir(dir));
+      const disc = renderDiscoveredBlock(sole[2]);
+      if (disc) group.appendChild(disc);
     } else {
       const products = document.createElement('div');
       products.className = 'source-vendor-products';
-      for (const [cat, dirs] of visibleCats) {
+      for (const [cat, indexed, discovered] of visibleCats) {
+        if (!indexed.length && !discovered.length) continue;
         const section = document.createElement('section');
         section.className = 'source-vendor-product';
         section.dataset.category = cat;
@@ -2476,12 +2407,12 @@ function _renderMemorySourceTree(sources, list) {
         productHeader.appendChild(pLabel);
         const pCount = document.createElement('span');
         pCount.className = 'source-vendor-count';
-        pCount.textContent = String(dirs.reduce((sum, d) => sum + (sourcesByDir[d] || []).length, 0));
+        pCount.textContent = String(indexed.reduce((sum, d) => sum + (sourcesByDir[d] || []).length, 0));
         productHeader.appendChild(pCount);
         section.appendChild(productHeader);
-        for (const dir of dirs) {
-          section.appendChild(_renderMemoryDirGroup(dir, sourcesByDir[dir] || [], statusByPath[dir], maxChunks));
-        }
+        for (const dir of indexed) section.appendChild(renderDir(dir));
+        const disc = renderDiscoveredBlock(discovered);
+        if (disc) section.appendChild(disc);
         products.appendChild(section);
       }
       group.appendChild(products);
@@ -2489,6 +2420,7 @@ function _renderMemorySourceTree(sources, list) {
 
     list.appendChild(group);
     renderedFiles += totalFiles;
+    void totalDiscovered;
   }
 
   if (!allDirs.size) {
@@ -2498,56 +2430,60 @@ function _renderMemorySourceTree(sources, list) {
   }
 }
 
-function _renderMemoryDirGroup(dir, items, status, maxChunks) {
-  const group = document.createElement('div');
+function _renderMemoryDirGroup(dir, items, status, maxChunks, opts) {
+  const { isDefault } = opts || {};
+  // ``<details>`` gives us a native chevron + auto-flip on toggle and
+  // matches the vendor group's disclosure shape one level up — keeping a
+  // single mental model for collapse state across the whole tree.
+  const group = document.createElement('details');
   group.className = 'source-group source-group-memory';
   if (status && status.exists === false) group.classList.add('source-group-missing');
+  group.open = true;
+  group.dataset.dir = dir;
 
-  const header = document.createElement('div');
+  const header = document.createElement('summary');
   header.className = 'source-group-header';
   header.title = dir;
-  header.setAttribute('aria-expanded', 'true');
-
-  const chevron = document.createElement('span');
-  chevron.className = 'source-group-chevron';
-  chevron.textContent = '▼';
-  header.appendChild(chevron);
 
   const dirLabel = document.createElement('span');
   dirLabel.className = 'source-group-dir';
-  // Full path goes on the row's ``title`` (set above) so hover still
-  // reveals it; the visible label is collapsed to ``…/parent/leaf`` so
-  // the stats badge + actions stay on screen at the default 340px
-  // sidebar width.
   dirLabel.textContent = (typeof shortDir === 'function') ? shortDir(dir) : dir;
   header.appendChild(dirLabel);
 
-  // Memory mode skips the per-group ``count`` badge that General mode
-  // uses — the stats badge below already carries indexed/files/chunks,
-  // so a separate count would be duplicate noise (and would mismatch
-  // when the sources response is missing rows the status response has).
+  if (isDefault) {
+    const pill = document.createElement('span');
+    pill.className = 'source-group-default-pill';
+    pill.textContent = (typeof t === 'function') ? t('sources.default_pill') : 'default';
+    header.appendChild(pill);
+  }
+
+  // 3-state status:
+  //   - missing  → exists === false (red, "missing")
+  //   - pending  → file_count > 0 && chunk_count === 0 (amber, ready to index)
+  //   - indexed  → otherwise (no color)
   if (status) {
     const statsBadge = document.createElement('span');
     statsBadge.className = 'source-group-stats';
-    if ((status.chunk_count || 0) === 0) statsBadge.classList.add('empty');
-    if (status.exists === false) statsBadge.classList.add('missing');
+    const files = (typeof status.file_count === 'number') ? status.file_count : 0;
+    const indexed = status.source_file_count || 0;
+    const chunks = status.chunk_count || 0;
     if (status.exists === false) {
+      statsBadge.classList.add('missing');
       statsBadge.textContent = (typeof t === 'function')
         ? t('sources.memory_dirs.status_missing') : 'missing';
     } else {
-      const files = (typeof status.file_count === 'number') ? status.file_count : 0;
-      const indexed = status.source_file_count || 0;
-      const chunks = status.chunk_count || 0;
+      if (chunks === 0 && files > 0) statsBadge.classList.add('pending');
       statsBadge.textContent = (typeof t === 'function')
         ? t('sources.memory_dirs.status_group', { files, indexed, chunks })
-        : `${indexed}/${files} files · ${chunks} chunks`;
+        : (indexed + '/' + files + ' files, ' + chunks + ' chunks');
     }
     header.appendChild(statsBadge);
   }
 
   // Hover-revealed actions: open the dir in the OS file manager,
-  // reindex its files, or remove it from memory_dirs config. Each
-  // stops propagation so it doesn't toggle the parent collapse.
+  // index/reindex its files, or remove it from memory_dirs config.
+  // ``preventDefault`` keeps the click from toggling the parent
+  // ``<details>`` (default behavior on summary clicks).
   const actions = document.createElement('div');
   actions.className = 'source-group-actions';
   const tFallback = (key, fb) => (typeof t === 'function' ? t(key) : fb);
@@ -2560,6 +2496,7 @@ function _renderMemoryDirGroup(dir, items, status, maxChunks) {
   if (status && status.exists === false) openBtn.disabled = true;
   openBtn.addEventListener('click', (ev) => {
     ev.stopPropagation();
+    ev.preventDefault();
     if (typeof mdOpenOne === 'function') mdOpenOne(dir, openBtn);
   });
   actions.appendChild(openBtn);
@@ -2575,6 +2512,7 @@ function _renderMemoryDirGroup(dir, items, status, maxChunks) {
   reindexBtn.title = tFallback('sources.memory_dirs.reindex_title', 'Reindex this directory');
   reindexBtn.addEventListener('click', (ev) => {
     ev.stopPropagation();
+    ev.preventDefault();
     if (typeof mdReindexOne === 'function') mdReindexOne(dir, reindexBtn);
   });
   actions.appendChild(reindexBtn);
@@ -2587,20 +2525,12 @@ function _renderMemoryDirGroup(dir, items, status, maxChunks) {
   if ((STATE.memoryDirs || []).length <= 1) removeBtn.disabled = true;
   removeBtn.addEventListener('click', (ev) => {
     ev.stopPropagation();
+    ev.preventDefault();
     if (typeof mdRemove === 'function') mdRemove(dir);
   });
   actions.appendChild(removeBtn);
 
   header.appendChild(actions);
-
-  header.addEventListener('click', (ev) => {
-    // Action buttons / inner spans bubble here too — guard by
-    // checking the closest ``.source-group-actions`` instead of the
-    // literal target.
-    if (ev.target.closest('.source-group-actions')) return;
-    group.classList.toggle('collapsed');
-    header.setAttribute('aria-expanded', !group.classList.contains('collapsed'));
-  });
   group.appendChild(header);
 
   for (const s of items) {

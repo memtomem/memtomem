@@ -128,29 +128,10 @@ function _buildMemoryDirsPanel(initialDirs) {
       if (resp && Array.isArray(resp.memory_dirs)) {
         refreshDirs(resp.memory_dirs);
       }
-      // ``kind`` arrives on every successful /memory-dirs/add response
-      // (PR #554). When it falls into the *other* sub-toggle, surface a
-      // one-tap "Switch view" so the user isn't left wondering why the
-      // path they just added isn't visible in the current panel.
-      const addedKind = resp && resp.kind;
-      const currentMode = (typeof getSourcesMode === 'function') ? getSourcesMode() : 'memory';
-      if (addedKind && addedKind !== currentMode) {
-        const otherLabel = t('sources.mode.' + addedKind);
-        showToast(
-          t('sources.toast.added_to_other_view', { path: trimmed, view: otherLabel }),
-          'success',
-          {
-            action: {
-              label: t('sources.toast.switch_view'),
-              onClick: () => {
-                if (typeof setSourcesMode === 'function') setSourcesMode(addedKind);
-              },
-            },
-          },
-        );
-      } else {
-        showToast(t('toast.memory_dir.added', { path: trimmed }), 'success');
-      }
+      // PR #554 returns ``kind`` for every add; with the unified single
+      // Sources panel the path always lands in the same view (its vendor
+      // group), so the historic "switch view" toast is no longer needed.
+      showToast(t('toast.memory_dir.added', { path: trimmed }), 'success');
     } catch (err) {
       showToast(t('toast.memory_dir.add_failed', { error: _apiErrorText(err) }), 'error');
     }
@@ -163,12 +144,13 @@ function _buildMemoryDirsPanel(initialDirs) {
     if (_memorySourcesByDir !== null) return _memorySourcesByDir;
     if (_memorySourcesPromise) return _memorySourcesPromise;
     _memorySourcesPromise = (async () => {
-      // ``limit=10000`` matches the route's hard cap. The Memory bucket
-      // tops out at one row per indexed file across registered memory
-      // dirs — well under the cap in practice (max observed ≈ a few
-      // hundred). Hitting the cap would be a pathological config and
-      // the user would see truncated drill-ins, not a crash.
-      const data = await api('GET', '/api/sources?kind=memory&limit=10000');
+      // ``limit=10000`` matches the route's hard cap. With the unified
+      // single-panel view we ask for every indexed source (no kind
+      // filter) so user-added dirs that classify as ``general`` still
+      // surface their file rows in their vendor group. Hitting the cap
+      // would be a pathological config and the user would see truncated
+      // drill-ins, not a crash.
+      const data = await api('GET', '/api/sources?limit=10000');
       const byDir = {};
       for (const s of (data && data.sources) || []) {
         const key = s.memory_dir || '';
@@ -282,13 +264,8 @@ function _buildMemoryDirsPanel(initialDirs) {
       li.appendChild(name);
       li.appendChild(meta);
       const activate = () => {
-        // Reuses the General view's chunks browser by switching modes
-        // and selecting the source there. Keeps a single chunks-browser
-        // DOM (no duplicate render path) and gives the user a clear
-        // visual transition into the file detail.
-        if (typeof setSourcesMode === 'function') {
-          setSourcesMode('general');
-        }
+        // Single Sources panel: just open the source in the shared
+        // chunks-browser pane.
         if (typeof browseSource === 'function') {
           browseSource(s.path);
         }
@@ -984,7 +961,7 @@ function renderMemoryDirsPanel() {
     container.appendChild(_buildMemoryDirsPanel(dirs));
     return;
   }
-  if (typeof loadSources === 'function') loadSources('memory');
+  if (typeof loadSources === 'function') loadSources();
 }
 
 // ── Module-level memory-dir actions ───────────────────────────────
@@ -1012,26 +989,8 @@ async function mdAdd(path) {
       }
       STATE.memoryDirs = [...resp.memory_dirs];
     }
-    const addedKind = resp && resp.kind;
-    const currentMode = (typeof getSourcesMode === 'function') ? getSourcesMode() : 'memory';
-    if (addedKind && addedKind !== currentMode) {
-      const otherLabel = t('sources.mode.' + addedKind);
-      showToast(
-        t('sources.toast.added_to_other_view', { path: trimmed, view: otherLabel }),
-        'success',
-        {
-          action: {
-            label: t('sources.toast.switch_view'),
-            onClick: () => {
-              if (typeof setSourcesMode === 'function') setSourcesMode(addedKind);
-            },
-          },
-        },
-      );
-    } else {
-      showToast(t('toast.memory_dir.added', { path: trimmed }), 'success');
-    }
-    if (typeof loadSources === 'function') loadSources(currentMode);
+    showToast(t('toast.memory_dir.added', { path: trimmed }), 'success');
+    if (typeof loadSources === 'function') loadSources();
   } catch (err) {
     showToast(t('toast.memory_dir.add_failed', { error: _mdApiErrorText(err) }), 'error');
   }
@@ -1072,7 +1031,7 @@ async function mdRemove(path) {
       showToast(t('toast.memory_dir.removed', { path }), 'success');
     }
     if (typeof hideBrowser === 'function') hideBrowser();
-    if (typeof loadSources === 'function') loadSources('memory');
+    if (typeof loadSources === 'function') loadSources();
     if (typeof loadStats === 'function') loadStats();
   } catch (err) {
     showToast(t('toast.memory_dir.remove_failed', { error: _mdApiErrorText(err) }), 'error');
@@ -1111,7 +1070,7 @@ async function mdReindexOne(path, btn) {
     showToast(t('toast.memory_dir.reindex_failed', { error: _mdApiErrorText(err) }), 'error');
   } finally {
     if (btn) btnLoading(btn, false);
-    if (typeof loadSources === 'function') loadSources('memory');
+    if (typeof loadSources === 'function') loadSources();
   }
 }
 
@@ -1134,6 +1093,6 @@ async function mdReindexAll(btn) {
     showToast(t('toast.reindex_failed', { error: _mdApiErrorText(err) }), 'error');
   } finally {
     if (btn) btnLoading(btn, false);
-    if (typeof loadSources === 'function') loadSources('memory');
+    if (typeof loadSources === 'function') loadSources();
   }
 }
