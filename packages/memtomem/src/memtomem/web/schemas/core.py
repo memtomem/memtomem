@@ -19,6 +19,11 @@ class ChunkOut(BaseModel):
     namespace: str = "default"
     created_at: datetime
     updated_at: datetime
+    # Temporal-validity window (RFC: temporal-validity §Goal 7).
+    # Both ``None`` => always-valid; one-sided window allowed. Frontend
+    # surfaces a badge with ∞ sentinel for the unbounded side.
+    valid_from_unix: int | None = None
+    valid_to_unix: int | None = None
 
 
 class ContextInfoOut(BaseModel):
@@ -65,6 +70,8 @@ def chunk_to_out(chunk) -> ChunkOut:
         namespace=meta.namespace,
         created_at=chunk.created_at,
         updated_at=chunk.updated_at,
+        valid_from_unix=meta.valid_from_unix,
+        valid_to_unix=meta.valid_to_unix,
     )
 
 

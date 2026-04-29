@@ -716,6 +716,8 @@ button:active { opacity: 0.7; }
 .badge-blue   { background: rgba(var(--accent-rgb),0.15); color: var(--accent); }
 .badge-gray   { background: rgba(123, 127, 150, 0.15); color: var(--muted); }
 .badge-source { background: rgba(76, 175, 125, 0.15); color: var(--green); font-family: var(--mono); font-weight: 400; }
+.badge-validity { background: rgba(108, 92, 231, 0.10); color: var(--muted); font-family: var(--mono); font-weight: 400; }
+.badge-validity--expired { opacity: 0.55; text-decoration: line-through; }
 
 .empty-state { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--muted); font-size: 0.875rem; }
 

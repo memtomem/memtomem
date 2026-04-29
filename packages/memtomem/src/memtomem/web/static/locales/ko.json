@@ -105,6 +105,8 @@
   "search.detail_diff": "차이점",
   "search.detail_history": "기록",
   "search.detail_tags": "태그",
+  "search.detail_validity_label": "유효",
+  "search.detail_validity_expired": "만료됨",
   "search.detail_tag_placeholder": "태그 추가…",
   "search.detail_tag_add": "추가",
   "search.detail_tag_save": "태그 저장",

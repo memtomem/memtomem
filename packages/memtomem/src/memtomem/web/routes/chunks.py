@@ -120,15 +120,18 @@ async def update_chunk_tags(
 
     deduped = list(dict.fromkeys(body.tags))
 
+    # Copy-with-override: spread every existing metadata field then
+    # replace only ``tags``. The previous shape (explicit field list)
+    # silently dropped any field not enumerated here — including
+    # ``overlap_before/after``, ``parent_context``, ``file_context``,
+    # and the newly added temporal-validity columns
+    # (``valid_from_unix`` / ``valid_to_unix``). The mm CLI's
+    # ``add`` command already uses this pattern; consolidate.
     new_meta = chunk.metadata.__class__(
-        source_file=chunk.metadata.source_file,
-        heading_hierarchy=chunk.metadata.heading_hierarchy,
-        chunk_type=chunk.metadata.chunk_type,
-        start_line=chunk.metadata.start_line,
-        end_line=chunk.metadata.end_line,
-        language=chunk.metadata.language,
-        tags=tuple(deduped),
-        namespace=chunk.metadata.namespace,
+        **{
+            **{f: getattr(chunk.metadata, f) for f in chunk.metadata.__dataclass_fields__},
+            "tags": tuple(deduped),
+        }
     )
     from memtomem.models import Chunk as _Chunk
 

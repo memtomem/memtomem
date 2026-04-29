@@ -594,6 +594,116 @@ class TestEditChunk:
 
 
 # ---------------------------------------------------------------------------
+# Temporal-validity exposure on ChunkOut (RFC §Goal 7 — Web UI badge)
+# ---------------------------------------------------------------------------
+
+
+class TestChunkValidityFields:
+    """``ChunkOut`` surfaces ``valid_from_unix`` / ``valid_to_unix`` so the
+    Web UI can render the temporal-validity badge. The frontend reads these
+    fields directly (see ``_renderValidityBadge`` / ``_validityBadgeHtml``
+    in ``app.js``), so the API contract is what this test pins.
+
+    Also verifies the regression fix in ``update_chunk_tags`` — the route
+    used to reconstruct ``ChunkMetadata`` with an explicit field list,
+    silently dropping any field not enumerated. The Goal 7 PR switches to
+    a copy-with-override (dict spread) so future ``ChunkMetadata``
+    extensions don't have to chase that call site.
+    """
+
+    async def test_chunkout_includes_validity_when_set(self, app, client: AsyncClient):
+        from memtomem.models import Chunk, ChunkMetadata
+
+        chunk = Chunk(
+            content="windowed",
+            metadata=ChunkMetadata(
+                source_file=Path("/tmp/test.md"),
+                tags=("policy",),
+                namespace="default",
+                start_line=1,
+                end_line=3,
+                valid_from_unix=1_734_220_800,  # 2024-12-15 00:00 UTC
+                valid_to_unix=1_743_465_599,  # 2025-Q1 end (2025-03-31 23:59:59 UTC)
+            ),
+            id=CHUNK_ID,
+            content_hash="abc123",
+            embedding=[0.1] * 768,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        app.state.storage.get_chunk.return_value = chunk
+
+        resp = await client.get(f"/api/chunks/{CHUNK_ID}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["valid_from_unix"] == 1_734_220_800
+        assert data["valid_to_unix"] == 1_743_465_599
+
+    async def test_chunkout_validity_null_when_unset(self, client: AsyncClient):
+        """``_make_test_chunk`` produces a chunk without validity frontmatter
+        — both fields must serialize as ``null`` so the frontend's
+        always-valid branch (hidden badge) fires.
+        """
+        resp = await client.get(f"/api/chunks/{CHUNK_ID}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["valid_from_unix"] is None
+        assert data["valid_to_unix"] is None
+
+    async def test_tag_update_preserves_validity(self, app, client: AsyncClient):
+        """Regression: PATCH /chunks/{id}/tags must not silently drop the
+        temporal-validity columns. Before Goal 7 the route reconstructed
+        ``ChunkMetadata`` with an explicit field list; with the
+        dict-spread fix every field — including ``valid_from_unix`` /
+        ``valid_to_unix`` and the long-broken ``overlap_*`` /
+        ``parent_context`` / ``file_context`` — round-trips intact.
+        """
+        from memtomem.models import Chunk, ChunkMetadata
+
+        chunk_with_validity = Chunk(
+            content="windowed",
+            metadata=ChunkMetadata(
+                source_file=Path("/tmp/test.md"),
+                tags=("old-tag",),
+                namespace="default",
+                start_line=1,
+                end_line=3,
+                valid_from_unix=1_734_220_800,
+                valid_to_unix=1_743_465_599,
+                parent_context="Section A",
+                overlap_before=42,
+            ),
+            id=CHUNK_ID,
+            content_hash="abc123",
+            embedding=[0.1] * 768,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        app.state.storage.get_chunk.return_value = chunk_with_validity
+
+        resp = await client.patch(
+            f"/api/chunks/{CHUNK_ID}/tags",
+            json={"tags": ["new-tag", "another"]},
+        )
+        assert resp.status_code == 200
+
+        # Inspect the actual upsert call — that is what touches the DB and
+        # therefore what would silently drop fields on the way back.
+        upsert_call = app.state.storage.upsert_chunks.await_args
+        assert upsert_call is not None, "tag PATCH must call upsert_chunks"
+        upserted_chunks = upsert_call.args[0]
+        assert len(upserted_chunks) == 1
+        new_meta = upserted_chunks[0].metadata
+        assert new_meta.valid_from_unix == 1_734_220_800
+        assert new_meta.valid_to_unix == 1_743_465_599
+        # Sister-fields the old explicit-list shape would also have wiped
+        # — pinning them prevents the same bug returning if someone re-flattens.
+        assert new_meta.parent_context == "Section A"
+        assert new_meta.overlap_before == 42
+        assert tuple(new_meta.tags) == ("new-tag", "another")
+
+
+# ---------------------------------------------------------------------------
 # GET /api/sessions
 # ---------------------------------------------------------------------------
 

@@ -105,6 +105,8 @@
   "search.detail_diff": "Diff",
   "search.detail_history": "History",
   "search.detail_tags": "Tags",
+  "search.detail_validity_label": "Valid",
+  "search.detail_validity_expired": "Expired",
   "search.detail_tag_placeholder": "Add tag…",
   "search.detail_tag_add": "Add",
   "search.detail_tag_save": "Save Tags",

@@ -225,6 +225,64 @@ function relativeTime(dateStr) {
   return `${Math.floor(mo / 12)}y ago`;
 }
 
+// ── Temporal-validity badge (RFC §Goal 7) ──
+// Renders ``Valid: 2025-08-15 → 2026-03-31`` (∞ for unbounded sides) when
+// either bound is set. Always-valid chunks (both bounds null) hide the
+// badge entirely. Expired (``now > valid_to``) gets a muted/strike style
+// — the chunk stays visible (validity is a search-time concept), only the
+// presentation flags it.
+function _formatValidityDate(unix) {
+  if (unix === null || unix === undefined) return '∞';
+  // toISOString returns YYYY-MM-DDTHH:MM:SS.sssZ — slice to the date part.
+  // unix is seconds; Date constructor expects ms.
+  return new Date(unix * 1000).toISOString().slice(0, 10);
+}
+
+// HTML-string variant for innerHTML templating in the result list
+// (where we already build a string-template). Returns "" for chunks
+// without a window so the caller can ${validityBadge} unconditionally.
+// Uses _formatValidityDate which produces strict ISO date strings —
+// no XSS surface in the interpolated content.
+function _validityBadgeHtml(validFromUnix, validToUnix) {
+  const hasWindow = validFromUnix !== null && validFromUnix !== undefined
+    || validToUnix !== null && validToUnix !== undefined;
+  if (!hasWindow) return '';
+  const label = (typeof t === 'function' ? t('search.detail_validity_label') : 'Valid');
+  const from = _formatValidityDate(validFromUnix);
+  const to = _formatValidityDate(validToUnix);
+  const expired = validToUnix !== null && validToUnix !== undefined
+    && Date.now() / 1000 > validToUnix;
+  const cls = expired ? 'badge badge-validity badge-validity--expired' : 'badge badge-validity';
+  return ` <span class="${cls}">${label}: ${from} → ${to}</span>`;
+}
+
+function _renderValidityBadge(el, validFromUnix, validToUnix) {
+  if (!el) return;
+  const hasWindow = validFromUnix !== null && validFromUnix !== undefined
+    || validToUnix !== null && validToUnix !== undefined;
+  if (!hasWindow) {
+    el.hidden = true;
+    el.textContent = '';
+    el.classList.remove('badge-validity--expired');
+    return;
+  }
+  const label = (typeof t === 'function' ? t('search.detail_validity_label') : 'Valid');
+  const from = _formatValidityDate(validFromUnix);
+  const to = _formatValidityDate(validToUnix);
+  el.textContent = `${label}: ${from} → ${to}`;
+  el.hidden = false;
+
+  const expired = validToUnix !== null && validToUnix !== undefined
+    && Date.now() / 1000 > validToUnix;
+  el.classList.toggle('badge-validity--expired', expired);
+  if (expired) {
+    const expiredLabel = (typeof t === 'function' ? t('search.detail_validity_expired') : 'Expired');
+    el.title = expiredLabel;
+  } else {
+    el.removeAttribute('title');
+  }
+}
+
 // ── B1: Debounce ──
 function debounce(fn, ms) {
   let timer;
@@ -1149,6 +1207,7 @@ function _buildResultItem(r) {
   const age = relativeTime(r.chunk.created_at);
   const nsBadge = r.chunk.namespace && r.chunk.namespace !== 'default'
     ? ` <span class="badge badge-ns">${escapeHtml(r.chunk.namespace)}</span>` : '';
+  const validityBadge = _validityBadgeHtml(r.chunk.valid_from_unix, r.chunk.valid_to_unix);
   const scorePct = STATE.maxResultScore > 0 ? Math.round((r.score / STATE.maxResultScore) * 100) : 0;
   const barColor = scorePct > 70 ? 'var(--green)' : scorePct > 40 ? 'var(--accent)' : 'var(--muted)';
 
@@ -1160,7 +1219,7 @@ function _buildResultItem(r) {
       <span class="result-filename">${escapeHtml(fname)}</span>
       <span class="score-badge">${r.score.toFixed(3)}</span>
       <span class="badge badge-retrieval badge-retrieval--${escapeAttr(r.source)}">${escapeHtml(r.source)}</span>
-      ${nsBadge}
+      ${nsBadge}${validityBadge}
     </div>
     <div class="result-item-meta">${escapeHtml(dir)} \u00b7 #${r.rank} \u00b7 ${escapeHtml(age)}</div>
     <div class="result-score-bar"><div class="result-score-fill" style="width:${scorePct}%;background:${barColor}"></div></div>
@@ -1482,6 +1541,7 @@ function showDetail(r) {
   updatePinBtn(r.chunk.id);
   _updateHistoryBtn(r.chunk.id);
   qs('d-created').textContent = relativeTime(r.chunk.created_at);
+  _renderValidityBadge(qs('d-validity'), r.chunk.valid_from_unix, r.chunk.valid_to_unix);
   _updateWordCount();
   _updateSourceNav();
 
