@@ -66,7 +66,20 @@ class _MarkdownEventHandler(FileSystemEventHandler):
 class FileWatcher:
     """Watches configured directories and triggers re-indexing on file changes.
 
-    Runs as an asyncio task alongside the MCP server.
+    Runs as an asyncio task alongside the MCP server and the web server
+    (``memtomem.web.app``). ``start()`` does two things:
+
+    1. Registers a ``recursive=True`` ``watchdog`` ``Observer`` on each
+       existing ``memory_dir`` so future create/modify/move events trigger
+       a debounced re-index.
+    2. Kicks off a one-shot **startup backfill** that walks each watched
+       dir via ``IndexEngine.index_path(recursive=True)``. The observer
+       only sees events from the moment it starts, so files that landed
+       while the server was down (or before the dir was added to
+       ``memory_dirs``) would otherwise stay invisible. The backfill is
+       idempotent — content-hash dedup inside ``_index_file`` skips
+       already-indexed files — and runs as a background task so a slow
+       walk over many memory_dirs doesn't block startup.
     """
 
     def __init__(
@@ -81,22 +94,37 @@ class FileWatcher:
         self._observer: BaseObserver | None = None
         self._queue: asyncio.Queue[Path] = asyncio.Queue(maxsize=_WATCHER_QUEUE_MAXSIZE)
         self._task: asyncio.Task[None] | None = None
+        self._backfill_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
         handler = _MarkdownEventHandler(self._queue, loop, self._config.supported_extensions)
         self._observer = Observer()
 
+        watched: list[Path] = []
         for watch_dir in self._config.memory_dirs:
             expanded = Path(watch_dir).expanduser().resolve()
             if expanded.exists():
                 self._observer.schedule(handler, str(expanded), recursive=True)
                 logger.info("Watching %s for changes", expanded)
+                watched.append(expanded)
 
         self._observer.start()
         self._task = asyncio.create_task(self._process_events())
+        if watched:
+            self._backfill_task = asyncio.create_task(self._backfill_existing(watched))
 
     async def stop(self) -> None:
+        if self._backfill_task is not None and not self._backfill_task.done():
+            # Cancel — the backfill walk can take a while on large trees and
+            # we don't want shutdown to block on it.
+            self._backfill_task.cancel()
+            try:
+                await self._backfill_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning("Startup backfill task error during stop: %s", exc)
         if self._task is not None:
             # Signal graceful shutdown — flush pending before exit
             try:
@@ -114,6 +142,36 @@ class FileWatcher:
         if self._observer:
             self._observer.stop()
             self._observer.join()
+
+    async def _backfill_existing(self, dirs: list[Path]) -> None:
+        """Index pre-existing files the observer can't see.
+
+        The watchdog observer only fires on change events from the moment
+        it's scheduled, so files that landed while the server was down (or
+        before the dir was added to ``memory_dirs``) are invisible to it.
+        This walks each watched dir once at startup and lets
+        ``IndexEngine.index_path`` decide what's new — already-indexed
+        files are skipped via content-hash dedup, so the cost is bounded
+        by the changed-file count rather than the total tree size on
+        every restart.
+
+        Per-dir errors are logged and don't abort siblings.
+        """
+        for d in dirs:
+            try:
+                stats = await self._engine.index_path(d, recursive=True)
+                if stats.indexed_chunks or stats.deleted_chunks:
+                    logger.info(
+                        "Startup backfill %s: indexed=%d skipped=%d deleted=%d",
+                        d,
+                        stats.indexed_chunks,
+                        stats.skipped_chunks,
+                        stats.deleted_chunks,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("Startup backfill failed for %s: %s", d, exc)
 
     async def _process_events(self) -> None:
         """Consume changed file paths with batch debouncing.

@@ -96,13 +96,23 @@ def _make_components(
 
 
 async def _run_lifespan(comp: MagicMock) -> FastAPI:
-    """Enter and exit ``_lifespan`` with a mocked ``create_components``."""
+    """Enter and exit ``_lifespan`` with a mocked ``create_components``.
+
+    The FileWatcher patch keeps the lifespan from spinning a real
+    watchdog Observer thread on every test. Tests that need to assert
+    on ``watcher.start`` / ``watcher.stop`` directly patch FileWatcher
+    themselves with a spy — see ``test_lifespan_starts_and_stops_file_watcher``.
+    """
     app = FastAPI()
+    fake_watcher = MagicMock()
+    fake_watcher.start = AsyncMock()
+    fake_watcher.stop = AsyncMock()
     with (
         patch("memtomem.server.component_factory.create_components", AsyncMock(return_value=comp)),
         patch("memtomem.server.component_factory.close_components", AsyncMock()),
         # The lifespan also instantiates DedupScanner — harmless to stub.
         patch("memtomem.search.dedup.DedupScanner", MagicMock()),
+        patch("memtomem.indexing.watcher.FileWatcher", lambda *_a, **_kw: fake_watcher),
     ):
         async with _lifespan(app):
             pass
@@ -251,3 +261,70 @@ async def test_policy_disabled_no_warning(caplog):
         await _run_lifespan(comp)
 
     assert not any("policy.enabled" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# FileWatcher wiring — guards the regression where ``mm web`` ran with no
+# fs watcher at all. Files added to memory_dirs (whether while the server
+# was up, or before the dir was registered) were never auto-picked-up
+# until the user clicked Reindex. The lifespan now wires the same
+# FileWatcher that ``server/context.py`` uses, gated on the same
+# degraded-mode check.
+# ---------------------------------------------------------------------------
+
+
+async def test_lifespan_starts_and_stops_file_watcher():
+    """Watcher started on lifespan entry, stopped on exit, exposed on
+    ``app.state.file_watcher`` so routes / shutdown handlers can find it.
+    """
+    fake_watcher = MagicMock()
+    fake_watcher.start = AsyncMock()
+    fake_watcher.stop = AsyncMock()
+    comp = _make_components(embedding_broken=None, stored_info=None)
+
+    app = FastAPI()
+    with (
+        patch("memtomem.server.component_factory.create_components", AsyncMock(return_value=comp)),
+        patch("memtomem.server.component_factory.close_components", AsyncMock()),
+        patch("memtomem.search.dedup.DedupScanner", MagicMock()),
+        patch("memtomem.indexing.watcher.FileWatcher", lambda *_a, **_kw: fake_watcher),
+    ):
+        async with _lifespan(app):
+            assert fake_watcher.start.await_count == 1
+            assert app.state.file_watcher is fake_watcher
+
+    assert fake_watcher.stop.await_count == 1
+
+
+async def test_lifespan_skips_watcher_in_degraded_mode():
+    """When embedding is broken, the watcher must NOT start — the
+    indexer would crash on the missing ``chunks_vec`` table. Recovery
+    happens via ``mem_embedding_reset``; mirrors the same guard in
+    ``server/context.py``.
+    """
+    fake_watcher = MagicMock()
+    fake_watcher.start = AsyncMock()
+    fake_watcher.stop = AsyncMock()
+    comp = _make_components(
+        embedding_broken={
+            "dimension_mismatch": True,
+            "model_mismatch": True,
+            "stored": {"dimension": 0, "provider": "none", "model": ""},
+            "configured": {"dimension": 1024, "provider": "onnx", "model": "bge-m3"},
+        },
+        stored_info={"dimension": 0, "provider": "none", "model": ""},
+    )
+
+    app = FastAPI()
+    with (
+        patch("memtomem.server.component_factory.create_components", AsyncMock(return_value=comp)),
+        patch("memtomem.server.component_factory.close_components", AsyncMock()),
+        patch("memtomem.search.dedup.DedupScanner", MagicMock()),
+        patch("memtomem.indexing.watcher.FileWatcher", lambda *_a, **_kw: fake_watcher),
+    ):
+        async with _lifespan(app):
+            pass
+
+    assert fake_watcher.start.await_count == 0
+    assert fake_watcher.stop.await_count == 0
+    assert not hasattr(app.state, "file_watcher")

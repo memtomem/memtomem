@@ -205,6 +205,7 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    from memtomem.indexing.watcher import FileWatcher
     from memtomem.server.component_factory import close_components, create_components
 
     comp = await create_components()
@@ -263,9 +264,28 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             "run ``memtomem-server`` (MCP) for the lifespan that starts PolicyScheduler"
         )
 
+    # File watcher: monitors memory_dirs for fs-event-driven re-indexing
+    # and runs a one-shot startup backfill so files added while ``mm web``
+    # was down (or before the dir was registered) get indexed without the
+    # user clicking Reindex. Skipped in degraded mode (broken embedding) —
+    # the indexer would crash on the missing chunks_vec table; recovery
+    # via ``mem_embedding_reset``. Mirrors the wiring in
+    # ``server/context.py``; without this ``mm web`` ran with no fs
+    # watcher at all.
+    watcher: FileWatcher | None = None
+    if comp.embedding_broken is None:
+        watcher = FileWatcher(comp.index_engine, comp.config.indexing)
+        await watcher.start()
+        app.state.file_watcher = watcher
+
     try:
         yield
     finally:
+        if watcher is not None:
+            try:
+                await watcher.stop()
+            except Exception as exc:
+                logger.warning("file watcher stop failed: %s", exc)
         await close_components(comp)
 
 

@@ -46,6 +46,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the Stop hook chains `mm index --flush` before
   `mm session end --auto`.
 
+### Fixed
+
+- **`mm web` now starts a `FileWatcher` and runs a startup backfill.**
+  Two gaps fixed together because they presented as one bug ("files
+  added to a `memory_dir` don't show up in Sources"):
+  - `mm web`'s lifespan previously did not wire `FileWatcher` at all
+    (only the MCP server's `AppContext` did), so `mm web` ran with no
+    fs watcher — files added while the server was up were never
+    auto-picked-up. The lifespan now starts and stops a `FileWatcher`
+    in the same way `server/context.py` does, gated on the same
+    degraded-mode check (skipped when embedding is broken).
+  - `FileWatcher.start()` previously only registered watchdog
+    observers — files that landed before `start()` (server was down,
+    or the dir was newly added to `memory_dirs`) stayed invisible
+    until manual reindex. A one-shot startup backfill task now walks
+    each watched dir via `IndexEngine.index_path(recursive=True)`;
+    content-hash dedup makes already-indexed files no-ops, so the
+    cost is bounded by changed-file count rather than tree size on
+    every restart. Background task — does not block startup.
+
 ## [0.1.33] — 2026-04-29
 
 ### Added

@@ -1322,6 +1322,69 @@ class TestFileWatcher:
         )
         assert watcher._debounce_s == 2.0
 
+    async def test_startup_backfill_indexes_preexisting_files(self, components, memory_dir):
+        """Pre-existing files get indexed via the startup backfill task.
+
+        The watchdog observer only fires on change events from the moment
+        it's scheduled — files that landed before ``start()`` (or while
+        the server was down) would otherwise stay invisible until the
+        user clicked Reindex. This is the regression cover for the
+        "files added to ``memory_dirs`` don't show up in Sources" bug.
+        """
+        from memtomem.indexing.watcher import FileWatcher
+
+        md = memory_dir / "preexisting.md"
+        md.write_text(
+            "# preexisting\n\ncontent that landed before the watcher started\n",
+            encoding="utf-8",
+        )
+
+        watcher = FileWatcher(
+            index_engine=components.index_engine,
+            config=components.config.indexing,
+            debounce_ms=100,
+        )
+        try:
+            await watcher.start()
+            assert watcher._backfill_task is not None
+            await watcher._backfill_task
+        finally:
+            await watcher.stop()
+
+        hashes = await components.storage.get_chunk_hashes(md)
+        assert len(hashes) > 0, "startup backfill should have indexed the pre-existing file"
+
+    async def test_startup_backfill_idempotent_on_unchanged_files(self, components, memory_dir):
+        """Backfill on every startup is bounded by changed-file count.
+
+        Content-hash dedup in ``IndexEngine`` makes already-indexed
+        files no-ops, so a second backfill produces the same chunk
+        count rather than duplicating chunks.
+        """
+        from memtomem.indexing.watcher import FileWatcher
+
+        md = memory_dir / "stable.md"
+        md.write_text("# stable\n\nno changes between runs\n", encoding="utf-8")
+
+        async def _run_one_backfill() -> int:
+            w = FileWatcher(
+                index_engine=components.index_engine,
+                config=components.config.indexing,
+                debounce_ms=100,
+            )
+            try:
+                await w.start()
+                assert w._backfill_task is not None
+                await w._backfill_task
+            finally:
+                await w.stop()
+            return len(await components.storage.get_chunk_hashes(md))
+
+        first = await _run_one_backfill()
+        second = await _run_one_backfill()
+        assert first > 0
+        assert first == second, f"expected backfill idempotent, got {first} -> {second}"
+
 
 # ===========================================================================
 # 11. memory_dir_stats — per-dir index status for the web widget

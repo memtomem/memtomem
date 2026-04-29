@@ -106,14 +106,17 @@ async def memory_dir_stats(
 
     Shape: ``[{path, chunk_count, source_file_count, exists, category,
     provider}]`` in the same order as ``memory_dirs``. Drives the web UI's
-    "(N chunks)" / "(not indexed)" badges so the user can see which dirs
-    still need a manual reindex (the file watcher only reacts to change
-    events, so pre-existing files in a newly added ``memory_dir`` stay
-    invisible until the user clicks the ↻ button). ``category`` is
-    provided by :func:`~memtomem.config.categorize_memory_dir` and
-    ``provider`` by :func:`~memtomem.config.provider_for_category`, so the
-    Web UI can build a vendor → product tree without maintaining its own
-    regex or mapping. RFC #304 Phase 1.
+    "(N chunks)" / "(not indexed)" badges. The startup backfill in
+    :class:`~memtomem.indexing.watcher.FileWatcher` indexes pre-existing
+    files automatically, so a "(not indexed)" badge typically means either
+    the backfill hasn't completed yet (background task, eventually
+    consistent) or the server is running degraded (broken embedding) —
+    the manual reindex button still works as a forced re-walk in either
+    case. ``category`` is provided by
+    :func:`~memtomem.config.categorize_memory_dir` and ``provider`` by
+    :func:`~memtomem.config.provider_for_category`, so the Web UI can
+    build a vendor → product tree without maintaining its own regex or
+    mapping. RFC #304 Phase 1.
 
     Aggregation: one ``get_source_files_with_counts()`` call over the
     whole ``chunks`` table, bucketed in Python by normalised-path prefix
