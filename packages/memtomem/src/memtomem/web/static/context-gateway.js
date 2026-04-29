@@ -173,9 +173,13 @@ function _ctxScopeIsServerCwd(scope) {
 function _ctxScopeBadges(scope) {
   // Compact non-default-source flags rendered next to the scope label so the
   // user can tell at a glance why a scope appears (and whether it's missing).
+  // Inline ``t()`` is sufficient — no ``data-i18n`` attribute, the i18n DOM
+  // walker would otherwise re-translate and clobber the rendered text.
   const parts = [];
   if (scope.experimental) {
-    parts.push(`<span class="ctx-scope-badge ctx-scope-badge--experimental" data-i18n="settings.ctx.scope_experimental" title="${escapeHtml(t('settings.ctx.scope_experimental_tip', 'Discovered via the opt-in ~/.claude/projects scan; the path may be misdecoded.'))}">${escapeHtml(t('settings.ctx.scope_experimental', 'experimental'))}</span>`);
+    const tip = t('settings.ctx.scope_experimental_tip',
+      'Discovered via the opt-in ~/.claude/projects scan; the path may be misdecoded.');
+    parts.push(`<span class="ctx-scope-badge ctx-scope-badge--experimental" title="${escapeHtml(tip)}">${escapeHtml(t('settings.ctx.scope_experimental', 'experimental'))}</span>`);
   }
   if (scope.missing) {
     parts.push(`<span class="ctx-scope-badge ctx-scope-badge--missing">${escapeHtml(t('settings.ctx.scope_missing', '(missing)'))}</span>`);
@@ -274,8 +278,12 @@ async function loadCtxList(type) {
       const removeBtn = removable
         ? `<button class="ctx-scope-remove" data-scope-id="${escapeHtml(scope.scope_id)}" title="${escapeHtml(t('settings.ctx.remove_project', 'Remove project'))}">×</button>`
         : '';
+      // Full root path on the summary's title attribute lets the user
+      // disambiguate same-name scopes (``Edu/inflearn`` vs ``Work/inflearn``)
+      // on hover without inflating the visible label.
+      const rootTitle = scope.root ? `title="${escapeHtml(scope.root)}"` : '';
       html += `<details class="ctx-scope-group" data-scope-id="${escapeHtml(scope.scope_id)}" data-tier="${escapeHtml(scope.tier)}"${isCwd ? ' open' : ''}>
-        <summary class="ctx-scope-summary">
+        <summary class="ctx-scope-summary" ${rootTitle}>
           <span class="ctx-scope-summary-label">${escapeHtml(scope.label)}</span>
           <span class="ctx-scope-summary-count">${count}</span>
           ${_ctxScopeBadges(scope)}

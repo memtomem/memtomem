@@ -174,8 +174,10 @@ async def test_post_warns_on_missing_marker(client, tmp_path: Path) -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert "scope_id" in data
+    # Both human prose and the machine-readable code (PR1 pattern) must be present.
     assert "warning" in data
     assert ".claude" in data["warning"]
+    assert data.get("warning_code") == "no_runtime_marker"
 
 
 @pytest.mark.asyncio
@@ -185,7 +187,9 @@ async def test_post_no_warning_when_marker_present(client, tmp_path: Path) -> No
     (proj / ".memtomem").mkdir()
     resp = await client.post("/api/context/known-projects", json={"root": str(proj)})
     assert resp.status_code == 200
-    assert "warning" not in resp.json()
+    body = resp.json()
+    assert "warning" not in body
+    assert "warning_code" not in body
 
 
 @pytest.mark.asyncio

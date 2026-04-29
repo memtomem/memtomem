@@ -100,6 +100,11 @@ def _counts_for(root: Path) -> dict[str, int]:
     plus runtime-only items the diff layer surfaces. Each ``diff_*`` call
     returns ``(runtime, name, status)`` triples; we count distinct names
     plus any canonical names with no runtime trace yet.
+
+    Cost: 3 × (canonical scan + N runtime scans) per scope, executed every
+    time the UI fetches ``GET /api/context/projects`` (every tab switch).
+    Acceptable at <30 scopes; revisit with caching if discovery growth
+    pushes that ceiling.
     """
     counts: dict[str, int] = {}
     try:
@@ -199,6 +204,10 @@ async def add_known_project(body: AddProjectRequest, request: Request) -> dict:
         "label": entry.label,
     }
     if not has_runtime_marker(entry.root):
+        # ``warning_code`` follows the PR1 (#549) machine-readable pattern so
+        # client matching is i18n-stable. ``warning`` carries the human prose
+        # for back-compat; new clients should switch on the code.
+        response["warning_code"] = "no_runtime_marker"
         response["warning"] = (
             "No .claude/.gemini/.agents/.memtomem directory found under this root."
         )

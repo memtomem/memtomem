@@ -15,16 +15,14 @@ contract plus the ``known_projects.json`` POST/DELETE endpoints.
 
 from __future__ import annotations
 
-import errno
 import fcntl
 import hashlib
 import json
 import logging
 import os
 import sys
-import tempfile
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Literal
@@ -93,9 +91,6 @@ class ProjectScope:
     sources: tuple[str, ...]
     missing: bool = False
     experimental: bool = False
-    # Display counts populated lazily by the route layer (canonical + runtime-only
-    # items per type). Discovery itself does not reach into the FS twice.
-    counts: dict[str, int] = field(default_factory=dict)
 
 
 # ── known_projects.json store ───────────────────────────────────────────
@@ -371,27 +366,3 @@ def has_runtime_marker(root: Path) -> bool:
     setting up a fresh checkout.
     """
     return any((root / m).is_dir() for m in _MARKER_DIRS)
-
-
-def _is_eaccess(exc: OSError) -> bool:
-    """Defensive: some FS conditions raise EACCES on a path we'd otherwise treat as
-    "exists". Caller decides whether to surface that vs reject.
-    """
-    return exc.errno in (errno.EACCES, errno.EPERM)
-
-
-# Re-exported so route handlers can format scope IDs in error messages
-# without re-importing internals.
-def is_project_scope_id(scope_id: str) -> bool:
-    return scope_id == "user" or (scope_id.startswith("p-") and len(scope_id) == 14)
-
-
-# ── temp-file helper for tests ──────────────────────────────────────────
-
-
-def _new_temp_known_projects_path(tmp_dir: Path) -> Path:
-    """Convenience for tests: a unique known_projects.json path under *tmp_dir*."""
-    fd, name = tempfile.mkstemp(prefix="known_projects_", suffix=".json", dir=str(tmp_dir))
-    os.close(fd)
-    Path(name).unlink(missing_ok=True)
-    return Path(name)
