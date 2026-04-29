@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.33] — 2026-04-29
+
 ### Added
 
 - **`mm upgrade` CLI** (#443) — wraps `uv tool install --refresh
