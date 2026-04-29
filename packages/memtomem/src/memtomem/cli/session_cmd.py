@@ -134,7 +134,7 @@ def session() -> None:
     "--json",
     "as_json",
     is_flag=True,
-    help='Emit one JSON line: {"session_id":..., "resumed":bool, "stale_ended":[...]}',
+    help='Emit one JSON line: {"session_id":..., "resumed":bool, "auto_ended":[...]}',
 )
 def start(
     agent_id: str,
@@ -197,7 +197,14 @@ async def _start(
 ) -> None:
     from memtomem.cli._bootstrap import cli_components
 
-    stale_ended: list[str] = []
+    # JSON exposes a flat ``auto_ended`` list of UUIDs; the per-reason counters
+    # below feed the text-mode breakdown so an interactive operator still sees
+    # whether the cleanup came from cutoff age (stale) or a cross-agent
+    # forced-end. ``sessions.metadata.reason`` carries the same information
+    # row-by-row for JSON consumers that need it (queryable via SQL).
+    auto_ended: list[str] = []
+    n_stale = 0
+    n_cross_agent = 0
     resumed = False
     session_id: str | None = None
     ns = _derive_session_namespace(agent_id, namespace)
@@ -214,7 +221,8 @@ async def _start(
                     f"auto-ended after {stale_label} inactivity",
                     {"auto_ended": True, "reason": "stale"},
                 )
-                stale_ended.append(row["id"])
+                auto_ended.append(row["id"])
+                n_stale += 1
             if len(stale_rows) >= _STALE_CLEANUP_BATCH:
                 logger.warning(
                     "auto-end-stale truncated to %d sessions; rerun the hook "
@@ -241,7 +249,8 @@ async def _start(
                             f"auto-ended on cross-agent resume to {agent_id}",
                             {"auto_ended": True, "reason": "cross_agent"},
                         )
-                        stale_ended.append(current)
+                        auto_ended.append(current)
+                        n_cross_agent += 1
 
         if session_id is None:
             session_id = str(uuid.uuid4())
@@ -255,7 +264,7 @@ async def _start(
                 {
                     "session_id": session_id,
                     "resumed": resumed,
-                    "stale_ended": stale_ended,
+                    "auto_ended": auto_ended,
                 }
             )
         )
@@ -269,8 +278,13 @@ async def _start(
             click.echo(f"  Title: {title}")
     click.echo(f"  Agent: {agent_id}")
     click.echo(f"  Namespace: {ns}")
-    if stale_ended:
-        click.echo(f"  Auto-ended {len(stale_ended)} stale session(s)")
+    if auto_ended:
+        bits = []
+        if n_stale:
+            bits.append(f"{n_stale} stale")
+        if n_cross_agent:
+            bits.append(f"{n_cross_agent} cross-agent")
+        click.echo(f"  Auto-ended {len(auto_ended)} session(s) ({', '.join(bits)})")
 
 
 @session.command()
