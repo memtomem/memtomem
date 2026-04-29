@@ -2091,6 +2091,14 @@ def _write_config_and_summary(
             if result.returncode == 0:
                 click.secho("  Claude Code: configured (user scope)", fg="green")
             elif "already exists" in (result.stderr or ""):
+                # Brittle by design: depends on Claude Code's stderr wording
+                # ("MCP server <name> already exists in user config") staying
+                # English-stable. If upstream rephrases or localizes, this
+                # branch silently regresses to the generic-failure path
+                # below — which still writes .mcp.json successfully but
+                # leaves duplicate state. Re-grep claude's source if/when
+                # users report a "claude mcp add failed (...)" with an
+                # already-exists-shaped stderr.
                 click.secho(
                     "  Claude Code: already registered (user scope) — skipped",
                     fg="green",

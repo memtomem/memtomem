@@ -2604,6 +2604,14 @@ class TestMcpChoiceOneClaudeAddBranches:
         # user-scope entry covering it.
         assert not (tmp_path / ".mcp.json").exists()
         assert "MCP config: wrote ./.mcp.json" not in out
+        # And paste-hints (Cursor / Windsurf / Claude Desktop / Gemini CLI)
+        # must NOT fire either — the user opted for "auto-register Claude
+        # Code", and the existing user-scope entry already covers it. A
+        # future refactor that hoists _emit_mcp_paste_hints() out of the
+        # generic-failure block would silently spam unrelated paste paths
+        # in this branch; pin against that.
+        assert "~/.cursor/mcp.json" not in out
+        assert "~/.codeium/windsurf/mcp_config.json" not in out
 
     def test_generic_nonzero_surfaces_stderr_and_falls_back(
         self,
@@ -2668,6 +2676,39 @@ class TestMcpChoiceOneClaudeAddBranches:
         out = unstyle(capsys.readouterr().out)
         assert "Claude Code: 'claude' not found" in out
         assert (tmp_path / ".mcp.json").exists()
+
+    def test_timeout_falls_back_to_not_found_branch(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """``subprocess.TimeoutExpired`` shares the legacy
+        ``FileNotFoundError`` branch (claude hung past 10s). The current
+        wording reuses "'claude' not found" — not strictly accurate for
+        timeouts but the same .mcp.json fallback is the right recovery,
+        so we just pin the existing behavior. If we ever split these
+        cases, this test wants a distinct message for timeouts.
+        """
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        def _hang(cmd: list[str], timeout: int = 10) -> subprocess.CompletedProcess:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(init_cmd, "_run", _hang)
+
+        init_cmd._write_config_and_summary(self._state(tmp_path), tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "Claude Code: 'claude' not found" in out
+        # Same fallback path as FileNotFoundError — write .mcp.json so the
+        # user can still wire Claude Code (or other editors) up manually.
+        assert (tmp_path / ".mcp.json").exists()
+        assert "MCP config: wrote ./.mcp.json" in out
 
 
 class TestClaudeDesktopConfigHint:
