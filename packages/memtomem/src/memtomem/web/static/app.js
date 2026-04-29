@@ -665,6 +665,37 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => activateTab(btn.dataset.tab));
 });
 
+// ── ARIA tabs keyboard navigation ──
+//
+// ArrowRight/Left cycle through the tablist, Home/End jump to either end.
+// "Auto-activation" model — focus and activate together — matches the click
+// behavior so a keyboard user toggles the panel just by walking the tab row,
+// without an extra Enter press. The currently focused element is the anchor;
+// when focus is outside the tablist the move starts at index 0.
+function _arrowNavIndex(length, currentIdx, key) {
+  if (!length) return -1;
+  if (key === 'ArrowRight') return (currentIdx + 1) % length;
+  if (key === 'ArrowLeft') return (currentIdx - 1 + length) % length;
+  if (key === 'Home') return 0;
+  if (key === 'End') return length - 1;
+  return -1;
+}
+
+document.querySelector('.tab-nav')?.addEventListener('keydown', (e) => {
+  if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
+  // Filter out dev-only buttons in prod mode so arrow nav matches what the
+  // user actually sees on screen — otherwise focus could land on a hidden tab.
+  const buttons = Array.from(document.querySelectorAll('.tab-nav .tab-btn'))
+    .filter(b => b.dataset.uiTier !== 'dev' || STATE.uiMode === 'dev');
+  const currentIdx = buttons.indexOf(document.activeElement);
+  const nextIdx = _arrowNavIndex(buttons.length, currentIdx === -1 ? 0 : currentIdx, e.key);
+  if (nextIdx < 0) return;
+  e.preventDefault();
+  const next = buttons[nextIdx];
+  next.focus();
+  if (next.dataset.tab) activateTab(next.dataset.tab);
+});
+
 // ── E1: ARIA init ──
 document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.setAttribute('role', 'tab');
@@ -2040,16 +2071,20 @@ function setSourcesMode(mode) {
   if (mode === 'memory') {
     memBtn.classList.add('btn-active');
     memBtn.setAttribute('aria-selected', 'true');
+    memBtn.setAttribute('tabindex', '0');
     genBtn.classList.remove('btn-active');
     genBtn.setAttribute('aria-selected', 'false');
+    genBtn.setAttribute('tabindex', '-1');
     memView.hidden = false;
     genView.hidden = true;
     if (typeof renderMemoryDirsPanel === 'function') renderMemoryDirsPanel();
   } else {
     genBtn.classList.add('btn-active');
     genBtn.setAttribute('aria-selected', 'true');
+    genBtn.setAttribute('tabindex', '0');
     memBtn.classList.remove('btn-active');
     memBtn.setAttribute('aria-selected', 'false');
+    memBtn.setAttribute('tabindex', '-1');
     memView.hidden = true;
     genView.hidden = false;
     loadSources();
@@ -2058,6 +2093,19 @@ function setSourcesMode(mode) {
 
 qs('sources-mode-memory').addEventListener('click', () => setSourcesMode('memory'));
 qs('sources-mode-general').addEventListener('click', () => setSourcesMode('general'));
+
+// Mirror the main tablist's keyboard nav onto the Sources sub-toggle.
+document.querySelector('.sources-mode-toggle')?.addEventListener('keydown', (e) => {
+  if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
+  const buttons = Array.from(document.querySelectorAll('.sources-mode-toggle [role="tab"]'));
+  const currentIdx = buttons.indexOf(document.activeElement);
+  const nextIdx = _arrowNavIndex(buttons.length, currentIdx === -1 ? 0 : currentIdx, e.key);
+  if (nextIdx < 0) return;
+  e.preventDefault();
+  const next = buttons[nextIdx];
+  next.focus();
+  setSourcesMode(next.id === 'sources-mode-memory' ? 'memory' : 'general');
+});
 
 document.querySelectorAll('.sources-sort-btn').forEach(btn => {
   btn.addEventListener('click', () => {
