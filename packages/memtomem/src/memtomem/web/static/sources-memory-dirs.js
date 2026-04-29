@@ -396,11 +396,15 @@ function _buildMemoryDirsPanel(initialDirs) {
       }
       const fileCount = (typeof st.file_count === 'number') ? st.file_count : 0;
       const chunkCount = st.chunk_count || 0;
+      const indexedCount = st.source_file_count || 0;
       if (chunkCount > 0) {
-        // Indexed: show files (disk) + chunks together.
+        // Indexed: show indexed/disk files + chunks together. Same
+        // ``{indexed}/{files}`` shape as the group label so the row's
+        // own progress (e.g. ``18/18`` fully indexed) is visible at a
+        // glance.
         parts.push(t(
           'sources.memory_dirs.status_group',
-          { files: fileCount, chunks: chunkCount },
+          { files: fileCount, indexed: indexedCount, chunks: chunkCount },
         ));
       } else if (fileCount > 0) {
         // Un-indexed but has files on disk → "{N} files · not indexed"
