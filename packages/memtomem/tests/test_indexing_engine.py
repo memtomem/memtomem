@@ -1322,14 +1322,38 @@ class TestFileWatcher:
         )
         assert watcher._debounce_s == 2.0
 
-    async def test_startup_backfill_indexes_preexisting_files(self, components, memory_dir):
-        """Pre-existing files get indexed via the startup backfill task.
+    async def test_startup_backfill_default_off_skips_walk(self, components, memory_dir):
+        """``startup_backfill`` defaults to False — guards against the
+        PR #295 silent-CPU-block regression. An unset flag MUST NOT
+        trigger a walk even when memory_dirs contain unindexed files;
+        users opt in explicitly via the wizard or by editing the config.
+        """
+        from memtomem.indexing.watcher import FileWatcher
 
-        The watchdog observer only fires on change events from the moment
-        it's scheduled — files that landed before ``start()`` (or while
-        the server was down) would otherwise stay invisible until the
-        user clicked Reindex. This is the regression cover for the
-        "files added to ``memory_dirs`` don't show up in Sources" bug.
+        (memory_dir / "unindexed.md").write_text("# never indexed\n", encoding="utf-8")
+        assert components.config.indexing.startup_backfill is False, (
+            "default must stay False; a True default reintroduces PR #295"
+        )
+
+        watcher = FileWatcher(
+            index_engine=components.index_engine,
+            config=components.config.indexing,
+            debounce_ms=100,
+        )
+        try:
+            await watcher.start()
+            assert watcher._backfill_task is None
+        finally:
+            await watcher.stop()
+
+    async def test_startup_backfill_indexes_preexisting_files_when_enabled(
+        self, components, memory_dir
+    ):
+        """When the user opts in via ``startup_backfill=True``, pre-
+        existing files get indexed. The watchdog observer only fires on
+        change events from the moment it's scheduled, so without this
+        opt-in path files that landed before ``start()`` stay invisible
+        until manual reindex.
         """
         from memtomem.indexing.watcher import FileWatcher
 
@@ -1338,6 +1362,7 @@ class TestFileWatcher:
             "# preexisting\n\ncontent that landed before the watcher started\n",
             encoding="utf-8",
         )
+        components.config.indexing.startup_backfill = True
 
         watcher = FileWatcher(
             index_engine=components.index_engine,
@@ -1352,19 +1377,20 @@ class TestFileWatcher:
             await watcher.stop()
 
         hashes = await components.storage.get_chunk_hashes(md)
-        assert len(hashes) > 0, "startup backfill should have indexed the pre-existing file"
+        assert len(hashes) > 0, "opt-in backfill should have indexed the pre-existing file"
 
     async def test_startup_backfill_idempotent_on_unchanged_files(self, components, memory_dir):
-        """Backfill on every startup is bounded by changed-file count.
-
-        Content-hash dedup in ``IndexEngine`` makes already-indexed
-        files no-ops, so a second backfill produces the same chunk
-        count rather than duplicating chunks.
+        """Opt-in backfill on every startup is bounded by changed-file
+        count. Content-hash dedup in ``IndexEngine`` makes already-
+        indexed files no-ops, so a second backfill produces the same
+        chunk count rather than duplicating — users who flip the flag
+        don't pay the full embed cost on every restart.
         """
         from memtomem.indexing.watcher import FileWatcher
 
         md = memory_dir / "stable.md"
         md.write_text("# stable\n\nno changes between runs\n", encoding="utf-8")
+        components.config.indexing.startup_backfill = True
 
         async def _run_one_backfill() -> int:
             w = FileWatcher(

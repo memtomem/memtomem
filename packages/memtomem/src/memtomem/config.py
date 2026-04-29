@@ -190,6 +190,23 @@ class IndexingConfig(BaseSettings):
     # False. Default stays True so existing users without an explicit value
     # still trigger migration on next startup. Will be removed in a future release.
     auto_discover: bool = True
+    # When True, ``FileWatcher.start()`` walks each ``memory_dir`` once at
+    # startup and indexes files the watchdog observer didn't see (the observer
+    # only fires on change events from the moment it's scheduled, so files
+    # that landed before start() — server was down, or the dir was newly
+    # added to ``memory_dirs`` — would otherwise stay invisible).
+    #
+    # Default False (PR #295 lesson): an unconditional startup walk is
+    # silently CPU-bound on first install — a multi-minute embed job blocks
+    # the server while the user thinks it hung, the same failure mode that
+    # killed the earlier startup-scan attempt. The ``mm init`` wizard's
+    # opt-in ``_maybe_seed_initial_index`` is the user-driven path that
+    # resolves the same gap with a visible progress bar and confirm prompt;
+    # users who want the same backfill on every restart can flip this to
+    # True explicitly. ``mm index <dir>`` and the web UI's per-dir Reindex
+    # button cover ad-hoc indexing without flipping this — content-hash
+    # dedup makes both paths idempotent.
+    startup_backfill: bool = False
 
     @field_validator(
         "max_chunk_tokens",

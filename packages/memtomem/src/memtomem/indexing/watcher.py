@@ -71,15 +71,19 @@ class FileWatcher:
 
     1. Registers a ``recursive=True`` ``watchdog`` ``Observer`` on each
        existing ``memory_dir`` so future create/modify/move events trigger
-       a debounced re-index.
-    2. Kicks off a one-shot **startup backfill** that walks each watched
-       dir via ``IndexEngine.index_path(recursive=True)``. The observer
-       only sees events from the moment it starts, so files that landed
-       while the server was down (or before the dir was added to
-       ``memory_dirs``) would otherwise stay invisible. The backfill is
-       idempotent — content-hash dedup inside ``_index_file`` skips
-       already-indexed files — and runs as a background task so a slow
-       walk over many memory_dirs doesn't block startup.
+       a debounced re-index. Always on — this is the ambient behavior
+       that lets the running server pick up edits.
+    2. **Opt-in startup backfill** (gated by
+       ``IndexingConfig.startup_backfill``, default False): when enabled,
+       walks each watched dir via ``IndexEngine.index_path(recursive=True)``
+       to catch files the observer didn't see (server was down when they
+       landed, or the dir was newly added to ``memory_dirs``). Idempotent
+       via content-hash dedup; runs as a background task so a slow walk
+       doesn't block startup. Default False because an unconditional
+       startup walk reintroduces the PR #295 failure mode — a silent
+       multi-minute CPU embed job blocking the server on first install.
+       Users opt in via the ``mm init`` wizard's seed prompt or by
+       editing ``indexing.startup_backfill`` directly.
     """
 
     def __init__(
@@ -111,7 +115,7 @@ class FileWatcher:
 
         self._observer.start()
         self._task = asyncio.create_task(self._process_events())
-        if watched:
+        if watched and self._config.startup_backfill:
             self._backfill_task = asyncio.create_task(self._backfill_existing(watched))
 
     async def stop(self) -> None:

@@ -61,10 +61,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
     observers — files that landed before `start()` (server was down,
     or the dir was newly added to `memory_dirs`) stayed invisible
     until manual reindex. A one-shot startup backfill task now walks
-    each watched dir via `IndexEngine.index_path(recursive=True)`;
-    content-hash dedup makes already-indexed files no-ops, so the
-    cost is bounded by changed-file count rather than tree size on
-    every restart. Background task — does not block startup.
+    each watched dir via `IndexEngine.index_path(recursive=True)`,
+    gated by the new `indexing.startup_backfill` flag (**default
+    False**). Content-hash dedup makes already-indexed files no-ops,
+    so an enabled backfill costs the changed-file count rather than
+    tree size. Default-off because an unconditional startup walk
+    reintroduces the PR #295 failure mode (silent multi-minute CPU
+    embed job blocking the server on first install) — the `mm init`
+    wizard's opt-in seed is the user-driven path that resolves the
+    same gap with a visible progress bar; users who want backfill on
+    every restart can flip the flag explicitly. `mm index <dir>` and
+    the web UI's per-dir Reindex button cover ad-hoc indexing without
+    flipping the flag.
 
 ## [0.1.33] — 2026-04-29
 
