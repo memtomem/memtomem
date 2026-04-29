@@ -117,21 +117,36 @@ class SessionMixin:
             "metadata": row[6],
         }
 
-    async def find_stale_active_sessions(self, started_before: str) -> list[dict]:
+    async def find_stale_active_sessions(
+        self, started_before: str, *, limit: int = 100
+    ) -> list[dict]:
         """Return active sessions (``ended_at IS NULL``) whose ``started_at``
-        is strictly less than the ISO-8601 cutoff.
+        is strictly less than the ISO-8601 cutoff, oldest-first, up to
+        ``limit`` rows.
 
         Backs ``mm session start --auto-end-stale``: SessionStart hooks call
         this to enumerate orphaned sessions left over from previous Claude
         Code processes that crashed before Stop fired. Caller passes each ID
         to ``end_session`` with an auto-cleanup summary.
+
+        Both ``started_before`` and the rows' ``started_at`` are compared as
+        ISO-8601 strings — relies on the format ``create_session`` writes
+        (``isoformat(timespec="seconds")`` on a tz-aware UTC datetime, e.g.
+        ``2026-04-29T04:39:35+00:00``). Mixing tz-naive and tz-aware values
+        breaks lexicographic ordering because ``+`` (0x2B) sorts before
+        digits — keep both sides in the same format.
+
+        ``limit`` caps a single SessionStart hook's blocking work: at
+        100/fire, a 1000-orphan backlog drains over ~10 invocations rather
+        than stalling boot for minutes synchronously. Caller should warn
+        when the result count hits the limit so users know more remain.
         """
         db = self._get_db()
         rows = db.execute(
             "SELECT id, agent_id, started_at, ended_at, summary, namespace, metadata"
             " FROM sessions WHERE ended_at IS NULL AND started_at < ?"
-            " ORDER BY started_at ASC",
-            (started_before,),
+            " ORDER BY started_at ASC LIMIT ?",
+            (started_before, limit),
         ).fetchall()
         return [
             {

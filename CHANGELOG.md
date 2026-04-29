@@ -41,6 +41,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   (`disabled`, `no llm`, `below min_chunks`, `too large`,
   `empty output`, `llm error`) surface in the tool response. See
   [Session Summary](docs/guides/configuration.md#session-summary).
+- **`mm session start` SessionStart hook primitives** (#541, RFC
+  `memtomem-docs#24`). New flags so a Claude Code SessionStart hook
+  can resume the active session instead of orphaning it on every
+  start: `--idempotent` returns the existing active session for the
+  same `--agent-id` (cross-agent collisions auto-end the prior
+  session); `--auto-end-stale=<duration>` (e.g. `24h`, `7d`) closes
+  active sessions older than the duration before the idempotency
+  check, with a 100-row per-call cap so a backlog of orphans drains
+  across multiple hook fires instead of stalling boot synchronously;
+  `--json` emits one line of `{"session_id": ..., "resumed": bool,
+  "stale_ended": [...]}` for hook parsing. The plugin's `hooks.json`
+  ships a SessionStart entry calling `mm session start --idempotent
+  --auto-end-stale 24h --agent-id claude-code` and the
+  `claude-code.md` Hooks Automation Setup snippet matches byte-for-byte
+  via the `TestPluginHooksDocsParity` guard added in #536.
+  Single-process safe; concurrent SessionStart fires are not locked
+  (Claude Code's hook runner serializes them per session, which is
+  the supported case).
 
 ### Changed
 

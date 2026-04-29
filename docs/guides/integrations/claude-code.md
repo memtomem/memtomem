@@ -164,6 +164,14 @@ Add the following to `~/.claude/settings.json`:
 ```json
 {
   "hooks": {
+    "SessionStart": [{
+      "matcher": "",
+      "hooks": [{
+        "type": "command",
+        "command": "mm session start --idempotent --auto-end-stale 24h --agent-id claude-code 2>>/tmp/mm-hook.log || true",
+        "timeout": 5000
+      }]
+    }],
     "UserPromptSubmit": [{
       "matcher": "",
       "hooks": [{
@@ -196,6 +204,7 @@ Add the following to `~/.claude/settings.json`:
 
 | Hook Event | Trigger Timing | memtomem Action |
 |------------|---------------|----------------|
+| `SessionStart` | When a Claude Code session starts | `mm session start --idempotent --auto-end-stale 24h` → Resume the active session for `claude-code`, or open a new one and close orphans older than 24h |
 | `UserPromptSubmit` | When a prompt is submitted | `mm search` → Automatically inject relevant memory into context |
 | `PostToolUse` (Write) | After new file creation | `mm index` → Automatically index the new file |
 | `Stop` | When the agent stops | `mm session end --auto` → Close session with structured summary |
@@ -203,7 +212,9 @@ Add the following to `~/.claude/settings.json`:
 ### Automation Flow
 
 ```
-User submits prompt (>20 chars)
+Claude Code starts
+  → SessionStart hook → mm session start --idempotent (resume or open)
+  → User submits prompt (>20 chars)
   → UserPromptSubmit hook → mem_search context injection
   → Claude creates new files
   → PostToolUse hook → mem_index auto-indexing
@@ -217,6 +228,7 @@ User submits prompt (>20 chars)
 - **Input sanitization**: `printf '%s'` + `head -c 500` prevent shell injection and cap query length.
 - **Error logging**: `2>>/tmp/mm-hook.log` preserves errors for debugging. Avoid `2>/dev/null` which hides real failures.
 - **Stop hook = session close**: Use `mm session end --auto` in the Stop hook to close the active session with a structured summary. Don't use a Stop hook to call `mm add` with raw timestamps — those pollute search.
+- **SessionStart hook = idempotent resume**: `mm session start --idempotent` resumes the active session for the same `--agent-id` instead of creating a new row, so a Claude Code restart inherits the previous session's `mm activity log` writes. `--auto-end-stale 24h` closes any active session older than 24h before the idempotency check — this is how orphans from a crashed previous run get cleaned up. The 24h cutoff also means that resuming Claude Code the morning after deliberately ends the prior day's session and starts fresh; lower the cutoff (e.g. `30m`) if you want shorter resume windows, raise it (e.g. `7d`) if you want sessions to span breaks. The idempotent path is single-process safe but not concurrency-safe — two parallel SessionStart hooks could both create new sessions; Claude Code's hook runner fires them serially per session, which is the supported case.
 - **Write only**: `Edit` is excluded from PostToolUse — edited files are already indexed, so re-indexing on every edit is redundant.
 - **Allowlist + blocklist**: `PostToolUse[Write]` only indexes canonical source extensions (`md`, `py`, `ts`/`tsx`, `js`/`jsx`, `go`, `rs`, `rb`, `java`, `kt`, `swift`, `c`/`cpp`/`h`/`hpp`, `sh`, `toml`, `yaml`/`yml`, `json`) and skips build / cache / VCS paths (`node_modules`, `dist`, `build`, `target`, `.next`, `.nuxt`, `__pycache__`, `.git`, `.venv`/`venv`, `coverage`, `.cache`) inline. Patterns include both leading-segment (`node_modules/*`) and any-segment (`*/node_modules/*`) forms for both absolute and relative `tool_input.file_path` values. Extension matching is case-sensitive — `*.MD` / `*.JS` would skip the allowlist; rename or extend the patterns if your repo uses uppercase. Adjust the `case` statements in `hooks.json` for project-specific needs — they are inline, easy to extend.
 - **Debounce gap**: rapid consecutive writes to the same file (e.g., codegen loops) may re-index it multiple times within a few seconds. The current hook indexes synchronously per Write with no batching. For large monorepos, wrap the `mm index` call in an external script with `flock` + a debounce window. Native debounce support is tracked separately.
@@ -321,7 +333,7 @@ Agent:
 |---------|---------------------|---------|
 | Semantic search | None (full loading or filename-based) | BM25 + Dense + RRF hybrid search |
 | Auto memory | MEMORY.md 200-line limit | Unlimited semantic search |
-| Hooks integration | Event emission only | Hooks + CLI for automation (UserPromptSubmit, PostToolUse) |
+| Hooks integration | Event emission only | Hooks + CLI for automation (SessionStart, UserPromptSubmit, PostToolUse, Stop) |
 
 ---
 

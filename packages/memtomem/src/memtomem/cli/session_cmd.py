@@ -30,6 +30,12 @@ _DURATION_UNITS = {
     "d": "days",
 }
 
+# Per-call cap on ``--auto-end-stale``'s cleanup work. Keeps a SessionStart
+# hook's blocking window bounded when an incident leaves hundreds of orphans.
+# Truncated runs leave the remainder for the next hook fire — see
+# ``find_stale_active_sessions`` for the drain math.
+_STALE_CLEANUP_BATCH = 100
+
 
 def _parse_duration(spec: str) -> timedelta:
     """Parse a short duration like ``24h``, ``7d``, ``30m``, ``45s``.
@@ -145,6 +151,14 @@ def start(
     sessions older than the duration. See
     ``memtomem-docs/memtomem/planning/hooks-session-cli-rfc.md`` for the
     SessionStart hook design these flags back.
+
+    ``--idempotent`` is safe for serial hook callers but not for concurrent
+    ones. Two parallel ``mm session start --idempotent`` invocations can both
+    observe a missing/stale state file and both create a session — the state
+    file is written atomically per call but the read-then-create is not
+    locked. Claude Code's SessionStart fires once per session, so this is
+    fine for the documented hook recipe; multi-process callers must
+    serialize themselves.
     """
     try:
         validate_agent_id(agent_id)
@@ -191,13 +205,24 @@ async def _start(
     async with cli_components() as comp:
         if stale_cutoff is not None:
             cutoff_iso = (datetime.now(timezone.utc) - stale_cutoff).isoformat(timespec="seconds")
-            for row in await comp.storage.find_stale_active_sessions(cutoff_iso):
+            stale_rows = await comp.storage.find_stale_active_sessions(
+                cutoff_iso, limit=_STALE_CLEANUP_BATCH
+            )
+            for row in stale_rows:
                 await comp.storage.end_session(
                     row["id"],
                     f"auto-ended after {stale_label} inactivity",
                     {"auto_ended": True, "reason": "stale"},
                 )
                 stale_ended.append(row["id"])
+            if len(stale_rows) >= _STALE_CLEANUP_BATCH:
+                logger.warning(
+                    "auto-end-stale truncated to %d sessions; rerun the hook "
+                    "or invoke `mm session start --auto-end-stale %s` again to "
+                    "drain the rest",
+                    _STALE_CLEANUP_BATCH,
+                    stale_label,
+                )
 
         if idempotent:
             current = _read_current_session()
@@ -208,6 +233,9 @@ async def _start(
                         session_id = current
                         resumed = True
                     else:
+                        # Cross-agent collision: end the old session here and
+                        # leave session_id=None so the create branch below
+                        # mints a fresh ID and rewrites the state file.
                         await comp.storage.end_session(
                             current,
                             f"auto-ended on cross-agent resume to {agent_id}",

@@ -532,3 +532,40 @@ class TestSessionStartIdempotent:
         assert "invalid duration" in result.output.lower()
         comp.storage.find_stale_active_sessions.assert_not_awaited()
         comp.storage.create_session.assert_not_awaited()
+
+    def test_auto_end_stale_warns_when_cap_hit(self, runner, monkeypatch, caplog):
+        """When ``find_stale_active_sessions`` returns ``_STALE_CLEANUP_BATCH``
+        rows the CLI emits a ``logger.warning`` so the next hook fire knows
+        a backlog remains. Pinned because the warning is the only signal
+        that the cap was hit — without it a long-tail orphan list would
+        drain silently across many invocations and operators wouldn't know
+        anything was unusual.
+        """
+        cap = 2
+        monkeypatch.setattr("memtomem.cli.session_cmd._STALE_CLEANUP_BATCH", cap)
+        stale_rows = [self._row(f"orphan-{i}", "claude-code") for i in range(cap)]
+        comp = self._comp(stale=stale_rows)
+        self._patch(monkeypatch, comp, None)
+
+        with caplog.at_level("WARNING", logger="memtomem.cli.session_cmd"):
+            result = runner.invoke(
+                cli,
+                [
+                    "session",
+                    "start",
+                    "--agent-id",
+                    "claude-code",
+                    "--auto-end-stale",
+                    "24h",
+                    "--json",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any("auto-end-stale truncated" in r.getMessage() for r in warnings), (
+            f"expected truncation warning, got: {[r.getMessage() for r in warnings]}"
+        )
+        # Cap is also forwarded to the storage layer so it actually limits work.
+        comp.storage.find_stale_active_sessions.assert_awaited_once()
+        kwargs = comp.storage.find_stale_active_sessions.await_args.kwargs
+        assert kwargs.get("limit") == cap

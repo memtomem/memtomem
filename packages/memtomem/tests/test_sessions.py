@@ -68,25 +68,51 @@ class TestSessions:
         """Backs ``mm session start --auto-end-stale``: only active rows
         with ``started_at < cutoff`` come back. Ended rows and recent
         active rows must be skipped so SessionStart hooks don't end
-        in-flight work or double-end already-closed sessions."""
-        # Active and old (started_at backdated below, after the row exists).
+        in-flight work or double-end already-closed sessions.
+
+        The cutoff and the backdated rows use the production format
+        (``isoformat(timespec="seconds")`` on a tz-aware UTC datetime,
+        which suffixes ``+00:00``) so this test covers the real
+        comparison shape — naive timestamps would mask sort surprises if
+        a legacy row ever lacked the suffix.
+        """
         await storage.create_session("stale-old", "agent", "default")
-        # Active and recent — must be skipped.
         await storage.create_session("stale-recent", "agent", "default")
-        # Ended — must be skipped regardless of started_at.
         await storage.create_session("stale-ended", "agent", "default")
         await storage.end_session("stale-ended", "manual", {})
-        # Backdate one active row so it's older than the cutoff.
         db = storage._get_db()
         db.execute(
             "UPDATE sessions SET started_at = ? WHERE id = ?",
-            ("2020-01-01T00:00:00", "stale-old"),
+            ("2020-01-01T00:00:00+00:00", "stale-old"),
         )
         db.commit()
 
-        rows = await storage.find_stale_active_sessions("2025-01-01T00:00:00")
+        rows = await storage.find_stale_active_sessions("2025-01-01T00:00:00+00:00")
         ids = [r["id"] for r in rows]
         assert ids == ["stale-old"]
+
+    @pytest.mark.asyncio
+    async def test_find_stale_active_sessions_caps_at_limit(self, storage):
+        """A backlog larger than ``limit`` returns exactly ``limit`` rows,
+        oldest-first. Pinned because the SessionStart hook uses this cap
+        to bound its blocking window — silently returning everything would
+        make a 1000-orphan boot stall for tens of seconds inside Claude
+        Code's hook timeout.
+        """
+        db = storage._get_db()
+        for i in range(7):
+            sid = f"backlog-{i:02d}"
+            await storage.create_session(sid, "agent", "default")
+            # Distinct backdated stamps so ORDER BY is deterministic.
+            db.execute(
+                "UPDATE sessions SET started_at = ? WHERE id = ?",
+                (f"2020-01-{i + 1:02d}T00:00:00+00:00", sid),
+            )
+        db.commit()
+
+        rows = await storage.find_stale_active_sessions("2025-01-01T00:00:00+00:00", limit=3)
+        ids = [r["id"] for r in rows]
+        assert ids == ["backlog-00", "backlog-01", "backlog-02"]
 
 
 class TestSessionAgentInheritance:
