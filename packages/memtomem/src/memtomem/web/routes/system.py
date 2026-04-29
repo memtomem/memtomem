@@ -391,10 +391,22 @@ async def add_memory_dir(
     request: Request,
     storage=Depends(get_storage),
     search_pipeline=Depends(get_search_pipeline),
+    index_engine=Depends(get_index_engine),
 ):
-    """Add a directory to memory_dirs watch list."""
+    """Add a directory to memory_dirs watch list, optionally indexing immediately.
+
+    Body:
+        path (str, required): Absolute or ``~``-relative path.
+        auto_index (bool, default False): Index the dir immediately after
+            registration. Defaults off for backward compatibility — Web UI
+            opts in via ``auto_index=true`` so a single "+ Add path" click
+            covers register + index + watcher activation. CLI / API users
+            keep the historic two-step (register, then ``/api/index``) by
+            omitting the field.
+    """
     body = await request.json()
     dir_path = body.get("path", "").strip()
+    auto_index = bool(body.get("auto_index", False))
     if not dir_path:
         raise HTTPException(status_code=400, detail="path is required")
 
@@ -412,32 +424,53 @@ async def add_memory_dir(
                 config = request.app.state.config
 
                 current = [Path(p).expanduser().resolve() for p in config.indexing.memory_dirs]
-                # ``kind`` of the just-added dir lets the Web UI's
-                # Sources page show a "Switch view" toast when the user
-                # adds a path that lands in the opposite sub-toggle (e.g.
-                # they're on General sources and add ``~/memories``).
+                # ``kind`` is preserved on the response for downstream
+                # consumers (CLI scripts, settings UI). The Web UI's
+                # historic "Switch view" toast was retired in PR #568 when
+                # the Memory/General sub-toggle disappeared, but the
+                # field stays for API stability.
                 kind = memory_dir_kind(resolved)
-                if norm_path(resolved) in {norm_path(p) for p in current}:
-                    return {
-                        "ok": True,
-                        "message": "Already in memory_dirs",
-                        "memory_dirs": [str(p) for p in current],
-                        "kind": kind,
-                    }
+                already_present = norm_path(resolved) in {norm_path(p) for p in current}
 
-                config.indexing.memory_dirs.append(resolved)
-                save_config_overrides(config)
-                _hot_reload.commit_writer_signature(request.app)
-                return {
-                    "ok": True,
-                    "message": f"Added {resolved}",
-                    "memory_dirs": [
-                        str(Path(p).expanduser().resolve()) for p in config.indexing.memory_dirs
-                    ],
-                    "kind": kind,
-                }
+                if not already_present:
+                    config.indexing.memory_dirs.append(resolved)
+                    save_config_overrides(config)
+                    _hot_reload.commit_writer_signature(request.app)
+
+                memory_dirs_snapshot = [
+                    str(Path(p).expanduser().resolve()) for p in config.indexing.memory_dirs
+                ]
+                message = "Already in memory_dirs" if already_present else f"Added {resolved}"
     except TimeoutError:
         raise HTTPException(503, "memory-dirs/add timed out — another update may be in progress")
+
+    # Index outside the config lock so a slow scan doesn't block other
+    # config writers (the watcher invariant — path inside ``memory_dirs``
+    # — is already satisfied by the register block above, so
+    # ``index_path`` will pass its own validation).
+    indexed: dict[str, object] | None = None
+    if auto_index:
+        try:
+            stats = await index_engine.index_path(resolved, recursive=True, force=False)
+            indexed = {
+                "total_files": stats.total_files,
+                "total_chunks": stats.total_chunks,
+                "indexed_chunks": stats.indexed_chunks,
+                "skipped_chunks": stats.skipped_chunks,
+                "deleted_chunks": stats.deleted_chunks,
+                "duration_ms": stats.duration_ms,
+                "errors": list(stats.errors) if stats.errors else [],
+            }
+        except Exception as err:  # pragma: no cover — surface partial result
+            indexed = {"error": str(err)}
+
+    return {
+        "ok": True,
+        "message": message,
+        "memory_dirs": memory_dirs_snapshot,
+        "kind": kind,
+        "indexed": indexed,
+    }
 
 
 @router.post("/memory-dirs/remove")

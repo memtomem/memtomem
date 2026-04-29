@@ -617,6 +617,7 @@
   "confirm.memory_dir_remove_msg": "{path} 를 memory_dirs 에서 제거할까요? 디스크의 디렉터리와 파일은 그대로 유지됩니다.",
   "confirm.memory_dir_delete_chunks_label": "이 디렉터리에서 인덱싱된 청크 {count} 개도 함께 삭제",
   "toast.memory_dir.added": "{path} 추가됨",
+  "toast.memory_dir.added_indexed": "{path} 추가 · 파일 {files}개에서 청크 {chunks}개 인덱싱",
   "toast.memory_dir.removed": "{path} 제거됨",
   "toast.memory_dir.removed_with_chunks": "{path} 및 청크 {count} 개 삭제됨",
   "toast.memory_dir.opened": "{path} 열기 시도",

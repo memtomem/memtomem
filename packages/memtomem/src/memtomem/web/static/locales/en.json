@@ -617,6 +617,7 @@
   "confirm.memory_dir_remove_msg": "Remove {path} from memory_dirs? The directory and its files on disk are not touched.",
   "confirm.memory_dir_delete_chunks_label": "Also delete {count} indexed chunks from this directory",
   "toast.memory_dir.added": "Added {path}",
+  "toast.memory_dir.added_indexed": "Added {path} · {chunks} chunks from {files} files",
   "toast.memory_dir.removed": "Removed {path}",
   "toast.memory_dir.removed_with_chunks": "Removed {path} and {count} chunks",
   "toast.memory_dir.opened": "Opened {path}",

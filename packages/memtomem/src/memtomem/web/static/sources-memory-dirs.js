@@ -124,14 +124,30 @@ function _buildMemoryDirsPanel(initialDirs) {
     const trimmed = path.trim();
     if (!trimmed) return;
     try {
-      const resp = await api('POST', '/api/memory-dirs/add', { path: trimmed });
+      // ``auto_index=true`` collapses the historic two-step (register →
+      // manually click Index) into a single click. The server registers,
+      // then runs ``index_path`` outside the config lock so the request
+      // can stream back chunk stats without blocking other config writes.
+      const resp = await api('POST', '/api/memory-dirs/add', {
+        path: trimmed,
+        auto_index: true,
+      });
       if (resp && Array.isArray(resp.memory_dirs)) {
         refreshDirs(resp.memory_dirs);
       }
-      // PR #554 returns ``kind`` for every add; with the unified single
-      // Sources panel the path always lands in the same view (its vendor
-      // group), so the historic "switch view" toast is no longer needed.
-      showToast(t('toast.memory_dir.added', { path: trimmed }), 'success');
+      const stats = resp && resp.indexed;
+      if (stats && typeof stats.indexed_chunks === 'number') {
+        showToast(
+          t('toast.memory_dir.added_indexed', {
+            path: trimmed,
+            chunks: stats.indexed_chunks,
+            files: stats.total_files,
+          }),
+          'success',
+        );
+      } else {
+        showToast(t('toast.memory_dir.added', { path: trimmed }), 'success');
+      }
     } catch (err) {
       showToast(t('toast.memory_dir.add_failed', { error: _apiErrorText(err) }), 'error');
     }
@@ -982,14 +998,30 @@ async function mdAdd(path) {
   const trimmed = (path || '').trim();
   if (!trimmed) return;
   try {
-    const resp = await api('POST', '/api/memory-dirs/add', { path: trimmed });
+    // ``auto_index=true`` — see ``handleAdd`` above for rationale.
+    const resp = await api('POST', '/api/memory-dirs/add', {
+      path: trimmed,
+      auto_index: true,
+    });
     if (resp && Array.isArray(resp.memory_dirs)) {
       if (STATE.serverConfig?.indexing) {
         STATE.serverConfig.indexing.memory_dirs = [...resp.memory_dirs];
       }
       STATE.memoryDirs = [...resp.memory_dirs];
     }
-    showToast(t('toast.memory_dir.added', { path: trimmed }), 'success');
+    const stats = resp && resp.indexed;
+    if (stats && typeof stats.indexed_chunks === 'number') {
+      showToast(
+        t('toast.memory_dir.added_indexed', {
+          path: trimmed,
+          chunks: stats.indexed_chunks,
+          files: stats.total_files,
+        }),
+        'success',
+      );
+    } else {
+      showToast(t('toast.memory_dir.added', { path: trimmed }), 'success');
+    }
     if (typeof loadSources === 'function') loadSources();
   } catch (err) {
     showToast(t('toast.memory_dir.add_failed', { error: _mdApiErrorText(err) }), 'error');

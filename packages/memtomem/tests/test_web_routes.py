@@ -1079,6 +1079,59 @@ class TestUnicodePaths:
         assert body["kind"] == "memory"
         assert body["message"].startswith("Added ")
 
+    async def test_add_memory_dir_auto_index_triggers_index_path(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """``auto_index=true`` collapses register + index into one call.
+        After a successful add, ``index_path`` runs on the registered dir
+        and the response carries the ``indexed`` stats block. The watcher
+        invariant (path inside ``memory_dirs``) is satisfied because the
+        register block ran first inside the same handler."""
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+        app.state.config.indexing.memory_dirs = []
+        # The shared fixture mocks ``index_path`` to return the stub stats
+        # block; reset the call list so we can assert on it.
+        app.state.index_engine.index_path.reset_mock()
+
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/add",
+                json={"path": str(memory_dir), "auto_index": True},
+            )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["message"].startswith("Added ")
+        assert body["indexed"] is not None
+        assert body["indexed"]["indexed_chunks"] == 2
+        assert body["indexed"]["total_files"] == 1
+        # ``index_path`` was called with the resolved path of the dir we
+        # just added — watcher invariant naturally satisfied.
+        called_args, _ = app.state.index_engine.index_path.call_args
+        assert Path(str(called_args[0])).resolve() == memory_dir.resolve()
+
+    async def test_add_memory_dir_default_skips_index(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """Backward compatibility: omitting ``auto_index`` keeps the
+        historic register-only behavior. ``indexed`` is null and
+        ``index_path`` is not called. CLI scripts and direct API users
+        that relied on the two-step flow keep working."""
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+        app.state.config.indexing.memory_dirs = []
+        app.state.index_engine.index_path.reset_mock()
+
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/add",
+                json={"path": str(memory_dir)},
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["indexed"] is None
+        assert app.state.index_engine.index_path.call_count == 0
+
     async def test_remove_memory_dir_matches_nfd_and_nfc(self, app, client: AsyncClient, tmp_path):
         # Config has the target dir in NFD form plus a second entry (the
         # route refuses to remove the last remaining memory_dir). The user
