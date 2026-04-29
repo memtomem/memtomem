@@ -70,14 +70,20 @@ class TestScheduleStore:
 
     @pytest.mark.asyncio
     async def test_list_due_returns_only_due(self, storage):
-        # Hourly schedule. Created "now"; due check just before next hour
-        # should be empty, just after should include it.
+        # Hourly schedule. Due check just before the next top-of-hour after
+        # creation should be empty; well past it should include the row.
         sid = await storage.schedule_insert("0 * * * *", "compaction")
         sched = await storage.schedule_get(sid)
         created = datetime.fromisoformat(sched["created_at"])
 
-        # 30s after creation → no slot yet
-        early = created + timedelta(seconds=30)
+        # Anchor "early" to the next cron slot rather than ``created + 30s``
+        # — the latter flakes for ~50 seconds every hour when ``created``
+        # lands close to a top-of-hour and ``early`` crosses it (CI run
+        # 25113291250 hit this at 13:59:48Z). 1 second before the next
+        # slot is always strictly before it, regardless of where in the
+        # hour creation happened.
+        next_slot = created.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        early = next_slot - timedelta(seconds=1)
         assert await storage.schedule_list_due(early) == []
 
         # Well past the next top-of-hour → due
