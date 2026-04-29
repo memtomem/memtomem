@@ -55,6 +55,9 @@ BUG_REPORT.md
 main.py
 scripts/
 
+# Experimental plugins kept private until promoted
+packages/memtomem-openclaw-plugin/
+
 # Dev repo: root tests excluded, package tests included
 tests/
 !packages/*/tests/

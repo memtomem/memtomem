@@ -28,7 +28,6 @@ uv run mypy packages/memtomem/src
 
 - `packages/memtomem/` — Core: MCP server, CLI, web UI, search, storage, indexing
 - `packages/memtomem-claude-plugin/` — Claude Code plugin (experimental)
-- `packages/memtomem-openclaw-plugin/` — OpenClaw plugin (experimental)
 
 The STM proxy gateway lives in a separate repository: [memtomem/memtomem-stm](https://github.com/memtomem/memtomem-stm).
 
