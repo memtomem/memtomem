@@ -216,7 +216,7 @@
   "settings.nav.reset_sub": "Delete all data",
 
   "settings.ctx.overview_title": "Context Gateway",
-  "settings.ctx.detect": "Detect",
+  "settings.ctx.detect": "Refresh",
   "settings.ctx.sync_all": "Sync All",
   "settings.ctx.sync": "Sync",
   "settings.ctx.import": "Import",
@@ -247,7 +247,7 @@
   "settings.ctx.status_in_sync": "In sync",
   "settings.ctx.status_out_of_sync": "Out of sync",
   "settings.ctx.status_missing_target": "Missing",
-  "settings.ctx.status_missing_canonical": "Runtime only",
+  "settings.ctx.status_missing_canonical": "Not yet imported",
   "settings.ctx.dropped_fields": "Dropped",
   "settings.ctx.no_artifacts": "No {type} found",
   "settings.ctx.no_artifacts_hint": "Create one or import from existing runtimes.",

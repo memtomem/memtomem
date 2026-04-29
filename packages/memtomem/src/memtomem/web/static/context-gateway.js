@@ -12,7 +12,9 @@ const _ctxStatusCls = {
   'in sync':           'ctx-runtime-badge--sync',
   'out of sync':       'ctx-runtime-badge--warn',
   'missing target':    'ctx-runtime-badge--missing',
-  'missing canonical': 'ctx-runtime-badge--error',
+  // Runtime-only items (canonical absent) are a normal pre-import state, not
+  // an error — the same red treatment as `parse error` over-signaled it.
+  'missing canonical': 'ctx-runtime-badge--pending',
   'parse error':       'ctx-runtime-badge--error',
 };
 const _ctxStatusLabel = {
@@ -33,7 +35,11 @@ function renderRuntimeBadges(runtimes) {
   return '<div class="ctx-runtime-badges">' +
     runtimes.map(r => {
       const short = r.runtime.replace(/_skills|_commands|_agents/g, '');
-      return `<span class="ctx-runtime-badge ${_ctxStatusCls[r.status] || ''}" title="${escapeHtml(r.runtime)}">${escapeHtml(short)}: ${escapeHtml(r.status)}</span>`;
+      // Route status text through i18n so the UI shows the localized label
+      // (e.g. "Not yet imported") rather than the raw wire string
+      // ("missing canonical"). Falls back to raw status if no key maps.
+      const label = t(_ctxStatusLabel[r.status] || '', r.status);
+      return `<span class="ctx-runtime-badge ${_ctxStatusCls[r.status] || ''}" title="${escapeHtml(r.runtime)}">${escapeHtml(short)}: ${escapeHtml(label)}</span>`;
     }).join('') + '</div>';
 }
 
