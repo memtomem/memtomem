@@ -60,9 +60,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   project-specific needs. Other hooks (`UserPromptSubmit`,
   `PostToolUse activity log`, `Stop`) are unchanged. Docs at
   [`docs/guides/integrations/claude-code.md`](docs/guides/integrations/claude-code.md)
-  Hooks Automation section synced to match. **Documented gap**:
-  rapid consecutive writes still re-index — native
-  `mm index --debounce-window` support is the planned follow-up.
+  Hooks Automation section synced to match. A
+  ``test_plugin_hooks_command_matches_docs_snippet`` parity test
+  locks ``hooks.json`` and the docs snippet against silent drift on
+  future edits. Existing installs that copy-pasted the previous
+  snippet into ``~/.claude/settings.json`` continue with the old
+  unfiltered behavior until the user re-pulls the snippet. **Documented
+  gap**: rapid consecutive writes still re-index the same file; native
+  debounce support is tracked separately.
 
 ## [0.1.32] — 2026-04-26
 

@@ -12,10 +12,17 @@ These guards protect invariants that code cannot enforce directly:
   tool group in both ``reference.md`` and ``mcp-clients.md``; both files
   must mark them with the ``\\*`` + ``MEMTOMEM_TOOL_MODE=full`` footnote,
   or users reading one file won't know they are gated.
+- The ``hooks.json`` snippet rendered in ``claude-code.md`` Hooks
+  Automation Setup must declare byte-identical ``command`` strings to
+  the plugin's shipped ``hooks.json`` for every event the snippet
+  covers. Drift between the two sites silently ships an outdated
+  user-facing recipe.
 """
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 
 import pytest
@@ -23,6 +30,8 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _GUIDES = _REPO_ROOT / "docs" / "guides"
 _INTEGRATIONS = _GUIDES / "integrations"
+_PLUGIN_HOOKS_JSON = _REPO_ROOT / "packages" / "memtomem-claude-plugin" / "hooks" / "hooks.json"
+_HOOKS_SNIPPET_ANCHOR = "Add the following to `~/.claude/settings.json`:"
 
 _ASTERISK_TOOLS = ("mem_config", "mem_embedding_reset", "mem_reset")
 _FOOTNOTE_PREFIX = r"\* Requires `MEMTOMEM_TOOL_MODE=full`"
@@ -124,4 +133,92 @@ class TestToolModeFootnoteParity:
             "mcp-clients.md must carry reference.md's tool-mode footnote "
             "line verbatim so the CLI / Web UI alternate-access hint stays "
             "in sync across the two Config-table entry points."
+        )
+
+
+def _extract_hooks_snippet(claude_code_md: str) -> dict:
+    """Extract the ``Add the following to ~/.claude/settings.json`` JSON
+    block from claude-code.md. Returns the parsed dict.
+
+    The Hooks Automation Setup section embeds a fenced ``json`` block that
+    users copy-paste into their Claude Code settings; this helper returns
+    that block as the parsed dict so parity tests can compare commands
+    against the plugin's shipped hooks.json.
+    """
+    anchor_idx = claude_code_md.find(_HOOKS_SNIPPET_ANCHOR)
+    if anchor_idx == -1:
+        pytest.fail(f"claude-code.md lost its hooks-snippet anchor: {_HOOKS_SNIPPET_ANCHOR!r}")
+    fence_re = re.compile(r"```json\n(.*?)\n```", re.DOTALL)
+    match = fence_re.search(claude_code_md, anchor_idx)
+    if match is None:
+        pytest.fail("claude-code.md has the hooks-snippet anchor but no ```json fence after it")
+    return json.loads(match.group(1))
+
+
+def _commands_by_event_matcher(hooks_doc: dict) -> dict[tuple[str, str], str]:
+    """Flatten a hooks.json shape into ``{(event, matcher): command}``.
+
+    Only entries with a single command are included; multi-command entries
+    fail loudly because the parity test isn't designed for them yet.
+    """
+    out: dict[tuple[str, str], str] = {}
+    for event, entries in hooks_doc.get("hooks", {}).items():
+        for entry in entries:
+            matcher = entry.get("matcher", "")
+            commands = entry.get("hooks", [])
+            assert len(commands) == 1, (
+                f"hooks parity helper expected exactly one command per entry, "
+                f"got {len(commands)} at {event}/{matcher!r}"
+            )
+            out[(event, matcher)] = commands[0]["command"]
+    return out
+
+
+class TestPluginHooksDocsParity:
+    """The hooks.json snippet in claude-code.md must declare byte-identical
+    ``command`` strings to the plugin's shipped hooks.json for every
+    (event, matcher) pair the docs cover. The docs intentionally show a
+    subset (the ``activity log`` PostToolUse entry is omitted to keep the
+    copy-paste recipe tight), so we iterate over the docs entries and
+    require each to match the plugin file — not the other way around.
+    """
+
+    @pytest.fixture(scope="class")
+    def plugin_commands(self) -> dict[tuple[str, str], str]:
+        plugin_hooks = json.loads(_PLUGIN_HOOKS_JSON.read_text(encoding="utf-8"))
+        return _commands_by_event_matcher(plugin_hooks)
+
+    @pytest.fixture(scope="class")
+    def docs_commands(self, claude_code: str) -> dict[tuple[str, str], str]:
+        snippet = _extract_hooks_snippet(claude_code)
+        return _commands_by_event_matcher(snippet)
+
+    def test_docs_snippet_is_subset_of_plugin(
+        self,
+        plugin_commands: dict[tuple[str, str], str],
+        docs_commands: dict[tuple[str, str], str],
+    ) -> None:
+        missing = [k for k in docs_commands if k not in plugin_commands]
+        assert not missing, (
+            f"claude-code.md hooks snippet declares (event, matcher) entries "
+            f"that the plugin hooks.json does not ship: {missing}. Either add "
+            f"them to packages/memtomem-claude-plugin/hooks/hooks.json or "
+            f"remove them from the docs."
+        )
+
+    def test_docs_snippet_commands_match_plugin(
+        self,
+        plugin_commands: dict[tuple[str, str], str],
+        docs_commands: dict[tuple[str, str], str],
+    ) -> None:
+        diffs = [
+            (event_matcher, plugin_commands[event_matcher], docs_cmd)
+            for event_matcher, docs_cmd in docs_commands.items()
+            if plugin_commands.get(event_matcher) != docs_cmd
+        ]
+        assert not diffs, (
+            "claude-code.md hooks snippet drifted from the plugin's "
+            "hooks.json. The two sites must declare byte-identical commands "
+            "for every (event, matcher) the docs render. Diffs:\n"
+            + "\n".join(f"  {em}:\n    plugin: {p}\n    docs:   {d}" for em, p, d in diffs)
         )
