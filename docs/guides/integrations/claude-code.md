@@ -184,7 +184,7 @@ Add the following to `~/.claude/settings.json`:
       "matcher": "Write",
       "hooks": [{
         "type": "command",
-        "command": "FP=\"${tool_input.file_path}\"; case \"$FP\" in *.md|*.py|*.ts|*.tsx|*.js|*.jsx|*.go|*.rs|*.rb|*.java|*.kt|*.swift|*.c|*.cpp|*.h|*.hpp|*.sh|*.toml|*.yaml|*.yml|*.json) ;; *) exit 0 ;; esac; case \"$FP\" in node_modules/*|*/node_modules/*|dist/*|*/dist/*|build/*|*/build/*|target/*|*/target/*|.next/*|*/.next/*|.nuxt/*|*/.nuxt/*|__pycache__/*|*/__pycache__/*|.git/*|*/.git/*|.venv/*|*/.venv/*|venv/*|*/venv/*|coverage/*|*/coverage/*|.cache/*|*/.cache/*) exit 0 ;; esac; mm index \"$FP\" 2>>/tmp/mm-hook.log || true",
+        "command": "FP=\"${tool_input.file_path}\"; case \"$FP\" in *.md|*.py|*.ts|*.tsx|*.js|*.jsx|*.go|*.rs|*.rb|*.java|*.kt|*.swift|*.c|*.cpp|*.h|*.hpp|*.sh|*.toml|*.yaml|*.yml|*.json) ;; *) exit 0 ;; esac; case \"$FP\" in node_modules/*|*/node_modules/*|dist/*|*/dist/*|build/*|*/build/*|target/*|*/target/*|.next/*|*/.next/*|.nuxt/*|*/.nuxt/*|__pycache__/*|*/__pycache__/*|.git/*|*/.git/*|.venv/*|*/.venv/*|venv/*|*/venv/*|coverage/*|*/coverage/*|.cache/*|*/.cache/*) exit 0 ;; esac; mm index --debounce-window 5 \"$FP\" 2>>/tmp/mm-hook.log || true",
         "timeout": 10000
       }]
     }],
@@ -192,8 +192,8 @@ Add the following to `~/.claude/settings.json`:
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "mm session end --auto 2>>/tmp/mm-hook.log || true",
-        "timeout": 5000
+        "command": "mm index --flush 2>>/tmp/mm-hook.log; mm session end --auto 2>>/tmp/mm-hook.log || true",
+        "timeout": 10000
       }]
     }]
   }
@@ -206,8 +206,8 @@ Add the following to `~/.claude/settings.json`:
 |------------|---------------|----------------|
 | `SessionStart` | When a Claude Code session starts | `mm session start --idempotent --auto-end-stale 24h` → Resume the active session for `claude-code`, or open a new one and close orphans older than 24h |
 | `UserPromptSubmit` | When a prompt is submitted | `mm search` → Automatically inject relevant memory into context |
-| `PostToolUse` (Write) | After new file creation | `mm index` → Automatically index the new file |
-| `Stop` | When the agent stops | `mm session end --auto` → Close session with structured summary |
+| `PostToolUse` (Write) | After new file creation | `mm index --debounce-window 5` → Record the file in the debounce queue and drain entries silent ≥5s; rapid consecutive writes restart the window so a burst is indexed once at the end |
+| `Stop` | When the agent stops | `mm index --flush; mm session end --auto` → Synchronously flush any pending debounced files, then close the session with a structured summary |
 
 ### Automation Flow
 
@@ -217,9 +217,9 @@ Claude Code starts
   → User submits prompt (>20 chars)
   → UserPromptSubmit hook → mem_search context injection
   → Claude creates new files
-  → PostToolUse hook → mem_index auto-indexing
+  → PostToolUse hook → mm index --debounce-window 5 (record + drain stale)
   → Agent stops
-  → Stop hook → mm session end --auto
+  → Stop hook → mm index --flush; mm session end --auto
 ```
 
 ### Important Caveats
@@ -231,7 +231,7 @@ Claude Code starts
 - **SessionStart hook = idempotent resume**: `mm session start --idempotent` resumes the active session for the same `--agent-id` instead of creating a new row, so a Claude Code restart inherits the previous session's `mm activity log` writes. `--auto-end-stale 24h` closes any active session older than 24h before the idempotency check — this is how orphans from a crashed previous run get cleaned up. The 24h cutoff also means that resuming Claude Code the morning after deliberately ends the prior day's session and starts fresh; lower the cutoff (e.g. `30m`) if you want shorter resume windows, raise it (e.g. `7d`) if you want sessions to span breaks. The idempotent path is single-process safe but not concurrency-safe — two parallel SessionStart hooks could both create new sessions; Claude Code's hook runner fires them serially per session, which is the supported case.
 - **Write only**: `Edit` is excluded from PostToolUse — edited files are already indexed, so re-indexing on every edit is redundant.
 - **Allowlist + blocklist**: `PostToolUse[Write]` only indexes canonical source extensions (`md`, `py`, `ts`/`tsx`, `js`/`jsx`, `go`, `rs`, `rb`, `java`, `kt`, `swift`, `c`/`cpp`/`h`/`hpp`, `sh`, `toml`, `yaml`/`yml`, `json`) and skips build / cache / VCS paths (`node_modules`, `dist`, `build`, `target`, `.next`, `.nuxt`, `__pycache__`, `.git`, `.venv`/`venv`, `coverage`, `.cache`) inline. Patterns include both leading-segment (`node_modules/*`) and any-segment (`*/node_modules/*`) forms for both absolute and relative `tool_input.file_path` values. Extension matching is case-sensitive — `*.MD` / `*.JS` would skip the allowlist; rename or extend the patterns if your repo uses uppercase. Adjust the `case` statements in `hooks.json` for project-specific needs — they are inline, easy to extend.
-- **Debounce gap**: rapid consecutive writes to the same file (e.g., codegen loops) may re-index it multiple times within a few seconds. The current hook indexes synchronously per Write with no batching. For large monorepos, wrap the `mm index` call in an external script with `flock` + a debounce window. Native debounce support is tracked separately.
+- **Debounce mechanics**: `mm index --debounce-window 5` records the file in `~/.memtomem/index_debounce_queue.json` (flock-protected) and drains entries that have been silent ≥5 seconds. Each Write hook fire restarts the window for that path, so a codegen burst indexes the final state once after the burst ends rather than once per Write. The Stop hook chains `mm index --flush` (synchronous drain — blocks until every queued file is indexed) before `mm session end --auto` to ensure session-end indexing isn't deferred. `mm index --status` prints a snapshot of the queue (depth + oldest entry) for telemetry; it's race-prone and not a correctness primitive — for "is the queue empty?" use `--flush`. RFC-B (PreCompact, deferred — needs Claude Code's PreCompact payload contract) will use a future `mm index --flush --paths <list>` for selective drain at checkpoint time.
 - **STM proxy overlap**: If using [memtomem-stm](https://github.com/memtomem/memtomem-stm) (separate package), hooks are redundant — the proxy already handles surfacing and indexing.
 
 ---

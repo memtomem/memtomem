@@ -5,6 +5,47 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **`mm index --debounce-window` / `--flush` / `--status` flags** (closes
+  PR #536 documented gap). `mm index` now exposes a file-system-backed
+  debounce queue under `~/.memtomem/index_debounce_queue.json`
+  (flock-protected). Three new flags:
+  - `--debounce-window <SECONDS>` records PATH and drains any entries
+    silent at least SECONDS. Designed for `PostToolUse[Write]` hook
+    callers — rapid consecutive writes to the same file restart the
+    window, so a codegen burst indexes the final state once at the end
+    rather than once per Write.
+  - `--flush` synchronously drains every queued entry. **Blocks until
+    each queued file is indexed (or recorded as an error).** Worst-case
+    latency ≈ queue depth × per-file index cost. Plugin's `Stop` hook
+    now chains `mm index --flush` before `mm session end --auto` so the
+    final burst doesn't get left in the queue.
+  - `--status` prints a snapshot of the queue (depth, oldest entry).
+    **Race-prone by design** — concurrent hooks may add or drain
+    entries between the read and any caller action. Use as telemetry
+    only; `--flush` is the only correctness primitive for "drain the
+    queue".
+
+  Indexer errors leave the entry in the queue for retry on the next
+  hook fire. Last-write-wins for `--namespace`/`--force` when the same
+  path is enqueued twice. `MEMTOMEM_INDEX_DEBOUNCE_QUEUE` env var
+  overrides the queue path (test-only).
+
+  **Future-extensibility (RFC-B PreCompact, deferred):** when the
+  PreCompact hook contract lands and a checkpoint handler wants to
+  flush only the files Claude Code reports as in-flight, `--flush`
+  will gain a `--paths <list>` form for selective drain. The current
+  `--flush` (drain all) remains the default; the API in
+  `memtomem.indexing.debounce.drain_all` already accepts an optional
+  `paths=` filter so adding the CLI surface is additive.
+
+  Plugin `hooks.json` and the `claude-code.md` Hooks Automation Setup
+  snippet are updated byte-for-byte (parity test catches drift). The
+  PostToolUse[Write] hook now calls `mm index --debounce-window 5`;
+  the Stop hook chains `mm index --flush` before
+  `mm session end --auto`.
+
 ## [0.1.33] — 2026-04-29
 
 ### Added

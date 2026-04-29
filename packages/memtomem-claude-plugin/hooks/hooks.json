@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "FP=\"${tool_input.file_path}\"; case \"$FP\" in *.md|*.py|*.ts|*.tsx|*.js|*.jsx|*.go|*.rs|*.rb|*.java|*.kt|*.swift|*.c|*.cpp|*.h|*.hpp|*.sh|*.toml|*.yaml|*.yml|*.json) ;; *) exit 0 ;; esac; case \"$FP\" in node_modules/*|*/node_modules/*|dist/*|*/dist/*|build/*|*/build/*|target/*|*/target/*|.next/*|*/.next/*|.nuxt/*|*/.nuxt/*|__pycache__/*|*/__pycache__/*|.git/*|*/.git/*|.venv/*|*/.venv/*|venv/*|*/venv/*|coverage/*|*/coverage/*|.cache/*|*/.cache/*) exit 0 ;; esac; mm index \"$FP\" 2>>/tmp/mm-hook.log || true",
+            "command": "FP=\"${tool_input.file_path}\"; case \"$FP\" in *.md|*.py|*.ts|*.tsx|*.js|*.jsx|*.go|*.rs|*.rb|*.java|*.kt|*.swift|*.c|*.cpp|*.h|*.hpp|*.sh|*.toml|*.yaml|*.yml|*.json) ;; *) exit 0 ;; esac; case \"$FP\" in node_modules/*|*/node_modules/*|dist/*|*/dist/*|build/*|*/build/*|target/*|*/target/*|.next/*|*/.next/*|.nuxt/*|*/.nuxt/*|__pycache__/*|*/__pycache__/*|.git/*|*/.git/*|.venv/*|*/.venv/*|venv/*|*/venv/*|coverage/*|*/coverage/*|.cache/*|*/.cache/*) exit 0 ;; esac; mm index --debounce-window 5 \"$FP\" 2>>/tmp/mm-hook.log || true",
             "timeout": 10000
           }
         ]
@@ -52,8 +52,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "mm session end --auto 2>>/tmp/mm-hook.log || true",
-            "timeout": 5000
+            "command": "mm index --flush 2>>/tmp/mm-hook.log; mm session end --auto 2>>/tmp/mm-hook.log || true",
+            "timeout": 10000
           }
         ]
       }
