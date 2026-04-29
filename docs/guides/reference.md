@@ -201,6 +201,7 @@ Combines keyword matching (exact words) with meaning-based search (similar conce
 | `source_filter` | File path substring (recommended) or glob | `"docs/adr"`, `".yaml"` |
 | `tag_filter` | Comma-separated tags, OR logic | `"redis,cache"` |
 | `namespace` | Scope to namespace | `"work"` |
+| `as_of` | Temporal validity query — only return chunks valid on this date (default = current time). Date-only `YYYY-MM-DD` or quarter `YYYY-QN`. Chunks without `valid_from`/`valid_to` frontmatter are always-valid and unaffected. | `"2024-Q3"` |
 | `bm25_weight` / `dense_weight` | Override RRF weights (default `1.0`) | `2.0` |
 | `context_window` | Expand each result with ±N adjacent chunks (`0` = disabled) | `1` |
 | `output_format` | `"compact"` (default), `"verbose"`, or `"structured"` (JSON with `hints` field) | `"structured"` |
@@ -208,7 +209,10 @@ Combines keyword matching (exact words) with meaning-based search (similar conce
 ```
 mem_search(query="caching strategy", tag_filter="redis,cache", namespace="work")
 mem_search(query="auth", source_filter="docs/adr", top_k=5)
+mem_search(query="deploy pipeline", as_of="2025-Q3")    # historical query
 ```
+
+> **Result count with filters**: `mem_search` returns *up to* `top_k` results. Post-rerank filters (`source_filter`, `tag_filter`, `as_of` validity) reduce the returned count one-for-one when they exclude candidates. Increase `top_k` or `rerank_pool` to widen the pre-filter candidate set; this method does not auto-oversample.
 
 > **source_filter tip**: Use substrings like `"docs/adr"` or `".py"` for filtering. Glob patterns (`*`, `?`) are matched against the **full absolute path** via `fnmatch`, so `"*.py"` won't work as expected — use `".py"` instead.
 
@@ -976,9 +980,10 @@ mm init                                # 9-step interactive wizard (b: back, q: 
 
 # Core (daily use)
 mm search "deployment"                 # hybrid search (keywords + meaning)
+mm search --as-of 2024-Q3 "deploy"     # temporal-validity query (date-only or YYYY-QN)
 mm index ~/notes                       # manual one-shot index (seed pre-existing files)
 mm add "note" --tags "tag1"            # add a memory
-mm recall --since 2026-03-01           # recall by date
+mm recall --since 2026-03-01           # recall by date (Validity column shown when chunks have valid_from/valid_to)
 
 # Configuration
 mm config show                         # view all settings

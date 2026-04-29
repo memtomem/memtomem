@@ -272,7 +272,7 @@ uses, so the output is identical. Useful as a sanity check between
 
 | Category | Tools |
 |----------|-------|
-| **Search** | `mem_search` (hybrid BM25+Dense+RRF), `mem_recall` (date-range retrieval), `mem_expand` (context-window expansion) |
+| **Search** | `mem_search` (hybrid BM25+Dense+RRF, optional `as_of` for temporal-validity queries), `mem_recall` (date-range retrieval), `mem_expand` (context-window expansion) |
 | **Browse** | `mem_list` (indexed sources), `mem_read` (chunk by UUID) |
 | **CRUD** | `mem_add`, `mem_edit`, `mem_delete`, `mem_batch_add` |
 | **Indexing** | `mem_index` (file/directory indexing, optional `auto_tag`) |
