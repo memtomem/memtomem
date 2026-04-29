@@ -2121,7 +2121,7 @@ document.querySelector('.sources-mode-toggle')?.addEventListener('keydown', (e) 
   e.preventDefault();
   const next = buttons[nextIdx];
   next.focus();
-  setSourcesMode(next.id === 'sources-mode-memory' ? 'memory' : 'general');
+  if (next.dataset.mode) setSourcesMode(next.dataset.mode);
 });
 
 document.querySelectorAll('.sources-sort-btn').forEach(btn => {
