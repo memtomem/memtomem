@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Iterable
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
 from typing import TYPE_CHECKING, TypedDict
@@ -98,25 +99,76 @@ def _path_is_excluded(
     return False
 
 
+def _dir_creation_time_iso(p: Path) -> str | None:
+    """OS filesystem creation time (ISO-8601 UTC) or ``None`` if dir missing.
+
+    Prefers ``st_birthtime`` (macOS / Windows always; Linux 3.12+ on
+    ext4/btrfs/xfs with statx). Falls back to ``st_ctime`` on older Linux
+    setups — ``st_ctime`` there is metadata-change time, so it can shift on
+    ``chmod`` / ``chown``. Acceptable for sort ordering since it's monotonic
+    for newly-created dirs in normal workflows.
+    """
+    try:
+        st = p.stat()
+    except OSError:
+        return None
+    ts = getattr(st, "st_birthtime", None)
+    if ts is None:
+        ts = st.st_ctime
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+
+def _count_files_on_disk(p: Path, extensions: frozenset[str]) -> int:
+    """Count regular files under ``p`` whose suffix is in ``extensions``.
+
+    Recursive ``rglob`` so the count matches what ``index_path(recursive=True)``
+    would discover, modulo user exclude patterns (left out here so the
+    web status fetch stays fast for the dominant case — users will hit
+    Reindex anyway, and the badge is informational). Returns 0 on
+    ``OSError`` (permissions, broken symlink, etc.) to keep the badge
+    reading "0 files" rather than crashing the panel.
+    """
+    try:
+        return sum(1 for fp in p.rglob("*") if fp.is_file() and fp.suffix in extensions)
+    except OSError:
+        return 0
+
+
 async def memory_dir_stats(
     storage: "StorageBackend",
     memory_dirs: Iterable[str | Path],
+    *,
+    supported_extensions: frozenset[str] | None = None,
 ) -> list[dict[str, object]]:
     """Return per-dir index status for each configured ``memory_dir``.
 
-    Shape: ``[{path, chunk_count, source_file_count, exists, category,
-    provider}]`` in the same order as ``memory_dirs``. Drives the web UI's
-    "(N chunks)" / "(not indexed)" badges so users can see which dirs
-    need a manual reindex (the running watcher only reacts to fs events,
-    so files that landed while the server was down stay invisible until
-    a forced re-walk; the opt-in
-    :attr:`~memtomem.config.IndexingConfig.startup_backfill` flag covers
-    the same gap on startup for users who explicitly enable it).
-    ``category`` is provided by
+    Shape: ``[{path, chunk_count, source_file_count, file_count, exists,
+    category, provider, created_at, last_indexed}]`` in the same order
+    as ``memory_dirs``. Drives the web UI's "(N chunks)" / "(not
+    indexed)" badges so users can see which dirs need a manual reindex
+    (the running watcher only reacts to fs events, so files that landed
+    while the server was down stay invisible until a forced re-walk;
+    the opt-in :attr:`~memtomem.config.IndexingConfig.startup_backfill`
+    flag covers the same gap on startup for users who explicitly enable
+    it). ``category`` is provided by
     :func:`~memtomem.config.categorize_memory_dir` and ``provider`` by
     :func:`~memtomem.config.provider_for_category`, so the Web UI can
     build a vendor → product tree without maintaining its own regex or
     mapping. RFC #304 Phase 1.
+
+    ``created_at`` is the OS filesystem creation time (ISO-8601 UTC,
+    ``None`` for missing dirs); ``last_indexed`` is the max
+    ``chunks.updated_at`` over source files under the dir prefix (``None``
+    when the dir has no chunks). Both feed the Web UI sort dropdown that
+    appears once a product leaf has ≥ 6 entries.
+
+    When ``supported_extensions`` is provided, each existing dir is also
+    walked with ``rglob`` to count files matching one of those suffixes —
+    that's ``file_count`` in the response. The walk runs in worker
+    threads via ``asyncio.gather`` so 28+ dirs don't serialize on disk
+    I/O. Without ``supported_extensions``, ``file_count`` is 0 — keeps
+    the existing test fixtures (which call this function directly without
+    a config) working unchanged.
 
     Aggregation: one ``get_source_files_with_counts()`` call over the
     whole ``chunks`` table, bucketed in Python by normalised-path prefix
@@ -125,9 +177,27 @@ async def memory_dir_stats(
     from memtomem.storage.sqlite_helpers import norm_path
 
     rows = await storage.get_source_files_with_counts()
+    dir_list = list(memory_dirs)
+
+    file_counts: list[int]
+    if supported_extensions:
+        file_counts = await asyncio.gather(
+            *[
+                asyncio.to_thread(
+                    _count_files_on_disk,
+                    Path(d).expanduser(),
+                    supported_extensions,
+                )
+                if Path(d).expanduser().exists()
+                else _resolved_zero()
+                for d in dir_list
+            ]
+        )
+    else:
+        file_counts = [0] * len(dir_list)
 
     out: list[dict[str, object]] = []
-    for d in memory_dirs:
+    for d, file_count in zip(dir_list, file_counts):
         dir_path = Path(d).expanduser()
         exists = dir_path.exists()
         prefix = norm_path(dir_path) if exists else str(dir_path)
@@ -136,12 +206,17 @@ async def memory_dir_stats(
 
         chunk_count = 0
         source_file_count = 0
+        max_last_updated: str | None = None
         for row in rows:
             # row = (Path, chunk_count, last_updated, namespaces, ...)
-            source_path, count = row[0], row[1]
+            source_path, count, last_updated = row[0], row[1], row[2]
             if norm_path(source_path).startswith(prefix):
                 chunk_count += count
                 source_file_count += 1
+                if last_updated is not None and (
+                    max_last_updated is None or last_updated > max_last_updated
+                ):
+                    max_last_updated = last_updated
 
         category = categorize_memory_dir(d)
         out.append(
@@ -149,12 +224,22 @@ async def memory_dir_stats(
                 "path": str(d),
                 "chunk_count": chunk_count,
                 "source_file_count": source_file_count,
+                "file_count": file_count,
                 "exists": exists,
                 "category": category,
                 "provider": provider_for_category(category),
+                "created_at": _dir_creation_time_iso(dir_path) if exists else None,
+                "last_indexed": max_last_updated,
             }
         )
     return out
+
+
+async def _resolved_zero() -> int:
+    """Awaitable that resolves to 0 — used for missing dirs in the
+    ``asyncio.gather`` slot so the result list stays positionally
+    aligned with ``memory_dirs``."""
+    return 0
 
 
 class _IndexFileBase(TypedDict):

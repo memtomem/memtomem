@@ -76,6 +76,40 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   PostToolUse[Write] hook now calls `mm index --debounce-window 5`;
   the Stop hook chains `mm index --flush` before
   `mm session end --auto`.
+- **Web UI Memory Dirs sort** — Sources tab → Memory Dirs panel now
+  exposes a sort dropdown on any product leaf with at least 6 entries
+  (the dominant case is "Claude projects" once a few dozen
+  per-project dirs are auto-discovered). Six modes: newest first,
+  oldest first, path A→Z, most files, most chunks, recently indexed.
+  Selection persists per product via `localStorage`. Backend
+  `/api/memory-dirs/status` gains `created_at` (OS filesystem birth
+  time, ISO-8601 UTC) and `last_indexed` (max `chunks.updated_at`
+  under the dir prefix) — both `null` for missing or un-indexed dirs.
+  Linux without statx-birthtime falls back to `st_ctime`, which can
+  shift on `chmod` / `chown` but is monotonic for fresh dirs in
+  normal workflows.
+- **Memory Dirs item-level metadata** — each row now shows the
+  directory creation date (locale-formatted) and a `{files} files ·
+  {chunks} chunks` badge mirroring the group total, so sort modes
+  like "Most files" / "Recently indexed" can be verified row-by-row.
+  Hovering the date shows full ISO timestamps for both `created_at`
+  and `last_indexed`.
+- **Optional chunk cleanup on memory_dir remove** —
+  `POST /api/memory-dirs/remove` accepts `delete_chunks: bool` (default
+  `false`). When `true`, every chunk whose `source_file` is under the
+  resolved dir prefix is dropped (cascades to FTS / vector / link
+  tables); the underlying files on disk are never touched. The Web
+  UI's delete confirm shows an opt-in checkbox labeled "Also delete N
+  indexed chunks" only when the dir has chunks — the safe default
+  remains unregister-only.
+
+### Changed
+
+- **`showConfirm` modal** gained an optional `extraOption: { id, label,
+  defaultChecked }` parameter that renders an opt-in checkbox below
+  the message. Callers that pass extras receive `{ ok, extras }`
+  instead of a plain boolean; existing callers without extras get the
+  boolean shape unchanged (backward compat).
 
 ### Fixed
 

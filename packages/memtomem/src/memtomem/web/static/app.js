@@ -373,21 +373,55 @@ function showToast(message, type = 'success') {
 }
 
 // ── A3: Confirm Dialog ──
-function showConfirm({ title, message = '', confirmText = t('common.confirm') }) {
+// Returns ``boolean`` for the OK/Cancel choice. When ``extraOption`` is
+// provided ({ id, label, defaultChecked }), the dialog renders an
+// opt-in checkbox below the message and resolves to
+// ``{ ok: boolean, extras: { [id]: boolean } }`` instead — callers that
+// pass extras must handle the object shape. Existing callers without
+// extras get the boolean shape unchanged.
+function showConfirm({
+  title,
+  message = '',
+  confirmText = t('common.confirm'),
+  extraOption = null,
+}) {
   return new Promise(resolve => {
     const modal = qs('confirm-modal');
     qs('confirm-title').textContent = title;
     qs('confirm-message').textContent = message;
     qs('confirm-ok-btn').textContent = confirmText;
+
+    const extraRow = qs('confirm-extra-row');
+    const extraCheckbox = qs('confirm-extra-checkbox');
+    const extraLabel = qs('confirm-extra-label');
+    if (extraOption) {
+      extraLabel.textContent = extraOption.label || '';
+      extraCheckbox.checked = !!extraOption.defaultChecked;
+      extraRow.hidden = false;
+    } else {
+      extraRow.hidden = true;
+      extraCheckbox.checked = false;
+    }
+
     show(modal);
     const focusables = [qs('confirm-cancel-btn'), qs('confirm-ok-btn')];
     focusables[1].focus();
 
-    function cleanup(result) {
+    function cleanup(ok) {
       hide(modal);
+      // Always reset the checkbox row so a later non-extra confirm
+      // doesn't inherit the previous label / checked state.
+      extraRow.hidden = true;
+      extraCheckbox.checked = false;
       modal.removeEventListener('click', onBackdrop);
       document.removeEventListener('keydown', onKey, true);
-      resolve(result);
+      if (extraOption) {
+        const extras = {};
+        extras[extraOption.id] = ok ? extraCheckbox.checked : false;
+        resolve({ ok, extras });
+      } else {
+        resolve(ok);
+      }
     }
     function onBackdrop(e) { if (e.target === modal) cleanup(false); }
     function onKey(e) {

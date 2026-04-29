@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio as _asyncio
 import json
 import logging
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
@@ -435,11 +438,20 @@ async def remove_memory_dir(
     storage=Depends(get_storage),
     search_pipeline=Depends(get_search_pipeline),
 ):
-    """Remove a directory from memory_dirs watch list."""
+    """Remove a directory from ``memory_dirs``, optionally deleting its chunks.
+
+    Body: ``{path: str, delete_chunks?: bool}``. ``delete_chunks=False`` (the
+    default) is the safe behaviour — only the registration is removed,
+    indexed chunks stay searchable. ``delete_chunks=True`` additionally
+    drops every chunk whose ``source_file`` is under the resolved dir
+    prefix; the underlying files on disk are never touched. The Web UI's
+    delete confirm shows a checkbox so the user opts in explicitly.
+    """
     body = await request.json()
     dir_path = body.get("path", "").strip()
     if not dir_path:
         raise HTTPException(status_code=400, detail="path is required")
+    delete_chunks = bool(body.get("delete_chunks", False))
 
     resolved = Path(dir_path).expanduser().resolve()
     resolved_norm = norm_path(resolved)
@@ -466,15 +478,119 @@ async def remove_memory_dir(
                 config.indexing.memory_dirs = new_dirs
                 save_config_overrides(config)
                 _hot_reload.commit_writer_signature(request.app)
+
+                # Chunk cleanup happens after the registration is removed
+                # so a partial failure never leaves chunks orphaned with
+                # the dir still registered. ``delete_by_source`` cascades
+                # to ``chunks_fts`` / ``chunks_vec`` / ``chunk_links`` via
+                # the schema's ``ON DELETE CASCADE``.
+                deleted_chunks = 0
+                if delete_chunks:
+                    rows = await storage.get_source_files_with_counts()
+                    prefix = resolved_norm
+                    if not prefix.endswith("/"):
+                        prefix = prefix + "/"
+                    for row in rows:
+                        source_path = row[0]
+                        if norm_path(source_path).startswith(prefix):
+                            deleted_chunks += await storage.delete_by_source(source_path)
+
                 return {
                     "ok": True,
                     "message": f"Removed {resolved}",
                     "memory_dirs": [
                         str(Path(p).expanduser().resolve()) for p in config.indexing.memory_dirs
                     ],
+                    "deleted_chunks": deleted_chunks,
                 }
     except TimeoutError:
         raise HTTPException(503, "memory-dirs/remove timed out — another update may be in progress")
+
+
+def _open_in_file_manager(path: Path) -> None:
+    """Spawn the platform's default file manager to reveal ``path``.
+
+    On macOS / Linux this uses ``subprocess.run`` with stderr captured
+    and a 5-second timeout so a non-zero exit (or a child that prints to
+    stderr but technically succeeds) surfaces as an explicit error
+    instead of a silent "Popen succeeded but Finder never opened"
+    failure mode. The launcher itself returns immediately once the
+    target app has been told to open — we're not waiting for the user
+    to close Finder.
+
+    Raises ``OSError`` for missing helpers (``xdg-open`` not installed,
+    etc.), non-zero exit status, or timeout. The route handler maps
+    these to a 500 with the captured stderr.
+    """
+    if sys.platform == "darwin":
+        cmd = ["open", str(path)]
+    elif sys.platform == "win32":
+        # ``os.startfile`` is Windows-only and is the canonical way to
+        # open a path with the default associated application. It
+        # returns immediately and doesn't expose a return code; trust it.
+        os.startfile(str(path))  # type: ignore[attr-defined]
+        return
+    else:
+        # Linux/BSD/etc. — ``xdg-open`` is the desktop-agnostic choice;
+        # falls through to the user's configured file manager.
+        cmd = ["xdg-open", str(path)]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise OSError(f"{cmd[0]} not found on PATH") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise OSError(f"{cmd[0]} timed out after 5s") from exc
+
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip() or "no stderr"
+        raise OSError(f"{cmd[0]} exited {result.returncode}: {stderr}")
+
+
+@router.post("/memory-dirs/open")
+async def open_memory_dir(request: Request, config=Depends(get_config)):
+    """Reveal a registered ``memory_dir`` in the OS file manager.
+
+    Body: ``{path: str}``. The path must already be in
+    ``config.indexing.memory_dirs`` — arbitrary filesystem paths cannot
+    be opened through this endpoint, since ``mm web`` is a local tool
+    but defense-in-depth keeps the route useful even if the bind host
+    were ever changed away from ``127.0.0.1``. Missing dirs return 404
+    rather than spawning a file-manager pointed at nothing.
+    """
+    body = await request.json()
+    dir_path = body.get("path", "").strip()
+    if not dir_path:
+        raise HTTPException(status_code=400, detail="path is required")
+
+    resolved = Path(dir_path).expanduser().resolve()
+    resolved_norm = norm_path(resolved)
+
+    in_list = any(
+        norm_path(Path(p).expanduser()) == resolved_norm for p in config.indexing.memory_dirs
+    )
+    if not in_list:
+        raise HTTPException(status_code=404, detail="Directory not in memory_dirs")
+    if not resolved.is_dir():
+        raise HTTPException(status_code=404, detail="Directory does not exist on disk")
+
+    try:
+        _open_in_file_manager(resolved)
+    except OSError as exc:
+        # Log with the resolved path so the server log gives the user a
+        # full repro line. The toast only sees the message; the log gets
+        # the path too in case it's a path-related failure (NFC vs NFD,
+        # special chars, etc.).
+        logger.warning("memory-dirs/open failed for %s: %s", resolved, exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {"ok": True, "path": str(resolved)}
 
 
 @router.get("/memory-dirs/status")
@@ -490,7 +606,11 @@ async def memory_dirs_status(
     """
     from memtomem.indexing.engine import memory_dir_stats
 
-    stats = await memory_dir_stats(storage, config.indexing.memory_dirs)
+    stats = await memory_dir_stats(
+        storage,
+        config.indexing.memory_dirs,
+        supported_extensions=config.indexing.supported_extensions,
+    )
     return {"dirs": stats}
 
 

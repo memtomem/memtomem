@@ -1087,3 +1087,127 @@ class TestMemoryDirsStatus:
         assert by_path[str(codex)]["provider"] == "openai"
         assert by_path[str(plans)]["provider"] == "claude"
         assert by_path[str(claude_mem)]["provider"] == "claude"
+
+
+class TestOpenMemoryDir:
+    """``POST /api/memory-dirs/open`` reveals a registered dir in the OS
+    file manager. Whitelist-gated against ``memory_dirs`` so the route
+    can't be coerced into spawning a file manager pointed at arbitrary
+    filesystem paths even if ``mm web`` were ever bound to a non-loopback
+    interface."""
+
+    async def test_rejects_path_not_in_memory_dirs(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        registered = tmp_path / "registered"
+        registered.mkdir()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        app.state.config.indexing.memory_dirs = [registered]
+
+        with patch("memtomem.web.routes.system._open_in_file_manager") as opener:
+            resp = await client.post(
+                "/api/memory-dirs/open",
+                json={"path": str(elsewhere)},
+            )
+        assert resp.status_code == 404, resp.text
+        opener.assert_not_called()
+
+    async def test_rejects_missing_dir_on_disk(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        # Path is registered but the directory has been removed from disk
+        # — opening would either fail at the OS level or pop a confusing
+        # "location not available" dialog. 404 short-circuits cleanly.
+        ghost = tmp_path / "ghost"
+        app.state.config.indexing.memory_dirs = [ghost]
+
+        with patch("memtomem.web.routes.system._open_in_file_manager") as opener:
+            resp = await client.post(
+                "/api/memory-dirs/open",
+                json={"path": str(ghost)},
+            )
+        assert resp.status_code == 404, resp.text
+        opener.assert_not_called()
+
+    async def test_opens_registered_dir(self, app, client: AsyncClient, tmp_path: Path) -> None:
+        target = tmp_path / "target"
+        target.mkdir()
+        app.state.config.indexing.memory_dirs = [target]
+
+        with patch("memtomem.web.routes.system._open_in_file_manager") as opener:
+            resp = await client.post(
+                "/api/memory-dirs/open",
+                json={"path": str(target)},
+            )
+        assert resp.status_code == 200, resp.text
+        opener.assert_called_once()
+        # The path passed to the helper should be the resolved target.
+        called_with = opener.call_args.args[0]
+        assert called_with == target.resolve()
+
+
+class TestRemoveMemoryDirChunkCleanup:
+    """``POST /api/memory-dirs/remove`` with ``delete_chunks=true`` must
+    drop every chunk under the resolved dir prefix; the default keeps
+    chunks searchable so the Web UI's checkbox-opt-in stays the safe
+    path. Mirrors the dir-level UX: removing a watch entry is reversible
+    until the user explicitly elects chunk cleanup."""
+
+    async def test_default_does_not_delete_chunks(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "going-away"
+        keep = tmp_path / "keep-this"
+        target.mkdir()
+        keep.mkdir()
+        app.state.config.indexing.memory_dirs = [target, keep]
+
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/remove",
+                json={"path": str(target)},
+            )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["deleted_chunks"] == 0
+        app.state.storage.delete_by_source.assert_not_called()
+
+    async def test_delete_chunks_true_removes_matching_source_files(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "going-away"
+        keep = tmp_path / "keep-this"
+        target.mkdir()
+        keep.mkdir()
+        app.state.config.indexing.memory_dirs = [target, keep]
+
+        # Two source files under ``target`` (should be deleted) plus one
+        # under ``keep`` (must be left alone). ``delete_by_source`` is
+        # mocked to return 2 chunks per file, so the route should report
+        # 4 deleted total.
+        under_target_a = target / "a.md"
+        under_target_b = target / "sub" / "b.md"
+        under_keep = keep / "k.md"
+        app.state.storage.get_source_files_with_counts.return_value = [
+            (under_target_a, 2, "2026-04-29T00:00:00", "default", 100, 50, 200),
+            (under_target_b, 2, "2026-04-29T00:00:00", "default", 100, 50, 200),
+            (under_keep, 5, "2026-04-29T00:00:00", "default", 100, 50, 200),
+        ]
+        app.state.storage.delete_by_source = AsyncMock(return_value=2)
+
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/remove",
+                json={"path": str(target), "delete_chunks": True},
+            )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["deleted_chunks"] == 4
+        # Two calls — one per matching source file. The ``keep`` file
+        # must NOT trigger a delete.
+        assert app.state.storage.delete_by_source.call_count == 2
+        deleted_paths = [call.args[0] for call in app.state.storage.delete_by_source.call_args_list]
+        assert under_target_a in deleted_paths
+        assert under_target_b in deleted_paths
+        assert under_keep not in deleted_paths

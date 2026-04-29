@@ -54,6 +54,18 @@ const _MEMORY_DIR_PROVIDER_COLLAPSED = new Set(['claude', 'openai']);
 // guard needed here.
 const _MEMORY_DIR_PROVIDER_FALLBACK = 'user';
 
+// Sort dropdown only renders once a product leaf has at least this many
+// entries — short leaves (1-3 dirs) don't benefit and the dropdown would
+// add visual noise. ``claude-memory`` is the dominant case (one entry per
+// project under ``~/.claude/projects``).
+const _MEMORY_DIRS_SORT_THRESHOLD = 6;
+const _MEMORY_DIRS_SORT_KEYS = [
+  'created_desc', 'created_asc', 'path_asc',
+  'files_desc', 'chunks_desc', 'last_indexed_desc',
+];
+const _MEMORY_DIRS_SORT_DEFAULT = 'created_desc';
+const _MEMORY_DIRS_SORT_LS_PREFIX = 'memtomem.memory_dirs.sort.';
+
 function _buildMemoryDirsPanel(initialDirs) {
   const wrap = document.createElement('div');
   wrap.className = 'memory-dirs-widget';
@@ -107,19 +119,58 @@ function _buildMemoryDirsPanel(initialDirs) {
   }
 
   async function handleRemove(path) {
-    const ok = await showConfirm({
+    // Offer chunk cleanup as an opt-in checkbox when the dir actually
+    // has indexed chunks. Default unchecked — the destructive path
+    // requires a deliberate click, mirroring the existing safe-by-
+    // default remove semantics. Dirs with zero chunks fall back to the
+    // simple boolean confirm.
+    const st = statusByPath[path];
+    const chunkCount = (st && st.chunk_count) || 0;
+    const extraOption = chunkCount > 0
+      ? {
+          id: 'deleteChunks',
+          label: t('confirm.memory_dir_delete_chunks_label', { count: chunkCount }),
+          defaultChecked: false,
+        }
+      : null;
+    const result = await showConfirm({
       title: t('confirm.memory_dir_remove_title'),
       message: t('confirm.memory_dir_remove_msg', { path }),
+      extraOption,
     });
+    const ok = extraOption ? result && result.ok : result;
     if (!ok) return;
+    const deleteChunks = !!(extraOption && result && result.extras && result.extras.deleteChunks);
     try {
-      const resp = await api('POST', '/api/memory-dirs/remove', { path });
+      const resp = await api('POST', '/api/memory-dirs/remove', {
+        path, delete_chunks: deleteChunks,
+      });
       if (resp && Array.isArray(resp.memory_dirs)) {
         refreshDirs(resp.memory_dirs);
       }
-      showToast(t('toast.memory_dir.removed', { path }), 'success');
+      const deleted = (resp && resp.deleted_chunks) || 0;
+      if (deleteChunks && deleted > 0) {
+        showToast(
+          t('toast.memory_dir.removed_with_chunks', { path, count: deleted }),
+          'success',
+        );
+      } else {
+        showToast(t('toast.memory_dir.removed', { path }), 'success');
+      }
     } catch (err) {
       showToast(t('toast.memory_dir.remove_failed', { error: _apiErrorText(err) }), 'error');
+    }
+  }
+
+  async function handleOpenOne(path, btn) {
+    if (btn) btnLoading(btn, true);
+    try {
+      await api('POST', '/api/memory-dirs/open', { path });
+      showToast(t('toast.memory_dir.opened', { path }), 'success');
+    } catch (err) {
+      showToast(t('toast.memory_dir.open_failed', { error: _apiErrorText(err) }), 'error');
+    } finally {
+      if (btn) btnLoading(btn, false);
     }
   }
 
@@ -188,6 +239,15 @@ function _buildMemoryDirsPanel(initialDirs) {
 
   let _addOpen = false;
   function render() {
+    // Capture current vendor-group open state so a sort-dropdown change
+    // (or any other mid-flight render) doesn't collapse the group the
+    // user is actively looking at. Falls through to the default-collapse
+    // set on first render or when the group isn't in the DOM yet.
+    const openByProvider = {};
+    for (const detail of wrap.querySelectorAll('details.memory-dirs-group')) {
+      const p = detail.dataset.provider;
+      if (p) openByProvider[p] = detail.open;
+    }
     wrap.innerHTML = '';
 
     // Single-row header: title · total summary · [+ Add] [↻ Reindex all]
@@ -291,7 +351,77 @@ function _buildMemoryDirsPanel(initialDirs) {
       bucket.byCategory[cat].push(d);
     }
 
+    function _formatDateTime(iso) {
+      // Locale-formatted "{date} {time}" — drops the year for current-year
+      // dates so the row stays compact, keeps the year for older entries
+      // so historical rows remain unambiguous. Time is always shown so
+      // sort modes that hinge on minutes (e.g. burst indexing runs) can
+      // be verified at a glance.
+      if (!iso) return '';
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return '';
+      const now = new Date();
+      const sameYear = d.getFullYear() === now.getFullYear();
+      const dateOpts = sameYear
+        ? { month: 'short', day: 'numeric' }
+        : { year: 'numeric', month: 'short', day: 'numeric' };
+      const timeOpts = { hour: '2-digit', minute: '2-digit' };
+      return `${d.toLocaleDateString(undefined, dateOpts)} `
+        + `${d.toLocaleTimeString(undefined, timeOpts)}`;
+    }
+
+    function _buildItemMetaText(st) {
+      // Single-line meta string: ``created {dt} · indexed {dt} ·
+      // {files} files · {chunks} chunks``. ``file_count`` (from disk)
+      // is the source of truth for "files" — ``source_file_count``
+      // only counts files that already have chunks, so un-indexed
+      // dirs would read "0 files" without it. Showing the disk count
+      // also gives the user a heads-up about how big a Reindex is
+      // about to be.
+      if (!st) return '';
+      if (st.exists === false) return t('sources.memory_dirs.status_missing');
+
+      const parts = [];
+      if (st.created_at) {
+        parts.push(t(
+          'sources.memory_dirs.meta_created',
+          { dt: _formatDateTime(st.created_at) },
+        ));
+      }
+      if (st.last_indexed) {
+        parts.push(t(
+          'sources.memory_dirs.meta_indexed',
+          { dt: _formatDateTime(st.last_indexed) },
+        ));
+      }
+      const fileCount = (typeof st.file_count === 'number') ? st.file_count : 0;
+      const chunkCount = st.chunk_count || 0;
+      if (chunkCount > 0) {
+        // Indexed: show files (disk) + chunks together.
+        parts.push(t(
+          'sources.memory_dirs.status_group',
+          { files: fileCount, chunks: chunkCount },
+        ));
+      } else if (fileCount > 0) {
+        // Un-indexed but has files on disk → "{N} files · not indexed"
+        // so the user sees both how much content is waiting and the
+        // current state.
+        parts.push(t('sources.memory_dirs.status_files_only', { count: fileCount }));
+        parts.push(t('sources.memory_dirs.status_empty'));
+      } else {
+        // Truly empty dir (no supported files on disk).
+        parts.push(t('sources.memory_dirs.status_empty'));
+      }
+      return parts.join(' · ');
+    }
+
     function _buildItemRow(path, st) {
+      // Two-row layout: ``main`` carries the path + action buttons,
+      // ``meta`` carries created/indexed timestamps and counts so the
+      // user can verify any sort mode (newest first, recently indexed,
+      // most files / chunks) directly on each row. The meta sub-row
+      // tucks under the path with mono-font muted styling so it doesn't
+      // compete with the actionable controls visually.
       const item = document.createElement('li');
       item.className = 'memory-dirs-item';
       if (statusLoaded && st) {
@@ -299,34 +429,26 @@ function _buildMemoryDirsPanel(initialDirs) {
         if (st.exists === false) item.classList.add('memory-dirs-item-missing');
       }
 
+      const mainRow = document.createElement('div');
+      mainRow.className = 'memory-dirs-item-main';
+
       const pathSpan = document.createElement('span');
       pathSpan.className = 'memory-dirs-path';
       pathSpan.textContent = path;
       pathSpan.title = path;
-      item.appendChild(pathSpan);
+      mainRow.appendChild(pathSpan);
 
-      if (statusLoaded && st) {
-        const badge = document.createElement('span');
-        badge.className = 'memory-dirs-status';
-        if (st.exists === false) {
-          badge.classList.add('missing');
-          badge.textContent = t('sources.memory_dirs.status_missing');
-        } else if ((st.chunk_count || 0) === 0) {
-          badge.classList.add('empty');
-          badge.textContent = t('sources.memory_dirs.status_empty');
-        } else {
-          badge.textContent = t(
-            'sources.memory_dirs.status_chunks',
-            { count: st.chunk_count },
-          );
-        }
-        item.appendChild(badge);
-      } else {
-        // Placeholder so the action buttons line up before status loads.
-        const ph = document.createElement('span');
-        ph.className = 'memory-dirs-status placeholder';
-        item.appendChild(ph);
-      }
+      const openBtn = document.createElement('button');
+      openBtn.type = 'button';
+      openBtn.className = 'btn btn-xs btn-ghost memory-dirs-open-btn';
+      openBtn.textContent = t('sources.memory_dirs.action_open');
+      openBtn.title = t('sources.memory_dirs.open_title');
+      // Disable when the dir isn't on disk — spawning a file manager
+      // pointed at a missing path produces a confusing OS error popup
+      // on macOS / a "location is not available" dialog on Windows.
+      if (statusLoaded && st && st.exists === false) openBtn.disabled = true;
+      openBtn.addEventListener('click', () => handleOpenOne(path, openBtn));
+      mainRow.appendChild(openBtn);
 
       const reindexBtn = document.createElement('button');
       reindexBtn.type = 'button';
@@ -341,7 +463,7 @@ function _buildMemoryDirsPanel(initialDirs) {
       );
       reindexBtn.title = t('sources.memory_dirs.reindex_title');
       reindexBtn.addEventListener('click', () => handleReindexOne(path, reindexBtn));
-      item.appendChild(reindexBtn);
+      mainRow.appendChild(reindexBtn);
 
       const removeBtn = document.createElement('button');
       removeBtn.type = 'button';
@@ -351,7 +473,24 @@ function _buildMemoryDirsPanel(initialDirs) {
       removeBtn.setAttribute('aria-label', t('sources.memory_dirs.delete_title'));
       if (dirs.length <= 1) removeBtn.disabled = true;
       removeBtn.addEventListener('click', () => handleRemove(path));
-      item.appendChild(removeBtn);
+      mainRow.appendChild(removeBtn);
+
+      item.appendChild(mainRow);
+
+      // Always render the meta row (even when status hasn't loaded yet)
+      // so the row height stays stable across the initial fetch — no
+      // jumpy reflow when ``/api/memory-dirs/status`` settles.
+      const metaRow = document.createElement('div');
+      metaRow.className = 'memory-dirs-item-meta';
+      if (statusLoaded && st) {
+        if (st.exists === false) metaRow.classList.add('missing');
+        else if ((st.chunk_count || 0) === 0) metaRow.classList.add('empty');
+        metaRow.textContent = _buildItemMetaText(st);
+      } else {
+        // U+00A0 reserves vertical space without showing visible text.
+        metaRow.textContent = ' ';
+      }
+      item.appendChild(metaRow);
 
       return item;
     }
@@ -366,6 +505,95 @@ function _buildMemoryDirsPanel(initialDirs) {
       if (cat === 'claude-memory') list.classList.add('memory-dirs-list-scroll');
       for (const path of entries) list.appendChild(_buildItemRow(path, statusByPath[path]));
       return list;
+    }
+
+    function _readSortPref(productKey) {
+      try {
+        const stored = localStorage.getItem(_MEMORY_DIRS_SORT_LS_PREFIX + productKey);
+        if (stored && _MEMORY_DIRS_SORT_KEYS.includes(stored)) return stored;
+      } catch (_err) { /* localStorage may be unavailable in private modes */ }
+      return _MEMORY_DIRS_SORT_DEFAULT;
+    }
+
+    function _writeSortPref(productKey, sortKey) {
+      try {
+        localStorage.setItem(_MEMORY_DIRS_SORT_LS_PREFIX + productKey, sortKey);
+      } catch (_err) { /* ignore — sort preference is best-effort */ }
+    }
+
+    function _sortEntries(entries, sortKey) {
+      // Returns a new array — never mutates the input. ``null`` /
+      // missing values always sink to the bottom regardless of asc/desc
+      // so un-indexed dirs don't dominate "Recently indexed" or jump
+      // ahead of real timestamps in "Newest first".
+      const arr = [...entries];
+      const pathCmp = (a, b) => a.localeCompare(b);
+      const byNumDesc = (key) => (a, b) => {
+        const sa = statusByPath[a];
+        const sb = statusByPath[b];
+        const va = (sa && typeof sa[key] === 'number') ? sa[key] : 0;
+        const vb = (sb && typeof sb[key] === 'number') ? sb[key] : 0;
+        if (vb !== va) return vb - va;
+        return pathCmp(a, b);
+      };
+      const byStrDesc = (key) => (a, b) => {
+        const sa = statusByPath[a];
+        const sb = statusByPath[b];
+        const va = sa && sa[key];
+        const vb = sb && sb[key];
+        if (va && vb) return vb < va ? -1 : (vb > va ? 1 : pathCmp(a, b));
+        if (va) return -1; // a has value, b doesn't → a first
+        if (vb) return 1;
+        return pathCmp(a, b);
+      };
+      const byStrAsc = (key) => (a, b) => {
+        const sa = statusByPath[a];
+        const sb = statusByPath[b];
+        const va = sa && sa[key];
+        const vb = sb && sb[key];
+        if (va && vb) return va < vb ? -1 : (va > vb ? 1 : pathCmp(a, b));
+        if (va) return -1;
+        if (vb) return 1;
+        return pathCmp(a, b);
+      };
+
+      switch (sortKey) {
+        case 'path_asc': arr.sort(pathCmp); break;
+        // ``file_count`` reflects the disk truth (matches the badge),
+        // so "Most files" sorts by what the user actually sees rather
+        // than the indexed-only ``source_file_count`` which is 0
+        // until the dir is reindexed.
+        case 'files_desc': arr.sort(byNumDesc('file_count')); break;
+        case 'chunks_desc': arr.sort(byNumDesc('chunk_count')); break;
+        case 'created_desc': arr.sort(byStrDesc('created_at')); break;
+        case 'created_asc': arr.sort(byStrAsc('created_at')); break;
+        case 'last_indexed_desc': arr.sort(byStrDesc('last_indexed')); break;
+        default: arr.sort(byStrDesc('created_at'));
+      }
+      return arr;
+    }
+
+    function _buildSortDropdown(productKey, currentValue) {
+      const select = document.createElement('select');
+      select.className = 'memory-dirs-sort';
+      select.setAttribute('aria-label', t('sources.memory_dirs.sort_label'));
+      select.title = t('sources.memory_dirs.sort_label');
+      for (const key of _MEMORY_DIRS_SORT_KEYS) {
+        const opt = document.createElement('option');
+        opt.value = key;
+        opt.textContent = t('sources.memory_dirs.sort.' + key);
+        if (key === currentValue) opt.selected = true;
+        select.appendChild(opt);
+      }
+      select.addEventListener('change', (ev) => {
+        ev.stopPropagation();
+        _writeSortPref(productKey, select.value);
+        render();
+      });
+      // Stop click bubbling so opening the dropdown inside a ``<summary>``
+      // doesn't toggle the parent ``<details>``.
+      select.addEventListener('click', (ev) => ev.stopPropagation());
+      return select;
     }
 
     function _aggregateStatus(entries) {
@@ -423,7 +651,14 @@ function _buildMemoryDirsPanel(initialDirs) {
       group.className = 'memory-dirs-group';
       if (!isSingleLeaf) group.classList.add('memory-dirs-vendor-group');
       group.dataset.provider = provider;
-      if (!_MEMORY_DIR_PROVIDER_COLLAPSED.has(provider)) group.open = true;
+      // Existing user choice wins over the static default-collapse set —
+      // otherwise picking a sort option closes the group the user just
+      // opened.
+      if (provider in openByProvider) {
+        group.open = openByProvider[provider];
+      } else if (!_MEMORY_DIR_PROVIDER_COLLAPSED.has(provider)) {
+        group.open = true;
+      }
 
       const summary = document.createElement('summary');
       summary.className = 'memory-dirs-summary';
@@ -451,16 +686,25 @@ function _buildMemoryDirsPanel(initialDirs) {
       // Per-product reindex stays at the product level; no vendor bulk
       // button (plan Q5). For single-leaf vendors the product *is* the
       // vendor, so the button belongs on the summary row.
-      if (isSingleLeaf) summary.appendChild(_buildGroupReindexButton(categories[0]));
-      group.appendChild(summary);
-
       if (isSingleLeaf) {
-        group.appendChild(_buildList(categories[0], bucket.byCategory[categories[0]]));
+        const onlyEntries = bucket.byCategory[categories[0]];
+        const productKey = `${provider}:${categories[0]}`;
+        const sortKey = _readSortPref(productKey);
+        if (onlyEntries.length >= _MEMORY_DIRS_SORT_THRESHOLD) {
+          summary.appendChild(_buildSortDropdown(productKey, sortKey));
+        }
+        summary.appendChild(_buildGroupReindexButton(categories[0]));
+        group.appendChild(summary);
+        const sortedEntries = _sortEntries(onlyEntries, sortKey);
+        group.appendChild(_buildList(categories[0], sortedEntries));
       } else {
+        group.appendChild(summary);
         const products = document.createElement('div');
         products.className = 'memory-dirs-products';
         for (const cat of categories) {
           const entries = bucket.byCategory[cat];
+          const productKey = `${provider}:${cat}`;
+          const sortKey = _readSortPref(productKey);
           const section = document.createElement('section');
           section.className = 'memory-dirs-product';
           section.dataset.category = cat;
@@ -483,9 +727,13 @@ function _buildMemoryDirsPanel(initialDirs) {
             header.appendChild(_buildStatusBadge(productAgg));
           }
 
+          if (entries.length >= _MEMORY_DIRS_SORT_THRESHOLD) {
+            header.appendChild(_buildSortDropdown(productKey, sortKey));
+          }
           header.appendChild(_buildGroupReindexButton(cat));
           section.appendChild(header);
-          section.appendChild(_buildList(cat, entries));
+          const sortedEntries = _sortEntries(entries, sortKey);
+          section.appendChild(_buildList(cat, sortedEntries));
           products.appendChild(section);
         }
         group.appendChild(products);

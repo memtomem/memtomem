@@ -1611,3 +1611,112 @@ class TestMemoryDirStats:
         storage = _FakeStorageForStats([])
         result = await memory_dir_stats(storage, [c, a, b])
         assert [r["path"] for r in result] == [str(c), str(a), str(b)]
+
+    async def test_created_at_is_iso_for_existing_dir(self, tmp_path):
+        """``created_at`` is the OS filesystem creation time, ISO-8601 UTC.
+
+        Drives the Web UI's "Newest first" / "Oldest first" sort options.
+        """
+        from memtomem.indexing.engine import memory_dir_stats
+
+        d = tmp_path / "fresh"
+        d.mkdir()
+        storage = _FakeStorageForStats([])
+        result = await memory_dir_stats(storage, [d])
+        created = result[0]["created_at"]
+        assert isinstance(created, str)
+        # ISO-8601 with timezone (e.g., "2026-04-29T10:30:00+00:00").
+        assert "T" in created and ("+" in created or created.endswith("Z"))
+
+    async def test_created_at_none_when_dir_missing(self, tmp_path):
+        """A registered ``memory_dir`` that doesn't exist on disk should
+        not crash — it just reports ``created_at=None`` (and the existing
+        ``exists=False``)."""
+        from memtomem.indexing.engine import memory_dir_stats
+
+        gone = tmp_path / "vanished"
+        storage = _FakeStorageForStats([])
+        result = await memory_dir_stats(storage, [gone])
+        assert result[0]["exists"] is False
+        assert result[0]["created_at"] is None
+
+    async def test_last_indexed_is_max_updated_at_under_dir(self, tmp_path):
+        """``last_indexed`` aggregates ``MAX(updated_at)`` over source
+        files under the dir prefix — not just the latest row in the
+        whole table."""
+        from memtomem.indexing.engine import memory_dir_stats
+
+        d = tmp_path / "active"
+        d.mkdir()
+        old = d / "old.md"
+        new = d / "new.md"
+        old.write_text("# old")
+        new.write_text("# new")
+
+        # Row shape: (path, chunk_count, last_updated, namespaces, avg, min, max)
+        rows = [
+            (old, 2, "2026-01-01T00:00:00+00:00", "default", 100, 50, 200),
+            (new, 3, "2026-04-29T12:00:00+00:00", "default", 100, 50, 200),
+        ]
+        storage = _FakeStorageForStats(rows)
+        result = await memory_dir_stats(storage, [d])
+        assert result[0]["last_indexed"] == "2026-04-29T12:00:00+00:00"
+
+    async def test_last_indexed_none_when_dir_has_no_chunks(self, tmp_path):
+        """Empty / un-indexed dirs report ``last_indexed=None`` so the
+        Web UI's "Recently indexed" sort can sink them to the bottom."""
+        from memtomem.indexing.engine import memory_dir_stats
+
+        d = tmp_path / "empty"
+        d.mkdir()
+        storage = _FakeStorageForStats([])
+        result = await memory_dir_stats(storage, [d])
+        assert result[0]["chunk_count"] == 0
+        assert result[0]["last_indexed"] is None
+
+    async def test_file_count_zero_when_extensions_not_passed(self, tmp_path):
+        """Backward compat — fixtures that call the function without
+        ``supported_extensions`` get ``file_count=0`` rather than a
+        crash, even when the dir has files."""
+        from memtomem.indexing.engine import memory_dir_stats
+
+        d = tmp_path / "with-files"
+        d.mkdir()
+        (d / "a.md").write_text("# a")
+        (d / "b.md").write_text("# b")
+
+        storage = _FakeStorageForStats([])
+        result = await memory_dir_stats(storage, [d])
+        assert result[0]["file_count"] == 0
+
+    async def test_file_count_walks_disk_when_extensions_passed(self, tmp_path):
+        """``file_count`` reflects what's on disk so the Web UI can
+        show "{N} files" on un-indexed dirs too — ``source_file_count``
+        only counts files with chunks, which is 0 before the user hits
+        Reindex."""
+        from memtomem.indexing.engine import memory_dir_stats
+
+        d = tmp_path / "fresh"
+        d.mkdir()
+        (d / "a.md").write_text("# a")
+        (d / "sub").mkdir()
+        (d / "sub" / "b.md").write_text("# b")
+        # Unsupported suffix — should not be counted.
+        (d / "ignore.txt").write_text("x")
+
+        storage = _FakeStorageForStats([])
+        result = await memory_dir_stats(storage, [d], supported_extensions=frozenset({".md"}))
+        assert result[0]["file_count"] == 2
+        # ``source_file_count`` stays 0 — no chunks indexed yet.
+        assert result[0]["source_file_count"] == 0
+
+    async def test_file_count_zero_for_missing_dir(self, tmp_path):
+        """A registered dir that doesn't exist on disk returns
+        ``file_count=0`` without crashing the gather."""
+        from memtomem.indexing.engine import memory_dir_stats
+
+        gone = tmp_path / "vanished"
+        storage = _FakeStorageForStats([])
+        result = await memory_dir_stats(storage, [gone], supported_extensions=frozenset({".md"}))
+        assert result[0]["exists"] is False
+        assert result[0]["file_count"] == 0
