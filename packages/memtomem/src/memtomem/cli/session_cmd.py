@@ -197,7 +197,14 @@ async def _start(
 ) -> None:
     from memtomem.cli._bootstrap import cli_components
 
+    # JSON exposes a flat ``auto_ended`` list of UUIDs; the per-reason counters
+    # below feed the text-mode breakdown so an interactive operator still sees
+    # whether the cleanup came from cutoff age (stale) or a cross-agent
+    # forced-end. ``sessions.metadata.reason`` carries the same information
+    # row-by-row for JSON consumers that need it (queryable via SQL).
     auto_ended: list[str] = []
+    n_stale = 0
+    n_cross_agent = 0
     resumed = False
     session_id: str | None = None
     ns = _derive_session_namespace(agent_id, namespace)
@@ -215,6 +222,7 @@ async def _start(
                     {"auto_ended": True, "reason": "stale"},
                 )
                 auto_ended.append(row["id"])
+                n_stale += 1
             if len(stale_rows) >= _STALE_CLEANUP_BATCH:
                 logger.warning(
                     "auto-end-stale truncated to %d sessions; rerun the hook "
@@ -242,6 +250,7 @@ async def _start(
                             {"auto_ended": True, "reason": "cross_agent"},
                         )
                         auto_ended.append(current)
+                        n_cross_agent += 1
 
         if session_id is None:
             session_id = str(uuid.uuid4())
@@ -270,7 +279,12 @@ async def _start(
     click.echo(f"  Agent: {agent_id}")
     click.echo(f"  Namespace: {ns}")
     if auto_ended:
-        click.echo(f"  Auto-ended {len(auto_ended)} session(s)")
+        bits = []
+        if n_stale:
+            bits.append(f"{n_stale} stale")
+        if n_cross_agent:
+            bits.append(f"{n_cross_agent} cross-agent")
+        click.echo(f"  Auto-ended {len(auto_ended)} session(s) ({', '.join(bits)})")
 
 
 @session.command()

@@ -509,6 +509,36 @@ class TestSessionStartIdempotent:
         assert data["resumed"] is False
         assert data["auto_ended"] == []
 
+    def test_text_mode_breakdown_by_reason(self, runner, monkeypatch):
+        """Text mode preserves the stale-vs-cross-agent split that the JSON
+        flat list intentionally drops. Both reasons firing in the same call
+        produces a ``(N stale, M cross-agent)`` suffix; pinning here so a
+        future refactor can't silently regress to a single bare count."""
+        stale_id = "55555555-5555-5555-5555-555555555555"
+        cross_id = "66666666-6666-6666-6666-666666666666"
+        comp = self._comp(
+            current_row=self._row(cross_id, "claude-code"),
+            stale=[self._row(stale_id, "claude-code")],
+        )
+        self._patch(monkeypatch, comp, cross_id)
+
+        result = runner.invoke(
+            cli,
+            [
+                "session",
+                "start",
+                "--agent-id",
+                "codex",
+                "--idempotent",
+                "--auto-end-stale",
+                "24h",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Auto-ended 2 session(s)" in result.output
+        assert "1 stale" in result.output
+        assert "1 cross-agent" in result.output
+
     def test_invalid_duration_raises_bad_parameter(self, runner, monkeypatch):
         """Hook authors mistyping ``--auto-end-stale`` see a useful Click
         error instead of a stack trace. Pinned because the parser is
