@@ -9,6 +9,7 @@ pydantic-settings parses list-typed env vars as JSON arrays.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Literal
@@ -2527,6 +2528,148 @@ class TestMcpPasteHints:
         assert "copy into your editor's config file" in out
 
 
+class TestMcpChoiceOneClaudeAddBranches:
+    """``mcp_choice == 1`` invokes ``claude mcp add`` and must distinguish
+    three failure modes — the old code collapsed all of them into
+    "'claude' not found", which lied to users who had ``claude`` on PATH
+    but already had a ``memtomem`` user-scope entry registered (rerun of
+    ``mm init``).
+    """
+
+    @staticmethod
+    def _state(tmp_path: Path) -> dict:
+        state = _make_init_state(tmp_path)
+        state["mcp_choice"] = 1
+        return state
+
+    def test_returncode_zero_emits_configured(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            init_cmd,
+            "_run",
+            lambda cmd, timeout=10: subprocess.CompletedProcess(cmd, 0, "", ""),
+        )
+
+        init_cmd._write_config_and_summary(self._state(tmp_path), tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "Claude Code: configured (user scope)" in out
+        # success path must NOT also write the .mcp.json fallback.
+        assert not (tmp_path / ".mcp.json").exists()
+        assert "MCP config: wrote ./.mcp.json" not in out
+
+    def test_already_exists_stderr_skips_fallback(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Reruns of ``mm init`` (or any case where ``memtomem`` is already
+        in the user-scope claude config) must report success and skip the
+        ``.mcp.json`` fallback — Claude Code is already covered by the
+        existing user-scope entry, so a project-scope file would only add
+        duplicate state for the user to clean up.
+        """
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            init_cmd,
+            "_run",
+            lambda cmd, timeout=10: subprocess.CompletedProcess(
+                cmd, 1, "", "MCP server memtomem already exists in user config\n"
+            ),
+        )
+
+        init_cmd._write_config_and_summary(self._state(tmp_path), tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "Claude Code: already registered (user scope) — skipped" in out
+        # Regression: the old wording must not leak back in.
+        assert "'claude' not found" not in out
+        # No fallback file should be written — Claude Code already has the
+        # user-scope entry covering it.
+        assert not (tmp_path / ".mcp.json").exists()
+        assert "MCP config: wrote ./.mcp.json" not in out
+
+    def test_generic_nonzero_surfaces_stderr_and_falls_back(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Any other non-zero return must NOT be reported as "claude not
+        found" — claude clearly ran. Surface the first stderr line so the
+        user can see what actually broke before we fall back to
+        ``.mcp.json``.
+        """
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            init_cmd,
+            "_run",
+            lambda cmd, timeout=10: subprocess.CompletedProcess(
+                cmd, 2, "", "claude: error: scope `user` is locked\n"
+            ),
+        )
+
+        init_cmd._write_config_and_summary(self._state(tmp_path), tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "Claude Code: claude mcp add failed" in out
+        assert "scope `user` is locked" in out
+        # Regression: misleading wording must not fire here.
+        assert "'claude' not found" not in out
+        # Generic failure DOES write the fallback — Claude Code is not yet
+        # configured, so user needs the project-scope file to recover.
+        assert (tmp_path / ".mcp.json").exists()
+        assert "MCP config: wrote ./.mcp.json" in out
+
+    def test_filenotfound_keeps_legacy_not_found_message(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """When the ``claude`` binary is genuinely missing the original
+        message is correct and must stay — this is the only branch where
+        "'claude' not found" reflects reality.
+        """
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        def _missing(cmd: list[str], timeout: int = 10) -> subprocess.CompletedProcess:
+            raise FileNotFoundError(2, "No such file or directory: 'claude'")
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(init_cmd, "_run", _missing)
+
+        init_cmd._write_config_and_summary(self._state(tmp_path), tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "Claude Code: 'claude' not found" in out
+        assert (tmp_path / ".mcp.json").exists()
+
+
 class TestClaudeDesktopConfigHint:
     """The Claude Desktop paste-hint must point at the real Claude Desktop
     config path for the user's OS, not the macOS-only path that used to be
@@ -4935,6 +5078,14 @@ class TestInitialSeedThreshold:
         assert "Reindex All to index 3 memory_dirs" in out
         # Regression: single-dir hint must NOT fire for multi-dir unseeded.
         assert f"mm index {state['memory_dir']}\n" not in out
+        # Step 1 already opens `mm web`, so the legacy step 3 ("3. mm web
+        # (browse...)") is folded into step 1 to avoid printing the same
+        # command on two lines (UX cleanup, 2026-04-29). Pin both halves —
+        # the consolidated wording in step 1, and the absence of a
+        # standalone step-3 line.
+        assert "then browse & manage your memories" in out
+        # The 4-space indented "3. " step-line must be gone in this branch.
+        assert "    3. " not in out
 
     def test_next_steps_single_dir_unseeded_keeps_mm_index_hint(
         self,
@@ -4962,6 +5113,12 @@ class TestInitialSeedThreshold:
         assert f"mm index {state['memory_dir']}" in out
         assert "Reindex All" not in out
         assert "already seeded" not in out
+        # In single-dir (or seeded) branches step 1 is `mm index`, not
+        # `mm web`, so the standalone step-3 `mm web (browse...)` line
+        # must still fire — the consolidation only applies to
+        # multi-dir-unseeded.
+        assert "    3. " in out
+        assert "mm web  (browse & manage your memories)" in out
 
     def test_next_steps_seeded_annotates_mm_index_hint(
         self,

@@ -2076,12 +2076,29 @@ def _write_config_and_summary(
         claude_cmd.append(server_cmd)
         claude_cmd.extend(server_args)
 
+        # Three failure modes need distinct UX, but the old code collapsed
+        # all of them into "'claude' not found":
+        #   1. FileNotFoundError → claude binary genuinely missing.
+        #   2. returncode != 0 with "already exists" stderr → memtomem MCP
+        #      is already registered in the user's claude config (rerun of
+        #      `mm init`, or manual `claude mcp add` earlier). Treat as
+        #      success and skip the .mcp.json fallback — the existing user
+        #      scope entry already covers Claude Code.
+        #   3. returncode != 0 for any other reason → surface stderr so the
+        #      user can see what actually failed before we fall back.
         try:
             result = _run(claude_cmd, timeout=10)
             if result.returncode == 0:
                 click.secho("  Claude Code: configured (user scope)", fg="green")
+            elif "already exists" in (result.stderr or ""):
+                click.secho(
+                    "  Claude Code: already registered (user scope) — skipped",
+                    fg="green",
+                )
             else:
-                click.echo("  Claude Code: 'claude' not found. Use .mcp.json instead.")
+                stderr_line = (result.stderr or "").strip().splitlines()[0:1]
+                detail = stderr_line[0] if stderr_line else f"exit {result.returncode}"
+                click.echo(f"  Claude Code: claude mcp add failed ({detail}).")
                 _write_mcp_json(server_cmd, server_args, mcp_env)
                 click.echo("  MCP config: wrote ./.mcp.json")
                 _emit_mcp_paste_hints()
@@ -2225,20 +2242,26 @@ def _write_config_and_summary(
     # + unseeded case points at the Web UI Reindex All button because
     # ``mm index`` CLI is single-path only (v0.1.23) — suggesting
     # ``mm index ~/memories`` would miss the 28 provider dirs entirely.
+    # In that branch step 1 already opens `mm web`, so the legacy step 3
+    # ("mm web (browse...)") is folded in as a trailing clause to avoid
+    # printing the same command on two lines (UX cleanup, 2026-04-29).
+    multi_dir_unseeded = (not seeded) and len(seed_paths) > 1
     if seeded:
         click.echo(
             f"    1. {run_prefix}mm index {state['memory_dir']}"
             "  (already seeded — re-run only if you add files)"
         )
-    elif len(seed_paths) > 1:
+    elif multi_dir_unseeded:
         click.echo(
             f"    1. {run_prefix}mm web  "
-            f"(Sources → Reindex All to index {len(seed_paths)} memory_dirs)"
+            f"(Sources → Reindex All to index {len(seed_paths)} memory_dirs, "
+            "then browse & manage your memories)"
         )
     else:
         click.echo(f"    1. {run_prefix}mm index {state['memory_dir']}")
     click.echo(f"    2. {run_prefix}mm search 'your first query'")
-    click.echo(f"    3. {run_prefix}mm web  (browse & manage your memories)")
+    if not multi_dir_unseeded:
+        click.echo(f"    3. {run_prefix}mm web  (browse & manage your memories)")
     if profile.mm_binary_origin == "uvx":
         # uvx envs are destroyed when the process exits — the next `mm web`
         # invocation starts in a fresh ephemeral env that won't have any
