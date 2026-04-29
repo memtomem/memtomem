@@ -359,7 +359,7 @@ class TestImportSkills:
         assert any(s["name"] == "already" for s in data["skipped"])
 
     @pytest.mark.anyio
-    async def test_import_empty(self, client: AsyncClient):
+    async def test_import_empty(self, client: AsyncClient, tmp_path: Path):
         r = await client.post(
             "/api/context/skills/import",
             json={},
@@ -369,15 +369,13 @@ class TestImportSkills:
         assert data["imported"] == []
         # PR1: import response carries project_root + scanned_dirs so the UI
         # can tell users which paths were inspected when nothing was found.
-        assert "project_root" in data
+        assert data["project_root"] == str(tmp_path)
         assert ".claude/skills" in data["scanned_dirs"]
         assert ".gemini/skills" in data["scanned_dirs"]
         assert ".agents/skills" in data["scanned_dirs"]
 
     @pytest.mark.anyio
-    async def test_import_skipped_carries_reason_code(
-        self, client: AsyncClient, tmp_path: Path
-    ):
+    async def test_import_skipped_carries_reason_code(self, client: AsyncClient, tmp_path: Path):
         # Existing canonical + matching runtime → "canonical exists" skip.
         _make_skill(tmp_path, "already")
         _make_runtime_skill(tmp_path, ".claude/skills", "already", "# Different\n")
@@ -558,11 +556,11 @@ class TestImportCommands:
         assert any(i["name"] == "from-claude" for i in data["imported"])
 
     @pytest.mark.anyio
-    async def test_import_empty_carries_meta(self, client: AsyncClient):
+    async def test_import_empty_carries_meta(self, client: AsyncClient, tmp_path: Path):
         r = await client.post("/api/context/commands/import", json={})
         assert r.status_code == 200
         data = r.json()
-        assert "project_root" in data
+        assert data["project_root"] == str(tmp_path)
         assert ".claude/commands" in data["scanned_dirs"]
         assert ".gemini/commands" in data["scanned_dirs"]
 
@@ -722,11 +720,11 @@ class TestImportAgents:
         assert any(i["name"] == "from-claude" for i in data["imported"])
 
     @pytest.mark.anyio
-    async def test_import_empty_carries_meta(self, client: AsyncClient):
+    async def test_import_empty_carries_meta(self, client: AsyncClient, tmp_path: Path):
         r = await client.post("/api/context/agents/import", json={})
         assert r.status_code == 200
         data = r.json()
-        assert "project_root" in data
+        assert data["project_root"] == str(tmp_path)
         assert ".claude/agents" in data["scanned_dirs"]
         assert ".gemini/agents" in data["scanned_dirs"]
         assert ".codex/agents" in data["scanned_dirs"]

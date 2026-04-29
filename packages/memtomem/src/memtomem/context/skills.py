@@ -178,13 +178,14 @@ class ExtractResult:
 
     imported: list[Path]
     # (item_name, human_reason, reason_code) — see :mod:`memtomem.context._skip_reasons`.
-    skipped: list[tuple[str, str, str]] = field(default_factory=list)
+    skipped: list[tuple[str, str, skip_codes.SkipCode]] = field(default_factory=list)
 
 
 @dataclass
 class SkillSyncResult:
     generated: list[tuple[str, Path]]  # (runtime_name, target_path)
-    skipped: list[tuple[str, str, str]]  # (runtime_name, human_reason, reason_code)
+    # (runtime_name, human_reason, reason_code)
+    skipped: list[tuple[str, str, skip_codes.SkipCode]]
 
 
 def generate_all_skills(
@@ -199,7 +200,7 @@ def generate_all_skills(
             runtimes (currently ``claude_skills`` + ``gemini_skills``).
     """
     generated: list[tuple[str, Path]] = []
-    skipped: list[tuple[str, str, str]] = []
+    skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
 
     canonicals = list_canonical_skills(project_root)
     if not canonicals:
@@ -244,7 +245,7 @@ def extract_skills_to_canonical(
 
     canonical_root = canonical_skills_root(project_root)
     imported: list[Path] = []
-    skipped: list[tuple[str, str, str]] = []
+    skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
     seen: dict[str, str] = {}  # skill_name → first runtime label
 
     for detected in detect_skill_dirs(project_root):

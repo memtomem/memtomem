@@ -441,7 +441,7 @@ class AgentSyncResult:
     generated: list[tuple[str, Path]]  # (runtime, target_file)
     dropped: list[tuple[str, str, list[str]]]  # (runtime, agent_name, dropped_fields)
     # (runtime_or_agent, human_reason, reason_code) — see :mod:`memtomem.context._skip_reasons`.
-    skipped: list[tuple[str, str, str]]
+    skipped: list[tuple[str, str, skip_codes.SkipCode]]
 
 
 @dataclass
@@ -450,7 +450,7 @@ class ExtractResult:
 
     imported: list[Path]
     # (item_name, human_reason, reason_code) — see :mod:`memtomem.context._skip_reasons`.
-    skipped: list[tuple[str, str, str]] = field(default_factory=list)
+    skipped: list[tuple[str, str, skip_codes.SkipCode]] = field(default_factory=list)
 
 
 class StrictDropError(ValueError):
@@ -482,7 +482,7 @@ def generate_all_agents(
 
     generated: list[tuple[str, Path]] = []
     dropped: list[tuple[str, str, list[str]]] = []
-    skipped: list[tuple[str, str, str]] = []
+    skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
 
     canonicals = list_canonical_agents(project_root)
     if not canonicals:
@@ -539,7 +539,7 @@ def extract_agents_to_canonical(
     """
     canonical_root = project_root / CANONICAL_AGENT_ROOT
     imported: list[Path] = []
-    skipped: list[tuple[str, str, str]] = []
+    skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
     seen: dict[str, str] = {}  # agent_name → first runtime label
 
     for runtime_dir in (

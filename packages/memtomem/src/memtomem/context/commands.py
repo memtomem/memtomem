@@ -260,7 +260,7 @@ class CommandSyncResult:
     generated: list[tuple[str, Path]]  # (runtime, target_file)
     dropped: list[tuple[str, str, list[str]]]  # (runtime, command_name, dropped_fields)
     # (runtime_or_command, human_reason, reason_code) — see :mod:`memtomem.context._skip_reasons`.
-    skipped: list[tuple[str, str, str]]
+    skipped: list[tuple[str, str, skip_codes.SkipCode]]
 
 
 @dataclass
@@ -269,7 +269,7 @@ class ExtractResult:
 
     imported: list[Path]
     # (item_name, human_reason, reason_code) — see :mod:`memtomem.context._skip_reasons`.
-    skipped: list[tuple[str, str, str]] = field(default_factory=list)
+    skipped: list[tuple[str, str, skip_codes.SkipCode]] = field(default_factory=list)
 
 
 class StrictDropError(ValueError):
@@ -296,7 +296,7 @@ def generate_all_commands(
 
     generated: list[tuple[str, Path]] = []
     dropped: list[tuple[str, str, list[str]]] = []
-    skipped: list[tuple[str, str, str]] = []
+    skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
 
     canonicals = list_canonical_commands(project_root)
     if not canonicals:
@@ -376,7 +376,7 @@ def extract_commands_to_canonical(
     """
     canonical_root = project_root / CANONICAL_COMMAND_ROOT
     imported: list[Path] = []
-    skipped: list[tuple[str, str, str]] = []
+    skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
     seen: dict[str, str] = {}  # cmd_name → first runtime label
 
     # Claude — direct copy (both sides are Markdown+YAML frontmatter).
