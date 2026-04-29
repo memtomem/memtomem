@@ -2548,9 +2548,64 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 .ctx-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 8px; background: var(--surface); cursor: pointer; transition: border-color 0.15s; }
 .ctx-card:hover { border-color: var(--accent); }
 .ctx-card.active { border-color: var(--accent); background: rgba(108, 143, 255, 0.06); }
+.ctx-card--readonly { cursor: default; }
+.ctx-card--readonly:hover { border-color: var(--border); }
 .ctx-card-header { display: flex; align-items: center; justify-content: space-between; }
 .ctx-card-name { font-weight: 600; font-size: 0.9rem; }
 .ctx-card-path { font-size: 0.72rem; color: var(--muted); margin-top: 2px; }
+
+/* PR2 multi-project: collapsible scope groups, mirroring memory-dirs-group. */
+.ctx-scope-group { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); margin-bottom: 8px; }
+.ctx-scope-group + .ctx-scope-group { margin-top: 0; }
+.ctx-scope-summary {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px;
+  cursor: pointer;
+  font-size: 0.86rem;
+  user-select: none;
+  list-style: none;
+}
+.ctx-scope-summary::-webkit-details-marker { display: none; }
+.ctx-scope-summary::before {
+  content: '▸';
+  font-size: 0.65rem;
+  color: var(--muted);
+  width: 10px;
+  transition: transform 0.12s ease;
+}
+.ctx-scope-group[open] > .ctx-scope-summary::before { transform: rotate(90deg); }
+.ctx-scope-summary:hover { background: var(--bg-hover); }
+.ctx-scope-summary-label { color: var(--text); font-weight: 600; }
+.ctx-scope-summary-count {
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-family: var(--mono);
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+.ctx-scope-badge {
+  font-size: 0.68rem;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-family: var(--mono);
+}
+.ctx-scope-badge--experimental { background: rgba(243, 156, 18, 0.15); color: var(--yellow); }
+.ctx-scope-badge--missing { background: rgba(224, 90, 90, 0.15); color: var(--danger); }
+.ctx-scope-remove {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  width: 22px; height: 22px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+.ctx-scope-remove:hover { color: var(--danger); border-color: var(--border); background: var(--bg-hover); }
+.ctx-scope-items { padding: 8px 14px 12px; }
 
 .ctx-runtime-badges { display: flex; gap: 5px; flex-wrap: wrap; }
 .ctx-runtime-badge { font-size: 0.68rem; padding: 2px 7px; border-radius: 4px; white-space: nowrap; }

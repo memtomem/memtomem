@@ -166,6 +166,84 @@ function _ctxBasename(p) {
   return String(p).replace(/\/$/, '').split('/').pop() || String(p);
 }
 
+function _ctxScopeIsServerCwd(scope) {
+  return scope && Array.isArray(scope.sources) && scope.sources.includes('server-cwd');
+}
+
+function _ctxScopeBadges(scope) {
+  // Compact non-default-source flags rendered next to the scope label so the
+  // user can tell at a glance why a scope appears (and whether it's missing).
+  const parts = [];
+  if (scope.experimental) {
+    parts.push(`<span class="ctx-scope-badge ctx-scope-badge--experimental" data-i18n="settings.ctx.scope_experimental" title="${escapeHtml(t('settings.ctx.scope_experimental_tip', 'Discovered via the opt-in ~/.claude/projects scan; the path may be misdecoded.'))}">${escapeHtml(t('settings.ctx.scope_experimental', 'experimental'))}</span>`);
+  }
+  if (scope.missing) {
+    parts.push(`<span class="ctx-scope-badge ctx-scope-badge--missing">${escapeHtml(t('settings.ctx.scope_missing', '(missing)'))}</span>`);
+  }
+  return parts.join('');
+}
+
+function _ctxScopeCount(scope, type) {
+  return (scope.counts && scope.counts[type]) || 0;
+}
+
+function _ctxRenderItemsHtml(items, type, projectRoot, { clickable }) {
+  if (!items.length) {
+    const canonical = `.memtomem/${type}`;
+    const hint = t('settings.ctx.empty_hint',
+      'Place {type} under {canonical}/<name>/ then click Sync, or click Import to pull existing {type} from {scan_dirs} within this project.')
+      .replace(/\{type\}/g, type)
+      .replace('{canonical}', canonical)
+      .replace('{scan_dirs}', '');
+    return emptyState(
+      '',
+      t('settings.ctx.no_artifacts', 'No {type} found').replace('{type}', type),
+      hint,
+    );
+  }
+  const cardClass = clickable ? 'ctx-card' : 'ctx-card ctx-card--readonly';
+  let html = '';
+  for (const item of items) {
+    html += `<div class="${cardClass}" data-name="${escapeHtml(item.name)}">
+      <div class="ctx-card-header">
+        <div>
+          <div class="ctx-card-name">${escapeHtml(item.name)}</div>
+          ${item.canonical_path ? `<div class="ctx-card-path">${escapeHtml(item.canonical_path)}</div>` : '<div class="ctx-card-path text-muted">(runtime only)</div>'}
+        </div>
+        ${renderRuntimeBadges(item.runtimes)}
+      </div>
+    </div>`;
+  }
+  return html;
+}
+
+async function _loadScopeGroupItems(type, scope, container) {
+  panelLoading(container);
+  try {
+    const params = _ctxScopeIsServerCwd(scope) ? '' : `?scope_id=${encodeURIComponent(scope.scope_id)}`;
+    const res = await fetch(`/api/context/${type}${params}`);
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Failed to load ${type}`);
+    const data = await res.json();
+    const items = data[type] || [];
+    container.innerHTML = _ctxRenderItemsHtml(items, type, scope.root, {
+      clickable: _ctxScopeIsServerCwd(scope),
+    });
+
+    if (_ctxScopeIsServerCwd(scope)) {
+      const listEl = qs(`ctx-${type}-list`);
+      container.querySelectorAll('.ctx-card').forEach(card => {
+        card.addEventListener('click', () => {
+          listEl.querySelectorAll('.ctx-card').forEach(c => c.classList.remove('active'));
+          card.classList.add('active');
+          loadCtxDetail(type, card.dataset.name);
+        });
+      });
+    }
+  } catch (err) {
+    container.innerHTML = emptyState('', 'Failed to load ' + type, err.message);
+  }
+}
+
 async function loadCtxList(type) {
   const listEl = qs(`ctx-${type}-list`);
   const detailEl = qs(`ctx-${type}-detail`);
@@ -176,53 +254,81 @@ async function loadCtxList(type) {
   _ctxCurrentDetail = { type: null, name: null };
 
   try {
-    const res = await fetch(`/api/context/${type}`);
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Failed to load ${type}`);
+    const res = await fetch('/api/context/projects');
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Failed to load projects');
     const data = await res.json();
-    const items = data[type] || [];
-
-    if (!items.length) {
-      // Wire-sourced canonical_root + scanned_dirs (added in this PR).
-      // Falls back to a derived value only if the response predates the
-      // contract — keeps the hint accurate without re-encoding the
-      // detector layout client-side.
-      const canonical = data.canonical_root || `.memtomem/${type}`;
-      const scanDirs = (data.scanned_dirs || []).join(', ');
-      const hint = t('settings.ctx.empty_hint',
-        'Place {type} under {canonical}/<name>/ then click Sync, or click Import to pull existing {type} from {scan_dirs} within this project.')
-        .replace(/\{type\}/g, type)
-        .replace('{canonical}', canonical)
-        .replace('{scan_dirs}', scanDirs);
-      listEl.innerHTML = emptyState(
-        '',
-        t('settings.ctx.no_artifacts', 'No {type} found').replace('{type}', type),
-        hint,
-      );
+    const scopes = data.scopes || [];
+    if (!scopes.length) {
+      // Should never happen — server cwd always present — but render
+      // something instead of leaving the panel blank.
+      listEl.innerHTML = emptyState('', 'No project scopes', '');
       return;
     }
 
     let html = '';
-    for (const item of items) {
-      html += `<div class="ctx-card" data-name="${escapeHtml(item.name)}">
-        <div class="ctx-card-header">
-          <div>
-            <div class="ctx-card-name">${escapeHtml(item.name)}</div>
-            ${item.canonical_path ? `<div class="ctx-card-path">${escapeHtml(item.canonical_path)}</div>` : '<div class="ctx-card-path text-muted">(runtime only)</div>'}
-          </div>
-          ${renderRuntimeBadges(item.runtimes)}
-        </div>
-      </div>`;
+    for (const scope of scopes) {
+      const isCwd = _ctxScopeIsServerCwd(scope);
+      const count = _ctxScopeCount(scope, type);
+      const groupId = `ctx-${type}-group-${escapeHtml(scope.scope_id)}`;
+      const removable = !isCwd;
+      const removeBtn = removable
+        ? `<button class="ctx-scope-remove" data-scope-id="${escapeHtml(scope.scope_id)}" title="${escapeHtml(t('settings.ctx.remove_project', 'Remove project'))}">×</button>`
+        : '';
+      html += `<details class="ctx-scope-group" data-scope-id="${escapeHtml(scope.scope_id)}" data-tier="${escapeHtml(scope.tier)}"${isCwd ? ' open' : ''}>
+        <summary class="ctx-scope-summary">
+          <span class="ctx-scope-summary-label">${escapeHtml(scope.label)}</span>
+          <span class="ctx-scope-summary-count">${count}</span>
+          ${_ctxScopeBadges(scope)}
+          ${removeBtn}
+        </summary>
+        <div class="ctx-scope-items" id="${groupId}" data-loaded="false"></div>
+      </details>`;
     }
     listEl.innerHTML = html;
 
-    // Click cards to show detail
-    listEl.querySelectorAll('.ctx-card').forEach(card => {
-      card.addEventListener('click', () => {
-        listEl.querySelectorAll('.ctx-card').forEach(c => c.classList.remove('active'));
-        card.classList.add('active');
-        loadCtxDetail(type, card.dataset.name);
-      });
-    });
+    // Wire up: lazy fetch on toggle, immediate fetch for the open cwd group,
+    // and the per-scope remove (×) button.
+    for (const scope of scopes) {
+      const groupEl = listEl.querySelector(`details[data-scope-id="${CSS.escape(scope.scope_id)}"]`);
+      if (!groupEl) continue;
+      const itemsEl = groupEl.querySelector('.ctx-scope-items');
+      const fetchOnce = () => {
+        if (itemsEl.dataset.loaded === 'true') return;
+        itemsEl.dataset.loaded = 'true';
+        _loadScopeGroupItems(type, scope, itemsEl);
+      };
+      if (groupEl.open) fetchOnce();
+      groupEl.addEventListener('toggle', () => { if (groupEl.open) fetchOnce(); });
+
+      const removeBtn = groupEl.querySelector('.ctx-scope-remove');
+      if (removeBtn) {
+        removeBtn.addEventListener('click', async (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const ok = await showConfirm({
+            title: t('settings.ctx.remove_project', 'Remove project'),
+            message: t('settings.ctx.confirm_remove_project',
+              'Stop tracking "{label}"? Files on disk are unaffected.')
+              .replace('{label}', scope.label),
+            confirmText: t('settings.ctx.remove', 'Remove'),
+          });
+          if (!ok) return;
+          try {
+            const r = await fetch(`/api/context/known-projects/${encodeURIComponent(scope.scope_id)}`, {
+              method: 'DELETE',
+            });
+            if (!r.ok) {
+              const err = await r.json().catch(() => ({}));
+              showToast(err.detail || t('toast.request_failed'), 'error');
+              return;
+            }
+            loadCtxList(type);
+          } catch (err) {
+            showToast(t('toast.delete_failed', { error: err.message }), 'error');
+          }
+        });
+      }
+    }
   } catch (err) {
     listEl.innerHTML = emptyState('', 'Failed to load ' + type, err.message);
   }
@@ -566,5 +672,48 @@ document.querySelectorAll('.ctx-create-btn').forEach(btn => {
     });
 
     form.querySelector('.ctx-create-name').focus();
+  });
+});
+
+// -- Add Project button (delegated) ------------------------------------------
+
+document.querySelectorAll('.ctx-add-project-btn').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const type = btn.dataset.type;
+    // Reuse showConfirm-with-input-style by handing the user a prompt — the
+    // browser dialog is enough for PR2 (no native folder picker is reachable
+    // from the SPA layer; per-RFC §Non-goals item 5 we don't try).
+    const raw = window.prompt(
+      t('settings.ctx.add_project_prompt',
+        'Absolute path to a project root (e.g. /Users/me/Edu/inflearn):'),
+      '',
+    );
+    if (!raw) return;
+    const root = raw.trim();
+    if (!root) return;
+    btnLoading(btn, true);
+    try {
+      const r = await fetch('/api/context/known-projects', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ root }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        showToast(err.detail || t('toast.request_failed'), 'error');
+        return;
+      }
+      const data = await r.json();
+      if (data.warning) {
+        showToast(data.warning, 'warning');
+      } else {
+        showToast(t('settings.ctx.add_project_success', 'Project added'), 'success');
+      }
+      loadCtxList(type);
+    } catch (err) {
+      showToast(t('toast.request_failed', { error: err.message }), 'error');
+    } finally {
+      btnLoading(btn, false);
+    }
   });
 });

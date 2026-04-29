@@ -651,6 +651,28 @@ class SessionSummaryConfig(BaseSettings):
         return v
 
 
+class ContextGatewayConfig(BaseSettings):
+    """Settings for the multi-project context UI (skills / commands / agents).
+
+    See ``memtomem-docs/memtomem/planning/multi-project-context-ui-rfc.md`` —
+    PR2 lands the read-only fields (``known_projects_path``,
+    ``experimental_claude_projects_scan``); ``user_tier_enabled`` reserved
+    here so PR3's mutating routes can wire onto a stable schema without a
+    second config bump.
+    """
+
+    # Where ``Add Project`` registrations are persisted. Sibling to the
+    # mem2mem config home so any installed user already has the parent.
+    known_projects_path: Path = Path("~/.memtomem/known_projects.json")
+    # Opt-in reverse-decode of ``~/.claude/projects/<encoded>`` directory
+    # names. Off by default — the encoding is fragile around dash-containing
+    # paths, so this is gated behind explicit consent (RFC §Decision 2).
+    experimental_claude_projects_scan: bool = False
+    # PR3 surface — listed here for forward-compat. While ``False`` the user
+    # scope is hidden from discovery responses entirely (RFC §Decision 5).
+    user_tier_enabled: bool = False
+
+
 class Mem2MemConfig(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="MEMTOMEM_",
@@ -679,6 +701,7 @@ class Mem2MemConfig(BaseSettings):
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     session_summary: SessionSummaryConfig = Field(default_factory=SessionSummaryConfig)
+    context_gateway: ContextGatewayConfig = Field(default_factory=ContextGatewayConfig)
 
 
 # ---------------------------------------------------------------------------

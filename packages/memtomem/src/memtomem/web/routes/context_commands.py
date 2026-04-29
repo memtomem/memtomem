@@ -24,6 +24,7 @@ from memtomem.context.commands import (
 )
 from memtomem.context.detector import COMMAND_DIRS
 from memtomem.web.deps import get_project_root
+from memtomem.web.routes.context_projects import resolve_scope_root
 from memtomem.web.routes._locks import _gateway_lock
 
 # Flat list of project-relative runtime scan paths reported on list / import
@@ -61,8 +62,9 @@ def _safe_rel(p: Path, project_root: Path) -> str:
 
 @router.get("/context/commands")
 async def list_commands(
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
 ) -> dict:
+    """List canonical commands. Accepts ``?scope_id=`` like list_skills."""
     canonicals = list_canonical_commands(project_root)
     diffs = diff_commands(project_root)
 

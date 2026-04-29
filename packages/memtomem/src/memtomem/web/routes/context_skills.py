@@ -26,6 +26,7 @@ from memtomem.context.skills import (
 )
 from memtomem.web.deps import get_project_root
 from memtomem.web.routes._locks import _gateway_lock
+from memtomem.web.routes.context_projects import resolve_scope_root
 
 # Flat list of project-relative runtime scan paths reported on list / import
 # responses so the web UI's empty-state hint can name the exact directories
@@ -58,9 +59,15 @@ def _safe_rel(p: Path, project_root: Path) -> str:
 
 @router.get("/context/skills")
 async def list_skills(
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
 ) -> dict:
-    """List canonical skills with per-runtime sync status."""
+    """List canonical skills with per-runtime sync status.
+
+    Without ``?scope_id=``, lists for the server cwd (legacy single-project
+    path). With ``?scope_id=`` from ``GET /api/context/projects``, lists
+    for that scope's root. PR2 keeps mutating endpoints (POST/PUT/DELETE/
+    sync/import) on cwd only — multi-scope writes ship in PR3.
+    """
     canonicals = list_canonical_skills(project_root)
     diffs = diff_skills(project_root)
 

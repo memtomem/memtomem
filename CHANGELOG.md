@@ -7,6 +7,38 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Multi-project read-only discovery for `mm web` Skills/Commands/Agents
+  (PR2 of the multi-project context UI series).** Each tab now renders
+  collapsible scope groups so a user running `mm web` from `memtomem`
+  can also browse skills/commands/agents under `~/Edu/inflearn/` (or
+  any other project root) without restarting the server.
+  - **`GET /api/context/projects`** enumerates every discovered scope
+    with the response shape `{scope_id, label, root, tier, sources,
+    missing, experimental, counts: {skills, commands, agents}}`. Sources
+    union "server-cwd", "known-projects", and the opt-in
+    "claude-projects" scan; the `scope_id` is `p-<sha12>` of the
+    case-normalized resolved path so it survives refresh and restart.
+  - **`POST /api/context/known-projects`** registers a project root
+    (atomic write + sidecar lockfile). Validates absolute path +
+    `is_dir()`; returns a `warning` field but still HTTP 200 when no
+    `.claude`/`.gemini`/`.agents`/`.memtomem` marker is present.
+  - **`DELETE /api/context/known-projects/{scope_id}`** drops a
+    registration (stale entries are removable too).
+  - **`GET /api/context/{skills,commands,agents}`** accept an optional
+    `?scope_id=` query that targets a different project root; without
+    it the legacy single-cwd contract is preserved exactly. Mutating
+    routes (POST/PUT/DELETE/sync/import) stay cwd-only — multi-scope
+    writes ship in PR3.
+  - **Web UI** gains an "Add Project" button in each tab header and
+    renders `<details>` scope groups with item counts, source/missing/
+    experimental badges, and a per-scope remove (×) button. Server CWD
+    items keep their click-to-edit behavior; non-cwd scope items render
+    as read-only cards in PR2.
+  - **Config** adds `[context_gateway]` with `known_projects_path`
+    (default `~/.memtomem/known_projects.json`),
+    `experimental_claude_projects_scan` (default `false`), and
+    `user_tier_enabled` (default `false`, forward-compat for PR3).
+
 - **Web UI Skills/Commands/Agents empty-state surfaces "why nothing
   happened"**. Previously `mm web` → Settings → Skills/Commands/Agents
   showed a generic `Sync completed` toast even when the canonical root

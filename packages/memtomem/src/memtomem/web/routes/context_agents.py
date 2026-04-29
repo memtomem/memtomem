@@ -25,6 +25,7 @@ from memtomem.context.agents import (
 )
 from memtomem.context.detector import AGENT_DIRS
 from memtomem.web.deps import get_project_root
+from memtomem.web.routes.context_projects import resolve_scope_root
 from memtomem.web.routes._locks import _gateway_lock
 
 # Flat list of project-relative runtime scan paths reported on list / import
@@ -75,8 +76,9 @@ def _agent_to_dict(agent: SubAgent) -> dict:
 
 @router.get("/context/agents")
 async def list_agents(
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
 ) -> dict:
+    """List canonical agents. Accepts ``?scope_id=`` like list_skills."""
     canonicals = list_canonical_agents(project_root)
     diffs = diff_agents(project_root)
 
