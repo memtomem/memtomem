@@ -176,7 +176,7 @@ Add the following to `~/.claude/settings.json`:
       "matcher": "Write",
       "hooks": [{
         "type": "command",
-        "command": "mm index \"${tool_input.file_path}\" 2>>/tmp/mm-hook.log || true",
+        "command": "FP=\"${tool_input.file_path}\"; case \"$FP\" in *.md|*.py|*.ts|*.tsx|*.js|*.jsx|*.go|*.rs|*.rb|*.java|*.kt|*.swift|*.c|*.cpp|*.h|*.hpp|*.sh|*.toml|*.yaml|*.yml|*.json) ;; *) exit 0 ;; esac; case \"$FP\" in */node_modules/*|*/dist/*|*/build/*|*/target/*|*/.next/*|*/.nuxt/*|*/__pycache__/*|*/.git/*|*/.venv/*|*/venv/*|*/coverage/*|*/.cache/*) exit 0 ;; esac; mm index \"$FP\" 2>>/tmp/mm-hook.log || true",
         "timeout": 10000
       }]
     }],
@@ -218,6 +218,8 @@ User submits prompt (>20 chars)
 - **Error logging**: `2>>/tmp/mm-hook.log` preserves errors for debugging. Avoid `2>/dev/null` which hides real failures.
 - **Stop hook = session close**: Use `mm session end --auto` in the Stop hook to close the active session with a structured summary. Don't use a Stop hook to call `mm add` with raw timestamps — those pollute search.
 - **Write only**: `Edit` is excluded from PostToolUse — edited files are already indexed, so re-indexing on every edit is redundant.
+- **Allowlist + blocklist**: `PostToolUse[Write]` only indexes canonical source extensions (`md`, `py`, `ts`/`tsx`, `js`/`jsx`, `go`, `rs`, `rb`, `java`, `kt`, `swift`, `c`/`cpp`/`h`/`hpp`, `sh`, `toml`, `yaml`/`yml`, `json`) and skips build / cache / VCS paths (`node_modules`, `dist`, `build`, `target`, `.next`, `.nuxt`, `__pycache__`, `.git`, `.venv`/`venv`, `coverage`, `.cache`) inline. Adjust the `case` patterns in `hooks.json` for project-specific needs — the filter is a single `case` statement, easy to extend.
+- **Debounce gap**: rapid consecutive writes to the same file (e.g., codegen loops) may re-index it multiple times within a few seconds. The current hook indexes synchronously per Write with no batching. For large monorepos, wrap the `mm index` call in an external script with `flock` + a debounce window, or wait for native `mm index --debounce-window` support.
 - **STM proxy overlap**: If using [memtomem-stm](https://github.com/memtomem/memtomem-stm) (separate package), hooks are redundant — the proxy already handles surfacing and indexing.
 
 ---
