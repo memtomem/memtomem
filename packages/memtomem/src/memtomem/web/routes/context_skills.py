@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from memtomem.context._atomic import atomic_write_text
-from memtomem.context._names import validate_name
+from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context.detector import SKILL_DIRS
 from memtomem.context.skills import (
     CANONICAL_SKILL_ROOT,
@@ -367,6 +367,47 @@ async def import_skills(
         "skipped": [
             {"name": name, "reason": reason, "reason_code": code}
             for name, reason, code in result.skipped
+        ],
+        "project_root": str(project_root),
+        "scanned_dirs": _SKILL_SCAN_DIRS,
+    }
+
+
+@router.post("/context/skills/{name}/import")
+async def import_skill(
+    name: str,
+    body: ImportRequest | None = None,
+    project_root: Path = Depends(get_project_root),
+) -> dict:
+    """Import a single runtime skill into ``.memtomem/skills/``.
+
+    Same response shape as the section-level import so the web UI can reuse
+    its rendering. 404 when no runtime directory matches the name (the
+    section import would silently report 0 imported, which is the wrong
+    shape of feedback for "you clicked a specific item that doesn't exist").
+    """
+    try:
+        validate_name(name, kind="skill name")
+    except InvalidNameError as exc:
+        raise HTTPException(400, f"Invalid skill name: {exc}")
+    overwrite = body.overwrite if body else False
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                result = extract_skills_to_canonical(
+                    project_root, overwrite=overwrite, only_name=name
+                )
+    except TimeoutError:
+        raise HTTPException(503, "Skill import timed out — another sync may be in progress")
+    if not result.imported and not result.skipped:
+        raise HTTPException(404, f"No runtime skill named {name!r} to import")
+    return {
+        "imported": [
+            {"name": p.name, "canonical_path": str(p.relative_to(project_root))}
+            for p in result.imported
+        ],
+        "skipped": [
+            {"name": n, "reason": reason, "reason_code": code} for n, reason, code in result.skipped
         ],
         "project_root": str(project_root),
         "scanned_dirs": _SKILL_SCAN_DIRS,

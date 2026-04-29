@@ -348,6 +348,26 @@ class TestExtractAgentsToCanonical:
         reason_by_name = {name: reason for name, reason, _code in result.skipped}
         assert "invalid name" in reason_by_name["-bad"]
 
+    def test_only_name_filters_to_one(self, tmp_path):
+        d = tmp_path / ".claude/agents"
+        d.mkdir(parents=True)
+        (d / "alpha.md").write_text(SAMPLE_MINIMAL_AGENT, encoding="utf-8")
+        (d / "beta.md").write_text(SAMPLE_MINIMAL_AGENT, encoding="utf-8")
+
+        result = extract_agents_to_canonical(tmp_path, only_name="alpha")
+        assert [p.stem for p in result.imported] == ["alpha"]
+        assert result.skipped == []
+        assert not (tmp_path / CANONICAL_AGENT_ROOT / "beta.md").exists()
+
+    def test_only_name_no_match_returns_empty(self, tmp_path):
+        d = tmp_path / ".claude/agents"
+        d.mkdir(parents=True)
+        (d / "alpha.md").write_text(SAMPLE_MINIMAL_AGENT, encoding="utf-8")
+
+        result = extract_agents_to_canonical(tmp_path, only_name="ghost")
+        assert result.imported == []
+        assert result.skipped == []
+
 
 class TestDiffAgents:
     def test_empty_project(self, tmp_path, codex_home):

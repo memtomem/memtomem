@@ -356,6 +356,7 @@ def _gemini_toml_to_canonical(toml_path: Path) -> str:
 def extract_commands_to_canonical(
     project_root: Path,
     overwrite: bool = False,
+    only_name: str | None = None,
 ) -> ExtractResult:
     """Import existing Claude/Gemini command files into ``.memtomem/commands/``.
 
@@ -373,6 +374,11 @@ def extract_commands_to_canonical(
     First occurrence wins: Claude runtime first, then Gemini.  Returns an
     :class:`ExtractResult` with both imported paths and skipped items so the
     caller can warn the user about silent deduplication.
+
+    When ``only_name`` is set, every runtime file with a different stem is
+    silently skipped before any validation/dedupe work. Callers (e.g. the
+    single-item import route) can detect "no such runtime artifact" by
+    inspecting an empty ``imported`` + ``skipped``.
     """
     canonical_root = project_root / CANONICAL_COMMAND_ROOT
     imported: list[Path] = []
@@ -384,6 +390,8 @@ def extract_commands_to_canonical(
     if claude_dir.is_dir():
         for md_file in sorted(claude_dir.glob("*.md")):
             cmd_name = md_file.stem
+            if only_name is not None and cmd_name != only_name:
+                continue
             try:
                 validate_name(cmd_name, kind="command name")
             except InvalidNameError as exc:
@@ -411,6 +419,8 @@ def extract_commands_to_canonical(
     if gemini_dir.is_dir():
         for toml_file in sorted(gemini_dir.glob("*.toml")):
             cmd_name = toml_file.stem
+            if only_name is not None and cmd_name != only_name:
+                continue
             try:
                 validate_name(cmd_name, kind="command name")
             except InvalidNameError as exc:

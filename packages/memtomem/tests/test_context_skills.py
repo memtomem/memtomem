@@ -238,6 +238,26 @@ class TestExtractSkills:
         assert len(result.imported) == 1
         assert (canonical / "SKILL.md").read_text(encoding="utf-8") == "new"
 
+    def test_only_name_filters_to_one(self, tmp_path):
+        for name in ("alpha", "beta"):
+            d = tmp_path / ".claude/skills" / name
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
+
+        result = extract_skills_to_canonical(tmp_path, only_name="alpha")
+        assert [p.name for p in result.imported] == ["alpha"]
+        assert result.skipped == []
+        assert not (tmp_path / CANONICAL_SKILL_ROOT / "beta").exists()
+
+    def test_only_name_no_match_returns_empty(self, tmp_path):
+        d = tmp_path / ".claude/skills/alpha"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
+
+        result = extract_skills_to_canonical(tmp_path, only_name="ghost")
+        assert result.imported == []
+        assert result.skipped == []
+
 
 class TestDiffSkills:
     def test_empty_project(self, tmp_path):

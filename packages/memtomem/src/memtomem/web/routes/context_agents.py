@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from memtomem.context._atomic import atomic_write_text
-from memtomem.context._names import validate_name
+from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context.agents import (
     AGENT_GENERATORS,
     CANONICAL_AGENT_ROOT,
@@ -412,6 +412,47 @@ async def import_agents(
         "skipped": [
             {"name": name, "reason": reason, "reason_code": code}
             for name, reason, code in result.skipped
+        ],
+        "project_root": str(project_root),
+        "scanned_dirs": _AGENT_SCAN_DIRS,
+    }
+
+
+@router.post("/context/agents/{name}/import")
+async def import_agent(
+    name: str,
+    body: ImportRequest | None = None,
+    project_root: Path = Depends(get_project_root),
+) -> dict:
+    """Import a single runtime agent into ``.memtomem/agents/``.
+
+    Same response shape as the section-level import so the web UI can reuse
+    its rendering. 404 when no runtime file matches the name (the section
+    import would silently report 0 imported, which is the wrong shape of
+    feedback for "you clicked a specific item that doesn't exist").
+    """
+    try:
+        validate_name(name, kind="agent name")
+    except InvalidNameError as exc:
+        raise HTTPException(400, f"Invalid agent name: {exc}")
+    overwrite = body.overwrite if body else False
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                result = extract_agents_to_canonical(
+                    project_root, overwrite=overwrite, only_name=name
+                )
+    except TimeoutError:
+        raise HTTPException(503, "Agent import timed out — another sync may be in progress")
+    if not result.imported and not result.skipped:
+        raise HTTPException(404, f"No runtime agent named {name!r} to import")
+    return {
+        "imported": [
+            {"name": p.stem, "canonical_path": str(p.relative_to(project_root))}
+            for p in result.imported
+        ],
+        "skipped": [
+            {"name": n, "reason": reason, "reason_code": code} for n, reason, code in result.skipped
         ],
         "project_root": str(project_root),
         "scanned_dirs": _AGENT_SCAN_DIRS,

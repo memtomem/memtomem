@@ -229,6 +229,7 @@ def generate_all_skills(
 def extract_skills_to_canonical(
     project_root: Path,
     overwrite: bool = False,
+    only_name: str | None = None,
 ) -> ExtractResult:
     """Import existing runtime skills into ``.memtomem/skills/``.
 
@@ -239,6 +240,11 @@ def extract_skills_to_canonical(
 
     Returns an :class:`ExtractResult` with both imported paths and skipped
     items so the caller can warn the user about silent deduplication.
+
+    When ``only_name`` is set, every runtime entry with a different name is
+    silently skipped before any validation/dedupe work. Callers (e.g. the
+    single-item import route) can detect "no such runtime artifact" by
+    inspecting an empty ``imported`` + ``skipped``.
     """
     # Lazy import to avoid cycles at module import time.
     from memtomem.context.detector import detect_skill_dirs
@@ -250,6 +256,8 @@ def extract_skills_to_canonical(
 
     for detected in detect_skill_dirs(project_root):
         skill_name = detected.path.name
+        if only_name is not None and skill_name != only_name:
+            continue
         runtime_label = detected.agent  # e.g. "claude_skills"
         try:
             validate_name(skill_name, kind="skill name")

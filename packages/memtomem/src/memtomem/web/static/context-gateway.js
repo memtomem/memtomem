@@ -659,21 +659,49 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl) {
       }
     }
 
+    // ``type`` is always the plural section name (skills/commands/agents);
+    // strip the trailing ``s`` for the singular CTA copy. Both i18n strings
+    // expose ``{type}`` so the same placeholder works across en/ko.
+    const singular = type.endsWith('s') ? type.slice(0, -1) : type;
     html += `<div class="ctx-edit-actions" style="margin-top:12px">
       <button class="btn-primary ctx-runtime-only-import" data-type="${escapeHtml(type)}">
-        ${t('settings.ctx.import_all_includes_this', 'Import all {type} (includes this)').replace('{type}', type)}
+        ${t('settings.ctx.import_this', 'Import this {type}').replace('{type}', singular)}
       </button>
     </div>`;
 
     html += '</div>';
     detailEl.innerHTML = html;
 
-    detailEl.querySelector('.ctx-runtime-only-import')?.addEventListener('click', () => {
-      // No single-name import API exists yet, so dispatch a click to the
-      // section-level Import button. When a single-name endpoint lands,
-      // swap this for a direct fetch and refine the CTA copy.
-      const importBtn = document.querySelector(`.ctx-import-btn[data-type="${type}"]`);
-      if (importBtn) importBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    detailEl.querySelector('.ctx-runtime-only-import')?.addEventListener('click', async () => {
+      const btn = detailEl.querySelector('.ctx-runtime-only-import');
+      btnLoading(btn, true);
+      try {
+        const r = await fetch(`/api/context/${type}/${encodeURIComponent(name)}/import`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          showToast(err.detail || t('toast.request_failed'), 'error');
+          return;
+        }
+        const data = await r.json();
+        if (data.imported && data.imported.length) {
+          showToast(t('settings.ctx.import_success', 'Import completed'));
+        } else if (data.skipped && data.skipped.length) {
+          // ``reason`` is backend English (e.g. "canonical exists"); the user
+          // still needs to know the import didn't run, so we surface it as-is
+          // rather than swallow it. Localizing every backend skip reason
+          // would multiply i18n keys without changing behavior.
+          showToast(data.skipped[0].reason || t('toast.request_failed'), 'warning');
+        }
+        loadCtxList(type);
+      } catch (err) {
+        showToast(t('toast.import_failed', { error: err.message }), 'error');
+      } finally {
+        btnLoading(btn, false);
+      }
     });
   } catch (err) {
     detailEl.innerHTML = emptyState('', 'Failed to load detail', err.message);

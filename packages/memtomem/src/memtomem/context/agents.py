@@ -527,6 +527,7 @@ def generate_all_agents(
 def extract_agents_to_canonical(
     project_root: Path,
     overwrite: bool = False,
+    only_name: str | None = None,
 ) -> ExtractResult:
     """Import existing Claude / Gemini agent files into ``.memtomem/agents/``.
 
@@ -536,6 +537,11 @@ def extract_agents_to_canonical(
 
     Returns an :class:`ExtractResult` with both imported paths and skipped
     items so the caller can warn the user about silent deduplication.
+
+    When ``only_name`` is set, every runtime file with a different stem is
+    silently skipped before any validation/dedupe work. Callers (e.g. the
+    single-item import route) can detect "no such runtime artifact" by
+    inspecting an empty ``imported`` + ``skipped``.
     """
     canonical_root = project_root / CANONICAL_AGENT_ROOT
     imported: list[Path] = []
@@ -551,6 +557,8 @@ def extract_agents_to_canonical(
         runtime_label = runtime_dir.relative_to(project_root).as_posix()
         for md_file in sorted(runtime_dir.glob("*.md")):
             agent_name = md_file.stem
+            if only_name is not None and agent_name != only_name:
+                continue
             try:
                 validate_name(agent_name, kind="agent name")
             except InvalidNameError as exc:

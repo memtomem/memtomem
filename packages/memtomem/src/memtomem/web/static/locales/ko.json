@@ -262,7 +262,7 @@
   "settings.ctx.sync_disabled_tooltip": "아직 fan-out 할 canonical {type} 이 없습니다. Import 를 먼저 누르세요.",
   "settings.ctx.sync_all_disabled_tooltip": "아직 fan-out 할 canonical 아티팩트가 없습니다. 각 섹션에서 Import 를 먼저 누르세요.",
   "settings.ctx.runtime_only_detail_hint": "런타임 미리보기 — 아직 .memtomem/ 에 없습니다.",
-  "settings.ctx.import_all_includes_this": "모든 {type} 가져오기 (이 항목 포함)",
+  "settings.ctx.import_this": "이 {type} 가져오기",
   "settings.ctx.runtime_output": "런타임 출력",
   "settings.ctx.canonical_source": "Canonical",
   "settings.ctx.diff_view": "비교",

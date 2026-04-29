@@ -281,6 +281,29 @@ class TestExtractCommandsToCanonical:
         skipped_names = sorted(name for name, _, _ in result.skipped)
         assert "-bad" in skipped_names
 
+    def test_only_name_filters_to_one(self, tmp_path):
+        d = tmp_path / ".claude/commands"
+        d.mkdir(parents=True)
+        (d / "alpha.md").write_text(SAMPLE_MINIMAL_COMMAND)
+        (d / "beta.md").write_text(SAMPLE_MINIMAL_COMMAND)
+
+        result = extract_commands_to_canonical(tmp_path, only_name="alpha")
+        assert [p.stem for p in result.imported] == ["alpha"]
+        assert result.skipped == []
+        # Beta was untouched — neither imported nor a canonical written.
+        assert not (tmp_path / CANONICAL_COMMAND_ROOT / "beta.md").exists()
+
+    def test_only_name_no_match_returns_empty(self, tmp_path):
+        """Caller-distinguishable signal for single-name miss: imported and
+        skipped both empty (route layer turns this into 404)."""
+        d = tmp_path / ".claude/commands"
+        d.mkdir(parents=True)
+        (d / "alpha.md").write_text(SAMPLE_MINIMAL_COMMAND)
+
+        result = extract_commands_to_canonical(tmp_path, only_name="ghost")
+        assert result.imported == []
+        assert result.skipped == []
+
 
 class TestDiffCommands:
     def test_empty_project(self, tmp_path):

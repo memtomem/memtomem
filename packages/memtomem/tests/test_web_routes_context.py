@@ -388,6 +388,32 @@ class TestImportSkills:
         assert "canonical_exists" in skipped_codes
 
 
+class TestImportOneSkill:
+    @pytest.mark.anyio
+    async def test_import_single(self, client: AsyncClient, tmp_path: Path):
+        _make_runtime_skill(tmp_path, ".claude/skills", "alpha", "# A\n")
+        _make_runtime_skill(tmp_path, ".claude/skills", "beta", "# B\n")
+        r = await client.post("/api/context/skills/alpha/import", json={})
+        assert r.status_code == 200
+        data = r.json()
+        assert [i["name"] for i in data["imported"]] == ["alpha"]
+        assert (tmp_path / ".memtomem" / "skills" / "alpha" / SKILL_MANIFEST).is_file()
+        # Beta untouched — single-name import does not fan out.
+        assert not (tmp_path / ".memtomem" / "skills" / "beta").exists()
+
+    @pytest.mark.anyio
+    async def test_404_when_no_runtime_match(self, client: AsyncClient, tmp_path: Path):
+        _make_runtime_skill(tmp_path, ".claude/skills", "alpha", "# A\n")
+        r = await client.post("/api/context/skills/ghost/import", json={})
+        assert r.status_code == 404
+
+    @pytest.mark.anyio
+    async def test_400_on_invalid_name(self, client: AsyncClient):
+        # Leading dash is rejected by validate_name before the FS is touched.
+        r = await client.post("/api/context/skills/-bad/import", json={})
+        assert r.status_code == 400
+
+
 # ---------------------------------------------------------------------------
 # Path traversal guard
 # ---------------------------------------------------------------------------
@@ -565,6 +591,30 @@ class TestImportCommands:
         assert ".gemini/commands" in data["scanned_dirs"]
 
 
+class TestImportOneCommand:
+    @pytest.mark.anyio
+    async def test_import_single(self, client: AsyncClient, tmp_path: Path):
+        _make_runtime_command(tmp_path, ".claude/commands", "alpha", ".md", _CMD_CONTENT)
+        _make_runtime_command(tmp_path, ".claude/commands", "beta", ".md", _CMD_CONTENT)
+        r = await client.post("/api/context/commands/alpha/import", json={})
+        assert r.status_code == 200
+        data = r.json()
+        assert [i["name"] for i in data["imported"]] == ["alpha"]
+        assert (tmp_path / ".memtomem" / "commands" / "alpha.md").is_file()
+        assert not (tmp_path / ".memtomem" / "commands" / "beta.md").exists()
+
+    @pytest.mark.anyio
+    async def test_404_when_no_runtime_match(self, client: AsyncClient, tmp_path: Path):
+        _make_runtime_command(tmp_path, ".claude/commands", "alpha", ".md", _CMD_CONTENT)
+        r = await client.post("/api/context/commands/ghost/import", json={})
+        assert r.status_code == 404
+
+    @pytest.mark.anyio
+    async def test_400_on_invalid_name(self, client: AsyncClient):
+        r = await client.post("/api/context/commands/-bad/import", json={})
+        assert r.status_code == 400
+
+
 # ===========================================================================
 # Agents
 # ===========================================================================
@@ -728,3 +778,27 @@ class TestImportAgents:
         assert ".claude/agents" in data["scanned_dirs"]
         assert ".gemini/agents" in data["scanned_dirs"]
         assert ".codex/agents" in data["scanned_dirs"]
+
+
+class TestImportOneAgent:
+    @pytest.mark.anyio
+    async def test_import_single(self, client: AsyncClient, tmp_path: Path):
+        _make_runtime_agent(tmp_path, ".claude/agents", "alpha")
+        _make_runtime_agent(tmp_path, ".claude/agents", "beta")
+        r = await client.post("/api/context/agents/alpha/import", json={})
+        assert r.status_code == 200
+        data = r.json()
+        assert [i["name"] for i in data["imported"]] == ["alpha"]
+        assert (tmp_path / ".memtomem" / "agents" / "alpha.md").is_file()
+        assert not (tmp_path / ".memtomem" / "agents" / "beta.md").exists()
+
+    @pytest.mark.anyio
+    async def test_404_when_no_runtime_match(self, client: AsyncClient, tmp_path: Path):
+        _make_runtime_agent(tmp_path, ".claude/agents", "alpha")
+        r = await client.post("/api/context/agents/ghost/import", json={})
+        assert r.status_code == 404
+
+    @pytest.mark.anyio
+    async def test_400_on_invalid_name(self, client: AsyncClient):
+        r = await client.post("/api/context/agents/-bad/import", json={})
+        assert r.status_code == 400

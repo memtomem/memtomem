@@ -262,7 +262,7 @@
   "settings.ctx.sync_disabled_tooltip": "No canonical {type} to fan out yet. Click Import first.",
   "settings.ctx.sync_all_disabled_tooltip": "No canonical artifacts to fan out yet. Click Import in each section first.",
   "settings.ctx.runtime_only_detail_hint": "Runtime preview — not yet in .memtomem/.",
-  "settings.ctx.import_all_includes_this": "Import all {type} (includes this)",
+  "settings.ctx.import_this": "Import this {type}",
   "settings.ctx.runtime_output": "Runtime Output",
   "settings.ctx.canonical_source": "Canonical",
   "settings.ctx.diff_view": "Diff",
