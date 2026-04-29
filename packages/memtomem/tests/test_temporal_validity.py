@@ -442,8 +442,6 @@ class TestValidityFilterPipelineWiring:
         2024–2025 and one valid for 2030 only — only the 2024–2025 chunk
         should survive.
         """
-        import memtomem.search.pipeline as pipeline_mod
-
         in_window = _result_with_window(
             _ts(2024, 1, 1), _ts(2025, 12, 31, 23, 59, 59), marker="now"
         )
@@ -459,8 +457,6 @@ class TestValidityFilterPipelineWiring:
 
         results, _stats = await pipe.search("anything", top_k=5)
         assert [r.chunk.content for r in results] == ["chunk-now"]
-        # Sanity: confirm we didn't accidentally short-circuit the filter.
-        assert pipeline_mod._apply_validity_filter is not None
 
     @pytest.mark.asyncio
     async def test_explicit_as_of_unix_filters_window(self) -> None:
@@ -511,7 +507,13 @@ class TestValidityFilterPipelineWiring:
 
     @pytest.mark.asyncio
     async def test_default_path_caches_filtered_result(self, monkeypatch) -> None:
-        """Two default-path calls — second hits cache (BM25 only invoked once)."""
+        """Two default-path calls — second hits cache (BM25 only invoked once).
+
+        TTL expiry is not exercised here — pinning ``time.time`` to a constant
+        keeps both calls inside the cache window by construction. The
+        meaningful assertion is the reuse path (one storage call across two
+        searches), not the TTL boundary.
+        """
         import time as _time
 
         monkeypatch.setattr(_time, "time", lambda: float(_ts(2025, 6, 15)))
