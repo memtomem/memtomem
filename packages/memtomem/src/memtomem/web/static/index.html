@@ -409,40 +409,48 @@
       <span class="tab-help-bar-text" data-i18n="sources.help">Indexed source files. Click a file to browse chunks. Drag the divider to resize. Sort by name, chunks, size, or recency.</span>
       <button class="tab-help-bar-dismiss" data-help-tab="sources">✕</button>
     </div>
-    <div id="memory-dirs-panel" class="memory-dirs-panel card"></div>
-    <div class="sources-layout">
-      <div class="sources-sidebar">
-        <div class="sources-header">
-          <h2 data-i18n="sources.title">Sources</h2>
-          <button id="refresh-sources-btn" class="btn-ghost" data-i18n="sources.refresh">Refresh</button>
-        </div>
-        <div class="sources-filter-row">
-          <input id="sources-filter" type="text" data-i18n-placeholder="sources.filter_placeholder" placeholder="Type to filter by path… e.g. .md, src/, utils" autocomplete="off" data-i18n-title="sources.filter_title" title="Filters source list by partial path match" />
-          <span id="sources-ns-chip" hidden></span>
-        </div>
-        <div class="sources-sort-row">
-          <button class="sources-sort-btn active" data-sort="name" data-i18n="sources.sort_name">Name</button>
-          <button class="sources-sort-btn" data-sort="chunks" data-i18n="sources.sort_chunks">Chunks</button>
-          <button class="sources-sort-btn" data-sort="size" data-i18n="sources.sort_size">Size</button>
-          <button class="sources-sort-btn" data-sort="recent" data-i18n="sources.sort_recent">Recent</button>
-        </div>
-        <div id="sources-stats" class="sources-stats" hidden></div>
-        <div id="sources-list">
-          <div class="loading-panel"><div class="spinner-panel"></div></div>
-        </div>
-      </div>
-      <div id="sources-divider" class="sources-divider"></div>
-      <div class="chunks-browser" id="chunks-browser">
-        <div class="empty-state">
-          <span class="empty-state-icon">📄</span>
-          <span data-i18n="sources.empty_text">Select a source to browse its chunks</span>
-        </div>
-        <div id="chunks-browser-content" hidden>
-          <div class="chunks-browser-header">
-            <span id="chunks-browser-title" class="file-path"></span>
-            <span id="chunks-browser-count" class="badge badge-blue"></span>
+    <div class="sources-mode-toggle" role="tablist" aria-label="Sources view">
+      <button id="sources-mode-memory" class="btn-ghost btn-active" role="tab" aria-selected="true" data-i18n="sources.mode.memory">Memory</button>
+      <button id="sources-mode-general" class="btn-ghost" role="tab" aria-selected="false" data-i18n="sources.mode.general">General sources</button>
+    </div>
+    <div id="sources-view-memory" class="sources-view">
+      <div id="memory-dirs-panel" class="memory-dirs-panel card"></div>
+    </div>
+    <div id="sources-view-general" class="sources-view" hidden>
+      <div class="sources-layout">
+        <div class="sources-sidebar">
+          <div class="sources-header">
+            <h2 data-i18n="sources.title">Sources</h2>
+            <button id="refresh-sources-btn" class="btn-ghost" data-i18n="sources.refresh">Refresh</button>
           </div>
-          <div id="chunks-browser-list"></div>
+          <div class="sources-filter-row">
+            <input id="sources-filter" type="text" data-i18n-placeholder="sources.filter_placeholder" placeholder="Type to filter by path… e.g. .md, src/, utils" autocomplete="off" data-i18n-title="sources.filter_title" title="Filters source list by partial path match" />
+            <span id="sources-ns-chip" hidden></span>
+          </div>
+          <div class="sources-sort-row">
+            <button class="sources-sort-btn active" data-sort="name" data-i18n="sources.sort_name">Name</button>
+            <button class="sources-sort-btn" data-sort="chunks" data-i18n="sources.sort_chunks">Chunks</button>
+            <button class="sources-sort-btn" data-sort="size" data-i18n="sources.sort_size">Size</button>
+            <button class="sources-sort-btn" data-sort="recent" data-i18n="sources.sort_recent">Recent</button>
+          </div>
+          <div id="sources-stats" class="sources-stats" hidden></div>
+          <div id="sources-list">
+            <div class="loading-panel"><div class="spinner-panel"></div></div>
+          </div>
+        </div>
+        <div id="sources-divider" class="sources-divider"></div>
+        <div class="chunks-browser" id="chunks-browser">
+          <div class="empty-state">
+            <span class="empty-state-icon">📄</span>
+            <span data-i18n="sources.empty_text">Select a source to browse its chunks</span>
+          </div>
+          <div id="chunks-browser-content" hidden>
+            <div class="chunks-browser-header">
+              <span id="chunks-browser-title" class="file-path"></span>
+              <span id="chunks-browser-count" class="badge badge-blue"></span>
+            </div>
+            <div id="chunks-browser-list"></div>
+          </div>
         </div>
       </div>
     </div>

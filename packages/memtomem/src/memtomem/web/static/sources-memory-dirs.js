@@ -73,6 +73,17 @@ function _buildMemoryDirsPanel(initialDirs) {
   let dirs = Array.isArray(initialDirs) ? [...initialDirs] : [];
   let statusByPath = {};
   let statusLoaded = false;
+  // Memoized ``GET /api/sources?kind=memory`` response, indexed by
+  // ``memory_dir`` field. First drill-in fetches the whole memory bucket
+  // (one round trip — typically <1 KB per source × N sources) and keeps
+  // it; subsequent expands hit the cache. Reindex/Remove invalidate it
+  // so the file list reflects the new state next click.
+  let _memorySourcesByDir = null;
+  let _memorySourcesPromise = null;
+  function _invalidateSourcesCache() {
+    _memorySourcesByDir = null;
+    _memorySourcesPromise = null;
+  }
 
   function _apiErrorText(err) {
     return (err && err.message) ? err.message : String(err);
@@ -100,6 +111,7 @@ function _buildMemoryDirsPanel(initialDirs) {
     if (STATE.serverConfig?.indexing) {
       STATE.serverConfig.indexing.memory_dirs = [...dirs];
     }
+    _invalidateSourcesCache();
     render();
     fetchStatus();
   }
@@ -112,10 +124,159 @@ function _buildMemoryDirsPanel(initialDirs) {
       if (resp && Array.isArray(resp.memory_dirs)) {
         refreshDirs(resp.memory_dirs);
       }
-      showToast(t('toast.memory_dir.added', { path: trimmed }), 'success');
+      // ``kind`` arrives on every successful /memory-dirs/add response
+      // (PR #554). When it falls into the *other* sub-toggle, surface a
+      // one-tap "Switch view" so the user isn't left wondering why the
+      // path they just added isn't visible in the current panel.
+      const addedKind = resp && resp.kind;
+      const currentMode = (typeof getSourcesMode === 'function') ? getSourcesMode() : 'memory';
+      if (addedKind && addedKind !== currentMode) {
+        const otherLabel = t('sources.mode.' + addedKind);
+        showToast(
+          t('sources.toast.added_to_other_view', { path: trimmed, view: otherLabel }),
+          'success',
+          {
+            action: {
+              label: t('sources.toast.switch_view'),
+              onClick: () => {
+                if (typeof setSourcesMode === 'function') setSourcesMode(addedKind);
+              },
+            },
+          },
+        );
+      } else {
+        showToast(t('toast.memory_dir.added', { path: trimmed }), 'success');
+      }
     } catch (err) {
       showToast(t('toast.memory_dir.add_failed', { error: _apiErrorText(err) }), 'error');
     }
+  }
+
+  async function _fetchMemorySources() {
+    // Single in-flight promise — avoids racing fetches when the user
+    // mashes multiple path rows in quick succession before the first
+    // one has a chance to populate the cache.
+    if (_memorySourcesByDir !== null) return _memorySourcesByDir;
+    if (_memorySourcesPromise) return _memorySourcesPromise;
+    _memorySourcesPromise = (async () => {
+      // ``limit=10000`` matches the route's hard cap. The Memory bucket
+      // tops out at one row per indexed file across registered memory
+      // dirs — well under the cap in practice (max observed ≈ a few
+      // hundred). Hitting the cap would be a pathological config and
+      // the user would see truncated drill-ins, not a crash.
+      const data = await api('GET', '/api/sources?kind=memory&limit=10000');
+      const byDir = {};
+      for (const s of (data && data.sources) || []) {
+        const key = s.memory_dir || '';
+        if (!byDir[key]) byDir[key] = [];
+        byDir[key].push(s);
+      }
+      _memorySourcesByDir = byDir;
+      return byDir;
+    })();
+    try {
+      return await _memorySourcesPromise;
+    } finally {
+      _memorySourcesPromise = null;
+    }
+  }
+
+  async function _toggleDirExpand(path, item, pathBtn) {
+    // Second click collapses without re-fetching — a no-op on the
+    // network even when the cache later becomes invalid (next render
+    // rebuilds rows fresh anyway).
+    if (item.classList.contains('memory-dirs-item-expanded')) {
+      item.classList.remove('memory-dirs-item-expanded');
+      pathBtn.setAttribute('aria-expanded', 'false');
+      const existing = item.querySelector('.memory-dirs-files');
+      if (existing) existing.remove();
+      return;
+    }
+
+    const filesWrap = document.createElement('div');
+    filesWrap.className = 'memory-dirs-files';
+    const loader = document.createElement('div');
+    loader.className = 'memory-dirs-files-loading';
+    loader.textContent = t('common.loading');
+    filesWrap.appendChild(loader);
+    item.appendChild(filesWrap);
+    item.classList.add('memory-dirs-item-expanded');
+    pathBtn.setAttribute('aria-expanded', 'true');
+
+    let byDir;
+    try {
+      byDir = await _fetchMemorySources();
+    } catch (err) {
+      filesWrap.innerHTML = '';
+      const errEl = document.createElement('div');
+      errEl.className = 'memory-dirs-files-empty';
+      errEl.textContent = _apiErrorText(err);
+      filesWrap.appendChild(errEl);
+      return;
+    }
+
+    // ``memory_dir`` on each ``SourceOut`` is the configured dir
+    // expanded with ``Path.expanduser().resolve()`` — comparing with
+    // the configured ``path`` directly works for absolute entries the
+    // user added, and falls through cleanly for tilde-prefixed entries
+    // (they show as empty rather than crashing).
+    let entries = byDir[path] || [];
+    if (!entries.length) {
+      // Fallback: try ``startswith`` against the resolved server-side
+      // owning dir. Catches the tilde / symlink case where the user
+      // added ``~/memories`` and the server normalised to
+      // ``/Users/x/memories``.
+      const matches = [];
+      for (const [dirKey, list] of Object.entries(byDir)) {
+        if (!dirKey) continue;
+        if (path === dirKey || dirKey === path) matches.push(...list);
+      }
+      entries = matches;
+    }
+
+    filesWrap.innerHTML = '';
+    if (!entries.length) {
+      const empty = document.createElement('div');
+      empty.className = 'memory-dirs-files-empty';
+      empty.textContent = t('sources.memory_dirs.files_empty');
+      filesWrap.appendChild(empty);
+      return;
+    }
+
+    entries.sort((a, b) => a.path.localeCompare(b.path));
+    const list = document.createElement('ul');
+    list.className = 'memory-dirs-files-list';
+    for (const s of entries) {
+      const li = document.createElement('li');
+      li.className = 'memory-dirs-file';
+      li.title = s.path;
+      const filename = s.path.split('/').pop() || s.path;
+      const name = document.createElement('span');
+      name.className = 'memory-dirs-file-name';
+      name.textContent = filename;
+      const meta = document.createElement('span');
+      meta.className = 'memory-dirs-file-meta';
+      meta.textContent = t(
+        'sources.memory_dirs.file_meta',
+        { chunks: s.chunk_count || 0 },
+      );
+      li.appendChild(name);
+      li.appendChild(meta);
+      li.addEventListener('click', () => {
+        // Reuses the General view's chunks browser by switching modes
+        // and selecting the source there. Keeps a single chunks-browser
+        // DOM (no duplicate render path) and gives the user a clear
+        // visual transition into the file detail.
+        if (typeof setSourcesMode === 'function') {
+          setSourcesMode('general');
+        }
+        if (typeof browseSource === 'function') {
+          browseSource(s.path);
+        }
+      });
+      list.appendChild(li);
+    }
+    filesWrap.appendChild(list);
   }
 
   async function handleRemove(path) {
@@ -194,6 +355,7 @@ function _buildMemoryDirsPanel(initialDirs) {
       showToast(t('toast.memory_dir.reindex_failed', { error: _apiErrorText(err) }), 'error');
     } finally {
       if (btn) btnLoading(btn, false);
+      _invalidateSourcesCache();
       fetchStatus();
     }
   }
@@ -436,11 +598,18 @@ function _buildMemoryDirsPanel(initialDirs) {
       const mainRow = document.createElement('div');
       mainRow.className = 'memory-dirs-item-main';
 
-      const pathSpan = document.createElement('span');
-      pathSpan.className = 'memory-dirs-path';
-      pathSpan.textContent = path;
-      pathSpan.title = path;
-      mainRow.appendChild(pathSpan);
+      // Path is the row's primary affordance — clicking it expands a
+      // file list inline so the user can drill down to chunks without
+      // hopping to the General view. ``<button>`` rather than a span so
+      // it gets keyboard activation and a focus ring for free.
+      const pathBtn = document.createElement('button');
+      pathBtn.type = 'button';
+      pathBtn.className = 'memory-dirs-path';
+      pathBtn.textContent = path;
+      pathBtn.title = path;
+      pathBtn.setAttribute('aria-expanded', 'false');
+      pathBtn.addEventListener('click', () => _toggleDirExpand(path, item, pathBtn));
+      mainRow.appendChild(pathBtn);
 
       const openBtn = document.createElement('button');
       openBtn.type = 'button';
@@ -451,7 +620,10 @@ function _buildMemoryDirsPanel(initialDirs) {
       // pointed at a missing path produces a confusing OS error popup
       // on macOS / a "location is not available" dialog on Windows.
       if (statusLoaded && st && st.exists === false) openBtn.disabled = true;
-      openBtn.addEventListener('click', () => handleOpenOne(path, openBtn));
+      openBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        handleOpenOne(path, openBtn);
+      });
       mainRow.appendChild(openBtn);
 
       const reindexBtn = document.createElement('button');
@@ -466,7 +638,10 @@ function _buildMemoryDirsPanel(initialDirs) {
         hasChunks ? 'sources.memory_dirs.action_reindex' : 'sources.memory_dirs.action_index',
       );
       reindexBtn.title = t('sources.memory_dirs.reindex_title');
-      reindexBtn.addEventListener('click', () => handleReindexOne(path, reindexBtn));
+      reindexBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        handleReindexOne(path, reindexBtn);
+      });
       mainRow.appendChild(reindexBtn);
 
       const removeBtn = document.createElement('button');
@@ -476,7 +651,10 @@ function _buildMemoryDirsPanel(initialDirs) {
       removeBtn.title = t('sources.memory_dirs.delete_title');
       removeBtn.setAttribute('aria-label', t('sources.memory_dirs.delete_title'));
       if (dirs.length <= 1) removeBtn.disabled = true;
-      removeBtn.addEventListener('click', () => handleRemove(path));
+      removeBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        handleRemove(path);
+      });
       mainRow.appendChild(removeBtn);
 
       item.appendChild(mainRow);

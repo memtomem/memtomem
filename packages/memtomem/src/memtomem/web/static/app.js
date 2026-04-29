@@ -355,11 +355,19 @@ function emptyState(icon, message, hint) {
 }
 
 // ── A1: Toast Notifications ──
-function showToast(message, type = 'success') {
+function showToast(message, type = 'success', options = {}) {
+  // ``options.action`` ({ label, onClick }) renders an inline action
+  // button next to the message — used by flows like Sources sub-toggle
+  // "Switch view" where the toast both reports a result and offers a
+  // one-tap follow-up. Action click runs the handler then dismisses
+  // the toast; close button works as before.
   const container = qs('toast-container');
   const toast = document.createElement('div');
   toast.className = `toast toast-${type}`;
-  toast.innerHTML = `<span class="toast-msg">${escapeHtml(message)}</span><button class="toast-close" title="Close">✕</button>`;
+  const msgSpan = document.createElement('span');
+  msgSpan.className = 'toast-msg';
+  msgSpan.textContent = message;
+  toast.appendChild(msgSpan);
   const delay = type === 'error' ? 5000 : 3000;
   let timer;
   function dismiss() {
@@ -367,7 +375,24 @@ function showToast(message, type = 'success') {
     toast.classList.add('toast-out');
     toast.addEventListener('animationend', () => toast.remove(), { once: true });
   }
-  toast.querySelector('.toast-close').addEventListener('click', dismiss);
+  if (options.action && options.action.label) {
+    const actionBtn = document.createElement('button');
+    actionBtn.type = 'button';
+    actionBtn.className = 'toast-action';
+    actionBtn.textContent = options.action.label;
+    actionBtn.addEventListener('click', () => {
+      try { options.action.onClick && options.action.onClick(); }
+      finally { dismiss(); }
+    });
+    toast.appendChild(actionBtn);
+  }
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'toast-close';
+  closeBtn.title = 'Close';
+  closeBtn.textContent = '✕';
+  closeBtn.addEventListener('click', dismiss);
+  toast.appendChild(closeBtn);
   timer = setTimeout(dismiss, delay);
   container.appendChild(toast);
 }
@@ -492,8 +517,11 @@ function activateTab(tabName) {
   if (tabName === 'home') { STATE.homeStale = false; loadDashboard(); renderPinnedSection(); }
   if (tabName === 'sources') {
     STATE.sourcesBrowserStale = false;
-    if (typeof renderMemoryDirsPanel === 'function') renderMemoryDirsPanel();
-    loadSources();
+    // ``setSourcesMode`` drives the loaders for whichever sub-toggle the
+    // user last left active (memory → memory-dirs panel; general →
+    // ``loadSources()``). Avoids the previous double-fetch pattern that
+    // hit the server even for the view that wasn't visible.
+    setSourcesMode(getSourcesMode());
   }
   if (tabName === 'index') loadStats();
   if (tabName === 'tags') { STATE.tagsTabStale = false; loadTags(); }
@@ -1978,6 +2006,54 @@ function navigateToSourcesByNs(nsName) {
 qs('refresh-sources-btn').addEventListener('click', loadSources);
 qs('sources-filter').addEventListener('input', () => renderSourceTree(_getFilteredSorted()));
 
+// ── Sources sub-toggle: Memory ↔ General ──
+// memory_dirs config lumps two distinct user intents together — agent
+// memory dirs (auto-discovered) vs arbitrary RAG folders. The sub-toggle
+// gives each its own surface; classification happens server-side via
+// ``GET /api/memory-dirs/status`` (kind field) and ``GET /api/sources?kind=``.
+const SOURCES_MODE_LS_KEY = 'memtomem.sources_mode';
+
+function getSourcesMode() {
+  try {
+    const stored = localStorage.getItem(SOURCES_MODE_LS_KEY);
+    if (stored === 'memory' || stored === 'general') return stored;
+  } catch (_err) { /* private mode */ }
+  return 'memory';
+}
+
+function setSourcesMode(mode) {
+  if (mode !== 'memory' && mode !== 'general') mode = 'memory';
+  STATE.sourcesMode = mode;
+  try { localStorage.setItem(SOURCES_MODE_LS_KEY, mode); } catch (_err) { /* ignore */ }
+
+  const memBtn = qs('sources-mode-memory');
+  const genBtn = qs('sources-mode-general');
+  const memView = qs('sources-view-memory');
+  const genView = qs('sources-view-general');
+  if (!memBtn || !genBtn || !memView || !genView) return;
+
+  if (mode === 'memory') {
+    memBtn.classList.add('btn-active');
+    memBtn.setAttribute('aria-selected', 'true');
+    genBtn.classList.remove('btn-active');
+    genBtn.setAttribute('aria-selected', 'false');
+    memView.hidden = false;
+    genView.hidden = true;
+    if (typeof renderMemoryDirsPanel === 'function') renderMemoryDirsPanel();
+  } else {
+    genBtn.classList.add('btn-active');
+    genBtn.setAttribute('aria-selected', 'true');
+    memBtn.classList.remove('btn-active');
+    memBtn.setAttribute('aria-selected', 'false');
+    memView.hidden = true;
+    genView.hidden = false;
+    loadSources();
+  }
+}
+
+qs('sources-mode-memory').addEventListener('click', () => setSourcesMode('memory'));
+qs('sources-mode-general').addEventListener('click', () => setSourcesMode('general'));
+
 document.querySelectorAll('.sources-sort-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.sources-sort-btn').forEach(b => b.classList.remove('active'));
@@ -1991,7 +2067,10 @@ async function loadSources() {
   const list = qs('sources-list');
   panelLoading(list);
   try {
-    const data = await api('GET', '/api/sources');
+    // The General view always asks the server for the ``general`` bucket
+    // (orphans tag along server-side so they remain visible). Memory
+    // mode never reaches here — Memory Dirs panel runs its own fetch.
+    const data = await api('GET', '/api/sources?kind=general');
     STATE.allSources = data.sources;
     _renderSourcesNsChip();
     renderSourceTree(_getFilteredSorted());
