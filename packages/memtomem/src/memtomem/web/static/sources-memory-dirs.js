@@ -597,6 +597,11 @@ function _buildMemoryDirsPanel(initialDirs) {
     }
 
     function _aggregateStatus(entries) {
+      // ``file_count`` is the disk truth (matches the per-row badge);
+      // ``source_file_count`` is the indexed-only count, which would
+      // make the group total disagree with the sum of the row badges
+      // — confusing when most rows are unindexed (group says "7 files"
+      // while the rows clearly show 803 .md on disk).
       let chunks = 0;
       let files = 0;
       let any = false;
@@ -605,7 +610,7 @@ function _buildMemoryDirsPanel(initialDirs) {
         if (st) {
           any = true;
           chunks += st.chunk_count || 0;
-          files += st.source_file_count || 0;
+          files += (typeof st.file_count === 'number') ? st.file_count : 0;
         }
       }
       return { chunks, files, any };
