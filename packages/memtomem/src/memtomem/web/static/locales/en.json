@@ -146,6 +146,7 @@
   "sources.toast.added_to_other_view": "{path} added to {view}",
   "sources.toast.switch_view": "Switch",
 
+  "index.help": "Index files into memtomem. Type a path to scan, drop files to upload, or write a memory directly. Toggle Force re-index to rebuild existing chunks.",
   "index.title": "Index Files",
   "index.path_label": "Path",
   "index.path_placeholder": "e.g. ~/memories or /path/to/notes",

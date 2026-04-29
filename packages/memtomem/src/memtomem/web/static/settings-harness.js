@@ -8,7 +8,7 @@
 // Tab Help System (A + C)
 // ---------------------------------------------------------------------------
 
-const _HELP_TABS = ['search', 'sources', 'tags', 'timeline'];
+const _HELP_TABS = ['search', 'sources', 'index', 'tags', 'timeline'];
 const _HELP_STORAGE_KEY = 'm2m-help-dismissed';
 
 function _getHelpDismissed() {

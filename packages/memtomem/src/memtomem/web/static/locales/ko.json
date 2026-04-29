@@ -146,6 +146,7 @@
   "sources.toast.added_to_other_view": "{path} 가 {view} 에 추가됨",
   "sources.toast.switch_view": "이동",
 
+  "index.help": "memtomem 에 파일을 인덱싱합니다. 경로를 입력해 스캔하거나, 파일을 드롭해 업로드하거나, 직접 기억을 작성하세요. 강제 재인덱스로 기존 청크를 다시 생성할 수 있습니다.",
   "index.title": "파일 인덱싱",
   "index.path_label": "경로",
   "index.path_placeholder": "예: ~/memories 또는 /path/to/notes",
