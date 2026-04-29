@@ -51,7 +51,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   check, with a 100-row per-call cap so a backlog of orphans drains
   across multiple hook fires instead of stalling boot synchronously;
   `--json` emits one line of `{"session_id": ..., "resumed": bool,
-  "stale_ended": [...]}` for hook parsing. The plugin's `hooks.json`
+  "auto_ended": [...]}` for hook parsing — the list groups both
+  cutoff-based stale cleanup and cross-agent forced-end UUIDs;
+  ``sessions.metadata.reason`` (`stale` or `cross_agent`) carries the
+  per-row distinction. The plugin's `hooks.json`
   ships a SessionStart entry calling `mm session start --idempotent
   --auto-end-stale 24h --agent-id claude-code` and the
   `claude-code.md` Hooks Automation Setup snippet matches byte-for-byte

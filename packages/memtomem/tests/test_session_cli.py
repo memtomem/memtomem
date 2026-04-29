@@ -425,7 +425,7 @@ class TestSessionStartIdempotent:
         data = json.loads(result.output)
         assert data["session_id"] == existing_id
         assert data["resumed"] is True
-        assert data["stale_ended"] == []
+        assert data["auto_ended"] == []
         comp.storage.create_session.assert_not_awaited()
         comp.storage.end_session.assert_not_awaited()
 
@@ -442,7 +442,7 @@ class TestSessionStartIdempotent:
         data = json.loads(result.output)
         assert data["resumed"] is False
         assert data["session_id"] != existing_id
-        assert existing_id in data["stale_ended"]
+        assert existing_id in data["auto_ended"]
         comp.storage.end_session.assert_awaited_once()
         comp.storage.create_session.assert_awaited_once()
 
@@ -459,7 +459,7 @@ class TestSessionStartIdempotent:
         data = json.loads(result.output)
         assert data["resumed"] is False
         assert data["session_id"] != ended_id
-        assert data["stale_ended"] == []
+        assert data["auto_ended"] == []
         comp.storage.end_session.assert_not_awaited()
         comp.storage.create_session.assert_awaited_once()
 
@@ -483,7 +483,7 @@ class TestSessionStartIdempotent:
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         assert data["resumed"] is False
-        assert stale_id in data["stale_ended"]
+        assert stale_id in data["auto_ended"]
         comp.storage.end_session.assert_awaited_once_with(
             stale_id,
             "auto-ended after 24h inactivity",
@@ -504,10 +504,10 @@ class TestSessionStartIdempotent:
         result = runner.invoke(cli, ["session", "start", "--agent-id", "claude-code", "--json"])
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
-        assert set(data.keys()) == {"session_id", "resumed", "stale_ended"}
+        assert set(data.keys()) == {"session_id", "resumed", "auto_ended"}
         assert isinstance(data["session_id"], str) and data["session_id"]
         assert data["resumed"] is False
-        assert data["stale_ended"] == []
+        assert data["auto_ended"] == []
 
     def test_invalid_duration_raises_bad_parameter(self, runner, monkeypatch):
         """Hook authors mistyping ``--auto-end-stale`` see a useful Click
