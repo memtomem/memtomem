@@ -74,10 +74,14 @@ function _buildMemoryDirsPanel(initialDirs) {
   let statusByPath = {};
   let statusLoaded = false;
   // Memoized ``GET /api/sources?kind=memory`` response, indexed by
-  // ``memory_dir`` field. First drill-in fetches the whole memory bucket
-  // (one round trip — typically <1 KB per source × N sources) and keeps
-  // it; subsequent expands hit the cache. Reindex/Remove invalidate it
-  // so the file list reflects the new state next click.
+  // ``memory_dir``. The cache scope is intentionally per-render: it
+  // lives in this closure, so re-rendering the panel (mode toggle,
+  // tab switch, ``refreshDirs`` after add/remove) drops it on the
+  // floor and the next render refetches against current config —
+  // worth the extra round trip to avoid stale cache after off-panel
+  // changes. Within one render generation, drill-ins after the first
+  // reuse the cached response. Reindex also invalidates explicitly
+  // so the file list picks up new chunks without a full re-render.
   let _memorySourcesByDir = null;
   let _memorySourcesPromise = null;
   function _invalidateSourcesCache() {
@@ -216,22 +220,30 @@ function _buildMemoryDirsPanel(initialDirs) {
     }
 
     // ``memory_dir`` on each ``SourceOut`` is the configured dir
-    // expanded with ``Path.expanduser().resolve()`` — comparing with
-    // the configured ``path`` directly works for absolute entries the
-    // user added, and falls through cleanly for tilde-prefixed entries
-    // (they show as empty rather than crashing).
+    // after ``Path(d).expanduser().resolve()`` on the server — so
+    // ``~/memories`` in config arrives here as ``/Users/x/memories``.
+    // Exact-match works for already-absolute entries; tilde-prefixed
+    // and trailing-slash forms need the suffix fallback below.
     let entries = byDir[path] || [];
     if (!entries.length) {
-      // Fallback: try ``startswith`` against the resolved server-side
-      // owning dir. Catches the tilde / symlink case where the user
-      // added ``~/memories`` and the server normalised to
-      // ``/Users/x/memories``.
-      const matches = [];
-      for (const [dirKey, list] of Object.entries(byDir)) {
-        if (!dirKey) continue;
-        if (path === dirKey || dirKey === path) matches.push(...list);
+      // Strip leading ``~`` and trailing slashes, then look for any
+      // configured dir whose resolved key matches that suffix. JS has
+      // no ``expanduser`` so we lean on the suffix-uniqueness of
+      // absolute paths in practice (``~/memories`` matches
+      // ``/Users/x/memories`` but not ``/code/memory-game``). First
+      // match wins; collisions would require two dirs sharing the
+      // same trailing segments, which would already be ambiguous in
+      // the panel UI.
+      const trimmed = path.replace(/^~/, '').replace(/\/+$/, '');
+      if (trimmed) {
+        for (const [dirKey, list] of Object.entries(byDir)) {
+          if (!dirKey) continue;
+          if (dirKey === trimmed || dirKey.endsWith(trimmed)) {
+            entries = list;
+            break;
+          }
+        }
       }
-      entries = matches;
     }
 
     filesWrap.innerHTML = '';
