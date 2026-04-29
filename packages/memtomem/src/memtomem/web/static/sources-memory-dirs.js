@@ -969,14 +969,171 @@ function _buildMemoryDirsPanel(initialDirs) {
   return wrap;
 }
 
-// Public entry — called from app.js when the Sources tab activates.
-// Idempotent: replaces panel contents each call so the widget picks up
-// config mutations made in the Config tab (e.g., memory_dirs toggled via
-// ``mm config set`` then reflected after external reload).
+// Public entry — historical wrapper kept so external callers (older
+// bookmarks, tests) that referenced ``renderMemoryDirsPanel`` don't
+// break. With the Sources view unification (Memory & General share one
+// ``.sources-layout`` driven by ``app.js: _renderMemorySourceTree``),
+// the legacy panel's container ``#memory-dirs-panel`` is no longer in
+// the DOM, so this function no-ops on a fresh page load. Triggers a
+// memory reload instead so callers get the new view refreshed.
 function renderMemoryDirsPanel() {
   const container = qs('memory-dirs-panel');
-  if (!container) return;
-  const dirs = STATE.serverConfig?.indexing?.memory_dirs || [];
-  container.innerHTML = '';
-  container.appendChild(_buildMemoryDirsPanel(dirs));
+  if (container) {
+    const dirs = STATE.serverConfig?.indexing?.memory_dirs || [];
+    container.innerHTML = '';
+    container.appendChild(_buildMemoryDirsPanel(dirs));
+    return;
+  }
+  if (typeof loadSources === 'function') loadSources('memory');
+}
+
+// ── Module-level memory-dir actions ───────────────────────────────
+// Wired from the per-row action buttons rendered by
+// ``app.js: _renderMemoryDirGroup`` (and the +Add path / Reindex all
+// header buttons in the unified sources sidebar). They reload the
+// memory view on success so the panel reflects the new state without
+// a tab toggle. Closure-local ``handleAdd`` / ``handleRemove`` /
+// ``handleReindex*`` above remain wired to the legacy
+// ``_buildMemoryDirsPanel`` callsite (kept for backward compatibility);
+// these wrappers exist because the new render path lives outside that
+// closure.
+function _mdApiErrorText(err) {
+  return (err && err.message) ? err.message : String(err);
+}
+
+async function mdAdd(path) {
+  const trimmed = (path || '').trim();
+  if (!trimmed) return;
+  try {
+    const resp = await api('POST', '/api/memory-dirs/add', { path: trimmed });
+    if (resp && Array.isArray(resp.memory_dirs)) {
+      if (STATE.serverConfig?.indexing) {
+        STATE.serverConfig.indexing.memory_dirs = [...resp.memory_dirs];
+      }
+      STATE.memoryDirs = [...resp.memory_dirs];
+    }
+    const addedKind = resp && resp.kind;
+    const currentMode = (typeof getSourcesMode === 'function') ? getSourcesMode() : 'memory';
+    if (addedKind && addedKind !== currentMode) {
+      const otherLabel = t('sources.mode.' + addedKind);
+      showToast(
+        t('sources.toast.added_to_other_view', { path: trimmed, view: otherLabel }),
+        'success',
+        {
+          action: {
+            label: t('sources.toast.switch_view'),
+            onClick: () => {
+              if (typeof setSourcesMode === 'function') setSourcesMode(addedKind);
+            },
+          },
+        },
+      );
+    } else {
+      showToast(t('toast.memory_dir.added', { path: trimmed }), 'success');
+    }
+    if (typeof loadSources === 'function') loadSources(currentMode);
+  } catch (err) {
+    showToast(t('toast.memory_dir.add_failed', { error: _mdApiErrorText(err) }), 'error');
+  }
+}
+
+async function mdRemove(path) {
+  const st = (STATE.memoryStatusByPath || {})[path];
+  const chunkCount = (st && st.chunk_count) || 0;
+  const extraOption = chunkCount > 0
+    ? {
+        id: 'deleteChunks',
+        label: t('confirm.memory_dir_delete_chunks_label', { count: chunkCount }),
+        defaultChecked: false,
+      }
+    : null;
+  const result = await showConfirm({
+    title: t('confirm.memory_dir_remove_title'),
+    message: t('confirm.memory_dir_remove_msg', { path }),
+    extraOption,
+  });
+  const ok = extraOption ? result && result.ok : result;
+  if (!ok) return;
+  const deleteChunks = !!(extraOption && result && result.extras && result.extras.deleteChunks);
+  try {
+    const resp = await api('POST', '/api/memory-dirs/remove', {
+      path, delete_chunks: deleteChunks,
+    });
+    if (resp && Array.isArray(resp.memory_dirs)) {
+      if (STATE.serverConfig?.indexing) {
+        STATE.serverConfig.indexing.memory_dirs = [...resp.memory_dirs];
+      }
+      STATE.memoryDirs = [...resp.memory_dirs];
+    }
+    const deleted = (resp && resp.deleted_chunks) || 0;
+    if (deleteChunks && deleted > 0) {
+      showToast(t('toast.memory_dir.removed_with_chunks', { path, count: deleted }), 'success');
+    } else {
+      showToast(t('toast.memory_dir.removed', { path }), 'success');
+    }
+    if (typeof hideBrowser === 'function') hideBrowser();
+    if (typeof loadSources === 'function') loadSources('memory');
+    if (typeof loadStats === 'function') loadStats();
+  } catch (err) {
+    showToast(t('toast.memory_dir.remove_failed', { error: _mdApiErrorText(err) }), 'error');
+  }
+}
+
+async function mdOpenOne(path, btn) {
+  if (btn) btnLoading(btn, true);
+  try {
+    await api('POST', '/api/memory-dirs/open', { path });
+    showToast(t('toast.memory_dir.opened', { path }), 'success');
+  } catch (err) {
+    showToast(t('toast.memory_dir.open_failed', { error: _mdApiErrorText(err) }), 'error');
+  } finally {
+    if (btn) btnLoading(btn, false);
+  }
+}
+
+async function mdReindexOne(path, btn) {
+  if (btn) btnLoading(btn, true);
+  showToast(t('toast.memory_dir.reindex_started', { path }), 'info');
+  try {
+    const resp = await api(
+      'POST', '/api/index',
+      { path, recursive: true, force: false },
+      { timeout: 300_000 },
+    );
+    const count = (resp && resp.indexed_chunks) || 0;
+    showToast(
+      t('toast.memory_dir.reindex_done', { path, count }),
+      (resp && resp.errors && resp.errors.length) ? 'error' : 'success',
+    );
+    if (typeof _markDataStale === 'function') _markDataStale();
+    if (typeof loadStats === 'function') loadStats();
+  } catch (err) {
+    showToast(t('toast.memory_dir.reindex_failed', { error: _mdApiErrorText(err) }), 'error');
+  } finally {
+    if (btn) btnLoading(btn, false);
+    if (typeof loadSources === 'function') loadSources('memory');
+  }
+}
+
+async function mdReindexAll(btn) {
+  if (btn) btnLoading(btn, true);
+  try {
+    const resp = await api('POST', '/api/reindex', undefined, { timeout: 300_000 });
+    if (resp.errors && resp.errors.length) {
+      showToast(
+        t('toast.reindex_partial', { count: resp.errors.length, first: resp.errors[0] }),
+        'error',
+      );
+    } else {
+      const total = (resp.results || []).reduce((s, r) => s + (r.indexed_chunks || 0), 0);
+      showToast(t('toast.reindex_complete', { count: total }), 'success');
+    }
+    if (typeof _markDataStale === 'function') _markDataStale();
+    if (typeof loadStats === 'function') loadStats();
+  } catch (err) {
+    showToast(t('toast.reindex_failed', { error: _mdApiErrorText(err) }), 'error');
+  } finally {
+    if (btn) btnLoading(btn, false);
+    if (typeof loadSources === 'function') loadSources('memory');
+  }
 }

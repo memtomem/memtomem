@@ -410,18 +410,26 @@
       <button class="tab-help-bar-dismiss" data-help-tab="sources">✕</button>
     </div>
     <div class="sources-mode-toggle" role="tablist" aria-label="Sources view">
-      <button id="sources-mode-memory" class="btn-ghost btn-active" role="tab" aria-selected="true" aria-controls="sources-view-memory" data-mode="memory" data-i18n="sources.mode.memory">Memory</button>
-      <button id="sources-mode-general" class="btn-ghost" role="tab" aria-selected="false" aria-controls="sources-view-general" data-mode="general" data-i18n="sources.mode.general">General sources</button>
+      <button id="sources-mode-memory" class="btn-ghost btn-active" role="tab" aria-selected="true" aria-controls="sources-view" data-mode="memory" data-i18n="sources.mode.memory">Memory</button>
+      <button id="sources-mode-general" class="btn-ghost" role="tab" aria-selected="false" aria-controls="sources-view" data-mode="general" data-i18n="sources.mode.general">General sources</button>
     </div>
-    <div id="sources-view-memory" class="sources-view" role="tabpanel" aria-labelledby="sources-mode-memory">
-      <div id="memory-dirs-panel" class="memory-dirs-panel card"></div>
-    </div>
-    <div id="sources-view-general" class="sources-view" role="tabpanel" aria-labelledby="sources-mode-general" hidden>
+    <div id="sources-view" class="sources-view" role="tabpanel" aria-labelledby="sources-mode-memory">
       <div class="sources-layout">
         <div class="sources-sidebar">
           <div class="sources-header">
             <h2 data-i18n="sources.title">Sources</h2>
-            <button id="refresh-sources-btn" class="btn-ghost" data-i18n="sources.refresh">Refresh</button>
+            <div id="sources-actions-memory" class="sources-actions">
+              <button id="memory-add-path-btn" class="btn-ghost btn-sm" data-i18n="sources.memory_dirs.add_btn">+ Add path</button>
+              <button id="memory-reindex-all-btn" class="btn-ghost btn-sm" data-i18n="sources.memory_dirs.reindex_all">Reindex all</button>
+            </div>
+            <div id="sources-actions-general" class="sources-actions" hidden>
+              <button id="refresh-sources-btn" class="btn-ghost" data-i18n="sources.refresh">Refresh</button>
+            </div>
+          </div>
+          <div id="memory-add-row" class="memory-dirs-add" hidden>
+            <input id="memory-add-input" type="text" class="memory-dirs-add-input" data-i18n-placeholder="sources.memory_dirs.add_placeholder" placeholder="/absolute/path/to/directory" />
+            <button id="memory-add-submit" class="btn-primary btn-sm" data-i18n="sources.memory_dirs.add_submit">Add</button>
+            <button id="memory-add-cancel" class="btn-ghost btn-sm" data-i18n="sources.memory_dirs.add_cancel">Cancel</button>
           </div>
           <div class="sources-filter-row">
             <input id="sources-filter" type="text" data-i18n-placeholder="sources.filter_placeholder" placeholder="Type to filter by path… e.g. .md, src/, utils" autocomplete="off" data-i18n-title="sources.filter_title" title="Filters source list by partial path match" />

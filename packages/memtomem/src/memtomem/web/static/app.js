@@ -2056,14 +2056,16 @@ function navigateToSourcesByNs(nsName) {
   activateTab('sources');
 }
 
-qs('refresh-sources-btn').addEventListener('click', loadSources);
+qs('refresh-sources-btn').addEventListener('click', () => loadSources('general'));
 qs('sources-filter').addEventListener('input', () => renderSourceTree(_getFilteredSorted()));
 
 // ── Sources sub-toggle: Memory ↔ General ──
 // memory_dirs config lumps two distinct user intents together — agent
 // memory dirs (auto-discovered) vs arbitrary RAG folders. The sub-toggle
-// gives each its own surface; classification happens server-side via
-// ``GET /api/memory-dirs/status`` (kind field) and ``GET /api/sources?kind=``.
+// gives each its own data slice but they now share one ``.sources-layout``
+// (sidebar + chunks-browser) so the view feels coherent: vendor groups
+// only appear when ``mode === 'memory'``, header actions swap between
+// the two modes, and clicking a file opens chunks in the same right pane.
 const SOURCES_MODE_LS_KEY = 'memtomem.sources_mode';
 
 function getSourcesMode() {
@@ -2081,10 +2083,7 @@ function setSourcesMode(mode) {
 
   const memBtn = qs('sources-mode-memory');
   const genBtn = qs('sources-mode-general');
-  const memView = qs('sources-view-memory');
-  const genView = qs('sources-view-general');
-  if (!memBtn || !genBtn || !memView || !genView) return;
-
+  if (!memBtn || !genBtn) return;
   if (mode === 'memory') {
     memBtn.classList.add('btn-active');
     memBtn.setAttribute('aria-selected', 'true');
@@ -2092,9 +2091,6 @@ function setSourcesMode(mode) {
     genBtn.classList.remove('btn-active');
     genBtn.setAttribute('aria-selected', 'false');
     genBtn.setAttribute('tabindex', '-1');
-    memView.hidden = false;
-    genView.hidden = true;
-    if (typeof renderMemoryDirsPanel === 'function') renderMemoryDirsPanel();
   } else {
     genBtn.classList.add('btn-active');
     genBtn.setAttribute('aria-selected', 'true');
@@ -2102,10 +2098,20 @@ function setSourcesMode(mode) {
     memBtn.classList.remove('btn-active');
     memBtn.setAttribute('aria-selected', 'false');
     memBtn.setAttribute('tabindex', '-1');
-    memView.hidden = true;
-    genView.hidden = false;
-    loadSources();
   }
+
+  // Header action groups swap with the mode. The add-path inline row
+  // is a Memory-only affordance — closing it on every mode switch keeps
+  // it from surviving as a stuck-open input under General mode.
+  const memActs = qs('sources-actions-memory');
+  const genActs = qs('sources-actions-general');
+  if (memActs) memActs.hidden = mode !== 'memory';
+  if (genActs) genActs.hidden = mode !== 'general';
+  const addRow = qs('memory-add-row');
+  if (addRow) addRow.hidden = true;
+
+  hideBrowser();
+  loadSources(mode);
 }
 
 qs('sources-mode-memory').addEventListener('click', () => setSourcesMode('memory'));
@@ -2133,15 +2139,76 @@ document.querySelectorAll('.sources-sort-btn').forEach(btn => {
   });
 });
 
-async function loadSources() {
+// ── Memory mode header actions ──
+// Inline +Add path form toggle, submit/cancel, Reindex all. Wired here
+// (rather than inside ``sources-memory-dirs.js``) so the file can stay
+// focused on per-row helpers while DOM event wiring lives in one place.
+(function _wireMemoryHeaderActions() {
+  const addBtn = qs('memory-add-path-btn');
+  const reindexAllBtn = qs('memory-reindex-all-btn');
+  const addRow = qs('memory-add-row');
+  const addInput = qs('memory-add-input');
+  const addSubmit = qs('memory-add-submit');
+  const addCancel = qs('memory-add-cancel');
+  if (addBtn && addRow && addInput) {
+    addBtn.addEventListener('click', () => {
+      addRow.hidden = !addRow.hidden;
+      if (!addRow.hidden) addInput.focus();
+    });
+  }
+  if (addSubmit && addInput) {
+    addSubmit.addEventListener('click', async () => {
+      const val = addInput.value;
+      addInput.value = '';
+      if (addRow) addRow.hidden = true;
+      if (typeof mdAdd === 'function') await mdAdd(val);
+    });
+    addInput.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') { ev.preventDefault(); addSubmit.click(); }
+      else if (ev.key === 'Escape') { ev.preventDefault(); if (addCancel) addCancel.click(); }
+    });
+  }
+  if (addCancel && addRow && addInput) {
+    addCancel.addEventListener('click', () => {
+      addInput.value = '';
+      addRow.hidden = true;
+    });
+  }
+  if (reindexAllBtn) {
+    reindexAllBtn.addEventListener('click', () => {
+      if (typeof mdReindexAll === 'function') mdReindexAll(reindexAllBtn);
+    });
+  }
+})();
+
+async function loadSources(mode) {
+  if (mode !== 'memory' && mode !== 'general') mode = STATE.sourcesMode || 'memory';
+  STATE.sourcesMode = mode;
   const list = qs('sources-list');
   panelLoading(list);
   try {
-    // The General view always asks the server for the ``general`` bucket
-    // (orphans tag along server-side so they remain visible). Memory
-    // mode never reaches here — Memory Dirs panel runs its own fetch.
-    const data = await api('GET', '/api/sources?kind=general');
-    STATE.allSources = data.sources;
+    if (mode === 'memory') {
+      // Memory mode joins two endpoints: ``/api/memory-dirs/status`` for
+      // per-directory metadata (vendor / category / counts / timestamps)
+      // and ``/api/sources?kind=memory`` for the file rows under those
+      // directories. ``limit=10000`` matches the route's hard cap.
+      const [statusResp, sourcesResp] = await Promise.all([
+        api('GET', '/api/memory-dirs/status'),
+        api('GET', '/api/sources?kind=memory&limit=10000'),
+      ]);
+      const statusByPath = {};
+      for (const entry of (statusResp && statusResp.dirs) || []) {
+        if (entry && typeof entry.path === 'string') statusByPath[entry.path] = entry;
+      }
+      STATE.memoryStatusByPath = statusByPath;
+      STATE.memoryDirs = (STATE.serverConfig?.indexing?.memory_dirs) || Object.keys(statusByPath);
+      STATE.allSources = (sourcesResp && sourcesResp.sources) || [];
+    } else {
+      // The General view always asks the server for the ``general`` bucket
+      // (orphans tag along server-side so they remain visible).
+      const data = await api('GET', '/api/sources?kind=general');
+      STATE.allSources = data.sources;
+    }
     _renderSourcesNsChip();
     renderSourceTree(_getFilteredSorted());
   } catch (err) {
@@ -2151,6 +2218,7 @@ async function loadSources() {
 
 function renderSourceTree(sources) {
   const list = qs('sources-list');
+  const mode = STATE.sourcesMode || 'memory';
 
   // C. Summary stats bar
   const statsEl = qs('sources-stats');
@@ -2161,6 +2229,14 @@ function renderSourceTree(sources) {
     statsEl.hidden = false;
   } else {
     statsEl.hidden = true;
+  }
+
+  // Memory mode: vendor → memory_dir → file cards. Even with zero
+  // sources the panel still renders so configured-but-empty memory dirs
+  // stay visible (with their reindex/remove actions reachable).
+  if (mode === 'memory') {
+    _renderMemorySourceTree(sources, list);
+    return;
   }
 
   if (!sources.length) {
@@ -2272,6 +2348,303 @@ function hideBrowser() {
   hide(qs('chunks-browser-content'));
   const browser = qs('chunks-browser');
   browser.innerHTML = '<div class="empty-state">' + emptyState('📄', 'Select a source to browse its chunks') + '</div>';
+}
+
+// ── Memory-mode source tree ─────────────────────────────────────────
+// Renders the same ``sources-list`` container in two layers:
+//   1. ``<details class="source-vendor-group">`` per vendor
+//      (user / claude / openai), keyed off the ``provider`` field on
+//      ``GET /api/memory-dirs/status``.
+//   2. ``.source-group`` per ``memory_dir`` inside that vendor, with
+//      the same chevron header used by General mode plus three
+//      hover-revealed actions on the right edge: Open · Reindex ·
+//      Remove. Each source-group's children are file cards (the same
+//      ``.source-item`` shape General uses) so the file-click → chunks
+//      drill-in flow is identical in both modes.
+//
+// Vendor / category constants come from ``sources-memory-dirs.js``
+// (underscore-prefixed module-level ``const`` — globals at script
+// scope since that file loads after app.js).
+function _renderMemorySourceTree(sources, list) {
+  const memDirs = STATE.memoryDirs || [];
+  const statusByPath = STATE.memoryStatusByPath || {};
+
+  const sourcesByDir = {};
+  for (const s of sources) {
+    const key = s.memory_dir || '';
+    if (!sourcesByDir[key]) sourcesByDir[key] = [];
+    sourcesByDir[key].push(s);
+  }
+
+  // Hide dirs whose files are all filtered out so a path filter
+  // doesn't leave empty "Claude (0)" rows behind.
+  const filterActive = !!(qs('sources-filter') && qs('sources-filter').value.trim());
+
+  const PROVIDER_ORDER = (typeof _MEMORY_DIR_PROVIDER_ORDER !== 'undefined')
+    ? _MEMORY_DIR_PROVIDER_ORDER : ['user', 'claude', 'openai'];
+  const PROVIDER_LABEL_KEY = (typeof _MEMORY_DIR_PROVIDER_LABEL_KEY !== 'undefined')
+    ? _MEMORY_DIR_PROVIDER_LABEL_KEY : {};
+  const CATEGORY_ORDER = (typeof _MEMORY_DIR_CATEGORY_ORDER !== 'undefined')
+    ? _MEMORY_DIR_CATEGORY_ORDER : ['user', 'claude-memory', 'claude-plans', 'codex'];
+  const CATEGORY_LABEL_KEY = (typeof _MEMORY_DIR_CATEGORY_LABEL_KEY !== 'undefined')
+    ? _MEMORY_DIR_CATEGORY_LABEL_KEY : {};
+  const PROVIDER_COLLAPSED = (typeof _MEMORY_DIR_PROVIDER_COLLAPSED !== 'undefined')
+    ? _MEMORY_DIR_PROVIDER_COLLAPSED : new Set(['claude', 'openai']);
+
+  const byProvider = {};
+  for (const p of PROVIDER_ORDER) byProvider[p] = { order: [], byCategory: {} };
+  // Union of configured dirs and dirs that show up in the sources
+  // response — covers orphaned chunks whose memory_dir was unset in
+  // config but still has indexed rows.
+  const allDirs = new Set(memDirs);
+  for (const k of Object.keys(sourcesByDir)) if (k) allDirs.add(k);
+  for (const d of allDirs) {
+    const st = statusByPath[d];
+    const cat = (st && CATEGORY_LABEL_KEY[st.category]) ? st.category : 'user';
+    const rawProvider = st && st.provider;
+    const provider = byProvider[rawProvider] ? rawProvider : 'user';
+    const bucket = byProvider[provider];
+    if (!bucket.byCategory[cat]) {
+      bucket.byCategory[cat] = [];
+      bucket.order.push(cat);
+    }
+    bucket.byCategory[cat].push(d);
+  }
+
+  list.innerHTML = '';
+  const maxChunks = Math.max(1, ...sources.map(s => s.chunk_count || 0));
+
+  let renderedFiles = 0;
+  for (const provider of PROVIDER_ORDER) {
+    const bucket = byProvider[provider];
+    if (!bucket.order.length) continue;
+
+    const categories = CATEGORY_ORDER.filter(c => bucket.byCategory[c]);
+    // Drop dirs with no visible files when a filter is active.
+    const visibleCats = filterActive
+      ? categories
+          .map(cat => [cat, bucket.byCategory[cat].filter(d => (sourcesByDir[d] || []).length > 0)])
+          .filter(([, dirs]) => dirs.length > 0)
+      : categories.map(cat => [cat, bucket.byCategory[cat]]);
+    if (!visibleCats.length) continue;
+
+    const totalFiles = visibleCats.reduce(
+      (sum, [, dirs]) => sum + dirs.reduce((s, d) => s + (sourcesByDir[d] || []).length, 0),
+      0,
+    );
+    const isSingleLeaf = visibleCats.length === 1;
+
+    const group = document.createElement('details');
+    group.className = 'source-vendor-group';
+    if (!PROVIDER_COLLAPSED.has(provider) || filterActive) group.open = true;
+    group.dataset.provider = provider;
+
+    const summary = document.createElement('summary');
+    summary.className = 'source-vendor-summary';
+    const labelKey = isSingleLeaf
+      ? (CATEGORY_LABEL_KEY[visibleCats[0][0]] || PROVIDER_LABEL_KEY[provider] || provider)
+      : (PROVIDER_LABEL_KEY[provider] || provider);
+    const label = document.createElement('span');
+    label.className = 'source-vendor-label';
+    label.textContent = (typeof t === 'function') ? t(labelKey) : labelKey;
+    summary.appendChild(label);
+
+    const count = document.createElement('span');
+    count.className = 'source-vendor-count';
+    count.textContent = String(totalFiles);
+    summary.appendChild(count);
+
+    group.appendChild(summary);
+
+    if (isSingleLeaf) {
+      for (const dir of visibleCats[0][1]) {
+        group.appendChild(_renderMemoryDirGroup(dir, sourcesByDir[dir] || [], statusByPath[dir], maxChunks));
+      }
+    } else {
+      const products = document.createElement('div');
+      products.className = 'source-vendor-products';
+      for (const [cat, dirs] of visibleCats) {
+        const section = document.createElement('section');
+        section.className = 'source-vendor-product';
+        section.dataset.category = cat;
+        const productHeader = document.createElement('div');
+        productHeader.className = 'source-vendor-product-header';
+        const pLabel = document.createElement('span');
+        pLabel.className = 'source-vendor-product-label';
+        const pKey = CATEGORY_LABEL_KEY[cat] || cat;
+        pLabel.textContent = (typeof t === 'function') ? t(pKey) : pKey;
+        productHeader.appendChild(pLabel);
+        const pCount = document.createElement('span');
+        pCount.className = 'source-vendor-count';
+        pCount.textContent = String(dirs.reduce((sum, d) => sum + (sourcesByDir[d] || []).length, 0));
+        productHeader.appendChild(pCount);
+        section.appendChild(productHeader);
+        for (const dir of dirs) {
+          section.appendChild(_renderMemoryDirGroup(dir, sourcesByDir[dir] || [], statusByPath[dir], maxChunks));
+        }
+        products.appendChild(section);
+      }
+      group.appendChild(products);
+    }
+
+    list.appendChild(group);
+    renderedFiles += totalFiles;
+  }
+
+  if (!allDirs.size) {
+    list.innerHTML = '<div class="empty-state">' + emptyState('📁', 'No memory directories', 'Add one with the + Add path button') + '</div>';
+  } else if (!renderedFiles && filterActive) {
+    list.innerHTML = '<div class="empty-state">' + emptyState('🔍', 'No matches for that filter') + '</div>';
+  }
+}
+
+function _renderMemoryDirGroup(dir, items, status, maxChunks) {
+  const group = document.createElement('div');
+  group.className = 'source-group source-group-memory';
+  if (status && status.exists === false) group.classList.add('source-group-missing');
+
+  const header = document.createElement('div');
+  header.className = 'source-group-header';
+  header.title = dir;
+  header.setAttribute('aria-expanded', 'true');
+
+  const chevron = document.createElement('span');
+  chevron.className = 'source-group-chevron';
+  chevron.textContent = '▼';
+  header.appendChild(chevron);
+
+  const dirLabel = document.createElement('span');
+  dirLabel.className = 'source-group-dir';
+  // Full path goes on the row's ``title`` (set above) so hover still
+  // reveals it; the visible label is collapsed to ``…/parent/leaf`` so
+  // the stats badge + actions stay on screen at the default 340px
+  // sidebar width.
+  dirLabel.textContent = (typeof shortDir === 'function') ? shortDir(dir) : dir;
+  header.appendChild(dirLabel);
+
+  // Memory mode skips the per-group ``count`` badge that General mode
+  // uses — the stats badge below already carries indexed/files/chunks,
+  // so a separate count would be duplicate noise (and would mismatch
+  // when the sources response is missing rows the status response has).
+  if (status) {
+    const statsBadge = document.createElement('span');
+    statsBadge.className = 'source-group-stats';
+    if ((status.chunk_count || 0) === 0) statsBadge.classList.add('empty');
+    if (status.exists === false) statsBadge.classList.add('missing');
+    if (status.exists === false) {
+      statsBadge.textContent = (typeof t === 'function')
+        ? t('sources.memory_dirs.status_missing') : 'missing';
+    } else {
+      const files = (typeof status.file_count === 'number') ? status.file_count : 0;
+      const indexed = status.source_file_count || 0;
+      const chunks = status.chunk_count || 0;
+      statsBadge.textContent = (typeof t === 'function')
+        ? t('sources.memory_dirs.status_group', { files, indexed, chunks })
+        : `${indexed}/${files} files · ${chunks} chunks`;
+    }
+    header.appendChild(statsBadge);
+  }
+
+  // Hover-revealed actions: open the dir in the OS file manager,
+  // reindex its files, or remove it from memory_dirs config. Each
+  // stops propagation so it doesn't toggle the parent collapse.
+  const actions = document.createElement('div');
+  actions.className = 'source-group-actions';
+  const tFallback = (key, fb) => (typeof t === 'function' ? t(key) : fb);
+
+  const openBtn = document.createElement('button');
+  openBtn.type = 'button';
+  openBtn.className = 'btn-ghost btn-xs';
+  openBtn.textContent = tFallback('sources.memory_dirs.action_open', 'Open');
+  openBtn.title = tFallback('sources.memory_dirs.open_title', 'Open in file manager');
+  if (status && status.exists === false) openBtn.disabled = true;
+  openBtn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    if (typeof mdOpenOne === 'function') mdOpenOne(dir, openBtn);
+  });
+  actions.appendChild(openBtn);
+
+  const reindexBtn = document.createElement('button');
+  reindexBtn.type = 'button';
+  reindexBtn.className = 'btn-ghost btn-xs';
+  const hasChunks = status && status.exists !== false && (status.chunk_count || 0) > 0;
+  reindexBtn.textContent = tFallback(
+    hasChunks ? 'sources.memory_dirs.action_reindex' : 'sources.memory_dirs.action_index',
+    hasChunks ? 'Reindex' : 'Index',
+  );
+  reindexBtn.title = tFallback('sources.memory_dirs.reindex_title', 'Reindex this directory');
+  reindexBtn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    if (typeof mdReindexOne === 'function') mdReindexOne(dir, reindexBtn);
+  });
+  actions.appendChild(reindexBtn);
+
+  const removeBtn = document.createElement('button');
+  removeBtn.type = 'button';
+  removeBtn.className = 'btn-ghost btn-xs source-group-remove';
+  removeBtn.textContent = tFallback('sources.memory_dirs.action_delete', 'Remove');
+  removeBtn.title = tFallback('sources.memory_dirs.delete_title', 'Remove from memory_dirs');
+  if ((STATE.memoryDirs || []).length <= 1) removeBtn.disabled = true;
+  removeBtn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    if (typeof mdRemove === 'function') mdRemove(dir);
+  });
+  actions.appendChild(removeBtn);
+
+  header.appendChild(actions);
+
+  header.addEventListener('click', (ev) => {
+    // Action buttons / inner spans bubble here too — guard by
+    // checking the closest ``.source-group-actions`` instead of the
+    // literal target.
+    if (ev.target.closest('.source-group-actions')) return;
+    group.classList.toggle('collapsed');
+    header.setAttribute('aria-expanded', !group.classList.contains('collapsed'));
+  });
+  group.appendChild(header);
+
+  for (const s of items) {
+    group.appendChild(_renderMemorySourceItem(s, maxChunks));
+  }
+
+  return group;
+}
+
+function _renderMemorySourceItem(s, maxChunks) {
+  const filename = s.path.split('/').pop() || s.path;
+  const item = document.createElement('div');
+  item.className = 'source-item';
+  item.title = s.path;
+  const size = s.file_size != null ? formatBytes(s.file_size) : '';
+  const age = s.last_indexed_at ? relativeTime(s.last_indexed_at) : '';
+  const barPct = Math.round(((s.chunk_count || 0) / maxChunks) * 100);
+  const nsBadges = (s.namespaces || [])
+    .filter(ns => ns !== 'default')
+    .map(ns => `<span class="badge badge-ns source-ns-badge">${escapeHtml(ns)}</span>`)
+    .join('');
+  item.innerHTML = `
+    <div class="source-item-row1">
+      <span class="source-type-dot" style="background:${fileTypeColor(s.path)}"></span>
+      <span class="source-name">${escapeHtml(filename)}</span>
+      ${nsBadges}
+    </div>
+    <div class="source-item-row2">
+      ${s.chunk_count ?? '?'} chunks${size ? ' · ' + size : ''}${s.avg_tokens ? ' · avg ' + s.avg_tokens + ' tok' : ''}${age ? ' · ' + age : ''}
+    </div>
+    <div class="source-chunk-bar">
+      <div class="source-chunk-bar-fill" style="width:${barPct}%"></div>
+    </div>
+  `;
+  item.setAttribute('tabindex', '0');
+  item.addEventListener('click', () => {
+    document.querySelectorAll('.source-item').forEach(el => el.classList.remove('active'));
+    item.classList.add('active');
+    browseSource(s.path);
+  });
+  item.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); item.click(); }
+  });
+  return item;
 }
 
 async function browseSource(path, limit = 100) {

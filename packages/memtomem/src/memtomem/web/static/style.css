@@ -1203,8 +1203,75 @@ button:active { opacity: 0.7; }
   font-size: 0.82rem;
   padding: 4px 12px;
 }
-.sources-view { display: flex; flex-direction: column; flex: 1; min-height: 0; }
-#sources-view-general { height: 100%; overflow: hidden; }
+.sources-view { display: flex; flex-direction: column; flex: 1; min-height: 0; height: 100%; overflow: hidden; }
+
+/* ── Memory mode source tree ──
+   Vendor → memory_dir → file cards inside the unified Sources sidebar.
+   ``.source-vendor-group`` is a ``<details>`` (browser-native keyboard
+   toggle); each summary carries the vendor label + total file count.
+   Multi-leaf vendors (Claude) wrap products in ``.source-vendor-products``
+   with their own header rows (mirrors the previous Phase-2 vendor tree
+   shape inside the new General-style layout). */
+.sources-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.source-vendor-group {
+  border: none; background: transparent;
+  margin-bottom: 8px;
+}
+.source-vendor-group + .source-vendor-group { border-top: 1px solid var(--border); padding-top: 6px; }
+.source-vendor-summary {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 4px;
+  cursor: pointer; user-select: none; list-style: none;
+  font-size: 0.84rem;
+}
+.source-vendor-summary::-webkit-details-marker { display: none; }
+.source-vendor-summary::before {
+  content: '▸';
+  font-size: 0.62rem; color: var(--muted); width: 10px;
+  transition: transform 0.12s ease;
+}
+.source-vendor-group[open] > .source-vendor-summary::before { transform: rotate(90deg); }
+.source-vendor-label { color: var(--text); font-weight: 500; }
+.source-vendor-count {
+  font-size: 0.7rem; color: var(--muted); font-family: var(--mono);
+  padding: 1px 7px; border-radius: 10px;
+  background: var(--bg); border: 1px solid var(--border);
+}
+.source-vendor-products { display: flex; flex-direction: column; gap: 4px; }
+.source-vendor-product { padding: 4px 0; }
+.source-vendor-product + .source-vendor-product { border-top: 1px dashed var(--border); }
+.source-vendor-product-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 4px 4px 18px;
+  font-size: 0.78rem;
+}
+.source-vendor-product-label { color: var(--text); font-weight: 500; }
+
+/* Memory source-group: same chevron header as General, plus per-dir
+   stats badge and three hover-revealed actions (Open / Reindex / Remove).
+   ``.source-group-memory`` indents below the vendor / product so the
+   hierarchy reads visually. */
+.source-group-memory { margin-left: 12px; }
+.source-vendor-product .source-group-memory { margin-left: 0; }
+.source-group-stats {
+  font-size: 0.68rem; color: var(--muted); font-family: var(--mono);
+  margin-left: auto; flex-shrink: 0; white-space: nowrap;
+  padding: 0 4px;
+}
+.source-group-stats.empty { color: #b91c1c; }
+.source-group-stats.missing { color: #b91c1c; font-style: italic; }
+.source-group-missing > .source-group-header .source-group-dir {
+  text-decoration: line-through; color: var(--muted);
+}
+.source-group-actions {
+  display: flex; gap: 2px; flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.source-group-header:hover .source-group-actions,
+.source-group-header:focus-within .source-group-actions { opacity: 1; }
+.source-group-actions .btn-xs { font-size: 0.7rem; padding: 2px 6px; }
+.source-group-remove:not(:disabled):hover { color: #b91c1c; }
 
 /* Path button — overrides the default ``<button>`` chrome so the row
    keeps the previous span's flat look while gaining keyboard / hover
