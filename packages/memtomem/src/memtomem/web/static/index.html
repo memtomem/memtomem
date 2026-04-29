@@ -410,13 +410,13 @@
       <button class="tab-help-bar-dismiss" data-help-tab="sources">✕</button>
     </div>
     <div class="sources-mode-toggle" role="tablist" aria-label="Sources view">
-      <button id="sources-mode-memory" class="btn-ghost btn-active" role="tab" aria-selected="true" data-i18n="sources.mode.memory">Memory</button>
-      <button id="sources-mode-general" class="btn-ghost" role="tab" aria-selected="false" data-i18n="sources.mode.general">General sources</button>
+      <button id="sources-mode-memory" class="btn-ghost btn-active" role="tab" aria-selected="true" aria-controls="sources-view-memory" data-i18n="sources.mode.memory">Memory</button>
+      <button id="sources-mode-general" class="btn-ghost" role="tab" aria-selected="false" aria-controls="sources-view-general" data-i18n="sources.mode.general">General sources</button>
     </div>
-    <div id="sources-view-memory" class="sources-view">
+    <div id="sources-view-memory" class="sources-view" role="tabpanel" aria-labelledby="sources-mode-memory">
       <div id="memory-dirs-panel" class="memory-dirs-panel card"></div>
     </div>
-    <div id="sources-view-general" class="sources-view" hidden>
+    <div id="sources-view-general" class="sources-view" role="tabpanel" aria-labelledby="sources-mode-general" hidden>
       <div class="sources-layout">
         <div class="sources-sidebar">
           <div class="sources-header">

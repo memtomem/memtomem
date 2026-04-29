@@ -1262,6 +1262,11 @@ button.memory-dirs-path:focus-visible {
   font-size: 0.78rem;
 }
 .memory-dirs-file:hover { background: var(--bg-hover); }
+.memory-dirs-file:focus-visible {
+  outline: 1px dashed var(--accent);
+  outline-offset: 2px;
+  background: var(--bg-hover);
+}
 .memory-dirs-file-name {
   flex: 1 1 auto;
   min-width: 0;

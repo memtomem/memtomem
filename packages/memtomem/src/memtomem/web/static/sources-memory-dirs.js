@@ -262,6 +262,13 @@ function _buildMemoryDirsPanel(initialDirs) {
       const li = document.createElement('li');
       li.className = 'memory-dirs-file';
       li.title = s.path;
+      // Keyboard-activatable row: ``role="button"`` + ``tabindex=0`` puts
+      // the row in tab order, and the keydown handler accepts Enter and
+      // Space the same way a native ``<button>`` does. Mirrors the
+      // source-tree rows in ``app.js:_renderSourceTree`` so the drill-in
+      // feels consistent with the General view.
+      li.setAttribute('role', 'button');
+      li.setAttribute('tabindex', '0');
       const filename = s.path.split('/').pop() || s.path;
       const name = document.createElement('span');
       name.className = 'memory-dirs-file-name';
@@ -274,7 +281,7 @@ function _buildMemoryDirsPanel(initialDirs) {
       );
       li.appendChild(name);
       li.appendChild(meta);
-      li.addEventListener('click', () => {
+      const activate = () => {
         // Reuses the General view's chunks browser by switching modes
         // and selecting the source there. Keeps a single chunks-browser
         // DOM (no duplicate render path) and gives the user a clear
@@ -284,6 +291,13 @@ function _buildMemoryDirsPanel(initialDirs) {
         }
         if (typeof browseSource === 'function') {
           browseSource(s.path);
+        }
+      };
+      li.addEventListener('click', activate);
+      li.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') {
+          ev.preventDefault();
+          activate();
         }
       });
       list.appendChild(li);
