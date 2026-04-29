@@ -2651,6 +2651,38 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 }
 .ctx-runtime-badge--error { background: rgba(224, 90, 90, 0.15); color: var(--danger); }
 
+/* Import-first state: when the cwd's canonical count is zero, demote the
+   Sync button (no-op until canonicals exist) and promote Import to the
+   primary affordance. The data attribute is wired by _ctxRefreshSectionState
+   so a refresh-driven re-render can't leave the buttons in a stale state. */
+.settings-section[data-canonical-count="0"] .ctx-sync-btn {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.settings-section[data-canonical-count="0"] .ctx-import-btn {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  border-color: transparent;
+}
+#ctx-sync-all-btn[data-runtime-only="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Inline call-out above the scope groups when the cwd has runtime-only
+   artifacts and nothing canonical yet — points the user at Import as the
+   next step. Left-border accent matches other callout patterns in the UI. */
+.ctx-runtime-only-banner {
+  margin: 0 0 8px 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  background: rgba(var(--accent-rgb), 0.06);
+  font-size: 0.85rem;
+  color: var(--text);
+  border-radius: 2px;
+}
+
 .ctx-detail { padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); margin-top: 12px; background: var(--surface); }
 .ctx-detail-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .ctx-detail-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
