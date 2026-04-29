@@ -74,6 +74,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
     the web UI's per-dir Reindex button cover ad-hoc indexing without
     flipping the flag.
 
+- **`mm init` wizard now offers `indexing.startup_backfill` as an
+  opt-in toggle.** After a successful inline seed the wizard adds a
+  second prompt — "Auto-index new files on every server restart?" —
+  defaulting to No (same default-skip discipline as the seed prompt).
+  Yes writes `indexing.startup_backfill: true` to `config.json`; the
+  unset / declined / non-TTY paths leave the key out and preserve
+  the `IndexingConfig` default. Closes the discoverability gap from
+  the FileWatcher backfill PR — users who actively sync a memory_dir
+  from elsewhere (cloud sync, periodic git pull) no longer need to
+  hand-edit `config.json` to enable it.
+
+- **`FileWatcher` startup backfill now logs progress.** A
+  `Startup backfill: walking N memory_dir(s)...` line at start and a
+  `Startup backfill complete: M new chunks indexed` line at end —
+  without these the only backfill log was a per-dir summary that only
+  fired when something was actually indexed, so opt-in users on slow
+  embedders couldn't tell whether the walk was hung or just busy.
+
 ## [0.1.33] — 2026-04-29
 
 ### Added

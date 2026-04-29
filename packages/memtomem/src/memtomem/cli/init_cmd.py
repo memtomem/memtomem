@@ -1714,6 +1714,41 @@ def _maybe_seed_initial_index(paths: list[Path], state: dict) -> bool:
     return _seed_with_progress(existing)
 
 
+def _maybe_offer_startup_backfill(state: dict) -> None:
+    """Offer to enable ``indexing.startup_backfill`` after a successful
+    inline seed.
+
+    The wizard's seed only indexes once. Users who keep adding files to
+    a ``memory_dir`` outside the running server (cloud sync, periodic
+    git pull, etc.) would need to re-run ``mm index`` after every
+    restart unless the backfill flag is on. Default No mirrors the
+    seed prompt — same default-skip discipline (PR #295 lesson),
+    visible to the user as an opt-in second confirm rather than a
+    silent toggle.
+
+    Side effect: when the user confirms, sets
+    ``state["startup_backfill"] = True`` so
+    :func:`_write_config_and_summary` emits
+    ``indexing.startup_backfill = true`` to ``config.json``. No-op when
+    not a TTY (CI, ``mm init -y``) so piped runs stay deterministic.
+    """
+    if not sys.stdin.isatty():
+        return
+    click.echo()
+    try:
+        enable = click.confirm(
+            "  Auto-index new files on every server restart? "
+            "(Useful when you sync this dir from elsewhere; off keeps "
+            "fresh starts fast and you can run `mm index` or click "
+            "Reindex manually)",
+            default=False,
+        )
+    except click.Abort:
+        return
+    if enable:
+        state["startup_backfill"] = True
+
+
 def _collect_missing_extras(state: dict) -> list[str]:
     """Return ordered list of missing extras the chosen config will need.
 
@@ -1933,6 +1968,13 @@ def _write_config_and_summary(
         seen.add(key)
         combined_dirs.append(entry)
 
+    indexing_block: dict = {"memory_dirs": combined_dirs, "auto_discover": False}
+    # Only emit ``startup_backfill`` when the user explicitly opted in via
+    # ``_maybe_offer_startup_backfill`` — leaving it unset preserves the
+    # ``False`` default (PR #295 lesson) and keeps ``config.json`` minimal.
+    if state.get("startup_backfill"):
+        indexing_block["startup_backfill"] = True
+
     init_data: dict = {
         "embedding": {
             "provider": state["provider"],
@@ -1940,7 +1982,7 @@ def _write_config_and_summary(
             "dimension": state["dimension"],
         },
         "storage": {"backend": "sqlite", "sqlite_path": state["db_path"]},
-        "indexing": {"memory_dirs": combined_dirs, "auto_discover": False},
+        "indexing": indexing_block,
         "namespace": {
             "enable_auto_ns": state["enable_auto_ns"],
             "default_namespace": state["default_ns"],
@@ -2236,6 +2278,8 @@ def _write_config_and_summary(
         seen_seed_keys.add(key)
         seed_paths.append(p)
     seeded = _maybe_seed_initial_index(seed_paths, state)
+    if seeded:
+        _maybe_offer_startup_backfill(state)
 
     click.echo()
     click.secho("  Next steps:", fg="cyan")

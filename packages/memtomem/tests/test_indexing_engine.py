@@ -1379,6 +1379,38 @@ class TestFileWatcher:
         hashes = await components.storage.get_chunk_hashes(md)
         assert len(hashes) > 0, "opt-in backfill should have indexed the pre-existing file"
 
+    async def test_startup_backfill_logs_walk_progress(self, components, memory_dir, caplog):
+        """Opt-in backfill emits a 'walking N memory_dir(s)' line at
+        start and a 'complete: M new chunks indexed' line at end.
+        Without these the only backfill log was a per-dir summary that
+        only fires when something was actually indexed — quiet logs
+        on a slow embedder look identical to a hung server, exactly
+        the UX failure mode the PR #295 silent startup scan caused.
+        """
+        import logging
+
+        from memtomem.indexing.watcher import FileWatcher
+
+        (memory_dir / "x.md").write_text("# x", encoding="utf-8")
+        components.config.indexing.startup_backfill = True
+
+        watcher = FileWatcher(
+            index_engine=components.index_engine,
+            config=components.config.indexing,
+            debounce_ms=100,
+        )
+        try:
+            with caplog.at_level(logging.INFO, logger="memtomem.indexing.watcher"):
+                await watcher.start()
+                assert watcher._backfill_task is not None
+                await watcher._backfill_task
+        finally:
+            await watcher.stop()
+
+        msgs = [r.message for r in caplog.records]
+        assert any("Startup backfill: walking" in m for m in msgs), msgs
+        assert any("Startup backfill complete" in m for m in msgs), msgs
+
     async def test_startup_backfill_idempotent_on_unchanged_files(self, components, memory_dir):
         """Opt-in backfill on every startup is bounded by changed-file
         count. Content-hash dedup in ``IndexEngine`` makes already-

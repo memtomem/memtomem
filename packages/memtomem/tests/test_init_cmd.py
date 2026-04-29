@@ -190,6 +190,89 @@ class TestInitConfigMerge:
         assert data["search"]["default_top_k"] == 10
 
 
+class TestStartupBackfillOptIn:
+    """The wizard offers an opt-in toggle for
+    ``indexing.startup_backfill`` after a successful inline seed —
+    flipping the flag on every restart is a separate decision from the
+    one-shot wizard seed (PR #295 lesson, see ``IndexingConfig``).
+    """
+
+    def test_config_omits_flag_when_state_unset(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Default path — no opt-in, no key in ``config.json``. Keeps
+        the ``False`` default in ``IndexingConfig`` and avoids polluting
+        the config file with redundant defaults."""
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / ".memtomem").mkdir()
+
+        state = _make_init_state(tmp_path)
+        _write_config_and_summary(state, tmp_path)
+
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        assert "startup_backfill" not in data["indexing"]
+
+    def test_config_emits_flag_when_state_true(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """User opted in via ``_maybe_offer_startup_backfill`` — config
+        must record ``indexing.startup_backfill = true`` so the next
+        ``mm web`` / ``mm server`` startup honours it."""
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / ".memtomem").mkdir()
+
+        state = _make_init_state(tmp_path)
+        state["startup_backfill"] = True
+        _write_config_and_summary(state, tmp_path)
+
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        assert data["indexing"]["startup_backfill"] is True
+
+    def test_offer_sets_state_when_user_confirms(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Yes at the prompt → ``state["startup_backfill"] = True``."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr(init_cmd.click, "confirm", lambda *a, **kw: True)
+
+        state: dict = {}
+        init_cmd._maybe_offer_startup_backfill(state)
+        assert state["startup_backfill"] is True
+
+    def test_offer_unchanged_when_user_declines(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No at the prompt → state unchanged, key not added. Same
+        default-skip discipline as the seed prompt."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr(init_cmd.click, "confirm", lambda *a, **kw: False)
+
+        state: dict = {}
+        init_cmd._maybe_offer_startup_backfill(state)
+        assert "startup_backfill" not in state
+
+    def test_offer_skipped_when_non_tty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Non-TTY (CI, piped ``mm init -y``) → silent skip without
+        calling confirm. Mirrors the seed prompt's isatty gate so
+        non-interactive runs stay deterministic."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd.sys.stdin, "isatty", lambda: False)
+
+        def _explode(*_a: object, **_kw: object) -> bool:
+            raise AssertionError("confirm must not be called when stdin is not a TTY")
+
+        monkeypatch.setattr(init_cmd.click, "confirm", _explode)
+
+        state: dict = {}
+        init_cmd._maybe_offer_startup_backfill(state)
+        assert "startup_backfill" not in state
+
+
 class TestRerankerStep:
     """`_step_reranker` writes an optional `rerank` section into config.json."""
 

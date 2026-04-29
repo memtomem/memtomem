@@ -160,10 +160,20 @@ class FileWatcher:
         every restart.
 
         Per-dir errors are logged and don't abort siblings.
+
+        Logs a single ``Startup backfill: walking N memory_dir(s)...``
+        line at the start so opt-in users can tell whether the (potentially
+        slow) walk is running or already finished — without this the only
+        backfill-related logs were per-dir summary lines, and a quiet log
+        looks identical to a hung server (the same UX failure mode that
+        killed the PR #295 silent startup scan).
         """
+        logger.info("Startup backfill: walking %d memory_dir(s)...", len(dirs))
+        total_indexed = 0
         for d in dirs:
             try:
                 stats = await self._engine.index_path(d, recursive=True)
+                total_indexed += stats.indexed_chunks
                 if stats.indexed_chunks or stats.deleted_chunks:
                     logger.info(
                         "Startup backfill %s: indexed=%d skipped=%d deleted=%d",
@@ -176,6 +186,7 @@ class FileWatcher:
                 raise
             except Exception as exc:
                 logger.error("Startup backfill failed for %s: %s", d, exc)
+        logger.info("Startup backfill complete: %d new chunks indexed", total_indexed)
 
     async def _process_events(self) -> None:
         """Consume changed file paths with batch debouncing.
