@@ -24,10 +24,16 @@ const _ctxStatusLabel = {
   'missing canonical': 'settings.ctx.status_missing_canonical',
 };
 
+// Localized status text for a wire status value. Falls back to the raw
+// status string when no i18n key is mapped — keeps unknown/future statuses
+// visible instead of silently rendering an empty label.
+function _ctxStatusText(status) {
+  return t(_ctxStatusLabel[status] || '', status);
+}
+
 function _ctxBadge(status) {
   const cls = _ctxStatusCls[status] || 'ctx-runtime-badge--missing';
-  const label = t(_ctxStatusLabel[status] || '', status);
-  return `<span class="ctx-runtime-badge ${cls}">${escapeHtml(label)}</span>`;
+  return `<span class="ctx-runtime-badge ${cls}">${escapeHtml(_ctxStatusText(status))}</span>`;
 }
 
 function renderRuntimeBadges(runtimes) {
@@ -35,11 +41,7 @@ function renderRuntimeBadges(runtimes) {
   return '<div class="ctx-runtime-badges">' +
     runtimes.map(r => {
       const short = r.runtime.replace(/_skills|_commands|_agents/g, '');
-      // Route status text through i18n so the UI shows the localized label
-      // (e.g. "Not yet imported") rather than the raw wire string
-      // ("missing canonical"). Falls back to raw status if no key maps.
-      const label = t(_ctxStatusLabel[r.status] || '', r.status);
-      return `<span class="ctx-runtime-badge ${_ctxStatusCls[r.status] || ''}" title="${escapeHtml(r.runtime)}">${escapeHtml(short)}: ${escapeHtml(label)}</span>`;
+      return `<span class="ctx-runtime-badge ${_ctxStatusCls[r.status] || ''}" title="${escapeHtml(r.runtime)}">${escapeHtml(short)}: ${escapeHtml(_ctxStatusText(r.status))}</span>`;
     }).join('') + '</div>';
 }
 
