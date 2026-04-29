@@ -41,17 +41,17 @@
   </div>
 
   <nav class="tab-nav" role="tablist" aria-label="Navigation">
-    <button class="tab-btn" data-ui-tier="prod" data-tab="home" data-i18n="nav.home">Home</button>
-    <button class="tab-btn active" data-ui-tier="prod" data-tab="search" data-i18n="nav.search">Search</button>
-    <button class="tab-btn" data-ui-tier="prod" data-tab="sources" data-i18n="nav.sources">Sources</button>
-    <button class="tab-btn" data-ui-tier="prod" data-tab="index" data-i18n="nav.index">Index</button>
-    <button class="tab-btn" data-ui-tier="prod" data-tab="tags" data-i18n="nav.tags">Tags</button>
-    <button class="tab-btn" data-ui-tier="prod" data-tab="timeline" data-i18n="nav.timeline">Timeline</button>
-    <button class="tab-btn" data-ui-tier="prod" data-tab="settings" data-i18n="nav.more">More</button>
+    <button id="tabbtn-home" class="tab-btn" role="tab" aria-controls="tab-home" aria-selected="false" tabindex="-1" data-ui-tier="prod" data-tab="home" data-i18n="nav.home">Home</button>
+    <button id="tabbtn-search" class="tab-btn active" role="tab" aria-controls="tab-search" aria-selected="true" tabindex="0" data-ui-tier="prod" data-tab="search" data-i18n="nav.search">Search</button>
+    <button id="tabbtn-sources" class="tab-btn" role="tab" aria-controls="tab-sources" aria-selected="false" tabindex="-1" data-ui-tier="prod" data-tab="sources" data-i18n="nav.sources">Sources</button>
+    <button id="tabbtn-index" class="tab-btn" role="tab" aria-controls="tab-index" aria-selected="false" tabindex="-1" data-ui-tier="prod" data-tab="index" data-i18n="nav.index">Index</button>
+    <button id="tabbtn-tags" class="tab-btn" role="tab" aria-controls="tab-tags" aria-selected="false" tabindex="-1" data-ui-tier="prod" data-tab="tags" data-i18n="nav.tags">Tags</button>
+    <button id="tabbtn-timeline" class="tab-btn" role="tab" aria-controls="tab-timeline" aria-selected="false" tabindex="-1" data-ui-tier="prod" data-tab="timeline" data-i18n="nav.timeline">Timeline</button>
+    <button id="tabbtn-settings" class="tab-btn" role="tab" aria-controls="tab-settings" aria-selected="false" tabindex="-1" data-ui-tier="prod" data-tab="settings" data-i18n="nav.more">More</button>
   </nav>
 
   <!-- ===== HOME TAB ===== -->
-  <div id="tab-home" class="tab-panel" hidden>
+  <div id="tab-home" class="tab-panel" role="tabpanel" aria-labelledby="tabbtn-home" hidden>
     <div class="home-layout">
       <div id="home-config-info" class="config-hint" hidden></div>
 
@@ -148,7 +148,7 @@
   </div>
 
   <!-- ===== SEARCH TAB ===== -->
-  <div id="tab-search" class="tab-panel active">
+  <div id="tab-search" class="tab-panel active" role="tabpanel" aria-labelledby="tabbtn-search">
     <div class="tab-help-bar" id="help-search" role="status" hidden>
       <span class="tab-help-bar-text" data-i18n="search.help">Semantic search across indexed memories. Filters: tag, namespace, type, score. Pipeline: BM25 (keyword) + Dense (semantic) → RRF fusion.</span>
       <button class="tab-help-bar-dismiss" data-help-tab="search">✕</button>
@@ -404,7 +404,7 @@
   </div>
 
   <!-- ===== SOURCES TAB ===== -->
-  <div id="tab-sources" class="tab-panel" hidden>
+  <div id="tab-sources" class="tab-panel" role="tabpanel" aria-labelledby="tabbtn-sources" hidden>
     <div class="tab-help-bar" id="help-sources" role="status" hidden>
       <span class="tab-help-bar-text" data-i18n="sources.help">Indexed source files. Click a file to browse chunks. Drag the divider to resize. Sort by name, chunks, size, or recency.</span>
       <button class="tab-help-bar-dismiss" data-help-tab="sources">✕</button>
@@ -457,7 +457,7 @@
   </div>
 
   <!-- ===== INDEX TAB ===== -->
-  <div id="tab-index" class="tab-panel" hidden>
+  <div id="tab-index" class="tab-panel" role="tabpanel" aria-labelledby="tabbtn-index" hidden>
     <div class="tab-help-bar" id="help-index" role="status" hidden>
       <span class="tab-help-bar-text" data-i18n="index.help">Index files into memtomem. Type a path to scan, drop files to upload, or write a memory directly. Toggle Force re-index to rebuild existing chunks.</span>
       <button class="tab-help-bar-dismiss" data-help-tab="index">✕</button>
@@ -551,7 +551,7 @@
   </div>
 
   <!-- ===== SETTINGS HUB ===== -->
-  <div id="tab-settings" class="tab-panel" hidden>
+  <div id="tab-settings" class="tab-panel" role="tabpanel" aria-labelledby="tabbtn-settings" hidden>
     <div class="settings-layout">
       <div class="settings-nav" role="tablist">
         <button class="settings-nav-group" type="button" data-group="general" aria-expanded="true">
@@ -1006,7 +1006,7 @@
   </div>
 
   <!-- ===== TAGS TAB ===== -->
-  <div id="tab-tags" class="tab-panel" hidden>
+  <div id="tab-tags" class="tab-panel" role="tabpanel" aria-labelledby="tabbtn-tags" hidden>
     <div class="tab-help-bar" id="help-tags" role="status" hidden>
       <span class="tab-help-bar-text" data-i18n="tags.help">Tag cloud sized by frequency. Click a tag to filter search. Auto-Tag analyzes content to suggest tags for untagged chunks.</span>
       <button class="tab-help-bar-dismiss" data-help-tab="tags">✕</button>
@@ -1072,7 +1072,7 @@
 
 
   <!-- ===== TIMELINE TAB ===== -->
-  <div id="tab-timeline" class="tab-panel" hidden>
+  <div id="tab-timeline" class="tab-panel" role="tabpanel" aria-labelledby="tabbtn-timeline" hidden>
     <div class="tab-help-bar" id="help-timeline" role="status" hidden>
       <span class="tab-help-bar-text" data-i18n="timeline.help">Activity timeline of indexed chunks. Heatmap shows daily activity. Toggle Chunks/Files view.</span>
       <button class="tab-help-bar-dismiss" data-help-tab="timeline">✕</button>

@@ -482,10 +482,14 @@ function activateTab(tabName) {
     return;
   }
 
-  // Deactivate all main tabs
+  // Deactivate all main tabs. ``tabindex=-1`` keeps non-current tabs out of
+  // the Tab key sequence so keyboard users land on the active tab once and
+  // arrow-key between siblings (single-tab-stop pattern from the ARIA tabs
+  // spec). The currently active tab gets ``tabindex=0`` below.
   document.querySelectorAll('.tab-btn').forEach(b => {
     b.classList.remove('active');
     b.setAttribute('aria-selected', 'false');
+    b.setAttribute('tabindex', '-1');
   });
 
   // Hide all panels
@@ -496,6 +500,7 @@ function activateTab(tabName) {
   if (btn) {
     btn.classList.add('active');
     btn.setAttribute('aria-selected', 'true');
+    btn.setAttribute('tabindex', '0');
   }
 
   // Show panel
