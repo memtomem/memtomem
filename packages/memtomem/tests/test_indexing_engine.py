@@ -1823,7 +1823,7 @@ class TestResolveOwningMemoryDir:
 
     def test_sibling_with_shared_prefix_does_not_match(self, tmp_path):
         """``/foo`` must not claim files under ``/foo-bar/...`` — the
-        trailing-slash normalisation in :func:`_norm_dir_prefix` is what
+        trailing-slash normalisation in :func:`norm_dir_prefix` is what
         prevents this. Pin the behaviour."""
         from memtomem.indexing.engine import resolve_owning_memory_dir
 

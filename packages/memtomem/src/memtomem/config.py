@@ -1334,16 +1334,19 @@ def memory_dir_kind(path: str | Path) -> MemoryDirKind:
       is unambiguously memory.
     - A ``"user"``-category dir flips to memory when any path segment is
       ``"memory"`` or ``"memories"`` — covers the common
-      ``~/memories/`` layout. Heuristic, so it intentionally over-includes
-      paths like ``~/Library/Caches/<app>/memory/`` or
-      ``~/projects/foo/memory/``; the cost is showing them in the Memory
-      view instead of General. Future PR can add an explicit
-      ``memory_dirs[i].kind`` override on top.
+      ``~/memories/`` layout. Segment match is case-insensitive so
+      ``/Users/X/Memories`` (which exists on macOS' case-insensitive
+      APFS) classifies the same as ``/Users/X/memories``. Heuristic, so
+      it intentionally over-includes paths like
+      ``~/Library/Caches/<app>/memory/`` or ``~/projects/foo/memory/``;
+      the cost is showing them in the Memory view instead of General.
+      Future PR can add an explicit ``memory_dirs[i].kind`` override on
+      top.
     """
     if categorize_memory_dir(path) != "user":
         return "memory"
     parts = Path(str(path)).parts
-    if any(p in _USER_MEMORY_SEGMENTS for p in parts):
+    if any(p.lower() in _USER_MEMORY_SEGMENTS for p in parts):
         return "memory"
     return "general"
 

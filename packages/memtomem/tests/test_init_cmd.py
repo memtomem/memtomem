@@ -3061,6 +3061,18 @@ class TestMemoryDirKind:
         assert memory_dir_kind("/Users/alice/memories") == "memory"
         assert memory_dir_kind("/Users/alice/Documents/memory") == "memory"
 
+    def test_segment_match_is_case_insensitive(self) -> None:
+        """macOS' default APFS is case-insensitive, so the same folder
+        surfaces as ``Memories`` or ``memories`` depending on how the
+        user typed it. Both must classify as memory — otherwise the
+        Sources view would partition the same folder differently
+        across machines."""
+        from memtomem.config import memory_dir_kind
+
+        assert memory_dir_kind("/Users/alice/Memories") == "memory"
+        assert memory_dir_kind("/Users/alice/MEMORIES") == "memory"
+        assert memory_dir_kind("/Users/alice/Documents/Memory") == "memory"
+
     def test_user_dir_without_memory_segment_is_general(self) -> None:
         from memtomem.config import memory_dir_kind
 

@@ -119,7 +119,7 @@ def _dir_creation_time_iso(p: Path) -> str | None:
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
 
-def _norm_dir_prefix(d: str | Path) -> str:
+def norm_dir_prefix(d: str | Path) -> str:
     """Return the directory path normalized for ``str.startswith`` matching.
 
     Adds a trailing slash so a configured dir ``/foo`` does not falsely
@@ -166,7 +166,7 @@ def resolve_owning_memory_dir(
     target = norm_path(Path(source_path).expanduser())
     best: tuple[int, Path] | None = None
     for d in configured_dirs:
-        prefix = _norm_dir_prefix(d)
+        prefix = norm_dir_prefix(d)
         if target.startswith(prefix):
             length = len(prefix)
             if best is None or length > best[0]:
@@ -259,7 +259,7 @@ async def memory_dir_stats(
     for d, file_count in zip(dir_list, file_counts):
         dir_path = Path(d).expanduser()
         exists = dir_path.exists()
-        prefix = _norm_dir_prefix(d)
+        prefix = norm_dir_prefix(d)
 
         chunk_count = 0
         source_file_count = 0

@@ -1057,6 +1057,28 @@ class TestUnicodePaths:
             assert body["kind"] == "memory"
             assert body["message"].startswith("Added ")
 
+    async def test_add_memory_dir_returns_kind_when_config_empty(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """Pin the empty-config first-add path: a fresh install has
+        ``memory_dirs=[]``, so the dedupe branch never fires and the
+        kind must come back from the add branch alone. Otherwise the
+        UI's "Switch view" toast would lose its trigger on the very
+        first dir a new user registers."""
+        app.state.config.indexing.memory_dirs = []
+        target = tmp_path / "memories"
+        target.mkdir()
+
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/add",
+                json={"path": str(target)},
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["kind"] == "memory"
+        assert body["message"].startswith("Added ")
+
     async def test_remove_memory_dir_matches_nfd_and_nfc(self, app, client: AsyncClient, tmp_path):
         # Config has the target dir in NFD form plus a second entry (the
         # route refuses to remove the last remaining memory_dir). The user

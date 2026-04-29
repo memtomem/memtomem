@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from memtomem.config import memory_dir_kind
-from memtomem.indexing.engine import resolve_owning_memory_dir
+from memtomem.config import MemoryDirKind, memory_dir_kind
+from memtomem.indexing.engine import norm_dir_prefix
+from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.web.deps import get_config, get_storage, require_indexed_source
 from memtomem.web.schemas.core import DeleteResponse
 from memtomem.web.schemas.sources import ChunkSizeBucket, SourceOut, SourcesResponse
@@ -21,7 +21,7 @@ router = APIRouter(prefix="/sources", tags=["sources"])
 async def list_sources(
     limit: int = Query(100, ge=1, le=10000),
     offset: int = Query(0, ge=0),
-    kind: Literal["memory", "general"] | None = Query(
+    kind: MemoryDirKind | None = Query(
         None,
         description=(
             "Filter to one bucket of the Sources page sub-toggle. "
@@ -35,7 +35,23 @@ async def list_sources(
     config=Depends(get_config),
 ) -> SourcesResponse:
     rows = await storage.get_source_files_with_counts()
-    configured_dirs = list(config.indexing.memory_dirs)
+
+    # Pre-compute (prefix, dir_path, kind) once per request so the
+    # per-source classification stays O(D × startswith) instead of
+    # O(D × Path.resolve()). For ~30 dirs × ~300 sources that drops
+    # ~9000 syscalls / NFC normalisations off the hot path of
+    # ``GET /api/sources``. Sorted by prefix length descending so the
+    # first match in the inner loop is the longest-prefix-wins one —
+    # matches :func:`resolve_owning_memory_dir`'s tie-break rule for
+    # nested configured dirs without repeating the comparison logic.
+    indexed_dirs: list[tuple[str, Path, MemoryDirKind]] = sorted(
+        (
+            (norm_dir_prefix(d), Path(d).expanduser(), memory_dir_kind(d))
+            for d in config.indexing.memory_dirs
+        ),
+        key=lambda t: -len(t[0]),
+    )
+
     all_sources: list[SourceOut] = []
     for p, cnt, last_indexed_iso, ns_csv, avg_tok, min_tok, max_tok in sorted(rows):
         last_indexed_at: datetime | None = None
@@ -55,10 +71,18 @@ async def list_sources(
 
         namespaces = ns_csv.split(",") if ns_csv else ["default"]
 
-        owning_dir = resolve_owning_memory_dir(p, configured_dirs)
-        source_kind: Literal["memory", "general"] | None
+        target = norm_path(p)
+        match = next(
+            (
+                (dir_path, dir_kind)
+                for prefix, dir_path, dir_kind in indexed_dirs
+                if target.startswith(prefix)
+            ),
+            None,
+        )
+        source_kind: MemoryDirKind | None
         memory_dir_str: str | None
-        if owning_dir is None:
+        if match is None:
             # Orphan: indexed source whose configured dir was removed
             # after indexing. Show in General view rather than hiding so
             # users can still find and prune the chunks; ``kind=None``
@@ -67,7 +91,7 @@ async def list_sources(
             source_kind = None
             memory_dir_str = None
         else:
-            source_kind = memory_dir_kind(owning_dir)
+            owning_dir, source_kind = match
             memory_dir_str = str(owning_dir)
 
         if kind is not None:

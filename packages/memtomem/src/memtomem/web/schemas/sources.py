@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
 
 from pydantic import BaseModel
 
+from memtomem.config import MemoryDirKind
 from memtomem.web.schemas.core import ChunkOut
 
 
@@ -28,7 +28,7 @@ class SourceOut(BaseModel):
     # pattern) and ``"general"`` for arbitrary indexed folders. ``None``
     # for orphans (no owning dir to classify). Drives the Sources page's
     # Memory / General sub-toggle.
-    kind: Literal["memory", "general"] | None = None
+    kind: MemoryDirKind | None = None
 
 
 class SourcesResponse(BaseModel):
