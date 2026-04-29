@@ -1,14 +1,16 @@
-"""Frontmatter validity-window parsing, schema, indexer threading, pipeline filter, and MCP surface.
+"""Frontmatter validity-window parsing, schema, indexer threading, pipeline filter, MCP + CLI surfaces.
 
-Covers Goals 1+2+3+4+5 of the temporal-validity RFC: the frontmatter parser
+Covers Goals 1+2+3+4+5+6 of the temporal-validity RFC: the frontmatter parser
 (``_parse_validity_bound`` / ``_extract_validity_window``), the
 ``ChunkMetadata.valid_from_unix`` / ``valid_to_unix`` fields, the schema
 migration that adds the two SQLite columns, the chunker→metadata wiring,
 the ``_apply_validity_filter`` pipeline stage with its
-``SearchPipeline.search(as_of_unix=...)`` plumbing, and the
-``mem_search(as_of=...)`` MCP-tool surface that parses caller strings to
-unix-seconds. The CLI ``mm search --as-of`` (Goal 6) and Web UI badge
-(Goal 7) surfaces are covered by later RFC PRs.
+``SearchPipeline.search(as_of_unix=...)`` plumbing, the
+``mem_search(as_of=...)`` MCP-tool surface, and the CLI surfaces:
+``mm search --as-of <date>`` and the conditional Validity column on
+``mm recall`` (the actual chunks-listing CLI; the RFC's "mm list" name
+was a drift — corrected in the same release window). The Web UI badge
+(Goal 7) is covered by a later RFC PR.
 
 The search round-trip tests in the middle of the file lock in the fix
 for PR #533 review feedback — bm25_search / dense_search must carry the
@@ -677,3 +679,220 @@ class TestMemSearchAsOfPlumbing:
 
         kwargs = app.search_pipeline.search.await_args.kwargs
         assert kwargs["as_of_unix"] is None
+
+
+# ── Goal 6: CLI surface (mm search --as-of, mm recall validity column) ──
+
+
+def _mock_cli_components_for_search(search_return):
+    """Build a mock ``cli_components()`` context manager for ``mm search``.
+
+    ``search_return`` is the ``(results, stats)`` tuple to return from the
+    pipeline call. The returned async-context-manager yields a
+    ``SimpleNamespace`` whose ``search_pipeline.search`` is an AsyncMock —
+    the test asserts on the AsyncMock's ``await_args``.
+    """
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    pipeline_mock = AsyncMock(return_value=search_return)
+    comp = SimpleNamespace(
+        search_pipeline=SimpleNamespace(search=pipeline_mock),
+    )
+
+    @asynccontextmanager
+    async def fake_cli_components():
+        yield comp
+
+    return fake_cli_components, pipeline_mock
+
+
+def _mock_cli_components_for_recall(chunks):
+    """Build a mock ``cli_components()`` context manager for ``mm recall``.
+
+    Provides ``comp.storage.recall_chunks`` returning the supplied chunk list
+    and a minimal ``comp.config.search.system_namespace_prefixes`` so the
+    NamespaceFilter parse path does not blow up.
+    """
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    storage = SimpleNamespace(recall_chunks=AsyncMock(return_value=list(chunks)))
+    config = SimpleNamespace(search=SimpleNamespace(system_namespace_prefixes=()))
+    comp = SimpleNamespace(storage=storage, config=config)
+
+    @asynccontextmanager
+    async def fake_cli_components():
+        yield comp
+
+    return fake_cli_components
+
+
+def _make_chunk_for_recall(
+    *,
+    valid_from_unix: int | None = None,
+    valid_to_unix: int | None = None,
+    source: str = "/tmp/note.md",
+    content: str = "hello",
+) -> Chunk:
+    """Construct a minimal ``Chunk`` with optional validity metadata.
+
+    Mirrors the ``mm recall`` data shape: ``recall_chunks`` returns
+    ``Chunk`` instances and the table renderer reads ``metadata.source_file``,
+    ``metadata.valid_from_unix`` / ``valid_to_unix``, ``content``,
+    ``created_at``.
+    """
+    return Chunk(
+        id=uuid.uuid4(),
+        content=content,
+        metadata=ChunkMetadata(
+            source_file=Path(source),
+            valid_from_unix=valid_from_unix,
+            valid_to_unix=valid_to_unix,
+        ),
+        created_at=datetime(2026, 4, 29, 12, 0, 0, tzinfo=timezone.utc),
+    )
+
+
+class TestMmSearchAsOfCLI:
+    """``mm search --as-of <date>`` parses + plumbs to the pipeline.
+
+    Mirrors the MCP-tool tests above but on the click surface. Invalid input
+    travels through ``click.ClickException`` (CliRunner returns non-zero
+    exit code with the message in ``result.output``) — the error message
+    must include the offending value AND both accepted formats so a script
+    author hitting this can correct the call without consulting docs.
+    """
+
+    def test_invalid_as_of_returns_nonzero_with_format_hint(self) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli
+
+        result = CliRunner().invoke(cli, ["search", "--as-of", "not-a-date", "hello"])
+        assert result.exit_code != 0
+        assert "not-a-date" in result.output
+        assert "YYYY-MM-DD" in result.output
+        assert "YYYY-QN" in result.output
+
+    def test_date_as_of_passes_day_start_unix_to_pipeline(self, monkeypatch) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli
+        from memtomem.search.pipeline import RetrievalStats
+
+        fake_components, pipeline_mock = _mock_cli_components_for_search(([], RetrievalStats()))
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake_components)
+
+        result = CliRunner().invoke(cli, ["search", "--as-of", "2025-08-15", "hello"])
+        assert result.exit_code == 0, result.output
+        kwargs = pipeline_mock.await_args.kwargs
+        assert kwargs["as_of_unix"] == _ts(2025, 8, 15, 0, 0, 0)
+
+    def test_quarter_as_of_passes_quarter_start_unix_to_pipeline(self, monkeypatch) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli
+        from memtomem.search.pipeline import RetrievalStats
+
+        fake_components, pipeline_mock = _mock_cli_components_for_search(([], RetrievalStats()))
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake_components)
+
+        result = CliRunner().invoke(cli, ["search", "--as-of", "2024-Q3", "hello"])
+        assert result.exit_code == 0, result.output
+        kwargs = pipeline_mock.await_args.kwargs
+        assert kwargs["as_of_unix"] == _ts(2024, 7, 1, 0, 0, 0)
+
+    def test_default_omitted_passes_none_to_pipeline(self, monkeypatch) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli
+        from memtomem.search.pipeline import RetrievalStats
+
+        fake_components, pipeline_mock = _mock_cli_components_for_search(([], RetrievalStats()))
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake_components)
+
+        result = CliRunner().invoke(cli, ["search", "hello"])
+        assert result.exit_code == 0, result.output
+        kwargs = pipeline_mock.await_args.kwargs
+        assert kwargs["as_of_unix"] is None
+
+
+class TestMmRecallValidityColumn:
+    """``mm recall`` table format surfaces a Validity column when at least
+    one chunk in the listing has ``valid_from_unix`` or ``valid_to_unix``.
+
+    Per RFC §CLI surfacing — the column is conditional so the default
+    table stays compact for users who haven't opted into temporal-validity
+    frontmatter.
+    """
+
+    def test_no_chunks_have_validity_column_omitted(self, monkeypatch) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli
+
+        chunks = [
+            _make_chunk_for_recall(content="alpha"),
+            _make_chunk_for_recall(content="beta"),
+        ]
+        monkeypatch.setattr(
+            "memtomem.cli._bootstrap.cli_components",
+            _mock_cli_components_for_recall(chunks),
+        )
+
+        result = CliRunner().invoke(cli, ["recall"])
+        assert result.exit_code == 0, result.output
+        assert "Validity" not in result.output
+        # Default columns are still rendered.
+        assert "Source" in result.output
+        assert "Created" in result.output
+
+    def test_at_least_one_validity_column_shown(self, monkeypatch) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli
+
+        chunks = [
+            _make_chunk_for_recall(content="plain"),
+            _make_chunk_for_recall(
+                content="windowed",
+                valid_from_unix=_ts(2025, 8, 15, 0, 0, 0),
+                valid_to_unix=_ts(2026, 3, 31, 23, 59, 59),
+            ),
+        ]
+        monkeypatch.setattr(
+            "memtomem.cli._bootstrap.cli_components",
+            _mock_cli_components_for_recall(chunks),
+        )
+
+        result = CliRunner().invoke(cli, ["recall"])
+        assert result.exit_code == 0, result.output
+        assert "Validity" in result.output
+        # Windowed chunk renders both bounds.
+        assert "[2025-08-15 → 2026-03-31]" in result.output
+        # Plain chunk rendered with infinity sentinels on both sides.
+        assert "[∞ → ∞]" in result.output
+
+    def test_half_bounded_renders_infinity_sentinel(self, monkeypatch) -> None:
+        """A chunk with only ``valid_from`` shows ``∞`` on the upper side."""
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli
+
+        chunks = [
+            _make_chunk_for_recall(
+                content="lower-only",
+                valid_from_unix=_ts(2025, 8, 15, 0, 0, 0),
+            ),
+        ]
+        monkeypatch.setattr(
+            "memtomem.cli._bootstrap.cli_components",
+            _mock_cli_components_for_recall(chunks),
+        )
+
+        result = CliRunner().invoke(cli, ["recall"])
+        assert result.exit_code == 0, result.output
+        assert "[2025-08-15 → ∞]" in result.output

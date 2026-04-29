@@ -10,6 +10,25 @@ from pathlib import Path
 import click
 
 
+def _render_validity_window(valid_from_unix: int | None, valid_to_unix: int | None) -> str:
+    """Render a chunk's temporal-validity window as a compact ``[from → to]`` label.
+
+    Per temporal-validity RFC §CLI surfacing. Both bounds are unix-seconds;
+    ``None`` is rendered as ``∞`` (no bound on that side). Date-only display —
+    the original frontmatter shape (``YYYY-MM-DD`` vs ``YYYY-QN``) is not
+    preserved through unix-second storage, so a quarter that ended ``2026-Q1``
+    surfaces as ``2026-03-31``. The user can inspect the source file for the
+    original spelling.
+    """
+
+    def _fmt(unix: int | None) -> str:
+        if unix is None:
+            return "∞"
+        return datetime.fromtimestamp(unix, tz=timezone.utc).strftime("%Y-%m-%d")
+
+    return f"[{_fmt(valid_from_unix)} → {_fmt(valid_to_unix)}]"
+
+
 @click.command()
 @click.argument("content")
 @click.option("--title", "-t", default=None, help="Entry title")
@@ -141,12 +160,33 @@ async def _recall(
             click.echo(c.content[:200])
             click.echo()
     else:
-        click.echo(f"{'Source':<40}{'Created':<25}{'Content'}")
-        click.echo("-" * 80)
-        for c in chunks:
-            src = str(c.metadata.source_file)
-            if len(src) > 38:
-                src = "..." + src[-35:]
-            snippet = c.content[:40].replace("\n", " ")
-            click.echo(f"{src:<40}{c.created_at.strftime('%Y-%m-%d %H:%M'):<25}{snippet}")
+        # Validity column appears only when at least one chunk has a
+        # window — keeps the default table compact for the common case
+        # where no chunks opted into temporal-validity frontmatter.
+        # Per temporal-validity RFC §CLI surfacing.
+        show_validity = any(
+            c.metadata.valid_from_unix is not None or c.metadata.valid_to_unix is not None
+            for c in chunks
+        )
+        if show_validity:
+            click.echo(f"{'Source':<40}{'Created':<18}{'Validity':<26}{'Content'}")
+            click.echo("-" * 100)
+            for c in chunks:
+                src = str(c.metadata.source_file)
+                if len(src) > 38:
+                    src = "..." + src[-35:]
+                snippet = c.content[:40].replace("\n", " ")
+                vw = _render_validity_window(c.metadata.valid_from_unix, c.metadata.valid_to_unix)
+                click.echo(
+                    f"{src:<40}{c.created_at.strftime('%Y-%m-%d %H:%M'):<18}{vw:<26}{snippet}"
+                )
+        else:
+            click.echo(f"{'Source':<40}{'Created':<25}{'Content'}")
+            click.echo("-" * 80)
+            for c in chunks:
+                src = str(c.metadata.source_file)
+                if len(src) > 38:
+                    src = "..." + src[-35:]
+                snippet = c.content[:40].replace("\n", " ")
+                click.echo(f"{src:<40}{c.created_at.strftime('%Y-%m-%d %H:%M'):<25}{snippet}")
         click.echo(f"\n{len(chunks)} chunk(s)")

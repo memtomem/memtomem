@@ -19,6 +19,12 @@ import click
 @click.option("--tag-filter", "-t", default=None, help="Tag filter (comma-separated)")
 @click.option("--namespace", "-n", default=None, help="Namespace filter")
 @click.option(
+    "--as-of",
+    "as_of",
+    default=None,
+    help="Temporal bound (YYYY-MM-DD or YYYY-QN). Default = now.",
+)
+@click.option(
     "--format",
     "fmt",
     type=click.Choice(["table", "json", "plain", "context", "smart"]),
@@ -30,11 +36,12 @@ def search(
     source_filter: str | None,
     tag_filter: str | None,
     namespace: str | None,
+    as_of: str | None,
     fmt: str,
 ) -> None:
     """Search the knowledge base."""
     try:
-        asyncio.run(_search(query, top_k, source_filter, tag_filter, namespace, fmt))
+        asyncio.run(_search(query, top_k, source_filter, tag_filter, namespace, as_of, fmt))
     except click.ClickException:
         raise
     except Exception as e:
@@ -47,9 +54,20 @@ async def _search(
     source_filter: str | None,
     tag_filter: str | None,
     namespace: str | None,
+    as_of: str | None,
     fmt: str,
 ) -> None:
+    from memtomem.chunking.markdown import _parse_validity_bound
     from memtomem.cli._bootstrap import cli_components
+
+    as_of_unix: int | None = None
+    if as_of is not None:
+        as_of_unix = _parse_validity_bound(as_of, upper=False)
+        if as_of_unix is None:
+            raise click.ClickException(
+                f"invalid --as-of value '{as_of}'. "
+                "Accepted formats: 'YYYY-MM-DD' (date) or 'YYYY-QN' (quarter, N in 1-4)."
+            )
 
     async with cli_components() as comp:
         results, stats = await comp.search_pipeline.search(
@@ -58,6 +76,7 @@ async def _search(
             source_filter=source_filter,
             tag_filter=tag_filter,
             namespace=namespace,
+            as_of_unix=as_of_unix,
         )
 
     if fmt == "context":
