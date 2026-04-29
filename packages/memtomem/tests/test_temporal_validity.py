@@ -1,12 +1,14 @@
-"""Frontmatter validity-window parsing, schema, indexer threading, and pipeline filter.
+"""Frontmatter validity-window parsing, schema, indexer threading, pipeline filter, and MCP surface.
 
-Covers Goals 1+2+3+4 of the temporal-validity RFC: the frontmatter parser
+Covers Goals 1+2+3+4+5 of the temporal-validity RFC: the frontmatter parser
 (``_parse_validity_bound`` / ``_extract_validity_window``), the
 ``ChunkMetadata.valid_from_unix`` / ``valid_to_unix`` fields, the schema
 migration that adds the two SQLite columns, the chunker→metadata wiring,
-and the ``_apply_validity_filter`` pipeline stage with its
-``SearchPipeline.search(as_of_unix=...)`` plumbing. The
-``mem_search(as_of=...)`` MCP/CLI/Web surfaces are covered by later RFC PRs.
+the ``_apply_validity_filter`` pipeline stage with its
+``SearchPipeline.search(as_of_unix=...)`` plumbing, and the
+``mem_search(as_of=...)`` MCP-tool surface that parses caller strings to
+unix-seconds. The CLI ``mm search --as-of`` (Goal 6) and Web UI badge
+(Goal 7) surfaces are covered by later RFC PRs.
 
 The search round-trip tests in the middle of the file lock in the fix
 for PR #533 review feedback — bm25_search / dense_search must carry the
@@ -562,3 +564,116 @@ class TestValidityFilterPipelineWiring:
         assert pipe._storage.bm25_search.await_count == before + 1, (
             "explicit as_of must bypass cache read"
         )
+
+
+# ── Goal 5: mem_search(as_of=...) MCP-tool surface ─────────────────────
+
+
+class TestMemSearchAsOfValidation:
+    """``as_of`` parsing rejects malformed input *before* app initialization.
+
+    Mirrors ``TestSearchValidation`` in ``test_validation_error_messages.py``:
+    the early validation path runs without a real ``ctx``/app, so these tests
+    invoke ``mem_search`` directly. The error message must point the caller at
+    the two accepted formats so they can fix the call without consulting docs.
+    """
+
+    @pytest.mark.asyncio
+    async def test_garbage_string_returns_error_with_format_hint(self) -> None:
+        from memtomem.server.tools.search import mem_search
+
+        result = await mem_search(query="hello", as_of="not-a-date")
+        assert "invalid as_of" in result
+        assert "not-a-date" in result
+        assert "YYYY-MM-DD" in result
+        assert "YYYY-QN" in result
+
+    @pytest.mark.asyncio
+    async def test_invalid_calendar_date_rejected(self) -> None:
+        from memtomem.server.tools.search import mem_search
+
+        result = await mem_search(query="hello", as_of="2025-13-01")
+        assert "invalid as_of" in result
+        assert "2025-13-01" in result
+
+    @pytest.mark.asyncio
+    async def test_invalid_quarter_rejected(self) -> None:
+        from memtomem.server.tools.search import mem_search
+
+        result = await mem_search(query="hello", as_of="2025-Q5")
+        assert "invalid as_of" in result
+        assert "2025-Q5" in result
+
+
+class TestMemSearchAsOfPlumbing:
+    """Valid ``as_of`` parses to unix-seconds and reaches the pipeline call.
+
+    Stubs ``_get_app_initialized`` so the test exercises only the parse +
+    forward path inside ``mem_search``, mirroring the ``TestMemExpand``
+    pattern in ``test_context_window.py``. Asserts on the kwargs the tool
+    passes to ``app.search_pipeline.search`` — that is the contract Goal 5
+    is establishing.
+    """
+
+    @pytest.mark.asyncio
+    async def test_date_as_of_passes_day_start_unix_to_pipeline(self, monkeypatch) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
+
+        from memtomem.search.pipeline import RetrievalStats
+        from memtomem.server.tools import search as search_tool
+
+        app = MagicMock()
+        app.current_namespace = None
+        app.search_pipeline.search = AsyncMock(return_value=([], RetrievalStats()))
+        app.webhook_manager = None
+        monkeypatch.setattr(search_tool, "_get_app_initialized", AsyncMock(return_value=app))
+
+        await search_tool.mem_search(query="hi", as_of="2025-08-15", ctx=SimpleNamespace())
+
+        kwargs = app.search_pipeline.search.await_args.kwargs
+        assert kwargs["as_of_unix"] == _ts(2025, 8, 15, 0, 0, 0)
+
+    @pytest.mark.asyncio
+    async def test_quarter_as_of_passes_quarter_start_unix_to_pipeline(self, monkeypatch) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
+
+        from memtomem.search.pipeline import RetrievalStats
+        from memtomem.server.tools import search as search_tool
+
+        app = MagicMock()
+        app.current_namespace = None
+        app.search_pipeline.search = AsyncMock(return_value=([], RetrievalStats()))
+        app.webhook_manager = None
+        monkeypatch.setattr(search_tool, "_get_app_initialized", AsyncMock(return_value=app))
+
+        await search_tool.mem_search(query="hi", as_of="2024-Q3", ctx=SimpleNamespace())
+
+        kwargs = app.search_pipeline.search.await_args.kwargs
+        # Q3 lower bound = July 1, 00:00:00 UTC.
+        assert kwargs["as_of_unix"] == _ts(2024, 7, 1, 0, 0, 0)
+
+    @pytest.mark.asyncio
+    async def test_default_none_passes_none_to_pipeline(self, monkeypatch) -> None:
+        """``as_of=None`` (default) keeps pipeline-level ``int(time.time())``
+        fallback authoritative — the tool must not pre-resolve ``None`` to a
+        timestamp, otherwise the pipeline's cache slot would diverge from the
+        default-path key.
+        """
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
+
+        from memtomem.search.pipeline import RetrievalStats
+        from memtomem.server.tools import search as search_tool
+
+        app = MagicMock()
+        app.current_namespace = None
+        app.search_pipeline.search = AsyncMock(return_value=([], RetrievalStats()))
+        app.webhook_manager = None
+        monkeypatch.setattr(search_tool, "_get_app_initialized", AsyncMock(return_value=app))
+
+        await search_tool.mem_search(query="hi", ctx=SimpleNamespace())
+
+        kwargs = app.search_pipeline.search.await_args.kwargs
+        assert kwargs["as_of_unix"] is None

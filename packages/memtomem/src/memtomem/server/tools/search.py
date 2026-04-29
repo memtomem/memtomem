@@ -6,6 +6,7 @@ import asyncio
 import logging
 from uuid import UUID
 
+from memtomem.chunking.markdown import _parse_validity_bound
 from memtomem.constants import INVALID_OUTPUT_FORMAT_PREFIX
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
@@ -34,6 +35,7 @@ async def mem_search(
     source_filter: str | None = None,
     tag_filter: str | None = None,
     namespace: str | None = None,
+    as_of: str | None = None,
     bm25_weight: float | None = None,
     dense_weight: float | None = None,
     context_window: int = 0,
@@ -49,6 +51,10 @@ async def mem_search(
         source_filter: Filter by source file path (substring match, or glob pattern with *, ?, [])
         tag_filter: Comma-separated tags — matches chunks containing ANY of the listed tags (OR logic)
         namespace: Namespace scope (single value)
+        as_of: Temporal bound for retroactive search — date-only ``YYYY-MM-DD`` or
+            quarter ``YYYY-QN`` (N in 1-4). Default ``None`` = current time. Chunks
+            whose ``valid_from`` / ``valid_to`` frontmatter excludes this point in
+            time are filtered out (chunks without those keys are always-valid).
         bm25_weight: Override BM25 weight in RRF fusion (default 1.0). Set higher to favor keyword matches.
         dense_weight: Override dense/semantic weight in RRF fusion (default 1.0). Set higher to favor meaning.
         context_window: Expand each result with ±N adjacent chunks (0=disabled). Use for more context.
@@ -56,6 +62,11 @@ async def mem_search(
         output_format: Output format — "compact" (default, human-readable), "verbose" (full
             details with UUID/pipeline stats), or "structured" (JSON for machine parsing).
             When set to non-default, overrides the verbose flag.
+
+    Result count may fall below ``top_k`` when post-rerank filters
+    (``source_filter``, ``tag_filter``, validity windows via ``as_of``) exclude
+    candidates. Increase ``top_k`` or ``rerank_pool`` to widen the pre-filter
+    candidate set; this method does not auto-oversample.
     """
     if not query.strip():
         return "Error: query cannot be empty."
@@ -70,6 +81,15 @@ async def mem_search(
         effective_format = "verbose"
     if effective_format not in _VALID_OUTPUT_FORMATS:
         return f"Error: {INVALID_OUTPUT_FORMAT_PREFIX} '{output_format}'."
+
+    as_of_unix: int | None = None
+    if as_of is not None:
+        as_of_unix = _parse_validity_bound(as_of, upper=False)
+        if as_of_unix is None:
+            return (
+                f"Error: invalid as_of value '{as_of}'. "
+                "Accepted formats: 'YYYY-MM-DD' (date) or 'YYYY-QN' (quarter, N in 1-4)."
+            )
 
     app = await _get_app_initialized(ctx)
     effective_ns = namespace or app.current_namespace
@@ -86,6 +106,7 @@ async def mem_search(
         namespace=effective_ns,
         rrf_weights=rrf_weights,
         context_window=context_window if context_window > 0 else None,
+        as_of_unix=as_of_unix,
     )
 
     # Build trust-UX hints shared across formats: archive filter count and a
