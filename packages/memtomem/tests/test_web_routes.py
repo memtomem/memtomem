@@ -1110,9 +1110,7 @@ class TestUnicodePaths:
         called_args, _ = app.state.index_engine.index_path.call_args
         assert Path(str(called_args[0])).resolve() == memory_dir.resolve()
 
-    async def test_add_memory_dir_default_skips_index(
-        self, app, client: AsyncClient, tmp_path
-    ):
+    async def test_add_memory_dir_default_skips_index(self, app, client: AsyncClient, tmp_path):
         """Backward compatibility: omitting ``auto_index`` keeps the
         historic register-only behavior. ``indexed`` is null and
         ``index_path`` is not called. CLI scripts and direct API users
