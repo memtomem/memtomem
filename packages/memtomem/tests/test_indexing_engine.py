@@ -1612,6 +1612,26 @@ class TestMemoryDirStats:
         result = await memory_dir_stats(storage, [c, a, b])
         assert [r["path"] for r in result] == [str(c), str(a), str(b)]
 
+    async def test_path_field_is_expanded_form(self, tmp_path, monkeypatch):
+        """Response ``path`` is always the expanded form, even when the
+        input has a ``~`` prefix.
+
+        Without this, ``~/memories`` came back raw in the response while
+        peer endpoints (``/add``, ``/remove``, ``/open``) all returned
+        ``str(Path(p).expanduser().resolve())`` — the web UI's per-row
+        metadata lookup compared the two and silently dropped badges
+        for any tilde-prefixed entry.
+        """
+        from memtomem.indexing.engine import memory_dir_stats
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / "memories").mkdir()
+        storage = _FakeStorageForStats([])
+
+        result = await memory_dir_stats(storage, ["~/memories"])
+        assert result[0]["path"] == str(tmp_path / "memories")
+        assert result[0]["path"] != "~/memories"
+
     async def test_created_at_is_iso_for_existing_dir(self, tmp_path):
         """``created_at`` is the OS filesystem creation time, ISO-8601 UTC.
 

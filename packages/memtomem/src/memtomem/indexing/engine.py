@@ -221,7 +221,14 @@ async def memory_dir_stats(
         category = categorize_memory_dir(d)
         out.append(
             {
-                "path": str(d),
+                # Return the expanded path so the response shape matches
+                # the other ``/api/memory-dirs/*`` endpoints (all of which
+                # use ``str(Path(p).expanduser().resolve())``). Returning
+                # the config-raw form (e.g. ``~/memories``) caused the web
+                # UI's per-row lookup to miss tilde-prefixed entries —
+                # every other dir rendered file/chunk/created badges
+                # while ``~/memories`` came back blank.
+                "path": str(dir_path),
                 "chunk_count": chunk_count,
                 "source_file_count": source_file_count,
                 "file_count": file_count,
