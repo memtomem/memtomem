@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
 from memtomem.context._names import InvalidNameError, validate_name
 
@@ -439,7 +440,8 @@ _register(CodexAgentsGenerator())
 class AgentSyncResult:
     generated: list[tuple[str, Path]]  # (runtime, target_file)
     dropped: list[tuple[str, str, list[str]]]  # (runtime, agent_name, dropped_fields)
-    skipped: list[tuple[str, str]]  # (runtime_or_agent, reason)
+    # (runtime_or_agent, human_reason, reason_code) — see :mod:`memtomem.context._skip_reasons`.
+    skipped: list[tuple[str, str, str]]
 
 
 @dataclass
@@ -447,7 +449,8 @@ class ExtractResult:
     """Result of a reverse (runtime → canonical) import."""
 
     imported: list[Path]
-    skipped: list[tuple[str, str]] = field(default_factory=list)  # (item_name, reason)
+    # (item_name, human_reason, reason_code) — see :mod:`memtomem.context._skip_reasons`.
+    skipped: list[tuple[str, str, str]] = field(default_factory=list)
 
 
 class StrictDropError(ValueError):
@@ -479,23 +482,27 @@ def generate_all_agents(
 
     generated: list[tuple[str, Path]] = []
     dropped: list[tuple[str, str, list[str]]] = []
-    skipped: list[tuple[str, str]] = []
+    skipped: list[tuple[str, str, str]] = []
 
     canonicals = list_canonical_agents(project_root)
     if not canonicals:
-        return AgentSyncResult(generated=[], dropped=[], skipped=[("<all>", "no canonical agents")])
+        return AgentSyncResult(
+            generated=[],
+            dropped=[],
+            skipped=[("<all>", "no canonical agents", skip_codes.NO_CANONICAL_ROOT)],
+        )
 
     targets = runtimes if runtimes is not None else list(AGENT_GENERATORS.keys())
     for target in targets:
         gen = AGENT_GENERATORS.get(target)
         if gen is None:
-            skipped.append((target, "unknown runtime"))
+            skipped.append((target, "unknown runtime", skip_codes.UNKNOWN_RUNTIME))
             continue
         for agent_path in canonicals:
             try:
                 agent = parse_canonical_agent(agent_path)
             except AgentParseError as exc:
-                skipped.append((agent_path.name, f"parse error: {exc}"))
+                skipped.append((agent_path.name, f"parse error: {exc}", skip_codes.PARSE_ERROR))
                 continue
             content, dropped_fields = gen.render(agent)
             if dropped_fields:
@@ -532,7 +539,7 @@ def extract_agents_to_canonical(
     """
     canonical_root = project_root / CANONICAL_AGENT_ROOT
     imported: list[Path] = []
-    skipped: list[tuple[str, str]] = []
+    skipped: list[tuple[str, str, str]] = []
     seen: dict[str, str] = {}  # agent_name → first runtime label
 
     for runtime_dir in (
@@ -547,7 +554,7 @@ def extract_agents_to_canonical(
             try:
                 validate_name(agent_name, kind="agent name")
             except InvalidNameError as exc:
-                skipped.append((agent_name, f"invalid name: {exc}"))
+                skipped.append((agent_name, f"invalid name: {exc}", skip_codes.INVALID_NAME))
                 logger.warning(
                     "skip %r from %s: invalid name",
                     agent_name,
@@ -556,13 +563,13 @@ def extract_agents_to_canonical(
                 continue
             if agent_name in seen:
                 reason = f"already imported from {seen[agent_name]}"
-                skipped.append((agent_name, reason))
+                skipped.append((agent_name, reason, skip_codes.ALREADY_IMPORTED))
                 logger.warning("skip %s from %s: %s", agent_name, runtime_label, reason)
                 continue
             dst = canonical_root / f"{agent_name}.md"
             if dst.exists() and not overwrite:
                 reason = "canonical exists (use --overwrite)"
-                skipped.append((agent_name, reason))
+                skipped.append((agent_name, reason, skip_codes.CANONICAL_EXISTS))
                 logger.warning("skip %s from %s: %s", agent_name, runtime_label, reason)
                 seen[agent_name] = runtime_label
                 continue

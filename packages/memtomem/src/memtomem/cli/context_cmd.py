@@ -110,7 +110,7 @@ def _print_skills_init(root: Path, overwrite: bool) -> None:
             click.echo(f"    {p.name}")
     else:
         click.echo("  (no runtime skills to import)")
-    for name, reason in result.skipped:
+    for name, reason, _code in result.skipped:
         click.secho(f"    skipped {name}: {reason}", fg="yellow")
 
 
@@ -121,7 +121,7 @@ def _print_skills_generate(root: Path) -> None:
         for runtime, path in result.generated:
             rel = path.relative_to(root) if path.is_relative_to(root) else path
             click.echo(f"    {runtime:15s}  {rel}")
-    for runtime, reason in result.skipped:
+    for runtime, reason, _code in result.skipped:
         click.secho(f"  skipped {runtime}: {reason}", fg="yellow")
 
 
@@ -159,7 +159,7 @@ def _print_agents_init(root: Path, overwrite: bool) -> None:
             click.echo(f"    {p.stem}")
     else:
         click.echo("  (no runtime sub-agents to import)")
-    for name, reason in result.skipped:
+    for name, reason, _code in result.skipped:
         click.secho(f"    skipped {name}: {reason}", fg="yellow")
 
 
@@ -178,7 +178,7 @@ def _print_agents_generate(root: Path, strict: bool, on_drop: str = "ignore") ->
             except ValueError:
                 rel = path
             click.echo(f"    {runtime:15s}  {rel}")
-    for runtime, reason in result.skipped:
+    for runtime, reason, _code in result.skipped:
         click.secho(f"  skipped {runtime}: {reason}", fg="yellow")
     for runtime, agent_name, dropped in result.dropped:
         click.secho(
@@ -221,7 +221,7 @@ def _print_commands_init(root: Path, overwrite: bool) -> None:
             click.echo(f"    {p.stem}")
     else:
         click.echo("  (no runtime commands to import)")
-    for name, reason in result.skipped:
+    for name, reason, _code in result.skipped:
         click.secho(f"    skipped {name}: {reason}", fg="yellow")
 
 
@@ -240,7 +240,7 @@ def _print_commands_generate(root: Path, strict: bool, on_drop: str = "ignore") 
             except ValueError:
                 rel = path
             click.echo(f"    {runtime:17s}  {rel}")
-    for runtime, reason in result.skipped:
+    for runtime, reason, _code in result.skipped:
         click.secho(f"  skipped {runtime}: {reason}", fg="yellow")
     for runtime, cmd_name, dropped in result.dropped:
         click.secho(

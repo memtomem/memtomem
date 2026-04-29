@@ -181,7 +181,7 @@ class TestGenerateAllCommands:
     def test_no_canonical_no_op(self, tmp_path):
         result = generate_all_commands(tmp_path)
         assert result.generated == []
-        assert result.skipped == [("<all>", "no canonical commands")]
+        assert result.skipped == [("<all>", "no canonical commands", "no_canonical_root")]
 
     def test_registry_contents(self):
         assert "claude_commands" in COMMAND_GENERATORS
@@ -191,7 +191,7 @@ class TestGenerateAllCommands:
     def test_unknown_runtime_skipped(self, tmp_path):
         _make_canonical_command(tmp_path, "hi", SAMPLE_MINIMAL_COMMAND)
         result = generate_all_commands(tmp_path, runtimes=["claude_commands", "nope"])
-        assert ("nope", "unknown runtime") in result.skipped
+        assert ("nope", "unknown runtime", "unknown_runtime") in result.skipped
 
 
 class TestStrictMode:
@@ -278,7 +278,7 @@ class TestExtractCommandsToCanonical:
         result = extract_commands_to_canonical(tmp_path)
         imported_names = sorted(p.stem for p in result.imported)
         assert imported_names == ["ok"]
-        skipped_names = sorted(name for name, _ in result.skipped)
+        skipped_names = sorted(name for name, _, _ in result.skipped)
         assert "-bad" in skipped_names
 
 

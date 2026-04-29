@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context._names import validate_name
+from memtomem.context.detector import SKILL_DIRS
 from memtomem.context.skills import (
     SKILL_GENERATORS,
     SKILL_MANIFEST,
@@ -313,7 +314,11 @@ async def sync_skills(
         "generated": [
             {"runtime": rt, "path": _safe_rel(p, project_root)} for rt, p in result.generated
         ],
-        "skipped": [{"runtime": rt, "reason": reason} for rt, reason in result.skipped],
+        "skipped": [
+            {"runtime": rt, "reason": reason, "reason_code": code}
+            for rt, reason, code in result.skipped
+        ],
+        "canonical_root": _safe_rel(canonical_skills_root(project_root), project_root),
     }
 
 
@@ -342,5 +347,10 @@ async def import_skills(
             {"name": p.name, "canonical_path": str(p.relative_to(project_root))}
             for p in result.imported
         ],
-        "skipped": [{"name": name, "reason": reason} for name, reason in result.skipped],
+        "skipped": [
+            {"name": name, "reason": reason, "reason_code": code}
+            for name, reason, code in result.skipped
+        ],
+        "project_root": str(project_root),
+        "scanned_dirs": [d for paths in SKILL_DIRS.values() for d in paths],
     }

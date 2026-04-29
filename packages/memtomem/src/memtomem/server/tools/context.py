@@ -195,7 +195,7 @@ async def mem_context_generate(
             for runtime, path in skill_result.generated:
                 rel = path.relative_to(root) if path.is_relative_to(root) else path
                 results.append(f"  {runtime}: {rel}")
-        for runtime, reason in skill_result.skipped:
+        for runtime, reason, _code in skill_result.skipped:
             results.append(f"  skipped {runtime}: {reason}")
 
     if "agents" in inc:
@@ -212,7 +212,7 @@ async def mem_context_generate(
                 except ValueError:
                     rel = path
                 results.append(f"  {runtime}: {rel}")
-        for runtime, reason in agent_result.skipped:
+        for runtime, reason, _code in agent_result.skipped:
             results.append(f"  skipped {runtime}: {reason}")
         for runtime, agent_name, dropped in agent_result.dropped:
             results.append(f"  {runtime} dropped {dropped} from '{agent_name}'")
@@ -231,7 +231,7 @@ async def mem_context_generate(
                 except ValueError:
                     rel = path
                 results.append(f"  {runtime}: {rel}")
-        for runtime, reason in command_result.skipped:
+        for runtime, reason, _code in command_result.skipped:
             results.append(f"  skipped {runtime}: {reason}")
         for runtime, cmd_name, dropped in command_result.dropped:
             results.append(f"  {runtime} dropped {dropped} from '{cmd_name}'")
@@ -426,7 +426,7 @@ async def mem_context_sync(
             for runtime, path in skill_result.generated:
                 rel = path.relative_to(root) if path.is_relative_to(root) else path
                 results.append(f"  {runtime}: {rel}")
-        for runtime, reason in skill_result.skipped:
+        for runtime, reason, _code in skill_result.skipped:
             results.append(f"  skipped {runtime}: {reason}")
 
     if "agents" in inc:
@@ -444,7 +444,7 @@ async def mem_context_sync(
                 except ValueError:
                     rel = path
                 results.append(f"  {runtime}: {rel}")
-        for runtime, reason in agent_result.skipped:
+        for runtime, reason, _code in agent_result.skipped:
             results.append(f"  skipped {runtime}: {reason}")
         for runtime, agent_name, dropped in agent_result.dropped:
             results.append(f"  {runtime} dropped {dropped} from '{agent_name}'")
@@ -464,7 +464,7 @@ async def mem_context_sync(
                 except ValueError:
                     rel = path
                 results.append(f"  {runtime}: {rel}")
-        for runtime, reason in command_result.skipped:
+        for runtime, reason, _code in command_result.skipped:
             results.append(f"  skipped {runtime}: {reason}")
         for runtime, cmd_name, dropped in command_result.dropped:
             results.append(f"  {runtime} dropped {dropped} from '{cmd_name}'")

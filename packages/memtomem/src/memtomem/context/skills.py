@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context._atomic import atomic_write_bytes
 from memtomem.context._names import InvalidNameError, validate_name
 
@@ -176,13 +177,14 @@ class ExtractResult:
     """Result of a reverse (runtime → canonical) import."""
 
     imported: list[Path]
-    skipped: list[tuple[str, str]] = field(default_factory=list)  # (item_name, reason)
+    # (item_name, human_reason, reason_code) — see :mod:`memtomem.context._skip_reasons`.
+    skipped: list[tuple[str, str, str]] = field(default_factory=list)
 
 
 @dataclass
 class SkillSyncResult:
     generated: list[tuple[str, Path]]  # (runtime_name, target_path)
-    skipped: list[tuple[str, str]]  # (runtime_name, reason)
+    skipped: list[tuple[str, str, str]]  # (runtime_name, human_reason, reason_code)
 
 
 def generate_all_skills(
@@ -197,17 +199,20 @@ def generate_all_skills(
             runtimes (currently ``claude_skills`` + ``gemini_skills``).
     """
     generated: list[tuple[str, Path]] = []
-    skipped: list[tuple[str, str]] = []
+    skipped: list[tuple[str, str, str]] = []
 
     canonicals = list_canonical_skills(project_root)
     if not canonicals:
-        return SkillSyncResult(generated=generated, skipped=[("<all>", "no canonical skills")])
+        return SkillSyncResult(
+            generated=generated,
+            skipped=[("<all>", "no canonical skills", skip_codes.NO_CANONICAL_ROOT)],
+        )
 
     targets = runtimes if runtimes is not None else list(SKILL_GENERATORS.keys())
     for target in targets:
         gen = SKILL_GENERATORS.get(target)
         if gen is None:
-            skipped.append((target, "unknown runtime"))
+            skipped.append((target, "unknown runtime", skip_codes.UNKNOWN_RUNTIME))
             continue
         for skill_dir in canonicals:
             dst = gen.target_dir(project_root, skill_dir.name)
@@ -239,7 +244,7 @@ def extract_skills_to_canonical(
 
     canonical_root = canonical_skills_root(project_root)
     imported: list[Path] = []
-    skipped: list[tuple[str, str]] = []
+    skipped: list[tuple[str, str, str]] = []
     seen: dict[str, str] = {}  # skill_name → first runtime label
 
     for detected in detect_skill_dirs(project_root):
@@ -248,7 +253,7 @@ def extract_skills_to_canonical(
         try:
             validate_name(skill_name, kind="skill name")
         except InvalidNameError as exc:
-            skipped.append((skill_name, f"invalid name: {exc}"))
+            skipped.append((skill_name, f"invalid name: {exc}", skip_codes.INVALID_NAME))
             logger.warning(
                 "skip %r from %s: invalid name",
                 skill_name,
@@ -257,13 +262,13 @@ def extract_skills_to_canonical(
             continue
         if skill_name in seen:
             reason = f"already imported from {seen[skill_name]}"
-            skipped.append((skill_name, reason))
+            skipped.append((skill_name, reason, skip_codes.ALREADY_IMPORTED))
             logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
             continue
         dst = canonical_root / skill_name
         if dst.exists() and not overwrite:
             reason = "canonical exists (use --overwrite)"
-            skipped.append((skill_name, reason))
+            skipped.append((skill_name, reason, skip_codes.CANONICAL_EXISTS))
             logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
             seen[skill_name] = runtime_label
             continue

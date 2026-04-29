@@ -131,7 +131,7 @@ class TestGenerateAllSkills:
     def test_no_canonical_no_op(self, tmp_path):
         result = generate_all_skills(tmp_path)
         assert result.generated == []
-        assert result.skipped == [("<all>", "no canonical skills")]
+        assert result.skipped == [("<all>", "no canonical skills", "no_canonical_root")]
 
     def test_respects_runtime_filter(self, tmp_path):
         _make_canonical_skill(tmp_path, "a")
@@ -144,7 +144,7 @@ class TestGenerateAllSkills:
     def test_unknown_runtime_reported(self, tmp_path):
         _make_canonical_skill(tmp_path, "a")
         result = generate_all_skills(tmp_path, runtimes=["claude_skills", "unknown"])
-        assert ("unknown", "unknown runtime") in result.skipped
+        assert ("unknown", "unknown runtime", "unknown_runtime") in result.skipped
 
     def test_generator_registry_contents(self):
         assert "claude_skills" in SKILL_GENERATORS

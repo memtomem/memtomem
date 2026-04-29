@@ -23,6 +23,7 @@ from memtomem.context.agents import (
     list_canonical_agents,
     parse_canonical_agent,
 )
+from memtomem.context.detector import AGENT_DIRS
 from memtomem.web.deps import get_project_root
 from memtomem.web.routes._locks import _gateway_lock
 
@@ -365,7 +366,11 @@ async def sync_agents(
         "dropped": [
             {"runtime": rt, "name": name, "fields": fields} for rt, name, fields in result.dropped
         ],
-        "skipped": [{"runtime": rt, "reason": reason} for rt, reason in result.skipped],
+        "skipped": [
+            {"runtime": rt, "reason": reason, "reason_code": code}
+            for rt, reason, code in result.skipped
+        ],
+        "canonical_root": CANONICAL_AGENT_ROOT,
     }
 
 
@@ -393,5 +398,10 @@ async def import_agents(
             {"name": p.stem, "canonical_path": str(p.relative_to(project_root))}
             for p in result.imported
         ],
-        "skipped": [{"name": name, "reason": reason} for name, reason in result.skipped],
+        "skipped": [
+            {"name": name, "reason": reason, "reason_code": code}
+            for name, reason, code in result.skipped
+        ],
+        "project_root": str(project_root),
+        "scanned_dirs": [d for paths in AGENT_DIRS.values() for d in paths],
     }

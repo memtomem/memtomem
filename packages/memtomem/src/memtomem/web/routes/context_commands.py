@@ -22,6 +22,7 @@ from memtomem.context.commands import (
     list_canonical_commands,
     parse_canonical_command,
 )
+from memtomem.context.detector import COMMAND_DIRS
 from memtomem.web.deps import get_project_root
 from memtomem.web.routes._locks import _gateway_lock
 
@@ -341,7 +342,11 @@ async def sync_commands(
         "dropped": [
             {"runtime": rt, "name": name, "fields": fields} for rt, name, fields in result.dropped
         ],
-        "skipped": [{"runtime": rt, "reason": reason} for rt, reason in result.skipped],
+        "skipped": [
+            {"runtime": rt, "reason": reason, "reason_code": code}
+            for rt, reason, code in result.skipped
+        ],
+        "canonical_root": CANONICAL_COMMAND_ROOT,
     }
 
 
@@ -369,5 +374,10 @@ async def import_commands(
             {"name": p.stem, "canonical_path": str(p.relative_to(project_root))}
             for p in result.imported
         ],
-        "skipped": [{"name": name, "reason": reason} for name, reason in result.skipped],
+        "skipped": [
+            {"name": name, "reason": reason, "reason_code": code}
+            for name, reason, code in result.skipped
+        ],
+        "project_root": str(project_root),
+        "scanned_dirs": [rel for rel, _suffix in COMMAND_DIRS.values()],
     }

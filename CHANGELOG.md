@@ -7,6 +7,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Web UI Skills/Commands/Agents empty-state surfaces "why nothing
+  happened"**. Previously `mm web` → Settings → Skills/Commands/Agents
+  showed a generic `Sync completed` toast even when the canonical root
+  (`.memtomem/skills/` etc.) was empty, and a generic `Import completed`
+  even when no `.claude/skills/`, `.gemini/skills/`, or `.agents/skills/`
+  directory existed under the project root. The toast looked successful
+  but nothing actually moved on disk, so users perceived the buttons as
+  broken. Now:
+  - **`POST /api/context/{skills,commands,agents}/sync`** responses gain
+    `canonical_root: str` and each entry in `skipped[]` carries
+    `reason_code: "no_canonical_root" | "unknown_runtime" | "parse_error"
+    | …` (machine-readable, stable across i18n changes).
+  - **`POST /api/context/{skills,commands,agents}/import`** responses gain
+    `project_root: str` + `scanned_dirs: list[str]` so the UI can name
+    the cwd and the runtime directories that were inspected. Each
+    `skipped[]` entry carries `reason_code` (`invalid_name`,
+    `already_imported`, `canonical_exists`, `toml_parse_error`).
+  - **Web UI** matches on `reason_code` (not the human prose) and shows
+    info-tone toasts: `No canonical {type} under {canonical}. Create one
+    first.` for empty-canonical syncs, and `No runtime {type} found in
+    {project_root}. Scanned: {scan_dirs}.` for empty-runtime imports.
+  - **Empty list state** under each tab now points at the canonical and
+    runtime paths instead of the generic "Create one or import from
+    existing runtimes." line — users see exactly where to drop a
+    `SKILL.md` / `*.md` / `*.toml` to populate the panel.
+  - **Sync handler** also now reads `data.skipped` (in addition to
+    `data.dropped`); previously skills' `skipped` was silently ignored
+    because skills don't carry `dropped` field-level omissions.
+
+  All response changes are additive — existing clients that only read
+  `imported`/`generated`/`skipped[].name|runtime|reason` keep working.
 - **`mm index --debounce-window` / `--flush` / `--status` flags** (closes
   PR #536 documented gap). `mm index` now exposes a file-system-backed
   debounce queue under `~/.memtomem/index_debounce_queue.json`

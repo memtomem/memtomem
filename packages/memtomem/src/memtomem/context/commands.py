@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
 from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context.agents import (
@@ -258,7 +259,8 @@ _register(GeminiCommandsGenerator())
 class CommandSyncResult:
     generated: list[tuple[str, Path]]  # (runtime, target_file)
     dropped: list[tuple[str, str, list[str]]]  # (runtime, command_name, dropped_fields)
-    skipped: list[tuple[str, str]]  # (runtime_or_command, reason)
+    # (runtime_or_command, human_reason, reason_code) — see :mod:`memtomem.context._skip_reasons`.
+    skipped: list[tuple[str, str, str]]
 
 
 @dataclass
@@ -266,7 +268,8 @@ class ExtractResult:
     """Result of a reverse (runtime → canonical) import."""
 
     imported: list[Path]
-    skipped: list[tuple[str, str]] = field(default_factory=list)  # (item_name, reason)
+    # (item_name, human_reason, reason_code) — see :mod:`memtomem.context._skip_reasons`.
+    skipped: list[tuple[str, str, str]] = field(default_factory=list)
 
 
 class StrictDropError(ValueError):
@@ -293,25 +296,27 @@ def generate_all_commands(
 
     generated: list[tuple[str, Path]] = []
     dropped: list[tuple[str, str, list[str]]] = []
-    skipped: list[tuple[str, str]] = []
+    skipped: list[tuple[str, str, str]] = []
 
     canonicals = list_canonical_commands(project_root)
     if not canonicals:
         return CommandSyncResult(
-            generated=[], dropped=[], skipped=[("<all>", "no canonical commands")]
+            generated=[],
+            dropped=[],
+            skipped=[("<all>", "no canonical commands", skip_codes.NO_CANONICAL_ROOT)],
         )
 
     targets = runtimes if runtimes is not None else list(COMMAND_GENERATORS.keys())
     for target in targets:
         gen = COMMAND_GENERATORS.get(target)
         if gen is None:
-            skipped.append((target, "unknown runtime"))
+            skipped.append((target, "unknown runtime", skip_codes.UNKNOWN_RUNTIME))
             continue
         for cmd_path in canonicals:
             try:
                 cmd = parse_canonical_command(cmd_path)
             except CommandParseError as exc:
-                skipped.append((cmd_path.name, f"parse error: {exc}"))
+                skipped.append((cmd_path.name, f"parse error: {exc}", skip_codes.PARSE_ERROR))
                 continue
             content, dropped_fields = gen.render(cmd)
             if dropped_fields:
@@ -371,7 +376,7 @@ def extract_commands_to_canonical(
     """
     canonical_root = project_root / CANONICAL_COMMAND_ROOT
     imported: list[Path] = []
-    skipped: list[tuple[str, str]] = []
+    skipped: list[tuple[str, str, str]] = []
     seen: dict[str, str] = {}  # cmd_name → first runtime label
 
     # Claude — direct copy (both sides are Markdown+YAML frontmatter).
@@ -382,18 +387,18 @@ def extract_commands_to_canonical(
             try:
                 validate_name(cmd_name, kind="command name")
             except InvalidNameError as exc:
-                skipped.append((cmd_name, f"invalid name: {exc}"))
+                skipped.append((cmd_name, f"invalid name: {exc}", skip_codes.INVALID_NAME))
                 logger.warning("skip %r from .claude/commands: invalid name", cmd_name)
                 continue
             if cmd_name in seen:
                 reason = f"already imported from {seen[cmd_name]}"
-                skipped.append((cmd_name, reason))
+                skipped.append((cmd_name, reason, skip_codes.ALREADY_IMPORTED))
                 logger.warning("skip %s from .claude/commands: %s", cmd_name, reason)
                 continue
             dst = canonical_root / f"{cmd_name}.md"
             if dst.exists() and not overwrite:
                 reason = "canonical exists (use --overwrite)"
-                skipped.append((cmd_name, reason))
+                skipped.append((cmd_name, reason, skip_codes.CANONICAL_EXISTS))
                 logger.warning("skip %s from .claude/commands: %s", cmd_name, reason)
                 seen[cmd_name] = ".claude/commands"
                 continue
@@ -409,25 +414,25 @@ def extract_commands_to_canonical(
             try:
                 validate_name(cmd_name, kind="command name")
             except InvalidNameError as exc:
-                skipped.append((cmd_name, f"invalid name: {exc}"))
+                skipped.append((cmd_name, f"invalid name: {exc}", skip_codes.INVALID_NAME))
                 logger.warning("skip %r from .gemini/commands: invalid name", cmd_name)
                 continue
             if cmd_name in seen:
                 reason = f"already imported from {seen[cmd_name]}"
-                skipped.append((cmd_name, reason))
+                skipped.append((cmd_name, reason, skip_codes.ALREADY_IMPORTED))
                 logger.warning("skip %s from .gemini/commands: %s", cmd_name, reason)
                 continue
             dst = canonical_root / f"{cmd_name}.md"
             if dst.exists() and not overwrite:
                 reason = "canonical exists (use --overwrite)"
-                skipped.append((cmd_name, reason))
+                skipped.append((cmd_name, reason, skip_codes.CANONICAL_EXISTS))
                 logger.warning("skip %s from .gemini/commands: %s", cmd_name, reason)
                 seen[cmd_name] = ".gemini/commands"
                 continue
             try:
                 canonical_content = _gemini_toml_to_canonical(toml_file)
             except (tomllib.TOMLDecodeError, OSError):
-                skipped.append((cmd_name, "TOML parse error"))
+                skipped.append((cmd_name, "TOML parse error", skip_codes.TOML_PARSE_ERROR))
                 logger.warning("skip %s from .gemini/commands: TOML parse error", cmd_name)
                 continue
             atomic_write_text(dst, canonical_content)

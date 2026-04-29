@@ -248,7 +248,7 @@ class TestGenerateAllAgents:
     def test_no_canonical_no_op(self, tmp_path):
         result = generate_all_agents(tmp_path)
         assert result.generated == []
-        assert result.skipped == [("<all>", "no canonical agents")]
+        assert result.skipped == [("<all>", "no canonical agents", "no_canonical_root")]
 
     def test_registry_contents(self):
         assert "claude_agents" in AGENT_GENERATORS
@@ -258,7 +258,7 @@ class TestGenerateAllAgents:
     def test_unknown_runtime_skipped(self, tmp_path):
         _make_canonical_agent(tmp_path, "helper", SAMPLE_MINIMAL_AGENT)
         result = generate_all_agents(tmp_path, runtimes=["claude_agents", "nope"])
-        assert ("nope", "unknown runtime") in result.skipped
+        assert ("nope", "unknown runtime", "unknown_runtime") in result.skipped
 
 
 class TestStrictMode:
@@ -343,10 +343,10 @@ class TestExtractAgentsToCanonical:
         # Only "ok" imported; "-bad" skipped with invalid-name reason.
         imported_names = sorted(p.stem for p in result.imported)
         assert imported_names == ["ok"]
-        skipped_names = sorted(name for name, _ in result.skipped)
+        skipped_names = sorted(name for name, _, _ in result.skipped)
         assert "-bad" in skipped_names
-        reason = dict(result.skipped)["-bad"]
-        assert "invalid name" in reason
+        reason_by_name = {name: reason for name, reason, _code in result.skipped}
+        assert "invalid name" in reason_by_name["-bad"]
 
 
 class TestDiffAgents:
