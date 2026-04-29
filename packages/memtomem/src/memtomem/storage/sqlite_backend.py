@@ -721,9 +721,11 @@ class SqliteBackend(
                 if frag:
                     ns_clause = f"AND c.{frag}"
 
-            sql = f"""SELECT c.id, c.content, c.content_hash, c.source_file,
-                          c.heading_hierarchy, c.chunk_type, c.start_line, c.end_line,
-                          c.language, c.tags, c.namespace, c.created_at, c.updated_at, sub.rank
+            # ``c.*`` carries the full chunks-row layout into ``_row_to_chunk``
+            # so all defensive guards (overlap, importance, validity) activate.
+            # Score sits at the trailing position after the chunk columns —
+            # see ``_chunks_table_column_count`` consumer below.
+            sql = f"""SELECT c.*, sub.rank
                    FROM (
                        SELECT rowid, rank
                        FROM chunks_fts
@@ -748,8 +750,8 @@ class SqliteBackend(
 
         return [
             SearchResult(
-                chunk=self._row_to_chunk(row[:13]),
-                score=abs(row[13]),
+                chunk=self._row_to_chunk(row[:-1]),
+                score=abs(row[-1]),
                 rank=rank_idx + 1,
                 source="bm25",
             )
@@ -780,9 +782,7 @@ class SqliteBackend(
 
         try:
             rows = db.execute(
-                f"""SELECT c.id, c.content, c.content_hash, c.source_file,
-                          c.heading_hierarchy, c.chunk_type, c.start_line, c.end_line,
-                          c.language, c.tags, c.namespace, c.created_at, c.updated_at, sub.distance
+                f"""SELECT c.*, sub.distance
                    FROM (
                        SELECT rowid, distance
                        FROM chunks_vec
@@ -805,8 +805,8 @@ class SqliteBackend(
 
         return [
             SearchResult(
-                chunk=self._row_to_chunk(row[:13]),
-                score=1.0 / (1.0 + row[13]),
+                chunk=self._row_to_chunk(row[:-1]),
+                score=1.0 / (1.0 + row[-1]),
                 rank=rank_idx + 1,
                 source="dense",
             )

@@ -6,17 +6,25 @@ Covers Goals 1+2+3 of the temporal-validity RFC: the frontmatter parser
 migration that adds the two SQLite columns, and the chunker→metadata wiring.
 The pipeline filter, ``mem_search(as_of=...)``, and CLI/Web surfaces are
 covered by later RFC PRs.
+
+The search round-trip tests at the end of the file lock in the fix for
+PR #533 review feedback — bm25_search / dense_search must carry the new
+columns through ``_row_to_chunk`` so the upcoming validity_filter stage
+can rely on chunks emerging from the search path with their windows
+intact.
 """
 
 from __future__ import annotations
 
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 import sqlite_vec
 
 from memtomem.chunking.markdown import MarkdownChunker, _parse_validity_bound
+from memtomem.models import Chunk, ChunkMetadata
 from memtomem.storage.sqlite_meta import MetaManager
 from memtomem.storage.sqlite_schema import create_tables
 
@@ -204,3 +212,88 @@ class TestSchemaMigration:
             _initialize(db)  # must not raise
         finally:
             db.close()
+
+
+def _chunk_with_validity(
+    *,
+    content: str,
+    valid_from_unix: int | None,
+    valid_to_unix: int | None,
+    embedding: list[float] | None = None,
+) -> Chunk:
+    """Build a Chunk that carries an explicit validity window.
+
+    Used by the search round-trip tests below — ``helpers.make_chunk`` does
+    not surface the new fields, and broadening that helper is out of scope
+    for this PR.
+    """
+    return Chunk(
+        content=content,
+        metadata=ChunkMetadata(
+            source_file=Path("/tmp/validity-search.md"),
+            valid_from_unix=valid_from_unix,
+            valid_to_unix=valid_to_unix,
+        ),
+        content_hash=f"hash-{uuid.uuid4().hex[:8]}",
+        embedding=embedding if embedding is not None else [0.1] * 1024,
+    )
+
+
+class TestSearchRoundTrip:
+    """Search results must carry validity columns through ``_row_to_chunk``.
+
+    PR #533 review uncovered that ``bm25_search`` / ``dense_search`` were
+    SELECTing only 13 chunk columns and slicing ``row[:13]`` to
+    ``_row_to_chunk``, so the ``len(row) >= 21`` guard never tripped and
+    every search-derived chunk carried ``valid_from_unix=None`` regardless
+    of what was stored. The fix switches both queries to ``SELECT c.*`` so
+    the full row reaches the deserializer. These tests lock that in.
+    """
+
+    async def test_bm25_search_preserves_validity_window(self, storage) -> None:
+        vfrom = _ts(2025, 8, 15, 0, 0, 0)
+        vto = _ts(2026, 3, 31, 23, 59, 59)
+        chunk = _chunk_with_validity(
+            content="quarterly policy bm25 marker",
+            valid_from_unix=vfrom,
+            valid_to_unix=vto,
+        )
+        await storage.upsert_chunks([chunk])
+
+        results = await storage.bm25_search("quarterly policy bm25 marker", top_k=5)
+        assert results, "BM25 search must return the seeded chunk"
+        assert results[0].chunk.metadata.valid_from_unix == vfrom
+        assert results[0].chunk.metadata.valid_to_unix == vto
+
+    async def test_dense_search_preserves_validity_window(self, storage) -> None:
+        vfrom = _ts(2025, 1, 1, 0, 0, 0)
+        vto = _ts(2025, 12, 31, 23, 59, 59)
+        emb = [0.2 + i * 0.0001 for i in range(1024)]
+        chunk = _chunk_with_validity(
+            content="dense-search validity target",
+            valid_from_unix=vfrom,
+            valid_to_unix=vto,
+            embedding=emb,
+        )
+        await storage.upsert_chunks([chunk])
+
+        results = await storage.dense_search(emb, top_k=5)
+        assert results, "Dense search must return the seeded chunk"
+        assert results[0].chunk.metadata.valid_from_unix == vfrom
+        assert results[0].chunk.metadata.valid_to_unix == vto
+
+    async def test_bm25_search_returns_none_pair_for_unset_chunks(self, storage) -> None:
+        """A chunk written without validity stays unbounded through search —
+        confirms ``SELECT c.*`` did not silently fabricate values for the
+        always-valid (None, None) backward-compat default."""
+        chunk = _chunk_with_validity(
+            content="no-validity bm25 marker",
+            valid_from_unix=None,
+            valid_to_unix=None,
+        )
+        await storage.upsert_chunks([chunk])
+
+        results = await storage.bm25_search("no-validity bm25 marker", top_k=5)
+        assert results
+        assert results[0].chunk.metadata.valid_from_unix is None
+        assert results[0].chunk.metadata.valid_to_unix is None
