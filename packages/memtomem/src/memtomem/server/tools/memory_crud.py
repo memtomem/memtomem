@@ -79,6 +79,19 @@ async def _mem_add_core(
     if hits:
         if force_unsafe:
             privacy.record("bypassed", "mem_add")
+            # Audit trail for forensic correlation. The matched bytes are
+            # never logged — only the request shape (counters answer "is
+            # bypass happening?"; this line answers "what specifically got
+            # through?"). The full chunk content stays in the on-disk
+            # markdown file the call is about to write.
+            logger.warning(
+                "redaction bypass via force_unsafe=True "
+                "(tool=mem_add, namespace=%r, file=%r, content_chars=%d, hits=%d)",
+                namespace,
+                file,
+                len(content),
+                len(hits),
+            )
         else:
             privacy.record("blocked", "mem_add")
             return (
@@ -199,6 +212,11 @@ async def mem_add(
     Set ``force_unsafe=True`` to bypass after manual review; bypass events
     are recorded with a ``bypassed`` outcome label so guard effectiveness
     and bypass usage stay observable. See ``mem_add_redaction_stats``.
+
+    The redaction scan covers the first 10,000 characters of ``content``;
+    matches beyond that window are not seen by the guard. This is parity
+    with the STM compression-side scanner — split very long content into
+    multiple calls if every region must be inspected.
 
     Args:
         content: The memory content to store
@@ -399,6 +417,10 @@ async def mem_batch_add(
     bypass for the whole batch (each hit item is recorded with a
     ``bypassed`` outcome label per audit).
 
+    The scan covers only the first 10,000 characters of each entry's
+    value; matches beyond that per-entry window are not seen by the
+    guard.
+
     Args:
         entries: List of {"key": "title", "value": "content", "tags": [...]}
         namespace: Namespace for all entries (default: config default)
@@ -439,6 +461,14 @@ async def mem_batch_add(
             continue
         if idx in hit_set:
             privacy.record("bypassed", "mem_batch_add")
+            logger.warning(
+                "redaction bypass via force_unsafe=True "
+                "(tool=mem_batch_add, namespace=%r, file=%r, item_idx=%d, content_chars=%d)",
+                namespace,
+                file,
+                idx,
+                len(value),
+            )
         else:
             privacy.record("pass", "mem_batch_add")
 
@@ -502,6 +532,14 @@ async def mem_add_redaction_stats(
 
     The ``by_tool`` map breaks the same outcomes down by ingress tool
     (``mem_add``, ``mem_batch_add``).
+
+    Counts reflect attempted *write outcomes*, not raw scans. A rejected
+    ``mem_batch_add`` records ``blocked`` once per hit item but does not
+    record ``pass`` for the clean siblings in the same rejected batch
+    (no write occurred for them). Summing
+    ``blocked + pass + bypassed`` therefore equals the count of actual
+    or attempted writes that reached the guard, not the total number
+    of entries inspected.
     """
     import json
 

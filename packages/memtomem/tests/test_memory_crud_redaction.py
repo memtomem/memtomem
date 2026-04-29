@@ -110,6 +110,38 @@ class TestMemAddRedactionGuard:
         assert after["blocked"] == before["blocked"]
         assert after["bypassed"] == before["bypassed"]
 
+    @pytest.mark.asyncio
+    async def test_clean_content_with_force_unsafe_records_pass_not_bypassed(
+        self, bm25_only_components
+    ):
+        """``force_unsafe=True`` without a hit must still record ``pass``.
+
+        ``bypassed`` is only meaningful when the guard would have blocked;
+        a clean write with the kwarg set is no different from a clean
+        write without it. Pin so the bypass label keeps measuring real
+        escape-hatch usage rather than degrading into "kwarg was passed."
+        """
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+        target = mem_dir / "clean_with_force.md"
+
+        before = privacy.snapshot()["outcomes"]
+        await mem_add(  # type: ignore[arg-type]
+            content=_CLEAN_SAMPLE,
+            file=str(target),
+            force_unsafe=True,
+            ctx=ctx,
+        )
+        after = privacy.snapshot()["outcomes"]
+
+        assert after["pass"] == before["pass"] + 1
+        assert after["bypassed"] == before["bypassed"], (
+            "force_unsafe with no hit must not increment bypassed"
+        )
+        assert after["blocked"] == before["blocked"]
+        assert target.exists()
+
 
 class TestMemBatchAddRedactionGuard:
     @pytest.mark.asyncio
