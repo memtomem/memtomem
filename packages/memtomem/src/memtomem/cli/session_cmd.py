@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import click
@@ -18,6 +20,29 @@ from memtomem.constants import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+_DURATION_RE = re.compile(r"^\s*(\d+)\s*([smhd])\s*$", re.IGNORECASE)
+_DURATION_UNITS = {
+    "s": "seconds",
+    "m": "minutes",
+    "h": "hours",
+    "d": "days",
+}
+
+
+def _parse_duration(spec: str) -> timedelta:
+    """Parse a short duration like ``24h``, ``7d``, ``30m``, ``45s``.
+
+    Raises ``click.BadParameter`` on unparseable input so the CLI surfaces
+    a useful message instead of a stack trace. Backs ``--auto-end-stale``.
+    """
+    match = _DURATION_RE.match(spec)
+    if not match:
+        raise click.BadParameter(f"invalid duration {spec!r}; expected like '30m', '24h', '7d'.")
+    n = int(match.group(1))
+    unit = _DURATION_UNITS[match.group(2).lower()]
+    return timedelta(**{unit: n})
 
 
 def _derive_session_namespace(agent_id: str, namespace: str | None) -> str:
@@ -81,38 +106,143 @@ def session() -> None:
 @click.option("--agent-id", "-a", default="default", help="Agent identifier")
 @click.option("--title", "-t", default=None, help="Session title")
 @click.option("--namespace", "-n", default=None, help="Namespace for session")
-def start(agent_id: str, title: str | None, namespace: str | None) -> None:
-    """Start a new session and save its ID to ~/.memtomem/.current_session."""
+@click.option(
+    "--idempotent",
+    is_flag=True,
+    help=(
+        "Return the active session for the same --agent-id if one exists, "
+        "otherwise start a new one. Designed for SessionStart hooks."
+    ),
+)
+@click.option(
+    "--auto-end-stale",
+    "auto_end_stale",
+    default=None,
+    metavar="DURATION",
+    help=(
+        "Before resolving idempotency, end any active session whose started_at "
+        "is older than DURATION (e.g. 24h, 7d). Off by default — opt in for hooks."
+    ),
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help='Emit one JSON line: {"session_id":..., "resumed":bool, "stale_ended":[...]}',
+)
+def start(
+    agent_id: str,
+    title: str | None,
+    namespace: str | None,
+    idempotent: bool,
+    auto_end_stale: str | None,
+    as_json: bool,
+) -> None:
+    """Start a new session and save its ID to ~/.memtomem/.current_session.
+
+    With ``--idempotent``, return the active session for the same ``--agent-id``
+    if one exists; with ``--auto-end-stale=<duration>``, first close any active
+    sessions older than the duration. See
+    ``memtomem-docs/memtomem/planning/hooks-session-cli-rfc.md`` for the
+    SessionStart hook design these flags back.
+    """
     try:
         validate_agent_id(agent_id)
         if namespace is not None:
             validate_namespace(namespace)
     except InvalidNameError as e:
         raise click.ClickException(str(e)) from e
+    stale_cutoff = _parse_duration(auto_end_stale) if auto_end_stale else None
     try:
-        asyncio.run(_start(agent_id, title, namespace))
+        asyncio.run(
+            _start(
+                agent_id,
+                title,
+                namespace,
+                idempotent=idempotent,
+                stale_cutoff=stale_cutoff,
+                stale_label=auto_end_stale,
+                as_json=as_json,
+            )
+        )
     except click.ClickException:
         raise
     except Exception as e:
         raise click.ClickException(str(e)) from e
 
 
-async def _start(agent_id: str, title: str | None, namespace: str | None) -> None:
+async def _start(
+    agent_id: str,
+    title: str | None,
+    namespace: str | None,
+    *,
+    idempotent: bool = False,
+    stale_cutoff: timedelta | None = None,
+    stale_label: str | None = None,
+    as_json: bool = False,
+) -> None:
     from memtomem.cli._bootstrap import cli_components
 
-    session_id = str(uuid.uuid4())
+    stale_ended: list[str] = []
+    resumed = False
+    session_id: str | None = None
     ns = _derive_session_namespace(agent_id, namespace)
-    metadata = {"title": title} if title else {}
 
     async with cli_components() as comp:
-        await comp.storage.create_session(session_id, agent_id, ns, metadata)
+        if stale_cutoff is not None:
+            cutoff_iso = (datetime.now(timezone.utc) - stale_cutoff).isoformat(timespec="seconds")
+            for row in await comp.storage.find_stale_active_sessions(cutoff_iso):
+                await comp.storage.end_session(
+                    row["id"],
+                    f"auto-ended after {stale_label} inactivity",
+                    {"auto_ended": True, "reason": "stale"},
+                )
+                stale_ended.append(row["id"])
 
-    _write_current_session(session_id)
-    click.echo(f"Session started: {session_id}")
-    if title:
-        click.echo(f"  Title: {title}")
+        if idempotent:
+            current = _read_current_session()
+            if current:
+                current_row = await comp.storage.get_session(current)
+                if current_row and current_row["ended_at"] is None:
+                    if current_row["agent_id"] == agent_id:
+                        session_id = current
+                        resumed = True
+                    else:
+                        await comp.storage.end_session(
+                            current,
+                            f"auto-ended on cross-agent resume to {agent_id}",
+                            {"auto_ended": True, "reason": "cross_agent"},
+                        )
+                        stale_ended.append(current)
+
+        if session_id is None:
+            session_id = str(uuid.uuid4())
+            metadata = {"title": title} if title else {}
+            await comp.storage.create_session(session_id, agent_id, ns, metadata)
+            _write_current_session(session_id)
+
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "session_id": session_id,
+                    "resumed": resumed,
+                    "stale_ended": stale_ended,
+                }
+            )
+        )
+        return
+
+    if resumed:
+        click.echo(f"Session resumed: {session_id}")
+    else:
+        click.echo(f"Session started: {session_id}")
+        if title:
+            click.echo(f"  Title: {title}")
     click.echo(f"  Agent: {agent_id}")
     click.echo(f"  Namespace: {ns}")
+    if stale_ended:
+        click.echo(f"  Auto-ended {len(stale_ended)} stale session(s)")
 
 
 @session.command()

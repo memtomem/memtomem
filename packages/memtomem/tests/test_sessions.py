@@ -63,6 +63,31 @@ class TestSessions:
         sessions = await storage.list_sessions(since="2099-01-01")
         assert len(sessions) == 0
 
+    @pytest.mark.asyncio
+    async def test_find_stale_active_sessions(self, storage):
+        """Backs ``mm session start --auto-end-stale``: only active rows
+        with ``started_at < cutoff`` come back. Ended rows and recent
+        active rows must be skipped so SessionStart hooks don't end
+        in-flight work or double-end already-closed sessions."""
+        # Active and old (started_at backdated below, after the row exists).
+        await storage.create_session("stale-old", "agent", "default")
+        # Active and recent — must be skipped.
+        await storage.create_session("stale-recent", "agent", "default")
+        # Ended — must be skipped regardless of started_at.
+        await storage.create_session("stale-ended", "agent", "default")
+        await storage.end_session("stale-ended", "manual", {})
+        # Backdate one active row so it's older than the cutoff.
+        db = storage._get_db()
+        db.execute(
+            "UPDATE sessions SET started_at = ? WHERE id = ?",
+            ("2020-01-01T00:00:00", "stale-old"),
+        )
+        db.commit()
+
+        rows = await storage.find_stale_active_sessions("2025-01-01T00:00:00")
+        ids = [r["id"] for r in rows]
+        assert ids == ["stale-old"]
+
 
 class TestSessionAgentInheritance:
     """``mem_session_start`` records ``agent_id`` on the AppContext so

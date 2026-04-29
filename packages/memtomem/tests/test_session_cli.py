@@ -374,3 +374,161 @@ class TestSessionWrapNamespaceDerivation:
         call_args = _create_session_call_args(create_session)
         assert call_args[1] == "default"
         assert call_args[2] == "default"
+
+
+class TestSessionStartIdempotent:
+    """``mm session start --idempotent`` / ``--auto-end-stale`` / ``--json``
+    are the SessionStart hook primitives defined in
+    ``memtomem-docs/memtomem/planning/hooks-session-cli-rfc.md``. Each test
+    here pins one of the five behaviours from the RFC's verification plan.
+    """
+
+    @staticmethod
+    def _comp(*, current_row: dict | None = None, stale: list[dict] | None = None):
+        return SimpleNamespace(
+            storage=SimpleNamespace(
+                create_session=AsyncMock(return_value=None),
+                end_session=AsyncMock(return_value=None),
+                get_session=AsyncMock(return_value=current_row),
+                find_stale_active_sessions=AsyncMock(return_value=list(stale or [])),
+            )
+        )
+
+    @staticmethod
+    def _patch(monkeypatch, comp, current_id: str | None) -> None:
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        monkeypatch.setattr("memtomem.cli.session_cmd._read_current_session", lambda: current_id)
+        monkeypatch.setattr("memtomem.cli.session_cmd._write_current_session", lambda _id: None)
+
+    @staticmethod
+    def _row(session_id: str, agent_id: str, *, ended: bool = False) -> dict:
+        return {
+            "id": session_id,
+            "agent_id": agent_id,
+            "started_at": "2026-04-29T00:00:00",
+            "ended_at": "2026-04-29T01:00:00" if ended else None,
+            "summary": "manual" if ended else None,
+            "namespace": f"agent-runtime:{agent_id}",
+            "metadata": "{}",
+        }
+
+    def test_idempotent_same_agent_returns_existing(self, runner, monkeypatch):
+        existing_id = "11111111-1111-1111-1111-111111111111"
+        comp = self._comp(current_row=self._row(existing_id, "claude-code"))
+        self._patch(monkeypatch, comp, existing_id)
+
+        result = runner.invoke(
+            cli,
+            ["session", "start", "--agent-id", "claude-code", "--idempotent", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["session_id"] == existing_id
+        assert data["resumed"] is True
+        assert data["stale_ended"] == []
+        comp.storage.create_session.assert_not_awaited()
+        comp.storage.end_session.assert_not_awaited()
+
+    def test_idempotent_cross_agent_ends_old_starts_new(self, runner, monkeypatch):
+        existing_id = "22222222-2222-2222-2222-222222222222"
+        comp = self._comp(current_row=self._row(existing_id, "claude-code"))
+        self._patch(monkeypatch, comp, existing_id)
+
+        result = runner.invoke(
+            cli,
+            ["session", "start", "--agent-id", "codex", "--idempotent", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["resumed"] is False
+        assert data["session_id"] != existing_id
+        assert existing_id in data["stale_ended"]
+        comp.storage.end_session.assert_awaited_once()
+        comp.storage.create_session.assert_awaited_once()
+
+    def test_idempotent_manual_end_then_start_creates_fresh(self, runner, monkeypatch):
+        ended_id = "33333333-3333-3333-3333-333333333333"
+        comp = self._comp(current_row=self._row(ended_id, "claude-code", ended=True))
+        self._patch(monkeypatch, comp, ended_id)
+
+        result = runner.invoke(
+            cli,
+            ["session", "start", "--agent-id", "claude-code", "--idempotent", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["resumed"] is False
+        assert data["session_id"] != ended_id
+        assert data["stale_ended"] == []
+        comp.storage.end_session.assert_not_awaited()
+        comp.storage.create_session.assert_awaited_once()
+
+    def test_auto_end_stale_closes_old_active(self, runner, monkeypatch):
+        stale_id = "44444444-4444-4444-4444-444444444444"
+        comp = self._comp(stale=[self._row(stale_id, "claude-code")])
+        self._patch(monkeypatch, comp, None)
+
+        result = runner.invoke(
+            cli,
+            [
+                "session",
+                "start",
+                "--agent-id",
+                "claude-code",
+                "--auto-end-stale",
+                "24h",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["resumed"] is False
+        assert stale_id in data["stale_ended"]
+        comp.storage.end_session.assert_awaited_once_with(
+            stale_id,
+            "auto-ended after 24h inactivity",
+            {"auto_ended": True, "reason": "stale"},
+        )
+        comp.storage.find_stale_active_sessions.assert_awaited_once()
+        cutoff_arg = comp.storage.find_stale_active_sessions.await_args.args[0]
+        # ISO-8601 second-precision timestamp, sane millennium prefix.
+        assert isinstance(cutoff_arg, str) and cutoff_arg.startswith("20")
+
+    def test_json_output_shape(self, runner, monkeypatch):
+        """``--json`` emits exactly the three keys defined in the RFC,
+        regardless of which path produced the session.
+        """
+        comp = self._comp(current_row=None)
+        self._patch(monkeypatch, comp, None)
+
+        result = runner.invoke(cli, ["session", "start", "--agent-id", "claude-code", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert set(data.keys()) == {"session_id", "resumed", "stale_ended"}
+        assert isinstance(data["session_id"], str) and data["session_id"]
+        assert data["resumed"] is False
+        assert data["stale_ended"] == []
+
+    def test_invalid_duration_raises_bad_parameter(self, runner, monkeypatch):
+        """Hook authors mistyping ``--auto-end-stale`` see a useful Click
+        error instead of a stack trace. Pinned because the parser is
+        bespoke (no library helper) and silent acceptance would land bad
+        cutoffs in production hooks."""
+        comp = self._comp(current_row=None)
+        self._patch(monkeypatch, comp, None)
+
+        result = runner.invoke(
+            cli,
+            [
+                "session",
+                "start",
+                "--agent-id",
+                "claude-code",
+                "--auto-end-stale",
+                "forever",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "invalid duration" in result.output.lower()
+        comp.storage.find_stale_active_sessions.assert_not_awaited()
+        comp.storage.create_session.assert_not_awaited()

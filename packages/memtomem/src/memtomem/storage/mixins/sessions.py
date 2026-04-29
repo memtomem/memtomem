@@ -117,6 +117,35 @@ class SessionMixin:
             "metadata": row[6],
         }
 
+    async def find_stale_active_sessions(self, started_before: str) -> list[dict]:
+        """Return active sessions (``ended_at IS NULL``) whose ``started_at``
+        is strictly less than the ISO-8601 cutoff.
+
+        Backs ``mm session start --auto-end-stale``: SessionStart hooks call
+        this to enumerate orphaned sessions left over from previous Claude
+        Code processes that crashed before Stop fired. Caller passes each ID
+        to ``end_session`` with an auto-cleanup summary.
+        """
+        db = self._get_db()
+        rows = db.execute(
+            "SELECT id, agent_id, started_at, ended_at, summary, namespace, metadata"
+            " FROM sessions WHERE ended_at IS NULL AND started_at < ?"
+            " ORDER BY started_at ASC",
+            (started_before,),
+        ).fetchall()
+        return [
+            {
+                "id": r[0],
+                "agent_id": r[1],
+                "started_at": r[2],
+                "ended_at": r[3],
+                "summary": r[4],
+                "namespace": r[5],
+                "metadata": r[6],
+            }
+            for r in rows
+        ]
+
     async def get_session_events(self, session_id: str) -> list[dict]:
         db = self._get_db()
         rows = db.execute(
