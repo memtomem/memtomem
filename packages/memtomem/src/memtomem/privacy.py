@@ -74,7 +74,36 @@ _INLINE_FLAG_GROUP_RE = re.compile(r"\(\?[imsux]+\)")
 _NAMED_GROUP_RE = re.compile(r"\(\?P<")
 _INLINE_COMMENT_RE = re.compile(r"\(\?#")
 _FLAG_NEGATION_RE = re.compile(r"\(\?[imsux]*-[imsux]+[:)]")
-_PYTHON_ANCHOR_RE = re.compile(r"\\[AZ]")
+
+
+def _has_unescaped_python_anchor(pat: str) -> bool:
+    r"""True iff ``pat`` contains an unescaped ``\A`` or ``\Z`` anchor.
+
+    A run of consecutive backslashes immediately before ``A`` or ``Z`` is
+    "active" (the final ``\`` escapes the next char) iff its length is odd.
+    Even-length runs are all ``\\`` literal-backslash pairs and leave the
+    next char unescaped — so ``r"foo\\Abar"`` (run of 2) is literal text
+    ``foo\Abar`` with no anchor, while ``r"foo\\\Abar"`` (run of 3) is a
+    literal ``\`` followed by the real ``\A`` anchor.
+
+    Character-class context (e.g. ``[\A]``) is intentionally out of scope
+    (issue #594): this helper checks top-level escape state only. Python's
+    ``re`` rejects ``[\A]`` at compile time anyway, and a secret-class
+    regex putting ``\A`` inside ``[…]`` is implausible.
+    """
+    i, n = 0, len(pat)
+    while i < n:
+        if pat[i] != "\\":
+            i += 1
+            continue
+        j = i
+        while j < n and pat[j] == "\\":
+            j += 1
+        if (j - i) % 2 == 1 and j < n and pat[j] in ("A", "Z"):
+            return True
+        i = j
+    return False
+
 
 # Map Python inline flag chars to ``re`` module flags so the translated
 # body can be sanity-compiled. ``x`` (verbose) is intentionally absent —
@@ -137,7 +166,7 @@ def to_js_pattern(pat: str) -> tuple[str, str]:
     while adding a pattern, extend ``to_js_pattern`` rather than
     suppressing the error.
     """
-    if _PYTHON_ANCHOR_RE.search(pat):
+    if _has_unescaped_python_anchor(pat):
         raise ValueError(
             f"Pattern {pat!r} uses Python-only construct: \\A or \\Z anchor "
             "(JS has no equivalent — use ^ / $ with the m flag)"

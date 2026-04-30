@@ -239,6 +239,10 @@ class TestJsPatternTranslation:
             # ``construct`` is a regex (pytest ``match=``); escape backslashes.
             (r"\Afoo", r"\\A or \\Z anchor"),
             (r"foo\Z", r"\\A or \\Z anchor"),
+            # Odd-length backslash run before ``A``: the leading ``\\`` is a
+            # literal-backslash pair, the final ``\`` actively escapes ``A``.
+            # Real anchor — must still raise.
+            (r"\\\Afoo", r"\\A or \\Z anchor"),
             ("foo(?i)bar", "mid-pattern inline flag group"),
             ("(?ix)foo", "verbose mode"),
             ("(?P<n>x)", "named group"),
@@ -249,6 +253,21 @@ class TestJsPatternTranslation:
     def test_hard_rejects_python_only_constructs(self, bad_pattern, construct):
         with pytest.raises(ValueError, match=construct):
             privacy.to_js_pattern(bad_pattern)
+
+    @pytest.mark.parametrize(
+        "pat",
+        [
+            r"foo\\Abar",  # run of 2: literal ``\`` + literal ``A``, no anchor
+            r"foo\\Zbar",  # run of 2: literal ``\`` + literal ``Z``, no anchor
+            r"foo\\\\Abar",  # run of 4: two literal-``\`` pairs + literal ``A``
+        ],
+    )
+    def test_accepts_escaped_anchor_literals(self, pat):
+        # Detector must distinguish ``\A``/``\Z`` (Python anchor) from
+        # ``\\A``/``\\Z`` (escaped backslash + literal char). Issue #594.
+        body, flags = privacy.to_js_pattern(pat)
+        assert body == pat
+        assert flags == ""
 
     def test_emitted_flags_are_jsregexp_compatible(self):
         # Each entry's flags is a (possibly empty) string of distinct
