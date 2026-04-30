@@ -27,6 +27,12 @@ const STATE = {
   allSources: [],
   sourcesSortBy: 'name',
   sourcesNsFilter: '',
+  // Active Sources vendor sub-tab (one of ``user`` / ``claude`` /
+  // ``openai``). Lazily populated from localStorage on first render so
+  // the value survives reloads. Keeping it on STATE means re-renders
+  // (filter typing, sort change) read the active vendor without
+  // hitting localStorage on the hot path.
+  sourcesActiveVendor: null,
   dedupScanActive: false,
   dedupAbortCtrl: null,
   lastTagsData: [],
@@ -2124,6 +2130,76 @@ document.querySelectorAll('.sources-sort-btn').forEach(btn => {
   }
 })();
 
+// ── Sources vendor sub-tabs ──
+// Issue #570: only one vendor's tree renders at a time. The tab strip
+// (``#sources-vendor-tabs``) drives ``STATE.sourcesActiveVendor`` which
+// scopes ``_renderMemorySourceTree`` to a single vendor.
+const _SOURCES_VENDORS = ['user', 'claude', 'openai'];
+const _SOURCES_VENDOR_LS = 'memtomem.sources.active_vendor';
+const _SOURCES_VENDOR_DEFAULT = 'user';
+
+function _readActiveSourcesVendor() {
+  try {
+    const v = localStorage.getItem(_SOURCES_VENDOR_LS);
+    if (v && _SOURCES_VENDORS.includes(v)) return v;
+  } catch (_err) { /* localStorage may be unavailable in private modes */ }
+  return _SOURCES_VENDOR_DEFAULT;
+}
+
+function _writeActiveSourcesVendor(vendor) {
+  try { localStorage.setItem(_SOURCES_VENDOR_LS, vendor); }
+  catch (_err) { /* best-effort persistence */ }
+}
+
+// Update tab DOM (active class, aria-selected, roving tabindex) without
+// re-rendering the tree. Called from ``_renderMemorySourceTree`` on the
+// first lazy resolve and from ``_setActiveSourcesVendor`` on user click /
+// arrow nav.
+function _syncSourcesVendorTabs(activeVendor) {
+  document.querySelectorAll('.sources-vendor-tab').forEach(btn => {
+    const isActive = btn.dataset.vendor === activeVendor;
+    btn.classList.toggle('active', isActive);
+    btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    btn.tabIndex = isActive ? 0 : -1;
+  });
+}
+
+function _setActiveSourcesVendor(vendor) {
+  if (!_SOURCES_VENDORS.includes(vendor)) return;
+  if (STATE.sourcesActiveVendor === vendor) return;
+  STATE.sourcesActiveVendor = vendor;
+  _writeActiveSourcesVendor(vendor);
+  _syncSourcesVendorTabs(vendor);
+  // ``_getFilteredSorted`` already covers the filter + sort axes; the
+  // active vendor is read from STATE inside the render itself.
+  if (typeof renderSourceTree === 'function') renderSourceTree(_getFilteredSorted());
+}
+
+(function _wireSourcesVendorTabs() {
+  const tabs = document.getElementById('sources-vendor-tabs');
+  if (!tabs) return;
+  tabs.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('.sources-vendor-tab');
+    if (!btn || !btn.dataset.vendor) return;
+    _setActiveSourcesVendor(btn.dataset.vendor);
+    btn.focus();
+  });
+  // Auto-activation arrow nav — same model as the main tablist
+  // (``focus + activate``) so a keyboard user toggles vendors by
+  // walking the strip without an extra Enter press.
+  tabs.addEventListener('keydown', (e) => {
+    if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
+    const buttons = Array.from(tabs.querySelectorAll('.sources-vendor-tab'));
+    const currentIdx = buttons.indexOf(document.activeElement);
+    const nextIdx = _arrowNavIndex(buttons.length, currentIdx === -1 ? 0 : currentIdx, e.key);
+    if (nextIdx < 0) return;
+    e.preventDefault();
+    const next = buttons[nextIdx];
+    next.focus();
+    if (next.dataset.vendor) _setActiveSourcesVendor(next.dataset.vendor);
+  });
+})();
+
 async function loadSources() {
   // Single-panel Sources: vendor grouping (사용자 / Claude / Codex) is the
   // only classification axis. We pull every memory_dir's status and every
@@ -2279,10 +2355,15 @@ function _renderMemorySourceTree(sources, list) {
     return out;
   };
 
-  // Build a vendor card whether or not it has any dirs — empty vendors
-  // collapse with a "not found · Add manually" placeholder so users know
-  // the slot exists without it taking up screen space.
-  let renderedFiles = 0;
+  // Pass 1: compute per-vendor stats. The sidebar only renders the
+  // active vendor's content (issue #570) but every vendor's count
+  // populates its sub-tab badge so the user can see at a glance which
+  // vendors hold matches before clicking. ``PROVIDER_COLLAPSED`` no
+  // longer drives an outer ``<details>`` collapse — the sub-tab strip
+  // *is* the disclosure now — but the constant stays imported in case
+  // a future view (e.g. an "all vendors" mode) wants it.
+  void PROVIDER_COLLAPSED;
+  const vendorPlans = {};
   for (const provider of PROVIDER_ORDER) {
     const bucket = byProvider[provider];
 
@@ -2293,8 +2374,8 @@ function _renderMemorySourceTree(sources, list) {
           .filter(([, dirs]) => dirs.length > 0)
       : categoriesAll.map(cat => [cat, bucket.byCategory[cat]]);
 
-    // Partition each category's dirs into indexed (default first for user
-    // provider) and discovered (kind=read-only, rendered as a collapsed
+    // Partition each category's dirs into indexed (default first for
+    // user provider) and discovered (read-only, rendered as a collapsed
     // sub-section).
     const visibleCats = visibleCatsRaw.map(([cat, dirs]) => {
       const indexed = dirs.filter(d => !isDiscovered(d));
@@ -2304,128 +2385,139 @@ function _renderMemorySourceTree(sources, list) {
     });
 
     const isEmptyVendor = !visibleCats.some(([, indexed, discovered]) => indexed.length || discovered.length);
-    if (filterActive && isEmptyVendor) continue;
-
     const totalFiles = visibleCats.reduce(
       (sum, [, indexed]) => sum + indexed.reduce((s, d) => s + (sourcesByDir[d] || []).length, 0),
       0,
     );
-    const totalDiscovered = visibleCats.reduce((sum, [, , discovered]) => sum + discovered.length, 0);
     const visibleIndexedCats = visibleCats.filter(([, indexed]) => indexed.length);
-    const isSingleLeaf = visibleIndexedCats.length === 1 || (visibleIndexedCats.length === 0 && visibleCats.length === 1);
+    const isSingleLeaf = visibleIndexedCats.length === 1
+      || (visibleIndexedCats.length === 0 && visibleCats.length === 1);
+    vendorPlans[provider] = { visibleCats, visibleIndexedCats, isEmptyVendor, totalFiles, isSingleLeaf };
 
-    const group = document.createElement('details');
-    group.className = 'source-vendor-group';
-    if (isEmptyVendor) group.classList.add('source-vendor-empty');
-    if ((!PROVIDER_COLLAPSED.has(provider) || filterActive) && !isEmptyVendor) group.open = true;
-    group.dataset.provider = provider;
-
-    const summary = document.createElement('summary');
-    summary.className = 'source-vendor-summary';
-    const labelKey = isSingleLeaf && visibleCats.length
-      ? (CATEGORY_LABEL_KEY[visibleCats[0][0]] || PROVIDER_LABEL_KEY[provider] || provider)
-      : (PROVIDER_LABEL_KEY[provider] || provider);
-    const label = document.createElement('span');
-    label.className = 'source-vendor-label';
-    label.textContent = (typeof t === 'function') ? t(labelKey) : labelKey;
-    summary.appendChild(label);
-
-    const count = document.createElement('span');
-    count.className = 'source-vendor-count';
-    count.textContent = String(totalFiles);
-    summary.appendChild(count);
-
-    group.appendChild(summary);
-
-    const renderDir = (dir) => _renderMemoryDirGroup(
-      dir,
-      sourcesByDir[dir] || [],
-      statusByPath[dir],
-      maxChunks,
-      { isDefault: dir === defaultDir },
-    );
-
-    const renderDiscoveredBlock = (dirs) => {
-      if (!dirs.length) return null;
-      const det = document.createElement('details');
-      det.className = 'source-vendor-discovered';
-      const sum = document.createElement('summary');
-      sum.className = 'source-vendor-discovered-summary';
-      const lbl = document.createElement('span');
-      lbl.className = 'source-vendor-discovered-label';
-      lbl.textContent = (typeof t === 'function') ? t('sources.discovered_label') : 'Discovered';
-      sum.appendChild(lbl);
-      const cnt = document.createElement('span');
-      cnt.className = 'source-vendor-count';
-      cnt.textContent = String(dirs.length);
-      sum.appendChild(cnt);
-      det.appendChild(sum);
-      for (const d of dirs) det.appendChild(renderDir(d));
-      return det;
-    };
-
-    if (isEmptyVendor) {
-      const placeholder = document.createElement('div');
-      placeholder.className = 'source-vendor-placeholder';
-      const msg = document.createElement('span');
-      msg.className = 'source-vendor-placeholder-msg';
-      const vendorName = (typeof t === 'function') ? t(PROVIDER_LABEL_KEY[provider] || provider) : provider;
-      msg.textContent = (typeof t === 'function')
-        ? t('sources.empty_vendor_placeholder', { vendor: vendorName })
-        : `${vendorName} memory not found`;
-      placeholder.appendChild(msg);
-      const cta = document.createElement('button');
-      cta.type = 'button';
-      cta.className = 'btn-ghost btn-xs source-vendor-add-cta';
-      cta.textContent = (typeof t === 'function') ? t('sources.add_manually_btn') : '+ Add manually';
-      cta.addEventListener('click', (ev) => {
-        ev.stopPropagation();
-        const addBtn = qs('memory-add-path-btn');
-        if (addBtn) addBtn.click();
-      });
-      placeholder.appendChild(cta);
-      group.appendChild(placeholder);
-    } else if (isSingleLeaf) {
-      const sole = visibleIndexedCats[0] || visibleCats[0];
-      for (const dir of sole[1]) group.appendChild(renderDir(dir));
-      const disc = renderDiscoveredBlock(sole[2]);
-      if (disc) group.appendChild(disc);
-    } else {
-      const products = document.createElement('div');
-      products.className = 'source-vendor-products';
-      for (const [cat, indexed, discovered] of visibleCats) {
-        if (!indexed.length && !discovered.length) continue;
-        const section = document.createElement('section');
-        section.className = 'source-vendor-product';
-        section.dataset.category = cat;
-        const productHeader = document.createElement('div');
-        productHeader.className = 'source-vendor-product-header';
-        const pLabel = document.createElement('span');
-        pLabel.className = 'source-vendor-product-label';
-        const pKey = CATEGORY_LABEL_KEY[cat] || cat;
-        pLabel.textContent = (typeof t === 'function') ? t(pKey) : pKey;
-        productHeader.appendChild(pLabel);
-        const pCount = document.createElement('span');
-        pCount.className = 'source-vendor-count';
-        pCount.textContent = String(indexed.reduce((sum, d) => sum + (sourcesByDir[d] || []).length, 0));
-        productHeader.appendChild(pCount);
-        section.appendChild(productHeader);
-        for (const dir of indexed) section.appendChild(renderDir(dir));
-        const disc = renderDiscoveredBlock(discovered);
-        if (disc) section.appendChild(disc);
-        products.appendChild(section);
-      }
-      group.appendChild(products);
+    // Update the sub-tab badge + empty class so all three vendor tabs
+    // reflect current state, not just the active one.
+    const countEl = document.querySelector(`[data-vendor-count="${provider}"]`);
+    if (countEl) {
+      countEl.textContent = String(totalFiles);
+      // Hide a "0" badge so the tab label stays uncluttered when the
+      // vendor has no indexed files. The ``sources-vendor-tab-empty``
+      // class still signals empty-via-color, so we don't lose the cue.
+      countEl.hidden = totalFiles === 0;
     }
-
-    list.appendChild(group);
-    renderedFiles += totalFiles;
-    void totalDiscovered;
+    const tabBtn = document.querySelector(`.sources-vendor-tab[data-vendor="${provider}"]`);
+    if (tabBtn) tabBtn.classList.toggle('sources-vendor-tab-empty', isEmptyVendor);
   }
 
+  // Resolve the active vendor. First render after page load reads
+  // localStorage; subsequent renders read STATE so filter/sort/reindex
+  // re-renders don't re-hit storage on the hot path.
+  let activeVendor = STATE.sourcesActiveVendor;
+  if (!activeVendor || !PROVIDER_ORDER.includes(activeVendor)) {
+    activeVendor = _readActiveSourcesVendor();
+    STATE.sourcesActiveVendor = activeVendor;
+    _syncSourcesVendorTabs(activeVendor);
+  }
+
+  // Helpers shared by the active-vendor render branches. Lifted out of
+  // the per-vendor loop because they don't close over the iteration.
+  const renderDir = (dir) => _renderMemoryDirGroup(
+    dir,
+    sourcesByDir[dir] || [],
+    statusByPath[dir],
+    maxChunks,
+    { isDefault: dir === defaultDir },
+  );
+
+  const renderDiscoveredBlock = (dirs) => {
+    if (!dirs.length) return null;
+    const det = document.createElement('details');
+    det.className = 'source-vendor-discovered';
+    const sum = document.createElement('summary');
+    sum.className = 'source-vendor-discovered-summary';
+    const lbl = document.createElement('span');
+    lbl.className = 'source-vendor-discovered-label';
+    lbl.textContent = (typeof t === 'function') ? t('sources.discovered_label') : 'Discovered';
+    sum.appendChild(lbl);
+    const cnt = document.createElement('span');
+    cnt.className = 'source-vendor-count';
+    cnt.textContent = String(dirs.length);
+    sum.appendChild(cnt);
+    det.appendChild(sum);
+    for (const d of dirs) det.appendChild(renderDir(d));
+    return det;
+  };
+
+  // Pass 2: render only the active vendor's content directly into the
+  // sidebar list — the sub-tab strip carries the vendor disclosure, so
+  // no per-vendor ``<details>`` wrapper is needed.
+  list.innerHTML = '';
+  const plan = vendorPlans[activeVendor];
+
+  if (plan.isEmptyVendor) {
+    const placeholder = document.createElement('div');
+    placeholder.className = 'source-vendor-placeholder';
+    const msg = document.createElement('span');
+    msg.className = 'source-vendor-placeholder-msg';
+    const vendorName = (typeof t === 'function')
+      ? t(PROVIDER_LABEL_KEY[activeVendor] || activeVendor)
+      : activeVendor;
+    msg.textContent = (typeof t === 'function')
+      ? t('sources.empty_vendor_placeholder', { vendor: vendorName })
+      : `${vendorName} memory not found`;
+    placeholder.appendChild(msg);
+    const cta = document.createElement('button');
+    cta.type = 'button';
+    cta.className = 'btn-ghost btn-xs source-vendor-add-cta';
+    cta.textContent = (typeof t === 'function') ? t('sources.add_manually_btn') : '+ Add manually';
+    cta.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const addBtn = qs('memory-add-path-btn');
+      if (addBtn) addBtn.click();
+    });
+    placeholder.appendChild(cta);
+    list.appendChild(placeholder);
+  } else if (plan.isSingleLeaf) {
+    const sole = plan.visibleIndexedCats[0] || plan.visibleCats[0];
+    for (const dir of sole[1]) list.appendChild(renderDir(dir));
+    const disc = renderDiscoveredBlock(sole[2]);
+    if (disc) list.appendChild(disc);
+  } else {
+    const products = document.createElement('div');
+    products.className = 'source-vendor-products';
+    for (const [cat, indexed, discovered] of plan.visibleCats) {
+      if (!indexed.length && !discovered.length) continue;
+      const section = document.createElement('section');
+      section.className = 'source-vendor-product';
+      section.dataset.category = cat;
+      const productHeader = document.createElement('div');
+      productHeader.className = 'source-vendor-product-header';
+      const pLabel = document.createElement('span');
+      pLabel.className = 'source-vendor-product-label';
+      const pKey = CATEGORY_LABEL_KEY[cat] || cat;
+      pLabel.textContent = (typeof t === 'function') ? t(pKey) : pKey;
+      productHeader.appendChild(pLabel);
+      const pCount = document.createElement('span');
+      pCount.className = 'source-vendor-count';
+      pCount.textContent = String(indexed.reduce((sum, d) => sum + (sourcesByDir[d] || []).length, 0));
+      productHeader.appendChild(pCount);
+      section.appendChild(productHeader);
+      for (const dir of indexed) section.appendChild(renderDir(dir));
+      const disc = renderDiscoveredBlock(discovered);
+      if (disc) section.appendChild(disc);
+      products.appendChild(section);
+    }
+    list.appendChild(products);
+  }
+
+  // Empty-state fallbacks scoped to the active vendor. If no memory
+  // dirs exist anywhere, show the "Add one with + Add path" hint
+  // regardless of which tab is active. If a filter is active and the
+  // active vendor has no matches but other vendors do, the muted "no
+  // matches" hint sits inside the panel — the populated badge on
+  // sibling tabs tells the user where to look.
   if (!allDirs.size) {
     list.innerHTML = '<div class="empty-state">' + emptyState('📁', 'No memory directories', 'Add one with the + Add path button') + '</div>';
-  } else if (!renderedFiles && filterActive) {
+  } else if (filterActive && !plan.totalFiles && !plan.isEmptyVendor) {
     list.innerHTML = '<div class="empty-state">' + emptyState('🔍', 'No matches for that filter') + '</div>';
   }
 }

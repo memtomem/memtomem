@@ -1196,20 +1196,42 @@ button:active { opacity: 0.7; }
 .memory-dirs-sort:hover { color: var(--text); border-color: var(--accent); }
 .memory-dirs-sort:focus { outline: none; border-color: var(--accent); }
 
-/* Sources sub-toggle: Memory ↔ General. Mirrors ``.tags-view-toggle``
-   visually (same .btn-ghost.btn-active reset already styles the active
-   state) but lives at the panel top so it reads as a primary view
-   selector rather than a secondary filter. */
-.sources-mode-toggle {
-  display: flex;
-  gap: 4px;
-  padding: 8px 12px;
+/* Sources vendor sub-tabs: User / Claude / OpenAI selector that scopes
+   the sidebar tree to one vendor at a time. Mirrors ``.tab-nav`` /
+   ``.tab-btn`` visually (underline-on-active) but tighter for the
+   sidebar slot. Empty vendors keep their tab visible so the user knows
+   the slot exists — rendered with reduced opacity so they read as
+   "available but quiet". */
+.sources-vendor-tabs {
+  display: flex; gap: 2px;
   border-bottom: 1px solid var(--border);
+  padding: 0 4px;
   flex-shrink: 0;
 }
-.sources-mode-toggle .btn-ghost {
-  font-size: 0.82rem;
-  padding: 4px 12px;
+.sources-vendor-tab {
+  background: none; border: none; cursor: pointer;
+  color: var(--muted);
+  padding: 8px 10px; font-size: 0.82rem;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.sources-vendor-tab:hover { color: var(--text); }
+.sources-vendor-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.sources-vendor-tab:focus-visible { outline-offset: -2px; }
+.sources-vendor-tab.sources-vendor-tab-empty { opacity: 0.55; }
+.sources-vendor-tab.sources-vendor-tab-empty.active { opacity: 0.85; }
+.sources-vendor-tab-count {
+  font-size: 0.68rem; color: var(--muted); font-family: var(--mono);
+  padding: 1px 6px; border-radius: 10px;
+  background: var(--bg); border: 1px solid var(--border);
+}
+.sources-vendor-tab.active .sources-vendor-tab-count {
+  color: var(--accent);
+  border-color: rgba(var(--accent-rgb, 59, 130, 246), 0.35);
 }
 .sources-view { display: flex; flex-direction: column; flex: 1; min-height: 0; height: 100%; overflow: hidden; }
 

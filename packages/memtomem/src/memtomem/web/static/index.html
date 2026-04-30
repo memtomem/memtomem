@@ -424,6 +424,20 @@
             <button id="memory-add-submit" class="btn-primary btn-sm" data-i18n="sources.memory_dirs.add_submit">Add</button>
             <button id="memory-add-cancel" class="btn-ghost btn-sm" data-i18n="sources.memory_dirs.add_cancel">Cancel</button>
           </div>
+          <div id="sources-vendor-tabs" class="sources-vendor-tabs" role="tablist" aria-label="Sources vendor">
+            <button type="button" class="sources-vendor-tab active" role="tab" data-vendor="user" aria-selected="true" tabindex="0">
+              <span class="sources-vendor-tab-label" data-i18n="sources.memory_dirs.provider.user">User</span>
+              <span class="sources-vendor-tab-count" data-vendor-count="user" hidden>0</span>
+            </button>
+            <button type="button" class="sources-vendor-tab" role="tab" data-vendor="claude" aria-selected="false" tabindex="-1">
+              <span class="sources-vendor-tab-label" data-i18n="sources.memory_dirs.provider.claude">Claude</span>
+              <span class="sources-vendor-tab-count" data-vendor-count="claude" hidden>0</span>
+            </button>
+            <button type="button" class="sources-vendor-tab" role="tab" data-vendor="openai" aria-selected="false" tabindex="-1">
+              <span class="sources-vendor-tab-label" data-i18n="sources.memory_dirs.provider.openai">OpenAI</span>
+              <span class="sources-vendor-tab-count" data-vendor-count="openai" hidden>0</span>
+            </button>
+          </div>
           <div class="sources-filter-row">
             <input id="sources-filter" type="text" data-i18n-placeholder="sources.filter_placeholder" placeholder="Type to filter by path… e.g. .md, src/, utils" autocomplete="off" data-i18n-title="sources.filter_title" title="Filters source list by partial path match" />
             <span id="sources-ns-chip" hidden></span>
