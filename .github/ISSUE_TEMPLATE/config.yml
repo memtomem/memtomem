@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and discussions
+    url: https://github.com/memtomem/memtomem/discussions
+    about: Ask questions, share use cases, or propose ideas before filing an issue.
+  - name: Security advisories
+    url: https://github.com/memtomem/memtomem/security/policy
+    about: Report security vulnerabilities privately — do not open a public issue.

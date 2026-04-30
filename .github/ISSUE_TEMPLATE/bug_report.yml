@@ -1,0 +1,104 @@
+name: Bug report
+description: Report unexpected behavior in memtomem (CLI, MCP server, Web UI, indexing, search, etc.)
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a report. A few notes before you start:
+
+        - **Have a question or want to discuss an idea?** Please use [Discussions](https://github.com/memtomem/memtomem/discussions) instead.
+        - **Found a security issue?** Please follow [SECURITY.md](https://github.com/memtomem/memtomem/blob/main/SECURITY.md) — do not open a public issue.
+        - **Search first.** A quick check of [open](https://github.com/memtomem/memtomem/issues) and [closed](https://github.com/memtomem/memtomem/issues?q=is%3Aissue+is%3Aclosed) issues often turns up the same bug or a related fix.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One or two sentences on what went wrong.
+      placeholder: "`mem_search` returns 0 results for a query that should match an indexed file."
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps that show the bug. Include the exact commands, tool calls, or UI actions.
+      placeholder: |
+        1. `mm init -y`
+        2. `mm index ~/notes`
+        3. Call `mem_search(query="...")` from Claude Code
+        4. Observe empty result
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: At least one match for the query.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include error messages, stack traces, or relevant log output. Use a code block for long output.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: memtomem version
+      description: Output of `mm --version` (or `uv run mm --version` in a dev checkout).
+      placeholder: "0.1.30"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options:
+        - uv tool install
+        - pipx
+        - pip
+        - From source (editable / dev)
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      description: Output of `python --version`.
+      placeholder: "3.12.7"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+        - Windows
+        - WSL
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: |
+        Anything else worth knowing — relevant config (`~/.memtomem/config.json`, redacted), the MCP client (Claude Code, Cursor, Codex CLI, etc.), whether STM proxy is involved, recent upgrades, etc.
+    validations:
+      required: false
