@@ -1,6 +1,6 @@
 # memtomem
 
-> Markdown-first long-term memory for AI coding agents. Hybrid search over your `.md` files via MCP — your data, your quota, no hooks.
+> Markdown-first long-term memory for AI coding agents — your data, your quota, no hooks.
 
 **Official website & docs: [https://memtomem.com](https://memtomem.com)**
 
