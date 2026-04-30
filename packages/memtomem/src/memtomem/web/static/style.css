@@ -663,6 +663,7 @@ mark {
   border: 2px dashed var(--border); border-radius: var(--radius);
   padding: 28px 16px; text-align: center; cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
+  max-width: 520px; margin: 0 auto;
 }
 .upload-drop:hover, .upload-drop.drag-over {
   border-color: var(--accent); background: rgba(var(--accent-rgb),0.06);
