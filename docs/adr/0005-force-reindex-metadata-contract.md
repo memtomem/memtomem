@@ -15,8 +15,8 @@ storage:
   hashes, leave hash-matches as `unchanged`.
 - **Force path** (`force=True`): unconditionally call
   `storage.delete_by_source(file_path)` (hard `DELETE FROM chunks WHERE
-  source_file=?`), then `upsert_chunks(new_chunks)` with freshly generated
-  rows.
+  source_file=?`, `engine.py:739`), then `upsert_chunks(new_chunks)`
+  (`engine.py:744`) with freshly generated rows.
 
 Today the force path is taken by:
 
@@ -108,13 +108,21 @@ explicit: delete by source, then index without force.
      metadata-loss footgun. Two parallel reconcile paths to maintain.
    - Rejected: leaves the wider footgun open and asymmetric.
 
-3. **Snapshot-and-restore by content hash inside the force path
-   (the chosen option).**
-   - *Pro:* one fix covers every force caller. Symmetric with the
-     non-force diff path's hash-keyed reasoning. mem_edit / mem_delete
-     keep `force=True` and Just Work.
-   - *Con:* slightly more complex transaction (need to hold metadata
-     in memory between delete and upsert).
+3. **Hash-aware reconcile inside the force path (the chosen option).**
+   - Approach: have the force path read existing rows up front (same
+     `SELECT id, content_hash, ...` shape the diff path already uses),
+     then *don't* delete rows whose hash matches a new chunk — assign
+     the existing `id` to the matching new chunk and update only the
+     columns the caller's edit actually shifted. Delete-by-id for
+     hashes that vanished, upsert for hashes that are new.
+   - *Pro:* one fix covers every force caller. The force branch
+     converges on the same hash-keyed reasoning the diff path already
+     does — at the limit, the two branches collapse into a single
+     reconcile (deferred to the impl PR's discretion). mem_edit /
+     mem_delete keep `force=True` and Just Work.
+   - *Con:* the force branch grows an extra `SELECT` and a hash-match
+     loop. Negligible at single-file scale, but it is more code than
+     the current 2-line "delete + upsert".
 
 4. **Introduce a separate `force_reset=True` flag that is the only path
    to today's hard-reset behavior.**
@@ -128,7 +136,7 @@ explicit: delete by source, then index without force.
 
 In rough order, all in `packages/memtomem/src/memtomem/`:
 
-1. `indexing/engine.py:_index_file` (force branch, line ~693): replace
+1. `indexing/engine.py:_index_file` (force branch, line 704): replace
    the `delete_by_source` + `upsert_chunks` pair with a hash-aware
    reconcile:
    - Read existing rows for this `source_file` (id + content_hash +
