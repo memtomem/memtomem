@@ -709,13 +709,18 @@ class IndexEngine:
         path: Path,
         recursive: bool = True,
         force: bool = False,
+        namespace: str | None = None,
     ):
         """Like index_path(), but yields progress dicts as each file is processed.
 
         Yields dicts with ``type`` key:
         - ``"progress"``: emitted after each file with fields
           ``file, files_done, files_total, indexed, skipped``.
-        - ``"complete"``: final summary (same fields as IndexingStats + duration_ms).
+        - ``"complete"``: final summary — ``total_files, total_chunks,
+          indexed_chunks, skipped_chunks, deleted_chunks, duration_ms,
+          errors``. ``errors`` is a list of human-readable strings in the
+          same loose shape as ``IndexingStats.errors`` so non-stream UI
+          handlers reuse verbatim. Empty list when the run had no errors.
         """
         start = time.monotonic()
         path = path.resolve()
@@ -733,28 +738,35 @@ class IndexEngine:
                 "skipped_chunks": 0,
                 "deleted_chunks": 0,
                 "duration_ms": 0.0,
+                "errors": [],
             }
             return
 
         total_files = len(files)
         agg = {"total_chunks": 0, "indexed": 0, "skipped": 0, "deleted": 0}
+        all_errors: list[str] = []
 
         for i, fp in enumerate(files, start=1):
             try:
-                result = await self._index_file(fp, force)
+                result = await self._index_file(fp, force, namespace=namespace)
             except Exception as exc:
                 logger.error("Stream indexing failed for %s: %s", fp, exc)
+                # Path-prefix matches non-stream's ``asyncio.gather(return_exceptions=True)``
+                # branch in ``_index_path_inner`` so consumers see the same error
+                # shape regardless of whether they used the stream or non-stream
+                # endpoint.
                 result = {
                     "total": 0,
                     "indexed": 0,
                     "skipped": 0,
                     "deleted": 0,
-                    "errors": [str(exc)],
+                    "errors": [f"{fp.name}: {exc}"],
                 }
             agg["total_chunks"] += result["total"]
             agg["indexed"] += result["indexed"]
             agg["skipped"] += result["skipped"]
             agg["deleted"] += result["deleted"]
+            all_errors.extend(result.get("errors", []))
             yield {
                 "type": "progress",
                 "file": str(fp),
@@ -773,6 +785,7 @@ class IndexEngine:
             "skipped_chunks": agg["skipped"],
             "deleted_chunks": agg["deleted"],
             "duration_ms": round(duration, 1),
+            "errors": all_errors,
         }
 
     @staticmethod

@@ -770,6 +770,7 @@ async def index_stream(
     path: str = ".",
     recursive: bool = True,
     force: bool = False,
+    namespace: str | None = None,
     index_engine=Depends(get_index_engine),
     config=Depends(get_config),
 ) -> StreamingResponse:
@@ -786,7 +787,7 @@ async def index_stream(
     async def _generate():
         try:
             async for event in index_engine.index_path_stream(
-                resolved, recursive=recursive, force=force
+                resolved, recursive=recursive, force=force, namespace=namespace
             ):
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:

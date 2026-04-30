@@ -350,6 +350,54 @@ class TestExcludePatterns:
         complete = next(e for e in events if e.get("type") == "complete")
         assert complete["indexed_chunks"] >= 1
 
+    async def test_index_path_stream_namespace_propagates(self, components, memory_dir):
+        """``index_path_stream`` must accept ``namespace`` and apply it to all
+        indexed chunks — same contract as ``index_path``. Issue #590: the
+        streaming endpoint previously dropped this argument silently, so
+        Web UI / CLI / MCP callers that streamed an index ignored the user's
+        namespace selection.
+        """
+        notes = memory_dir / "notes.md"
+        notes.write_text("# Heading\n\nBody to index for namespace check.")
+
+        engine = components.index_engine
+        events = [
+            ev
+            async for ev in engine.index_path_stream(memory_dir, recursive=True, namespace="ns590")
+        ]
+        complete = next(e for e in events if e.get("type") == "complete")
+        assert complete["indexed_chunks"] >= 1
+
+        chunks = await components.storage.list_chunks_by_source(notes)
+        assert chunks, "expected indexed chunks for notes.md"
+        assert all(c.metadata.namespace == "ns590" for c in chunks)
+
+    async def test_index_path_stream_complete_errors_no_silent_drop(self, components, memory_dir):
+        """Per-file ``_index_file`` errors must surface in the ``complete``
+        event's ``errors`` field. Issue #590 regression guard: previously the
+        stream loop summed only chunk counters and silently dropped any
+        ``result["errors"]``, so partial-failure runs (binary file, file too
+        large, embedding failure on a subset) appeared successful.
+
+        Uses a binary file (engine.py:621-628 path) as the cleanest
+        deterministic per-file error trigger — ``_index_file`` returns
+        ``errors=[f"{name}: binary file detected, skipping"]`` without raising.
+        """
+        binary = memory_dir / "blob.md"
+        # NUL byte in the first 8 KiB → ``_index_file`` short-circuits with a
+        # binary-detected error entry rather than chunking + embedding.
+        binary.write_bytes(b"# Title\n\nbody\x00more body\n")
+
+        engine = components.index_engine
+        events = [ev async for ev in engine.index_path_stream(memory_dir, recursive=True)]
+        complete = next(e for e in events if e.get("type") == "complete")
+
+        assert complete["errors"], (
+            "complete.errors must be non-empty when a file fails — silent "
+            "drop is a contract violation (#590)"
+        )
+        assert any("blob.md" in err for err in complete["errors"])
+
 
 # ===========================================================================
 # 2. _resolve_namespace
