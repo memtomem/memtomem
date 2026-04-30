@@ -1383,9 +1383,7 @@ class TestIndexFile:
             f"got {ac_after} (pre-fix would be 0)"
         )
 
-    async def test_force_reindex_updates_line_ranges_for_unchanged_after_body_edit(
-        self, components, memory_dir
-    ):
+    async def test_force_reindex_refreshes_line_ranges_for_unchanged(self, components, memory_dir):
         """When a sibling chunk's body shifts line numbers, the unchanged chunk's
         ``start_line`` / ``end_line`` columns must catch up — even with force=True
         (which routes hash-matched chunks through the upsert UPDATE path).
@@ -1472,6 +1470,48 @@ class TestIndexFile:
         assert b_after is not None, "Sibling B should keep its UUID across mem_edit"
         ac = (await components.storage.get_access_counts([b_id]))[str(b_id)]
         assert ac == 1, f"Sibling B.access_count should be preserved; got {ac}"
+
+    async def test_force_reindex_deletes_vanished_chunks(self, components, memory_dir):
+        """force=True must drop rows whose hash no longer appears in the file.
+
+        Pre-fix this was guaranteed by ``delete_by_source`` (blanket DELETE);
+        post-fix the same end state must hold via ``compute_diff``'s
+        ``to_delete`` set + ``delete_chunks``.
+        """
+        md_path = memory_dir / "vanish.md"
+        md_path.write_text(
+            "# Section A\n\n" + ("Body for section A.\n" * 8) + "\n"
+            "# Section B\n\n" + ("Body for section B.\n" * 8) + "\n",
+            encoding="utf-8",
+        )
+
+        mock_embedder = AsyncMock()
+        mock_embedder.embed_texts = AsyncMock(
+            side_effect=lambda texts: [[0.1] * 1024 for _ in texts]
+        )
+        mock_embedder.dimension = 1024
+        components.index_engine._embedder = mock_embedder
+
+        await components.index_engine.index_file(md_path)
+        chunks_before = await components.storage.list_chunks_by_source(md_path)
+        assert len(chunks_before) >= 2
+
+        # Remove Section B from the file entirely.
+        md_path.write_text(
+            "# Section A\n\n" + ("Body for section A.\n" * 8) + "\n",
+            encoding="utf-8",
+        )
+        stats = await components.index_engine.index_file(md_path, force=True)
+
+        chunks_after = await components.storage.list_chunks_by_source(md_path)
+        assert len(chunks_after) == 1, (
+            f"force-reindex should drop vanished chunks; "
+            f"got {len(chunks_after)} rows after section B was removed"
+        )
+        assert stats.deleted_chunks >= 1, (
+            f"IndexingStats.deleted_chunks should report removals under force; "
+            f"got {stats.deleted_chunks}"
+        )
 
 
 # ===========================================================================

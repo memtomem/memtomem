@@ -25,7 +25,7 @@ from memtomem.config import (
     memory_dir_kind,
     provider_for_category,
 )
-from memtomem.indexing.differ import compute_diff
+from memtomem.indexing.differ import DiffResult, compute_diff
 from memtomem.models import Chunk, ChunkMetadata, IndexingStats
 
 if TYPE_CHECKING:
@@ -712,14 +712,17 @@ class IndexEngine:
         # and chunk identity. See ``docs/adr/0005-force-reindex-metadata-contract.md``.
         existing_hashes = await self._storage.get_chunk_hashes(file_path)
         diff_result = compute_diff(existing_hashes, new_chunks)
-        # Snapshot truly-new chunk IDs before force may merge unchanged in.
         # ``new_chunk_ids`` in the return shape is documented as "freshly
         # created chunks" — callers like ``mem_consolidate_apply`` rely on
-        # this distinction.
+        # this distinction. Capture before any force-promotion so the
+        # field stays accurate even when force re-embeds unchanged chunks.
         truly_new_chunk_ids = [c.id for c in diff_result.to_upsert]
         if force and diff_result.unchanged:
-            diff_result.to_upsert.extend(diff_result.unchanged)
-            diff_result.unchanged = []
+            diff_result = DiffResult(
+                to_upsert=diff_result.to_upsert + diff_result.unchanged,
+                to_delete=diff_result.to_delete,
+                unchanged=[],
+            )
 
         # Embed BEFORE any deletion — if embedding fails, DB stays untouched.
         # Skip embedding entirely when using the noop provider (BM25-only mode).
