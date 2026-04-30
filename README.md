@@ -2,8 +2,6 @@
 
 > Markdown-first long-term memory for AI coding agents — your data, your quota, no hooks.
 
-**Official website & docs: [https://memtomem.com](https://memtomem.com)**
-
 [![PyPI](https://img.shields.io/pypi/v/memtomem)](https://pypi.org/project/memtomem/)
 [![Downloads](https://img.shields.io/pypi/dm/memtomem)](https://pypi.org/project/memtomem/)
 [![GitHub stars](https://img.shields.io/github/stars/memtomem/memtomem)](https://github.com/memtomem/memtomem/stargazers)
@@ -143,6 +141,8 @@ See [MCP Client Setup](docs/guides/mcp-clients.md) for Cursor / Windsurf / Claud
 ---
 
 ## Documentation
+
+Hosted at **[memtomem.com](https://memtomem.com)** — also available as Markdown in this repo:
 
 | Guide | Description |
 |-------|-------------|
