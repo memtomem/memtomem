@@ -642,15 +642,27 @@ mark {
 .chunk-card-collapsible:has(.chunk-card-content.expanded):hover::after { opacity: 0.9; }
 
 /* ── Index Tab ── */
-/* Mode toggle mirrors ``.sources-mode-toggle`` so the sub-toggle reads as a
-   primary view selector (folder / upload / compose), not a secondary filter. */
+/* Mode toggle reads as a sub-tab strip (folder / upload / compose), subordinate
+   to the main ``.tab-nav`` row above. Active state mirrors ``.sources-vendor-tab``
+   (bottom-border) rather than the global ``.btn-ghost.btn-active`` outline, so
+   the visual hierarchy between main tabs and mode toggle stays distinct. */
 .index-mode-toggle {
   display: flex; gap: 4px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
-.index-mode-toggle .btn-ghost { font-size: 0.82rem; padding: 4px 12px; }
+.index-mode-toggle .btn-ghost {
+  background: none; border: none;
+  border-bottom: 2px solid transparent; border-radius: 0;
+  color: var(--muted);
+  font-size: 0.82rem; padding: 4px 12px;
+  transition: color 0.15s, border-color 0.15s;
+}
+.index-mode-toggle .btn-ghost:hover { color: var(--text); }
+.index-mode-toggle .btn-ghost.btn-active {
+  color: var(--accent); border-bottom-color: var(--accent);
+}
 .index-layout { display: flex; flex-direction: column; gap: 20px; padding: 20px 0 20px; overflow-y: auto; }
 /* min-height keeps the panel container stable across mode switches; floor
    chosen so the folder panel's empty-on-first-visit area stays modest while
