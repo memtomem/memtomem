@@ -456,7 +456,18 @@ class IndexEngine:
         force: bool = False,
         namespace: str | None = None,
     ) -> IndexingStats:
-        """Index a single file. Convenience wrapper for external callers."""
+        """Index a single file. Convenience wrapper for external callers.
+
+        ``force=True`` currently rebuilds storage by deleting all rows for
+        ``source_file`` and re-inserting fresh chunks. Side effect: chunks
+        whose content was unchanged still lose ``access_count`` /
+        ``last_accessed_at`` and are assigned new UUIDs. This is the
+        unintended-coupling contract documented in
+        ``docs/adr/0005-force-reindex-metadata-contract.md``; the planned
+        fix (preserve metadata for hash-matched chunks) ships in a
+        follow-up PR. Callers that go through ``mem_edit`` / ``mem_delete``
+        / CLI ``mm index --force`` / web ``POST /reindex`` hit this path.
+        """
         # Defense-in-depth: the primary guard lives at the top of
         # ``_index_file`` (covers every caller — watcher, stream endpoint,
         # CLI, MCP tools). This public-entry check is kept so the call
