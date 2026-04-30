@@ -2505,6 +2505,17 @@ select:focus-visible {
   border-radius: var(--radius); margin-bottom: 8px;
 }
 .config-hint .pipeline-badge { font-size: 0.7rem; padding: 1px 7px; }
+
+/* Inline panel help text — muted small line above an action area, e.g. the
+   one-shot vs persistent surfacing in the folder index panel. */
+.panel-help-text {
+  font-size: 0.78rem; color: var(--muted); margin: 4px 0 10px;
+}
+.link-inline {
+  color: var(--accent); text-decoration: underline; cursor: pointer;
+}
+.link-inline:hover { color: var(--accent-hover, var(--accent)); }
+
 .config-status {
   font-size: 0.78rem; padding: 6px 10px;
   border-radius: var(--radius); margin-bottom: 8px;

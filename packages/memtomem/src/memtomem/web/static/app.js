@@ -2997,6 +2997,21 @@ document.querySelector('.index-mode-toggle')?.addEventListener('keydown', (e) =>
 
 setIndexMode(_readIndexMode());
 
+// Folder mode is one-shot — surface the persistent alternative inline
+// (link inside the panel + "Register as Source" action on the success toast).
+function goToSourcesAddPath() {
+  document.querySelector('.tab-btn[data-tab="sources"]')?.click();
+  setTimeout(() => {
+    const btn = qs('memory-add-path-btn');
+    btn?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    btn?.focus({ preventScroll: true });
+  }, 50);
+}
+qs('folder-hint-sources-link')?.addEventListener('click', e => {
+  e.preventDefault();
+  goToSourcesAddPath();
+});
+
 // ---------------------------------------------------------------------------
 // Index
 // ---------------------------------------------------------------------------
@@ -3031,7 +3046,12 @@ qs('index-btn').addEventListener('click', async () => {
         'error',
       );
     } else {
-      showToast(t('toast.indexed_count', { count: data.indexed_chunks }), 'success');
+      showToast(t('toast.indexed_count', { count: data.indexed_chunks }), 'success', {
+        action: {
+          label: t('toast.action.register_persistent'),
+          onClick: goToSourcesAddPath,
+        },
+      });
     }
     qs('r-files').textContent    = data.total_files;
     qs('r-chunks').textContent   = data.total_chunks;
