@@ -133,6 +133,11 @@ function _refreshAddFilePlaceholder() {
 window.addEventListener('langchange', () => {
   _refreshAddFilePlaceholder();
   _syncHeaderConfig();
+  // ``index-namespace`` / ``add-namespace`` placeholders are JS-owned
+  // (no ``data-i18n-placeholder``) so the dynamic ``(auto-determined
+  // from path)`` / ``(from config)`` suffix translates on toggle. Without
+  // this re-sync the placeholder stays in the previous locale's wording.
+  _syncIndexHints();
 });
 
 // Compute the config-derived placeholder (no path entered yet). Pulled

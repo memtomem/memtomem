@@ -500,7 +500,11 @@
           <label class="field-label" for="index-path" data-i18n="index.path_label">Path</label>
           <input id="index-path" type="text" data-i18n-placeholder="index.path_placeholder" placeholder="e.g. ~/memories or /path/to/notes" />
           <label class="field-label" for="index-namespace" data-i18n="index.ns_label">Namespace</label>
-          <input id="index-namespace" type="text" data-i18n-placeholder="index.ns_placeholder" placeholder="default (from config)" />
+          <!-- placeholder is JS-owned (``_syncIndexHints``) so i18n.js
+               applyDOM doesn't overwrite the dynamic auto/config suffix
+               on every lang toggle. See ``_refreshAddFilePlaceholder``
+               for the same pattern. -->
+          <input id="index-namespace" type="text" placeholder="default (from config)" />
           <div class="checkbox-row">
             <label><input type="checkbox" id="index-recursive" checked /> <span data-i18n="index.recursive">Recursive</span></label>
             <label><input type="checkbox" id="index-force" /> <span data-i18n="index.force">Force re-index</span></label>
@@ -553,7 +557,8 @@
           <label class="field-label" for="add-file" data-i18n="index.add_file_label">Target File</label>
           <input id="add-file" type="text" placeholder="~/.memtomem/memories/" />
           <label class="field-label" for="add-namespace" data-i18n="index.add_ns_label">Namespace</label>
-          <input id="add-namespace" type="text" data-i18n-placeholder="index.add_ns_placeholder" placeholder="default (from config)" />
+          <!-- JS-owned placeholder; see #index-namespace above. -->
+          <input id="add-namespace" type="text" placeholder="default (from config)" />
           <label class="field-label" for="add-content" data-i18n="index.add_content_label">Content</label>
           <textarea id="add-content" spellcheck="false" data-i18n-placeholder="index.add_content_placeholder" placeholder="Write your memory here…"></textarea>
           <button id="add-btn" class="btn-primary mt-10" data-i18n="index.add_btn">Add</button>
@@ -1265,7 +1270,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js"></script>
   <script src="/i18n.js?v=3"></script>
   <script src="/app.js?v=72"></script>
-  <script src="/settings-config.js?v=5"></script>
+  <script src="/settings-config.js?v=6"></script>
   <script src="/sources-memory-dirs.js?v=6"></script>
   <script src="/settings-maintenance.js?v=1"></script>
   <script src="/settings-namespaces.js?v=3"></script>
