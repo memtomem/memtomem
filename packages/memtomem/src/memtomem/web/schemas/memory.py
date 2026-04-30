@@ -58,3 +58,10 @@ class IndexResponse(BaseModel):
     deleted_chunks: int
     duration_ms: float
     errors: list[str] = []
+    resolved_namespaces: list[str | None] = []
+
+
+class PreviewNamespaceResponse(BaseModel):
+    resolved_namespaces: list[str | None] = []
+    truncated: bool = False
+    scanned_files: int = 0

@@ -369,11 +369,10 @@ class IndexEngine:
             logger.warning("Path %s resolves outside configured memory_dirs, skipping", path)
             return IndexingStats(0, 0, 0, 0, 0, 0.0)
 
-        if path.is_file():
-            files = [path]
-        elif path.is_dir():
-            files = self._discover_files(path, recursive)
-        else:
+        # File-set parity: route through ``discover_indexable_files`` so the
+        # preview-namespace endpoint and the indexing run see the same set.
+        files = self.discover_indexable_files(path, recursive)
+        if not files:
             return IndexingStats(0, 0, 0, 0, 0, 0.0)
 
         sem = asyncio.Semaphore(8)
@@ -401,6 +400,12 @@ class IndexEngine:
             if ids:
                 all_new_chunk_ids.extend(ids)
 
+        # Distinct namespaces resolved across the file set. Computed
+        # independently of ``_index_file`` so a per-file failure (parse
+        # error, embedding crash) doesn't drop the namespace echo. Pure
+        # pathspec match, no I/O.
+        resolved_ns = self.resolve_namespaces_for(files, namespace)
+
         duration = (time.monotonic() - start) * 1000
         return IndexingStats(
             total_files=len(files),
@@ -411,7 +416,39 @@ class IndexEngine:
             duration_ms=duration,
             errors=tuple(all_errors),
             new_chunk_ids=tuple(all_new_chunk_ids),
+            resolved_namespaces=tuple(resolved_ns),
         )
+
+    def resolve_namespaces_for(
+        self, files: list[Path], explicit_ns: str | None = None
+    ) -> list[str | None]:
+        """Resolve namespaces for ``files`` in stable (sort) order, distinct.
+
+        Public companion to ``_resolve_namespace`` for callers (preview
+        route, future surfaces) that need the namespace echo without
+        running the indexer. ``None`` represents the
+        ``default_namespace == "default"`` carve-out (untagged).
+        """
+        ns_set: set[str | None] = {self._resolve_namespace(f, explicit_ns) for f in files}
+        return sorted(ns_set, key=lambda x: (x is None, x or ""))
+
+    def discover_indexable_files(self, path: Path, recursive: bool = True) -> list[Path]:
+        """Enumerate files ``index_path`` would visit for ``path``.
+
+        Single source of truth for "which files would be indexed" — the
+        ``trigger_index`` route, the ``preview-namespace`` route, and any
+        future surface that needs to introspect the file set go through
+        here. Mirrors the file-vs-dir branching at the top of
+        ``_index_path_inner`` so the preview cannot drift from reality.
+        """
+        path = path.resolve()
+        if not self._is_within_memory_dirs(path):
+            return []
+        if path.is_file():
+            return [path]
+        if path.is_dir():
+            return self._discover_files(path, recursive)
+        return []
 
     async def index_file(
         self,
@@ -739,10 +776,15 @@ class IndexEngine:
                 "deleted_chunks": 0,
                 "duration_ms": 0.0,
                 "errors": [],
+                "resolved_namespaces": [],
             }
             return
 
         total_files = len(files)
+        # Pre-compute the namespace echo so the complete event surfaces
+        # what was actually applied — single render across both stream
+        # and non-stream paths (see ``_index_path_inner``).
+        resolved_ns_for_event = self.resolve_namespaces_for(files, namespace)
         agg = {"total_chunks": 0, "indexed": 0, "skipped": 0, "deleted": 0}
         all_errors: list[str] = []
 
@@ -786,6 +828,7 @@ class IndexEngine:
             "deleted_chunks": agg["deleted"],
             "duration_ms": round(duration, 1),
             "errors": all_errors,
+            "resolved_namespaces": resolved_ns_for_event,
         }
 
     @staticmethod

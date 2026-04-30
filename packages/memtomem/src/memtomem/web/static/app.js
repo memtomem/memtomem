@@ -315,6 +315,33 @@ function debounce(fn, ms) {
   return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), ms); };
 }
 
+// Render a list of namespaces (preview placeholder OR result-row echo)
+// using the ``index.ns_render.*`` i18n family. ``mode`` selects the
+// suffix variant: ``'preview'`` for the placeholder hint,
+// ``'applied'`` for the post-index result row. ``namespaces`` is a
+// distinct list of ``str | null`` (null = untagged ``default`` carve-out).
+// ``truncated`` and ``scanned`` come from the preview endpoint; passing
+// ``truncated=false`` / ``scanned=0`` skips the suffix.
+function renderResolvedNamespaces(namespaces, { truncated = false, scanned = 0, mode = 'applied' } = {}) {
+  const list = Array.isArray(namespaces) ? namespaces : [];
+  const isUntagged = list.length === 0 || (list.length === 1 && list[0] === null);
+  let body;
+  if (isUntagged) {
+    body = t(`index.ns_render.untagged_${mode}`);
+  } else if (list.length === 1) {
+    body = t(`index.ns_render.single_${mode}`, { ns: list[0] });
+  } else {
+    // Mixed list may contain a trailing null sentinel; render it as
+    // ``(untagged)`` inline so the joined display matches the rest.
+    const display = list.map(n => n === null ? t('index.ns_render.untagged_applied') : n);
+    body = t(`index.ns_render.multi_${mode}`, { list: display.join(', '), n: list.length });
+  }
+  if (truncated && scanned > 0) {
+    body += t('index.ns_render.truncated_suffix', { scanned });
+  }
+  return body;
+}
+
 // ── B2: Copy to Clipboard ──
 async function copyToClipboard(text) {
   try {
@@ -3510,6 +3537,10 @@ async function runIndexStream() {
       qs('r-skipped').textContent = event.skipped_chunks;
       qs('r-deleted').textContent = event.deleted_chunks;
       qs('r-duration').textContent = `${event.duration_ms.toFixed(0)} ms`;
+      const nsCell = qs('r-namespace');
+      if (nsCell) {
+        nsCell.textContent = renderResolvedNamespaces(event.resolved_namespaces, { mode: 'applied' });
+      }
 
       // #354 / #590: ``complete.errors`` may be present even on HTTP-200
       // streams (e.g. ONNX missing on a subset of files, binary/too-large

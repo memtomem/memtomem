@@ -183,3 +183,10 @@ class IndexingStats:
     # freshly created chunks — e.g. ``mem_consolidate_apply`` linking a new
     # summary — should read this instead of polling ``recall_chunks``.
     new_chunk_ids: tuple[UUID, ...] = ()
+    # Distinct namespaces ``IndexEngine._resolve_namespace`` returned across
+    # the indexed file set, in stable (sort) order. ``None`` represents the
+    # ``default_namespace == "default"`` carve-out (untagged chunks). Empty
+    # on zero-result paths. Surfaced in the web ``IndexResponse`` so the UI
+    # can echo what was *actually* applied — important when policy rules
+    # split a folder into multiple namespaces.
+    resolved_namespaces: tuple[str | None, ...] = ()

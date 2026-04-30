@@ -135,16 +135,42 @@ window.addEventListener('langchange', () => {
   _syncHeaderConfig();
 });
 
+// Latest preview state per input; keyed by the namespace input element so
+// the path-typing path can know whether the placeholder currently reflects
+// a fresh preview vs. a stale config-derived default. Consulted by the
+// ``input`` invalidation handler.
+const _NS_PREVIEW_STATE = new WeakMap();
+
+// Compute the config-derived placeholder (no path entered yet). Pulled
+// out of ``_syncIndexHints`` so the preview-invalidation handler can
+// reset to it after the user clears the path or namespace input.
+function _configDerivedNsPlaceholder() {
+  const nsCfg = STATE.serverConfig?.namespace;
+  if (!nsCfg?.default_namespace) return null;
+  const suffix = nsCfg.enable_auto_ns
+    ? t('index.ns_suffix.auto')
+    : t('index.ns_suffix.config');
+  return `${nsCfg.default_namespace} (${suffix})`;
+}
+
 // ── B1-B3: Index tab hints ──
 function _syncIndexHints() {
-  // Sync namespace placeholder from config
-  const nsCfg = STATE.serverConfig?.namespace;
-  if (nsCfg?.default_namespace) {
-    const nsPlaceholder = nsCfg.default_namespace + (nsCfg.enable_auto_ns ? ' (auto-ns active)' : ' (from config)');
+  // Sync namespace placeholder from config. The suffix moved to i18n
+  // (``index.ns_suffix.{auto,config}``) — the previous hard-coded
+  // "auto-ns active" sounded like the default itself; "auto-determined
+  // from path" describes what auto-NS will actually do.
+  const placeholder = _configDerivedNsPlaceholder();
+  if (placeholder) {
     const indexNs = qs('index-namespace');
-    if (indexNs) indexNs.placeholder = nsPlaceholder;
+    if (indexNs) {
+      indexNs.placeholder = placeholder;
+      _NS_PREVIEW_STATE.set(indexNs, { source: 'config' });
+    }
     const addNs = qs('add-namespace');
-    if (addNs) addNs.placeholder = nsPlaceholder;
+    if (addNs) {
+      addNs.placeholder = placeholder;
+      _NS_PREVIEW_STATE.set(addNs, { source: 'config' });
+    }
   }
   _refreshAddFilePlaceholder();
 
@@ -602,7 +628,7 @@ const _CONFIG_GUIDES = {
     title: 'Namespace',
     desc: 'Organize chunks into logical groups for scoped search and management.',
     items: [
-      { label: 'Default NS', text: 'Applied when no namespace is specified during indexing or memory add. Set "default" to leave chunks untagged.' },
+      { label: 'Default NS', text: 'Applied when no namespace is specified during indexing or memory add. Leaving this as "default" results in untagged chunks (backward compatibility — chunks indexed before namespaces existed).' },
       { label: 'Auto NS', text: 'When enabled, derives namespace from the parent folder name during indexing. Overrides Default NS.' },
     ],
     envs: [
@@ -1296,6 +1322,103 @@ qs('imp-file').addEventListener('change', () => {
   if (nameEl) nameEl.textContent = files?.length ? files[0].name : 'No file chosen';
 });
 qs('imp-btn').addEventListener('click', () => runImport());
+
+// ── Index tab: preview-namespace wiring ──
+//
+// Three event surfaces, only one debounced. Spec:
+//   • namespace input ``focus``   → immediate preview (discrete event;
+//                                    debouncing a one-shot is meaningless)
+//   • path input     ``input``    → 300ms-debounced preview, but only if
+//                                    the namespace input is empty
+//                                    (otherwise the user has typed an
+//                                    explicit override and we'd stomp it)
+//   • namespace input ``input``   → invalidate any cached preview state
+//                                    immediately so emptying the field
+//                                    after a stale preview doesn't echo
+//                                    a value that no longer matches the
+//                                    current path
+async function _fetchPreviewNamespace(pathValue) {
+  if (!pathValue) return null;
+  try {
+    const params = new URLSearchParams({ path: pathValue });
+    return await api('GET', `/api/index/preview-namespace?${params.toString()}`);
+  } catch (_) {
+    // 403 (out of memory_dirs) / network errors / route absent — fall
+    // through to the config-derived placeholder. The form submit will
+    // surface a real error if the path is genuinely invalid.
+    return null;
+  }
+}
+
+function _setNsPreviewPlaceholder(nsInput, resp) {
+  if (!nsInput || !resp) return;
+  const text = renderResolvedNamespaces(resp.resolved_namespaces, {
+    truncated: resp.truncated,
+    scanned: resp.scanned_files,
+    mode: 'preview',
+  });
+  nsInput.placeholder = text;
+  _NS_PREVIEW_STATE.set(nsInput, { source: 'preview', path: nsInput.dataset.previewPath });
+}
+
+async function _runNsPreview(nsInput, pathInput) {
+  if (!nsInput || !pathInput) return;
+  const pathValue = pathInput.value.trim();
+  if (!pathValue) {
+    // Nothing to preview against — restore the config-derived hint.
+    const fallback = _configDerivedNsPlaceholder();
+    if (fallback) {
+      nsInput.placeholder = fallback;
+      _NS_PREVIEW_STATE.set(nsInput, { source: 'config' });
+    }
+    return;
+  }
+  nsInput.dataset.previewPath = pathValue;
+  const resp = await _fetchPreviewNamespace(pathValue);
+  // Late-arrival guard: if the user has typed a different path since this
+  // request was issued, drop the response on the floor.
+  if (nsInput.dataset.previewPath !== pathValue) return;
+  if (!resp) {
+    const fallback = _configDerivedNsPlaceholder();
+    if (fallback) nsInput.placeholder = fallback;
+    return;
+  }
+  _setNsPreviewPlaceholder(nsInput, resp);
+}
+
+function _wirePreviewNamespace(nsInputId, pathInputId) {
+  const nsInput = qs(nsInputId);
+  const pathInput = qs(pathInputId);
+  if (!nsInput || !pathInput) return;
+
+  // (1) namespace focus → fire preview immediately
+  nsInput.addEventListener('focus', () => { _runNsPreview(nsInput, pathInput); });
+
+  // (2) path typing → 300ms-debounced; skip when namespace has an explicit value
+  const debouncedPathPreview = debounce(() => {
+    if (nsInput.value.trim()) return;
+    _runNsPreview(nsInput, pathInput);
+  }, 300);
+  pathInput.addEventListener('input', debouncedPathPreview);
+
+  // (3) namespace typing → invalidate cache immediately. When the user
+  // clears the field after typing, the next focus should re-preview from
+  // the *current* path, not echo a value frozen at a prior preview call.
+  nsInput.addEventListener('input', () => {
+    _NS_PREVIEW_STATE.delete(nsInput);
+    delete nsInput.dataset.previewPath;
+    if (!nsInput.value.trim()) {
+      const fallback = _configDerivedNsPlaceholder();
+      if (fallback) nsInput.placeholder = fallback;
+    }
+  });
+}
+
+_wirePreviewNamespace('index-namespace', 'index-path');
+// Compose tab also exposes a namespace input; the path-equivalent there is
+// the target file path. Wire it the same way for symmetry — preview against
+// the file path the user is composing into.
+_wirePreviewNamespace('add-namespace', 'add-file');
 
 fetchServerConfig();
 

@@ -783,6 +783,134 @@ class TestNamespacePolicyRules:
 
 
 # ===========================================================================
+# 2c. discover_indexable_files + resolve_namespaces_for (preview-namespace)
+# ===========================================================================
+
+
+class TestPreviewHelpers:
+    """Public helpers powering both ``trigger_index`` and the
+    ``preview-namespace`` route. The two paths must walk the same file
+    set and resolve the same namespaces, otherwise the UI's preview echo
+    silently disagrees with the actually-applied result."""
+
+    async def test_discover_indexable_files_handles_single_file(
+        self, components, memory_dir
+    ):
+        engine = components.index_engine
+        fp = memory_dir / "single.md"
+        fp.write_text("# Single", encoding="utf-8")
+
+        files = engine.discover_indexable_files(fp)
+        assert files == [fp.resolve()]
+
+    async def test_discover_indexable_files_handles_directory(
+        self, components, memory_dir
+    ):
+        engine = components.index_engine
+        (memory_dir / "a.md").write_text("# A", encoding="utf-8")
+        (memory_dir / "b.md").write_text("# B", encoding="utf-8")
+
+        files = engine.discover_indexable_files(memory_dir)
+        names = {f.name for f in files}
+        assert names == {"a.md", "b.md"}
+
+    async def test_discover_indexable_files_outside_memory_dirs(
+        self, components, tmp_path
+    ):
+        """Out-of-memory_dirs returns empty — same trust gate as
+        ``index_path``. The route layer turns this into a 403; the engine
+        helper must not leak file enumeration outside the boundary."""
+        engine = components.index_engine
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "leak.md").write_text("# Leak", encoding="utf-8")
+
+        assert engine.discover_indexable_files(outside) == []
+
+    async def test_resolve_namespaces_for_uniform(self, components, memory_dir):
+        """All files under the memory_dir root with default config →
+        single ``None`` entry (untagged, ``default_namespace == 'default'``
+        carve-out)."""
+        engine = components.index_engine
+        (memory_dir / "a.md").write_text("# A", encoding="utf-8")
+        (memory_dir / "b.md").write_text("# B", encoding="utf-8")
+
+        files = engine.discover_indexable_files(memory_dir)
+        assert engine.resolve_namespaces_for(files) == [None]
+
+    async def test_resolve_namespaces_for_rule_variance(
+        self, components, memory_dir
+    ):
+        """The motivating case for the list shape: a folder where rules
+        split files into two namespaces. A scalar response would silently
+        lie about which namespace was applied."""
+        engine = components.index_engine
+        (memory_dir / "alpha").mkdir()
+        (memory_dir / "beta").mkdir()
+        (memory_dir / "alpha" / "a.md").write_text("# A", encoding="utf-8")
+        (memory_dir / "beta" / "b.md").write_text("# B", encoding="utf-8")
+        _install_rules(
+            engine,
+            [
+                NamespacePolicyRule(
+                    path_glob=f"{memory_dir.as_posix()}/alpha/**",
+                    namespace="ns-alpha",
+                ),
+                NamespacePolicyRule(
+                    path_glob=f"{memory_dir.as_posix()}/beta/**",
+                    namespace="ns-beta",
+                ),
+            ],
+        )
+
+        files = engine.discover_indexable_files(memory_dir)
+        result = engine.resolve_namespaces_for(files)
+        assert result == ["ns-alpha", "ns-beta"]
+
+    async def test_resolve_namespaces_for_sorts_with_none_last(
+        self, components, memory_dir
+    ):
+        """``None`` (untagged) sorts after named namespaces — UI renders
+        named NSes first, then the untagged sentinel, in stable order."""
+        engine = components.index_engine
+        (memory_dir / "ruled").mkdir()
+        (memory_dir / "ruled" / "r.md").write_text("# R", encoding="utf-8")
+        (memory_dir / "untagged.md").write_text("# U", encoding="utf-8")
+        _install_rules(
+            engine,
+            [
+                NamespacePolicyRule(
+                    path_glob=f"{memory_dir.as_posix()}/ruled/**",
+                    namespace="zeta-ruled",
+                ),
+            ],
+        )
+
+        files = engine.discover_indexable_files(memory_dir)
+        # zeta-ruled is alphabetically *after* a hypothetical None — confirm
+        # None doesn't naively win the sort.
+        result = engine.resolve_namespaces_for(files)
+        assert result == ["zeta-ruled", None]
+
+    async def test_walk_matches_index_walk(self, components, memory_dir):
+        """File-set parity contract: ``discover_indexable_files`` returns
+        exactly the files ``index_path`` would visit, so the preview
+        cannot disagree with the actually-applied namespace set."""
+        engine = components.index_engine
+        (memory_dir / "a.md").write_text("# A", encoding="utf-8")
+        (memory_dir / "sub").mkdir()
+        (memory_dir / "sub" / "nested.md").write_text("# Nested", encoding="utf-8")
+        # Hidden / excluded files must be filtered out by both paths.
+        (memory_dir / ".hidden.md").write_text("# Hidden", encoding="utf-8")
+
+        # Public helper.
+        public = set(engine.discover_indexable_files(memory_dir, recursive=True))
+        # Internal walker — what ``_index_path_inner`` calls today.
+        internal = set(engine._discover_files(memory_dir, recursive=True))
+        assert public == internal
+
+
+# ===========================================================================
 # 3. _apply_namespace
 # ===========================================================================
 

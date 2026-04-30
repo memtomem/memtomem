@@ -183,6 +183,13 @@ def app():
             duration_ms=50.0,
         )
     )
+    # Sync helpers powering the preview-namespace route. Default to a
+    # 1-file walk producing a single named NS — individual tests override
+    # to exercise rule-variance / truncation / untagged paths.
+    index_engine.discover_indexable_files = MagicMock(
+        return_value=[Path("/tmp/memories/note.md")]
+    )
+    index_engine.resolve_namespaces_for = MagicMock(return_value=["notes"])
 
     # -- dedup scanner mock --
     dedup_scanner = AsyncMock()
@@ -975,6 +982,115 @@ class TestIndex:
     async def test_trigger_index_outside_memory_dirs(self, client: AsyncClient):
         resp = await client.post("/api/index", json={"path": "/etc"})
         assert resp.status_code == 403
+
+    async def test_trigger_index_returns_resolved_namespaces(
+        self, app, client: AsyncClient
+    ):
+        """``IndexResponse.resolved_namespaces`` must echo what the engine
+        actually applied across the file set — including the rule-variance
+        case where a folder splits into multiple namespaces. The list
+        shape is deliberate; collapsing to a single value would silently
+        misrepresent multi-NS folders."""
+        app.state.index_engine.index_path = AsyncMock(
+            return_value=IndexingStats(
+                total_files=2,
+                total_chunks=4,
+                indexed_chunks=4,
+                skipped_chunks=0,
+                deleted_chunks=0,
+                duration_ms=80.0,
+                resolved_namespaces=("ns-alpha", "ns-beta"),
+            )
+        )
+        resp = await client.post("/api/index", json={"path": "/tmp/memories"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["resolved_namespaces"] == ["ns-alpha", "ns-beta"]
+
+    async def test_preview_namespace_leaf_file(self, app, client: AsyncClient):
+        """Single-file path → single-element list (here: ``notes``)."""
+        resp = await client.get("/api/index/preview-namespace?path=/tmp/memories/note.md")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["resolved_namespaces"] == ["notes"]
+        assert data["truncated"] is False
+        assert data["scanned_files"] == 1
+
+    async def test_preview_namespace_directory_uniform(
+        self, app, client: AsyncClient
+    ):
+        """Directory where all files share one NS → 1-element list."""
+        app.state.index_engine.discover_indexable_files = MagicMock(
+            return_value=[
+                Path("/tmp/memories/a.md"),
+                Path("/tmp/memories/b.md"),
+            ]
+        )
+        app.state.index_engine.resolve_namespaces_for = MagicMock(
+            return_value=["personal"]
+        )
+        resp = await client.get("/api/index/preview-namespace?path=/tmp/memories")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["resolved_namespaces"] == ["personal"]
+        assert data["scanned_files"] == 2
+
+    async def test_preview_namespace_directory_with_rule_variance(
+        self, app, client: AsyncClient
+    ):
+        """Directory with rule-divergent files → multi-element list. This
+        is the test that justifies the list shape; without it the regression
+        slips in silently if someone collapses to a scalar."""
+        app.state.index_engine.discover_indexable_files = MagicMock(
+            return_value=[
+                Path("/tmp/memories/alpha/a.md"),
+                Path("/tmp/memories/beta/b.md"),
+            ]
+        )
+        app.state.index_engine.resolve_namespaces_for = MagicMock(
+            return_value=["ns-alpha", "ns-beta"]
+        )
+        resp = await client.get("/api/index/preview-namespace?path=/tmp/memories")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["resolved_namespaces"] == ["ns-alpha", "ns-beta"]
+
+    async def test_preview_namespace_directory_truncated(
+        self, app, client: AsyncClient
+    ):
+        """File walk capped at 200; truncated flag surfaces the limit so the
+        UI can render ``scanned 200+`` instead of pretending exhaustiveness."""
+        app.state.index_engine.discover_indexable_files = MagicMock(
+            return_value=[Path(f"/tmp/memories/f{i}.md") for i in range(250)]
+        )
+        app.state.index_engine.resolve_namespaces_for = MagicMock(
+            return_value=["notes"]
+        )
+        resp = await client.get("/api/index/preview-namespace?path=/tmp/memories")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["truncated"] is True
+        assert data["scanned_files"] == 200
+        # The mock should have been called with exactly 200 files (the cap),
+        # not the full 250 — confirms the route applied the cap before
+        # invoking the resolver.
+        called_with = app.state.index_engine.resolve_namespaces_for.call_args.args[0]
+        assert len(called_with) == 200
+
+    async def test_preview_namespace_outside_memory_dirs(
+        self, app, client: AsyncClient
+    ):
+        """403, not 422: out-of-memory_dirs is a security boundary, same
+        trust gate as POST /index."""
+        resp = await client.get("/api/index/preview-namespace?path=/etc/passwd")
+        assert resp.status_code == 403
+
+    async def test_preview_namespace_missing_path(
+        self, app, client: AsyncClient
+    ):
+        """422 — FastAPI query-param validation."""
+        resp = await client.get("/api/index/preview-namespace")
+        assert resp.status_code == 422
 
     async def test_trigger_index_surfaces_engine_errors(self, app, client: AsyncClient):
         """#354 regression: POST /api/index must surface ``IndexingStats.errors``

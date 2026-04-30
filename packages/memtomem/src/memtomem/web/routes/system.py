@@ -57,6 +57,7 @@ from memtomem.web.schemas.memory import (
     AddMemoryResponse,
     IndexRequest,
     IndexResponse,
+    PreviewNamespaceResponse,
     UploadFileResult,
     UploadResponse,
 )
@@ -854,6 +855,51 @@ async def trigger_index(
         deleted_chunks=stats.deleted_chunks,
         duration_ms=stats.duration_ms,
         errors=list(stats.errors) if stats.errors else [],
+        resolved_namespaces=list(stats.resolved_namespaces),
+    )
+
+
+# Cap on files walked by the preview endpoint. Large memory_dirs (10k+
+# files) would otherwise stall the synchronous focus event for seconds;
+# the truncated flag lets the UI surface "scanned N+, more not shown".
+_PREVIEW_FILE_CAP = 200
+
+
+@router.get(
+    "/index/preview-namespace",
+    response_model=PreviewNamespaceResponse,
+    dependencies=[Depends(require_configured)],
+)
+async def preview_namespace(
+    path: str,
+    recursive: bool = True,
+    index_engine=Depends(get_index_engine),
+    config=Depends(get_config),
+) -> PreviewNamespaceResponse:
+    """Preview which namespace(s) would be applied if ``path`` were indexed.
+
+    Walks the same file set ``trigger_index`` would walk (via
+    ``IndexEngine.discover_indexable_files``) and returns the distinct
+    namespaces ``_resolve_namespace`` produces with no explicit override.
+    Capped at ``_PREVIEW_FILE_CAP`` files to keep focus-event latency
+    bounded; ``truncated=True`` flags when the cap was hit.
+    """
+    resolved = Path(path).expanduser().resolve()
+    resolved_norm = Path(norm_path(resolved))
+    memory_dirs = [Path(norm_path(Path(d).expanduser())) for d in config.indexing.memory_dirs]
+    if not any(resolved_norm.is_relative_to(d) for d in memory_dirs):
+        # 403 (not 422) — same trust gate as POST /index. Out-of-memory_dirs
+        # is a security boundary (read access to arbitrary paths), not a
+        # parse error. Mirror trigger_index for parity.
+        raise HTTPException(status_code=403, detail="Path is outside configured memory directories")
+
+    files = index_engine.discover_indexable_files(resolved, recursive)
+    truncated = len(files) > _PREVIEW_FILE_CAP
+    walked = files[:_PREVIEW_FILE_CAP]
+    return PreviewNamespaceResponse(
+        resolved_namespaces=index_engine.resolve_namespaces_for(walked),
+        truncated=truncated,
+        scanned_files=len(walked),
     )
 
 
