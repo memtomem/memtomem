@@ -758,6 +758,7 @@ MUTABLE_FIELDS: dict[str, set[str]] = {
         "structured_chunk_mode",
         "exclude_patterns",
         "auto_discover",
+        "supported_extensions",
     },
     "embedding": {"batch_size"},
     "decay": {"enabled", "half_life_days"},

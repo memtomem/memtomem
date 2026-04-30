@@ -1037,6 +1037,30 @@ button:active { opacity: 0.7; }
 .exclude-remove-btn { min-width: 28px; padding: 2px 8px; }
 .exclude-add-btn { align-self: flex-start; font-size: 0.78rem; }
 
+.supported-ext-widget { display: flex; flex-direction: column; gap: 8px; }
+.supported-ext-chips { display: flex; flex-wrap: wrap; gap: 6px; min-height: 28px; }
+.supported-ext-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 4px 3px 10px; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--bg); font-family: var(--mono); font-size: 0.82rem;
+}
+.supported-ext-chip-label { color: var(--text); }
+.supported-ext-chip-remove {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%;
+  background: transparent; color: var(--muted); cursor: pointer;
+  font-size: 1rem; line-height: 1;
+}
+.supported-ext-chip-remove:hover:not(:disabled) { background: var(--border); color: var(--text); }
+.supported-ext-chip-remove:disabled { opacity: 0.3; cursor: default; }
+.supported-ext-add-row {
+  display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: center;
+}
+.supported-ext-input { font-family: var(--mono); font-size: 0.84rem; }
+.supported-ext-add-btn { font-size: 0.78rem; }
+.supported-ext-err { font-size: 0.72rem; color: #b91c1c; min-height: 0; display: none; }
+.supported-ext-err.supported-ext-err-visible { display: block; }
+
 /* ============================================================
    Sources tab — Memory Dirs panel
    ============================================================ */

@@ -592,6 +592,16 @@
   "settings.exclude_patterns.err_duplicate": "Duplicate pattern: {pattern}",
   "settings.exclude_patterns.err_syntax": "Invalid pathspec pattern: {pattern}",
   "settings.exclude_patterns.err_save_blocked": "Fix the highlighted exclude patterns before saving",
+
+  "settings.supported_extensions.label": "Extensions",
+  "settings.supported_extensions.placeholder": "e.g. .md, .py",
+  "settings.supported_extensions.add": "+ Add",
+  "settings.supported_extensions.remove": "Remove extension",
+  "settings.supported_extensions.err_cap": "Maximum 20 extensions",
+  "settings.supported_extensions.min_required": "At least one extension required",
+  "settings.supported_extensions.reset_confirm": "Reset extensions to default?",
+  "settings.supported_extensions.reindex_hint": "New extensions take effect on next index. Existing directories need a re-index to pick them up.",
+
   "settings.reset.aria_label": "Reset to default",
   "settings.reset.title": "Reset to default (preview; press Save to apply)",
 

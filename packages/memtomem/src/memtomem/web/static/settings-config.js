@@ -30,7 +30,7 @@ const _READONLY_SECTIONS = new Set(['embedding', 'storage']);
 
 // Individual read-only fields within editable sections
 const _READONLY_FIELDS = {
-  indexing: new Set(['supported_extensions']),
+  indexing: new Set([]),
 };
 
 // Fields that use a custom widget which persists each change immediately
@@ -714,6 +714,7 @@ const _CONFIG_SELECT_OPTIONS = {
 const _CONFIG_CUSTOM_WIDGETS = {
   'search.rrf_weights': _buildRRFWeightsWidget,
   'indexing.exclude_patterns': _buildExcludePatternsWidget,
+  'indexing.supported_extensions': _buildSupportedExtensionsWidget,
 };
 
 // Cached {secret, noise} from GET /api/indexing/builtin-exclude-patterns.
@@ -946,6 +947,162 @@ function _resetExcludePatterns(comparandVal, listEl, addRow, syncHidden) {
   const patterns = Array.isArray(comparandVal) ? comparandVal : [];
   patterns.forEach(p => addRow(p));
   syncHidden();
+}
+
+// Cap on the number of extensions a user can configure through the GUI.
+// Soft guardrail — backend has no equivalent limit, so CLI/config.json
+// edits are unaffected. Sized so legitimate language sets still fit.
+const _SUPPORTED_EXTENSIONS_CAP = 20;
+
+// ``raw`` -> ``.lower``; lossy on purpose (forgiving auto-normalize).
+// Returns null for empty/whitespace input so the caller can silently skip.
+function _normalizeExtension(raw) {
+  const s = String(raw == null ? '' : raw).trim().toLowerCase();
+  if (!s) return null;
+  return s.startsWith('.') ? s : '.' + s;
+}
+
+function _buildSupportedExtensionsWidget(section, key, val) {
+  const wrap = document.createElement('div');
+  wrap.className = 'supported-ext-widget';
+
+  // chips is the canonical state; always kept sorted + deduped so the UI
+  // matches the post-reload server view (system.py serializes sorted()).
+  let chips = (Array.isArray(val) ? val : [])
+    .map(_normalizeExtension)
+    .filter(Boolean);
+  chips = Array.from(new Set(chips)).sort();
+
+  const hidden = document.createElement('input');
+  hidden.type = 'hidden';
+  hidden.dataset.section = section;
+  hidden.dataset.key = key;
+  hidden.dataset.valType = 'json';
+  const origStr = JSON.stringify(chips);
+  hidden.dataset.original = origStr;
+  hidden.value = origStr;
+
+  const listEl = document.createElement('div');
+  listEl.className = 'supported-ext-chips';
+  wrap.appendChild(listEl);
+
+  const addRow = document.createElement('div');
+  addRow.className = 'supported-ext-add-row';
+  addRow.innerHTML = `
+    <input type="text" class="supported-ext-input"
+           data-i18n-placeholder="settings.supported_extensions.placeholder" />
+    <button type="button" class="btn-ghost btn-sm supported-ext-add-btn">
+      <span data-i18n="settings.supported_extensions.add">+ Add</span>
+    </button>
+  `;
+  wrap.appendChild(addRow);
+
+  const errEl = document.createElement('div');
+  errEl.className = 'supported-ext-err';
+  errEl.setAttribute('role', 'alert');
+  wrap.appendChild(errEl);
+
+  wrap.appendChild(hidden);
+
+  const inputEl = addRow.querySelector('.supported-ext-input');
+
+  function _syncHidden() {
+    hidden.value = JSON.stringify(chips);
+    _markConfigDirty(section);
+  }
+
+  function _showError(msg) {
+    errEl.textContent = msg || '';
+    errEl.classList.toggle('supported-ext-err-visible', Boolean(msg));
+  }
+
+  function _renderChips() {
+    listEl.innerHTML = '';
+    const minReached = chips.length <= 1;
+    chips.forEach(ext => {
+      const chip = document.createElement('span');
+      chip.className = 'supported-ext-chip';
+      const label = document.createElement('span');
+      label.className = 'supported-ext-chip-label';
+      label.textContent = ext;
+      chip.appendChild(label);
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'supported-ext-chip-remove';
+      removeBtn.textContent = '×';
+      removeBtn.setAttribute(
+        'aria-label',
+        t('settings.supported_extensions.remove') + ': ' + ext,
+      );
+      if (minReached) {
+        removeBtn.disabled = true;
+        removeBtn.title = t('settings.supported_extensions.min_required');
+      }
+      removeBtn.addEventListener('click', () => {
+        if (chips.length <= 1) return;
+        chips = chips.filter(e => e !== ext);
+        _renderChips();
+        _syncHidden();
+      });
+      chip.appendChild(removeBtn);
+      listEl.appendChild(chip);
+    });
+  }
+
+  function _tryAdd() {
+    const normalized = _normalizeExtension(inputEl.value);
+    if (!normalized) {
+      // Empty/whitespace — silent skip. Keep input clean.
+      inputEl.value = '';
+      inputEl.focus();
+      return;
+    }
+    if (chips.includes(normalized)) {
+      // Forgiving dedup: silent ignore, just clear the input.
+      inputEl.value = '';
+      inputEl.focus();
+      return;
+    }
+    if (chips.length >= _SUPPORTED_EXTENSIONS_CAP) {
+      _showError(t('settings.supported_extensions.err_cap'));
+      return;
+    }
+    chips = [...chips, normalized].sort();
+    _renderChips();
+    _syncHidden();
+    _showError('');
+    inputEl.value = '';
+    inputEl.focus();
+  }
+
+  addRow.querySelector('.supported-ext-add-btn').addEventListener('click', _tryAdd);
+  inputEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      _tryAdd();
+    }
+  });
+
+  _renderChips();
+
+  // Reset-to-default hook (↺): server-provided defaults from
+  // STATE.serverDefaults flow through here. Confirm before wiping user list
+  // since defaults may overwrite a curated set; the value still lands in
+  // the hidden input only — user must press Save to persist.
+  hidden._reset = (comparandVal) => {
+    if (!confirm(t('settings.supported_extensions.reset_confirm'))) return;
+    const next = (Array.isArray(comparandVal) ? comparandVal : [])
+      .map(_normalizeExtension)
+      .filter(Boolean);
+    chips = Array.from(new Set(next)).sort();
+    _renderChips();
+    _syncHidden();
+    _showError('');
+  };
+
+  if (typeof I18N !== 'undefined') I18N.applyDOM();
+  return wrap;
 }
 
 function _buildConfigInput(section, key, val) {
@@ -1209,6 +1366,12 @@ async function _saveSection(section) {
       _syncConfigToUI();
       // Check if changed fields need reindex/FTS rebuild
       _showReindexWarning(resp.applied);
+      // Surface the supported_extensions reindex nudge as a toast — the
+      // ``applied`` list already filters to actual changes, so no extra
+      // diff-tracking needed.
+      if (resp.applied.some(c => c.field === 'indexing.supported_extensions')) {
+        showToast(t('settings.supported_extensions.reindex_hint'), 'info');
+      }
     }
 
     if (btn) btn.disabled = true;
