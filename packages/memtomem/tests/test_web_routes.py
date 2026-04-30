@@ -1103,6 +1103,33 @@ class TestIndex:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/indexing/active  (#582 item 4.11 follow-up — server-bound indicator)
+# ---------------------------------------------------------------------------
+
+
+class TestIndexingActive:
+    """Tests for ``GET /api/indexing/active``.
+
+    The endpoint reports ``IndexEngine.is_active`` so the web UI's header
+    indicator (introduced in #602) survives page reloads and reaches
+    second tabs. Response shape is intentionally minimal —
+    ``{"active": bool}`` only — to match the client's single-bool model.
+    """
+
+    async def test_active_idle(self, app, client: AsyncClient):
+        app.state.index_engine.is_active = False
+        resp = await client.get("/api/indexing/active")
+        assert resp.status_code == 200
+        assert resp.json() == {"active": False}
+
+    async def test_active_running(self, app, client: AsyncClient):
+        app.state.index_engine.is_active = True
+        resp = await client.get("/api/indexing/active")
+        assert resp.status_code == 200
+        assert resp.json() == {"active": True}
+
+
+# ---------------------------------------------------------------------------
 # GET /api/embedding-status
 # ---------------------------------------------------------------------------
 
@@ -1815,6 +1842,23 @@ class TestRequireConfigured:
         assert resp.status_code == 409, resp.text
         assert resp.json()["detail"] == ("memtomem is not configured. Run 'mm init' to set up.")
         assert app.state.index_engine.index_path.call_count == 0
+
+    async def test_indexing_active_409_when_no_config(
+        self,
+        app,
+        client: AsyncClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        restore_gate,
+    ):
+        """``GET /api/indexing/active`` shares the same gate as the rest
+        of the indexing surface (``/index``, ``/index/stream``,
+        ``/reindex``) — uniform 409 on a not-yet-configured server.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        resp = await client.get("/api/indexing/active")
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"] == ("memtomem is not configured. Run 'mm init' to set up.")
 
     async def test_memory_dirs_add_passes_when_config_exists(
         self,

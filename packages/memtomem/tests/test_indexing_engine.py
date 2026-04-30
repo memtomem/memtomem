@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -397,6 +398,126 @@ class TestExcludePatterns:
             "drop is a contract violation (#590)"
         )
         assert any("blob.md" in err for err in complete["errors"])
+
+
+# ===========================================================================
+# 1.b _active_runs / is_active counter
+# ===========================================================================
+
+
+class TestActiveRunsCounter:
+    """Tests for ``IndexEngine.is_active`` / ``_active_runs``.
+
+    The counter feeds ``GET /api/indexing/active`` so the web UI's header
+    indicator (#582 item 4.11) survives page reloads and reaches second
+    tabs. It must cover all three public entry points — including
+    ``index_path_stream``, which runs **outside** ``_index_lock`` and is
+    therefore invisible to ``asyncio.Lock.locked()``.
+    """
+
+    async def test_idle_engine_is_not_active(self, components):
+        assert components.index_engine.is_active is False
+        assert components.index_engine._active_runs == 0
+
+    async def test_active_during_index_path(self, components, memory_dir):
+        """Counter goes 0 → 1 while ``index_path`` is awaiting and back to
+        0 after it returns. Use a gate to make the lifecycle deterministic
+        without timing assumptions.
+        """
+        (memory_dir / "notes.md").write_text("# Keep\n\nContent.")
+        engine = components.index_engine
+        gate = asyncio.Event()
+        orig = engine._index_file
+
+        async def blocked(fp, force=False, namespace=None):
+            await gate.wait()
+            return await orig(fp, force, namespace=namespace)
+
+        engine._index_file = blocked  # type: ignore[method-assign]
+        try:
+            assert engine.is_active is False
+            task = asyncio.create_task(engine.index_path(memory_dir))
+            # A few yields so the task reaches the lock + the patched
+            # ``_index_file`` and parks on ``gate.wait()``.
+            for _ in range(3):
+                await asyncio.sleep(0)
+            assert engine.is_active is True
+            gate.set()
+            await task
+            assert engine.is_active is False
+            assert engine._active_runs == 0
+        finally:
+            engine._index_file = orig  # type: ignore[method-assign]
+
+    async def test_active_during_index_path_stream(self, components, memory_dir):
+        """``index_path_stream`` runs outside ``_index_lock`` — verify the
+        counter still tracks it. This is the critical path: a server-bound
+        active-state endpoint that read ``_index_lock.locked()`` would
+        miss every streaming run.
+        """
+        (memory_dir / "notes.md").write_text("# Keep\n\nContent.")
+        engine = components.index_engine
+        assert engine.is_active is False
+
+        gen = engine.index_path_stream(memory_dir, recursive=True)
+        first = await gen.__anext__()
+        assert first.get("type") in ("progress", "complete")
+        assert engine.is_active is True
+
+        async for _ in gen:
+            pass
+        assert engine.is_active is False
+        assert engine._active_runs == 0
+
+    async def test_active_concurrent_runs(self, components, memory_dir):
+        """Counter, not boolean — two parallel ``index_path`` calls both
+        bump it to 2 even though the lock serializes the inner work
+        (``_active_runs += 1`` is *outside* ``async with self._index_lock``).
+        """
+        (memory_dir / "notes.md").write_text("# Keep\n\nContent.")
+        engine = components.index_engine
+        gate = asyncio.Event()
+        orig = engine._index_file
+
+        async def blocked(fp, force=False, namespace=None):
+            await gate.wait()
+            return await orig(fp, force, namespace=namespace)
+
+        engine._index_file = blocked  # type: ignore[method-assign]
+        try:
+            t1 = asyncio.create_task(engine.index_path(memory_dir))
+            t2 = asyncio.create_task(engine.index_path(memory_dir))
+            for _ in range(5):
+                await asyncio.sleep(0)
+            assert engine._active_runs == 2
+            gate.set()
+            await asyncio.gather(t1, t2)
+            assert engine._active_runs == 0
+            assert engine.is_active is False
+        finally:
+            engine._index_file = orig  # type: ignore[method-assign]
+
+    async def test_decrements_on_exception(self, components, memory_dir):
+        """``finally`` must restore the counter when the inner work raises.
+        Otherwise a single failing run would stick ``is_active`` on
+        ``True`` until process restart.
+        """
+        notes = memory_dir / "notes.md"
+        notes.write_text("# Keep\n\nContent.")
+        engine = components.index_engine
+        orig = engine._index_file
+
+        async def boom(fp, force=False, namespace=None):
+            raise RuntimeError("simulated failure")
+
+        engine._index_file = boom  # type: ignore[method-assign]
+        try:
+            with pytest.raises(RuntimeError):
+                await engine.index_file(notes)
+            assert engine.is_active is False
+            assert engine._active_runs == 0
+        finally:
+            engine._index_file = orig  # type: ignore[method-assign]
 
 
 # ===========================================================================

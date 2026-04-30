@@ -344,6 +344,22 @@ class IndexEngine:
             ]
         )
         self._index_lock = asyncio.Lock()  # prevent concurrent indexing of same files
+        # Observability counter for ``GET /api/indexing/active`` — independent
+        # of ``_index_lock`` because ``index_path_stream`` runs outside the
+        # lock and ``asyncio.Lock.locked()`` is racy. Incremented on entry
+        # and decremented in a ``finally`` block by every public entry point
+        # (``index_path``, ``index_file``, ``index_path_stream``).
+        self._active_runs: int = 0
+
+    @property
+    def is_active(self) -> bool:
+        """True while at least one indexing run is in flight on this engine.
+
+        Drives the cross-tab / post-reload survival of the web UI's header
+        indicator (#582 item 4.11). Counter, not boolean — concurrent stream
+        + locked runs both keep it on.
+        """
+        return self._active_runs > 0
 
     async def index_path(
         self,
@@ -352,8 +368,12 @@ class IndexEngine:
         force: bool = False,
         namespace: str | None = None,
     ) -> IndexingStats:
-        async with self._index_lock:
-            return await self._index_path_inner(path, recursive, force, namespace)
+        self._active_runs += 1
+        try:
+            async with self._index_lock:
+                return await self._index_path_inner(path, recursive, force, namespace)
+        finally:
+            self._active_runs -= 1
 
     async def _index_path_inner(
         self,
@@ -484,10 +504,14 @@ class IndexEngine:
                 duration_ms=0.0,
                 new_chunk_ids=(),
             )
-        async with self._index_lock:
-            start = time.monotonic()
-            result = await self._index_file(file_path.resolve(), force, namespace=namespace)
-            duration = (time.monotonic() - start) * 1000
+        self._active_runs += 1
+        try:
+            async with self._index_lock:
+                start = time.monotonic()
+                result = await self._index_file(file_path.resolve(), force, namespace=namespace)
+                duration = (time.monotonic() - start) * 1000
+        finally:
+            self._active_runs -= 1
         return IndexingStats(
             total_files=1,
             total_chunks=result["total"],
@@ -782,78 +806,87 @@ class IndexEngine:
           errors``. ``errors`` is a list of human-readable strings in the
           same loose shape as ``IndexingStats.errors`` so non-stream UI
           handlers reuse verbatim. Empty list when the run had no errors.
-        """
-        start = time.monotonic()
-        path = path.resolve()
 
-        if path.is_file():
-            files = [path]
-        elif path.is_dir():
-            files = self._discover_files(path, recursive)
-        else:
+        Note: this path runs **outside** ``_index_lock`` (a deliberate
+        carve-out so progress events can interleave with other engine
+        work). The ``_active_runs`` counter is bumped here too so
+        ``GET /api/indexing/active`` covers stream runs uniformly.
+        """
+        self._active_runs += 1
+        try:
+            start = time.monotonic()
+            path = path.resolve()
+
+            if path.is_file():
+                files = [path]
+            elif path.is_dir():
+                files = self._discover_files(path, recursive)
+            else:
+                yield {
+                    "type": "complete",
+                    "total_files": 0,
+                    "total_chunks": 0,
+                    "indexed_chunks": 0,
+                    "skipped_chunks": 0,
+                    "deleted_chunks": 0,
+                    "duration_ms": 0.0,
+                    "errors": [],
+                    "resolved_namespaces": [],
+                }
+                return
+
+            total_files = len(files)
+            # Pre-compute the namespace echo so the complete event surfaces
+            # what was actually applied — single render across both stream
+            # and non-stream paths (see ``_index_path_inner``).
+            resolved_ns_for_event = self.resolve_namespaces_for(files, namespace)
+            agg = {"total_chunks": 0, "indexed": 0, "skipped": 0, "deleted": 0}
+            all_errors: list[str] = []
+
+            for i, fp in enumerate(files, start=1):
+                try:
+                    result = await self._index_file(fp, force, namespace=namespace)
+                except Exception as exc:
+                    logger.error("Stream indexing failed for %s: %s", fp, exc)
+                    # Path-prefix matches non-stream's ``asyncio.gather(return_exceptions=True)``
+                    # branch in ``_index_path_inner`` so consumers see the same error
+                    # shape regardless of whether they used the stream or non-stream
+                    # endpoint.
+                    result = {
+                        "total": 0,
+                        "indexed": 0,
+                        "skipped": 0,
+                        "deleted": 0,
+                        "errors": [f"{fp.name}: {exc}"],
+                    }
+                agg["total_chunks"] += result["total"]
+                agg["indexed"] += result["indexed"]
+                agg["skipped"] += result["skipped"]
+                agg["deleted"] += result["deleted"]
+                all_errors.extend(result.get("errors", []))
+                yield {
+                    "type": "progress",
+                    "file": str(fp),
+                    "files_done": i,
+                    "files_total": total_files,
+                    "indexed": result["indexed"],
+                    "skipped": result["skipped"],
+                }
+
+            duration = (time.monotonic() - start) * 1000
             yield {
                 "type": "complete",
-                "total_files": 0,
-                "total_chunks": 0,
-                "indexed_chunks": 0,
-                "skipped_chunks": 0,
-                "deleted_chunks": 0,
-                "duration_ms": 0.0,
-                "errors": [],
-                "resolved_namespaces": [],
+                "total_files": total_files,
+                "total_chunks": agg["total_chunks"],
+                "indexed_chunks": agg["indexed"],
+                "skipped_chunks": agg["skipped"],
+                "deleted_chunks": agg["deleted"],
+                "duration_ms": round(duration, 1),
+                "errors": all_errors,
+                "resolved_namespaces": resolved_ns_for_event,
             }
-            return
-
-        total_files = len(files)
-        # Pre-compute the namespace echo so the complete event surfaces
-        # what was actually applied — single render across both stream
-        # and non-stream paths (see ``_index_path_inner``).
-        resolved_ns_for_event = self.resolve_namespaces_for(files, namespace)
-        agg = {"total_chunks": 0, "indexed": 0, "skipped": 0, "deleted": 0}
-        all_errors: list[str] = []
-
-        for i, fp in enumerate(files, start=1):
-            try:
-                result = await self._index_file(fp, force, namespace=namespace)
-            except Exception as exc:
-                logger.error("Stream indexing failed for %s: %s", fp, exc)
-                # Path-prefix matches non-stream's ``asyncio.gather(return_exceptions=True)``
-                # branch in ``_index_path_inner`` so consumers see the same error
-                # shape regardless of whether they used the stream or non-stream
-                # endpoint.
-                result = {
-                    "total": 0,
-                    "indexed": 0,
-                    "skipped": 0,
-                    "deleted": 0,
-                    "errors": [f"{fp.name}: {exc}"],
-                }
-            agg["total_chunks"] += result["total"]
-            agg["indexed"] += result["indexed"]
-            agg["skipped"] += result["skipped"]
-            agg["deleted"] += result["deleted"]
-            all_errors.extend(result.get("errors", []))
-            yield {
-                "type": "progress",
-                "file": str(fp),
-                "files_done": i,
-                "files_total": total_files,
-                "indexed": result["indexed"],
-                "skipped": result["skipped"],
-            }
-
-        duration = (time.monotonic() - start) * 1000
-        yield {
-            "type": "complete",
-            "total_files": total_files,
-            "total_chunks": agg["total_chunks"],
-            "indexed_chunks": agg["indexed"],
-            "skipped_chunks": agg["skipped"],
-            "deleted_chunks": agg["deleted"],
-            "duration_ms": round(duration, 1),
-            "errors": all_errors,
-            "resolved_namespaces": resolved_ns_for_event,
-        }
+        finally:
+            self._active_runs -= 1
 
     @staticmethod
     def _apply_namespace(chunks: list[Chunk], namespace: str) -> list[Chunk]:

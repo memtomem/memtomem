@@ -91,6 +91,15 @@ const STATE = {
     loadPrivacyPatterns();
     renderRecentChips();
     _initTabHelp();
+    // Server-bound indicator hydration (#582 item 4.11). Restores the
+    // header pill if a run is in flight (page-reload survival, second-
+    // tab visibility) — see ``_indexingHydrateFromServer``.
+    _indexingHydrateFromServer();
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && !STATE.indexing) {
+        _indexingHydrateFromServer();
+      }
+    });
     // Re-apply i18n when language changes (dynamic JS strings)
     window.addEventListener('langchange', () => {
       if (typeof I18N !== 'undefined') I18N.applyDOM();
@@ -426,6 +435,53 @@ function _indexingEnd() {
   STATE.indexing = false;
   const indicator = qs('indexing-indicator');
   if (indicator) hide(indicator);
+  if (STATE._indexingPollHandle) {
+    clearTimeout(STATE._indexingPollHandle);
+    STATE._indexingPollHandle = null;
+  }
+}
+
+// ── Server-bound hydration (#582 item 4.11 follow-up to #602) ──
+// PR #602 left the header indicator session-bound: a page reload mid-
+// indexing reset ``STATE.indexing`` to ``false`` even though the server
+// run continued. ``GET /api/indexing/active`` reports server truth so
+// boot + tab-visibility-change can restore the indicator and a bounded
+// poll clears it once the server-side run actually finishes.
+const _INDEXING_POLL_MS = 3000;
+
+async function _indexingHydrateFromServer() {
+  try {
+    const r = await api('GET', '/api/indexing/active');
+    if (r && r.active && !STATE.indexing) {
+      _indexingTryStart();
+      _indexingPollUntilIdle();
+    }
+  } catch (err) {
+    // Soft-fail: server unavailable just leaves the indicator off.
+    console.warn('[indexing-active]', err);
+  }
+}
+
+function _indexingPollUntilIdle() {
+  if (STATE._indexingPollHandle) return; // single-flight
+  const tick = async () => {
+    STATE._indexingPollHandle = null;
+    if (!STATE.indexing) return; // local handler already cleared it
+    try {
+      const r = await api('GET', '/api/indexing/active');
+      if (!r || !r.active) {
+        _indexingEnd();
+        return;
+      }
+    } catch (err) {
+      // Transient fetch failure — keep the indicator visible and retry.
+      console.warn('[indexing-active poll]', err);
+    }
+    if (STATE.indexing) {
+      STATE._indexingPollHandle = setTimeout(tick, _INDEXING_POLL_MS);
+    }
+  };
+  STATE._indexingPollHandle = setTimeout(tick, _INDEXING_POLL_MS);
 }
 function panelLoading(container) {
   container.innerHTML = '<div class="loading-panel"><div class="spinner-panel"></div></div>';
