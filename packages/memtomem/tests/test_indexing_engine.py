@@ -793,9 +793,7 @@ class TestPreviewHelpers:
     set and resolve the same namespaces, otherwise the UI's preview echo
     silently disagrees with the actually-applied result."""
 
-    async def test_discover_indexable_files_handles_single_file(
-        self, components, memory_dir
-    ):
+    async def test_discover_indexable_files_handles_single_file(self, components, memory_dir):
         engine = components.index_engine
         fp = memory_dir / "single.md"
         fp.write_text("# Single", encoding="utf-8")
@@ -803,9 +801,7 @@ class TestPreviewHelpers:
         files = engine.discover_indexable_files(fp)
         assert files == [fp.resolve()]
 
-    async def test_discover_indexable_files_handles_directory(
-        self, components, memory_dir
-    ):
+    async def test_discover_indexable_files_handles_directory(self, components, memory_dir):
         engine = components.index_engine
         (memory_dir / "a.md").write_text("# A", encoding="utf-8")
         (memory_dir / "b.md").write_text("# B", encoding="utf-8")
@@ -814,9 +810,7 @@ class TestPreviewHelpers:
         names = {f.name for f in files}
         assert names == {"a.md", "b.md"}
 
-    async def test_discover_indexable_files_outside_memory_dirs(
-        self, components, tmp_path
-    ):
+    async def test_discover_indexable_files_outside_memory_dirs(self, components, tmp_path):
         """Out-of-memory_dirs returns empty — same trust gate as
         ``index_path``. The route layer turns this into a 403; the engine
         helper must not leak file enumeration outside the boundary."""
@@ -838,9 +832,7 @@ class TestPreviewHelpers:
         files = engine.discover_indexable_files(memory_dir)
         assert engine.resolve_namespaces_for(files) == [None]
 
-    async def test_resolve_namespaces_for_rule_variance(
-        self, components, memory_dir
-    ):
+    async def test_resolve_namespaces_for_rule_variance(self, components, memory_dir):
         """The motivating case for the list shape: a folder where rules
         split files into two namespaces. A scalar response would silently
         lie about which namespace was applied."""
@@ -867,9 +859,7 @@ class TestPreviewHelpers:
         result = engine.resolve_namespaces_for(files)
         assert result == ["ns-alpha", "ns-beta"]
 
-    async def test_resolve_namespaces_for_sorts_with_none_last(
-        self, components, memory_dir
-    ):
+    async def test_resolve_namespaces_for_sorts_with_none_last(self, components, memory_dir):
         """``None`` (untagged) sorts after named namespaces — UI renders
         named NSes first, then the untagged sentinel, in stable order."""
         engine = components.index_engine
