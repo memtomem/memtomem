@@ -178,7 +178,7 @@
   "index.add_heading_placeholder": "Optional heading",
   "index.add_tags_label": "Tags",
   "index.add_tags_placeholder": "tag1, tag2, …",
-  "index.add_file_label": "Target File",
+  "index.add_file_label": "Target file (save location)",
   "index.add_file_placeholder_prefix": "~/.memtomem/memories/",
   "index.add_file_placeholder_suffix": ".md (leave blank for auto)",
   "index.add_ns_label": "Namespace",

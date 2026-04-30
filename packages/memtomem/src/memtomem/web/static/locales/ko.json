@@ -178,7 +178,7 @@
   "index.add_heading_placeholder": "선택적 헤딩",
   "index.add_tags_label": "태그",
   "index.add_tags_placeholder": "태그1, 태그2, …",
-  "index.add_file_label": "대상 파일",
+  "index.add_file_label": "대상 파일 (저장 위치)",
   "index.add_file_placeholder_prefix": "~/.memtomem/memories/",
   "index.add_file_placeholder_suffix": ".md (비워두면 자동)",
   "index.add_ns_label": "네임스페이스",
