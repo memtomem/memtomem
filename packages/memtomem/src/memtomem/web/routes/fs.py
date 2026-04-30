@@ -15,6 +15,7 @@ picker-specific toast without conflating with real auth failures elsewhere.
 
 from __future__ import annotations
 
+import os
 import unicodedata
 from pathlib import Path
 
@@ -73,8 +74,23 @@ def _display_name(p: Path) -> str:
         return str(p_norm)
 
 
-def _resolve_request_path(raw: str) -> Path:
-    return Path(norm_path(Path(raw).expanduser()))
+def _request_paths(raw: str) -> tuple[Path, Path]:
+    """Compute the two views of a request path.
+
+    The first is *symbolic*: NFC-normalized and lexically cleaned (``..``
+    collapsed), but symlinks are NOT followed. This is what the response's
+    ``path`` / ``parent`` fields carry and what ``iterdir`` runs against,
+    so children inherit the symbolic prefix the user clicked. The second
+    is *resolved*: ``.resolve()`` + NFC, used for the boundary check and
+    the existence / is_dir gates so security stays anchored to the real
+    on-disk location regardless of how many symlinks the symbolic path
+    crosses.
+    """
+    expanded = Path(raw).expanduser()
+    symbolic_str = unicodedata.normalize("NFC", os.path.normpath(str(expanded)))
+    symbolic = Path(symbolic_str)
+    resolved = Path(norm_path(expanded))
+    return symbolic, resolved
 
 
 def _inside_any_root(target: Path, roots: list[Path]) -> bool:
@@ -102,18 +118,23 @@ async def list_directory(
             entries=[FsEntry(name=_display_name(r), path=str(r)) for r in roots],
         )
 
-    target = _resolve_request_path(path)
+    symbolic, resolved = _request_paths(path)
 
-    if not _inside_any_root(target, roots):
+    if not _inside_any_root(resolved, roots):
         raise HTTPException(status_code=422, detail="outside_picker_scope")
-    if not target.exists():
+    if not resolved.exists():
         raise HTTPException(status_code=404, detail="not_found")
-    if not target.is_dir():
+    if not resolved.is_dir():
         raise HTTPException(status_code=400, detail="not_a_directory")
 
     children: list[FsEntry] = []
     try:
-        iterator = target.iterdir()
+        # Iterdir runs against the symbolic path so child Path objects
+        # carry the symbolic prefix (e.g. ``…/ln_inside/foo`` instead of
+        # the resolve target's ``…/alpha/foo``). The OS still follows the
+        # symlink internally — only the prefix Python keeps in front of
+        # each entry differs.
+        iterator = symbolic.iterdir()
     except (PermissionError, OSError) as exc:
         raise HTTPException(status_code=400, detail="not_a_directory") from exc
 
@@ -124,10 +145,10 @@ async def list_directory(
             # Symlink-out exclusion: if the resolved target leaves every
             # allow-list root, drop the entry. Without this the user would
             # click an allow-list child and hit 422 — confusing, given the
-            # entry was rendered as part of an allow-listed parent. The
-            # response keeps the *symlink path* (NFC-normalized, not
-            # resolved) so the visible tree matches what iterdir reported;
-            # only the boundary check uses .resolve.
+            # entry was rendered as part of an allow-listed parent. Only
+            # the boundary check uses .resolve; the response carries the
+            # symbolic path so the visible tree matches what iterdir
+            # reported.
             resolved_child = Path(norm_path(child))
             if not _inside_any_root(resolved_child, roots):
                 continue
@@ -137,13 +158,19 @@ async def list_directory(
 
     children.sort(key=lambda e: e.name.casefold())
 
-    parent_path = target.parent
+    parent_path = symbolic.parent
     parent_str: str | None = None
-    if parent_path != target and _inside_any_root(parent_path, roots):
-        parent_str = str(parent_path)
+    if parent_path != symbolic:
+        # Boundary check on the resolved parent so a symlinked parent
+        # whose target leaves the allow-list isn't reachable via Up. The
+        # displayed parent stays symbolic so Up returns to a path the
+        # user recognises from the breadcrumb.
+        parent_resolved = Path(norm_path(parent_path))
+        if _inside_any_root(parent_resolved, roots):
+            parent_str = unicodedata.normalize("NFC", str(parent_path))
 
     return FsListResponse(
-        path=str(target),
+        path=unicodedata.normalize("NFC", str(symbolic)),
         parent=parent_str,
         is_root=False,
         entries=children,

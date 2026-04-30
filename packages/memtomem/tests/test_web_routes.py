@@ -2160,6 +2160,32 @@ class TestFsList:
         expected_symlink_path = unicodedata.normalize("NFC", str(memdir / "ln_inside"))
         assert entries["ln_inside"] == expected_symlink_path
 
+    async def test_navigate_symlink_keeps_symbolic_prefix(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Navigating into ``ln_inside`` (-> alpha) returns a listing
+        whose ``path`` is the symlink path, not the resolve target. The
+        breadcrumb on the frontend stays anchored to what the user
+        clicked, and ``Up`` returns them to the symlink's parent rather
+        than teleporting them to wherever the target lives.
+        """
+        memdir = fs_tree["memdir"]
+        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        self._wire_memory_dirs(app, [memdir], monkeypatch)
+
+        ln = memdir / "ln_inside"
+        resp = await client.get(f"/api/fs/list?path={ln}")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        expected_path = unicodedata.normalize("NFC", str(ln))
+        expected_parent = unicodedata.normalize("NFC", str(memdir))
+        assert body["path"] == expected_path
+        assert body["parent"] == expected_parent
+
     async def test_symlink_outside_allow_list_excluded(
         self,
         app,
