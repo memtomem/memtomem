@@ -9,6 +9,7 @@
 
   "header.stat_chunks": "— chunks",
   "header.stat_sources": "— sources",
+  "header.sys_info_jump_title": "Open Embedding & Storage settings",
   "header.settings_title": "Settings",
   "header.theme_title": "Toggle theme",
   "header.help_title": "Toggle help hints (h)",

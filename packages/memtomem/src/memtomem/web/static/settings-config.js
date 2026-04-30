@@ -130,7 +130,10 @@ function _refreshAddFilePlaceholder() {
   const today = new Date().toISOString().slice(0, 10);
   el.placeholder = t('index.add_file_placeholder_prefix') + today + t('index.add_file_placeholder_suffix');
 }
-window.addEventListener('langchange', _refreshAddFilePlaceholder);
+window.addEventListener('langchange', () => {
+  _refreshAddFilePlaceholder();
+  _syncHeaderConfig();
+});
 
 // ── B1-B3: Index tab hints ──
 function _syncIndexHints() {
@@ -284,10 +287,13 @@ function _syncHeaderConfig() {
     const tip = [];
     if (emb) tip.push(`Embedding: ${emb.provider}/${emb.model} (${emb.dimension || '?'}d)`);
     if (stor?.backend) tip.push(`Storage: ${stor.backend}`);
+    tip.push(t('header.sys_info_jump_title'));
     el.title = tip.join('\n');
+    el.setAttribute('aria-label', t('header.sys_info_jump_title'));
     if (sep) { sep.textContent = '|'; show(sep); }
   } else {
     el.textContent = '';
+    el.removeAttribute('aria-label');
     if (sep) hide(sep);
   }
 }

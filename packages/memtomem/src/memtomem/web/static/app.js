@@ -3006,6 +3006,23 @@ document.querySelector('.index-mode-toggle')?.addEventListener('keydown', (e) =>
 
 setIndexMode(_readIndexMode());
 
+// Header sys-info chip ("provider/model · backend") jumps to Settings → Config
+// so users can act on a slow-search / wrong-storage hunch in one click.
+(function wireHeaderSysInfoJump() {
+  const el = qs('header-sys-info');
+  if (!el) return;
+  const open = () => {
+    document.querySelector('.tab-btn[data-tab="settings"]')?.click();
+    setTimeout(() => {
+      document.querySelector('.settings-nav-btn[data-section="config"]')?.click();
+    }, 50);
+  };
+  el.addEventListener('click', open);
+  el.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
+  });
+})();
+
 // Folder mode is one-shot — surface the persistent alternative inline
 // (link inside the panel + "Register as Source" action on the success toast).
 function goToSourcesAddPath() {

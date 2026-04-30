@@ -9,6 +9,7 @@
 
   "header.stat_chunks": "— 청크",
   "header.stat_sources": "— 소스",
+  "header.sys_info_jump_title": "임베딩 & 저장소 설정 열기",
   "header.settings_title": "설정",
   "header.theme_title": "테마 전환",
   "header.help_title": "도움말 표시/숨기기 (h)",

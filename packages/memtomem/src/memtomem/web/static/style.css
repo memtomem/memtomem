@@ -83,6 +83,9 @@ header {
 header h1 { font-size: 1.2rem; font-weight: 700; color: var(--accent); letter-spacing: -0.5px; flex-shrink: 0; }
 .header-info-bar { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-shrink: 1; min-width: 0; }
 .header-sys-info { font-size: 0.75rem; color: var(--muted); font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.header-sys-info.clickable { cursor: pointer; }
+.header-sys-info.clickable:hover,
+.header-sys-info.clickable:focus-visible { color: var(--accent); outline: none; }
 .header-sep { color: var(--border); font-size: 0.75rem; flex-shrink: 0; }
 .header-actions { display: flex; gap: 4px; align-items: center; flex-shrink: 0; }
 .stat-pill {
