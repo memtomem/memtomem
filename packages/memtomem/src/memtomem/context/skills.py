@@ -25,8 +25,9 @@ from pathlib import Path
 from typing import Protocol
 
 from memtomem.context import _skip_reasons as skip_codes
-from memtomem.context._atomic import copy_tree_atomic
-from memtomem.context._names import InvalidNameError, validate_name
+from memtomem.context import override as _override
+from memtomem.context._atomic import atomic_write_bytes, copy_tree_atomic
+from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, validate_name
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +208,16 @@ def generate_all_skills(
         for skill_dir in canonicals:
             dst = gen.target_dir(project_root, skill_dir.name)
             copy_skill(skill_dir, dst)
+            # ADR-0008 Invariant 4: per-vendor override replaces SKILL.md only.
+            # Auxiliary files (scripts/, references/) stay from canonical.
+            vendor = GENERATOR_VENDOR.get(target)
+            if vendor is not None:
+                override_path = _override.resolve(project_root, "skills", skill_dir.name, vendor)
+                if override_path is not None:
+                    atomic_write_bytes(
+                        dst / SKILL_MANIFEST,
+                        override_path.read_bytes(),
+                    )
             generated.append((target, dst))
 
     return SkillSyncResult(generated=generated, skipped=skipped)

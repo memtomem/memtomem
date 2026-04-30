@@ -15,6 +15,7 @@ import hashlib
 import subprocess
 from pathlib import Path
 
+from memtomem.context import override
 from memtomem.context.install import install_skill
 from memtomem.context.skills import SKILL_GENERATORS, generate_all_skills
 from memtomem.wiki.store import WikiStore
@@ -105,3 +106,145 @@ def test_skills_fanout_byte_identical_preserves_aux_files(wiki_root: Path, tmp_p
             assert vendor == canonical, (
                 f"{gen_name} {relpath} diverged from canonical without override"
             )
+
+
+# ── override.resolve unit tests ─────────────────────────────────────────
+
+
+def test_resolve_returns_none_when_no_override(tmp_path: Path) -> None:
+    (tmp_path / ".memtomem" / "skills" / "foo").mkdir(parents=True)
+    assert override.resolve(tmp_path, "skills", "foo", "claude") is None
+
+
+def test_resolve_returns_path_when_override_present(tmp_path: Path) -> None:
+    overrides_dir = tmp_path / ".memtomem" / "skills" / "foo" / "overrides"
+    overrides_dir.mkdir(parents=True)
+    (overrides_dir / "claude.md").write_bytes(b"# claude override\n")
+    result = override.resolve(tmp_path, "skills", "foo", "claude")
+    assert result == overrides_dir / "claude.md"
+
+
+def test_resolve_unknown_vendor_returns_none(tmp_path: Path) -> None:
+    """Vendors outside ``OVERRIDE_FORMATS`` (cursor, copilot, ...) get
+    None — the matrix is the trust boundary, not a stringly-typed lookup."""
+    overrides_dir = tmp_path / ".memtomem" / "skills" / "foo" / "overrides"
+    overrides_dir.mkdir(parents=True)
+    (overrides_dir / "cursor.md").write_bytes(b"# stray cursor file\n")
+    assert override.resolve(tmp_path, "skills", "foo", "cursor") is None
+
+
+def test_resolve_invariant_1_works_without_wiki(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """ADR-0008 Invariant 1: resolver reads project tree only — no wiki
+    needed at sync time. Make sure no wiki env var is consulted by
+    pointing the wiki at a non-existent path."""
+    monkeypatch.setenv("MEMTOMEM_WIKI_PATH", str(tmp_path / "no-such-wiki"))
+    overrides_dir = tmp_path / ".memtomem" / "skills" / "foo" / "overrides"
+    overrides_dir.mkdir(parents=True)
+    (overrides_dir / "gemini.md").write_bytes(b"# gemini override\n")
+    result = override.resolve(tmp_path, "skills", "foo", "gemini")
+    assert result == overrides_dir / "gemini.md"
+
+
+def test_resolve_skips_agents_in_pr_c(tmp_path: Path) -> None:
+    """PR-C activates skills only. Agents/commands matrix rows are
+    shipped but the resolver guards them; flip the guard in PR-D to
+    activate. This test pins the gate so the enable-day diff is
+    one-line revertable."""
+    overrides_dir = tmp_path / ".memtomem" / "agents" / "bar" / "overrides"
+    overrides_dir.mkdir(parents=True)
+    (overrides_dir / "claude.md").write_bytes(b"# would-be agent override\n")
+    assert override.resolve(tmp_path, "agents", "bar", "claude") is None
+
+
+def test_resolve_skips_commands_in_pr_c(tmp_path: Path) -> None:
+    overrides_dir = tmp_path / ".memtomem" / "commands" / "baz" / "overrides"
+    overrides_dir.mkdir(parents=True)
+    (overrides_dir / "gemini.toml").write_bytes(b"# would-be command override\n")
+    assert override.resolve(tmp_path, "commands", "baz", "gemini") is None
+
+
+# ── skills fan-out applies overrides correctly ─────────────────────────
+
+
+def test_skills_fanout_applies_claude_override_only(wiki_root: Path, tmp_path: Path) -> None:
+    """Stage a claude override; .claude SKILL.md must equal the override
+    bytes while .gemini and .agents/codex SKILL.md keep canonical bytes."""
+    _initialized_wiki()
+    canonical_bytes = b"# hello\nbody from canonical\n"
+    _seed_skill(wiki_root, "hello", {"SKILL.md": canonical_bytes})
+    project = tmp_path
+    install_skill(project, "hello")
+
+    overrides_dir = project / ".memtomem" / "skills" / "hello" / "overrides"
+    overrides_dir.mkdir(parents=True)
+    claude_override = b"# hello\nclaude-only override body\n"
+    (overrides_dir / "claude.md").write_bytes(claude_override)
+
+    generate_all_skills(project)
+
+    claude_path = SKILL_GENERATORS["claude_skills"].target_dir(project, "hello") / "SKILL.md"
+    gemini_path = SKILL_GENERATORS["gemini_skills"].target_dir(project, "hello") / "SKILL.md"
+    codex_path = SKILL_GENERATORS["codex_skills"].target_dir(project, "hello") / "SKILL.md"
+
+    assert claude_path.read_bytes() == claude_override
+    assert gemini_path.read_bytes() == canonical_bytes
+    assert codex_path.read_bytes() == canonical_bytes
+
+
+def test_skills_fanout_applies_all_three_overrides(wiki_root: Path, tmp_path: Path) -> None:
+    _initialized_wiki()
+    _seed_skill(wiki_root, "hello", {"SKILL.md": b"# canonical\n"})
+    project = tmp_path
+    install_skill(project, "hello")
+
+    overrides_dir = project / ".memtomem" / "skills" / "hello" / "overrides"
+    overrides_dir.mkdir(parents=True)
+    claude_bytes = b"# claude\n"
+    gemini_bytes = b"# gemini\n"
+    codex_bytes = b"# codex\n"
+    (overrides_dir / "claude.md").write_bytes(claude_bytes)
+    (overrides_dir / "gemini.md").write_bytes(gemini_bytes)
+    (overrides_dir / "codex.md").write_bytes(codex_bytes)
+
+    generate_all_skills(project)
+
+    assert (
+        SKILL_GENERATORS["claude_skills"].target_dir(project, "hello") / "SKILL.md"
+    ).read_bytes() == claude_bytes
+    assert (
+        SKILL_GENERATORS["gemini_skills"].target_dir(project, "hello") / "SKILL.md"
+    ).read_bytes() == gemini_bytes
+    assert (
+        SKILL_GENERATORS["codex_skills"].target_dir(project, "hello") / "SKILL.md"
+    ).read_bytes() == codex_bytes
+
+
+def test_override_only_touches_skill_md_not_scripts(wiki_root: Path, tmp_path: Path) -> None:
+    """Invariant 4 says ``byte-copy that file`` (singular). Auxiliary
+    files (``scripts/``, ``references/``) MUST stay from canonical even
+    when an override is staged for the SKILL.md."""
+    _initialized_wiki()
+    _seed_skill(
+        wiki_root,
+        "hello",
+        {
+            "SKILL.md": b"# canonical\n",
+            "scripts/run.sh": b"#!/bin/bash\necho canonical\n",
+        },
+    )
+    project = tmp_path
+    install_skill(project, "hello")
+
+    overrides_dir = project / ".memtomem" / "skills" / "hello" / "overrides"
+    overrides_dir.mkdir(parents=True)
+    (overrides_dir / "claude.md").write_bytes(b"# claude only\n")
+
+    generate_all_skills(project)
+
+    claude_dir = SKILL_GENERATORS["claude_skills"].target_dir(project, "hello")
+    assert (claude_dir / "SKILL.md").read_bytes() == b"# claude only\n"
+    # The script came from canonical and was NOT replaced by any override.
+    assert (claude_dir / "scripts" / "run.sh").read_bytes() == (b"#!/bin/bash\necho canonical\n")

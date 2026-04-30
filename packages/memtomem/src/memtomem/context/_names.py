@@ -22,10 +22,54 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-__all__ = ["InvalidNameError", "validate_name"]
+__all__ = [
+    "GENERATOR_VENDOR",
+    "InvalidNameError",
+    "OVERRIDE_FORMATS",
+    "validate_name",
+]
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _MAX_LEN = 64
+
+# ADR-0008 PR-C: per-(asset_type, vendor) override file extension. The
+# tuple is ``(alias, extension)``; ``alias`` is reserved for v2 multi-vendor
+# (e.g. cursor sharing claude's surface) and ``extension`` is what
+# ``override.resolve`` joins to ``<vendor>.<ext>``.
+#
+# v1 covers Claude / Gemini / Codex across skills, agents, commands. The
+# ``("commands", "codex")`` row is a placeholder — there is no
+# ``codex_commands`` generator yet (Codex slash prompts are user-scope and
+# upstream-deprecated; PR-C does not activate that surface). The
+# ``_PR_C_ACTIVE_TYPES`` guard in :mod:`memtomem.context.override` keeps
+# all rows except skills inactive in v1.
+OVERRIDE_FORMATS: dict[tuple[str, str], tuple[str, str]] = {
+    ("skills", "claude"): ("claude", "md"),
+    ("skills", "gemini"): ("gemini", "md"),
+    ("skills", "codex"): ("codex", "md"),
+    ("agents", "claude"): ("claude", "md"),
+    ("agents", "gemini"): ("gemini", "md"),
+    ("agents", "codex"): ("codex", "toml"),
+    ("commands", "claude"): ("claude", "md"),
+    ("commands", "gemini"): ("gemini", "toml"),
+    ("commands", "codex"): ("codex", "md"),
+}
+
+# Maps generator name (`gen.name` — e.g. ``"claude_skills"``) to the
+# vendor key shared with :data:`OVERRIDE_FORMATS`. Centralizing here so
+# ``skills.py`` / ``agents.py`` / ``commands.py`` fan-out and PR-D's
+# lint/status all reuse the same source of truth. Naming pattern is
+# ``<vendor>_<asset_type>`` across the codebase.
+GENERATOR_VENDOR: dict[str, str] = {
+    "claude_skills": "claude",
+    "gemini_skills": "gemini",
+    "codex_skills": "codex",
+    "claude_agents": "claude",
+    "gemini_agents": "gemini",
+    "codex_agents": "codex",
+    "claude_commands": "claude",
+    "gemini_commands": "gemini",
+}
 
 
 class InvalidNameError(ValueError):
