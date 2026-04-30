@@ -358,6 +358,14 @@ class IndexEngine:
         Drives the cross-tab / post-reload survival of the web UI's header
         indicator (#582 item 4.11). Counter, not boolean — concurrent stream
         + locked runs both keep it on.
+
+        Scope is **broader** than the three web-triggered surfaces #602's
+        ``STATE.indexing`` covered: any caller that enters ``index_path``,
+        ``index_file``, or ``index_path_stream`` is counted, including the
+        file watcher, MCP-tool ``mem_edit`` / ``mem_delete`` paths, and CLI
+        ``mm index``. The result is that the web indicator may flicker
+        briefly on watcher-triggered re-indexes — preferred over silently
+        under-reporting server-side indexing activity to the UI.
         """
         return self._active_runs > 0
 
