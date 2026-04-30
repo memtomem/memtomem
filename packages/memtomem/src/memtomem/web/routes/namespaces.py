@@ -14,10 +14,11 @@ from memtomem.web.schemas import (
     RenameRequest,
 )
 
-router = APIRouter(prefix="/namespaces", tags=["namespaces"])
+admin_router = APIRouter(prefix="/namespaces", tags=["namespaces"])
 
 
-@router.get("", response_model=NamespacesListResponse)
+# Registered on the read router in namespaces_read.py; not on admin_router
+# (read-side surface lives in the prod tier — see web/app.py _PROD_ROUTERS).
 async def list_namespaces(storage=Depends(get_storage)) -> NamespacesListResponse:
     """List all namespaces with chunk counts and metadata."""
     meta_list = await storage.list_namespace_meta()
@@ -33,7 +34,7 @@ async def list_namespaces(storage=Depends(get_storage)) -> NamespacesListRespons
     return NamespacesListResponse(namespaces=out, total=len(out))
 
 
-@router.get("/{namespace}", response_model=NamespaceInfoResponse)
+@admin_router.get("/{namespace}", response_model=NamespaceInfoResponse)
 async def get_namespace(namespace: str, storage=Depends(get_storage)) -> NamespaceInfoResponse:
     """Get info for a specific namespace."""
     ns_list = await storage.list_namespaces()
@@ -53,7 +54,7 @@ async def get_namespace(namespace: str, storage=Depends(get_storage)) -> Namespa
     )
 
 
-@router.patch("/{namespace}", response_model=NamespaceInfoResponse)
+@admin_router.patch("/{namespace}", response_model=NamespaceInfoResponse)
 async def update_metadata(
     namespace: str,
     body: NamespaceMetaRequest,
@@ -72,7 +73,7 @@ async def update_metadata(
     )
 
 
-@router.post("/{namespace}/rename", response_model=NamespaceInfoResponse)
+@admin_router.post("/{namespace}/rename", response_model=NamespaceInfoResponse)
 async def rename_namespace(
     namespace: str,
     body: RenameRequest,
@@ -89,8 +90,14 @@ async def rename_namespace(
     )
 
 
-@router.delete("/{namespace}", response_model=DeleteResponse)
+@admin_router.delete("/{namespace}", response_model=DeleteResponse)
 async def delete_namespace(namespace: str, storage=Depends(get_storage)) -> DeleteResponse:
     """Delete all chunks in a namespace."""
     deleted = await storage.delete_by_namespace(namespace)
     return DeleteResponse(deleted=deleted)
+
+
+# Module-attribute alias keeping web/app.py's include loop (`module.router`)
+# wired to the dev-only admin surface. The read-side endpoint is mounted via
+# the sibling ``namespaces_read`` module in _PROD_ROUTERS.
+router = admin_router

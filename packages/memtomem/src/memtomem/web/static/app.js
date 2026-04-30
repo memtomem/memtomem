@@ -905,16 +905,14 @@ async function checkEmbeddingMismatch() {
 
 async function loadDashboard() {
   try {
-    // /api/namespaces is dev-only; prod returns 404. Gate the fetch and
-    // let the namespace card render 0 rather than fire a guaranteed miss.
+    // /api/sessions and /api/scratch are dev-only; the namespaces list
+    // endpoint is now prod-mounted via namespaces_read so the donut +
+    // count card render real values in both tiers.
     const devMode = STATE.uiMode === 'dev';
-    const nsPromise = devMode
-      ? api('GET', '/api/namespaces').catch(() => ({ namespaces: [] }))
-      : Promise.resolve({ namespaces: [] });
     const [stats, sourcesData, nsData, configData, embStatus, timelineData] = await Promise.all([
       api('GET', '/api/stats'),
       api('GET', '/api/sources'),
-      nsPromise,
+      api('GET', '/api/namespaces').catch(() => ({ namespaces: [] })),
       api('GET', '/api/config'),
       api('GET', '/api/embedding-status').catch(() => null),
       api('GET', '/api/timeline?days=365&limit=1000').catch(() => ({ chunks: [] })),

@@ -57,11 +57,9 @@ function _groupNamespaces(namespaces) {
 // ---------------------------------------------------------------------------
 
 async function loadNamespaceDropdowns() {
-  // /api/namespaces is mounted only in dev mode (web/app.py _DEV_ONLY_ROUTERS).
-  // Skip the fetch in prod to avoid a guaranteed 404 — the filter dropdowns
-  // keep their static "All Namespaces" option. Mirrors the gate pattern in
-  // app.js loadDashboard.
-  if (STATE.uiMode !== 'dev') return;
+  // GET /api/namespaces is mounted in both prod and dev tiers via the
+  // namespaces_read router (web/app.py _PROD_ROUTERS). The admin (CRUD)
+  // surface stays dev-only — see loadNamespacesTab below.
   try {
     const data = await api('GET', '/api/namespaces');
     const namespaces = data.namespaces || [];
@@ -172,9 +170,12 @@ function _buildNsCard(ns, defaultNs) {
 }
 
 async function loadNamespacesTab() {
-  // /api/namespaces is mounted only in dev mode (web/app.py _DEV_ONLY_ROUTERS).
-  // Skip the fetch in prod to avoid a guaranteed 404 — the tab keeps its
-  // initial state. Mirrors the gate pattern in loadNamespaceDropdowns above.
+  // The Namespaces management *tab* is dev-only (data-ui-tier="dev" on the
+  // settings nav button). The Edit/Rename/Delete buttons rendered below
+  // call PATCH/POST/DELETE /api/namespaces/{name} on the admin_router,
+  // which stays in _DEV_ONLY_ROUTERS. The list endpoint itself is
+  // prod-mounted but the CRUD UX requires the admin surface, so this
+  // early-return keeps the tab from rendering in prod.
   if (STATE.uiMode !== 'dev') return;
   const list = qs('ns-list');
   list.innerHTML = '<div class="loading-panel"><div class="spinner-panel"></div></div>';

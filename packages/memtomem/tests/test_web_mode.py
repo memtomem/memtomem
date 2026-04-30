@@ -161,7 +161,6 @@ def test_dev_routes_extend_prod_routes() -> None:
     [
         ("/api/sessions", "GET"),
         ("/api/scratch", "GET"),
-        ("/api/namespaces", "GET"),
         ("/api/procedures", "GET"),
         ("/api/watchdog/status", "GET"),
         ("/api/settings-sync", "GET"),
@@ -212,6 +211,69 @@ def test_prod_keeps_polished_routes_mounted() -> None:
         assert expected in prod_paths, (
             f"{expected} is missing from prod — reclassify or the router list"
         )
+
+
+@pytest.mark.asyncio
+async def test_namespaces_list_is_prod_mounted_but_admin_routes_blocked() -> None:
+    """4.10a (#582): the read endpoint graduates to prod for the Search /
+    Timeline / Export filter dropdowns and the Home dashboard donut, but the
+    admin (CRUD) surface stays dev-only. A future refactor that promotes
+    PATCH/POST/DELETE to prod must fail this gate.
+
+    The list endpoint is mounted via ``namespaces_read`` in _PROD_ROUTERS;
+    the admin surface (PATCH/POST/DELETE/GET-by-id) stays on
+    ``namespaces.admin_router`` in _DEV_ONLY_ROUTERS.
+    """
+    prod_app = create_app(mode="prod")
+    prod_paths = _api_paths(prod_app)
+    assert "/api/namespaces" in prod_paths, (
+        "GET /api/namespaces must be prod-mounted via namespaces_read"
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=prod_app, client=("127.0.0.1", 0)),
+        base_url="http://testserver",
+    ) as c:
+        for method, path in (
+            ("GET", "/api/namespaces/foo"),
+            ("PATCH", "/api/namespaces/foo"),
+            ("POST", "/api/namespaces/foo/rename"),
+            ("DELETE", "/api/namespaces/foo"),
+        ):
+            resp = await c.request(method, path)
+            assert resp.status_code == 404, (
+                f"{method} {path} leaked into prod: {resp.status_code} "
+                "(admin surface must stay dev-only)"
+            )
+
+
+def test_namespaces_list_remains_reachable_in_dev() -> None:
+    """The router split must not break the dev path: dev mode mounts both
+    ``namespaces_read`` (read.router via _PROD_ROUTERS) and ``namespaces``
+    (admin_router via _DEV_ONLY_ROUTERS). Only the read router registers
+    ``GET ""`` — re-decorating ``list_namespaces`` on admin_router would
+    surface as a duplicate registration (FastAPI accepts it via
+    first-match-wins, but the OpenAPI docs would show it twice and the
+    dead second registration is a code smell).
+    """
+    dev_app = create_app(mode="dev")
+    list_routes = [
+        r
+        for r in dev_app.routes
+        if getattr(r, "path", "") == "/api/namespaces" and "GET" in getattr(r, "methods", set())
+    ]
+    assert len(list_routes) == 1, (
+        f"Expected exactly one GET /api/namespaces handler in dev; "
+        f"found {len(list_routes)} — admin_router accidentally re-registered the list?"
+    )
+
+    dev_paths = _api_paths(dev_app)
+    for expected in (
+        "/api/namespaces",
+        "/api/namespaces/{namespace}",
+        "/api/namespaces/{namespace}/rename",
+    ):
+        assert expected in dev_paths, f"{expected} missing from dev — split broke the admin surface"
 
 
 # ---------------------------------------------------------------------------
