@@ -2509,6 +2509,16 @@ select:focus-visible {
 }
 .config-hint .pipeline-badge { font-size: 0.7rem; padding: 1px 7px; }
 
+/* Index-tab Extensions hint reads as data, not as a callout — strip the
+   filled-card chrome the shared .config-hint base adds and prefix with an
+   info glyph via ::before so the marker is single-source-of-truth in CSS
+   regardless of which writer populates `textContent`. */
+#index-config-hint {
+  background: transparent; border: none; padding: 0; margin-bottom: 6px;
+  border-radius: 0;
+}
+#index-config-hint::before { content: 'ⓘ\00a0'; color: var(--muted); }
+
 /* Inline panel help text — muted small line above an action area, e.g. the
    one-shot vs persistent surfacing in the folder index panel. */
 .panel-help-text {
