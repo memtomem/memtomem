@@ -180,6 +180,31 @@ Both are idempotent — chunks are content-hashed, so unchanged files are
 skipped on re-runs. This is why the `mm init` wizard's `Next steps` lists
 `mm index {memory_dir}` as step 1.
 
+### Hook integration — debounce queue
+
+For editor / hook callers (PostToolUse[Write] in Claude Code, etc.) that
+fire on every save, `mm index` ships three mutually-exclusive flags that
+share a small on-disk queue at `~/.memtomem/index_debounce_queue.json`:
+
+```bash
+mm index --debounce-window 5 PATH   # record PATH; drain entries silent ≥5s
+mm index --flush                    # synchronously drain everything queued
+mm index --status                   # snapshot queue depth + oldest entry
+```
+
+- `--debounce-window <SECONDS>` records the path and re-indexes only
+  entries that have been silent for at least `SECONDS`. Rapid consecutive
+  writes restart the window so a burst is indexed once at the end.
+- `--flush` blocks until every queued file has been indexed (or recorded
+  as an error). Use this when correctness matters — e.g. a `Stop` hook
+  draining before session end. Worst-case latency ≈ queue depth ×
+  per-file index cost.
+- `--status` is informational only. Concurrent hooks may modify the
+  queue between this read and any later action; for correctness use
+  `--flush`, not status-then-flush.
+
+All three accept `--json` for one-line scripted output.
+
 ---
 
 ## 2. Search — `mem_search`, `mem_recall`
@@ -982,6 +1007,9 @@ mm init                                # 9-step interactive wizard (b: back, q: 
 mm search "deployment"                 # hybrid search (keywords + meaning)
 mm search --as-of 2024-Q3 "deploy"     # temporal-validity query (date-only or YYYY-QN)
 mm index ~/notes                       # manual one-shot index (seed pre-existing files)
+mm index --debounce-window 5 PATH      # record PATH; drain entries silent ≥5s (hook callers)
+mm index --flush                       # synchronously drain queue (correctness primitive)
+mm index --status                      # snapshot queue depth + oldest entry
 mm add "note" --tags "tag1"            # add a memory
 mm recall --since 2026-03-01           # recall by date (Validity column shown when chunks have valid_from/valid_to)
 
@@ -1003,12 +1031,14 @@ mm context generate --include=settings # merge hooks → ~/.claude/settings.json
 mm context diff --include=settings     # check hook sync status
 
 # Sessions & activity
-mm session start                       # start a tracked session
-mm session end                         # end session with auto-summary
-mm session list                        # list sessions
-mm session events <id>                 # show events for a session
-mm session wrap -- CMD                 # wrap a command with session lifecycle
-mm activity log                        # log agent activity event
+mm session start                                              # start a tracked session
+mm session start --idempotent --agent-id claude-code          # resume active session for that agent (SessionStart hooks)
+mm session start --idempotent --auto-end-stale 24h            # additionally close any active session older than 24h first
+mm session end                                                # end session with auto-summary
+mm session list                                               # list sessions
+mm session events <id>                                        # show events for a session
+mm session wrap -- CMD                                        # wrap a command with session lifecycle
+mm activity log                                               # log agent activity event
 # Scripting: list/events/log support --json (see CONTRIBUTING.md → CLI output convention)
 
 # Health
