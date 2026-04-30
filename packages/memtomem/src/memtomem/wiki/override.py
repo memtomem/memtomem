@@ -2,11 +2,18 @@
 
 Companion to :mod:`memtomem.context.override` (which is the project-side
 *resolver*). The seed helper here is what ``mm wiki <type> override``
-calls to produce the initial bytes the user then edits. Skills are
-byte-identical across vendors, so the seed is simply the canonical
-``SKILL.md``; agents and commands need vendor-specific renderers and
-land in a follow-up PR alongside the rest of the multi-kind override
-surface.
+calls to produce the initial bytes the user then edits.
+
+- Skills are byte-identical across vendors, so the seed is simply the
+  canonical ``SKILL.md``.
+- Agents and commands feed the canonical through the vendor's renderer
+  in :data:`AGENT_GENERATORS` / :data:`COMMAND_GENERATORS` so the seed
+  bytes match what the vendor's runtime would actually emit. This reuses
+  PR-C's layout-aware ``parse_canonical_agent`` / ``parse_canonical_command``
+  rather than widening the generator API surface.
+- ``("commands", "codex")`` is a permanent placeholder row in
+  :data:`OVERRIDE_FORMATS` (no ``codex_commands`` generator); seeding
+  raises :class:`NotImplementedError` with a diagnostic message.
 """
 
 from __future__ import annotations
@@ -28,22 +35,55 @@ def render_seed_bytes(
     store: WikiStore,
     asset_type: str,
     name: str,
-    _vendor: str,
+    vendor: str,
 ) -> bytes:
     """Return the bytes to seed an override file with.
 
-    Skills (byte-identical fan-out) → seed equals canonical ``SKILL.md``.
-    Agents and commands ride the vendor-specific renderers and are not
-    activated in PR-C; the resolver in :mod:`memtomem.context.override`
-    has a matching gate. ``_vendor`` is reserved for that follow-up
-    (per-vendor renderer dispatch) and intentionally unused for skills.
+    Skills → canonical ``SKILL.md``.
+    Agents / commands → ``parse_canonical_*`` + vendor renderer.
+    ``("commands", "codex")`` → :class:`NotImplementedError`.
     """
-    if asset_type != "skills":
-        raise NotImplementedError(f"override seeding for {asset_type!r} lands in a follow-up PR")
-    src = store.root / "skills" / name / "SKILL.md"
-    if not src.is_file():
-        raise FileNotFoundError(f"wiki has no skills/{name}/SKILL.md to seed from at {src}")
-    return src.read_bytes()
+    if asset_type == "skills":
+        src = store.root / "skills" / name / "SKILL.md"
+        if not src.is_file():
+            raise FileNotFoundError(f"wiki has no skills/{name}/SKILL.md to seed from at {src}")
+        return src.read_bytes()
+
+    canonical = store.root / asset_type / name / f"{asset_type[:-1]}.md"
+    if not canonical.is_file():
+        raise FileNotFoundError(
+            f"wiki has no {asset_type}/{name}/{asset_type[:-1]}.md to seed from at {canonical}"
+        )
+
+    # Function-body imports dodge a wiki ↔ context import cycle:
+    # ``context.install`` already imports ``wiki.store``; widening to
+    # module-top imports here would close the loop.
+    if asset_type == "agents":
+        from memtomem.context.agents import AGENT_GENERATORS, parse_canonical_agent
+
+        gen_key = f"{vendor}_agents"
+        if gen_key not in AGENT_GENERATORS:
+            raise NotImplementedError(
+                f"{vendor!r} agents not yet supported — see OVERRIDE_FORMATS placeholder"
+            )
+        agent = parse_canonical_agent(canonical, layout="dir")
+        text, _dropped = AGENT_GENERATORS[gen_key].render(agent)
+        return text.encode("utf-8")
+    if asset_type == "commands":
+        from memtomem.context.commands import (
+            COMMAND_GENERATORS,
+            parse_canonical_command,
+        )
+
+        gen_key = f"{vendor}_commands"
+        if gen_key not in COMMAND_GENERATORS:
+            raise NotImplementedError(
+                f"{vendor!r} commands not yet supported — see OVERRIDE_FORMATS placeholder"
+            )
+        cmd = parse_canonical_command(canonical, layout="dir")
+        text, _dropped = COMMAND_GENERATORS[gen_key].render(cmd)
+        return text.encode("utf-8")
+    raise ValueError(f"unsupported asset_type for override seeding: {asset_type!r}")
 
 
 def seed_override(

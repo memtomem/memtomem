@@ -150,25 +150,33 @@ def test_resolve_invariant_1_works_without_wiki(
     assert result == overrides_dir / "gemini.md"
 
 
-def test_resolve_skips_agents_in_pr_c(tmp_path: Path) -> None:
-    """PR-C activates skills only. Agents/commands matrix rows are
-    shipped but the resolver guards them; flip the guard in PR-D to
-    activate. This test pins the gate so the enable-day diff is
-    one-line revertable."""
+def test_resolve_returns_path_for_agents_override(tmp_path: Path) -> None:
+    """Agents override resolution active post-PR-D gate removal.
+
+    Pin-and-invert from ``test_resolve_skips_agents_in_pr_c`` (carry-forward
+    from PR-C #624). PR-D-prep #627 added fan-out application sites; PR-D
+    C1a removes the ``_PR_C_ACTIVE_TYPES`` gate. Series PR archive.
+    """
     overrides_dir = tmp_path / ".memtomem" / "agents" / "bar" / "overrides"
     overrides_dir.mkdir(parents=True)
-    (overrides_dir / "claude.md").write_bytes(b"# would-be agent override\n")
-    assert override.resolve(tmp_path, "agents", "bar", "claude") is None
+    (overrides_dir / "claude.md").write_bytes(b"# agent override\n")
+    assert override.resolve(tmp_path, "agents", "bar", "claude") == overrides_dir / "claude.md"
 
 
-def test_resolve_skips_commands_in_pr_c(tmp_path: Path) -> None:
+def test_resolve_returns_path_for_commands_override(tmp_path: Path) -> None:
+    """Commands override resolution active post-PR-D gate removal.
+
+    Pin-and-invert from ``test_resolve_skips_commands_in_pr_c`` (carry-forward
+    from PR-C #624). PR-D-prep #627 added fan-out application sites; PR-D
+    C1a removes the ``_PR_C_ACTIVE_TYPES`` gate. Series PR archive.
+    """
     overrides_dir = tmp_path / ".memtomem" / "commands" / "baz" / "overrides"
     overrides_dir.mkdir(parents=True)
-    (overrides_dir / "gemini.toml").write_bytes(b"# would-be command override\n")
-    assert override.resolve(tmp_path, "commands", "baz", "gemini") is None
+    (overrides_dir / "gemini.toml").write_bytes(b"# command override\n")
+    assert override.resolve(tmp_path, "commands", "baz", "gemini") == overrides_dir / "gemini.toml"
 
 
-# ── fan-out under PR-C gate: application sites pinned inactive for agents/commands
+# ── fan-out applies overrides for agents/commands (PR-D C1a)
 
 _SAMPLE_AGENT_BODY = """---
 name: bar
@@ -186,12 +194,14 @@ Command body.
 """
 
 
-def test_agents_fanout_does_not_apply_override_under_gate(tmp_path: Path) -> None:
-    """PR-D-prep adds override application to ``generate_all_agents`` as dead
-    code under the PR-C ``_PR_C_ACTIVE_TYPES`` gate. With the gate active,
-    fan-out must produce canonical-rendered output even when an override file
-    is staged in the project tree. PR-D removes the gate; this test inverts
-    on enable day so the behavior diff is one-line revertable.
+def test_agents_fanout_applies_claude_override(tmp_path: Path) -> None:
+    """Agents fan-out applies override (full-file replacement, Invariant 4).
+
+    Pin-and-invert from ``test_agents_fanout_does_not_apply_override_under_gate``
+    (PR-D-prep #627). PR-D C1a removes ``_PR_C_ACTIVE_TYPES`` so the fan-out
+    application site lights up. 3-assertion marker pattern (per
+    ``feedback_pin_invert_symmetric_assertion``): canonical body absent +
+    override marker present + byte-equality.
     """
     canonical_dir = tmp_path / ".memtomem" / "agents"
     canonical_dir.mkdir(parents=True)
@@ -199,48 +209,53 @@ def test_agents_fanout_does_not_apply_override_under_gate(tmp_path: Path) -> Non
 
     overrides_dir = tmp_path / ".memtomem" / "agents" / "bar" / "overrides"
     overrides_dir.mkdir(parents=True)
-    would_be_override = b"# would-be agent override\n"
-    (overrides_dir / "claude.md").write_bytes(would_be_override)
+    override_body = b"# OVERRIDE_MARKER_AGENT\nclaude full replacement body\n"
+    (overrides_dir / "claude.md").write_bytes(override_body)
 
     generate_all_agents(tmp_path, runtimes=["claude_agents"])
 
     runtime_file = tmp_path / ".claude" / "agents" / "bar.md"
     assert runtime_file.is_file()
-    # Positive assertion: canonical body marker must be present so a generator
-    # failure that writes garbage cannot be mistaken for gate-correct behavior.
-    # PR-D inverts: marker disappears (override replaces full body), and the
-    # negative assertion below flips to ``==``.
-    assert b"Body of the agent." in runtime_file.read_bytes(), (
-        "runtime file does not contain canonical body — generator failure?"
+    body = runtime_file.read_bytes()
+    assert b"Body of the agent." not in body, (
+        "canonical body still present despite gate removed — override not applied?"
     )
-    assert runtime_file.read_bytes() != would_be_override, (
-        "override applied despite _PR_C_ACTIVE_TYPES gate active for agents"
+    assert b"OVERRIDE_MARKER_AGENT" in body, (
+        "override marker absent — override file not seeded correctly?"
     )
+    assert body == override_body
 
 
-def test_commands_fanout_does_not_apply_override_under_gate(tmp_path: Path) -> None:
-    """Same pin as the agents counterpart — fan-out application site is dead
-    code while the gate is active."""
+def test_commands_fanout_applies_claude_override(tmp_path: Path) -> None:
+    """Commands fan-out applies override (full-file replacement, Invariant 4).
+
+    Pin-and-invert from ``test_commands_fanout_does_not_apply_override_under_gate``
+    (PR-D-prep #627). PR-D C1a removes ``_PR_C_ACTIVE_TYPES`` so the fan-out
+    application site lights up. 3-assertion marker pattern (per
+    ``feedback_pin_invert_symmetric_assertion``): canonical body absent +
+    override marker present + byte-equality.
+    """
     canonical_dir = tmp_path / ".memtomem" / "commands"
     canonical_dir.mkdir(parents=True)
     (canonical_dir / "baz.md").write_text(_SAMPLE_COMMAND_BODY, encoding="utf-8")
 
     overrides_dir = tmp_path / ".memtomem" / "commands" / "baz" / "overrides"
     overrides_dir.mkdir(parents=True)
-    would_be_override = b"# would-be command override\n"
-    (overrides_dir / "claude.md").write_bytes(would_be_override)
+    override_body = b"# OVERRIDE_MARKER_COMMAND\nclaude full replacement body\n"
+    (overrides_dir / "claude.md").write_bytes(override_body)
 
     generate_all_commands(tmp_path, runtimes=["claude_commands"])
 
     runtime_file = tmp_path / ".claude" / "commands" / "baz.md"
     assert runtime_file.is_file()
-    # Positive assertion mirrors the agents counterpart — see comment there.
-    assert b"Command body." in runtime_file.read_bytes(), (
-        "runtime file does not contain canonical body — generator failure?"
+    body = runtime_file.read_bytes()
+    assert b"Command body." not in body, (
+        "canonical body still present despite gate removed — override not applied?"
     )
-    assert runtime_file.read_bytes() != would_be_override, (
-        "override applied despite _PR_C_ACTIVE_TYPES gate active for commands"
+    assert b"OVERRIDE_MARKER_COMMAND" in body, (
+        "override marker absent — override file not seeded correctly?"
     )
+    assert body == override_body
 
 
 # ── skills fan-out applies overrides correctly ─────────────────────────

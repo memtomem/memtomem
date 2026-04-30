@@ -49,9 +49,9 @@ _MAX_LEN = 64
 # v1 covers Claude / Gemini / Codex across skills, agents, commands. The
 # ``("commands", "codex")`` row is a placeholder — there is no
 # ``codex_commands`` generator yet (Codex slash prompts are user-scope and
-# upstream-deprecated; PR-C does not activate that surface). The
-# ``_PR_C_ACTIVE_TYPES`` guard in :mod:`memtomem.context.override` keeps
-# all rows except skills inactive in v1.
+# upstream-deprecated). The matrix entry stays for the day Codex commands
+# ship; until then, ``render_seed_bytes`` raises ``NotImplementedError``
+# for ``("commands", "codex")``.
 OVERRIDE_FORMATS: dict[tuple[str, str], tuple[str, str]] = {
     ("skills", "claude"): ("claude", "md"),
     ("skills", "gemini"): ("gemini", "md"),
