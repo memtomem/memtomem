@@ -49,6 +49,16 @@ class BuiltinExcludePatternsResponse(BaseModel):
     noise: list[str]
 
 
+class PrivacyPatternEntry(BaseModel):
+    pattern: str
+    flags: str
+
+
+class PrivacyPatternsResponse(BaseModel):
+    patterns: list[PrivacyPatternEntry]
+    sha: str
+
+
 class ConfigDecayOut(BaseModel):
     enabled: bool
     half_life_days: float

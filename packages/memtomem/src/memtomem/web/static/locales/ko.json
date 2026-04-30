@@ -186,6 +186,10 @@
   "index.add_content_placeholder": "여기에 기억을 작성하세요…",
   "index.add_btn": "추가",
 
+  "compose.privacy_warning_title": "비밀 정보 가능성",
+  "compose.privacy_warning_message": "API 키로 보이는 내용이 발견됐습니다. 이 내용은 로컬 DB 에 그대로 저장되고 검색에 노출됩니다. 계속할까요?",
+  "compose.privacy_warning_proceed": "계속",
+
   "settings.nav.general": "일반",
   "settings.nav.integrations": "연동",
   "settings.nav.runtime": "런타임",

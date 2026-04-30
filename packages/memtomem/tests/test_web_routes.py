@@ -404,6 +404,108 @@ class TestConfig:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/privacy/patterns (issue #580)
+# ---------------------------------------------------------------------------
+
+
+class TestPrivacyPatterns:
+    """The Web UI compose-mode privacy warning fetches LTM secret
+    patterns from this endpoint and runs them client-side against the
+    textarea before submission. The endpoint is read-only metadata —
+    no ``require_configured`` gate, mirroring ``/api/config`` and
+    ``/api/indexing/builtin-exclude-patterns``."""
+
+    async def test_returns_documented_shape(self, client: AsyncClient):
+        from memtomem import privacy
+
+        resp = await client.get("/api/privacy/patterns")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert set(data.keys()) == {"patterns", "sha"}
+
+        assert isinstance(data["sha"], str)
+        assert len(data["sha"]) == 64
+        assert all(c in "0123456789abcdef" for c in data["sha"])
+
+        assert isinstance(data["patterns"], list)
+        assert len(data["patterns"]) == len(privacy.DEFAULT_PATTERNS)
+        # Each entry's flags is a (possibly empty) string of distinct
+        # chars from the JS-compatible subset the translator emits.
+        # ``g`` (global) and ``y`` (sticky) are JS-only — the lifter
+        # never produces them; ``x`` (verbose) is hard-rejected.
+        allowed = set("imsu")
+        for entry in data["patterns"]:
+            assert set(entry.keys()) == {"pattern", "flags"}
+            assert isinstance(entry["pattern"], str) and entry["pattern"]
+            flags = entry["flags"]
+            assert isinstance(flags, str)
+            assert len(flags) == len(set(flags)), (
+                f"duplicate flag char in {flags!r} — JS rejects new RegExp(body, 'ii')"
+            )
+            assert set(flags) <= allowed, (
+                f"unexpected flag in {flags!r}; allowed: {sorted(allowed)}"
+            )
+
+    async def test_patterns_match_translator_over_default_set(self, client: AsyncClient):
+        """Drift guard: the wire patterns must equal what
+        ``to_js_pattern`` produces for the live ``DEFAULT_PATTERNS``.
+        If anyone touches the source tuple without re-deriving the JS
+        view, this fails."""
+        from memtomem import privacy
+
+        resp = await client.get("/api/privacy/patterns")
+        wire = resp.json()["patterns"]
+        derived = [
+            {"pattern": body, "flags": flags}
+            for body, flags in (privacy.to_js_pattern(p) for p in privacy.DEFAULT_PATTERNS)
+        ]
+        assert wire == derived
+
+    async def test_sha_locks_serialization_choice(self, client: AsyncClient):
+        """SHA is computed from the live ``JS_PATTERNS`` using a
+        canonical JSON encoding (sort_keys=True + tight separators).
+        Locks *serialization* only — adding a 10th pattern would fail
+        the parity test above, not this one."""
+        import hashlib
+        import json
+
+        from memtomem import privacy
+
+        resp = await client.get("/api/privacy/patterns")
+        expected = hashlib.sha256(
+            json.dumps(
+                privacy.JS_PATTERNS,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        assert resp.json()["sha"] == expected
+
+    async def test_no_require_configured_gate(
+        self,
+        app,
+        client: AsyncClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Read-only metadata endpoint — must serve patterns even when
+        ``~/.memtomem/config.json`` is absent. Mirrors ``/api/config``
+        (also unguarded). Verified by *restoring* the real gate
+        (the shared ``app`` fixture stubs it to ``lambda: None`` so
+        all unrelated tests don't depend on the developer's real
+        config) and pointing HOME at an empty tmpdir — if the gate
+        had crept onto the route, this would 409."""
+        from memtomem.web.deps import require_configured
+
+        del app.dependency_overrides[require_configured]
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        resp = await client.get("/api/privacy/patterns")
+        assert resp.status_code == 200, resp.text
+        assert "patterns" in resp.json()
+
+
+# ---------------------------------------------------------------------------
 # GET /api/search
 # ---------------------------------------------------------------------------
 

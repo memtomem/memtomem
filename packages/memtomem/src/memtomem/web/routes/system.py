@@ -49,6 +49,8 @@ from memtomem.web.schemas.config import (
     EmbeddingConfigInfo,
     EmbeddingResetResponse,
     EmbeddingStatusResponse,
+    PrivacyPatternEntry,
+    PrivacyPatternsResponse,
 )
 from memtomem.web.schemas.memory import (
     AddMemoryRequest,
@@ -268,6 +270,28 @@ async def get_builtin_exclude_patterns() -> BuiltinExcludePatternsResponse:
     return BuiltinExcludePatternsResponse(
         secret=list(_BUILTIN_SECRET_PATTERNS),
         noise=list(_BUILTIN_NOISE_PATTERNS),
+    )
+
+
+@router.get("/privacy/patterns", response_model=PrivacyPatternsResponse)
+async def get_privacy_patterns() -> PrivacyPatternsResponse:
+    """Return the LTM secret-class redaction patterns in JS-RegExp shape.
+
+    The Web UI's compose-mode privacy warning fetches this once on load
+    and uses it to scan textarea content client-side. Each entry is a
+    ``{pattern, flags}`` pair already translated to JS-compatible form
+    by ``privacy.to_js_pattern`` — Python inline flag groups like
+    ``(?i)`` are lifted out of the body, since ``new RegExp("(?i)…")``
+    rejects them.
+
+    Read-only metadata; no ``require_configured`` gate (mirrors
+    ``/api/config`` and ``/api/indexing/builtin-exclude-patterns``).
+    """
+    from memtomem import privacy
+
+    return PrivacyPatternsResponse(
+        patterns=[PrivacyPatternEntry(**entry) for entry in privacy.JS_PATTERNS],
+        sha=privacy.JS_PATTERNS_SHA,
     )
 
 

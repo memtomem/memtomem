@@ -27,6 +27,8 @@ redaction guard here still applies. STM-bypass is not safety-bypass.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
 from collections import defaultdict
@@ -53,6 +55,141 @@ DEFAULT_PATTERNS: tuple[str, ...] = (
     r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
     r"(?i)(BEGIN\s+(RSA|EC|OPENSSH|DSA|PGP)\s+PRIVATE\s+KEY)",
 )
+
+
+# ---------------------------------------------------------------------------
+# JS-RegExp translation
+# ---------------------------------------------------------------------------
+#
+# The Web UI's compose-mode privacy warning needs to scan textarea content
+# client-side using the same patterns the server enforces. Python's ``re``
+# and JavaScript's ``RegExp`` diverge on inline flag groups: ``(?i)foo``
+# parses in Python but raises ``SyntaxError: Invalid group`` in JS. The
+# translator below lifts a position-0 inline flag group into JS-style
+# global flags and hard-rejects any construct it can't safely translate,
+# so a silent semantic divergence cannot reach the client.
+
+_LEADING_INLINE_FLAGS_RE = re.compile(r"^\(\?([imsux]+)\)")
+_INLINE_FLAG_GROUP_RE = re.compile(r"\(\?[imsux]+\)")
+_NAMED_GROUP_RE = re.compile(r"\(\?P<")
+_INLINE_COMMENT_RE = re.compile(r"\(\?#")
+_FLAG_NEGATION_RE = re.compile(r"\(\?[imsux]*-[imsux]+[:)]")
+_PYTHON_ANCHOR_RE = re.compile(r"\\[AZ]")
+
+# Map Python inline flag chars to ``re`` module flags so the translated
+# body can be sanity-compiled. ``x`` (verbose) is intentionally absent —
+# verbose mode strips whitespace + ``#`` comments and has no JS equivalent,
+# so it's hard-rejected upstream.
+_PY_FLAG_TO_RE = {
+    "i": re.IGNORECASE,
+    "m": re.MULTILINE,
+    "s": re.DOTALL,
+    "u": re.UNICODE,
+}
+
+
+def _flags_str_to_re_flags(flags: str) -> int:
+    out = 0
+    for ch in flags:
+        out |= _PY_FLAG_TO_RE.get(ch, 0)
+    return out
+
+
+def to_js_pattern(pat: str) -> tuple[str, str]:
+    """Translate a Python regex string to a JS-RegExp ``(body, flags)`` pair.
+
+    Translates only what ``DEFAULT_PATTERNS`` actually uses today: a
+    position-0 inline flag group like ``(?i)foo`` or ``(?ims)foo`` is
+    lifted into a flags string and stripped from the body. Everything
+    else passes through unchanged.
+
+    Hard-rejects (raises ``ValueError``) any construct whose JS semantics
+    differ or don't exist:
+
+    - **Mid-pattern inline flag groups** (anywhere except position 0).
+      In Python, ``foo(?i)bar`` makes ``bar`` case-insensitive while
+      ``foo`` stays sensitive — JS has no per-segment flag scope, so a
+      naive lift would silently change semantics.
+    - **Verbose mode** (``(?x)`` or any leading group containing ``x``).
+      Verbose mode strips whitespace + ``#`` comments before matching,
+      which the translator does not do.
+    - **Inline flag negation** like ``(?-i)`` or ``(?i-m:...)`` —
+      same per-segment-scope problem as mid-pattern lifts.
+    - **Named groups** ``(?P<name>...)`` — JS uses ``(?<name>...)`` and
+      a rewrite is not implemented (none of the current 9 patterns use
+      named groups).
+    - **Inline comments** ``(?#comment)`` — no JS equivalent.
+    - **Python-only anchors** ``\\A`` and ``\\Z`` — use ``^`` / ``$``
+      with the ``m`` flag in JS instead.
+
+    Returns ``(body, flags)`` where ``flags`` is a (possibly empty) string
+    of distinct chars from ``imsu``. The caller is responsible for
+    feeding this into ``new RegExp(body, flags)``.
+    """
+    if _PYTHON_ANCHOR_RE.search(pat):
+        raise ValueError(
+            f"Pattern {pat!r} uses Python-only construct: \\A or \\Z anchor "
+            "(JS has no equivalent — use ^ / $ with the m flag)"
+        )
+    if _NAMED_GROUP_RE.search(pat):
+        raise ValueError(
+            f"Pattern {pat!r} uses Python-only construct: named group (?P<...>) "
+            "(JS uses (?<...>); rewrite not implemented)"
+        )
+    if _INLINE_COMMENT_RE.search(pat):
+        raise ValueError(f"Pattern {pat!r} uses Python-only construct: inline comment (?#...)")
+    if _FLAG_NEGATION_RE.search(pat):
+        raise ValueError(
+            f"Pattern {pat!r} uses Python-only construct: inline flag negation "
+            "(JS has no per-segment flag scope)"
+        )
+
+    body = pat
+    flags = ""
+    leading = _LEADING_INLINE_FLAGS_RE.match(pat)
+    if leading:
+        flag_chars = leading.group(1)
+        if "x" in flag_chars:
+            raise ValueError(
+                f"Pattern {pat!r} uses Python-only construct: verbose mode (?x) "
+                "(verbose mode strips whitespace and #-comments — JS has no equivalent)"
+            )
+        flags = "".join(sorted(set(flag_chars)))
+        body = pat[leading.end() :]
+
+    # Anything that still looks like an inline flag group is mid-pattern.
+    # JS ``RegExp`` flags are global to the regex; lifting a mid-pattern
+    # ``(?i)`` to a global flag would change semantics (the unflagged
+    # prefix would also become case-insensitive).
+    if _INLINE_FLAG_GROUP_RE.search(body):
+        raise ValueError(
+            f"Pattern {pat!r} uses Python-only construct: mid-pattern inline flag group "
+            "(JS RegExp has no per-segment flag scope)"
+        )
+
+    # Sanity check: the translated body + lifted flags must still parse
+    # as a valid Python regex. This is the translator's own contract,
+    # not a JS-runtime check.
+    try:
+        re.compile(body, _flags_str_to_re_flags(flags))
+    except re.error as exc:  # pragma: no cover — defensive; current patterns all parse
+        raise ValueError(
+            f"Pattern {pat!r} translation produced invalid regex {body!r}: {exc}"
+        ) from exc
+
+    return body, flags
+
+
+# Pre-computed JS-shape view of ``DEFAULT_PATTERNS`` and a stable hash over
+# it. Both are computed once at import (the pattern tuple is immutable).
+JS_PATTERNS: tuple[dict[str, str], ...] = tuple(
+    {"pattern": body, "flags": flags}
+    for body, flags in (to_js_pattern(p) for p in DEFAULT_PATTERNS)
+)
+JS_PATTERNS_SHA: str = hashlib.sha256(
+    json.dumps(JS_PATTERNS, sort_keys=True, separators=(",", ":")).encode("utf-8")
+).hexdigest()
+
 
 _SCAN_WINDOW = 10_000
 

@@ -186,6 +186,10 @@
   "index.add_content_placeholder": "Write your memory here…",
   "index.add_btn": "Add",
 
+  "compose.privacy_warning_title": "Possible secret detected",
+  "compose.privacy_warning_message": "What looks like an API key was found. This content will be stored as-is in the local database and exposed to search — proceed anyway?",
+  "compose.privacy_warning_proceed": "Proceed",
+
   "settings.nav.general": "General",
   "settings.nav.integrations": "Integrations",
   "settings.nav.runtime": "Runtime",

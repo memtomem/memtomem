@@ -40,6 +40,12 @@ const STATE = {
   tagsSortBy: 'count-desc',
   serverConfig: null,
   serverDefaults: null,
+  // Compiled RegExp objects from /api/privacy/patterns (#580). The
+  // compose-mode Add handler scans textarea content against these and
+  // shows a confirm dialog on a hit. Lazy-init: ``null`` until the
+  // boot-time fetch resolves; on fetch failure stays ``null`` and the
+  // scan is silently skipped (defense-in-depth, not a hard gate).
+  privacyPatterns: null,
   lastRetrievalStats: null,
   groupMode: false,
   cmdPaletteOpen: false,
@@ -70,6 +76,11 @@ const STATE = {
     const uiModePromise = initUiMode();
     if (typeof I18N !== 'undefined') await I18N.init();
     await uiModePromise;
+    // Fire-and-forget: privacy-pattern fetch for the compose warning.
+    // Soft-fails if the endpoint is unavailable (cache stays null,
+    // submit handler skips the scan). Not awaited — Add doesn't gate
+    // on it (#580).
+    loadPrivacyPatterns();
     renderRecentChips();
     _initTabHelp();
     // Re-apply i18n when language changes (dynamic JS strings)
@@ -3042,9 +3053,49 @@ qs('folder-hint-sources-link')?.addEventListener('click', e => {
 // Add Memory
 // ---------------------------------------------------------------------------
 
+// Compile the server's ``/api/privacy/patterns`` payload into JS RegExp
+// objects, cached on STATE.privacyPatterns. Soft-fail on network /
+// translator error: leave the cache null and the submit handler skips
+// the scan rather than break Add on a transient blip. The server's
+// /api/add route does not invoke privacy.scan either, so a strict
+// client gate would not be real security — this is defense-in-depth
+// for accidental paste, not the trust boundary.
+async function loadPrivacyPatterns() {
+  try {
+    const data = await api('GET', '/api/privacy/patterns');
+    const entries = (data && data.patterns) || [];
+    STATE.privacyPatterns = entries
+      .map(({ pattern, flags }) => {
+        try { return new RegExp(pattern, flags); }
+        catch (e) { console.warn('[privacy] skip pattern', pattern, e); return null; }
+      })
+      .filter(Boolean);
+  } catch (err) {
+    console.warn('[privacy] pattern fetch failed; compose warning disabled', err);
+    STATE.privacyPatterns = null;
+  }
+}
+
 qs('add-btn').addEventListener('click', async () => {
   const content = qs('add-content').value.trim();
   if (!content) { setMsg(qs('add-msg'), 'Content is required.', true); return; }
+
+  // Privacy pre-check (#580). On a hit, surface a confirm dialog that
+  // names the *concrete behavior* — "stored as-is in the local
+  // database and exposed to search" — rather than abstract anxiety.
+  // Clean inputs and a missing pattern cache both pass through
+  // silently: no checkmark, no helper text. A success indicator on a
+  // clean input would be peak false security since the regex misses
+  // many real secrets.
+  const patterns = STATE.privacyPatterns;
+  if (patterns && patterns.some(re => re.test(content))) {
+    const ok = await showConfirm({
+      title: t('compose.privacy_warning_title'),
+      message: t('compose.privacy_warning_message'),
+      confirmText: t('compose.privacy_warning_proceed'),
+    });
+    if (!ok) return;
+  }
 
   const title = qs('add-title').value.trim() || null;
   const tagsRaw = qs('add-tags').value.trim();

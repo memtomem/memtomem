@@ -251,6 +251,40 @@ def test_html_dev_mode_banner_is_present_and_starts_hidden() -> None:
     )
 
 
+def test_app_js_pins_compose_privacy_warning() -> None:
+    """JS-source pin for the compose-mode privacy warning (#580).
+
+    The test suite has no JS runtime, so we grep ``app.js`` for the
+    wiring that the integration test would otherwise verify:
+
+    - the boot-time fetch site exists,
+    - the cache field on STATE is populated from that fetch,
+    - regex objects are constructed from the documented
+      ``{pattern, flags}`` shape (a future refactor that drops the
+      flags arg would silently make ``(?i)``-lifted patterns
+      case-sensitive),
+    - the i18n key the confirm dialog reads is present.
+
+    This pin covers wiring only; behaviour parity (Python ``re`` of
+    translated body+flags == original pattern) is in
+    ``test_privacy.py:TestJsPatternTranslation``.
+    """
+    js = _read_static("app.js")
+    assert "'/api/privacy/patterns'" in js, "privacy patterns fetch site missing"
+    assert "STATE.privacyPatterns" in js, "STATE cache field for privacy patterns missing"
+    assert "compose.privacy_warning_title" in js, "compose privacy i18n key not wired"
+    # Pattern-and-flags constructor — locks the {pattern, flags} shape
+    # so a future refactor that drops the flags argument fails this
+    # pin instead of silently demoting case-insensitive matches.
+    assert "new RegExp(pattern, flags)" in js, (
+        "RegExp constructor must use both pattern and flags from the wire shape"
+    )
+    en = _read_static("locales/en.json")
+    ko = _read_static("locales/ko.json")
+    assert '"compose.privacy_warning_title"' in en
+    assert '"compose.privacy_warning_title"' in ko
+
+
 def test_app_js_pins_ui_mode_default_and_toast_copy() -> None:
     """JS grep pin — the test suite has no JS runtime. A source scan catches
     regressions in the three behaviors we rely on."""
