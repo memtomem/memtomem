@@ -63,7 +63,7 @@ const I18N = (() => {
     applyDOM();
     // Update the toggle button label
     const btn = document.getElementById('lang-toggle');
-    if (btn) btn.textContent = lang === 'ko' ? 'EN' : '한';
+    if (btn) btn.textContent = lang === 'ko' ? 'EN' : 'KO';
   }
 
   /** Initialise: detect language, load locale, apply. */
@@ -76,7 +76,7 @@ const I18N = (() => {
     applyDOM();
     const btn = document.getElementById('lang-toggle');
     if (btn) {
-      btn.textContent = lang === 'ko' ? 'EN' : '한';
+      btn.textContent = lang === 'ko' ? 'EN' : 'KO';
       btn.addEventListener('click', () => {
         setLang(_lang === 'ko' ? 'en' : 'ko');
         // Notify app.js that language changed
