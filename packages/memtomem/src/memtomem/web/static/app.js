@@ -54,6 +54,11 @@ const STATE = {
   // through ``_indexingTryStart`` / ``_indexingEnd``; reading directly
   // is fine.
   indexing: false,
+  // Active ``setTimeout`` handle for ``_indexingPollUntilIdle``. Single-
+  // flight guard so visibilitychange + boot-hydration don't stack
+  // concurrent pollers. Cleared by ``_indexingEnd`` and by the tick
+  // itself before re-arming.
+  _indexingPollHandle: null,
   lastRetrievalStats: null,
   groupMode: false,
   cmdPaletteOpen: false,

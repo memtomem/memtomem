@@ -1128,6 +1128,15 @@ class TestIndexingActive:
         assert resp.status_code == 200
         assert resp.json() == {"active": True}
 
+    async def test_no_store_cache_header(self, app, client: AsyncClient):
+        """``Cache-Control: no-store`` keeps a polling client from being
+        served a stale ``active=false`` by an intermediary while a run
+        starts up. Mirrors ``/index/stream``'s no-cache hygiene.
+        """
+        app.state.index_engine.is_active = False
+        resp = await client.get("/api/indexing/active")
+        assert resp.headers.get("cache-control") == "no-store"
+
 
 # ---------------------------------------------------------------------------
 # GET /api/embedding-status

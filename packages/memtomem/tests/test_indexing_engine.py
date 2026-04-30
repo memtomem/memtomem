@@ -497,6 +497,29 @@ class TestActiveRunsCounter:
         finally:
             engine._index_file = orig  # type: ignore[method-assign]
 
+    async def test_decrements_on_stream_aclose(self, components, memory_dir):
+        """Async-generator path relies on ``GeneratorExit`` triggering the
+        ``finally`` block when the consumer aborts mid-stream (the
+        realistic SSE-disconnect case). Locks the contract in so a
+        future refactor that swaps ``try/finally`` for, say, an
+        ``ExitStack`` doesn't silently break cancellation cleanup.
+        """
+        # Two files so the generator suspends between yields rather
+        # than running through to ``complete`` before we can ``aclose``.
+        (memory_dir / "a.md").write_text("# A\n\nfirst")
+        (memory_dir / "b.md").write_text("# B\n\nsecond")
+        engine = components.index_engine
+        assert engine.is_active is False
+
+        gen = engine.index_path_stream(memory_dir, recursive=True)
+        ev = await gen.__anext__()
+        assert ev.get("type") == "progress"
+        assert engine._active_runs == 1
+
+        await gen.aclose()
+        assert engine.is_active is False
+        assert engine._active_runs == 0
+
     async def test_decrements_on_exception(self, components, memory_dir):
         """``finally`` must restore the counter when the inner work raises.
         Otherwise a single failing run would stick ``is_active`` on

@@ -807,10 +807,10 @@ class IndexEngine:
           same loose shape as ``IndexingStats.errors`` so non-stream UI
           handlers reuse verbatim. Empty list when the run had no errors.
 
-        Note: this path runs **outside** ``_index_lock`` (a deliberate
-        carve-out so progress events can interleave with other engine
-        work). The ``_active_runs`` counter is bumped here too so
-        ``GET /api/indexing/active`` covers stream runs uniformly.
+        Note: this path runs **outside** ``_index_lock`` (unlike
+        ``index_path`` / ``index_file``). The ``_active_runs`` counter
+        is bumped here too so ``GET /api/indexing/active`` covers
+        stream runs uniformly.
         """
         self._active_runs += 1
         try:
