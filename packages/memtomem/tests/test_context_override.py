@@ -206,6 +206,13 @@ def test_agents_fanout_does_not_apply_override_under_gate(tmp_path: Path) -> Non
 
     runtime_file = tmp_path / ".claude" / "agents" / "bar.md"
     assert runtime_file.is_file()
+    # Positive assertion: canonical body marker must be present so a generator
+    # failure that writes garbage cannot be mistaken for gate-correct behavior.
+    # PR-D inverts: marker disappears (override replaces full body), and the
+    # negative assertion below flips to ``==``.
+    assert b"Body of the agent." in runtime_file.read_bytes(), (
+        "runtime file does not contain canonical body — generator failure?"
+    )
     assert runtime_file.read_bytes() != would_be_override, (
         "override applied despite _PR_C_ACTIVE_TYPES gate active for agents"
     )
@@ -227,6 +234,10 @@ def test_commands_fanout_does_not_apply_override_under_gate(tmp_path: Path) -> N
 
     runtime_file = tmp_path / ".claude" / "commands" / "baz.md"
     assert runtime_file.is_file()
+    # Positive assertion mirrors the agents counterpart — see comment there.
+    assert b"Command body." in runtime_file.read_bytes(), (
+        "runtime file does not contain canonical body — generator failure?"
+    )
     assert runtime_file.read_bytes() != would_be_override, (
         "override applied despite _PR_C_ACTIVE_TYPES gate active for commands"
     )

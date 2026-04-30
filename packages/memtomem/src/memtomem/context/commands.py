@@ -383,6 +383,8 @@ def generate_all_commands(
             out_path = gen.target_file(project_root, cmd.name)
             atomic_write_text(out_path, content)
             # ADR-0008 Invariant 4: per-vendor override replaces the runtime file.
+            # Race: see PR-D' for the unified write path that closes the
+            # canonical→override window. Same pattern as skills.py:213-220.
             vendor = GENERATOR_VENDOR.get(target)
             if vendor is not None:
                 override_path = _override.resolve(project_root, "commands", cmd.name, vendor)
