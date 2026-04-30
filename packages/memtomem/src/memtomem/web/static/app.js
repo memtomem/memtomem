@@ -3087,6 +3087,14 @@ qs('add-btn').addEventListener('click', async () => {
   // silently: no checkmark, no helper text. A success indicator on a
   // clean input would be peak false security since the regex misses
   // many real secrets.
+  //
+  // Scan-window asymmetry: ``re.test()`` here scans the entire
+  // textarea, while server-side ``privacy.scan()`` caps at the first
+  // 10K chars (``_SCAN_WINDOW`` in privacy.py). Today moot —
+  // ``/api/add`` does not invoke ``privacy.scan`` — but if the
+  // ADR-tracked server gate ever lands, the two would disagree on
+  // very long content. The client is more permissive (covers more);
+  // the server boundary is the source of truth.
   const patterns = STATE.privacyPatterns;
   if (patterns && patterns.some(re => re.test(content))) {
     const ok = await showConfirm({

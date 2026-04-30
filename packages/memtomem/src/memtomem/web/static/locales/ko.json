@@ -187,7 +187,7 @@
   "index.add_btn": "추가",
 
   "compose.privacy_warning_title": "비밀 정보 가능성",
-  "compose.privacy_warning_message": "API 키로 보이는 내용이 발견됐습니다. 이 내용은 로컬 DB 에 그대로 저장되고 검색에 노출됩니다. 계속할까요?",
+  "compose.privacy_warning_message": "API 키로 보이는 내용이 발견됐습니다. 이 내용은 로컬 DB에 그대로 저장되고 검색에 노출됩니다. 계속할까요?",
   "compose.privacy_warning_proceed": "계속",
 
   "settings.nav.general": "일반",

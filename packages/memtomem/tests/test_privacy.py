@@ -193,7 +193,7 @@ class TestJsPatternTranslation:
         body, flags = privacy.to_js_pattern(original)
 
         original_re = re.compile(original)
-        translated_re = re.compile(body, privacy._flags_str_to_re_flags(flags))
+        translated_re = re.compile(body, privacy.flags_str_to_re_flags(flags))
 
         # Positive fixture: same hits, same spans.
         orig_hits = [m.span() for m in original_re.finditer(positive)]

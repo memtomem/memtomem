@@ -88,7 +88,7 @@ _PY_FLAG_TO_RE = {
 }
 
 
-def _flags_str_to_re_flags(flags: str) -> int:
+def flags_str_to_re_flags(flags: str) -> int:
     out = 0
     for ch in flags:
         out |= _PY_FLAG_TO_RE.get(ch, 0)
@@ -125,6 +125,17 @@ def to_js_pattern(pat: str) -> tuple[str, str]:
     Returns ``(body, flags)`` where ``flags`` is a (possibly empty) string
     of distinct chars from ``imsu``. The caller is responsible for
     feeding this into ``new RegExp(body, flags)``.
+
+    Note on fail-loud-at-import: ``JS_PATTERNS`` below calls this for
+    every entry in ``DEFAULT_PATTERNS`` at module import. Adding a
+    pattern that this translator can't handle will break
+    ``from memtomem import privacy`` — and therefore ``mm web`` startup,
+    every test that imports privacy, and every MCP ``mem_add`` call.
+    This is **intentional**: a silent client-warning bypass would be
+    worse than a loud failure that forces the contributor to either
+    translate the construct or accept the breakage. If you hit this
+    while adding a pattern, extend ``to_js_pattern`` rather than
+    suppressing the error.
     """
     if _PYTHON_ANCHOR_RE.search(pat):
         raise ValueError(
@@ -171,7 +182,7 @@ def to_js_pattern(pat: str) -> tuple[str, str]:
     # as a valid Python regex. This is the translator's own contract,
     # not a JS-runtime check.
     try:
-        re.compile(body, _flags_str_to_re_flags(flags))
+        re.compile(body, flags_str_to_re_flags(flags))
     except re.error as exc:  # pragma: no cover — defensive; current patterns all parse
         raise ValueError(
             f"Pattern {pat!r} translation produced invalid regex {body!r}: {exc}"
