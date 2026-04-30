@@ -186,7 +186,7 @@
   "index.upload_btn": "Upload & Index",
   "index.upload_usage_label": "Saved in",
   "index.upload_usage_count_one": "{count} file",
-  "index.upload_usage_count_many": "{count} files",
+  "index.upload_usage_count_other": "{count} files",
   "index.upload_usage_oldest": "oldest {rel}",
   "index.add_heading_label": "Title",
   "index.add_heading_placeholder": "Optional heading",
@@ -484,6 +484,13 @@
   "common.expire": "Expire",
   "common.sync": "Sync",
 
+  "time.relative.just_now": "just now",
+  "time.relative.minutes_ago": "{m}m ago",
+  "time.relative.hours_ago": "{h}h ago",
+  "time.relative.days_ago": "{d}d ago",
+  "time.relative.months_ago": "{mo}mo ago",
+  "time.relative.years_ago": "{y}y ago",
+
   "toast.copied": "Copied!",
   "toast.pinned": "Pinned!",
   "toast.unpinned": "Unpinned",
@@ -606,7 +613,7 @@
 
   "sources.memory_dirs.title": "Memory Dirs",
   "sources.memory_dirs.total_one": "{count} dir",
-  "sources.memory_dirs.total_many": "{count} dirs",
+  "sources.memory_dirs.total_other": "{count} dirs",
   "sources.memory_dirs.category.user": "User",
   "sources.memory_dirs.category.claude_memory": "Claude projects",
   "sources.memory_dirs.category.claude_plans": "Claude plans",

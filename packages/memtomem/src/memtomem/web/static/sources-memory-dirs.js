@@ -447,7 +447,7 @@ function _buildMemoryDirsPanel(initialDirs) {
     const totalCount = document.createElement('span');
     totalCount.className = 'memory-dirs-total';
     totalCount.textContent = t(
-      dirs.length === 1 ? 'sources.memory_dirs.total_one' : 'sources.memory_dirs.total_many',
+      dirs.length === 1 ? 'sources.memory_dirs.total_one' : 'sources.memory_dirs.total_other',
       { count: dirs.length },
     );
     titleGroup.appendChild(totalCount);

@@ -247,16 +247,16 @@ function relativeTime(dateStr) {
   if (!dateStr) return '';
   const diff = Date.now() - new Date(dateStr).getTime();
   const s = Math.floor(diff / 1000);
-  if (s < 60) return 'just now';
+  if (s < 60) return t('time.relative.just_now');
   const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
+  if (m < 60) return t('time.relative.minutes_ago', { m });
   const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
+  if (h < 24) return t('time.relative.hours_ago', { h });
   const d = Math.floor(h / 24);
-  if (d < 30) return `${d}d ago`;
+  if (d < 30) return t('time.relative.days_ago', { d });
   const mo = Math.floor(d / 30);
-  if (mo < 12) return `${mo}mo ago`;
-  return `${Math.floor(mo / 12)}y ago`;
+  if (mo < 12) return t('time.relative.months_ago', { mo });
+  return t('time.relative.years_ago', { y: Math.floor(mo / 12) });
 }
 
 // ── Temporal-validity badge (RFC §Goal 7) ──
@@ -3312,7 +3312,7 @@ async function loadUploadUsage() {
     if (!d.file_count) { hide(el); return; }
     const countKey = d.file_count === 1
       ? 'index.upload_usage_count_one'
-      : 'index.upload_usage_count_many';
+      : 'index.upload_usage_count_other';
     const parts = [
       t(countKey, { count: d.file_count }),
       formatBytes(d.total_bytes),

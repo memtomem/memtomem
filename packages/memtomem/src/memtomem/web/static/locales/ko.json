@@ -186,7 +186,7 @@
   "index.upload_btn": "업로드 & 인덱스",
   "index.upload_usage_label": "저장 위치",
   "index.upload_usage_count_one": "{count}개 파일",
-  "index.upload_usage_count_many": "{count}개 파일",
+  "index.upload_usage_count_other": "{count}개 파일",
   "index.upload_usage_oldest": "가장 오래된 {rel}",
   "index.add_heading_label": "제목",
   "index.add_heading_placeholder": "선택적 헤딩",
@@ -484,6 +484,13 @@
   "common.expire": "만료",
   "common.sync": "동기화",
 
+  "time.relative.just_now": "방금",
+  "time.relative.minutes_ago": "{m}분 전",
+  "time.relative.hours_ago": "{h}시간 전",
+  "time.relative.days_ago": "{d}일 전",
+  "time.relative.months_ago": "{mo}개월 전",
+  "time.relative.years_ago": "{y}년 전",
+
   "toast.copied": "복사됨!",
   "toast.pinned": "고정됨!",
   "toast.unpinned": "고정 해제됨",
@@ -606,7 +613,7 @@
 
   "sources.memory_dirs.title": "Memory 디렉터리",
   "sources.memory_dirs.total_one": "{count}개",
-  "sources.memory_dirs.total_many": "{count}개",
+  "sources.memory_dirs.total_other": "{count}개",
   "sources.memory_dirs.category.user": "사용자",
   "sources.memory_dirs.category.claude_memory": "Claude 프로젝트",
   "sources.memory_dirs.category.claude_plans": "Claude plans",
