@@ -135,12 +135,6 @@ window.addEventListener('langchange', () => {
   _syncHeaderConfig();
 });
 
-// Latest preview state per input; keyed by the namespace input element so
-// the path-typing path can know whether the placeholder currently reflects
-// a fresh preview vs. a stale config-derived default. Consulted by the
-// ``input`` invalidation handler.
-const _NS_PREVIEW_STATE = new WeakMap();
-
 // Compute the config-derived placeholder (no path entered yet). Pulled
 // out of ``_syncIndexHints`` so the preview-invalidation handler can
 // reset to it after the user clears the path or namespace input.
@@ -162,15 +156,9 @@ function _syncIndexHints() {
   const placeholder = _configDerivedNsPlaceholder();
   if (placeholder) {
     const indexNs = qs('index-namespace');
-    if (indexNs) {
-      indexNs.placeholder = placeholder;
-      _NS_PREVIEW_STATE.set(indexNs, { source: 'config' });
-    }
+    if (indexNs) indexNs.placeholder = placeholder;
     const addNs = qs('add-namespace');
-    if (addNs) {
-      addNs.placeholder = placeholder;
-      _NS_PREVIEW_STATE.set(addNs, { source: 'config' });
-    }
+    if (addNs) addNs.placeholder = placeholder;
   }
   _refreshAddFilePlaceholder();
 
@@ -1352,13 +1340,11 @@ async function _fetchPreviewNamespace(pathValue) {
 
 function _setNsPreviewPlaceholder(nsInput, resp) {
   if (!nsInput || !resp) return;
-  const text = renderResolvedNamespaces(resp.resolved_namespaces, {
+  nsInput.placeholder = renderResolvedNamespaces(resp.resolved_namespaces, {
     truncated: resp.truncated,
     scanned: resp.scanned_files,
     mode: 'preview',
   });
-  nsInput.placeholder = text;
-  _NS_PREVIEW_STATE.set(nsInput, { source: 'preview', path: nsInput.dataset.previewPath });
 }
 
 async function _runNsPreview(nsInput, pathInput) {
@@ -1367,16 +1353,14 @@ async function _runNsPreview(nsInput, pathInput) {
   if (!pathValue) {
     // Nothing to preview against — restore the config-derived hint.
     const fallback = _configDerivedNsPlaceholder();
-    if (fallback) {
-      nsInput.placeholder = fallback;
-      _NS_PREVIEW_STATE.set(nsInput, { source: 'config' });
-    }
+    if (fallback) nsInput.placeholder = fallback;
     return;
   }
+  // Race-guard: ``dataset.previewPath`` is the in-flight request's path.
+  // The post-await check below drops responses that arrived after the
+  // user typed a different path.
   nsInput.dataset.previewPath = pathValue;
   const resp = await _fetchPreviewNamespace(pathValue);
-  // Late-arrival guard: if the user has typed a different path since this
-  // request was issued, drop the response on the floor.
   if (nsInput.dataset.previewPath !== pathValue) return;
   if (!resp) {
     const fallback = _configDerivedNsPlaceholder();
@@ -1401,11 +1385,10 @@ function _wirePreviewNamespace(nsInputId, pathInputId) {
   }, 300);
   pathInput.addEventListener('input', debouncedPathPreview);
 
-  // (3) namespace typing → invalidate cache immediately. When the user
-  // clears the field after typing, the next focus should re-preview from
-  // the *current* path, not echo a value frozen at a prior preview call.
+  // (3) namespace typing → invalidate the in-flight race-guard. When the
+  // user clears the field after typing, the next focus should re-preview
+  // from the *current* path, not echo a value frozen at a prior call.
   nsInput.addEventListener('input', () => {
-    _NS_PREVIEW_STATE.delete(nsInput);
     delete nsInput.dataset.previewPath;
     if (!nsInput.value.trim()) {
       const fallback = _configDerivedNsPlaceholder();
@@ -1415,10 +1398,13 @@ function _wirePreviewNamespace(nsInputId, pathInputId) {
 }
 
 _wirePreviewNamespace('index-namespace', 'index-path');
-// Compose tab also exposes a namespace input; the path-equivalent there is
-// the target file path. Wire it the same way for symmetry — preview against
-// the file path the user is composing into.
-_wirePreviewNamespace('add-namespace', 'add-file');
+// Compose tab's ``add-namespace`` input is intentionally not wired — its
+// counterpart ``add-file`` is the *target save path* of a memory being
+// composed, which doesn't exist on disk yet. ``discover_indexable_files``
+// only enumerates existing files, so the preview would return ``[]`` and
+// render a misleading ``(untagged) (preview)`` for what auto-NS would
+// actually produce. Issue #581 scopes the cluster to the Index tab; a
+// "phantom-path" preview API for compose is a follow-up.
 
 fetchServerConfig();
 
