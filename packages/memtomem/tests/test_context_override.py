@@ -16,6 +16,8 @@ import subprocess
 from pathlib import Path
 
 from memtomem.context import override
+from memtomem.context.agents import generate_all_agents
+from memtomem.context.commands import generate_all_commands
 from memtomem.context.install import install_skill
 from memtomem.context.skills import SKILL_GENERATORS, generate_all_skills
 from memtomem.wiki.store import WikiStore
@@ -164,6 +166,70 @@ def test_resolve_skips_commands_in_pr_c(tmp_path: Path) -> None:
     overrides_dir.mkdir(parents=True)
     (overrides_dir / "gemini.toml").write_bytes(b"# would-be command override\n")
     assert override.resolve(tmp_path, "commands", "baz", "gemini") is None
+
+
+# ── fan-out under PR-C gate: application sites pinned inactive for agents/commands
+
+_SAMPLE_AGENT_BODY = """---
+name: bar
+description: test agent
+---
+
+Body of the agent.
+"""
+
+_SAMPLE_COMMAND_BODY = """---
+description: test command
+---
+
+Command body.
+"""
+
+
+def test_agents_fanout_does_not_apply_override_under_gate(tmp_path: Path) -> None:
+    """PR-D-prep adds override application to ``generate_all_agents`` as dead
+    code under the PR-C ``_PR_C_ACTIVE_TYPES`` gate. With the gate active,
+    fan-out must produce canonical-rendered output even when an override file
+    is staged in the project tree. PR-D removes the gate; this test inverts
+    on enable day so the behavior diff is one-line revertable.
+    """
+    canonical_dir = tmp_path / ".memtomem" / "agents"
+    canonical_dir.mkdir(parents=True)
+    (canonical_dir / "bar.md").write_text(_SAMPLE_AGENT_BODY, encoding="utf-8")
+
+    overrides_dir = tmp_path / ".memtomem" / "agents" / "bar" / "overrides"
+    overrides_dir.mkdir(parents=True)
+    would_be_override = b"# would-be agent override\n"
+    (overrides_dir / "claude.md").write_bytes(would_be_override)
+
+    generate_all_agents(tmp_path, runtimes=["claude_agents"])
+
+    runtime_file = tmp_path / ".claude" / "agents" / "bar.md"
+    assert runtime_file.is_file()
+    assert runtime_file.read_bytes() != would_be_override, (
+        "override applied despite _PR_C_ACTIVE_TYPES gate active for agents"
+    )
+
+
+def test_commands_fanout_does_not_apply_override_under_gate(tmp_path: Path) -> None:
+    """Same pin as the agents counterpart — fan-out application site is dead
+    code while the gate is active."""
+    canonical_dir = tmp_path / ".memtomem" / "commands"
+    canonical_dir.mkdir(parents=True)
+    (canonical_dir / "baz.md").write_text(_SAMPLE_COMMAND_BODY, encoding="utf-8")
+
+    overrides_dir = tmp_path / ".memtomem" / "commands" / "baz" / "overrides"
+    overrides_dir.mkdir(parents=True)
+    would_be_override = b"# would-be command override\n"
+    (overrides_dir / "claude.md").write_bytes(would_be_override)
+
+    generate_all_commands(tmp_path, runtimes=["claude_commands"])
+
+    runtime_file = tmp_path / ".claude" / "commands" / "baz.md"
+    assert runtime_file.is_file()
+    assert runtime_file.read_bytes() != would_be_override, (
+        "override applied despite _PR_C_ACTIVE_TYPES gate active for commands"
+    )
 
 
 # ── skills fan-out applies overrides correctly ─────────────────────────

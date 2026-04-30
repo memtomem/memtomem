@@ -39,8 +39,9 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from memtomem.context import _skip_reasons as skip_codes
+from memtomem.context import override as _override
 from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
-from memtomem.context._names import InvalidNameError, Layout, validate_name
+from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, Layout, validate_name
 
 logger = logging.getLogger(__name__)
 
@@ -572,6 +573,12 @@ def generate_all_agents(
                     logger.warning("%s dropped %s from '%s'", target, dropped_fields, agent.name)
             out_path = gen.target_file(project_root, agent.name)
             atomic_write_text(out_path, content)
+            # ADR-0008 Invariant 4: per-vendor override replaces the runtime file.
+            vendor = GENERATOR_VENDOR.get(target)
+            if vendor is not None:
+                override_path = _override.resolve(project_root, "agents", agent.name, vendor)
+                if override_path is not None:
+                    atomic_write_bytes(out_path, override_path.read_bytes())
             generated.append((target, out_path))
             if dropped_fields:
                 dropped.append((target, agent.name, dropped_fields))
