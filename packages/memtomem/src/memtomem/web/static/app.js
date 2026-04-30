@@ -3276,7 +3276,11 @@ async function loadUploadUsage() {
   if (!el || !stats) return;
   try {
     const res = await fetch('/api/uploads/usage');
-    if (!res.ok) { hide(el); return; }
+    if (!res.ok) {
+      console.warn('[upload-usage] /api/uploads/usage returned', res.status);
+      hide(el);
+      return;
+    }
     const d = await res.json();
     if (!d.file_count) { hide(el); return; }
     const countKey = d.file_count === 1
@@ -3286,12 +3290,15 @@ async function loadUploadUsage() {
       t(countKey, { count: d.file_count }),
       formatBytes(d.total_bytes),
     ];
-    if (d.oldest_mtime) {
+    if (d.oldest_mtime !== null && d.oldest_mtime !== undefined) {
       parts.push(t('index.upload_usage_oldest', { rel: relativeTime(d.oldest_mtime * 1000) }));
     }
     stats.textContent = parts.join(' · ');
     show(el);
-  } catch (_e) { hide(el); }
+  } catch (err) {
+    console.warn('[upload-usage] fetch failed', err);
+    hide(el);
+  }
 }
 
 // ---------------------------------------------------------------------------
