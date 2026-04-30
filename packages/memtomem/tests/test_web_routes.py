@@ -1110,11 +1110,17 @@ class TestUnicodePaths:
         called_args, _ = app.state.index_engine.index_path.call_args
         assert Path(str(called_args[0])).resolve() == memory_dir.resolve()
 
-    async def test_add_memory_dir_default_skips_index(self, app, client: AsyncClient, tmp_path):
-        """Backward compatibility: omitting ``auto_index`` keeps the
-        historic register-only behavior. ``indexed`` is null and
-        ``index_path`` is not called. CLI scripts and direct API users
-        that relied on the two-step flow keep working."""
+    async def test_add_memory_dir_default_omitted_indexes(self, app, client: AsyncClient, tmp_path):
+        """**As of this PR, the ``auto_index`` default is ``True``** —
+        omitting the field triggers indexing. Locks the new default
+        semantics: without this test, a future regression flip back to
+        ``False`` would only fail the explicit-false test (which
+        doesn't actually exercise the omit-path default).
+
+        Naming intentionally describes the *input shape* (``omitted``)
+        rather than the behavior (``auto_indexes``) so the test name
+        doesn't lie if the default ever moves again — only the
+        assertions need updating."""
         memory_dir = tmp_path / "memories"
         memory_dir.mkdir()
         app.state.config.indexing.memory_dirs = []
@@ -1124,6 +1130,52 @@ class TestUnicodePaths:
             resp = await client.post(
                 "/api/memory-dirs/add",
                 json={"path": str(memory_dir)},
+            )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["indexed"] is not None
+        assert app.state.index_engine.index_path.call_count == 1
+
+    async def test_add_memory_dir_explicit_false_skips_index(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """Opt-out: explicit ``auto_index=false`` preserves
+        register-only behavior for direct-API callers that want the
+        historic two-step (register, then ``/api/index``)."""
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+        app.state.config.indexing.memory_dirs = []
+        app.state.index_engine.index_path.reset_mock()
+
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/add",
+                json={"path": str(memory_dir), "auto_index": False},
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["indexed"] is None
+        assert app.state.index_engine.index_path.call_count == 0
+
+    async def test_add_memory_dir_explicit_null_skips_index(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """JSON ``null`` is treated as opt-out (``bool(None) == False``),
+        distinct from field omission. This lock is **intentional, not
+        incidental** — locks the contract for clients that send all
+        fields with ``null`` placeholders. If a future PR wants
+        ``null`` to mean 'use default', that's a contract change:
+        update this test, the docstring at ``system.py:`` (the
+        ``add_memory_dir`` handler), and add a CHANGELOG entry."""
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+        app.state.config.indexing.memory_dirs = []
+        app.state.index_engine.index_path.reset_mock()
+
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/add",
+                json={"path": str(memory_dir), "auto_index": None},
             )
         assert resp.status_code == 200
         body = resp.json()

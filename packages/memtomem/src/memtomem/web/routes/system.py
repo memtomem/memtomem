@@ -397,16 +397,19 @@ async def add_memory_dir(
 
     Body:
         path (str, required): Absolute or ``~``-relative path.
-        auto_index (bool, default False): Index the dir immediately after
-            registration. Defaults off for backward compatibility — Web UI
-            opts in via ``auto_index=true`` so a single "+ Add path" click
-            covers register + index + watcher activation. CLI / API users
-            keep the historic two-step (register, then ``/api/index``) by
-            omitting the field.
+        auto_index (bool, default True): Index the dir immediately after
+            registration so a single call covers register + index +
+            watcher activation. Direct-API callers that want the historic
+            register-only behavior must pass ``auto_index=false``
+            explicitly. JSON ``null`` is treated the same as ``false``
+            (opt-out), distinct from field omission which fires the
+            default. PR1 (#571) shipped this as opt-in
+            (``default=False``); this PR flips the default after one
+            release cycle.
     """
     body = await request.json()
     dir_path = body.get("path", "").strip()
-    auto_index = bool(body.get("auto_index", False))
+    auto_index = bool(body.get("auto_index", True))
     if not dir_path:
         raise HTTPException(status_code=400, detail="path is required")
 

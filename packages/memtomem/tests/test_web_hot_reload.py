@@ -198,7 +198,14 @@ async def test_memory_dirs_add_reloads_before_write(
     )
 
     second = tmp_path / "second"
-    resp = await client.post("/api/memory-dirs/add", json={"path": str(second)})
+    # ``auto_index=False`` keeps the test focused on the reload-before-write
+    # contract; the default flipped to ``True`` so an omitted flag would also
+    # exercise ``index_path`` against an unconfigured AsyncMock and obscure
+    # this test's actual assertion (external ``mmr`` edit survives).
+    resp = await client.post(
+        "/api/memory-dirs/add",
+        json={"path": str(second), "auto_index": False},
+    )
     assert resp.status_code == 200, resp.text
 
     on_disk = json.loads((home / ".memtomem" / "config.json").read_text())

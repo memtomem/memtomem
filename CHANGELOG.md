@@ -137,6 +137,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **`POST /api/memory-dirs/add` indexes the registered directory by
+  default now.** PR #571 introduced opt-in `auto_index` (default
+  `False`) for backward compatibility; the Web UI sent
+  `auto_index=true` while CLI/direct-API callers kept the two-step
+  (register, then `/api/index`). This release flips the default to
+  `True` so omitting the field also indexes — register + index in
+  one call for the common case. Callers that want register-only must
+  now send `auto_index=false` explicitly (JSON `null` is also
+  treated as opt-out, distinct from field omission). Response shape
+  is unchanged, but callers that omit `auto_index` will now receive
+  an `indexed` object (or `indexed: {"error": ...}` on failure)
+  where they previously received `indexed: null` — schema-strict
+  clients should expect a populated value. Watcher invariant and
+  lock boundary are unchanged; indexing failures still surface as
+  `indexed: {"error": ...}` instead of bubbling a 500
+  (registration is preserved).
+
 - **`showConfirm` modal** gained an optional `extraOption: { id, label,
   defaultChecked }` parameter that renders an opt-in checkbox below
   the message. Callers that pass extras receive `{ ok, extras }`
