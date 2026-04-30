@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, cast
 
 from memtomem.context._atomic import copy_tree_atomic
 from memtomem.context._names import validate_name
@@ -48,9 +49,15 @@ class AlreadyInstalledError(RuntimeError):
 
 @dataclass(frozen=True)
 class InstallResult:
-    """Outcome of a successful install. Display-oriented; not persisted."""
+    """Outcome of a successful install. Display-oriented; not persisted.
 
-    asset_type: str
+    ``asset_type`` is ``Literal["skills"]`` in PR-B and widens alongside the
+    public ``install_agent`` / ``install_command`` wrappers that PR-C adds.
+    The private ``_install_asset`` callee keeps a wider parameter type so
+    PR-C is a one-line widening, not a re-architecture.
+    """
+
+    asset_type: Literal["skills"]
     name: str
     wiki_commit: str
     installed_at: str
@@ -81,8 +88,19 @@ def _install_asset(
     *,
     wiki: WikiStore | None,
 ) -> InstallResult:
-    validated = validate_name(name, kind=f"{asset_type.rstrip('s')} name")
+    """Internal: install a single asset of any type.
+
+    Concurrency contract: same-asset races accept last-write-wins on the
+    lockfile entry. Both writers pin the same ``wiki_commit`` (HEAD is read
+    once per call before copy) and per-file ``atomic_write_bytes`` keeps
+    individual files consistent, so byte content under ``dest`` converges
+    even if the workers interleave. Distinct-asset writers serialize
+    cleanly on the lockfile sidecar lock and both entries survive.
+    """
+    validated = validate_name(name, kind=f"{asset_type.removesuffix('s')} name")
     project_root = Path(project_root).expanduser()
+    if not project_root.is_dir():
+        raise FileNotFoundError(f"project root does not exist: {project_root}")
 
     wiki = wiki if wiki is not None else WikiStore.at_default()
     wiki.require_exists()
@@ -119,8 +137,11 @@ def _install_asset(
         installed_at=installed_at,
     )
 
+    # PR-B contract: only "skills" reaches this construction site (the
+    # public wrapper is install_skill). PR-C widens InstallResult.asset_type
+    # alongside install_agent / install_command wrappers.
     return InstallResult(
-        asset_type=asset_type,
+        asset_type=cast('Literal["skills"]', asset_type),
         name=validated,
         wiki_commit=wiki_commit,
         installed_at=installed_at,

@@ -72,7 +72,7 @@ class Lockfile:
     last-write-wins on the entry.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path | str) -> None:
         self._path = Path(path).expanduser()
 
     @classmethod

@@ -66,7 +66,7 @@ def test_install_skill_copies_tree(wiki_root: Path, tmp_path: Path) -> None:
             "overrides/claude.md": b"claude-only override\n",
         },
     )
-    project = tmp_path / "proj"
+    project = tmp_path
 
     result = install_skill(project, "foo")
 
@@ -82,7 +82,7 @@ def test_install_skill_copies_tree(wiki_root: Path, tmp_path: Path) -> None:
 def test_install_records_lockfile_entry(wiki_root: Path, tmp_path: Path) -> None:
     store = _initialized_wiki(wiki_root)
     _seed_skill(wiki_root, "foo", {"SKILL.md": b"x"})
-    project = tmp_path / "proj"
+    project = tmp_path
 
     result = install_skill(project, "foo")
 
@@ -111,7 +111,7 @@ def test_install_skips_dotgit_in_source(wiki_root: Path, tmp_path: Path) -> None
             ".git/HEAD": b"ref: refs/heads/main\n",  # synthetic — won't really be added by git
         },
     )
-    project = tmp_path / "proj"
+    project = tmp_path
 
     install_skill(project, "foo")
 
@@ -120,7 +120,81 @@ def test_install_skips_dotgit_in_source(wiki_root: Path, tmp_path: Path) -> None
     assert not (dest / ".git").exists()
 
 
+def test_install_skips_dsstore_and_pycache(wiki_root: Path, tmp_path: Path) -> None:
+    """COPY_SKIP_NAMES: macOS Finder + Python bytecode side-effects don't propagate."""
+    _initialized_wiki(wiki_root)
+    _seed_skill(
+        wiki_root,
+        "foo",
+        {
+            "SKILL.md": b"x",
+            ".DS_Store": b"\x00\x00\x00\x00",
+            "__pycache__/foo.cpython-312.pyc": b"\x00\x00",
+        },
+    )
+    project = tmp_path
+
+    install_skill(project, "foo")
+
+    dest = project / ".memtomem" / "skills" / "foo"
+    assert (dest / "SKILL.md").is_file()
+    assert not (dest / ".DS_Store").exists()
+    assert not (dest / "__pycache__").exists()
+
+
+def test_install_skips_symlinks_in_source(
+    wiki_root: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """copy_tree_atomic refuses to dereference symlinks — would silently
+    leak out-of-tree bytes (e.g., /etc/passwd) into the project otherwise."""
+    _initialized_wiki(wiki_root)
+    skill_dir = wiki_root / "skills" / "foo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("real", encoding="utf-8")
+    # Dangling symlink — entry.is_symlink() fires regardless of target validity.
+    (skill_dir / "danger.md").symlink_to("/nonexistent/target")
+    subprocess.run(["git", "-C", str(wiki_root), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(wiki_root), "commit", "-m", "add foo with symlink"],
+        check=True,
+        capture_output=True,
+    )
+    project = tmp_path
+
+    with caplog.at_level("WARNING", logger="memtomem.context._atomic"):
+        install_skill(project, "foo")
+
+    dest = project / ".memtomem" / "skills" / "foo"
+    assert (dest / "SKILL.md").is_file()
+    assert not (dest / "danger.md").exists()
+    assert any("skipping symlink" in r.message for r in caplog.records)
+
+
+def test_install_files_written_with_default_mode(wiki_root: Path, tmp_path: Path) -> None:
+    """Asset content lands at 0o644 (readable by other tools), not at the
+    0o600 atomic_write_bytes default reserved for state files."""
+    _initialized_wiki(wiki_root)
+    _seed_skill(wiki_root, "foo", {"SKILL.md": b"x"})
+    project = tmp_path
+
+    install_skill(project, "foo")
+
+    skill_md = project / ".memtomem" / "skills" / "foo" / "SKILL.md"
+    # Owner-readable + group/other-readable; no write for group/other.
+    assert (skill_md.stat().st_mode & 0o777) == 0o644
+
+
 # ── install_skill: failure paths ─────────────────────────────────────────
+
+
+def test_install_project_root_missing(wiki_root: Path, tmp_path: Path) -> None:
+    """A typo'd project root errors loudly instead of silently creating it."""
+    _initialized_wiki(wiki_root)
+    _seed_skill(wiki_root, "foo", {"SKILL.md": b"x"})
+    missing = tmp_path / "nonexistent"
+
+    with pytest.raises(FileNotFoundError, match="project root does not exist"):
+        install_skill(missing, "foo")
 
 
 def test_install_wiki_missing_invariant3(
@@ -130,7 +204,7 @@ def test_install_wiki_missing_invariant3(
 ) -> None:
     """Invariant 3: precise message including path and `mm wiki init`."""
     monkeypatch.setenv("MEMTOMEM_WIKI_PATH", str(tmp_path / "no-wiki"))
-    project = tmp_path / "proj"
+    project = tmp_path
 
     with pytest.raises(WikiNotFoundError) as excinfo:
         install_skill(project, "foo")
@@ -140,7 +214,7 @@ def test_install_wiki_missing_invariant3(
 
 def test_install_asset_missing(wiki_root: Path, tmp_path: Path) -> None:
     _initialized_wiki(wiki_root)
-    project = tmp_path / "proj"
+    project = tmp_path
     with pytest.raises(AssetNotFoundError, match="skills/nope"):
         install_skill(project, "nope")
 
@@ -148,7 +222,7 @@ def test_install_asset_missing(wiki_root: Path, tmp_path: Path) -> None:
 def test_install_refuses_when_lockfile_and_dest_present(wiki_root: Path, tmp_path: Path) -> None:
     _initialized_wiki(wiki_root)
     _seed_skill(wiki_root, "foo", {"SKILL.md": b"x"})
-    project = tmp_path / "proj"
+    project = tmp_path
 
     install_skill(project, "foo")
 
@@ -163,7 +237,7 @@ def test_install_refuses_when_only_lockfile_present(wiki_root: Path, tmp_path: P
     """The OR-not-AND case: user wiped dest but left lockfile orphaned."""
     _initialized_wiki(wiki_root)
     _seed_skill(wiki_root, "foo", {"SKILL.md": b"x"})
-    project = tmp_path / "proj"
+    project = tmp_path
 
     install_skill(project, "foo")
     shutil.rmtree(project / ".memtomem" / "skills" / "foo")
@@ -179,7 +253,7 @@ def test_install_refuses_when_only_dest_present(wiki_root: Path, tmp_path: Path)
     """Lockfile damaged (or external copy) but dest exists."""
     _initialized_wiki(wiki_root)
     _seed_skill(wiki_root, "foo", {"SKILL.md": b"x"})
-    project = tmp_path / "proj"
+    project = tmp_path
     pre = project / ".memtomem" / "skills" / "foo"
     pre.mkdir(parents=True)
     (pre / "stray.txt").write_text("hand-placed", encoding="utf-8")
@@ -195,7 +269,7 @@ def test_install_refuses_when_only_dest_present(wiki_root: Path, tmp_path: Path)
 
 def test_install_invalid_name(wiki_root: Path, tmp_path: Path) -> None:
     _initialized_wiki(wiki_root)
-    project = tmp_path / "proj"
+    project = tmp_path
     with pytest.raises(InvalidNameError):
         install_skill(project, "../escape")
 
@@ -216,7 +290,7 @@ def test_install_two_skills_concurrent(wiki_root: Path, tmp_path: Path) -> None:
     _initialized_wiki(wiki_root)
     _seed_skill(wiki_root, "foo", {"SKILL.md": b"x"})
     _seed_skill(wiki_root, "bar", {"SKILL.md": b"y"})
-    project = tmp_path / "proj"
+    project = tmp_path
 
     ctx = mp.get_context("spawn")
     p1 = ctx.Process(target=_install_worker, args=(str(wiki_root), str(project), "foo"))
@@ -241,7 +315,10 @@ def test_install_two_skills_concurrent(wiki_root: Path, tmp_path: Path) -> None:
 @pytest.fixture
 def project_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Tmp project root (with a sentinel ``.git``) wired as cwd so
-    ``_find_project_root`` resolves there."""
+    ``_find_project_root`` resolves there. Uses a subdirectory of
+    ``tmp_path`` so ``_find_project_root`` doesn't accidentally walk up
+    into the test runner's ``tmp_path`` parent and find an unrelated
+    ``.git``/``pyproject.toml`` first."""
     project = tmp_path / "proj"
     project.mkdir()
     (project / ".git").mkdir()
@@ -310,7 +387,7 @@ def test_lockfile_contains_only_two_keys_per_entry(wiki_root: Path, tmp_path: Pa
     """Schema discipline: install writes exactly the two mandated keys."""
     _initialized_wiki(wiki_root)
     _seed_skill(wiki_root, "foo", {"SKILL.md": b"x"})
-    project = tmp_path / "proj"
+    project = tmp_path
     install_skill(project, "foo")
 
     lock = Lockfile.at(project)
