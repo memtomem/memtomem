@@ -710,9 +710,9 @@ Requires `MEMTOMEM_LLM__ENABLED=true` and a configured provider. Generated summa
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMTOMEM_TOOL_MODE` | `core` | Which MCP tools are exposed: `core` (9 tools), `standard` (~32 incl. `mem_do`), `full` (74) |
+| `MEMTOMEM_TOOL_MODE` | `core` | Which MCP tools are exposed: `core` (9 tools), `standard` (37 incl. `mem_do`), `full` (79) |
 
-In `core` mode, use `mem_do(action="...", params={...})` to access any of the 65+ non-core actions. Fewer tools means less context usage for AI agents.
+In `core` mode, use `mem_do(action="...", params={...})` to access any of the 70+ non-core actions. Fewer tools means less context usage for AI agents.
 
 ## Web UI Mode
 

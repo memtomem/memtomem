@@ -268,7 +268,7 @@ mm status
 uses, so the output is identical. Useful as a sanity check between
 `mm init` and the first editor-side call.
 
-### Available MCP Tools (74)
+### Available MCP Tools (79)
 
 | Category | Tools |
 |----------|-------|
