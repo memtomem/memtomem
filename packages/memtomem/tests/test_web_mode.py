@@ -356,10 +356,12 @@ def test_app_js_pins_ui_mode_default_and_toast_copy() -> None:
     assert re.search(r"uiMode:\s*'prod'", js), "STATE.uiMode early default changed"
     # Hash-fallback / settings-section redirect toast — routed through i18n.
     assert "toast.dev_only_section" in js, "dev-only redirect toast key missing"
-    # Home dashboard must gate dev-only endpoints behind the mode check so
-    # prod users don't see guaranteed 404s on every Home render.
-    assert "const devMode = STATE.uiMode === 'dev'" in js, (
-        "Home dashboard lost its dev-only fetch gate"
+    # Home dashboard must gate the dev-only sessions+scratch fetches behind
+    # the mode check so prod users don't see guaranteed 404s on every Home
+    # render. The namespaces list endpoint graduated to prod via
+    # namespaces_read (#582 4.10a) so it no longer needs a gate.
+    assert "if (STATE.uiMode === 'dev')" in js, (
+        "Home dashboard lost its dev-only sessions+scratch fetch gate"
     )
     # The Context Gateway (Artifact Sync) tab graduated to prod, but the
     # settings_sync router stays dev-only — so the "Sync All" button and

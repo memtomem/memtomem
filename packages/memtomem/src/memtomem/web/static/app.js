@@ -905,10 +905,9 @@ async function checkEmbeddingMismatch() {
 
 async function loadDashboard() {
   try {
-    // /api/sessions and /api/scratch are dev-only; the namespaces list
-    // endpoint is now prod-mounted via namespaces_read so the donut +
-    // count card render real values in both tiers.
-    const devMode = STATE.uiMode === 'dev';
+    // /api/sessions and /api/scratch are dev-only — gated below. The
+    // namespaces list endpoint is prod-mounted via namespaces_read so
+    // the donut + count card render real values in both tiers.
     const [stats, sourcesData, nsData, configData, embStatus, timelineData] = await Promise.all([
       api('GET', '/api/stats'),
       api('GET', '/api/sources'),
@@ -933,7 +932,7 @@ async function loadDashboard() {
     try {
       let sessData = { total: 0 };
       let scratchData = { total: 0 };
-      if (devMode) {
+      if (STATE.uiMode === 'dev') {
         [sessData, scratchData] = await Promise.all([
           api('GET', '/api/sessions?limit=1').catch(() => ({ total: 0 })),
           api('GET', '/api/scratch').catch(() => ({ total: 0 })),
