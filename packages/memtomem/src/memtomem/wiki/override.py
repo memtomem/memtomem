@@ -42,7 +42,14 @@ def render_seed_bytes(
     Skills → canonical ``SKILL.md``.
     Agents / commands → ``parse_canonical_*`` + vendor renderer.
     ``("commands", "codex")`` → :class:`NotImplementedError`.
+
+    ``name`` is validated here even though :func:`seed_override` (the usual
+    caller) already validates — the function is in ``__all__`` so direct
+    callers should not have to remember to pre-validate. Defense in depth
+    for the ``store.root / asset_type / name / ...`` path joins below.
     """
+    validate_name(name, kind=f"{asset_type.removesuffix('s')} name")
+
     if asset_type == "skills":
         src = store.root / "skills" / name / "SKILL.md"
         if not src.is_file():
@@ -55,6 +62,12 @@ def render_seed_bytes(
             f"wiki has no {asset_type}/{name}/{asset_type[:-1]}.md to seed from at {canonical}"
         )
 
+    # ``gen.render()`` returns ``(text, dropped_field_names)`` — fields the
+    # vendor format can't represent (e.g., gemini drops ``tools`` /
+    # ``skills`` / ``model``). C1a silently discards ``_dropped``; C1b CLI
+    # will surface them via stderr WARNING so users editing the override
+    # know which fields the runtime won't see.
+    #
     # Function-body imports dodge a wiki ↔ context import cycle:
     # ``context.install`` already imports ``wiki.store``; widening to
     # module-top imports here would close the loop.

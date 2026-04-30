@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from memtomem.context._names import InvalidNameError
 from memtomem.wiki.override import render_seed_bytes
 from memtomem.wiki.store import WikiStore
 
@@ -98,3 +99,22 @@ def test_render_seed_bytes_codex_commands_raises_not_implemented(
 
     with pytest.raises(NotImplementedError, match="commands not yet supported"):
         render_seed_bytes(store, "commands", "baz", "codex")
+
+
+def test_render_seed_bytes_rejects_traversal_name(wiki_root: Path) -> None:
+    """Defense-in-depth: ``render_seed_bytes`` validates ``name`` itself.
+
+    ``seed_override`` (the usual caller) already validates, but
+    ``render_seed_bytes`` is in ``__all__`` so direct callers should not
+    have to remember to pre-validate. A traversal-shaped name in the
+    ``store.root / asset_type / name / ...`` path would otherwise escape
+    the wiki root.
+    """
+    store = _initialized_wiki()
+
+    with pytest.raises(InvalidNameError):
+        render_seed_bytes(store, "agents", "../etc/passwd", "claude")
+    with pytest.raises(InvalidNameError):
+        render_seed_bytes(store, "commands", "../../escape", "claude")
+    with pytest.raises(InvalidNameError):
+        render_seed_bytes(store, "skills", "../../escape", "claude")
