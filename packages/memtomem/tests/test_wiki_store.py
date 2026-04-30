@@ -16,18 +16,6 @@ from memtomem.wiki.store import (
 )
 
 
-@pytest.fixture
-def wiki_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point WikiStore.at_default() at a tmp dir + give git an identity."""
-    target = tmp_path / "wiki"
-    monkeypatch.setenv("MEMTOMEM_WIKI_PATH", str(target))
-    monkeypatch.setenv("GIT_AUTHOR_NAME", "test")
-    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@example.com")
-    monkeypatch.setenv("GIT_COMMITTER_NAME", "test")
-    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@example.com")
-    return target
-
-
 class TestDefaultPath:
     def test_default_path_is_home_relative(self) -> None:
         assert DEFAULT_WIKI_PATH == Path.home() / ".memtomem-wiki"
@@ -93,15 +81,14 @@ class TestInitScratch:
 
 class TestInitFromUrl:
     def test_clone_from_local_file_url(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        git_identity: None,  # noqa: ARG002
     ) -> None:
         # Set up a source wiki at one path…
         source = tmp_path / "source-wiki"
         monkeypatch.setenv("MEMTOMEM_WIKI_PATH", str(source))
-        monkeypatch.setenv("GIT_AUTHOR_NAME", "test")
-        monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@example.com")
-        monkeypatch.setenv("GIT_COMMITTER_NAME", "test")
-        monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@example.com")
         WikiStore.at_default().init()
 
         # …clone from it into another path.

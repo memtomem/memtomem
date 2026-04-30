@@ -15,19 +15,17 @@ contract plus the ``known_projects.json`` POST/DELETE endpoints.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import logging
 import os
 import sys
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Literal
+from typing import Literal
 
-from memtomem.context._atomic import atomic_write_bytes
+from memtomem.context._atomic import _file_lock, _lock_path_for, atomic_write_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -97,32 +95,6 @@ class ProjectScope:
 
 
 _KNOWN_PROJECTS_VERSION = 1
-
-
-@contextmanager
-def _file_lock(lock_path: Path) -> Iterator[None]:
-    """Cross-process exclusive lock on a sidecar lockfile.
-
-    Locking the data file directly does **not** survive ``os.replace`` —
-    the lock is on the inode, and the rename swaps the inode mid-operation
-    so concurrent writers race on stale fds. The fix is to lock a sibling
-    (`feedback_sidecar_lockfile_for_replaced_files.md` PR #548). The
-    lockfile itself is never renamed, so its inode is stable.
-    """
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            os.close(fd)
-
-
-def _lock_path_for(data_path: Path) -> Path:
-    return data_path.parent / f".{data_path.name}.lock"
 
 
 @dataclass(frozen=True)

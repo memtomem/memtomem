@@ -14,6 +14,12 @@ import pytest
 from memtomem.config import Mem2MemConfig
 from memtomem.server.component_factory import Components, create_components, close_components
 
+# Re-export wiki fixtures so any test in this directory can request
+# ``git_identity`` / ``wiki_root`` as a parameter without per-file imports.
+# Keeping the definitions in ``_wiki_fixtures.py`` avoids bloating this
+# already-heavy conftest with unrelated git-env plumbing.
+from _wiki_fixtures import git_identity, wiki_root  # noqa: E402, F401
+
 
 def _ollama_available() -> bool:
     """Check if Ollama is reachable at localhost:11434."""

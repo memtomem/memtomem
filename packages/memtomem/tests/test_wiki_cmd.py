@@ -11,15 +11,9 @@ from memtomem.cli.wiki_cmd import wiki
 
 
 @pytest.fixture
-def isolated_wiki(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect the wiki path to tmp + give git an identity."""
-    target = tmp_path / "wiki"
-    monkeypatch.setenv("MEMTOMEM_WIKI_PATH", str(target))
-    monkeypatch.setenv("GIT_AUTHOR_NAME", "test")
-    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@example.com")
-    monkeypatch.setenv("GIT_COMMITTER_NAME", "test")
-    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@example.com")
-    return target
+def isolated_wiki(wiki_root: Path) -> Path:
+    """Backwards-compat alias for the shared ``wiki_root`` fixture."""
+    return wiki_root
 
 
 class TestInitCmd:
@@ -40,13 +34,14 @@ class TestInitCmd:
         assert result.exit_code != 0
         assert "already initialized" in result.output
 
-    def test_init_from_url_clones(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_init_from_url_clones(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        git_identity: None,  # noqa: ARG002
+    ) -> None:
         source = tmp_path / "source"
         monkeypatch.setenv("MEMTOMEM_WIKI_PATH", str(source))
-        monkeypatch.setenv("GIT_AUTHOR_NAME", "test")
-        monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@example.com")
-        monkeypatch.setenv("GIT_COMMITTER_NAME", "test")
-        monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@example.com")
 
         runner = CliRunner()
         runner.invoke(wiki, ["init"])

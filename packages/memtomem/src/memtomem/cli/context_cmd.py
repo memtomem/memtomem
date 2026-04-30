@@ -19,6 +19,7 @@ from memtomem.context.commands import (
     extract_commands_to_canonical,
     generate_all_commands,
 )
+from memtomem.context._names import InvalidNameError
 from memtomem.context.detector import (
     detect_agent_dirs,
     detect_agent_files,
@@ -26,6 +27,12 @@ from memtomem.context.detector import (
     detect_settings_files,
     detect_skill_dirs,
 )
+from memtomem.context.install import (
+    AlreadyInstalledError,
+    AssetNotFoundError,
+    install_skill,
+)
+from memtomem.context.lockfile import LockfileVersionError
 from memtomem.context.generator import (
     GENERATORS,
     extract_sections_from_agent_file,
@@ -41,6 +48,7 @@ from memtomem.context.skills import (
     extract_skills_to_canonical,
     generate_all_skills,
 )
+from memtomem.wiki.store import WikiNotFoundError
 
 # Phase 1-3 supports skills/agents/commands; Phase D adds settings.
 _KNOWN_INCLUDES: frozenset[str] = frozenset({"skills", "agents", "commands", "settings"})
@@ -636,3 +644,39 @@ def sync_cmd(include: tuple[str, ...], strict: bool, on_drop: str, yes: bool) ->
             click.secho("  Skipped settings sync (declined).", fg="yellow")
 
     click.secho("Synced.", fg="green")
+
+
+@context.command("install")
+@click.argument("asset_type", type=click.Choice(["skill"]))
+@click.argument("name")
+def install_cmd(asset_type: str, name: str) -> None:
+    """Install a wiki asset into ``<project>/.memtomem/<type>/<name>/``.
+
+    PR-B supports ``skill`` only. Agents and commands land in PR-C
+    alongside override resolution. The wiki at ``~/.memtomem-wiki/`` must
+    be initialized first (``mm wiki init``).
+    """
+    root = _find_project_root()
+    try:
+        if asset_type == "skill":
+            result = install_skill(root, name)
+        else:  # pragma: no cover — guarded by click.Choice
+            raise click.ClickException(f"unknown asset type: {asset_type}")
+    except WikiNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except AssetNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except AlreadyInstalledError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except InvalidNameError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except LockfileVersionError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.secho(
+        f"Installed {result.asset_type}/{result.name} (wiki {result.wiki_commit[:12]})",
+        fg="green",
+    )
+    rel_dest = result.dest.relative_to(root) if result.dest.is_relative_to(root) else result.dest
+    click.echo(f"  → {rel_dest}/")
+    click.echo(f"  {result.files_written} file(s) copied")

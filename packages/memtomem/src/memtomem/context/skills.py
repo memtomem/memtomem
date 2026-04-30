@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Protocol
 
 from memtomem.context import _skip_reasons as skip_codes
-from memtomem.context._atomic import atomic_write_bytes
+from memtomem.context._atomic import copy_tree_atomic
 from memtomem.context._names import InvalidNameError, validate_name
 
 logger = logging.getLogger(__name__)
@@ -155,18 +155,7 @@ def copy_skill(src: Path, dst: Path) -> None:
         shutil.rmtree(dst)
 
     dst.mkdir(parents=True)
-    _copy_tree_atomic(src, dst)
-
-
-def _copy_tree_atomic(src: Path, dst: Path) -> None:
-    """Recursively mirror *src* → *dst*, each file via atomic_write_bytes."""
-    dst.mkdir(parents=True, exist_ok=True)
-    for entry in src.iterdir():
-        target = dst / entry.name
-        if entry.is_file():
-            atomic_write_bytes(target, entry.read_bytes())
-        elif entry.is_dir():
-            _copy_tree_atomic(entry, target)
+    copy_tree_atomic(src, dst)
 
 
 # ── Fan-out: canonical → runtimes ─────────────────────────────────────
