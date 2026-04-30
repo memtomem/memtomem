@@ -500,7 +500,6 @@
   "picker.empty": "No subfolders.",
   "picker.outside": "Outside the picker scope. Close and type the path to use it.",
   "picker.error": "Could not list folder.",
-  "picker.up": "Up",
 
   "toast.copied": "Copied!",
   "toast.pinned": "Pinned!",

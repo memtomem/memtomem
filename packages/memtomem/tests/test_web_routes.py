@@ -2152,6 +2152,13 @@ class TestFsList:
         resp = await client.get(f"/api/fs/list?path={memdir}")
         entries = {e["name"]: e["path"] for e in resp.json()["entries"]}
         assert "ln_inside" in entries
+        # The response carries the symlink path itself (NFC-normalised),
+        # not the resolve target. Without this, ln_inside (-> alpha) would
+        # surface as alpha's absolute path and clicking the row would
+        # write the target into #index-path instead of the symlink the
+        # user actually saw in the tree.
+        expected_symlink_path = unicodedata.normalize("NFC", str(memdir / "ln_inside"))
+        assert entries["ln_inside"] == expected_symlink_path
 
     async def test_symlink_outside_allow_list_excluded(
         self,

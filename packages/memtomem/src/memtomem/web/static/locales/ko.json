@@ -500,7 +500,6 @@
   "picker.empty": "하위 폴더가 없습니다.",
   "picker.outside": "선택 가능 범위 밖입니다. 창을 닫고 경로를 직접 입력해 주세요.",
   "picker.error": "폴더를 불러오지 못했습니다.",
-  "picker.up": "위로",
 
   "toast.copied": "복사됨!",
   "toast.pinned": "고정됨!",

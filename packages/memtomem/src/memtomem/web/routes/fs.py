@@ -15,6 +15,7 @@ picker-specific toast without conflating with real auth failures elsewhere.
 
 from __future__ import annotations
 
+import unicodedata
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -124,14 +125,15 @@ async def list_directory(
             # allow-list root, drop the entry. Without this the user would
             # click an allow-list child and hit 422 — confusing, given the
             # entry was rendered as part of an allow-listed parent. The
-            # response keeps the symlink path so the visible tree matches
-            # what iterdir reported; only the boundary check uses .resolve.
+            # response keeps the *symlink path* (NFC-normalized, not
+            # resolved) so the visible tree matches what iterdir reported;
+            # only the boundary check uses .resolve.
             resolved_child = Path(norm_path(child))
             if not _inside_any_root(resolved_child, roots):
                 continue
         except (PermissionError, OSError):
             continue
-        children.append(FsEntry(name=child.name, path=str(Path(norm_path(child)))))
+        children.append(FsEntry(name=child.name, path=unicodedata.normalize("NFC", str(child))))
 
     children.sort(key=lambda e: e.name.casefold())
 
