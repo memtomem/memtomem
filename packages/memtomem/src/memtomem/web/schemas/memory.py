@@ -30,6 +30,12 @@ class UploadResponse(BaseModel):
     total_indexed: int
 
 
+class UploadUsageResponse(BaseModel):
+    file_count: int
+    total_bytes: int
+    oldest_mtime: float | None = None
+
+
 class ExportStatsResponse(BaseModel):
     total_chunks: int
 

@@ -1653,6 +1653,95 @@ class TestRemoveMemoryDirChunkCleanup:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/uploads/usage  (issue #583)
+# ---------------------------------------------------------------------------
+
+
+class TestUploadsUsage:
+    """Cumulative-footprint endpoint for ``~/.memtomem/uploads/``.
+
+    Read-only directory stat, no ``require_configured`` gate — it must
+    return a zero-state response on a fresh install (no ``~/.memtomem/``
+    yet) so the UI panel can decide to hide vs. surface from a single
+    fetch. ``Path.expanduser()`` reads ``$HOME`` per call on POSIX, so
+    ``monkeypatch.setenv('HOME', tmp_path)`` cleanly isolates each case.
+    """
+
+    async def test_home_memtomem_missing(
+        self,
+        client: AsyncClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Fresh install — ``~/.memtomem`` itself does not exist."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        resp = await client.get("/api/uploads/usage")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"file_count": 0, "total_bytes": 0, "oldest_mtime": None}
+
+    async def test_uploads_subdir_missing(
+        self,
+        client: AsyncClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Config wizard ran but no upload yet — ``.memtomem/`` exists,
+        ``uploads/`` does not. Same code path as the missing-HOME case
+        but a distinct user state worth pinning."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / ".memtomem").mkdir()
+        resp = await client.get("/api/uploads/usage")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"file_count": 0, "total_bytes": 0, "oldest_mtime": None}
+
+    async def test_populated(
+        self,
+        client: AsyncClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import os
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        upload_dir = tmp_path / ".memtomem" / "uploads"
+        upload_dir.mkdir(parents=True)
+        a = upload_dir / "a.md"
+        a.write_bytes(b"x" * 10)
+        b = upload_dir / "b.md"
+        b.write_bytes(b"y" * 25)
+        # Pin mtimes — older first so ``oldest_mtime`` is deterministic.
+        os.utime(a, (1_700_000_000, 1_700_000_000))
+        os.utime(b, (1_700_005_000, 1_700_005_000))
+
+        resp = await client.get("/api/uploads/usage")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["file_count"] == 2
+        assert body["total_bytes"] == 35
+        assert body["oldest_mtime"] == pytest.approx(1_700_000_000)
+
+    async def test_subdirectories_ignored(
+        self,
+        client: AsyncClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """``is_file()`` filter must skip nested dirs so a stray
+        directory doesn't inflate ``file_count``."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        upload_dir = tmp_path / ".memtomem" / "uploads"
+        upload_dir.mkdir(parents=True)
+        (upload_dir / "real.md").write_bytes(b"hello")
+        (upload_dir / "stray-subdir").mkdir()
+
+        resp = await client.get("/api/uploads/usage")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["file_count"] == 1
+        assert body["total_bytes"] == 5
+
+
+# ---------------------------------------------------------------------------
 # require_configured gate (issue #577)
 # ---------------------------------------------------------------------------
 

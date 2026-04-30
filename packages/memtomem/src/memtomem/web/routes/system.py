@@ -60,6 +60,7 @@ from memtomem.web.schemas.memory import (
     PreviewNamespaceResponse,
     UploadFileResult,
     UploadResponse,
+    UploadUsageResponse,
 )
 from memtomem.web.schemas.sources import StatsResponse
 
@@ -960,6 +961,34 @@ async def upload_files(
         files=results,
         total_indexed=sum(r.indexed_chunks for r in results),
     )
+
+
+@router.get("/uploads/usage", response_model=UploadUsageResponse)
+async def uploads_usage() -> UploadUsageResponse:
+    """Cumulative disk footprint of files saved via /api/upload.
+
+    Read-only directory stat; intentionally **no** ``require_configured``
+    gate so the panel surfaces the empty state on a fresh install before
+    the user finishes the config wizard.
+    """
+    upload_dir = Path("~/.memtomem/uploads").expanduser()
+    if not upload_dir.is_dir():
+        return UploadUsageResponse(file_count=0, total_bytes=0, oldest_mtime=None)
+    file_count = 0
+    total_bytes = 0
+    oldest: float | None = None
+    for entry in upload_dir.iterdir():
+        if not entry.is_file():
+            continue
+        try:
+            st = entry.stat()
+        except OSError:
+            continue
+        file_count += 1
+        total_bytes += st.st_size
+        if oldest is None or st.st_mtime < oldest:
+            oldest = st.st_mtime
+    return UploadUsageResponse(file_count=file_count, total_bytes=total_bytes, oldest_mtime=oldest)
 
 
 @router.post("/add", response_model=AddMemoryResponse, dependencies=[Depends(require_configured)])
