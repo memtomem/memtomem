@@ -3039,80 +3039,6 @@ qs('folder-hint-sources-link')?.addEventListener('click', e => {
 });
 
 // ---------------------------------------------------------------------------
-// Index
-// ---------------------------------------------------------------------------
-
-qs('index-btn').addEventListener('click', async () => {
-  const path    = qs('index-path').value.trim();
-  if (!path) { setMsg(qs('index-msg'), 'Please enter a path to index.', true); return; }
-  const recursive = qs('index-recursive').checked;
-  const force   = qs('index-force').checked;
-  const namespace = qs('index-namespace').value.trim() || null;
-  const btn     = qs('index-btn');
-  const msg     = qs('index-msg');
-  const result  = qs('index-result');
-
-  btnLoading(btn, true);
-  hide(msg); hide(result);
-
-  try {
-    const data = await api('POST', '/api/index', { path, recursive, force, namespace });
-    const errList = Array.isArray(data.errors) ? data.errors : [];
-    // HTTP 200 ≠ success — backend returns 200 even when every file's
-    // embedding step fails (e.g. fastembed extra missing). #354: surface
-    // data.errors as a red toast + visible row so the UI isn't silently
-    // misleading the user that everything worked.
-    if (errList.length > 0) {
-      showToast(
-        t('toast.index_partial', {
-          count: data.indexed_chunks,
-          errors: errList.length,
-          first: errList[0],
-        }),
-        'error',
-      );
-    } else {
-      showToast(t('toast.indexed_count', { count: data.indexed_chunks }), 'success', {
-        action: {
-          label: t('toast.action.register_persistent'),
-          onClick: goToSourcesAddPath,
-        },
-      });
-    }
-    qs('r-files').textContent    = data.total_files;
-    qs('r-chunks').textContent   = data.total_chunks;
-    qs('r-indexed').textContent  = data.indexed_chunks;
-    qs('r-skipped').textContent  = data.skipped_chunks;
-    qs('r-deleted').textContent  = data.deleted_chunks;
-    qs('r-duration').textContent = `${data.duration_ms.toFixed(0)} ms`;
-    const errRow = qs('r-errors-row');
-    if (errList.length > 0) {
-      // Cap visible list at 5 entries with a trailing "+N more" line — a
-      // full ONNX-missing run emits hundreds of identical errors, one per
-      // indexed file, which would otherwise overflow the card.
-      const shown = errList.slice(0, 5);
-      const more = errList.length - shown.length;
-      qs('r-errors').textContent = (
-        more > 0 ? [...shown, `…and ${more} more`] : shown
-      ).join('\n');
-      errRow.hidden = false;
-    } else {
-      qs('r-errors').textContent = '';
-      errRow.hidden = true;
-    }
-    show(result);
-    _markDataStale();
-    loadNamespaceDropdowns();
-    loadSourceFilter();
-  } catch (err) {
-    showToast(t('toast.index_failed', { error: err.message }), 'error');
-  } finally {
-    btnLoading(btn, false);
-    loadStats();
-  }
-});
-
-// ---------------------------------------------------------------------------
 // Add Memory
 // ---------------------------------------------------------------------------
 
@@ -3461,7 +3387,7 @@ async function runAutoTag() {
 }
 
 // ---------------------------------------------------------------------------
-// Index stream (SSE progress)
+// Index (SSE-streamed; folder-mode primary action)
 // ---------------------------------------------------------------------------
 
 async function runIndexStream() {
@@ -3469,22 +3395,25 @@ async function runIndexStream() {
   if (!path) { setMsg(qs('index-msg'), 'Please enter a path to index.', true); return; }
   const recursive = qs('index-recursive').checked;
   const force     = qs('index-force').checked;
+  const namespace = qs('index-namespace').value.trim();
 
   const progressEl = qs('index-progress');
   const barEl      = qs('index-progress-bar');
   const labelEl    = qs('index-progress-label');
   const fileEl     = qs('index-progress-file');
   const resultEl   = qs('index-result');
+  const btn        = qs('index-btn');
 
   show(progressEl); hide(resultEl); hide(qs('index-msg'));
   barEl.style.width = '0%';
   labelEl.textContent = 'Starting…';
   fileEl.textContent = '';
 
-  btnLoading(qs('index-stream-btn'), true);
-  btnLoading(qs('index-btn'), true);
+  btnLoading(btn, true);
 
-  const params = new URLSearchParams({ path, recursive, force });
+  const paramObj = { path, recursive, force };
+  if (namespace) paramObj.namespace = namespace;
+  const params = new URLSearchParams(paramObj);
   const es = new EventSource(`/api/index/stream?${params}`);
   let _sseFailCount = 0;
   const _SSE_MAX_FAILS = 3;
@@ -3499,8 +3428,7 @@ async function runIndexStream() {
         es.close();
         showToast(t('toast.stream_fallback'), 'error');
         hide(progressEl);
-        btnLoading(qs('index-stream-btn'), false);
-        btnLoading(qs('index-btn'), false);
+        btnLoading(btn, false);
       }
       return;
     }
@@ -3522,15 +3450,47 @@ async function runIndexStream() {
       qs('r-indexed').textContent = event.indexed_chunks;
       qs('r-skipped').textContent = event.skipped_chunks;
       qs('r-deleted').textContent = event.deleted_chunks;
-      qs('r-duration').textContent = event.duration_ms.toFixed(0) + ' ms';
+      qs('r-duration').textContent = `${event.duration_ms.toFixed(0)} ms`;
+
+      // #354 / #590: ``complete.errors`` may be present even on HTTP-200
+      // streams (e.g. ONNX missing on a subset of files, binary/too-large
+      // skips). Surface the same partial-failure UX as the previous
+      // non-stream POST handler — red toast + visible error row capped at
+      // 5 entries with a "+N more" tail.
+      const errList = Array.isArray(event.errors) ? event.errors : [];
+      const errRow = qs('r-errors-row');
+      if (errList.length > 0) {
+        const shown = errList.slice(0, 5);
+        const more = errList.length - shown.length;
+        qs('r-errors').textContent = (
+          more > 0 ? [...shown, `…and ${more} more`] : shown
+        ).join('\n');
+        errRow.hidden = false;
+        showToast(
+          t('toast.index_partial', {
+            count: event.indexed_chunks,
+            errors: errList.length,
+            first: errList[0],
+          }),
+          'error',
+        );
+      } else {
+        qs('r-errors').textContent = '';
+        errRow.hidden = true;
+        showToast(t('toast.indexed_count', { count: event.indexed_chunks }), 'success', {
+          action: {
+            label: t('toast.action.register_persistent'),
+            onClick: goToSourcesAddPath,
+          },
+        });
+      }
+
       show(resultEl);
-      showToast(t('toast.stream_complete', { count: event.total_files }), 'success');
       _markDataStale();
       loadStats();
       loadNamespaceDropdowns();
       loadSourceFilter();
-      btnLoading(qs('index-stream-btn'), false);
-      btnLoading(qs('index-btn'), false);
+      btnLoading(btn, false);
     }
   };
 
@@ -3538,12 +3498,11 @@ async function runIndexStream() {
     es.close();
     showToast(t('toast.stream_fallback'), 'error');
     hide(progressEl);
-    btnLoading(qs('index-stream-btn'), false);
-    btnLoading(qs('index-btn'), false);
+    btnLoading(btn, false);
   };
 }
 
-qs('index-stream-btn').addEventListener('click', runIndexStream);
+qs('index-btn').addEventListener('click', runIndexStream);
 
 qs('refresh-tags-btn').addEventListener('click', loadTags);
 qs('autotag-btn').addEventListener('click', runAutoTag);

@@ -898,7 +898,6 @@ button:active { opacity: 0.7; }
 .autotag-result table td:last-child  { font-weight: 600; text-align: right; }
 
 /* Index progress bar */
-.index-btn-row { display: flex; gap: 8px; margin-bottom: 10px; }
 .index-progress { margin: 12px 0; }
 .progress-bar-wrap { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; margin-bottom: 6px; }
 .progress-bar { height: 100%; background: var(--accent); border-radius: 4px; transition: width 0.2s ease; }

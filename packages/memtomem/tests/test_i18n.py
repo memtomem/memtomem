@@ -208,7 +208,6 @@ class TestNoHardcodedStrings:
             "toast.saved_to_file",
             "toast.upload_complete",
             "toast.tagged_count",
-            "toast.stream_complete",
             "toast.query_saved",
             "toast.query_deleted",
             "toast.query_removed",
