@@ -1,5 +1,7 @@
 # memtomem
 
+> Markdown-first long-term memory for AI coding agents. Hybrid search over your `.md` files via MCP — your data, your quota, no hooks.
+
 **Official website & docs: [https://memtomem.com](https://memtomem.com)**
 
 [![PyPI](https://img.shields.io/pypi/v/memtomem)](https://pypi.org/project/memtomem/)
@@ -11,8 +13,6 @@
 [![Safety](https://img.shields.io/badge/safety-no%20vulnerabilities-brightgreen)](https://data.safetycli.com/packages/pypi/memtomem)
 
 > 🚧 **Alpha** — APIs, defaults, and on-disk config surfaces may still change between `0.1.x` releases. Feedback and issue reports are especially welcome: [Issues](https://github.com/memtomem/memtomem/issues) · [Discussions](https://github.com/memtomem/memtomem/discussions).
-
-**Give your AI agent a long-term memory.**
 
 memtomem turns your markdown notes, documents, and code into a searchable knowledge base that any AI coding agent can use. Write notes as plain `.md` files — memtomem indexes them and makes them searchable by both keywords and meaning.
 
