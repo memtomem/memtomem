@@ -10,6 +10,7 @@ from pathlib import Path
 
 from memtomem.context.commands import (
     CANONICAL_COMMAND_ROOT,
+    canonical_command_name,
     extract_commands_to_canonical,
     list_canonical_commands,
     parse_canonical_command,
@@ -78,6 +79,21 @@ def test_list_commands_both_layouts_dir_wins(
     assert any(
         "both flat" in rec.message and rec.levelno == logging.WARNING for rec in caplog.records
     )
+
+
+# ── canonical_command_name helper ──────────────────────────────────────
+
+
+def test_canonical_command_name_dispatch_on_layout(tmp_path: Path) -> None:
+    """Mirror of agents helper test — same dispatch shape, layout tag
+    drives the dispatch."""
+    flat = tmp_path / CANONICAL_COMMAND_ROOT / "foo.md"
+    dir_path = tmp_path / CANONICAL_COMMAND_ROOT / "foo" / "command.md"
+    literal_command_flat = tmp_path / CANONICAL_COMMAND_ROOT / "command.md"
+    assert canonical_command_name(flat, "flat") == "foo"
+    assert canonical_command_name(dir_path, "dir") == "foo"
+    # Literal `command.md` flat file is NOT misread as dir-form.
+    assert canonical_command_name(literal_command_flat, "flat") == "command"
 
 
 # ── parse_canonical_command layout dispatch ────────────────────────────

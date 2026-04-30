@@ -40,9 +40,8 @@ from typing import Protocol
 
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
-from memtomem.context._names import InvalidNameError, validate_name
+from memtomem.context._names import InvalidNameError, Layout, validate_name
 from memtomem.context.agents import (
-    Layout,
     _FRONT_MATTER_RE,
     _parse_flat_yaml,
     _toml_scalar,
@@ -52,6 +51,17 @@ logger = logging.getLogger(__name__)
 
 CANONICAL_COMMAND_ROOT = ".memtomem/commands"
 COMMAND_DIR_FILENAME = "command.md"
+
+
+def canonical_command_name(path: Path, layout: Layout) -> str:
+    """Single source of truth for command path → name dispatch.
+
+    Mirror of :func:`memtomem.context.agents.canonical_agent_name`. Avoids
+    the brittle ``path.name == "command.md"`` heuristic — callers must
+    pass the layout tag from :func:`list_canonical_commands` or
+    :func:`extract_commands_to_canonical`.
+    """
+    return path.parent.name if layout == "dir" else path.stem
 
 
 # ── Canonical dataclass ──────────────────────────────────────────────
@@ -303,9 +313,14 @@ class CommandSyncResult:
 
 @dataclass
 class ExtractResult:
-    """Result of a reverse (runtime → canonical) import."""
+    """Result of a reverse (runtime → canonical) import.
 
-    imported: list[Path]
+    Each entry in ``imported`` is ``(path, layout)`` so consumers can use
+    :func:`canonical_command_name` without re-deriving the layout from
+    the path.
+    """
+
+    imported: list[tuple[Path, Layout]]
     # (item_name, human_reason, reason_code) — see :mod:`memtomem.context._skip_reasons`.
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = field(default_factory=list)
 
@@ -451,7 +466,7 @@ def extract_commands_to_canonical(
     PR-C — migration to directory layout is a separate command (PR-D).
     """
     canonical_root = project_root / CANONICAL_COMMAND_ROOT
-    imported: list[Path] = []
+    imported: list[tuple[Path, Layout]] = []
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
     seen: dict[str, str] = {}  # cmd_name → first runtime label
 
@@ -473,7 +488,7 @@ def extract_commands_to_canonical(
                 skipped.append((cmd_name, reason, skip_codes.ALREADY_IMPORTED))
                 logger.warning("skip %s from .claude/commands: %s", cmd_name, reason)
                 continue
-            dst, _layout = _resolve_command_extract_target(canonical_root, cmd_name)
+            dst, layout = _resolve_command_extract_target(canonical_root, cmd_name)
             if dst.exists() and not overwrite:
                 reason = "canonical exists (use --overwrite)"
                 skipped.append((cmd_name, reason, skip_codes.CANONICAL_EXISTS))
@@ -482,7 +497,7 @@ def extract_commands_to_canonical(
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_bytes(dst, md_file.read_bytes())
-            imported.append(dst)
+            imported.append((dst, layout))
             seen[cmd_name] = ".claude/commands"
 
     # Gemini — TOML → canonical Markdown conversion.
@@ -503,7 +518,7 @@ def extract_commands_to_canonical(
                 skipped.append((cmd_name, reason, skip_codes.ALREADY_IMPORTED))
                 logger.warning("skip %s from .gemini/commands: %s", cmd_name, reason)
                 continue
-            dst, _layout = _resolve_command_extract_target(canonical_root, cmd_name)
+            dst, layout = _resolve_command_extract_target(canonical_root, cmd_name)
             if dst.exists() and not overwrite:
                 reason = "canonical exists (use --overwrite)"
                 skipped.append((cmd_name, reason, skip_codes.CANONICAL_EXISTS))
@@ -518,7 +533,7 @@ def extract_commands_to_canonical(
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(dst, canonical_content)
-            imported.append(dst)
+            imported.append((dst, layout))
             seen[cmd_name] = ".gemini/commands"
 
     return ExtractResult(imported=imported, skipped=skipped)
@@ -596,6 +611,7 @@ __all__ = [
     "GeminiCommandsGenerator",
     "SlashCommand",
     "StrictDropError",
+    "canonical_command_name",
     "diff_commands",
     "extract_commands_to_canonical",
     "generate_all_commands",

@@ -17,6 +17,7 @@ from memtomem.context.agents import (
     CANONICAL_AGENT_ROOT,
     AgentParseError,
     SubAgent,
+    canonical_agent_name,
     diff_agents,
     extract_agents_to_canonical,
     generate_all_agents,
@@ -89,7 +90,7 @@ async def list_agents(
     agents: list[dict[str, object]] = []
     canonical_names: set[str] = set()
     for agent_path, layout in canonicals:
-        name = agent_path.parent.name if layout == "dir" else agent_path.stem
+        name = canonical_agent_name(agent_path, layout)
         canonical_names.add(name)
         agents.append(
             {
@@ -408,10 +409,10 @@ async def import_agents(
     return {
         "imported": [
             {
-                "name": p.parent.name if p.name == "agent.md" else p.stem,
+                "name": canonical_agent_name(p, layout),
                 "canonical_path": str(p.relative_to(project_root)),
             }
-            for p in result.imported
+            for p, layout in result.imported
         ],
         "skipped": [
             {"name": name, "reason": reason, "reason_code": code}
@@ -453,10 +454,10 @@ async def import_agent(
     return {
         "imported": [
             {
-                "name": p.parent.name if p.name == "agent.md" else p.stem,
+                "name": canonical_agent_name(p, layout),
                 "canonical_path": str(p.relative_to(project_root)),
             }
-            for p in result.imported
+            for p, layout in result.imported
         ],
         "skipped": [
             {"name": n, "reason": reason, "reason_code": code} for n, reason, code in result.skipped

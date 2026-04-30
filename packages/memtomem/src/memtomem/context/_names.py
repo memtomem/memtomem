@@ -21,13 +21,22 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Literal
 
 __all__ = [
     "GENERATOR_VENDOR",
     "InvalidNameError",
+    "Layout",
     "OVERRIDE_FORMATS",
     "validate_name",
 ]
+
+# ADR-0008 PR-C: agents/commands canonical may live in either the legacy
+# flat layout (``<name>.md``) or the directory layout
+# (``<name>/agent.md`` / ``<name>/command.md``). Hoisted here so both
+# ``agents.py`` and ``commands.py`` share one type definition rather than
+# cross-importing.
+Layout = Literal["flat", "dir"]
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _MAX_LEN = 64

@@ -16,6 +16,7 @@ from memtomem.context.commands import (
     CANONICAL_COMMAND_ROOT,
     COMMAND_GENERATORS,
     CommandParseError,
+    canonical_command_name,
     diff_commands,
     extract_commands_to_canonical,
     generate_all_commands,
@@ -75,7 +76,7 @@ async def list_commands(
     commands: list[dict[str, object]] = []
     canonical_names: set[str] = set()
     for cmd_path, layout in canonicals:
-        name = cmd_path.parent.name if layout == "dir" else cmd_path.stem
+        name = canonical_command_name(cmd_path, layout)
         canonical_names.add(name)
         commands.append(
             {
@@ -384,10 +385,10 @@ async def import_commands(
     return {
         "imported": [
             {
-                "name": p.parent.name if p.name == "command.md" else p.stem,
+                "name": canonical_command_name(p, layout),
                 "canonical_path": str(p.relative_to(project_root)),
             }
-            for p in result.imported
+            for p, layout in result.imported
         ],
         "skipped": [
             {"name": name, "reason": reason, "reason_code": code}
@@ -429,10 +430,10 @@ async def import_command(
     return {
         "imported": [
             {
-                "name": p.parent.name if p.name == "command.md" else p.stem,
+                "name": canonical_command_name(p, layout),
                 "canonical_path": str(p.relative_to(project_root)),
             }
-            for p in result.imported
+            for p, layout in result.imported
         ],
         "skipped": [
             {"name": n, "reason": reason, "reason_code": code} for n, reason, code in result.skipped

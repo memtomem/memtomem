@@ -116,6 +116,22 @@ def test_wiki_skill_override_missing_skill(wiki_root: Path) -> None:
     assert "ghost" in result.output
 
 
+def test_wiki_skill_override_does_not_create_overrides_dir_on_missing_skill(
+    wiki_root: Path,
+) -> None:
+    """Refused calls (missing skill / collision) MUST NOT leave a
+    half-built ``skills/<name>/overrides/`` directory behind. Pre-flight
+    the seed bytes BEFORE mkdir so the wiki tree stays clean on refuse."""
+    _initialized_wiki()
+    runner = CliRunner()
+
+    runner.invoke(wiki_group, ["skill", "override", "ghost", "--vendor", "claude"])
+
+    # The skills/ghost/ subtree must not have been created at all —
+    # neither the overrides/ dir nor its parent ghost/ dir.
+    assert not (wiki_root / "skills" / "ghost").exists()
+
+
 def test_wiki_skill_override_missing_wiki(monkeypatch, tmp_path: Path) -> None:
     """No wiki initialized → classified error, not traceback."""
     monkeypatch.setenv("MEMTOMEM_WIKI_PATH", str(tmp_path / "no-wiki"))

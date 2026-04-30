@@ -28,23 +28,21 @@ def render_seed_bytes(
     store: WikiStore,
     asset_type: str,
     name: str,
-    vendor: str,
+    _vendor: str,
 ) -> bytes:
     """Return the bytes to seed an override file with.
 
     Skills (byte-identical fan-out) → seed equals canonical ``SKILL.md``.
     Agents and commands ride the vendor-specific renderers and are not
     activated in PR-C; the resolver in :mod:`memtomem.context.override`
-    has a matching gate.
+    has a matching gate. ``_vendor`` is reserved for that follow-up
+    (per-vendor renderer dispatch) and intentionally unused for skills.
     """
     if asset_type != "skills":
         raise NotImplementedError(f"override seeding for {asset_type!r} lands in a follow-up PR")
     src = store.root / "skills" / name / "SKILL.md"
     if not src.is_file():
         raise FileNotFoundError(f"wiki has no skills/{name}/SKILL.md to seed from at {src}")
-    # Vendor parameter is reserved for parity with the agents/commands
-    # surface that will land later — for skills the seed is vendor-agnostic.
-    del vendor
     return src.read_bytes()
 
 
@@ -60,6 +58,10 @@ def seed_override(
 
     Returns the override file path. ``force`` overwrites an existing file
     after writing a ``.bak`` sibling so the previous content is recoverable.
+
+    All preconditions are checked before any filesystem mutation: a refused
+    call (missing wiki / missing canonical / collision without ``force``)
+    must NOT leave a half-built ``overrides/`` directory behind.
     """
     store.require_exists()
     validate_name(name, kind=f"{asset_type.removesuffix('s')} name")
@@ -68,14 +70,17 @@ def seed_override(
         raise ValueError(f"no override format registered for ({asset_type!r}, {vendor!r})")
     _, ext = fmt
     target = store.root / asset_type / name / "overrides" / f"{vendor}.{ext}"
-    target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists() and not force:
         raise OverrideExistsError(
             f"override already exists at {target}; pass --force to overwrite "
             f"(creates a .bak sibling so the previous content is recoverable)"
         )
+    # Pre-flight the seed bytes so missing-canonical does not leave an
+    # empty overrides/ directory behind from the mkdir below.
+    seed_bytes = render_seed_bytes(store, asset_type, name, vendor)
+    target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists() and force:
         backup = target.with_suffix(target.suffix + ".bak")
         atomic_write_bytes(backup, target.read_bytes())
-    atomic_write_bytes(target, render_seed_bytes(store, asset_type, name, vendor))
+    atomic_write_bytes(target, seed_bytes)
     return target

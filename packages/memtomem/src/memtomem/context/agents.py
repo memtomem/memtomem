@@ -36,22 +36,30 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
-from memtomem.context._names import InvalidNameError, validate_name
+from memtomem.context._names import InvalidNameError, Layout, validate_name
 
 logger = logging.getLogger(__name__)
 
 CANONICAL_AGENT_ROOT = ".memtomem/agents"
 AGENT_DIR_FILENAME = "agent.md"
 
-# ADR-0008 commits to directory layout (`agents/<name>/agent.md`); the
-# legacy flat layout (`agents/<name>.md`) was the only form before PR-C.
-# Fan-out reads both during the migration window; reverse-sync preserves
-# whichever form already exists so PR-C does not move user files.
-Layout = Literal["flat", "dir"]
+
+def canonical_agent_name(path: Path, layout: Layout) -> str:
+    """Single source of truth for agent path → name dispatch.
+
+    Used by :func:`list_canonical_agents` consumers, the web routes import
+    handler, and any other place that needs the canonical name without
+    re-implementing the layout fallback. The brittle
+    ``path.name == "agent.md"`` heuristic is intentionally avoided —
+    callers must pass the layout tag they got from
+    :func:`list_canonical_agents` or :func:`extract_agents_to_canonical`.
+    """
+    return path.parent.name if layout == "dir" else path.stem
+
 
 # Reuse the same frontmatter regex used by the markdown chunker so canonical
 # agent files parse consistently with the rest of memtomem.
@@ -489,9 +497,16 @@ class AgentSyncResult:
 
 @dataclass
 class ExtractResult:
-    """Result of a reverse (runtime → canonical) import."""
+    """Result of a reverse (runtime → canonical) import.
 
-    imported: list[Path]
+    Each entry in ``imported`` is ``(path, layout)`` so consumers can use
+    :func:`canonical_agent_name` without re-deriving the layout from the
+    path. ``layout`` is whichever form the canonical now lives in on disk
+    (preserving an existing flat file or writing a new dir entry — see
+    :func:`_resolve_agent_extract_target`).
+    """
+
+    imported: list[tuple[Path, Layout]]
     # (item_name, human_reason, reason_code) — see :mod:`memtomem.context._skip_reasons`.
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = field(default_factory=list)
 
@@ -621,7 +636,7 @@ def extract_agents_to_canonical(
     PR-C — migration to directory layout is a separate command (PR-D).
     """
     canonical_root = project_root / CANONICAL_AGENT_ROOT
-    imported: list[Path] = []
+    imported: list[tuple[Path, Layout]] = []
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
     seen: dict[str, str] = {}  # agent_name → first runtime label
 
@@ -651,7 +666,7 @@ def extract_agents_to_canonical(
                 skipped.append((agent_name, reason, skip_codes.ALREADY_IMPORTED))
                 logger.warning("skip %s from %s: %s", agent_name, runtime_label, reason)
                 continue
-            dst, _layout = _resolve_agent_extract_target(canonical_root, agent_name)
+            dst, layout = _resolve_agent_extract_target(canonical_root, agent_name)
             if dst.exists() and not overwrite:
                 reason = "canonical exists (use --overwrite)"
                 skipped.append((agent_name, reason, skip_codes.CANONICAL_EXISTS))
@@ -660,7 +675,7 @@ def extract_agents_to_canonical(
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_bytes(dst, md_file.read_bytes())
-            imported.append(dst)
+            imported.append((dst, layout))
             seen[agent_name] = runtime_label
 
     return ExtractResult(imported=imported, skipped=skipped)
@@ -742,6 +757,7 @@ __all__ = [
     "ON_DROP_LEVELS",
     "StrictDropError",
     "SubAgent",
+    "canonical_agent_name",
     "diff_agents",
     "extract_agents_to_canonical",
     "generate_all_agents",

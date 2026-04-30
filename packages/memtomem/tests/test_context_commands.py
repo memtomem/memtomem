@@ -11,6 +11,7 @@ from memtomem.context.commands import (
     CommandParseError,
     CommandSyncResult,
     StrictDropError,
+    canonical_command_name,
     diff_commands,
     extract_commands_to_canonical,
     generate_all_commands,
@@ -281,8 +282,8 @@ class TestExtractCommandsToCanonical:
         (d / "ok.md").write_text(SAMPLE_MINIMAL_COMMAND)
 
         result = extract_commands_to_canonical(tmp_path)
-        # Dir layout: imported paths are <root>/<name>/command.md.
-        imported_names = sorted(p.parent.name for p in result.imported)
+        # ExtractResult.imported is now (path, layout) tuples.
+        imported_names = sorted(canonical_command_name(p, layout) for p, layout in result.imported)
         assert imported_names == ["ok"]
         skipped_names = sorted(name for name, _, _ in result.skipped)
         assert "-bad" in skipped_names
@@ -294,8 +295,8 @@ class TestExtractCommandsToCanonical:
         (d / "beta.md").write_text(SAMPLE_MINIMAL_COMMAND)
 
         result = extract_commands_to_canonical(tmp_path, only_name="alpha")
-        # Dir layout: imported paths are <root>/<name>/command.md.
-        assert [p.parent.name for p in result.imported] == ["alpha"]
+        # ExtractResult.imported is (path, layout) tuples.
+        assert [canonical_command_name(p, layout) for p, layout in result.imported] == ["alpha"]
         assert result.skipped == []
         # Beta was untouched — neither imported nor a canonical written.
         assert not (tmp_path / CANONICAL_COMMAND_ROOT / "beta" / "command.md").exists()

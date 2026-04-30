@@ -13,6 +13,7 @@ from memtomem.context.agents import (
     _runtime_agent_names,
     _toml_escape_basic_string,
     _toml_escape_multiline_string,
+    canonical_agent_name,
     diff_agents,
     extract_agents_to_canonical,
     generate_all_agents,
@@ -342,8 +343,9 @@ class TestExtractAgentsToCanonical:
         result = extract_agents_to_canonical(tmp_path)
 
         # Only "ok" imported; "-bad" skipped with invalid-name reason.
-        # Dir layout: imported paths are <root>/<name>/agent.md.
-        imported_names = sorted(p.parent.name for p in result.imported)
+        # ExtractResult.imported is now (path, layout) tuples; new agents
+        # land in dir layout per ADR-0008.
+        imported_names = sorted(canonical_agent_name(p, layout) for p, layout in result.imported)
         assert imported_names == ["ok"]
         skipped_names = sorted(name for name, _, _ in result.skipped)
         assert "-bad" in skipped_names
@@ -357,8 +359,8 @@ class TestExtractAgentsToCanonical:
         (d / "beta.md").write_text(SAMPLE_MINIMAL_AGENT, encoding="utf-8")
 
         result = extract_agents_to_canonical(tmp_path, only_name="alpha")
-        # Dir layout: imported paths are <root>/<name>/agent.md.
-        assert [p.parent.name for p in result.imported] == ["alpha"]
+        # ExtractResult.imported is (path, layout) tuples.
+        assert [canonical_agent_name(p, layout) for p, layout in result.imported] == ["alpha"]
         assert result.skipped == []
         assert not (tmp_path / CANONICAL_AGENT_ROOT / "beta" / "agent.md").exists()
 

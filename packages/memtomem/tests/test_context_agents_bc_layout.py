@@ -13,6 +13,7 @@ from pathlib import Path
 
 from memtomem.context.agents import (
     CANONICAL_AGENT_ROOT,
+    canonical_agent_name,
     extract_agents_to_canonical,
     list_canonical_agents,
     parse_canonical_agent,
@@ -92,6 +93,23 @@ def test_list_agents_both_layouts_dir_wins(
     assert any(
         "both flat" in rec.message and rec.levelno == logging.WARNING for rec in caplog.records
     )
+
+
+# ── canonical_agent_name helper ────────────────────────────────────────
+
+
+def test_canonical_agent_name_dispatch_on_layout(tmp_path: Path) -> None:
+    """Helper is the single source of truth for path → name. Layout tag
+    drives the dispatch; the brittle ``path.name == "agent.md"`` heuristic
+    is intentionally not used (a literal flat ``agent.md`` file would
+    misclassify under that heuristic)."""
+    flat = tmp_path / CANONICAL_AGENT_ROOT / "foo.md"
+    dir_path = tmp_path / CANONICAL_AGENT_ROOT / "foo" / "agent.md"
+    literal_agent_flat = tmp_path / CANONICAL_AGENT_ROOT / "agent.md"
+    assert canonical_agent_name(flat, "flat") == "foo"
+    assert canonical_agent_name(dir_path, "dir") == "foo"
+    # Literal `agent.md` flat file is NOT misread as dir-form.
+    assert canonical_agent_name(literal_agent_flat, "flat") == "agent"
 
 
 # ── parse_canonical_agent layout dispatch ───────────────────────────────
