@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=70" />
+  <link rel="stylesheet" href="/style.css?v=71" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" />
 </head>
 <body>
@@ -499,7 +499,10 @@
             <span data-i18n="index.folder_oneshot_hint">One-shot scan. For automatic re-indexing, use </span><a href="#" id="folder-hint-sources-link" class="link-inline" data-i18n="index.folder_oneshot_link">Sources → Add path</a><span data-i18n="index.folder_oneshot_suffix">.</span>
           </p>
           <label class="field-label" for="index-path" data-i18n="index.path_label">Path</label>
-          <input id="index-path" type="text" data-i18n-placeholder="index.path_placeholder" placeholder="e.g. ~/memories or /path/to/notes" />
+          <div class="path-input-row">
+            <input id="index-path" type="text" data-i18n-placeholder="index.path_placeholder" placeholder="e.g. ~/memories or /path/to/notes" />
+            <button type="button" id="path-picker-browse-btn" class="btn-ghost" data-i18n="index.browse_btn" data-i18n-aria-label="index.browse_aria">📁 Browse</button>
+          </div>
           <label class="field-label" for="index-namespace" data-i18n="index.ns_label">Namespace</label>
           <!-- placeholder is JS-owned (``_syncIndexHints``) so i18n.js
                applyDOM doesn't overwrite the dynamic auto/config suffix
@@ -1267,6 +1270,22 @@
     </div>
   </div>
 
+  <!-- Folder picker (issue #582 4.12) -->
+  <div id="path-picker-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" data-i18n-aria-label="picker.aria_label">
+    <div class="modal-inner path-picker-dialog">
+      <div class="modal-header">
+        <span class="modal-title" data-i18n="picker.title">Pick a folder</span>
+      </div>
+      <nav id="path-picker-breadcrumb" class="path-picker-breadcrumb" aria-label="breadcrumb"></nav>
+      <ul id="path-picker-list" class="path-picker-list" role="listbox"></ul>
+      <p id="path-picker-empty" class="path-picker-empty" hidden data-i18n="picker.empty">No subdirectories</p>
+      <div class="confirm-actions">
+        <button type="button" id="path-picker-cancel-btn" class="btn-ghost" data-i18n="picker.cancel">Cancel</button>
+        <button type="button" id="path-picker-select-btn" class="btn-primary" data-i18n="picker.select" disabled>Select</button>
+      </div>
+    </div>
+  </div>
+
   <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
@@ -1285,5 +1304,6 @@
   <script src="/settings-hooks-watchdog.js?v=1"></script>
   <script src="/timeline.js?v=1"></script>
   <script src="/context-gateway.js?v=5"></script>
+  <script src="/path-picker.js?v=1"></script>
 </body>
 </html>

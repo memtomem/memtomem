@@ -3046,3 +3046,77 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 .tab-nav { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
 .tab-nav::-webkit-scrollbar { display: none; }
 
+/* =====================================================================
+   FOLDER PICKER (issue #582 4.12)
+   ===================================================================== */
+
+.path-input-row { display: flex; gap: 8px; align-items: center; }
+.path-input-row > input { flex: 1; min-width: 0; }
+.path-input-row > .btn-ghost { flex-shrink: 0; }
+
+.path-picker-dialog {
+  width: 560px;
+  max-width: 90vw;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.path-picker-breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  font-size: 0.82rem;
+  color: var(--muted);
+  margin: 8px 0 12px 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  word-break: break-all;
+}
+.path-picker-breadcrumb .crumb {
+  cursor: pointer;
+  color: var(--accent);
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+.path-picker-breadcrumb .crumb:hover { background: var(--surface); text-decoration: underline; }
+.path-picker-breadcrumb .crumb.crumb-current { color: var(--text); cursor: default; }
+.path-picker-breadcrumb .crumb.crumb-current:hover { background: transparent; text-decoration: none; }
+.path-picker-breadcrumb .crumb-sep { color: var(--muted); }
+
+.path-picker-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  min-height: 200px;
+}
+.path-picker-list li {
+  padding: 8px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.88rem;
+  color: var(--text);
+}
+.path-picker-list li:last-child { border-bottom: none; }
+.path-picker-list li:hover { background: var(--surface); }
+.path-picker-list li:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+.path-picker-list .picker-icon { color: var(--muted); flex-shrink: 0; }
+
+.path-picker-empty {
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 24px 0;
+}
+

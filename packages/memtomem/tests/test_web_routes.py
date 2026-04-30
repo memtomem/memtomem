@@ -1877,3 +1877,317 @@ class TestRequireConfigured:
         resp = await getattr(client, method)(path, **kwargs)
         assert resp.status_code == 409, resp.text
         assert resp.json()["detail"] == ("memtomem is not configured. Run 'mm init' to set up.")
+
+
+# ---------------------------------------------------------------------------
+# GET /api/fs/list — Index-tab folder picker (issue #582 4.12)
+# ---------------------------------------------------------------------------
+
+
+class TestFsList:
+    """Exercise the picker endpoint's allow-list, symlink, and i18n
+    boundary handling. The endpoint isn't a security gate — ``mm web`` is
+    localhost-bound and the user can still type any path into the Index
+    input. These tests pin the *picker scope* contract: only allow-listed
+    descendants navigate, symlinks pointing out are excluded so users never
+    click an entry and hit a 422, broken symlinks don't sink the whole
+    listing, and macOS NFD vs NFC for non-ASCII directory names compares
+    equal.
+    """
+
+    @pytest.fixture
+    def fs_tree(self, tmp_path: Path):
+        """Build a small allow-listed tree with edge-case entries.
+
+        Layout (``home`` and ``outside`` are siblings so the picker's HOME
+        root genuinely doesn't cover ``outside``)::
+
+            tmp_path/
+              home/               (HOME for these tests)
+                memdir/           (registered as memory_dir)
+                  alpha/
+                  beta/
+                  .hidden/
+                  empty/
+                  한글노트/       (Korean dirname — NFD form on disk if macOS)
+                  ln_inside  -> alpha
+                  ln_outside -> /etc
+                  ln_broken  -> nowhere
+                  a_file.md
+              outside/            (NOT in allow-list)
+                target/
+        """
+        home = tmp_path / "home"
+        home.mkdir()
+        memdir = home / "memdir"
+        outside = tmp_path / "outside"
+        (memdir / "alpha").mkdir(parents=True)
+        (memdir / "beta").mkdir()
+        (memdir / ".hidden").mkdir()
+        (memdir / "empty").mkdir()
+        korean_nfc = unicodedata.normalize("NFC", "한글노트")
+        (memdir / korean_nfc).mkdir()
+        (memdir / "a_file.md").write_text("hello")
+        (outside / "target").mkdir(parents=True)
+        (memdir / "ln_inside").symlink_to(memdir / "alpha", target_is_directory=True)
+        (memdir / "ln_outside").symlink_to(Path("/etc"), target_is_directory=True)
+        (memdir / "ln_broken").symlink_to(memdir / "no_such_target")
+        return {"home": home, "memdir": memdir, "outside": outside}
+
+    def _wire_memory_dirs(self, app, dirs: list[Path], monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(app.state.config.indexing, "memory_dirs", dirs)
+
+    async def test_roots_no_path_or_empty(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        # HOME goes first, then memory_dirs in config order, deduped.
+        memdir = fs_tree["memdir"]
+        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        # Same dir twice + Home (= tmp_path) — the dedup must collapse to two.
+        self._wire_memory_dirs(app, [memdir, memdir], monkeypatch)
+
+        resp_none = await client.get("/api/fs/list")
+        resp_empty = await client.get("/api/fs/list?path=")
+        assert resp_none.status_code == 200
+        assert resp_empty.status_code == 200
+        assert resp_none.json() == resp_empty.json()
+
+        body = resp_none.json()
+        assert body["is_root"] is True
+        assert body["path"] is None
+        assert body["parent"] is None
+        # Order: Home first, then memdir; duplicate collapsed.
+        norm_paths = [e["path"] for e in body["entries"]]
+        assert len(norm_paths) == 2
+        assert Path(norm_paths[0]).name == fs_tree["home"].name
+        assert Path(norm_paths[1]) == Path(unicodedata.normalize("NFC", str(memdir.resolve())))
+
+    async def test_subdirs_inside_allow_list(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        memdir = fs_tree["memdir"]
+        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        self._wire_memory_dirs(app, [memdir], monkeypatch)
+
+        resp = await client.get(f"/api/fs/list?path={memdir}")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["is_root"] is False
+        names = [e["name"] for e in body["entries"]]
+        # Sorted case-insensitively. ln_outside excluded (target outside).
+        # ln_broken excluded (OSError on resolve / is_dir).
+        # a_file.md excluded (not a dir).
+        assert "alpha" in names
+        assert "beta" in names
+        assert ".hidden" in names  # hidden visible by default
+        assert "empty" in names
+        assert "ln_inside" in names  # symlink → alpha (inside) kept
+        assert "ln_outside" not in names
+        assert "ln_broken" not in names
+        assert "a_file.md" not in names
+
+    async def test_path_param_tilde_expansion(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        memdir = fs_tree["memdir"]
+        # Pretend the memory_dir lives under a fake HOME.
+        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        self._wire_memory_dirs(app, [memdir], monkeypatch)
+
+        rel = memdir.relative_to(fs_tree["home"])
+        resp = await client.get(f"/api/fs/list?path=~/{rel}")
+        assert resp.status_code == 200, resp.text
+        names = [e["name"] for e in resp.json()["entries"]]
+        assert "alpha" in names
+
+    async def test_path_param_dotdot_resolved_inside(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        memdir = fs_tree["memdir"]
+        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        self._wire_memory_dirs(app, [memdir], monkeypatch)
+
+        # /…/memdir/alpha/../beta resolves to /…/memdir/beta — inside.
+        path = f"{memdir}/alpha/../beta"
+        resp = await client.get(f"/api/fs/list?path={path}")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["is_root"] is False
+
+    async def test_outside_allow_list_422(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        memdir = fs_tree["memdir"]
+        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        self._wire_memory_dirs(app, [memdir], monkeypatch)
+
+        outside = fs_tree["outside"] / "target"
+        resp = await client.get(f"/api/fs/list?path={outside}")
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"] == "outside_picker_scope"
+
+    async def test_nonexistent_404(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        memdir = fs_tree["memdir"]
+        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        self._wire_memory_dirs(app, [memdir], monkeypatch)
+
+        resp = await client.get(f"/api/fs/list?path={memdir}/no_such_subdir")
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "not_found"
+
+    async def test_file_not_dir_400(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        memdir = fs_tree["memdir"]
+        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        self._wire_memory_dirs(app, [memdir], monkeypatch)
+
+        resp = await client.get(f"/api/fs/list?path={memdir}/a_file.md")
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "not_a_directory"
+
+    async def test_hidden_dirs_visible(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        memdir = fs_tree["memdir"]
+        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        self._wire_memory_dirs(app, [memdir], monkeypatch)
+
+        resp = await client.get(f"/api/fs/list?path={memdir}")
+        names = [e["name"] for e in resp.json()["entries"]]
+        assert ".hidden" in names
+
+    async def test_permission_error_skipped(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import os
+        import sys
+
+        if sys.platform == "win32":
+            pytest.skip("chmod 000 not meaningful on Windows")
+        memdir = fs_tree["memdir"]
+        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        self._wire_memory_dirs(app, [memdir], monkeypatch)
+
+        guarded = memdir / "guarded"
+        guarded.mkdir()
+        os.chmod(guarded, 0o000)
+        try:
+            resp = await client.get(f"/api/fs/list?path={memdir}")
+            assert resp.status_code == 200
+            names = [e["name"] for e in resp.json()["entries"]]
+            # The directory itself is still a dir (chmod doesn't hide it),
+            # but iterdir on it would fail. The endpoint listing the parent
+            # still returns the rest.
+            assert "alpha" in names
+        finally:
+            os.chmod(guarded, 0o755)
+
+    async def test_broken_symlink_skipped(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        memdir = fs_tree["memdir"]
+        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        self._wire_memory_dirs(app, [memdir], monkeypatch)
+
+        resp = await client.get(f"/api/fs/list?path={memdir}")
+        assert resp.status_code == 200
+        names = [e["name"] for e in resp.json()["entries"]]
+        assert "ln_broken" not in names
+        # Listing still completed despite the broken symlink.
+        assert "alpha" in names
+
+    async def test_symlink_inside_allow_list_kept(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        memdir = fs_tree["memdir"]
+        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        self._wire_memory_dirs(app, [memdir], monkeypatch)
+
+        resp = await client.get(f"/api/fs/list?path={memdir}")
+        entries = {e["name"]: e["path"] for e in resp.json()["entries"]}
+        assert "ln_inside" in entries
+
+    async def test_symlink_outside_allow_list_excluded(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        memdir = fs_tree["memdir"]
+        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        self._wire_memory_dirs(app, [memdir], monkeypatch)
+
+        resp = await client.get(f"/api/fs/list?path={memdir}")
+        names = [e["name"] for e in resp.json()["entries"]]
+        assert "ln_outside" not in names
+
+    async def test_subdirs_with_korean_dirname(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        memdir = fs_tree["memdir"]
+        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        self._wire_memory_dirs(app, [memdir], monkeypatch)
+
+        # Listing the memdir surfaces the Korean entry.
+        resp = await client.get(f"/api/fs/list?path={memdir}")
+        names = [e["name"] for e in resp.json()["entries"]]
+        korean_names = [n for n in names if "한" in unicodedata.normalize("NFC", n)]
+        assert korean_names, names
+
+        # Querying with the NFC form of the path navigates into it even when
+        # the on-disk form may be NFD (macOS APFS). norm_path normalises both
+        # sides so the boundary check matches regardless of input form.
+        nfc_path = unicodedata.normalize("NFC", str(memdir / "한글노트"))
+        resp2 = await client.get(f"/api/fs/list?path={nfc_path}")
+        assert resp2.status_code == 200, resp2.text
