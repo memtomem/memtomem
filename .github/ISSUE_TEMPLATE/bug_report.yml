@@ -122,10 +122,8 @@ body:
         - Claude Desktop
         - Cursor
         - Windsurf
-        - Codex CLI
-        - Cline
-        - Aider
         - Gemini CLI
+        - Codex CLI
         - Other
     validations:
       required: false
