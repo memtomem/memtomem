@@ -4,9 +4,10 @@
 **Date:** 2026-04-30
 **Context:** Issue #585 — PR #575 follow-up review surfaced that
 `packages/memtomem/src/memtomem/privacy.py: DEFAULT_PATTERNS` is enforced
-only on the MCP `mem_add` / `mem_edit` paths. The Web UI's folder-index and
-upload surfaces accept content raw, bypassing the LTM trust boundary that
-CLAUDE.md asserts ("STM-bypass must not be safety-bypass").
+only on the MCP `mem_add` / `mem_batch_add` paths. The Web UI's
+folder-index and upload surfaces accept content raw, bypassing the LTM
+trust boundary that CLAUDE.md asserts ("STM-bypass must not be
+safety-bypass").
 
 ## Background
 
@@ -39,11 +40,19 @@ exposed via the `mem_add_redaction_stats` MCP tool (a JSON snapshot of
 `privacy.snapshot()`); the `logger.warning(...)` line is the only
 persistent breadcrumb today (stderr / log sink, not a database row).
 
-`mem_edit` (line 445) follows the same shape. Compose-mode in the Web UI is
-covered separately by **#580 (CLOSED)** — a client-side regex pre-check
-against `GET /api/privacy/patterns` (`web/routes/system.py:278`) shows a
-confirm dialog before submission. That handles the "user is the typist"
-case where per-input confirm is meaningful.
+`mem_batch_add` (line 400, with the gate at line 445-465) follows the
+same shape — `privacy.record("bypassed"|"blocked", "mem_batch_add")`
+plus the same `logger.warning(...)` line, scoped per item-index. Note
+that **`mem_edit` and `mem_delete` are unguarded today** (no
+`privacy.scan()` call, no `force_unsafe` parameter); that is a related
+but separate MCP-path gap and is out of scope for this ADR (which
+addresses only the Web UI bulk surfaces).
+
+Compose-mode in the Web UI is covered separately by **#580 (CLOSED)** —
+a client-side regex pre-check against `GET /api/privacy/patterns`
+(`web/routes/system.py:278`) shows a confirm dialog before submission.
+That handles the "user is the typist" case where per-input confirm is
+meaningful.
 
 The remaining gap is on bulk surfaces, where per-file confirm is not a
 meaningful UX:
@@ -166,12 +175,14 @@ most prose. C.1 keeps the asymmetric-sync invariant from CLAUDE.md intact.
 - *UI toggle* — `mem_add` already exposes `force_unsafe=True` over MCP. A
   Web UI checkbox at the same trust level is the consistent extension.
 - *Audit trail* — today MCP bypass produces (a) a counter increment via
-  `privacy.record("bypassed", "mem_add")` (snapshot-readable through
-  `mem_add_redaction_stats`) and (b) a `logger.warning(...)` line
-  (`memory_crud.py:88, 465`) that names tool / namespace / file /
-  content_chars / hits. Bulk bypass should reuse the same two
-  surfaces — extending counter labels to `mem_add_bulk` (or similar)
-  and emitting the same warning shape. **Open sub-question for the
+  `privacy.record("bypassed", "<tool>")` (snapshot-readable through
+  `mem_add_redaction_stats`; existing labels are `mem_add` at
+  `memory_crud.py:88` and `mem_batch_add` at `memory_crud.py:463`) and
+  (b) a `logger.warning(...)` line at the same sites that names tool /
+  namespace / file / content_chars / hits. Bulk bypass should reuse the
+  same two surfaces — adding a new ingress-tool label (e.g.
+  `index_bulk` or `web_bulk_index`, exact name a PR-A detail) and
+  emitting the same warning shape. **Open sub-question for the
   implementation PR**: whether a persistent audit table (chunk-id +
   matched-pattern hash + caller surface) is also warranted, or whether
   counters + structured logs remain enough. This ADR records the
@@ -308,7 +319,8 @@ These were considered when drafting and folded into the leaning above:
 - `packages/memtomem/src/memtomem/server/tools/memory_crud.py:78-104` —
   existing gate model on `mem_add`.
 - `packages/memtomem/src/memtomem/server/tools/memory_crud.py:445-465` —
-  same model on `mem_edit`.
+  same model on `mem_batch_add`. (`mem_edit` / `mem_delete` are
+  unguarded today — separate MCP-path gap, not addressed here.)
 - `packages/memtomem/src/memtomem/web/routes/system.py:835` —
   `trigger_index` (POST `/api/index`).
 - `packages/memtomem/src/memtomem/web/routes/system.py:795` —
