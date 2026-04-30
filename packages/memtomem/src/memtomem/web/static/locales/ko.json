@@ -162,7 +162,7 @@
   "index.force": "강제 재인덱스",
   "index.index_btn": "인덱스",
   "index.progress_label": "0 / 0 파일",
-  "indexing.indicator": "⏳ 인덱싱 중…",
+  "index.indicator": "⏳ 인덱싱 중…",
   "index.result.files": "스캔된 파일",
   "index.result.chunks": "전체 청크",
   "index.result.indexed": "인덱싱됨",

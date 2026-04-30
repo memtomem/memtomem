@@ -162,7 +162,7 @@
   "index.force": "Force re-index",
   "index.index_btn": "Index",
   "index.progress_label": "0 / 0 files",
-  "indexing.indicator": "⏳ Indexing…",
+  "index.indicator": "⏳ Indexing…",
   "index.result.files": "Files scanned",
   "index.result.chunks": "Total chunks",
   "index.result.indexed": "Indexed",

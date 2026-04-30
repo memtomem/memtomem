@@ -98,9 +98,9 @@ header h1 { font-size: 1.2rem; font-weight: 700; color: var(--accent); letter-sp
    knows a long-running operation is still in flight after navigating
    away from the Index tab. Triggered from STATE.indexing in app.js. */
 .indexing-pill {
-  background: color-mix(in srgb, var(--accent, #4a90e2) 12%, transparent);
-  border-color: color-mix(in srgb, var(--accent, #4a90e2) 50%, transparent);
-  color: var(--accent, #4a90e2);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  color: var(--accent);
   animation: indexing-pulse 1.6s ease-in-out infinite;
 }
 @keyframes indexing-pulse {

@@ -3563,10 +3563,25 @@ async function runIndexStream() {
 
   btnLoading(btn, true);
 
-  const paramObj = { path, recursive, force };
-  if (namespace) paramObj.namespace = namespace;
-  const params = new URLSearchParams(paramObj);
-  const es = new EventSource(`/api/index/stream?${params}`);
+  // ``new EventSource`` can throw synchronously (malformed URL, browser
+  // storage policy edge cases). Without this guard a throw here would
+  // leave ``STATE.indexing`` stuck on ``true`` and the indicator
+  // permanently visible until page reload, blocking every subsequent
+  // indexing trigger across all surfaces.
+  let es;
+  try {
+    const paramObj = { path, recursive, force };
+    if (namespace) paramObj.namespace = namespace;
+    const params = new URLSearchParams(paramObj);
+    es = new EventSource(`/api/index/stream?${params}`);
+  } catch (err) {
+    console.error('[index-stream] failed to open stream:', err);
+    showToast(t('toast.stream_fallback'), 'error');
+    hide(progressEl);
+    btnLoading(btn, false);
+    _indexingEnd();
+    return;
+  }
   let _sseFailCount = 0;
   const _SSE_MAX_FAILS = 3;
 
