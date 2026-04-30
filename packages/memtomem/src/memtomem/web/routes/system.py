@@ -403,9 +403,9 @@ async def add_memory_dir(
             register-only behavior must pass ``auto_index=false``
             explicitly. JSON ``null`` is treated the same as ``false``
             (opt-out), distinct from field omission which fires the
-            default. PR1 (#571) shipped this as opt-in
-            (``default=False``); this PR flips the default after one
-            release cycle.
+            default. PR #571 shipped this as opt-in
+            (``default=False``); PR #576 flipped the default as a
+            follow-up.
     """
     body = await request.json()
     dir_path = body.get("path", "").strip()

@@ -141,7 +141,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   default now.** PR #571 introduced opt-in `auto_index` (default
   `False`) for backward compatibility; the Web UI sent
   `auto_index=true` while CLI/direct-API callers kept the two-step
-  (register, then `/api/index`). This release flips the default to
+  (register, then `/api/index`). PR #576 flips the default to
   `True` so omitting the field also indexes — register + index in
   one call for the common case. Callers that want register-only must
   now send `auto_index=false` explicitly (JSON `null` is also
@@ -149,10 +149,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   is unchanged, but callers that omit `auto_index` will now receive
   an `indexed` object (or `indexed: {"error": ...}` on failure)
   where they previously received `indexed: null` — schema-strict
-  clients should expect a populated value. Watcher invariant and
-  lock boundary are unchanged; indexing failures still surface as
-  `indexed: {"error": ...}` instead of bubbling a 500
-  (registration is preserved).
+  clients should expect a populated value. **Performance note:**
+  `index_path()` runs in the request/response cycle, so direct-API
+  callers indexing large directories will see longer `add` response
+  times than before; pass `auto_index=false` to keep the historic
+  register-only timings. Watcher invariant and lock boundary are
+  unchanged (indexing still runs outside `_config_lock`); indexing
+  failures still surface as `indexed: {"error": ...}` instead of
+  bubbling a 500 (registration is preserved).
 
 - **`showConfirm` modal** gained an optional `extraOption: { id, label,
   defaultChecked }` parameter that renders an opt-in checkbox below

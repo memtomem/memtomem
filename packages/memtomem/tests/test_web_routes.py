@@ -1111,11 +1111,11 @@ class TestUnicodePaths:
         assert Path(str(called_args[0])).resolve() == memory_dir.resolve()
 
     async def test_add_memory_dir_default_omitted_indexes(self, app, client: AsyncClient, tmp_path):
-        """**As of this PR, the ``auto_index`` default is ``True``** —
-        omitting the field triggers indexing. Locks the new default
-        semantics: without this test, a future regression flip back to
-        ``False`` would only fail the explicit-false test (which
-        doesn't actually exercise the omit-path default).
+        """**The ``auto_index`` default is ``True``** (flipped in
+        PR #576) — omitting the field triggers indexing. Locks the
+        new default semantics: without this test, a future regression
+        flip back to ``False`` would only fail the explicit-false
+        test (which doesn't actually exercise the omit-path default).
 
         Naming intentionally describes the *input shape* (``omitted``)
         rather than the behavior (``auto_indexes``) so the test name
@@ -1165,8 +1165,9 @@ class TestUnicodePaths:
         incidental** — locks the contract for clients that send all
         fields with ``null`` placeholders. If a future PR wants
         ``null`` to mean 'use default', that's a contract change:
-        update this test, the docstring at ``system.py:`` (the
-        ``add_memory_dir`` handler), and add a CHANGELOG entry."""
+        update this test, the ``add_memory_dir`` handler docstring in
+        ``packages/memtomem/src/memtomem/web/routes/system.py``, and
+        add a CHANGELOG entry."""
         memory_dir = tmp_path / "memories"
         memory_dir.mkdir()
         app.state.config.indexing.memory_dirs = []
