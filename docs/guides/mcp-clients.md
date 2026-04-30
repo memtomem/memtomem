@@ -178,7 +178,42 @@ Restart Gemini CLI after configuration.
 
 ---
 
-## 6. Antigravity
+## 6. Codex CLI
+
+Codex CLI reads MCP servers from `~/.codex/config.toml` under the
+`[mcp_servers.<id>]` section header — TOML, not JSON. Add a section for
+memtomem:
+
+```toml
+[mcp_servers.memtomem]
+command = "uvx"
+args = ["--from", "memtomem", "memtomem-server"]
+
+[mcp_servers.memtomem.env]
+MEMTOMEM_INDEXING__MEMORY_DIRS = '["~/memories"]'
+```
+
+Restart Codex CLI after configuration.
+
+> Codex MCP tools default to **serialized** calls. memtomem is safe to
+> run in parallel — opt in by adding `supports_parallel_tool_calls = true`
+> alongside `command`/`args`. Other server-level knobs documented by
+> Codex (e.g. `enabled`, `enabled_tools`, `disabled_tools`,
+> `startup_timeout_sec`, `tool_timeout_sec`) all work; see the official
+> [Codex config reference](https://developers.openai.com/codex/config-reference)
+> for the full schema.
+
+### Verify Connection
+
+In Codex CLI:
+
+```
+Call mem_status to check the memtomem connection status
+```
+
+---
+
+## 7. Antigravity
 
 1. Click the `...` menu at the top of the Agent panel > **MCP Servers**
 2. Click **Manage MCP Servers** at the top of the MCP Store
@@ -216,7 +251,7 @@ Restart Gemini CLI after configuration.
 
 ---
 
-## 7. Verifying Your Connection
+## 8. Verifying Your Connection
 
 These verification methods work across all clients.
 
@@ -268,7 +303,7 @@ mm status
 uses, so the output is identical. Useful as a sanity check between
 `mm init` and the first editor-side call.
 
-### Available MCP Tools (74)
+### Available MCP Tools (79)
 
 | Category | Tools |
 |----------|-------|
@@ -304,7 +339,7 @@ uses, so the output is identical. Useful as a sanity check between
 
 \* Requires `MEMTOMEM_TOOL_MODE=full`. In `core` or `standard` mode, use `mm config` (CLI) or the Web UI Settings tab instead.
 
-> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 tools, default), `standard` (core + common packs + `mem_do`), or `full` (all 74 tools individually) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
+> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 tools, default), `standard` (core + common packs + `mem_do`), or `full` (all 79 tools individually) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
 
 ### STM Proxy Tools (optional, separate package)
 
@@ -312,7 +347,7 @@ The STM proxy is distributed as a separate package: **[memtomem-stm](https://git
 
 ---
 
-## 8. Environment Variable Overrides
+## 9. Environment Variable Overrides
 
 You can override settings by adding environment variables to the `env` block.
 
