@@ -2236,12 +2236,29 @@ function renderSourceTree(sources) {
   // whose ``file_count`` reflects disk-only files. Per-dir badges also
   // surface the ``indexed/files`` split, so this number lines up with
   // the left side of those badges.
+  //
+  // Scope: the sub-tab strip (issue #570) only renders one vendor's
+  // tree at a time, so the stats line is scoped to that vendor too \u2014
+  // a global "47 files \u00b7 442 chunks" sitting above a User-only sidebar
+  // read as ambiguous (was that User's 20 or all three combined?).
+  // The active-vendor scoping makes the number always match what the
+  // user is currently looking at; global totals can be inferred by
+  // summing the three sub-tab badges.
   const statsEl = qs('sources-stats');
   const statusByPath = STATE.memoryStatusByPath || {};
+  const activeVendor = STATE.sourcesActiveVendor
+    || (typeof _readActiveSourcesVendor === 'function' ? _readActiveSourcesVendor() : 'user');
   let indexedFiles = 0;
   let totalChunks = 0;
   for (const s of Object.values(statusByPath)) {
     if (!s || s.exists === false) continue;
+    // Same fallback rule as ``_renderMemorySourceTree``: unknown
+    // providers (forward-compat for a server that adds a vendor before
+    // the client deploys) bucket into ``user``.
+    const rawProvider = s.provider;
+    const provider = (_SOURCES_VENDORS && _SOURCES_VENDORS.includes(rawProvider))
+      ? rawProvider : 'user';
+    if (provider !== activeVendor) continue;
     indexedFiles += s.source_file_count || 0;
     totalChunks += s.chunk_count || 0;
   }
