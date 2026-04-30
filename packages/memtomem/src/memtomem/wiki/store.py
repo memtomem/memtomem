@@ -1,8 +1,9 @@
 """``~/.memtomem-wiki/`` git repository abstraction.
 
-PR-A scope: scratch ``init``, ``init --from <git-url>`` clone, ``list``,
-``current_commit``, ``exists``. Snapshot install / override resolution /
-lockfile / lint live in PR-B/C/D modules. See ADR-0008.
+Provides :class:`WikiStore` with scratch ``init``, ``init --from <git-url>``
+clone, asset listing, and HEAD commit lookup. Snapshot install, override
+resolution, lockfile, and staleness lint live in sibling modules per
+ADR-0008's roadmap.
 """
 
 from __future__ import annotations
@@ -22,10 +23,9 @@ _INITIAL_COMMIT_MESSAGE = "Initialize memtomem wiki"
 
 _README_TEMPLATE = """# memtomem wiki
 
-Local skills/agents/commands library managed by `mm wiki ...`.
+Personal wiki for AI agent skills, agents, and commands.
 
-This is a git repository containing canonical (vendor-neutral) artifacts
-that `mm context install` deploys into projects.
+This is a git repository containing canonical (vendor-neutral) artifacts.
 
 ## Layout
 
@@ -36,16 +36,11 @@ that `mm context install` deploys into projects.
 - `<type>/<name>/overrides/<vendor>.<ext>` — optional vendor-specific
   file; bypasses auto-conversion when present.
 
-## Common operations
+## Available commands
 
-```
-mm wiki init [--from <git-url>]   # create or clone
-mm wiki list                      # show all assets
-mm wiki skill edit <name>         # edit canonical skill
-mm context install skill <name>   # snapshot into current project
-```
-
-See ADR-0008 in the memtomem repo for invariants.
+Run `mm wiki --help` for the current set of subcommands available in your
+installed version. See <https://github.com/memtomem/memtomem> for the
+project README and ADR-0008 (the wiki layer design document).
 """
 
 
@@ -151,7 +146,13 @@ class WikiStore:
         _git(["clone", url, str(self.root)], cwd=self.root.parent)
 
     def current_commit(self) -> str:
-        """Return the wiki HEAD commit SHA (short or full per git config)."""
+        """Return the wiki HEAD commit SHA as the full 40-character hex string.
+
+        Display surfaces (e.g. ``mm wiki list``) may abbreviate when
+        rendering, but the canonical value is always full-length to
+        avoid abbreviation collisions in stored references such as
+        the project lockfile (see ADR-0008).
+        """
         self.require_exists()
         result = _git(["rev-parse", "HEAD"], cwd=self.root)
         return result.stdout.strip()

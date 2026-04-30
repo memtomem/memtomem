@@ -43,7 +43,7 @@ class TestDefaultPath:
     def test_at_default_falls_back_to_home(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("MEMTOMEM_WIKI_PATH", raising=False)
         store = WikiStore.at_default()
-        assert store.root == DEFAULT_WIKI_PATH
+        assert store.root == Path.home() / ".memtomem-wiki"
 
 
 class TestInitScratch:

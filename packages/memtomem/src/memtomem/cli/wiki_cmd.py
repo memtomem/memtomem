@@ -1,7 +1,6 @@
 """``mm wiki`` — manage the local wiki (``~/.memtomem-wiki/``).
 
-PR-A surface: ``init [--from <git-url>]``, ``list``. Edit/override/diff/lint
-verbs ship in PR-C/PR-D. See ADR-0008.
+See ADR-0008 for the wiki layer's role in the context-gateway pipeline.
 """
 
 from __future__ import annotations
@@ -40,7 +39,7 @@ def init_cmd(from_url: str | None) -> None:
             store.init()
             click.secho(f"Initialized wiki at {store.root}", fg="green")
             click.echo("  Layout: skills/, agents/, commands/")
-            click.echo("  Next: `mm wiki skill edit <name>` (PR-C+) or `mm wiki list`.")
+            click.echo("  Run `mm wiki list` or `mm wiki --help` to see what is available.")
     except WikiAlreadyExistsError as exc:
         raise click.ClickException(str(exc)) from exc
     except RuntimeError as exc:

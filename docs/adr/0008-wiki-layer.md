@@ -132,11 +132,22 @@ multi-asset bulk verb.
 ```json
 {
   "version": 1,
-  "skills":   { "foo": { "wiki_commit": "abc123…", "installed_at": "2026-04-30T…" } },
-  "agents":   { "bar": { … } },
-  "commands": { "baz": { … } }
+  "skills": {
+    "foo": {
+      "wiki_commit": "abc123def4567890abc123def4567890abc12345",
+      "installed_at": "2026-04-30T12:34:56Z"
+    }
+  },
+  "agents":   { "bar": { "wiki_commit": "…", "installed_at": "…" } },
+  "commands": { "baz": { "wiki_commit": "…", "installed_at": "…" } }
 }
 ```
+
+`wiki_commit` MUST be the **full 40-character SHA**. Display surfaces
+(`mm context status`, `mm wiki list`) may abbreviate to 12 characters
+for readability; the stored value is always full-length to avoid
+abbreviation collisions across projects that share a wiki and to keep
+`git checkout <wiki_commit>` directly usable for forensics.
 
 Reads MUST preserve unknown top-level and per-entry fields (round-trip
 through plain `dict` is sufficient). The `version` field is reserved for
