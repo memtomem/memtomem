@@ -156,6 +156,16 @@ hash match, so they all show up under `Indexed`:
 mem_index(path="~/notes", force=True)
 ```
 
+**Chunk identity is preserved when content is unchanged.** As of v0.1.33
+([ADR-0005](../adr/0005-force-reindex-metadata-contract.md)), force-reindex
+keeps the existing `id` (UUID), `access_count`, `last_accessed_at`,
+`importance_score`, and `chunk_links` rows for any chunk whose content
+hash still matches what the file produces. Only embeddings are
+recomputed. This means agents that cache chunk IDs, scheduled
+re-embedding jobs, and personalization signals all survive a force
+rebuild — previously every force pass regenerated UUIDs and silently
+zeroed access stats.
+
 ### Namespace-scoped indexing
 
 ```
@@ -440,6 +450,37 @@ memory_dirs = ["~/notes"]
 Files at the root of a `memory_dir` get the default namespace. Only files inside subfolders get auto-derived namespaces. This prevents the memory_dir folder name itself from becoming an unintended namespace.
 
 For systematic tagging across opt-in provider directories (e.g. the per-project `~/.claude/projects/<project>/memory/` paths added via `mm init`, or cloud-sync roots), declare path → namespace rules in `namespace.rules` instead — see [Namespace rules in the configuration guide](configuration.md#namespace-rules-path-based-auto-tagging). Rules are evaluated before `enable_auto_ns` and cover use cases where the immediate parent folder name is opaque (UUIDs, generic labels like `memory`).
+
+### Namespace and `agent_id` validation
+
+Caller-supplied `namespace=` and `agent_id=` values are validated
+strictly across every public surface (MCP tools, CLI, LangGraph adapter,
+context-gateway endpoints) since v0.1.32. Names are split on `:` into
+segments; each segment must match `[A-Za-z0-9._-]+` and is rejected if
+it contains a slash, backslash, whitespace, comma, or control character,
+starts with `-`, or equals `.` / `..`. Empty segments (leading,
+trailing, or consecutive `:`) are also rejected.
+
+The `agent-runtime:` prefix is special — it requires exactly one
+trailing segment that is itself a valid `agent_id`, so
+`agent-runtime:my-agent` is accepted but `agent-runtime:foo:bar`,
+`agent-runtime:` (empty), and `agent-runtime:../x` (path traversal) are
+not. Any rejection raises `InvalidNameError` with a message starting
+`invalid namespace ...` or `invalid agent-id ...`, so log scrapers see
+one shape across surfaces.
+
+Accepted namespaces in normal use:
+
+- `default` — the catch-all when nothing is set
+- `<word>` — flat names like `work`, `personal`, `project-x`
+- `<prefix>:<segment>` — `archive:2026-q1`, `claude-memory:project-foo`,
+  `agent-runtime:planner`, `shared:lessons`
+- `custom:<...>` — your own scheme, subject to the segment rules above
+
+The `agent-runtime:<id>` shape is what `mem_session_start(agent_id=...)`
+auto-derives, so scope-bound writes from session-aware tools land
+there without a manual `namespace=` argument (see "Multi-agent
+workflow" below).
 
 ---
 
