@@ -26,8 +26,8 @@ jobs:
             This PR has had no updates for 30 days. Marking as `stale`.
 
             If you'd like to keep working on it, leave any comment or push
-            a commit — that's enough to clear the label. Otherwise, it'll
-            receive one more nudge in 15 days and close 15 days after that.
+            a commit — that's enough to clear the label. Otherwise it will
+            close 30 days after this notice.
 
             Thanks for the contribution — this is an automated triage
             message, not a judgement on the PR itself.
