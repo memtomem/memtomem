@@ -73,8 +73,10 @@ async def list_commands(
         by_name.setdefault(cmd_name, []).append({"runtime": runtime, "status": status})
 
     commands: list[dict[str, object]] = []
-    for cmd_path in canonicals:
-        name = cmd_path.stem
+    canonical_names: set[str] = set()
+    for cmd_path, layout in canonicals:
+        name = cmd_path.parent.name if layout == "dir" else cmd_path.stem
+        canonical_names.add(name)
         commands.append(
             {
                 "name": name,
@@ -83,7 +85,6 @@ async def list_commands(
             }
         )
 
-    canonical_names = {p.stem for p in canonicals}
     for cmd_name, runtimes in by_name.items():
         if cmd_name not in canonical_names:
             commands.append({"name": cmd_name, "canonical_path": None, "runtimes": runtimes})
@@ -382,7 +383,10 @@ async def import_commands(
         raise HTTPException(503, "Commands import timed out — another sync may be in progress")
     return {
         "imported": [
-            {"name": p.stem, "canonical_path": str(p.relative_to(project_root))}
+            {
+                "name": p.parent.name if p.name == "command.md" else p.stem,
+                "canonical_path": str(p.relative_to(project_root)),
+            }
             for p in result.imported
         ],
         "skipped": [
@@ -424,7 +428,10 @@ async def import_command(
         raise HTTPException(404, f"No runtime command named {name!r} to import")
     return {
         "imported": [
-            {"name": p.stem, "canonical_path": str(p.relative_to(project_root))}
+            {
+                "name": p.parent.name if p.name == "command.md" else p.stem,
+                "canonical_path": str(p.relative_to(project_root)),
+            }
             for p in result.imported
         ],
         "skipped": [

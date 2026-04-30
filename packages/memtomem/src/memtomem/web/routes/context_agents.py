@@ -87,8 +87,10 @@ async def list_agents(
         by_name.setdefault(agent_name, []).append({"runtime": runtime, "status": status})
 
     agents: list[dict[str, object]] = []
-    for agent_path in canonicals:
-        name = agent_path.stem
+    canonical_names: set[str] = set()
+    for agent_path, layout in canonicals:
+        name = agent_path.parent.name if layout == "dir" else agent_path.stem
+        canonical_names.add(name)
         agents.append(
             {
                 "name": name,
@@ -97,7 +99,6 @@ async def list_agents(
             }
         )
 
-    canonical_names = {p.stem for p in canonicals}
     for agent_name, runtimes in by_name.items():
         if agent_name not in canonical_names:
             agents.append({"name": agent_name, "canonical_path": None, "runtimes": runtimes})
@@ -406,7 +407,10 @@ async def import_agents(
         raise HTTPException(503, "Agents import timed out — another sync may be in progress")
     return {
         "imported": [
-            {"name": p.stem, "canonical_path": str(p.relative_to(project_root))}
+            {
+                "name": p.parent.name if p.name == "agent.md" else p.stem,
+                "canonical_path": str(p.relative_to(project_root)),
+            }
             for p in result.imported
         ],
         "skipped": [
@@ -448,7 +452,10 @@ async def import_agent(
         raise HTTPException(404, f"No runtime agent named {name!r} to import")
     return {
         "imported": [
-            {"name": p.stem, "canonical_path": str(p.relative_to(project_root))}
+            {
+                "name": p.parent.name if p.name == "agent.md" else p.stem,
+                "canonical_path": str(p.relative_to(project_root)),
+            }
             for p in result.imported
         ],
         "skipped": [

@@ -1,16 +1,17 @@
 """Install a single wiki asset into ``<project>/.memtomem/<type>/<name>/``.
 
-Implements PR-B of ADR-0008. The wiki at ``~/.memtomem-wiki/`` is the
-source of truth; an "install" is a copytree snapshot pinned to the wiki's
-HEAD commit, recorded in :class:`memtomem.context.lockfile.Lockfile`.
+Implements ADR-0008 PR-B (skills) and PR-C (agents, commands). The wiki at
+``~/.memtomem-wiki/`` is the source of truth; an "install" is a copytree
+snapshot pinned to the wiki's HEAD commit, recorded in
+:class:`memtomem.context.lockfile.Lockfile`.
 
-PR-B exposes only :func:`install_skill`. Skill fan-out works end-to-end
-through the existing :mod:`memtomem.context.skills` generators, so the
-user can install a wiki skill and immediately have it appear under
-``.claude/skills/`` etc. Agent and command install land in PR-C alongside
-override resolution — without override-aware extraction the snapshot
-exists on disk but does not flow through fan-out, which would surprise
-users into thinking install is broken.
+Public wrappers — :func:`install_skill`, :func:`install_agent`,
+:func:`install_command` — all delegate to :func:`_install_asset`. The wiki
+is expected to use directory layout for every kind
+(``agents/<name>/agent.md``, ``commands/<name>/command.md``); fan-out at
+:mod:`memtomem.context.agents` / :mod:`memtomem.context.commands` reads
+both directory and legacy flat layouts during PR-C so the install does
+not strand newly-installed assets in an unread layout.
 
 Install is intentionally non-destructive: if either a lockfile entry OR
 the destination directory already exists, install refuses with a
@@ -35,6 +36,8 @@ __all__ = [
     "AlreadyInstalledError",
     "AssetNotFoundError",
     "InstallResult",
+    "install_agent",
+    "install_command",
     "install_skill",
 ]
 
@@ -49,15 +52,9 @@ class AlreadyInstalledError(RuntimeError):
 
 @dataclass(frozen=True)
 class InstallResult:
-    """Outcome of a successful install. Display-oriented; not persisted.
+    """Outcome of a successful install. Display-oriented; not persisted."""
 
-    ``asset_type`` is ``Literal["skills"]`` in PR-B and widens alongside the
-    public ``install_agent`` / ``install_command`` wrappers that PR-C adds.
-    The private ``_install_asset`` callee keeps a wider parameter type so
-    PR-C is a one-line widening, not a re-architecture.
-    """
-
-    asset_type: Literal["skills"]
+    asset_type: Literal["skills", "agents", "commands"]
     name: str
     wiki_commit: str
     installed_at: str
@@ -79,6 +76,26 @@ def install_skill(
     or the destination directory already exists — see module docstring.
     """
     return _install_asset(project_root, "skills", name, wiki=wiki)
+
+
+def install_agent(
+    project_root: Path | str,
+    name: str,
+    *,
+    wiki: WikiStore | None = None,
+) -> InstallResult:
+    """Snapshot ``<wiki>/agents/<name>/`` into ``<project>/.memtomem/agents/<name>/``."""
+    return _install_asset(project_root, "agents", name, wiki=wiki)
+
+
+def install_command(
+    project_root: Path | str,
+    name: str,
+    *,
+    wiki: WikiStore | None = None,
+) -> InstallResult:
+    """Snapshot ``<wiki>/commands/<name>/`` into ``<project>/.memtomem/commands/<name>/``."""
+    return _install_asset(project_root, "commands", name, wiki=wiki)
 
 
 def _install_asset(
@@ -137,11 +154,8 @@ def _install_asset(
         installed_at=installed_at,
     )
 
-    # PR-B contract: only "skills" reaches this construction site (the
-    # public wrapper is install_skill). PR-C widens InstallResult.asset_type
-    # alongside install_agent / install_command wrappers.
     return InstallResult(
-        asset_type=cast('Literal["skills"]', asset_type),
+        asset_type=cast('Literal["skills", "agents", "commands"]', asset_type),
         name=validated,
         wiki_commit=wiki_commit,
         installed_at=installed_at,

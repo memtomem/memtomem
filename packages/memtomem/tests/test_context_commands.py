@@ -104,7 +104,7 @@ class TestListCanonicalCommands:
     def test_sorted(self, tmp_path):
         _make_canonical_command(tmp_path, "zeta", SAMPLE_MINIMAL_COMMAND)
         _make_canonical_command(tmp_path, "alpha", SAMPLE_MINIMAL_COMMAND)
-        names = [p.stem for p in list_canonical_commands(tmp_path)]
+        names = [p.stem for p, _layout in list_canonical_commands(tmp_path)]
         assert names == ["alpha", "zeta"]
 
 
@@ -213,7 +213,8 @@ class TestExtractCommandsToCanonical:
         (d / "review.md").write_text(SAMPLE_FULL_COMMAND, encoding="utf-8")
         result = extract_commands_to_canonical(tmp_path)
         assert len(result.imported) == 1
-        assert (tmp_path / CANONICAL_COMMAND_ROOT / "review.md").is_file()
+        # New commands land in directory layout per ADR-0008.
+        assert (tmp_path / CANONICAL_COMMAND_ROOT / "review" / "command.md").is_file()
         assert result.skipped == []
 
     def test_imports_gemini_toml_with_placeholder_rewrite(self, tmp_path):
@@ -225,7 +226,9 @@ class TestExtractCommandsToCanonical:
         )
         result = extract_commands_to_canonical(tmp_path)
         assert len(result.imported) == 1
-        canonical = (tmp_path / CANONICAL_COMMAND_ROOT / "review.md").read_text(encoding="utf-8")
+        canonical = (tmp_path / CANONICAL_COMMAND_ROOT / "review" / "command.md").read_text(
+            encoding="utf-8"
+        )
         assert "description: Review a file" in canonical
         # {{args}} rewritten back to $ARGUMENTS
         assert "$ARGUMENTS" in canonical
@@ -241,7 +244,9 @@ class TestExtractCommandsToCanonical:
             (d / filename).write_text(content, encoding="utf-8")
         result = extract_commands_to_canonical(tmp_path)
         assert len(result.imported) == 1
-        canonical = (tmp_path / CANONICAL_COMMAND_ROOT / "shared.md").read_text(encoding="utf-8")
+        canonical = (tmp_path / CANONICAL_COMMAND_ROOT / "shared" / "command.md").read_text(
+            encoding="utf-8"
+        )
         assert "Simple prompt" in canonical  # claude version won
         # Gemini copy was skipped.
         assert len(result.skipped) == 1
@@ -276,7 +281,8 @@ class TestExtractCommandsToCanonical:
         (d / "ok.md").write_text(SAMPLE_MINIMAL_COMMAND)
 
         result = extract_commands_to_canonical(tmp_path)
-        imported_names = sorted(p.stem for p in result.imported)
+        # Dir layout: imported paths are <root>/<name>/command.md.
+        imported_names = sorted(p.parent.name for p in result.imported)
         assert imported_names == ["ok"]
         skipped_names = sorted(name for name, _, _ in result.skipped)
         assert "-bad" in skipped_names
@@ -288,10 +294,11 @@ class TestExtractCommandsToCanonical:
         (d / "beta.md").write_text(SAMPLE_MINIMAL_COMMAND)
 
         result = extract_commands_to_canonical(tmp_path, only_name="alpha")
-        assert [p.stem for p in result.imported] == ["alpha"]
+        # Dir layout: imported paths are <root>/<name>/command.md.
+        assert [p.parent.name for p in result.imported] == ["alpha"]
         assert result.skipped == []
         # Beta was untouched — neither imported nor a canonical written.
-        assert not (tmp_path / CANONICAL_COMMAND_ROOT / "beta.md").exists()
+        assert not (tmp_path / CANONICAL_COMMAND_ROOT / "beta" / "command.md").exists()
 
     def test_only_name_no_match_returns_empty(self, tmp_path):
         """Caller-distinguishable signal for single-name miss: imported and
@@ -406,7 +413,10 @@ class TestRoundtrip:
         shutil.rmtree(tmp_path / CANONICAL_COMMAND_ROOT)
         result = extract_commands_to_canonical(tmp_path)
         assert len(result.imported) == 1
-        reparsed = parse_canonical_command(tmp_path / CANONICAL_COMMAND_ROOT / "review.md")
+        # New canonical lands in dir layout per ADR-0008.
+        reparsed = parse_canonical_command(
+            tmp_path / CANONICAL_COMMAND_ROOT / "review" / "command.md", layout="dir"
+        )
         assert reparsed.name == "review"
         assert "$ARGUMENTS" in reparsed.body
 
@@ -418,7 +428,10 @@ class TestRoundtrip:
         shutil.rmtree(tmp_path / CANONICAL_COMMAND_ROOT)
         result = extract_commands_to_canonical(tmp_path)
         assert len(result.imported) == 1
-        canonical = (tmp_path / CANONICAL_COMMAND_ROOT / "hi.md").read_text(encoding="utf-8")
+        # New canonical lands in dir layout per ADR-0008.
+        canonical = (tmp_path / CANONICAL_COMMAND_ROOT / "hi" / "command.md").read_text(
+            encoding="utf-8"
+        )
         assert "description: Simple prompt" in canonical
         assert "$ARGUMENTS" in canonical
         assert "{{args}}" not in canonical

@@ -42,6 +42,7 @@ from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
 from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context.agents import (
+    Layout,
     _FRONT_MATTER_RE,
     _parse_flat_yaml,
     _toml_scalar,
@@ -50,6 +51,7 @@ from memtomem.context.agents import (
 logger = logging.getLogger(__name__)
 
 CANONICAL_COMMAND_ROOT = ".memtomem/commands"
+COMMAND_DIR_FILENAME = "command.md"
 
 
 # ── Canonical dataclass ──────────────────────────────────────────────
@@ -71,8 +73,16 @@ class CommandParseError(ValueError):
     """Raised when a canonical command file cannot be parsed."""
 
 
-def parse_canonical_command(path: Path) -> SlashCommand:
-    """Parse a canonical command file into a :class:`SlashCommand`."""
+def parse_canonical_command(path: Path, *, layout: Layout = "flat") -> SlashCommand:
+    """Parse a canonical command file into a :class:`SlashCommand`.
+
+    ``layout`` selects the default-name fallback when the frontmatter omits
+    ``name``: ``"flat"`` (legacy ``commands/<name>.md``) uses ``path.stem``;
+    ``"dir"`` (ADR-0008 ``commands/<name>/command.md``) uses
+    ``path.parent.name``.
+    """
+    default_name = path.parent.name if layout == "dir" else path.stem
+
     content = path.read_text(encoding="utf-8")
     # Share agents.py's CRLF normalization — the shared ``_FRONT_MATTER_RE``
     # anchors on ``\n`` only, so a CRLF file would otherwise parse as "no
@@ -84,7 +94,7 @@ def parse_canonical_command(path: Path) -> SlashCommand:
         # as the prompt body with a filename-derived name.
         body = content.lstrip("\n").rstrip() + "\n"
         try:
-            stem = validate_name(path.stem, kind="command name")
+            stem = validate_name(default_name, kind="command name")
         except InvalidNameError as exc:
             raise CommandParseError(f"{exc} (source: {path})") from exc
         return SlashCommand(name=stem, description="", body=body)
@@ -92,7 +102,7 @@ def parse_canonical_command(path: Path) -> SlashCommand:
     frontmatter = _parse_flat_yaml(m.group(1))
     body = content[m.end() :].lstrip("\n").rstrip() + "\n"
 
-    name = str(frontmatter.get("name") or path.stem)
+    name = str(frontmatter.get("name") or default_name)
     try:
         name = validate_name(name, kind="command name")
     except InvalidNameError as exc:
@@ -129,11 +139,39 @@ def parse_canonical_command(path: Path) -> SlashCommand:
     )
 
 
-def list_canonical_commands(project_root: Path) -> list[Path]:
+def list_canonical_commands(project_root: Path) -> list[tuple[Path, Layout]]:
+    """Enumerate canonical commands in both flat and directory layouts.
+
+    Flat layout (legacy): ``commands/<name>.md``. Directory layout (ADR-0008
+    PR-C+): ``commands/<name>/command.md``. When the same name has both
+    forms, the directory layout wins and a WARNING is logged so the silent
+    flat file is visible.
+    """
     root = project_root / CANONICAL_COMMAND_ROOT
     if not root.is_dir():
         return []
-    return sorted(p for p in root.glob("*.md") if p.is_file())
+
+    flat: dict[str, Path] = {p.stem: p for p in sorted(root.glob("*.md")) if p.is_file()}
+    dirs: dict[str, Path] = {}
+    for entry in sorted(root.iterdir()):
+        if entry.is_dir():
+            cmd_md = entry / COMMAND_DIR_FILENAME
+            if cmd_md.is_file():
+                dirs[entry.name] = cmd_md
+
+    for name in sorted(set(flat) & set(dirs)):
+        logger.warning(
+            "commands/%s: both flat (%s.md) and dir (%s/command.md) layouts "
+            "present; using dir. Remove the flat file or run "
+            "`mm context migrate` (PR-D).",
+            name,
+            name,
+            name,
+        )
+
+    merged_paths = {**flat, **dirs}  # dir overrides flat on collision
+    layouts: dict[str, Layout] = {**dict.fromkeys(flat, "flat"), **dict.fromkeys(dirs, "dir")}
+    return [(merged_paths[k], layouts[k]) for k in sorted(merged_paths)]
 
 
 # ── Placeholder rewriting ────────────────────────────────────────────
@@ -312,9 +350,9 @@ def generate_all_commands(
         if gen is None:
             skipped.append((target, "unknown runtime", skip_codes.UNKNOWN_RUNTIME))
             continue
-        for cmd_path in canonicals:
+        for cmd_path, layout in canonicals:
             try:
-                cmd = parse_canonical_command(cmd_path)
+                cmd = parse_canonical_command(cmd_path, layout=layout)
             except CommandParseError as exc:
                 skipped.append((cmd_path.name, f"parse error: {exc}", skip_codes.PARSE_ERROR))
                 continue
@@ -353,6 +391,34 @@ def _gemini_toml_to_canonical(toml_path: Path) -> str:
     return body
 
 
+def _resolve_command_extract_target(canonical_root: Path, cmd_name: str) -> tuple[Path, Layout]:
+    """Decide where reverse-sync writes the canonical for ``cmd_name``.
+
+    Truth table mirrors :func:`memtomem.context.agents._resolve_agent_extract_target`:
+    dir+flat both → dir wins (silent flat divergence WARNed);
+    dir only → dir; flat only → flat (preserve); neither → dir (ADR layout).
+    """
+    dir_target = canonical_root / cmd_name / COMMAND_DIR_FILENAME
+    flat_target = canonical_root / f"{cmd_name}.md"
+    has_dir = dir_target.is_file()
+    has_flat = flat_target.is_file()
+    if has_dir and has_flat:
+        logger.warning(
+            "commands/%s: reverse-sync updates dir layout (%s/command.md); the "
+            "flat file (%s.md) is now silently divergent. Remove it or run "
+            "`mm context migrate` (PR-D).",
+            cmd_name,
+            cmd_name,
+            cmd_name,
+        )
+        return dir_target, "dir"
+    if has_dir:
+        return dir_target, "dir"
+    if has_flat:
+        return flat_target, "flat"
+    return dir_target, "dir"
+
+
 def extract_commands_to_canonical(
     project_root: Path,
     overwrite: bool = False,
@@ -379,6 +445,10 @@ def extract_commands_to_canonical(
     silently skipped before any validation/dedupe work. Callers (e.g. the
     single-item import route) can detect "no such runtime artifact" by
     inspecting an empty ``imported`` + ``skipped``.
+
+    Layout policy: new commands (no existing canonical) land in directory
+    layout per ADR-0008. Existing flat-layout entries are preserved by
+    PR-C — migration to directory layout is a separate command (PR-D).
     """
     canonical_root = project_root / CANONICAL_COMMAND_ROOT
     imported: list[Path] = []
@@ -403,13 +473,14 @@ def extract_commands_to_canonical(
                 skipped.append((cmd_name, reason, skip_codes.ALREADY_IMPORTED))
                 logger.warning("skip %s from .claude/commands: %s", cmd_name, reason)
                 continue
-            dst = canonical_root / f"{cmd_name}.md"
+            dst, _layout = _resolve_command_extract_target(canonical_root, cmd_name)
             if dst.exists() and not overwrite:
                 reason = "canonical exists (use --overwrite)"
                 skipped.append((cmd_name, reason, skip_codes.CANONICAL_EXISTS))
                 logger.warning("skip %s from .claude/commands: %s", cmd_name, reason)
                 seen[cmd_name] = ".claude/commands"
                 continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_bytes(dst, md_file.read_bytes())
             imported.append(dst)
             seen[cmd_name] = ".claude/commands"
@@ -432,7 +503,7 @@ def extract_commands_to_canonical(
                 skipped.append((cmd_name, reason, skip_codes.ALREADY_IMPORTED))
                 logger.warning("skip %s from .gemini/commands: %s", cmd_name, reason)
                 continue
-            dst = canonical_root / f"{cmd_name}.md"
+            dst, _layout = _resolve_command_extract_target(canonical_root, cmd_name)
             if dst.exists() and not overwrite:
                 reason = "canonical exists (use --overwrite)"
                 skipped.append((cmd_name, reason, skip_codes.CANONICAL_EXISTS))
@@ -445,6 +516,7 @@ def extract_commands_to_canonical(
                 skipped.append((cmd_name, "TOML parse error", skip_codes.TOML_PARSE_ERROR))
                 logger.warning("skip %s from .gemini/commands: TOML parse error", cmd_name)
                 continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(dst, canonical_content)
             imported.append(dst)
             seen[cmd_name] = ".gemini/commands"
@@ -478,8 +550,11 @@ def diff_commands(project_root: Path) -> list[tuple[str, str, str]]:
     ``"missing canonical"``, or ``"parse error"``.
     """
     results: list[tuple[str, str, str]] = []
-    canonical_root = project_root / CANONICAL_COMMAND_ROOT
-    canonical_names = {p.stem for p in list_canonical_commands(project_root)}
+    canonical_index = {
+        path.parent.name if layout == "dir" else path.stem: (path, layout)
+        for path, layout in list_canonical_commands(project_root)
+    }
+    canonical_names = set(canonical_index)
 
     for gen_name, gen in COMMAND_GENERATORS.items():
         runtime_names = _runtime_command_names(gen_name, project_root)
@@ -492,9 +567,9 @@ def diff_commands(project_root: Path) -> list[tuple[str, str, str]]:
                 results.append((gen_name, name, "missing canonical"))
                 continue
 
-            src = canonical_root / f"{name}.md"
+            src, layout = canonical_index[name]
             try:
-                cmd = parse_canonical_command(src)
+                cmd = parse_canonical_command(src, layout=layout)
             except CommandParseError:
                 results.append((gen_name, name, "parse error"))
                 continue
@@ -511,6 +586,7 @@ def diff_commands(project_root: Path) -> list[tuple[str, str, str]]:
 
 __all__ = [
     "CANONICAL_COMMAND_ROOT",
+    "COMMAND_DIR_FILENAME",
     "COMMAND_GENERATORS",
     "ClaudeCommandsGenerator",
     "CommandGenerator",

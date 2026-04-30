@@ -600,8 +600,9 @@ class TestImportOneCommand:
         assert r.status_code == 200
         data = r.json()
         assert [i["name"] for i in data["imported"]] == ["alpha"]
-        assert (tmp_path / ".memtomem" / "commands" / "alpha.md").is_file()
-        assert not (tmp_path / ".memtomem" / "commands" / "beta.md").exists()
+        # New canonical lands in dir layout per ADR-0008.
+        assert (tmp_path / ".memtomem" / "commands" / "alpha" / "command.md").is_file()
+        assert not (tmp_path / ".memtomem" / "commands" / "beta" / "command.md").exists()
 
     @pytest.mark.anyio
     async def test_404_when_no_runtime_match(self, client: AsyncClient, tmp_path: Path):
@@ -789,8 +790,9 @@ class TestImportOneAgent:
         assert r.status_code == 200
         data = r.json()
         assert [i["name"] for i in data["imported"]] == ["alpha"]
-        assert (tmp_path / ".memtomem" / "agents" / "alpha.md").is_file()
-        assert not (tmp_path / ".memtomem" / "agents" / "beta.md").exists()
+        # New canonical lands in dir layout per ADR-0008.
+        assert (tmp_path / ".memtomem" / "agents" / "alpha" / "agent.md").is_file()
+        assert not (tmp_path / ".memtomem" / "agents" / "beta" / "agent.md").exists()
 
     @pytest.mark.anyio
     async def test_404_when_no_runtime_match(self, client: AsyncClient, tmp_path: Path):

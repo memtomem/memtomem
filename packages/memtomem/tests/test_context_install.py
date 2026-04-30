@@ -358,10 +358,10 @@ def test_cli_install_wiki_missing_message(
 
 def test_cli_install_rejects_unknown_type(project_cwd: Path) -> None:
     runner = CliRunner()
-    result = runner.invoke(context_group, ["install", "agent", "foo"])
-    # PR-B: only "skill" is an allowed type; PR-C widens.
+    result = runner.invoke(context_group, ["install", "settings", "foo"])
+    # PR-C: only skill / agent / command are allowed types.
     assert result.exit_code != 0
-    assert "agent" in result.output  # click usage error mentions the bad value
+    assert "settings" in result.output  # click usage error mentions the bad value
 
 
 def test_cli_install_already_installed_classified_message(

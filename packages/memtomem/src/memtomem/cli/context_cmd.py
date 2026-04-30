@@ -30,6 +30,8 @@ from memtomem.context.detector import (
 from memtomem.context.install import (
     AlreadyInstalledError,
     AssetNotFoundError,
+    install_agent,
+    install_command,
     install_skill,
 )
 from memtomem.context.lockfile import LockfileVersionError
@@ -647,19 +649,23 @@ def sync_cmd(include: tuple[str, ...], strict: bool, on_drop: str, yes: bool) ->
 
 
 @context.command("install")
-@click.argument("asset_type", type=click.Choice(["skill"]))
+@click.argument("asset_type", type=click.Choice(["skill", "agent", "command"]))
 @click.argument("name")
 def install_cmd(asset_type: str, name: str) -> None:
     """Install a wiki asset into ``<project>/.memtomem/<type>/<name>/``.
 
-    PR-B supports ``skill`` only. Agents and commands land in PR-C
-    alongside override resolution. The wiki at ``~/.memtomem-wiki/`` must
-    be initialized first (``mm wiki init``).
+    The wiki at ``~/.memtomem-wiki/`` must be initialized first
+    (``mm wiki init``). Skills, agents, and commands all flow through
+    fan-out after install.
     """
     root = _find_project_root()
     try:
         if asset_type == "skill":
             result = install_skill(root, name)
+        elif asset_type == "agent":
+            result = install_agent(root, name)
+        elif asset_type == "command":
+            result = install_command(root, name)
         else:  # pragma: no cover — guarded by click.Choice
             raise click.ClickException(f"unknown asset type: {asset_type}")
     except WikiNotFoundError as exc:
