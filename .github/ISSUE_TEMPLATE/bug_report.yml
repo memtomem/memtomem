@@ -21,6 +21,23 @@ body:
     validations:
       required: true
 
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      description: Which part of memtomem is involved? Pick the closest match.
+      options:
+        - CLI (`mm`)
+        - MCP server (tool calls from an agent)
+        - Web UI (`mm web`)
+        - Indexing
+        - Search
+        - STM proxy interaction
+        - Install / setup
+        - Other
+    validations:
+      required: true
+
   - type: textarea
     id: repro
     attributes:
@@ -55,7 +72,7 @@ body:
     attributes:
       label: memtomem version
       description: Output of `mm --version` (or `uv run mm --version` in a dev checkout).
-      placeholder: "0.1.30"
+      placeholder: "0.1.33"
     validations:
       required: true
 
@@ -94,11 +111,30 @@ body:
     validations:
       required: true
 
+  - type: dropdown
+    id: mcp_client
+    attributes:
+      label: MCP client (if applicable)
+      description: Which agent or client was talking to the MCP server? Skip if the bug is CLI- or Web-UI-only.
+      options:
+        - Not applicable (CLI / Web UI only)
+        - Claude Code
+        - Claude Desktop
+        - Cursor
+        - Windsurf
+        - Codex CLI
+        - Cline
+        - Aider
+        - Gemini CLI
+        - Other
+    validations:
+      required: false
+
   - type: textarea
     id: context
     attributes:
       label: Additional context
       description: |
-        Anything else worth knowing — relevant config (`~/.memtomem/config.json`, redacted), the MCP client (Claude Code, Cursor, Codex CLI, etc.), whether STM proxy is involved, recent upgrades, etc.
+        Anything else worth knowing — relevant config (`~/.memtomem/config.json`, redacted), whether STM proxy is involved, recent upgrades, etc.
     validations:
       required: false
