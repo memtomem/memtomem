@@ -228,13 +228,13 @@ In rough order, all in `packages/memtomem/src/memtomem/`:
   policy.
 - **Documentation surface widens.** The user-guide gains an NS section
   for prod (today the topic is implicit in "auto-namespace format"
-  power-user docs). Doc-fanout follows the `feedback_default_change_fanout`
-  pattern — README + getting-started + user-guide same PR.
+  power-user docs). Doc-fanout follows the project's default-change
+  convention — README + getting-started + user-guide same PR.
 - **`namespaces_edit` router (or equivalent).** Adding a mid-tier
   router introduces a new tier between `_PROD_ROUTERS` and
-  `_DEV_ROUTERS`. If the count stays at one verb (`PATCH`), inline
-  classification on the existing prod router is fine; no new file
-  needed.
+  `_DEV_ONLY_ROUTERS` (the actual list names in `web/app.py:63, 80`).
+  If the count stays at one verb (`PATCH`), inline classification on
+  the existing prod router is fine; no new file needed.
 - **Empty state is a teaching moment.** First-time installs with no
   indexing yet now see "what is a namespace" instead of an empty UI.
   This is a small but material onboarding improvement that doesn't
