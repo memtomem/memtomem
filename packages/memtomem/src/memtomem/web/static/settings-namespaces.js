@@ -140,16 +140,6 @@ function _buildNsCard(ns, defaultNs) {
   editBtn.textContent = 'Edit';
   editBtn.addEventListener('click', () => editNamespaceMeta(ns, card));
 
-  const renameBtn = document.createElement('button');
-  renameBtn.className = 'btn-ghost btn-xs';
-  renameBtn.textContent = 'Rename';
-  renameBtn.addEventListener('click', () => renameNamespace(ns.namespace));
-
-  const delBtn = document.createElement('button');
-  delBtn.className = 'btn-danger btn-xs';
-  delBtn.textContent = 'Delete';
-  delBtn.addEventListener('click', () => deleteNamespace(ns.namespace));
-
   const sourcesBtn = document.createElement('button');
   sourcesBtn.className = 'btn-ghost btn-xs';
   sourcesBtn.textContent = 'Sources';
@@ -158,8 +148,25 @@ function _buildNsCard(ns, defaultNs) {
 
   actions.appendChild(sourcesBtn);
   actions.appendChild(editBtn);
-  actions.appendChild(renameBtn);
-  actions.appendChild(delBtn);
+
+  // Rename + Delete are admin-only verbs (chunk-migration risk; ADR-0007
+  // defers them to a separate ADR with chunk-id stability design). The
+  // backend routes live on admin_router → _DEV_ONLY_ROUTERS, so calling
+  // them in prod would 404. Keep the buttons in dev only.
+  if (STATE.uiMode === 'dev') {
+    const renameBtn = document.createElement('button');
+    renameBtn.className = 'btn-ghost btn-xs';
+    renameBtn.textContent = 'Rename';
+    renameBtn.addEventListener('click', () => renameNamespace(ns.namespace));
+
+    const delBtn = document.createElement('button');
+    delBtn.className = 'btn-danger btn-xs';
+    delBtn.textContent = 'Delete';
+    delBtn.addEventListener('click', () => deleteNamespace(ns.namespace));
+
+    actions.appendChild(renameBtn);
+    actions.appendChild(delBtn);
+  }
 
   card.appendChild(dot);
   card.appendChild(name);
@@ -170,13 +177,11 @@ function _buildNsCard(ns, defaultNs) {
 }
 
 async function loadNamespacesTab() {
-  // The Namespaces management *tab* is dev-only (data-ui-tier="dev" on the
-  // settings nav button). The Edit/Rename/Delete buttons rendered below
-  // call PATCH/POST/DELETE /api/namespaces/{name} on the admin_router,
-  // which stays in _DEV_ONLY_ROUTERS. The list endpoint itself is
-  // prod-mounted but the CRUD UX requires the admin surface, so this
-  // early-return keeps the tab from rendering in prod.
-  if (STATE.uiMode !== 'dev') return;
+  // The tab is prod-visible after ADR-0007. The Edit button calls
+  // PATCH /api/namespaces/{name}, mounted on the prod-tier read router
+  // (cosmetic edit doesn't migrate chunks). Rename + Delete buttons are
+  // gated to dev mode in `_buildNsCard` because their backend routes stay
+  // on admin_router until chunk-id stability lands (ADR-0005 follow-up).
   const list = qs('ns-list');
   list.innerHTML = '<div class="loading-panel"><div class="spinner-panel"></div></div>';
 
@@ -184,7 +189,8 @@ async function loadNamespacesTab() {
     const data = await api('GET', '/api/namespaces');
     const namespaces = data.namespaces || [];
     if (!namespaces.length) {
-      list.innerHTML = emptyState('📁', 'No namespaces yet', 'Index files with a namespace to get started');
+      const cta = `<a class="empty-state-cta" href="https://github.com/memtomem/memtomem/blob/main/docs/guides/configuration.md#namespace" target="_blank" rel="noopener">${escapeHtml(t('settings.ns.empty.cta'))} →</a>`;
+      list.innerHTML = `<div class="empty-state">${emptyState('🗂', t('settings.ns.empty.title'), t('settings.ns.empty.body'))}${cta}</div>`;
       return;
     }
     list.innerHTML = '';

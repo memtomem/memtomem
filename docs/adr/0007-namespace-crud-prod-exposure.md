@@ -1,7 +1,8 @@
 # ADR-0007: Namespace CRUD prod exposure model
 
-**Status:** Proposed (deferred pending trigger)
-**Date:** 2026-04-30
+**Status:** Accepted (PR-A + PR-B implemented)
+**Date:** 2026-04-30 (drafted), 2026-04-30 (accepted same day after maintainer
+prod-user feedback fired the trigger — see Decision section).
 **Context:** Issue #586 — Settings → Namespaces tab (NS list, color,
 description, rules editing) is dev-mode only. PR #604 (#582 4.10a) just
 ungated the Search NS filter dropdown for prod. The deeper product
@@ -158,10 +159,17 @@ promote rename via its own ADR with full chunk-migration design.
 
 ## Decision
 
-**Defer.** Leaning toward **A.2 + B.1 + C.1 + D.2 + E.2** when
-implementation is triggered.
+**Accept A.2 + B.1 + C.1 + D.2 + E.2** — PR-A and PR-B implemented in
+the same release window as the ADR draft. Trigger #1 fired same-day:
+maintainer doing the prod transition reported the Settings → Namespaces
+tab missing in prod and confirmed (via question dialog) that this was
+the gap they cared about, not the filter-dropdown surface PR #604
+already covered. One report from the maintainer — who was the prod-user
+voice the ADR was waiting on — is sufficient signal here; the
+"≥ 2 reports" bar in trigger #1 was framed for external feedback,
+which a maintainer-driven trigger short-circuits.
 
-### Why hold instead of implement now
+### Earlier rationale for holding (kept for reference)
 
 - **Single signal.** The issue body is one design audit. Below the
   "twice = pattern" bar; the same threshold ADR-0004 used to defer.
@@ -173,6 +181,9 @@ implementation is triggered.
   indexing detail") may be correct. Deferring lets a user-facing
   signal (issue, support comment, review) fire before we build the
   empty-state CTA and risk teaching a primitive nobody asked for.
+
+The third bullet is what flipped: the maintainer-as-prod-user signal
+fired, removing the deferral's main rationale.
 
 ### Trigger criteria (any one promotes to "Accepted")
 
@@ -191,34 +202,37 @@ implementation is triggered.
    namespaces as the grouping unit. In that case A.2 + B.1 + C.1
    become a prerequisite.
 
-### Implementation outline (when triggered)
+### Implementation outline (PR-A + PR-B shipped; PR-C deferred)
 
-In rough order, all in `packages/memtomem/src/memtomem/`:
+PR-A and PR-B were bundled in one PR since both unblock the same
+"Namespaces tab in prod" trigger. PR-C remains gated by separate
+chunk-id stability work.
 
-- **PR-A — Lift the JS dev-gate; expose PATCH in prod tier.**
-  - Remove the `if (STATE.uiMode !== 'dev') return;` early-return at
-    `web/static/settings-namespaces.js:179`. Read-only listing in
-    prod was already half-wired (the dropdown comment at line 60-62
-    already says the read endpoint is prod tier).
-  - Move `PATCH /api/namespaces/{ns}` from `admin_router` to
-    `namespaces_read` (or to a new `namespaces_edit` mid-tier router).
-    `namespaces.py:57` is the registration site. POST/{ns}/rename and
-    DELETE/{ns} stay on `admin_router`.
-  - The frontend already has the form for color/description. Verify
-    it doesn't reach for the dev-only DELETE path on submit.
-- **PR-B — Empty-state CTA + onboarding link.**
-  - When `loadNamespacesTab()` resolves to an empty list in prod, render
-    a first-time tile: "Define your first namespace" with a one-line
-    explanation and a link to the user-guide section on NS rules.
-  - Optional: a "Create" button that POSTs to a new prod-tier
-    `POST /api/namespaces` (currently nonexistent — `admin_router`
-    doesn't have it, NS are auto-created by indexing). If creating an
-    empty NS turns out to be conceptually weird (a NS with no chunks?),
-    leave creation to indexing and have the CTA link to "add a folder
-    that uses your NS rule" instead.
-- **PR-C (gated by separate triggers, not this ADR's) — rename / bulk
-  delete.**
-  - Each is its own ADR with chunk-migration design.
+- **PR-A — Lift the JS dev-gate; expose PATCH in prod tier.** ✓ shipped.
+  - Removed `if (STATE.uiMode !== 'dev') return;` from
+    `web/static/settings-namespaces.js:loadNamespacesTab`.
+  - Flipped `data-ui-tier="dev"` → `"prod"` on the Settings nav button
+    (`web/static/index.html:596`).
+  - Dropped `update_metadata`'s `@admin_router.patch` decorator and
+    re-mounted via `add_api_route` in `web/routes/namespaces_read.py`
+    (same pattern `list_namespaces` already used).
+  - Rename + Delete buttons in `_buildNsCard` are gated to
+    `STATE.uiMode === 'dev'` so they don't render in prod (their
+    backend routes stay on `admin_router` until PR-C lands).
+- **PR-B — Empty-state CTA + onboarding link.** ✓ shipped.
+  - When `loadNamespacesTab()` resolves to an empty list, the panel
+    renders a first-time tile with title, body, and a CTA link to
+    `docs/guides/configuration.md#namespace`. The "Create" button
+    sub-option was rejected: an empty NS without chunks has no clear
+    semantic, and the indexing/rules path already handles creation.
+  - i18n keys: `settings.ns.empty.title`, `settings.ns.empty.body`,
+    `settings.ns.empty.cta` (en + ko).
+- **PR-C (deferred) — rename / bulk delete prod exposure.**
+  - Each is its own ADR with chunk-migration design (depends on
+    ADR-0005 chunk-id stability outcome). Tracking issue should be
+    filed when one of the trigger criteria fires (post-rollout
+    feedback, multi-agent grouping verdict 2026-05-09, or
+    onboarding-flow rules surface).
 
 ## Consequences
 

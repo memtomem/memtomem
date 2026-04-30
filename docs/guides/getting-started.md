@@ -319,6 +319,18 @@ mm add "Redis LRU→LFU reduced cache misses by 40%" --tags "redis,performance"
 mm recall --since 2026-04-01
 ```
 
+### 5. Organise memories with namespaces
+
+Each chunk lives in a namespace. Indexing creates them automatically — for
+example, ingesting `~/.claude/projects/...` produces `claude-memory:<slug>`
+namespaces — and you can also pass `--namespace work-notes` to `mm index`
+to bucket on demand. Once a namespace exists, open **Settings →
+Namespaces** in the Web UI to attach a colour and a one-line description
+so it's easy to pick out in filters and result chips. Structural ops
+(rename, delete) live in `--dev` mode pending chunk-id stability work
+(see [`docs/guides/configuration.md#namespace`](configuration.md#namespace)
+for rules and ADR-0007 for the rationale).
+
 ---
 
 ## CLI reference

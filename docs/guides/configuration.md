@@ -722,7 +722,7 @@ In `core` mode, use `mem_do(action="...", params={...})` to access any of the 65
 
 `mm web --mode {prod,dev}` overrides the env. `mm web --dev` is a shortcut for `--mode dev` and is mutually exclusive with `--mode`. An invalid value fails fast rather than silently falling back.
 
-Tab classification changes over time — run `mm web --dev` to see the full surface of your installed version. The API endpoints backing dev-only pages (for example `/api/sessions`, `/api/scratch`, `/api/namespaces`) return 404 in `prod` mode; switch to `dev` mode if you're scripting against them.
+Tab classification changes over time — run `mm web --dev` to see the full surface of your installed version. Dev-only API endpoints (for example `/api/sessions`, `/api/scratch`, `POST /api/namespaces/{ns}/rename`, `DELETE /api/namespaces/{ns}`) return 404 in `prod` mode; switch to `dev` mode if you're scripting against them. The namespace list (`GET /api/namespaces`) and cosmetic metadata edit (`PATCH /api/namespaces/{ns}`) are prod-tier and respond in both modes — see ADR-0007.
 
 ## Querying and Modifying at Runtime
 

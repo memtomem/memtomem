@@ -215,14 +215,15 @@ def test_prod_keeps_polished_routes_mounted() -> None:
 
 @pytest.mark.asyncio
 async def test_namespaces_list_is_prod_mounted_but_admin_routes_blocked() -> None:
-    """4.10a (#582): the read endpoint graduates to prod for the Search /
-    Timeline / Export filter dropdowns and the Home dashboard donut, but the
-    admin (CRUD) surface stays dev-only. A future refactor that promotes
-    PATCH/POST/DELETE to prod must fail this gate.
+    """ADR-0007 PR-A: the read endpoint and the cosmetic PATCH (color,
+    description) live on the prod tier; the structural admin surface
+    (GET-by-id, rename, delete) stays dev-only. Cosmetic edit was
+    promoted because it doesn't migrate chunks; rename/delete need
+    chunk-id stability design (ADR-0005 follow-up) before promotion.
 
-    The list endpoint is mounted via ``namespaces_read`` in _PROD_ROUTERS;
-    the admin surface (PATCH/POST/DELETE/GET-by-id) stays on
-    ``namespaces.admin_router`` in _DEV_ONLY_ROUTERS.
+    Backed by ``namespaces_read.router`` in _PROD_ROUTERS (GET list +
+    PATCH metadata) and ``namespaces.admin_router`` in
+    _DEV_ONLY_ROUTERS (GET info + rename + delete).
     """
     prod_app = create_app(mode="prod")
     prod_paths = _api_paths(prod_app)
@@ -230,13 +231,34 @@ async def test_namespaces_list_is_prod_mounted_but_admin_routes_blocked() -> Non
         "GET /api/namespaces must be prod-mounted via namespaces_read"
     )
 
+    # Path-level pin: PATCH /api/namespaces/{namespace} is prod (cosmetic
+    # edit). Rename and delete share the same path template but live on
+    # admin_router, so a path string match alone isn't enough — verify
+    # the methods registered for the path.
+    patch_methods = {
+        m
+        for r in prod_app.routes
+        if getattr(r, "path", "") == "/api/namespaces/{namespace}"
+        for m in getattr(r, "methods", set()) or set()
+    }
+    assert "PATCH" in patch_methods, (
+        "PATCH /api/namespaces/{namespace} must be prod-mounted via namespaces_read"
+    )
+    assert "GET" not in patch_methods, (
+        "GET /api/namespaces/{namespace} (info) must stay dev-only on admin_router"
+    )
+    assert "DELETE" not in patch_methods, (
+        "DELETE /api/namespaces/{namespace} must stay dev-only on admin_router"
+    )
+
     async with AsyncClient(
         transport=ASGITransport(app=prod_app, client=("127.0.0.1", 0)),
         base_url="http://testserver",
     ) as c:
+        # Structural verbs must stay dev-only — these all live on
+        # namespaces.admin_router and 404 cleanly without a storage mock.
         for method, path in (
             ("GET", "/api/namespaces/foo"),
-            ("PATCH", "/api/namespaces/foo"),
             ("POST", "/api/namespaces/foo/rename"),
             ("DELETE", "/api/namespaces/foo"),
         ):
@@ -405,7 +427,11 @@ def test_html_classification_matches_router_lists() -> None:
     # section id != router module). Source of truth: whoever edits the
     # router lists must also update the HTML, and this test enforces it.
     expected_dev = {
-        "namespaces",
+        # ADR-0007 PR-A promoted Settings → Namespaces to prod (cosmetic
+        # CRUD only). Rename and delete buttons inside the panel are
+        # dev-gated in JS (settings-namespaces.js _buildNsCard) because
+        # their backend verbs stay on admin_router; this HTML check tracks
+        # the section visibility, not the per-button gating.
         "hooks-sync",
         "harness-sessions",
         "harness-scratch",

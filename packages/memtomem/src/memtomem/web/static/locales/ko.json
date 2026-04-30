@@ -325,6 +325,9 @@
   "settings.ns.title": "네임스페이스",
   "settings.ns.refresh": "새로고침",
   "settings.ns.group_chunks": "{count}개 청크",
+  "settings.ns.empty.title": "아직 네임스페이스가 없습니다",
+  "settings.ns.empty.body": "파일을 인덱싱할 때 네임스페이스를 지정하거나, 설정 규칙에 정의해 기억을 분류하세요.",
+  "settings.ns.empty.cta": "네임스페이스 사용법 알아보기",
 
   "settings.dedup.desc": "유사도 임계값 기반으로 중복 청크를 찾아 병합하거나 건너뜁니다.",
   "settings.dedup.threshold_label": "임계값",

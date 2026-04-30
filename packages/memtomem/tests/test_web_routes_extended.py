@@ -963,6 +963,73 @@ class TestNamespaceCRUD:
 
 
 # ---------------------------------------------------------------------------
+# Namespace tier split (ADR-0007 PR-A)
+# ---------------------------------------------------------------------------
+
+
+class TestNamespaceProdTier:
+    """In ``prod`` mode the read+cosmetic surface (GET list, PATCH metadata)
+    is mounted; the structural admin surface (per-NS info GET, rename,
+    delete) returns 404. The dev-mode counterparts already pass via
+    ``TestNamespaceCRUD`` — this class pins the asymmetry.
+    """
+
+    @pytest.fixture
+    async def prod_client(self):
+        application = create_app(lifespan=None, mode="prod")
+        storage = AsyncMock()
+        storage.list_namespace_meta = AsyncMock(
+            return_value=[
+                {
+                    "namespace": "default",
+                    "chunk_count": 1,
+                    "description": "",
+                    "color": "",
+                }
+            ]
+        )
+        storage.list_namespaces = AsyncMock(return_value=[("default", 1)])
+        storage.set_namespace_meta = AsyncMock()
+        storage.get_namespace_meta = AsyncMock(
+            return_value={"description": "Updated", "color": "#abcdef"}
+        )
+        application.state.storage = storage
+        application.state.config = FakeConfig()
+        transport = ASGITransport(app=application)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
+
+    async def test_list_endpoint_open_in_prod(self, prod_client: AsyncClient):
+        resp = await prod_client.get("/api/namespaces")
+        assert resp.status_code == 200
+
+    async def test_patch_metadata_open_in_prod(self, prod_client: AsyncClient):
+        resp = await prod_client.patch(
+            "/api/namespaces/default",
+            json={"description": "Updated", "color": "#abcdef"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["namespace"] == "default"
+        assert data["description"] == "Updated"
+
+    async def test_per_namespace_info_blocked_in_prod(self, prod_client: AsyncClient):
+        resp = await prod_client.get("/api/namespaces/default")
+        assert resp.status_code == 404
+
+    async def test_rename_blocked_in_prod(self, prod_client: AsyncClient):
+        resp = await prod_client.post(
+            "/api/namespaces/default/rename",
+            json={"new_name": "general"},
+        )
+        assert resp.status_code == 404
+
+    async def test_delete_blocked_in_prod(self, prod_client: AsyncClient):
+        resp = await prod_client.delete("/api/namespaces/default")
+        assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # Scratch workspace CRUD
 # ---------------------------------------------------------------------------
 

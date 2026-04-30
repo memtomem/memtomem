@@ -1829,6 +1829,8 @@ select:focus-visible {
 .empty-state { flex-direction: column; gap: 6px; }
 .empty-state-icon { font-size: 1.6rem; opacity: 0.5; }
 .empty-state-hint { font-size: 0.78rem; color: var(--muted); opacity: 0.7; }
+.empty-state-cta { font-size: 0.82rem; color: var(--accent); text-decoration: none; margin-top: 4px; }
+.empty-state-cta:hover { text-decoration: underline; }
 
 /* Recent search chips (empty state) */
 .recent-chips {

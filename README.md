@@ -122,7 +122,7 @@ See [MCP Client Setup](docs/guides/mcp-clients.md) for Cursor / Windsurf / Claud
 - **Hybrid search** — BM25 keyword + dense vector + RRF fusion in one query
 - **Semantic chunking** — heading-aware Markdown, AST-based Python, tree-sitter JS/TS, structure-aware JSON/YAML/TOML
 - **Incremental indexing** — chunk-level SHA-256 diff; only changed chunks get re-embedded
-- **Namespaces** — organize memories into scoped groups with auto-derivation from folder names
+- **Namespaces** — organize memories into scoped groups with auto-derivation from folder names; review and label them (colour, description) from Settings → Namespaces in the Web UI
 - **Maintenance** — near-duplicate detection, time-based decay, TTL expiration, auto-tagging
 - **Web UI** — visual dashboard for search, sources, tags, timeline, dedup, and more (`mm web --dev` for the full maintainer surface)
 - **MCP tools** — `mem_do` meta-tool routes all non-core actions in `core` mode for minimal context usage

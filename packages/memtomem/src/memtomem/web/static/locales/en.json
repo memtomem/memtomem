@@ -325,6 +325,9 @@
   "settings.ns.title": "Namespaces",
   "settings.ns.refresh": "Refresh",
   "settings.ns.group_chunks": "{count} chunks",
+  "settings.ns.empty.title": "No namespaces yet",
+  "settings.ns.empty.body": "Index files with a namespace, or define one in your config rules to bucket memories.",
+  "settings.ns.empty.cta": "Learn how namespaces work",
 
   "settings.dedup.desc": "Find near-duplicate chunks by similarity threshold and merge or skip them.",
   "settings.dedup.threshold_label": "Threshold",

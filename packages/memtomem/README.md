@@ -90,7 +90,7 @@ the editor: `~/.cursor/mcp.json` (Cursor),
 - **🔍 Hybrid search** — BM25 (FTS5) + dense vectors (sqlite-vec) merged via Reciprocal Rank Fusion. Exact terms via keyword, meaning via semantic, both at once.
 - **📦 Semantic chunking** — heading-aware Markdown, AST-based Python, tree-sitter JS/TS, structure-aware JSON/YAML/TOML
 - **♻️ Incremental indexing** — chunk-level SHA-256 diff means only changed chunks get re-embedded
-- **🏷️ Namespaces** — scope memories into groups (work / personal / project) with optional auto-derivation from folder names
+- **🏷️ Namespaces** — scope memories into groups (work / personal / project) with optional auto-derivation from folder names; label them (colour, description) from Settings → Namespaces in the Web UI
 - **🧹 Maintenance** — near-duplicate detection with merge, time-based score decay, TTL expiration, auto-tagging
 - **🔄 Export / import** — JSON bundle backup and restore with re-embedding
 - **🌐 Web UI** — polished SPA dashboard for search, sources, indexing, tags, and timeline (`mm web --dev` unlocks the full maintainer surface including Sessions, Working Memory, and Health Report)

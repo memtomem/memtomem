@@ -1,4 +1,16 @@
-"""Namespace management endpoints."""
+"""Namespace management endpoints.
+
+Tier split (after ADR-0007):
+
+* ``list_namespaces`` and ``update_metadata`` are tier-mounted in
+  ``namespaces_read`` (prod). They read or cosmetically edit per-namespace
+  metadata (color, description) — both are safe to expose without
+  chunk-migration policy.
+* ``get_namespace``, ``rename_namespace``, and ``delete_namespace`` stay on
+  ``admin_router`` (dev-only). Rename and delete need chunk-id stability
+  design (ADR-0005) before promotion; the per-namespace info GET is
+  redundant with the list endpoint and stays admin-side.
+"""
 
 from __future__ import annotations
 
@@ -54,7 +66,8 @@ async def get_namespace(namespace: str, storage=Depends(get_storage)) -> Namespa
     )
 
 
-@admin_router.patch("/{namespace}", response_model=NamespaceInfoResponse)
+# Registered on the read router in namespaces_read.py (prod tier — cosmetic
+# edit doesn't migrate chunks). Rename and delete stay on admin_router below.
 async def update_metadata(
     namespace: str,
     body: NamespaceMetaRequest,
