@@ -477,7 +477,7 @@
       <span class="tab-help-bar-text" data-i18n="index.help">Three ways to add memories to memtomem.</span>
       <button class="tab-help-bar-dismiss" data-help-tab="index">✕</button>
     </div>
-    <div class="index-mode-toggle" role="tablist" aria-label="Index mode">
+    <div class="index-mode-toggle" role="tablist" data-i18n-aria-label="index.mode_aria" aria-label="Index mode">
       <button id="index-mode-folder" class="btn-ghost btn-active"
               role="tab" aria-selected="true" aria-controls="index-panel-folder"
               tabindex="0"
@@ -546,13 +546,13 @@
 
         <div id="index-panel-compose" class="index-panel" role="tabpanel" aria-labelledby="index-mode-compose" hidden>
           <label class="field-label" for="add-title" data-i18n="index.add_heading_label">Title</label>
-          <input id="add-title" type="text" data-i18n-placeholder="index.add_heading_placeholder" placeholder="Optional heading" style="width:100%" />
+          <input id="add-title" type="text" data-i18n-placeholder="index.add_heading_placeholder" placeholder="Optional heading" />
           <label class="field-label" for="add-tags" data-i18n="index.add_tags_label">Tags</label>
-          <input id="add-tags" type="text" data-i18n-placeholder="index.add_tags_placeholder" placeholder="tag1, tag2, …" style="width:100%" />
+          <input id="add-tags" type="text" data-i18n-placeholder="index.add_tags_placeholder" placeholder="tag1, tag2, …" />
           <label class="field-label" for="add-file" data-i18n="index.add_file_label">Target File</label>
-          <input id="add-file" type="text" data-i18n-placeholder="index.add_file_placeholder" placeholder="path/to/memories.md" style="width:100%" />
+          <input id="add-file" type="text" data-i18n-placeholder="index.add_file_placeholder" placeholder="path/to/memories.md" />
           <label class="field-label" for="add-namespace" data-i18n="index.add_ns_label">Namespace</label>
-          <input id="add-namespace" type="text" data-i18n-placeholder="index.add_ns_placeholder" placeholder="default (from config)" style="width:100%" />
+          <input id="add-namespace" type="text" data-i18n-placeholder="index.add_ns_placeholder" placeholder="default (from config)" />
           <label class="field-label" for="add-content" data-i18n="index.add_content_label">Content</label>
           <textarea id="add-content" spellcheck="false" data-i18n-placeholder="index.add_content_placeholder" placeholder="Write your memory here…"></textarea>
           <button id="add-btn" class="btn-primary mt-10" data-i18n="index.add_btn">Add</button>

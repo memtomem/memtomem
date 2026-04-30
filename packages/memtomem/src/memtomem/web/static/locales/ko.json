@@ -146,6 +146,7 @@
   "sources.default_pill": "기본",
 
   "index.help": "memtomem 에 기억을 추가하는 3가지 방법.",
+  "index.mode_aria": "인덱스 모드",
   "index.mode.folder": "폴더 인덱싱",
   "index.mode.upload": "파일 업로드",
   "index.mode.compose": "새 기억",

@@ -146,6 +146,7 @@
   "sources.default_pill": "default",
 
   "index.help": "Three ways to add memories to memtomem.",
+  "index.mode_aria": "Index mode",
   "index.mode.folder": "Folder index",
   "index.mode.upload": "Upload files",
   "index.mode.compose": "New memory",
