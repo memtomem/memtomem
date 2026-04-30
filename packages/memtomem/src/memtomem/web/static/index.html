@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=68" />
+  <link rel="stylesheet" href="/style.css?v=69" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" />
 </head>
 <body>
@@ -547,6 +547,12 @@
           <button id="upload-btn" class="btn-primary mt-10" disabled data-i18n="index.upload_btn">Upload &amp; Index</button>
           <div id="upload-msg" class="status-msg" hidden></div>
           <div id="upload-result" class="upload-result" hidden></div>
+          <p id="upload-usage" hidden>
+            <span data-i18n="index.upload_usage_label">Saved in</span>
+            <code>~/.memtomem/uploads/</code>
+            <span> · </span>
+            <span id="upload-usage-stats"></span>
+          </p>
         </div>
 
         <div id="index-panel-compose" class="index-panel" role="tabpanel" aria-labelledby="index-mode-compose" hidden>
@@ -1269,7 +1275,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js"></script>
   <script src="/i18n.js?v=3"></script>
-  <script src="/app.js?v=72"></script>
+  <script src="/app.js?v=73"></script>
   <script src="/settings-config.js?v=6"></script>
   <script src="/sources-memory-dirs.js?v=6"></script>
   <script src="/settings-maintenance.js?v=1"></script>

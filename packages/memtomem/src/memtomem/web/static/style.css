@@ -697,6 +697,8 @@ mark {
 .upload-result-row { font-size: 0.8rem; display: flex; align-items: center; gap: 6px; }
 .upload-result-ok { color: var(--green); }
 .upload-result-err { color: var(--danger); }
+#upload-usage { font-size: 0.75rem; color: var(--muted); margin-top: 8px; }
+#upload-usage code { font-size: inherit; color: var(--muted); }
 textarea#add-content {
   width: 100%; min-height: 240px; background: var(--surface);
   border: 1px solid var(--border); border-radius: var(--radius);

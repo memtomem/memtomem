@@ -3023,6 +3023,7 @@ function setIndexMode(mode) {
     btn.setAttribute('tabindex', active ? '0' : '-1');
     pnl.hidden = !active;
   }
+  if (mode === 'upload') loadUploadUsage();
 }
 
 INDEX_MODES.forEach(m => {
@@ -3258,6 +3259,7 @@ qs('add-btn').addEventListener('click', async () => {
       _markDataStale();
       loadSourceFilter();
       loadStats();
+      loadUploadUsage();
     } catch (err) {
       showToast(t('toast.upload_failed', { error: err.message }), 'error');
     } finally {
@@ -3265,6 +3267,32 @@ qs('add-btn').addEventListener('click', async () => {
     }
   });
 })();
+
+// Cumulative footprint of /api/upload's destination directory. Hidden when
+// empty so a fresh-install Upload mode stays visually clean (issue #583).
+async function loadUploadUsage() {
+  const el = qs('upload-usage');
+  const stats = qs('upload-usage-stats');
+  if (!el || !stats) return;
+  try {
+    const res = await fetch('/api/uploads/usage');
+    if (!res.ok) { hide(el); return; }
+    const d = await res.json();
+    if (!d.file_count) { hide(el); return; }
+    const countKey = d.file_count === 1
+      ? 'index.upload_usage_count_one'
+      : 'index.upload_usage_count_many';
+    const parts = [
+      t(countKey, { count: d.file_count }),
+      formatBytes(d.total_bytes),
+    ];
+    if (d.oldest_mtime) {
+      parts.push(t('index.upload_usage_oldest', { rel: relativeTime(d.oldest_mtime * 1000) }));
+    }
+    stats.textContent = parts.join(' · ');
+    show(el);
+  } catch (_e) { hide(el); }
+}
 
 // ---------------------------------------------------------------------------
 // Tags tab
