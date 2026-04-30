@@ -21,6 +21,7 @@ class AddMemoryResponse(BaseModel):
 class UploadFileResult(BaseModel):
     filename: str
     indexed_chunks: int
+    path: str | None = None
     error: str | None = None
 
 

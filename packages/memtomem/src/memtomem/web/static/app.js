@@ -3219,7 +3219,11 @@ qs('add-btn').addEventListener('click', async () => {
         }
         result.appendChild(row);
       });
-      showToast(t('toast.upload_complete', { count: data.total_indexed }), 'success');
+      const firstPath = data.files.find(r => !r.error && r.path)?.path;
+      const msg = firstPath
+        ? t('toast.upload_complete_with_path', { count: data.total_indexed, path: tildifyPath(firstPath) })
+        : t('toast.upload_complete', { count: data.total_indexed });
+      showToast(msg, 'success');
       selectedFiles = [];
       renderFileList();
       _markDataStale();

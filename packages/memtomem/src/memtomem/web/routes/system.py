@@ -875,7 +875,13 @@ async def upload_files(
                 continue
             dest.write_bytes(content)
             stats = await index_engine.index_file(dest)
-            results.append(UploadFileResult(filename=fname, indexed_chunks=stats.indexed_chunks))
+            results.append(
+                UploadFileResult(
+                    filename=fname,
+                    indexed_chunks=stats.indexed_chunks,
+                    path=str(dest),
+                )
+            )
         except Exception as exc:
             results.append(UploadFileResult(filename=fname, indexed_chunks=0, error=str(exc)))
 
