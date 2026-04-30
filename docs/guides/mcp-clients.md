@@ -178,7 +178,42 @@ Restart Gemini CLI after configuration.
 
 ---
 
-## 6. Antigravity
+## 6. Codex CLI
+
+Codex CLI reads MCP servers from `~/.codex/config.toml` under the
+`[mcp_servers.<id>]` section header — TOML, not JSON. Add a section for
+memtomem:
+
+```toml
+[mcp_servers.memtomem]
+command = "uvx"
+args = ["--from", "memtomem", "memtomem-server"]
+
+[mcp_servers.memtomem.env]
+MEMTOMEM_INDEXING__MEMORY_DIRS = '["~/memories"]'
+```
+
+Restart Codex CLI after configuration.
+
+> Codex MCP tools default to **serialized** calls. memtomem is safe to
+> run in parallel — opt in by adding `supports_parallel_tool_calls = true`
+> alongside `command`/`args`. Other server-level knobs documented by
+> Codex (e.g. `enabled`, `enabled_tools`, `disabled_tools`,
+> `startup_timeout_sec`, `tool_timeout_sec`) all work; see the official
+> [Codex config reference](https://developers.openai.com/codex/config-reference)
+> for the full schema.
+
+### Verify Connection
+
+In Codex CLI:
+
+```
+Call mem_status to check the memtomem connection status
+```
+
+---
+
+## 7. Antigravity
 
 1. Click the `...` menu at the top of the Agent panel > **MCP Servers**
 2. Click **Manage MCP Servers** at the top of the MCP Store
@@ -216,7 +251,7 @@ Restart Gemini CLI after configuration.
 
 ---
 
-## 7. Verifying Your Connection
+## 8. Verifying Your Connection
 
 These verification methods work across all clients.
 
@@ -312,7 +347,7 @@ The STM proxy is distributed as a separate package: **[memtomem-stm](https://git
 
 ---
 
-## 8. Environment Variable Overrides
+## 9. Environment Variable Overrides
 
 You can override settings by adding environment variables to the `env` block.
 
