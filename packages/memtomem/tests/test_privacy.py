@@ -239,10 +239,11 @@ class TestJsPatternTranslation:
             # ``construct`` is a regex (pytest ``match=``); escape backslashes.
             (r"\Afoo", r"\\A or \\Z anchor"),
             (r"foo\Z", r"\\A or \\Z anchor"),
-            # Odd-length backslash run before ``A``: the leading ``\\`` is a
-            # literal-backslash pair, the final ``\`` actively escapes ``A``.
-            # Real anchor — must still raise.
+            # Odd-length backslash run before ``A``/``Z``: the leading ``\\``
+            # is a literal-backslash pair, the final ``\`` actively escapes
+            # the next char. Real anchor — must still raise. Symmetric pair.
             (r"\\\Afoo", r"\\A or \\Z anchor"),
+            (r"foo\\\Z", r"\\A or \\Z anchor"),
             ("foo(?i)bar", "mid-pattern inline flag group"),
             ("(?ix)foo", "verbose mode"),
             ("(?P<n>x)", "named group"),
