@@ -205,7 +205,7 @@ class TestNoHardcodedStrings:
             "confirm.hooks_sync_title",
             "confirm.hooks_sync_msg",
             "toast.indexed_count",
-            "toast.saved_n_indexed",
+            "toast.saved_to_file",
             "toast.upload_complete",
             "toast.tagged_count",
             "toast.stream_complete",

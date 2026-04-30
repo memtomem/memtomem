@@ -176,6 +176,15 @@ function setMsg(el, text, isErr) {
 }
 function truncate(str, n) { return str.length > n ? str.slice(0, n) + '…' : str; }
 function basename(path) { return path.split('/').pop() || path; }
+// Server returns absolute paths under $HOME/.memtomem/...; the browser doesn't
+// know $HOME, so collapse the host-specific prefix to ~ for display by the
+// well-known `.memtomem/` segment that backend code (system.py) anchors on.
+function tildifyPath(p) {
+  if (!p) return p;
+  const idx = p.indexOf('/.memtomem/');
+  if (idx > 0) return '~/.memtomem/' + p.slice(idx + '/.memtomem/'.length);
+  return p;
+}
 function shortDir(dir) {
   const parts = dir.split('/').filter(Boolean);
   return parts.length > 2 ? '…/' + parts.slice(-2).join('/') : dir;
@@ -3107,7 +3116,7 @@ qs('add-btn').addEventListener('click', async () => {
   try {
     const data = await api('POST', '/api/add', { content, title, tags, file, namespace });
     const n = data.indexed_chunks;
-    showToast(t('toast.saved_n_indexed', { count: n }), 'success');
+    showToast(t('toast.saved_to_file', { path: tildifyPath(data.file), count: n }), 'success');
     qs('add-content').value = '';
     _markDataStale();
     loadStats();

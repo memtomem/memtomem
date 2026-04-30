@@ -121,6 +121,17 @@ function _updateContextWindowLabel() {
   }
 }
 
+// JS-owned (no data-i18n-placeholder) so the lang toggle can't write the
+// raw `{date}` token back into the input — i18n.js applyDOM would otherwise
+// reset it on every switch.
+function _refreshAddFilePlaceholder() {
+  const el = qs('add-file');
+  if (!el) return;
+  const today = new Date().toISOString().slice(0, 10);
+  el.placeholder = t('index.add_file_placeholder_prefix') + today + t('index.add_file_placeholder_suffix');
+}
+window.addEventListener('langchange', _refreshAddFilePlaceholder);
+
 // ── B1-B3: Index tab hints ──
 function _syncIndexHints() {
   // Sync namespace placeholder from config
@@ -132,6 +143,7 @@ function _syncIndexHints() {
     const addNs = qs('add-namespace');
     if (addNs) addNs.placeholder = nsPlaceholder;
   }
+  _refreshAddFilePlaceholder();
 
   if (!STATE.serverConfig?.indexing) return;
   const idx = STATE.serverConfig.indexing;
