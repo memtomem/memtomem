@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=67" />
+  <link rel="stylesheet" href="/style.css?v=68" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" />
 </head>
 <body>
@@ -474,71 +474,69 @@
   <!-- ===== INDEX TAB ===== -->
   <div id="tab-index" class="tab-panel" role="tabpanel" aria-labelledby="tabbtn-index" hidden>
     <div class="tab-help-bar" id="help-index" role="status" hidden>
-      <span class="tab-help-bar-text" data-i18n="index.help">Index files into memtomem. Type a path to scan, drop files to upload, or write a memory directly. Toggle Force re-index to rebuild existing chunks.</span>
+      <span class="tab-help-bar-text" data-i18n="index.help">Three ways to add memories to memtomem.</span>
       <button class="tab-help-bar-dismiss" data-help-tab="index">✕</button>
     </div>
+    <div class="index-mode-toggle" role="tablist" aria-label="Index mode">
+      <button id="index-mode-folder" class="btn-ghost btn-active"
+              role="tab" aria-selected="true" aria-controls="index-panel-folder"
+              tabindex="0"
+              data-mode="folder" data-i18n="index.mode.folder">Folder index</button>
+      <button id="index-mode-upload" class="btn-ghost"
+              role="tab" aria-selected="false" aria-controls="index-panel-upload"
+              tabindex="-1"
+              data-mode="upload" data-i18n="index.mode.upload">Upload files</button>
+      <button id="index-mode-compose" class="btn-ghost"
+              role="tab" aria-selected="false" aria-controls="index-panel-compose"
+              tabindex="-1"
+              data-mode="compose" data-i18n="index.mode.compose">New memory</button>
+    </div>
     <div class="index-layout">
-      <div class="index-form card index-primary">
-        <h2 data-i18n="index.title">Index Files</h2>
-        <div class="index-form-row">
-          <div class="index-form-main">
-            <label class="field-label" for="index-path" data-i18n="index.path_label">Path</label>
-            <input id="index-path" type="text" data-i18n-placeholder="index.path_placeholder" placeholder="e.g. ~/memories or /path/to/notes" />
-            <label class="field-label" for="index-namespace" data-i18n="index.ns_label">Namespace</label>
-            <input id="index-namespace" type="text" data-i18n-placeholder="index.ns_placeholder" placeholder="default (from config)" />
-            <div class="checkbox-row">
-              <label><input type="checkbox" id="index-recursive" checked /> <span data-i18n="index.recursive">Recursive</span></label>
-              <label><input type="checkbox" id="index-force" /> <span data-i18n="index.force">Force re-index</span></label>
-            </div>
-            <div class="index-btn-row">
-              <button id="index-btn" class="btn-primary" data-i18n="index.index_btn">Index</button>
-              <button id="index-stream-btn" class="btn-ghost" data-i18n="index.stream_btn">Index with Progress</button>
-            </div>
-            <div id="index-msg" class="status-msg" hidden></div>
+      <div class="card index-panels">
+        <div id="index-panel-folder" class="index-panel" role="tabpanel" aria-labelledby="index-mode-folder">
+          <label class="field-label" for="index-path" data-i18n="index.path_label">Path</label>
+          <input id="index-path" type="text" data-i18n-placeholder="index.path_placeholder" placeholder="e.g. ~/memories or /path/to/notes" />
+          <label class="field-label" for="index-namespace" data-i18n="index.ns_label">Namespace</label>
+          <input id="index-namespace" type="text" data-i18n-placeholder="index.ns_placeholder" placeholder="default (from config)" />
+          <div class="checkbox-row">
+            <label><input type="checkbox" id="index-recursive" checked /> <span data-i18n="index.recursive">Recursive</span></label>
+            <label><input type="checkbox" id="index-force" /> <span data-i18n="index.force">Force re-index</span></label>
           </div>
-          <div class="index-form-stats">
-            <div class="stat-card-mini">
-              <div class="stat-value" id="card-chunks">—</div>
-              <div class="stat-label" data-i18n="index.stat_chunks">Chunks</div>
-            </div>
-            <div class="stat-card-mini">
-              <div class="stat-value" id="card-sources">—</div>
-              <div class="stat-label" data-i18n="index.stat_sources">Sources</div>
-            </div>
+          <div class="index-btn-row">
+            <button id="index-btn" class="btn-primary" data-i18n="index.index_btn">Index</button>
+            <button id="index-stream-btn" class="btn-ghost" data-i18n="index.stream_btn">Index with Progress</button>
           </div>
-        </div>
-        <div id="index-progress" class="index-progress" hidden>
-          <div class="progress-bar-wrap">
-            <div id="index-progress-bar" class="progress-bar" style="width:0%"></div>
+          <div id="index-msg" class="status-msg" hidden></div>
+          <div id="index-progress" class="index-progress" hidden>
+            <div class="progress-bar-wrap">
+              <div id="index-progress-bar" class="progress-bar" style="width:0%"></div>
+            </div>
+            <div id="index-progress-label" class="progress-label">0 / 0 files</div>
+            <div id="index-progress-file" class="progress-file"></div>
           </div>
-          <div id="index-progress-label" class="progress-label">0 / 0 files</div>
-          <div id="index-progress-file" class="progress-file"></div>
+          <div id="index-result" class="index-result" hidden>
+            <table>
+              <tr><td data-i18n="index.result.files">Files scanned</td><td id="r-files"></td></tr>
+              <tr><td data-i18n="index.result.chunks">Total chunks</td><td id="r-chunks"></td></tr>
+              <tr><td data-i18n="index.result.indexed">Indexed</td><td id="r-indexed"></td></tr>
+              <tr><td data-i18n="index.result.skipped">Skipped</td><td id="r-skipped"></td></tr>
+              <tr><td data-i18n="index.result.deleted">Deleted</td><td id="r-deleted"></td></tr>
+              <tr><td data-i18n="index.result.duration">Duration</td><td id="r-duration"></td></tr>
+              <tr id="r-errors-row" hidden>
+                <td data-i18n="index.result.errors">Errors</td>
+                <td id="r-errors" class="index-result-errors"></td>
+              </tr>
+            </table>
+          </div>
+          <div id="index-config-hint" class="config-hint" hidden></div>
         </div>
-        <div id="index-result" class="index-result" hidden>
-          <table>
-            <tr><td data-i18n="index.result.files">Files scanned</td><td id="r-files"></td></tr>
-            <tr><td data-i18n="index.result.chunks">Total chunks</td><td id="r-chunks"></td></tr>
-            <tr><td data-i18n="index.result.indexed">Indexed</td><td id="r-indexed"></td></tr>
-            <tr><td data-i18n="index.result.skipped">Skipped</td><td id="r-skipped"></td></tr>
-            <tr><td data-i18n="index.result.deleted">Deleted</td><td id="r-deleted"></td></tr>
-            <tr><td data-i18n="index.result.duration">Duration</td><td id="r-duration"></td></tr>
-            <tr id="r-errors-row" hidden>
-              <td data-i18n="index.result.errors">Errors</td>
-              <td id="r-errors" class="index-result-errors"></td>
-            </tr>
-          </table>
-        </div>
-        <div id="index-config-hint" class="config-hint" hidden></div>
-      </div>
 
-      <div class="index-secondary">
-        <div class="upload-form card">
-          <h2 data-i18n="index.upload_title">Upload Files</h2>
+        <div id="index-panel-upload" class="index-panel" role="tabpanel" aria-labelledby="index-mode-upload" hidden>
           <div id="upload-drop" class="upload-drop">
             <div class="upload-drop-icon">📂</div>
             <p class="upload-drop-hint"><span data-i18n="index.upload_hint">Drop files here or</span> <label for="upload-input" class="upload-browse-link" data-i18n="index.upload_browse">browse</label></p>
-            <p class="upload-drop-ext" data-i18n="index.upload_ext">.md .txt .py .js .ts .json .yaml</p>
-            <input id="upload-input" type="file" multiple accept=".md,.txt,.py,.js,.ts,.tsx,.json,.yaml,.yml" hidden />
+            <p class="upload-drop-ext" data-i18n="index.upload_ext">.md .txt .json .yaml .yml .toml</p>
+            <input id="upload-input" type="file" multiple accept=".md,.txt,.json,.yaml,.yml,.toml" hidden />
           </div>
           <div id="upload-file-list" class="upload-file-list" hidden></div>
           <button id="upload-btn" class="btn-primary mt-10" disabled data-i18n="index.upload_btn">Upload &amp; Index</button>
@@ -546,8 +544,7 @@
           <div id="upload-result" class="upload-result" hidden></div>
         </div>
 
-        <div class="add-form card">
-          <h2 data-i18n="index.add_title">Add Memory</h2>
+        <div id="index-panel-compose" class="index-panel" role="tabpanel" aria-labelledby="index-mode-compose" hidden>
           <label class="field-label" for="add-title" data-i18n="index.add_heading_label">Title</label>
           <input id="add-title" type="text" data-i18n-placeholder="index.add_heading_placeholder" placeholder="Optional heading" style="width:100%" />
           <label class="field-label" for="add-tags" data-i18n="index.add_tags_label">Tags</label>

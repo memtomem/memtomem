@@ -758,8 +758,6 @@ async function loadStats() {
     const data = await api('GET', '/api/stats');
     qs('stat-chunks').textContent = `${data.total_chunks} chunks`;
     qs('stat-sources').textContent = `${data.total_sources} sources`;
-    qs('card-chunks').textContent = data.total_chunks;
-    qs('card-sources').textContent = data.total_sources;
   } catch (e) { console.warn('[stats]', e); }
 }
 
@@ -2944,6 +2942,60 @@ function _startChunkEdit(card, chunk, sourcePath) {
     }
   });
 }
+
+// ---------------------------------------------------------------------------
+// Index — mode toggle (folder / upload / compose)
+// ---------------------------------------------------------------------------
+//
+// The three input paths live in one card; the segmented toggle picks which
+// panel is visible. Mirrors the main tablist's auto-activation arrow-nav
+// (focus + activate together) so a keyboard user toggles by walking the row.
+
+const INDEX_MODES = ['folder', 'upload', 'compose'];
+const INDEX_MODE_LS_KEY = 'memtomem.index.mode';
+
+function _readIndexMode() {
+  try {
+    const v = localStorage.getItem(INDEX_MODE_LS_KEY);
+    if (v && INDEX_MODES.includes(v)) return v;
+  } catch (_e) { /* private mode */ }
+  return 'folder';
+}
+
+function setIndexMode(mode) {
+  if (!INDEX_MODES.includes(mode)) mode = 'folder';
+  STATE.indexMode = mode;
+  try { localStorage.setItem(INDEX_MODE_LS_KEY, mode); } catch (_e) { /* ignore */ }
+  for (const m of INDEX_MODES) {
+    const btn = qs(`index-mode-${m}`);
+    const pnl = qs(`index-panel-${m}`);
+    if (!btn || !pnl) continue;
+    const active = m === mode;
+    btn.classList.toggle('btn-active', active);
+    btn.setAttribute('aria-selected', String(active));
+    btn.setAttribute('tabindex', active ? '0' : '-1');
+    pnl.hidden = !active;
+  }
+}
+
+INDEX_MODES.forEach(m => {
+  const btn = qs(`index-mode-${m}`);
+  if (btn) btn.addEventListener('click', () => setIndexMode(m));
+});
+
+document.querySelector('.index-mode-toggle')?.addEventListener('keydown', (e) => {
+  if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
+  const buttons = Array.from(document.querySelectorAll('.index-mode-toggle [role="tab"]'));
+  const currentIdx = buttons.indexOf(document.activeElement);
+  const nextIdx = _arrowNavIndex(buttons.length, currentIdx === -1 ? 0 : currentIdx, e.key);
+  if (nextIdx < 0) return;
+  e.preventDefault();
+  const next = buttons[nextIdx];
+  next.focus();
+  if (next.dataset.mode) setIndexMode(next.dataset.mode);
+});
+
+setIndexMode(_readIndexMode());
 
 // ---------------------------------------------------------------------------
 // Index

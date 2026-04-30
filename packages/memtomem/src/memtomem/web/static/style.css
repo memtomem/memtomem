@@ -639,21 +639,23 @@ mark {
 .chunk-card-collapsible:has(.chunk-card-content.expanded):hover::after { opacity: 0.9; }
 
 /* ── Index Tab ── */
-.index-layout { display: flex; flex-direction: column; gap: 20px; padding: 20px; overflow-y: auto; }
-.index-primary { width: 100%; }
-.index-form h2 { margin-bottom: 16px; font-size: 1rem; font-weight: 600; }
-.index-form-row { display: flex; gap: 20px; align-items: flex-start; }
-.index-form-main { flex: 1; min-width: 0; }
-.index-form-stats { display: flex; gap: 12px; flex-shrink: 0; }
-.stat-card-mini { text-align: center; padding: 10px 16px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); }
-.stat-card-mini .stat-value { font-size: 1.4rem; font-weight: 700; color: var(--accent); }
-.stat-card-mini .stat-label { font-size: 0.68rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
-.index-secondary { display: flex; gap: 20px; align-items: flex-start; }
-.index-secondary > * { flex: 1; min-width: 0; }
+/* Mode toggle mirrors ``.sources-mode-toggle`` so the sub-toggle reads as a
+   primary view selector (folder / upload / compose), not a secondary filter. */
+.index-mode-toggle {
+  display: flex; gap: 4px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.index-mode-toggle .btn-ghost { font-size: 0.82rem; padding: 4px 12px; }
+.index-layout { display: flex; flex-direction: column; gap: 20px; padding: 20px 0 20px; overflow-y: auto; }
+/* min-height keeps the panel container stable across mode switches; floor
+   chosen so the folder panel's empty-on-first-visit area stays modest while
+   compose still looks anchored. */
+.index-panels { margin: 0 20px; min-height: 320px; }
+.index-panel input[type="text"] { width: 100%; box-sizing: border-box; }
 
 /* Upload */
-.upload-form { flex: 1; }
-.upload-form h2 { margin-bottom: 12px; font-size: 1rem; font-weight: 600; }
 .upload-drop {
   border: 2px dashed var(--border); border-radius: var(--radius);
   padding: 28px 16px; text-align: center; cursor: pointer;
@@ -679,7 +681,6 @@ mark {
 .upload-result-row { font-size: 0.8rem; display: flex; align-items: center; gap: 6px; }
 .upload-result-ok { color: var(--green); }
 .upload-result-err { color: var(--danger); }
-.add-form h2 { margin-bottom: 16px; font-size: 1rem; font-weight: 600; }
 textarea#add-content {
   width: 100%; min-height: 120px; background: var(--surface);
   border: 1px solid var(--border); border-radius: var(--radius);
