@@ -63,7 +63,7 @@ sequenceDiagram
 
 ## MCP Tools at a Glance
 
-memtomem provides **74 MCP tools** organized into categories:
+memtomem provides **79 MCP tools** organized into categories:
 
 | Category | Tools | What they do |
 |----------|-------|-------------|
@@ -1133,4 +1133,4 @@ See [`uninstall.md`](uninstall.md) for the five-step removal flow: detach the MC
 - [LLM Providers](llm-providers.md) — Optional LLM features (auto-tag, entity extraction, ask)
 - [MCP Client Setup](mcp-clients.md) — Editor-specific configuration
 - [memtomem-stm](https://github.com/memtomem/memtomem-stm) — Proactive surfacing, compression, caching (separate package)
-- [Full Tool Reference](../../packages/memtomem/README.md) — All 74 tools with parameters
+- [Full Tool Reference](../../packages/memtomem/README.md) — All 79 tools with parameters
