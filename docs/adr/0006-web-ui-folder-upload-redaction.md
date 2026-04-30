@@ -11,12 +11,13 @@ CLAUDE.md asserts ("STM-bypass must not be safety-bypass").
 ## Background
 
 `privacy.py: DEFAULT_PATTERNS` is the LTM project's secret-pattern allowlist
-— eight regexes covering API keys, password assignments, provider tokens
-(`sk-`, `ghp_`, `xox[bps]-`, `github_pat_`, Stripe/Clerk/Svix `(sk|pk|rk)_(live|test)_`,
-npm `npm_`, AWS `AKIA|ASIA`, JWT `eyJ…`, PEM private-key headers). The
-module docstring records that this is **secret-class only** by intent —
-PII-class patterns from STM do not auto-sync because they would force
-`force_unsafe=True` on most legitimate prose.
+— nine regexes covering API key / password assignments, provider tokens
+(`sk-`, `ghp_`, `xox[bps]-`, `github_pat_`), Stripe / Clerk / Svix
+(`(sk|pk|rk)_(live|test)_…` and `whsec_…`), npm `npm_`, AWS `AKIA|ASIA`,
+JWT (`eyJ…`), and PEM private-key headers. The module docstring records
+that this is **secret-class only** by intent — PII-class patterns from STM
+do not auto-sync because they would force `force_unsafe=True` on most
+legitimate prose.
 
 The existing gate model is `mem_add()` in
 `server/tools/memory_crud.py:78-104`:
@@ -25,11 +26,18 @@ The existing gate model is `mem_add()` in
 hits = privacy.scan(content)
 if hits:
     if force_unsafe:
-        # bypass + audit log via mem_add_redaction_stats
+        privacy.record("bypassed", "mem_add")
+        logger.warning("redaction bypass via force_unsafe=True ...")
         ...
     else:
+        privacy.record("blocked", "mem_add")
         raise ToolError("write rejected. Retry with force_unsafe=True ...")
 ```
+
+`privacy.record(...)` increments process-lifetime in-memory counters
+exposed via the `mem_add_redaction_stats` MCP tool (a JSON snapshot of
+`privacy.snapshot()`); the `logger.warning(...)` line is the only
+persistent breadcrumb today (stderr / log sink, not a database row).
 
 `mem_edit` (line 445) follows the same shape. Compose-mode in the Web UI is
 covered separately by **#580 (CLOSED)** — a client-side regex pre-check
@@ -111,7 +119,7 @@ folder. The mitigation is in axis E (override).
 
 | Option | Behavior |
 |--------|----------|
-| C.1 — **same `DEFAULT_PATTERNS`** | eight secret-class regexes, identical to MCP |
+| C.1 — **same `DEFAULT_PATTERNS`** | nine secret-class regexes, identical to MCP |
 | C.2 — folder-mode subset | drop e.g. JWT (high false-positive on docs) |
 | C.3 — stricter set + PII | add email/phone/etc. for bulk surfaces |
 
@@ -157,10 +165,19 @@ most prose. C.1 keeps the asymmetric-sync invariant from CLAUDE.md intact.
 
 - *UI toggle* — `mem_add` already exposes `force_unsafe=True` over MCP. A
   Web UI checkbox at the same trust level is the consistent extension.
-- *Audit log* — every bypass writes a row to `mem_add_redaction_stats`'s
-  underlying audit table (`memory_crud.py:88, 465`) with chunk-id +
-  matched-pattern hash + caller surface. This is the only condition
-  under which "my secret got indexed" is debuggable after the fact.
+- *Audit trail* — today MCP bypass produces (a) a counter increment via
+  `privacy.record("bypassed", "mem_add")` (snapshot-readable through
+  `mem_add_redaction_stats`) and (b) a `logger.warning(...)` line
+  (`memory_crud.py:88, 465`) that names tool / namespace / file /
+  content_chars / hits. Bulk bypass should reuse the same two
+  surfaces — extending counter labels to `mem_add_bulk` (or similar)
+  and emitting the same warning shape. **Open sub-question for the
+  implementation PR**: whether a persistent audit table (chunk-id +
+  matched-pattern hash + caller surface) is also warranted, or whether
+  counters + structured logs remain enough. This ADR records the
+  default as "match MCP's existing trail"; promotion to a real audit
+  table is its own decision if the trigger conversation reveals the
+  log line is too easy to lose.
 
 E.2 (CLI only) is too narrow — the `mm web` user has no terminal in flow.
 E.3 is too blunt — making bypass the persisted default flips the trust
@@ -216,16 +233,21 @@ In rough order, all in `packages/memtomem/src/memtomem/`:
     `auto_index=true` (416), `upload_files()` (911). Each handler
     catches `PrivacyRejection` and converts to the appropriate response
     shape (HTTPException for one-shot; SSE error event for stream).
-  - Reuse `mem_add`'s audit-log helper from `server/tools/memory_crud.py`
-    so bulk bypass writes the same `mem_add_redaction_stats` rows as
-    MCP bypass — single audit surface.
+  - Reuse `mem_add`'s bypass trail from `server/tools/memory_crud.py` —
+    `privacy.record("bypassed", "<tool>")` for the in-memory counter
+    and the `logger.warning("redaction bypass via force_unsafe=True ...")`
+    shape — so MCP and bulk bypass land in the same `mem_add_redaction_stats`
+    snapshot and the same log sink. (Whether to add a persistent audit
+    table is the open sub-question called out in axis E.)
 - **PR-B — Web UI override toggle + audit surface.**
   - Add an "Index without privacy gate (audit-logged)" checkbox to the
     Index tab and the Sources `+ 경로 추가` modal. On submit, pass
     `force_unsafe=true` query/body param to the relevant endpoint.
-  - Surface the audit log: extend the existing redaction-stats panel
-    (or add a new tab) so bulk bypasses are visible alongside MCP
-    bypasses.
+  - Surface the bypass trail: extend the existing redaction-stats
+    panel (the GUI view of `privacy.snapshot()`) so bulk bypass
+    counters are visible alongside MCP bypass counters. If the open
+    sub-question on axis E resolves to "add a persistent audit
+    table," that's a follow-up PR with its own schema work.
 - **PR-C (optional, gated by separate signal) — CLI parity.**
   - `mm index --force-unsafe` plumbing reuses PR-A's `IndexEngine`
     parameter. Hold until a CLI user reports needing it; the bulk
@@ -238,10 +260,13 @@ In rough order, all in `packages/memtomem/src/memtomem/`:
   event instead of the chunk silently appearing. This is the intended
   behavior; it should be telegraphed in the next minor's CHANGELOG as a
   behavior change.
-- **Audit log grows.** Every bulk bypass adds rows to the redaction-stats
-  audit table at the same rate as MCP bypass. Storage cost is small
-  (one row per bypass) but the table grows linearly — note for any
-  future eviction policy.
+- **Bypass observability extends.** `privacy.snapshot()` (surfaced
+  through `mem_add_redaction_stats`) gains bulk-surface counter labels;
+  log volume picks up one `logger.warning` line per bulk bypass at the
+  same rate as MCP bypass. Both signals are process-lifetime / log-sink
+  scoped, not persistent rows — promotion to a real audit table is the
+  open sub-question in axis E and would carry its own storage
+  implications (eviction policy etc.) only if taken.
 - **`IndexEngine` API gains a parameter.** External callers (currently
   none outside this repo, but the engine is part of the public Python
   API) get a new keyword. Default `False` keeps the existing behavior
@@ -278,7 +303,7 @@ These were considered when drafting and folded into the leaning above:
 - CLAUDE.md (project root) — "STM-bypass must not be safety-bypass" trust
   boundary; `privacy.py` asymmetric-sync rule.
 - `packages/memtomem/src/memtomem/privacy.py:42-57` — `DEFAULT_PATTERNS`
-  (eight secret-class regexes).
+  (nine secret-class regexes).
 - `packages/memtomem/src/memtomem/privacy.py:268` — `scan()` entry point.
 - `packages/memtomem/src/memtomem/server/tools/memory_crud.py:78-104` —
   existing gate model on `mem_add`.
