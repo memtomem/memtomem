@@ -1476,10 +1476,10 @@ class TestRequireConfigured:
         from memtomem.web.deps import require_configured
 
         del app.dependency_overrides[require_configured]
+        # No teardown: ``app`` is function-scoped per pytest's default,
+        # so the next test gets a freshly-built app with the override
+        # already re-installed by the shared ``app`` fixture.
         yield
-        # Re-install for any later tests reusing ``app``; pytest's
-        # function-scoped fixture should rebuild ``app``, but be safe.
-        app.dependency_overrides[require_configured] = lambda: None
 
     async def test_memory_dirs_add_409_when_no_config(
         self,
@@ -1553,3 +1553,38 @@ class TestRequireConfigured:
                 json={"path": str(target), "auto_index": False},
             )
         assert resp.status_code == 200, resp.text
+
+    @pytest.mark.parametrize(
+        "method,path,kwargs",
+        [
+            ("get", "/api/index/stream", {"params": {"path": "/tmp/x"}}),
+            ("post", "/api/reindex", {}),
+            (
+                "post",
+                "/api/upload",
+                {"files": [("files", ("x.md", b"content", "text/markdown"))]},
+            ),
+            ("post", "/api/add", {"json": {"text": "hello", "source": "/tmp/x"}}),
+        ],
+        ids=["index/stream", "reindex", "upload", "add"],
+    )
+    async def test_other_gated_routes_return_409_when_no_config(
+        self,
+        app,
+        client: AsyncClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        restore_gate,
+        method,
+        path,
+        kwargs,
+    ):
+        """Per-route 409 coverage for the 4 remaining gated routes.
+        ``dependencies=[]`` is per-route, so a regression that drops
+        the dep on ``/reindex`` (say) without dropping it on
+        ``/memory-dirs/add`` would still pass the deep tests above —
+        these parametrized cases lock the perimeter."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        resp = await getattr(client, method)(path, **kwargs)
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"] == ("memtomem is not configured. Run 'mm init' to set up.")

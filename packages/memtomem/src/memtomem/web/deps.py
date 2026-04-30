@@ -11,11 +11,12 @@ from memtomem.storage.sqlite_helpers import norm_path
 
 # Mirror of the CLI bootstrap gate at
 # ``packages/memtomem/src/memtomem/cli/_bootstrap.py`` (`_CONFIG_PATH`
-# + the ``"memtomem is not configured"`` ClickException). Keep the
-# message string and the predicate (``~/.memtomem/config.json``
-# existence) byte-identical so the CLI and Web surfaces refuse with
-# the same signal — see issue #577 for the asymmetry that motivated
-# this gate.
+# + the ``"memtomem is not configured"`` ClickException). The error
+# message string is byte-identical; the predicate
+# (``~/.memtomem/config.json`` existence) matches in shape but is
+# recomputed on every call here, while bootstrap pins the path at
+# module load (see ``require_configured`` docstring for the
+# rationale). Issue #577 motivated this gate.
 
 if TYPE_CHECKING:
     from memtomem.config import Mem2MemConfig

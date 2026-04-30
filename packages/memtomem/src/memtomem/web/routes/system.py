@@ -835,7 +835,7 @@ async def trigger_index(
 _ALLOWED_UPLOAD_EXTS = {".md", ".txt", ".json", ".yaml", ".yml", ".toml"}
 
 
-@router.post("/upload", response_model=UploadResponse)
+@router.post("/upload", response_model=UploadResponse, dependencies=[Depends(require_configured)])
 async def upload_files(
     files: list[UploadFile] = File(...),
     index_engine=Depends(get_index_engine),
@@ -885,7 +885,7 @@ async def upload_files(
     )
 
 
-@router.post("/add", response_model=AddMemoryResponse)
+@router.post("/add", response_model=AddMemoryResponse, dependencies=[Depends(require_configured)])
 async def add_memory(
     req: AddMemoryRequest,
     index_engine=Depends(get_index_engine),

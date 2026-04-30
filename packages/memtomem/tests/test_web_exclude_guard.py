@@ -29,10 +29,11 @@ async def real_stack_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("HOME", str(tmp_path))
 
     # Mark the tmp HOME as ``mm init``-completed so the
-    # ``require_configured`` gate (issue #577) lets the
-    # ``/api/index/stream`` request through. This fixture simulates
-    # a real running ``mm web`` against a configured user, which is
-    # exactly what an initialized HOME looks like on disk.
+    # ``require_configured`` gate (issue #577) lets
+    # ``/api/index/stream`` through. The marker file exists *only*
+    # to satisfy the gate's existence check; the runtime config is
+    # the ``Mem2MemConfig()`` instance built immediately below and
+    # passed to ``create_components(cfg)``.
     cfg_marker = tmp_path / ".memtomem"
     cfg_marker.mkdir(exist_ok=True)
     (cfg_marker / "config.json").write_text("{}")
