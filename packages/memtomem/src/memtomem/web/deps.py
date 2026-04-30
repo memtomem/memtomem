@@ -9,6 +9,14 @@ from fastapi import HTTPException, Request
 
 from memtomem.storage.sqlite_helpers import norm_path
 
+# Mirror of the CLI bootstrap gate at
+# ``packages/memtomem/src/memtomem/cli/_bootstrap.py`` (`_CONFIG_PATH`
+# + the ``"memtomem is not configured"`` ClickException). Keep the
+# message string and the predicate (``~/.memtomem/config.json``
+# existence) byte-identical so the CLI and Web surfaces refuse with
+# the same signal — see issue #577 for the asymmetry that motivated
+# this gate.
+
 if TYPE_CHECKING:
     from memtomem.config import Mem2MemConfig
     from memtomem.embedding.base import EmbeddingProvider
@@ -43,6 +51,26 @@ def get_dedup_scanner(request: Request):
 
 def get_project_root(request: Request) -> Path:
     return request.app.state.project_root
+
+
+def require_configured() -> None:
+    """Refuse mutating index routes when ``mm init`` has not run.
+
+    Predicate: ``~/.memtomem/config.json`` exists. Path is recomputed
+    on every call so test fixtures that monkeypatch ``HOME`` work
+    naturally (the CLI bootstrap pins the path at module load — that's
+    fine for a single CLI invocation but unhelpful for the long-lived
+    web process and its tests).
+
+    Raises HTTP 409 with the same message the CLI prints, so a
+    direct-API caller, the Web UI's existing toast handler, and the
+    CLI all see the same signal.
+    """
+    if not (Path.home() / ".memtomem" / "config.json").exists():
+        raise HTTPException(
+            status_code=409,
+            detail="memtomem is not configured. Run 'mm init' to set up.",
+        )
 
 
 def require_indexed_source(user_path: str, indexed_sources: Iterable[Path]) -> Path:

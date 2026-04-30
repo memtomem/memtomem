@@ -30,6 +30,7 @@ from memtomem.web.deps import (
     get_index_engine,
     get_search_pipeline,
     get_storage,
+    require_configured,
 )
 from memtomem.web.routes._locks import _config_lock
 from memtomem.web.schemas.config import (
@@ -386,7 +387,7 @@ async def save_config(
     return {"ok": True, "message": "Config saved to ~/.memtomem/config.json"}
 
 
-@router.post("/memory-dirs/add")
+@router.post("/memory-dirs/add", dependencies=[Depends(require_configured)])
 async def add_memory_dir(
     request: Request,
     storage=Depends(get_storage),
@@ -658,7 +659,7 @@ async def memory_dirs_status(
     return {"dirs": stats}
 
 
-@router.post("/reindex")
+@router.post("/reindex", dependencies=[Depends(require_configured)])
 async def reindex_all(
     force: bool = False,
     config=Depends(get_config),
@@ -764,7 +765,7 @@ async def get_stats(storage=Depends(get_storage)) -> StatsResponse:
     )
 
 
-@router.get("/index/stream")
+@router.get("/index/stream", dependencies=[Depends(require_configured)])
 async def index_stream(
     path: str = ".",
     recursive: bool = True,
@@ -803,7 +804,7 @@ async def index_stream(
     )
 
 
-@router.post("/index", response_model=IndexResponse)
+@router.post("/index", response_model=IndexResponse, dependencies=[Depends(require_configured)])
 async def trigger_index(
     req: IndexRequest = IndexRequest(),
     index_engine=Depends(get_index_engine),

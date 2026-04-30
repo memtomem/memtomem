@@ -209,6 +209,15 @@ def app():
     application.state.config_signature = _hot_reload.current_signature()
     application.state.last_reload_error = None
 
+    # Override the ``mm init`` gate (issue #577): these tests use
+    # FakeConfig + AsyncMock components, so the real
+    # ``~/.memtomem/config.json`` predicate is irrelevant. Dedicated
+    # require_configured tests live further down and exercise the
+    # gate against a monkeypatched HOME.
+    from memtomem.web.deps import require_configured
+
+    application.dependency_overrides[require_configured] = lambda: None
+
     return application
 
 
@@ -1441,3 +1450,106 @@ class TestRemoveMemoryDirChunkCleanup:
         assert under_target_a in deleted_paths
         assert under_target_b in deleted_paths
         assert under_keep not in deleted_paths
+
+
+# ---------------------------------------------------------------------------
+# require_configured gate (issue #577)
+# ---------------------------------------------------------------------------
+
+
+class TestRequireConfigured:
+    """Mutating index routes refuse with HTTP 409 when ``mm init`` has
+    not run, mirroring the CLI bootstrap gate at
+    ``cli/_bootstrap.py``. Without this gate ``mm web`` accepts
+    ``+ 경로 추가`` clicks against a fresh HOME and returns
+    ``indexed: {total_files: 0, ...}`` silently — confusing dead-end
+    for the user (issue #577).
+
+    These tests *restore* the gate (the shared ``app`` fixture
+    overrides it to ``lambda: None`` so all the unrelated FakeConfig
+    tests don't depend on the developer's real
+    ``~/.memtomem/config.json``) and monkeypatch ``HOME`` to control
+    the predicate."""
+
+    @pytest.fixture
+    def restore_gate(self, app):
+        from memtomem.web.deps import require_configured
+
+        del app.dependency_overrides[require_configured]
+        yield
+        # Re-install for any later tests reusing ``app``; pytest's
+        # function-scoped fixture should rebuild ``app``, but be safe.
+        app.dependency_overrides[require_configured] = lambda: None
+
+    async def test_memory_dirs_add_409_when_no_config(
+        self,
+        app,
+        client: AsyncClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        restore_gate,
+    ):
+        """Fresh HOME with no ``~/.memtomem/config.json`` → 409 with
+        the same message ``mm index`` prints. ``index_path`` must
+        not be invoked (gate runs *before* indexing, so a regression
+        that moves the gate after ``index_path`` would catch the
+        artifact-only assertion but fail this one)."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        app.state.index_engine.index_path.reset_mock()
+
+        target = tmp_path / "target"
+        target.mkdir()
+        resp = await client.post(
+            "/api/memory-dirs/add",
+            json={"path": str(target)},
+        )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"] == ("memtomem is not configured. Run 'mm init' to set up.")
+        assert app.state.index_engine.index_path.call_count == 0
+
+    async def test_index_409_when_no_config(
+        self,
+        app,
+        client: AsyncClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        restore_gate,
+    ):
+        """``POST /api/index`` is the second path the issue calls out
+        (the manual reindex trigger). Same gate, same message."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        app.state.index_engine.index_path.reset_mock()
+
+        target = tmp_path / "target"
+        target.mkdir()
+        resp = await client.post("/api/index", json={"path": str(target)})
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"] == ("memtomem is not configured. Run 'mm init' to set up.")
+        assert app.state.index_engine.index_path.call_count == 0
+
+    async def test_memory_dirs_add_passes_when_config_exists(
+        self,
+        app,
+        client: AsyncClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        restore_gate,
+    ):
+        """Same gate, configured HOME (``~/.memtomem/config.json``
+        exists) → request proceeds normally."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        cfg_dir = tmp_path / ".memtomem"
+        cfg_dir.mkdir()
+        (cfg_dir / "config.json").write_text("{}")
+
+        target = tmp_path / "target"
+        target.mkdir()
+        app.state.config.indexing.memory_dirs = []
+        app.state.index_engine.index_path.reset_mock()
+
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/add",
+                json={"path": str(target), "auto_index": False},
+            )
+        assert resp.status_code == 200, resp.text
