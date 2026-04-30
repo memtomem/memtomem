@@ -881,6 +881,31 @@ class TestConfigPatch:
         assert len(data["applied"]) == 0
         assert any("namespace.rules" in r for r in data["rejected"])
 
+    async def test_patch_supported_extensions(self, app, client: AsyncClient):
+        """PATCH /api/config accepts indexing.supported_extensions as list[str].
+
+        Regression guard for the MUTABLE_FIELDS entry added with the chip-input
+        Settings UI (#584): if the entry is dropped, this PATCH falls through to
+        ``read-only`` rejection and the GUI silently fails.
+        """
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.patch(
+                "/api/config",
+                json={"indexing": {"supported_extensions": [".md", ".org", ".rst"]}},
+            )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert len(data["applied"]) == 1
+        assert data["applied"][0]["field"] == "indexing.supported_extensions"
+        # Compare as set — runtime ``setattr`` bypasses pydantic re-validation,
+        # so the live container may be a list rather than the declared
+        # ``frozenset[str]``. Both are accepted downstream.
+        assert set(app.state.config.indexing.supported_extensions) == {
+            ".md",
+            ".org",
+            ".rst",
+        }
+
 
 # ---------------------------------------------------------------------------
 # Namespace CRUD
