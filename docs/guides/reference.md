@@ -63,7 +63,7 @@ sequenceDiagram
 
 ## MCP Tools at a Glance
 
-memtomem provides **74 MCP tools** organized into categories:
+memtomem provides **79 MCP tools** organized into categories:
 
 | Category | Tools | What they do |
 |----------|-------|-------------|
@@ -156,6 +156,16 @@ hash match, so they all show up under `Indexed`:
 mem_index(path="~/notes", force=True)
 ```
 
+**Chunk identity is preserved when content is unchanged.** As of v0.1.33
+([ADR-0005](../adr/0005-force-reindex-metadata-contract.md)), force-reindex
+keeps the existing `id` (UUID), `access_count`, `last_accessed_at`,
+`importance_score`, and `chunk_links` rows for any chunk whose content
+hash still matches what the file produces. Only embeddings are
+recomputed. This means agents that cache chunk IDs, scheduled
+re-embedding jobs, and personalization signals all survive a force
+rebuild — previously every force pass regenerated UUIDs and silently
+zeroed access stats.
+
 ### Namespace-scoped indexing
 
 ```
@@ -179,6 +189,31 @@ Two cases it does NOT cover:
 Both are idempotent — chunks are content-hashed, so unchanged files are
 skipped on re-runs. This is why the `mm init` wizard's `Next steps` lists
 `mm index {memory_dir}` as step 1.
+
+### Hook integration — debounce queue
+
+For editor / hook callers (PostToolUse[Write] in Claude Code, etc.) that
+fire on every save, `mm index` ships three mutually-exclusive flags that
+share a small on-disk queue at `~/.memtomem/index_debounce_queue.json`:
+
+```bash
+mm index --debounce-window 5 PATH   # record PATH; drain entries silent ≥5s
+mm index --flush                    # synchronously drain everything queued
+mm index --status                   # snapshot queue depth + oldest entry
+```
+
+- `--debounce-window <SECONDS>` records the path and re-indexes only
+  entries that have been silent for at least `SECONDS`. Rapid consecutive
+  writes restart the window so a burst is indexed once at the end.
+- `--flush` blocks until every queued file has been indexed (or recorded
+  as an error). Use this when correctness matters — e.g. a `Stop` hook
+  draining before session end. Worst-case latency ≈ queue depth ×
+  per-file index cost.
+- `--status` is informational only. Concurrent hooks may modify the
+  queue between this read and any later action; for correctness use
+  `--flush`, not status-then-flush.
+
+All three accept `--json` for one-line scripted output.
 
 ---
 
@@ -440,6 +475,37 @@ memory_dirs = ["~/notes"]
 Files at the root of a `memory_dir` get the default namespace. Only files inside subfolders get auto-derived namespaces. This prevents the memory_dir folder name itself from becoming an unintended namespace.
 
 For systematic tagging across opt-in provider directories (e.g. the per-project `~/.claude/projects/<project>/memory/` paths added via `mm init`, or cloud-sync roots), declare path → namespace rules in `namespace.rules` instead — see [Namespace rules in the configuration guide](configuration.md#namespace-rules-path-based-auto-tagging). Rules are evaluated before `enable_auto_ns` and cover use cases where the immediate parent folder name is opaque (UUIDs, generic labels like `memory`).
+
+### Namespace and `agent_id` validation
+
+Caller-supplied `namespace=` and `agent_id=` values are validated
+strictly across every public surface (MCP tools, CLI, LangGraph adapter,
+context-gateway endpoints) since v0.1.32. Names are split on `:` into
+segments; each segment must match `[A-Za-z0-9._-]+` and is rejected if
+it contains a slash, backslash, whitespace, comma, or control character,
+starts with `-`, or equals `.` / `..`. Empty segments (leading,
+trailing, or consecutive `:`) are also rejected.
+
+The `agent-runtime:` prefix is special — it requires exactly one
+trailing segment that is itself a valid `agent_id`, so
+`agent-runtime:my-agent` is accepted but `agent-runtime:foo:bar`,
+`agent-runtime:` (empty), and `agent-runtime:../x` (path traversal) are
+not. Any rejection raises `InvalidNameError` with a message starting
+`invalid namespace ...` or `invalid agent-id ...`, so log scrapers see
+one shape across surfaces.
+
+Accepted namespaces in normal use:
+
+- `default` — the catch-all when nothing is set
+- `<word>` — flat names like `work`, `personal`, `project-x`
+- `<prefix>:<segment>` — `archive:2026-q1`, `claude-memory:project-foo`,
+  `agent-runtime:planner`, `shared:lessons`
+- `custom:<...>` — your own scheme, subject to the segment rules above
+
+The `agent-runtime:<id>` shape is what `mem_session_start(agent_id=...)`
+auto-derives, so scope-bound writes from session-aware tools land
+there without a manual `namespace=` argument (see "Multi-agent
+workflow" below).
 
 ---
 
@@ -982,6 +1048,9 @@ mm init                                # 9-step interactive wizard (b: back, q: 
 mm search "deployment"                 # hybrid search (keywords + meaning)
 mm search --as-of 2024-Q3 "deploy"     # temporal-validity query (date-only or YYYY-QN)
 mm index ~/notes                       # manual one-shot index (seed pre-existing files)
+mm index --debounce-window 5 PATH      # record PATH; drain entries silent ≥5s (hook callers)
+mm index --flush                       # synchronously drain queue (correctness primitive)
+mm index --status                      # snapshot queue depth + oldest entry
 mm add "note" --tags "tag1"            # add a memory
 mm recall --since 2026-03-01           # recall by date (Validity column shown when chunks have valid_from/valid_to)
 
@@ -1003,12 +1072,14 @@ mm context generate --include=settings # merge hooks → ~/.claude/settings.json
 mm context diff --include=settings     # check hook sync status
 
 # Sessions & activity
-mm session start                       # start a tracked session
-mm session end                         # end session with auto-summary
-mm session list                        # list sessions
-mm session events <id>                 # show events for a session
-mm session wrap -- CMD                 # wrap a command with session lifecycle
-mm activity log                        # log agent activity event
+mm session start                                              # start a tracked session
+mm session start --idempotent --agent-id claude-code          # resume active session for that agent (SessionStart hooks)
+mm session start --idempotent --auto-end-stale 24h            # additionally close any active session older than 24h first
+mm session end                                                # end session with auto-summary
+mm session list                                               # list sessions
+mm session events <id>                                        # show events for a session
+mm session wrap -- CMD                                        # wrap a command with session lifecycle
+mm activity log                                               # log agent activity event
 # Scripting: list/events/log support --json (see CONTRIBUTING.md → CLI output convention)
 
 # Health
@@ -1133,4 +1204,4 @@ See [`uninstall.md`](uninstall.md) for the five-step removal flow: detach the MC
 - [LLM Providers](llm-providers.md) — Optional LLM features (auto-tag, entity extraction, ask)
 - [MCP Client Setup](mcp-clients.md) — Editor-specific configuration
 - [memtomem-stm](https://github.com/memtomem/memtomem-stm) — Proactive surfacing, compression, caching (separate package)
-- [Full Tool Reference](../../packages/memtomem/README.md) — All 74 tools with parameters
+- [Full Tool Reference](../../packages/memtomem/README.md) — All 79 tools with parameters

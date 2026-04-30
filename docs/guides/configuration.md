@@ -273,6 +273,13 @@ prints `mm index {memory_dir}` as step 1 — once seeded, subsequent edits
 flow through the watcher automatically (as long as `mm server` is
 running).
 
+> **Adding a folder via the Web UI** registers and indexes in one call:
+> `POST /api/memory-dirs/add` defaults to `auto_index=true`, so the
+> watcher sees the directory **and** the existing files are seeded
+> immediately. Pass `auto_index=false` if you want register-only
+> behavior (config-write without the seed scan) — useful for staging a
+> large folder before a controlled `mm index` run.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEMTOMEM_INDEXING__MEMORY_DIRS` | `["~/.memtomem/memories"]` (+ provider folders selected in `mm init`) | Directories watched for reactive re-index (see above) |
@@ -283,6 +290,7 @@ running).
 | `MEMTOMEM_INDEXING__STRUCTURED_CHUNK_MODE` | `original` | JSON/YAML/TOML chunking: `original` or `recursive` |
 | `MEMTOMEM_INDEXING__PARAGRAPH_SPLIT_THRESHOLD` | `800` | Split long prose into paragraphs above this token count (must be ≥ 0) |
 | `MEMTOMEM_INDEXING__EXCLUDE_PATTERNS` | `[]` | Pathspec (gitignore-style) globs for files the indexer should skip |
+| `MEMTOMEM_INDEXING__STARTUP_BACKFILL` | `false` | When `true`, `mm web` runs a one-shot backfill scan over `memory_dirs` on boot to catch files added while the server was down. Off by default — multi-minute embed jobs blocked the server on a multi-GB memory_dir during 0.1.24 testing, so the wizard offers it as opt-in. `mm index <dir>` and the Web UI per-dir Reindex button cover ad-hoc backfills idempotently without flipping this. |
 
 ### Exclude patterns
 
@@ -710,9 +718,9 @@ Requires `MEMTOMEM_LLM__ENABLED=true` and a configured provider. Generated summa
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMTOMEM_TOOL_MODE` | `core` | Which MCP tools are exposed: `core` (9 tools), `standard` (~32 incl. `mem_do`), `full` (74) |
+| `MEMTOMEM_TOOL_MODE` | `core` | Which MCP tools are exposed: `core` (9 tools), `standard` (37 incl. `mem_do`), `full` (79) |
 
-In `core` mode, use `mem_do(action="...", params={...})` to access any of the 65+ non-core actions. Fewer tools means less context usage for AI agents.
+In `core` mode, use `mem_do(action="...", params={...})` to access any of the 70+ non-core actions. Fewer tools means less context usage for AI agents.
 
 ## Web UI Mode
 
@@ -723,6 +731,20 @@ In `core` mode, use `mem_do(action="...", params={...})` to access any of the 65
 `mm web --mode {prod,dev}` overrides the env. `mm web --dev` is a shortcut for `--mode dev` and is mutually exclusive with `--mode`. An invalid value fails fast rather than silently falling back.
 
 Tab classification changes over time — run `mm web --dev` to see the full surface of your installed version. Dev-only API endpoints (for example `/api/sessions`, `/api/scratch`, `POST /api/namespaces/{ns}/rename`, `DELETE /api/namespaces/{ns}`) return 404 in `prod` mode; switch to `dev` mode if you're scripting against them. The namespace list (`GET /api/namespaces`) and cosmetic metadata edit (`PATCH /api/namespaces/{ns}`) are prod-tier and respond in both modes — see ADR-0007.
+
+## Context Gateway
+
+Settings for the multi-project context UI (skills / commands / agents)
+that ships with `mm web`. The discovery surface enumerates every scope
+the gateway knows about — the server's current working directory, any
+project roots registered via the Web UI, and (opt-in) decoded paths
+from `~/.claude/projects/`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMTOMEM_CONTEXT_GATEWAY__KNOWN_PROJECTS_PATH` | `~/.memtomem/known_projects.json` | Where the Web UI persists "Add Project" registrations. The Sources / Skills / Commands / Agents tabs render one collapsible group per registered scope. |
+| `MEMTOMEM_CONTEXT_GATEWAY__EXPERIMENTAL_CLAUDE_PROJECTS_SCAN` | `false` | When `true`, the gateway also reverse-decodes `~/.claude/projects/<encoded>` directory names into project roots and surfaces them as discovered scopes. Off by default — the encoding is fragile around dash-containing paths, so this stays gated behind explicit consent. |
+| `MEMTOMEM_CONTEXT_GATEWAY__USER_TIER_ENABLED` | `false` | Forward-compat flag for the user-scope artifact surface. While `false`, user-tier entries are hidden from discovery responses entirely. |
 
 ## Querying and Modifying at Runtime
 

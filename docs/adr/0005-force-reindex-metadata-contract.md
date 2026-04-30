@@ -179,6 +179,14 @@ In rough order, all in `packages/memtomem/src/memtomem/`:
 - **Importance scoring**: `importance_score` (which factors in
   access_count, tag_count, relation_count) stops resetting on edits.
   See `server/tools/importance.py:51`.
+- **Share lineage**: `chunk_links` rows pointing at content-hash-matched
+  chunks survive force-reindex transitively. The FK is
+  `chunk_links.source_id REFERENCES chunks(id) ON DELETE SET NULL`
+  (`storage/sqlite_schema.py:385`); previously every force pass hard-
+  deleted the chunk row, which fired `SET NULL` on every link pointing
+  at it and silently broke share provenance. With `id` preservation the
+  cascade never fires. This is a consequence of the `id` rule above, not
+  an independent preservation contract.
 - **Performance**: the force path does an extra `SELECT id, content_hash,
   ...` before reconcile. Negligible at typical memtomem scale (a single
   source file's chunks fit in memory; ~10–100 rows per file).
