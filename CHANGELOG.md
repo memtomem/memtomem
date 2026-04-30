@@ -151,7 +151,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   stop seeing silent invalidation; access-frequency boost
   (`search/access.py`) and importance scoring
   (`server/tools/importance.py`) no longer drop to 0 when a sibling
-  chunk is edited. Contract recorded in
+  chunk is edited. `chunk_links` rows pointing at unchanged chunks
+  also survive — pre-fix the blanket `delete_by_source` cascaded via
+  `ON DELETE CASCADE` (target_id) / `ON DELETE SET NULL` (source_id),
+  silently dropping consolidation-summary and provenance edges
+  whenever a sibling chunk was edited. Contract recorded in
   `docs/adr/0005-force-reindex-metadata-contract.md`. (#582 item 4.2)
 
 - **`POST /api/memory-dirs/add` indexes the registered directory by

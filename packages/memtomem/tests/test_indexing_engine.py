@@ -1332,17 +1332,19 @@ class TestIndexFile:
         components.index_engine._embedder = mock_embedder
 
         await components.index_engine.index_file(md_path)
-        ids_before = sorted(
-            str(c.id) for c in await components.storage.list_chunks_by_source(md_path)
-        )
-        assert len(ids_before) >= 2
+        # Bind id to content so an ID swap (assigning A's id to B and vice
+        # versa) fails the test even though the set of ids would still match.
+        binding_before = {
+            c.content: str(c.id) for c in await components.storage.list_chunks_by_source(md_path)
+        }
+        assert len(binding_before) >= 2
 
         await components.index_engine.index_file(md_path, force=True)
-        ids_after = sorted(
-            str(c.id) for c in await components.storage.list_chunks_by_source(md_path)
-        )
+        binding_after = {
+            c.content: str(c.id) for c in await components.storage.list_chunks_by_source(md_path)
+        }
 
-        assert ids_after == ids_before
+        assert binding_after == binding_before
 
     async def test_force_reindex_preserves_access_count(self, components, memory_dir):
         """force=True must keep ``access_count`` for chunks whose content is unchanged.
