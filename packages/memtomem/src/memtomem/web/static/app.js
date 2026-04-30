@@ -46,6 +46,14 @@ const STATE = {
   // boot-time fetch resolves; on fetch failure stays ``null`` and the
   // scan is silently skipped (defense-in-depth, not a hard gate).
   privacyPatterns: null,
+  // True while *any* indexing run (Index tab streaming, Sources card
+  // single-dir reindex, Sources card "reindex all") is in flight. The
+  // shared flag prevents double-trigger across surfaces — clicking a
+  // second indexing button mid-run shows a toast instead of starting a
+  // concurrent run that would race on the same DB rows. Mutated only
+  // through ``_indexingTryStart`` / ``_indexingEnd``; reading directly
+  // is fine.
+  indexing: false,
   lastRetrievalStats: null,
   groupMode: false,
   cmdPaletteOpen: false,
@@ -396,6 +404,28 @@ function btnLoading(btn, loading) {
     btn.disabled = false;
     btn.classList.remove('btn-loading');
   }
+}
+
+// ── Global indexing-state guard ──
+// Centralizes start/end of any indexing run so all surfaces (Index tab
+// streaming, Sources card per-dir reindex, Sources "Reindex All") share
+// the same global flag and the same external indicator. ``tryStart``
+// returns ``false`` (and shows a toast) when a run is already in flight
+// so callers can early-return without starting a concurrent operation.
+function _indexingTryStart() {
+  if (STATE.indexing) {
+    showToast(t('toast.indexing_in_progress'), 'info');
+    return false;
+  }
+  STATE.indexing = true;
+  const indicator = qs('indexing-indicator');
+  if (indicator) show(indicator);
+  return true;
+}
+function _indexingEnd() {
+  STATE.indexing = false;
+  const indicator = qs('indexing-indicator');
+  if (indicator) hide(indicator);
 }
 function panelLoading(container) {
   container.innerHTML = '<div class="loading-panel"><div class="spinner-panel"></div></div>';
@@ -3514,6 +3544,7 @@ async function runAutoTag() {
 async function runIndexStream() {
   const path     = qs('index-path').value.trim();
   if (!path) { setMsg(qs('index-msg'), 'Please enter a path to index.', true); return; }
+  if (!_indexingTryStart()) return;
   const recursive = qs('index-recursive').checked;
   const force     = qs('index-force').checked;
   const namespace = qs('index-namespace').value.trim();
@@ -3550,6 +3581,7 @@ async function runIndexStream() {
         showToast(t('toast.stream_fallback'), 'error');
         hide(progressEl);
         btnLoading(btn, false);
+        _indexingEnd();
       }
       return;
     }
@@ -3616,6 +3648,7 @@ async function runIndexStream() {
       loadNamespaceDropdowns();
       loadSourceFilter();
       btnLoading(btn, false);
+      _indexingEnd();
     }
   };
 
@@ -3624,6 +3657,7 @@ async function runIndexStream() {
     showToast(t('toast.stream_fallback'), 'error');
     hide(progressEl);
     btnLoading(btn, false);
+    _indexingEnd();
   };
 }
 

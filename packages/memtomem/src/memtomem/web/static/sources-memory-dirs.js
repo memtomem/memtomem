@@ -1083,6 +1083,7 @@ async function mdOpenOne(path, btn) {
 }
 
 async function mdReindexOne(path, btn) {
+  if (typeof _indexingTryStart === 'function' && !_indexingTryStart()) return;
   if (btn) btnLoading(btn, true);
   showToast(t('toast.memory_dir.reindex_started', { path }), 'info');
   try {
@@ -1102,11 +1103,13 @@ async function mdReindexOne(path, btn) {
     showToast(t('toast.memory_dir.reindex_failed', { error: _mdApiErrorText(err) }), 'error');
   } finally {
     if (btn) btnLoading(btn, false);
+    if (typeof _indexingEnd === 'function') _indexingEnd();
     if (typeof loadSources === 'function') loadSources();
   }
 }
 
 async function mdReindexAll(btn) {
+  if (typeof _indexingTryStart === 'function' && !_indexingTryStart()) return;
   if (btn) btnLoading(btn, true);
   try {
     const resp = await api('POST', '/api/reindex', undefined, { timeout: 300_000 });
@@ -1125,6 +1128,7 @@ async function mdReindexAll(btn) {
     showToast(t('toast.reindex_failed', { error: _mdApiErrorText(err) }), 'error');
   } finally {
     if (btn) btnLoading(btn, false);
+    if (typeof _indexingEnd === 'function') _indexingEnd();
     if (typeof loadSources === 'function') loadSources();
   }
 }
