@@ -1310,6 +1310,169 @@ class TestIndexFile:
         hashes = await components.storage.get_chunk_hashes(md_path)
         assert len(hashes) > 0  # chunks were stored
 
+    async def test_force_reindex_preserves_chunk_id_for_unchanged(self, components, memory_dir):
+        """force=True must keep the same UUID for chunks whose content_hash is unchanged.
+
+        Regression guard for ADR-0005: pre-fix the force path called
+        ``delete_by_source`` + fresh ``upsert_chunks``, which generated new
+        UUIDs for chunks the caller had no intent to modify.
+        """
+        md_path = memory_dir / "two_chunks.md"
+        md_path.write_text(
+            "# Section A\n\n" + ("Body for section A.\n" * 12) + "\n"
+            "# Section B\n\n" + ("Body for section B.\n" * 12) + "\n",
+            encoding="utf-8",
+        )
+
+        mock_embedder = AsyncMock()
+        mock_embedder.embed_texts = AsyncMock(
+            side_effect=lambda texts: [[0.1] * 1024 for _ in texts]
+        )
+        mock_embedder.dimension = 1024
+        components.index_engine._embedder = mock_embedder
+
+        await components.index_engine.index_file(md_path)
+        ids_before = sorted(
+            str(c.id) for c in await components.storage.list_chunks_by_source(md_path)
+        )
+        assert len(ids_before) >= 2
+
+        await components.index_engine.index_file(md_path, force=True)
+        ids_after = sorted(
+            str(c.id) for c in await components.storage.list_chunks_by_source(md_path)
+        )
+
+        assert ids_after == ids_before
+
+    async def test_force_reindex_preserves_access_count(self, components, memory_dir):
+        """force=True must keep ``access_count`` for chunks whose content is unchanged.
+
+        Regression guard for ADR-0005: pre-fix the force path reset access
+        stats to schema defaults because ``delete_by_source`` removed the
+        row before fresh insertion.
+        """
+        md_path = memory_dir / "two_chunks_access.md"
+        md_path.write_text(
+            "# Section A\n\n" + ("Body for section A.\n" * 12) + "\n"
+            "# Section B\n\n" + ("Body for section B.\n" * 12) + "\n",
+            encoding="utf-8",
+        )
+
+        mock_embedder = AsyncMock()
+        mock_embedder.embed_texts = AsyncMock(
+            side_effect=lambda texts: [[0.1] * 1024 for _ in texts]
+        )
+        mock_embedder.dimension = 1024
+        components.index_engine._embedder = mock_embedder
+
+        await components.index_engine.index_file(md_path)
+        chunks_before = await components.storage.list_chunks_by_source(md_path)
+        assert len(chunks_before) >= 2
+        # Bump access_count on the second chunk only
+        target_id = chunks_before[1].id
+        await components.storage.increment_access([target_id])
+
+        ac_before = (await components.storage.get_access_counts([target_id]))[str(target_id)]
+        assert ac_before == 1
+
+        await components.index_engine.index_file(md_path, force=True)
+
+        ac_after = (await components.storage.get_access_counts([target_id]))[str(target_id)]
+        assert ac_after == 1, (
+            f"force-reindex should preserve access_count for unchanged chunks, "
+            f"got {ac_after} (pre-fix would be 0)"
+        )
+
+    async def test_force_reindex_updates_line_ranges_for_unchanged_after_body_edit(
+        self, components, memory_dir
+    ):
+        """When a sibling chunk's body shifts line numbers, the unchanged chunk's
+        ``start_line`` / ``end_line`` columns must catch up — even with force=True
+        (which routes hash-matched chunks through the upsert UPDATE path).
+        """
+        md_path = memory_dir / "shift.md"
+        md_path.write_text(
+            "# Section A\n\n" + ("Body for section A.\n" * 5) + "\n"
+            "# Section B\n\n" + ("Body for section B.\n" * 5) + "\n",
+            encoding="utf-8",
+        )
+
+        mock_embedder = AsyncMock()
+        mock_embedder.embed_texts = AsyncMock(
+            side_effect=lambda texts: [[0.1] * 1024 for _ in texts]
+        )
+        mock_embedder.dimension = 1024
+        components.index_engine._embedder = mock_embedder
+
+        await components.index_engine.index_file(md_path)
+        chunks_before = sorted(
+            await components.storage.list_chunks_by_source(md_path),
+            key=lambda c: c.metadata.start_line,
+        )
+        assert len(chunks_before) >= 2
+        b_chunk_before = chunks_before[1]
+        b_id = b_chunk_before.id
+        b_start_before = b_chunk_before.metadata.start_line
+
+        # Insert extra lines in section A so B's start_line shifts.
+        md_path.write_text(
+            "# Section A\n\n" + ("Body for section A.\n" * 15) + "\n"
+            "# Section B\n\n" + ("Body for section B.\n" * 5) + "\n",
+            encoding="utf-8",
+        )
+        await components.index_engine.index_file(md_path, force=True)
+
+        b_chunk_after = await components.storage.get_chunk(b_id)
+        assert b_chunk_after is not None, "B chunk lost identity across force-reindex"
+        assert b_chunk_after.metadata.start_line > b_start_before, (
+            f"B.start_line should reflect the upward shift; "
+            f"before={b_start_before}, after={b_chunk_after.metadata.start_line}"
+        )
+
+    async def test_mem_edit_preserves_sibling_chunk_metadata(self, components, memory_dir):
+        """End-to-end regression: mem_edit on chunk A leaves chunk B's
+        ``access_count`` and ``id`` intact (the spike scenario from ADR-0005).
+
+        Uses the same call pattern as ``server.tools.memory_crud.mem_edit``:
+        mutate the source file, then ``index_file(force=True)``.
+        """
+        md_path = memory_dir / "edit_pair.md"
+        md_path.write_text(
+            "# Section A\n\n" + ("Body for section A.\n" * 8) + "\n"
+            "# Section B\n\n" + ("Body for section B.\n" * 8) + "\n",
+            encoding="utf-8",
+        )
+
+        mock_embedder = AsyncMock()
+        mock_embedder.embed_texts = AsyncMock(
+            side_effect=lambda texts: [[0.1] * 1024 for _ in texts]
+        )
+        mock_embedder.dimension = 1024
+        components.index_engine._embedder = mock_embedder
+
+        await components.index_engine.index_file(md_path)
+        chunks = sorted(
+            await components.storage.list_chunks_by_source(md_path),
+            key=lambda c: c.metadata.start_line,
+        )
+        assert len(chunks) >= 2
+        b_id = chunks[1].id
+        await components.storage.increment_access([b_id])
+
+        # Simulate mem_edit's body-only edit on chunk A: rewrite section A,
+        # leave section B byte-identical, then index_file(force=True).
+        md_path.write_text(
+            "# Section A\n\n" + ("Body for section A. EDITED.\n" * 8) + "\n"
+            "# Section B\n\n" + ("Body for section B.\n" * 8) + "\n",
+            encoding="utf-8",
+        )
+        await components.index_engine.index_file(md_path, force=True)
+
+        b_after = await components.storage.get_chunk(b_id)
+        assert b_after is not None, "Sibling B should keep its UUID across mem_edit"
+        ac = (await components.storage.get_access_counts([b_id]))[str(b_id)]
+        assert ac == 1, f"Sibling B.access_count should be preserved; got {ac}"
+
 
 # ===========================================================================
 # 8. index_path — directory indexing

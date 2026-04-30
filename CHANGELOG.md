@@ -137,6 +137,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **Force-reindex preserves chunk identity and per-chunk personalization
+  (`mem_edit` / `mem_delete` / `mm index --force` / `POST /reindex`).**
+  Pre-fix the force path called `delete_by_source` followed by fresh
+  `upsert_chunks`, generating new UUIDs and resetting `access_count`,
+  `use_count`, `last_accessed_at`, `importance_score` for every chunk
+  in the file — including chunks the caller never touched. Now the
+  force path runs the same hash-aware diff the non-force path uses,
+  preserves IDs for hash-matched chunks, and re-embeds them
+  (the `force=True` semantics) via the existing-row UPDATE clause —
+  which intentionally does not rewrite personalization columns.
+  User-visible: agents that cache chunk IDs across `mem_edit` calls
+  stop seeing silent invalidation; access-frequency boost
+  (`search/access.py`) and importance scoring
+  (`server/tools/importance.py`) no longer drop to 0 when a sibling
+  chunk is edited. Contract recorded in
+  `docs/adr/0005-force-reindex-metadata-contract.md`. (#582 item 4.2)
+
 - **`POST /api/memory-dirs/add` indexes the registered directory by
   default now.** PR #571 introduced opt-in `auto_index` (default
   `False`) for backward compatibility; the Web UI sent

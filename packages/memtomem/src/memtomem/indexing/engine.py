@@ -458,15 +458,15 @@ class IndexEngine:
     ) -> IndexingStats:
         """Index a single file. Convenience wrapper for external callers.
 
-        ``force=True`` currently rebuilds storage by deleting all rows for
-        ``source_file`` and re-inserting fresh chunks. Side effect: chunks
-        whose content was unchanged still lose ``access_count`` /
-        ``last_accessed_at`` and are assigned new UUIDs. This is the
-        unintended-coupling contract documented in
-        ``docs/adr/0005-force-reindex-metadata-contract.md``; the planned
-        fix (preserve metadata for hash-matched chunks) ships in a
-        follow-up PR. Callers that go through ``mem_edit`` / ``mem_delete``
-        / CLI ``mm index --force`` / web ``POST /reindex`` hit this path.
+        ``force=True`` re-embeds every chunk in the file but preserves chunk
+        identity (UUID) and per-chunk personalization (``access_count``,
+        ``use_count``, ``last_accessed_at``, ``importance_score``) for
+        chunks whose content hash matches an existing row. New chunks get
+        schema defaults; chunks whose hash vanished from the file are
+        deleted. See ``docs/adr/0005-force-reindex-metadata-contract.md``
+        for the contract and rationale. Callers that go through
+        ``mem_edit`` / ``mem_delete`` / CLI ``mm index --force`` / web
+        ``POST /reindex`` all use this path.
         """
         # Defense-in-depth: the primary guard lives at the top of
         # ``_index_file`` (covers every caller — watcher, stream endpoint,
@@ -701,13 +701,25 @@ class IndexEngine:
             deleted = await self._storage.delete_by_source(file_path)
             return {"total": 0, "indexed": 0, "skipped": 0, "deleted": deleted, "errors": []}
 
-        if force:
-            diff_result = type(
-                "D", (), {"to_upsert": new_chunks, "to_delete": [], "unchanged": []}
-            )()
-        else:
-            existing_hashes = await self._storage.get_chunk_hashes(file_path)
-            diff_result = compute_diff(existing_hashes, new_chunks)
+        # Always run hash-aware diff: ``compute_diff`` reuses existing chunk
+        # IDs for hash-matched chunks (see ``differ.py:compute_diff``). For
+        # ``force=True`` we then promote the matched ``unchanged`` chunks
+        # into ``to_upsert`` so they get re-embedded — but their IDs are
+        # preserved by the diff, and ``upsert_chunks`` UPDATE clause does not
+        # touch ``access_count`` / ``use_count`` / ``last_accessed_at`` /
+        # ``importance_score`` (sqlite_backend.py UPDATE column list). Net
+        # effect: force re-indexes content but keeps per-chunk personalization
+        # and chunk identity. See ``docs/adr/0005-force-reindex-metadata-contract.md``.
+        existing_hashes = await self._storage.get_chunk_hashes(file_path)
+        diff_result = compute_diff(existing_hashes, new_chunks)
+        # Snapshot truly-new chunk IDs before force may merge unchanged in.
+        # ``new_chunk_ids`` in the return shape is documented as "freshly
+        # created chunks" — callers like ``mem_consolidate_apply`` rely on
+        # this distinction.
+        truly_new_chunk_ids = [c.id for c in diff_result.to_upsert]
+        if force and diff_result.unchanged:
+            diff_result.to_upsert.extend(diff_result.unchanged)
+            diff_result.unchanged = []
 
         # Embed BEFORE any deletion — if embedding fails, DB stays untouched.
         # Skip embedding entirely when using the noop provider (BM25-only mode).
@@ -735,9 +747,7 @@ class IndexEngine:
         # Now safe to mutate DB — embedding succeeded.
         # Wrap delete+upsert in a single transaction for atomicity.
         async with self._storage.transaction():
-            if force:
-                await self._storage.delete_by_source(file_path)
-            elif diff_result.to_delete:
+            if diff_result.to_delete:
                 await self._storage.delete_chunks(diff_result.to_delete)
 
             if diff_result.to_upsert:
@@ -747,9 +757,9 @@ class IndexEngine:
             "total": len(new_chunks),
             "indexed": len(diff_result.to_upsert),
             "skipped": len(diff_result.unchanged),
-            "deleted": len(diff_result.to_delete) if not force else 0,
+            "deleted": len(diff_result.to_delete),
             "errors": [],
-            "new_chunk_ids": [c.id for c in diff_result.to_upsert],
+            "new_chunk_ids": truly_new_chunk_ids,
         }
 
     async def index_path_stream(
