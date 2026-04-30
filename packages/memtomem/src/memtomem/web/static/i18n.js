@@ -83,6 +83,13 @@ const I18N = (() => {
         window.dispatchEvent(new CustomEvent('langchange', { detail: { lang: _lang } }));
       });
     }
+    // JS-owned dynamic strings (Compose placeholder, header chip jump
+    // hint) read t() inside listeners that fire from settings-config.js's
+    // module-level ``fetchServerConfig()``, which races with this init.
+    // Fire langchange once after the locale cache is populated so those
+    // listeners get a fresh read with real translations instead of the
+    // raw-key fallback they'd otherwise hold for the entire session.
+    window.dispatchEvent(new CustomEvent('langchange', { detail: { lang } }));
   }
 
   function lang() { return _lang; }
