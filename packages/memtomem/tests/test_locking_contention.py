@@ -14,6 +14,13 @@ conservative assume-alive fallbacks.
 Tests use ``multiprocessing`` (not threads) because portalocker delegates
 to ``fcntl.flock`` / ``LockFileEx``, both of which are process-level — same
 process holding two refs would not contend.
+
+Each worker gets its own ``mp.Queue`` (rather than sharing one). Python's
+multiprocessing docs guarantee FIFO order *only within a single producer*;
+items put by different processes can interleave in the receiver's view,
+which on slower runners flips the order between p1's "released" and p2's
+"acquired". Per-process queues keep the within-queue ordering meaningful;
+cross-process ordering is verified separately via timestamps.
 """
 
 from __future__ import annotations
@@ -93,22 +100,23 @@ class TestAtomicLockContention:
         """Positive pin: two processes contending on the same sidecar lock
         serialize — the second's acquisition is >= the first's release."""
         lock_path = tmp_path / ".guard.lock"
-        q = _CTX.Queue()
+        q1 = _CTX.Queue()
+        q2 = _CTX.Queue()
         hold_seconds = 0.5
 
-        p1 = _CTX.Process(target=_hold_atomic_lock, args=(str(lock_path), hold_seconds, q))
+        p1 = _CTX.Process(target=_hold_atomic_lock, args=(str(lock_path), hold_seconds, q1))
         p1.start()
-        msg, p1_acquired = q.get(timeout=10)
+        msg, p1_acquired = q1.get(timeout=10)
         assert msg == "acquired"
 
-        p2 = _CTX.Process(target=_take_atomic_lock, args=(str(lock_path), q))
+        p2 = _CTX.Process(target=_take_atomic_lock, args=(str(lock_path), q2))
         p2.start()
-        msg, p2_requested = q.get(timeout=10)
+        msg, p2_requested = q2.get(timeout=10)
         assert msg == "requested"
 
-        msg, p1_released = q.get(timeout=10)
+        msg, p1_released = q1.get(timeout=10)
         assert msg == "released"
-        msg, p2_acquired = q.get(timeout=10)
+        msg, p2_acquired = q2.get(timeout=10)
         assert msg == "acquired"
 
         p1.join(timeout=5)
@@ -146,22 +154,23 @@ class TestDebounceLockContention:
         """Replaces the prior 'POSIX only; on Windows the lock is a no-op'
         contract — debounce queue mutators now serialize on every OS."""
         queue_path = tmp_path / "debounce_queue.json"
-        q = _CTX.Queue()
+        q1 = _CTX.Queue()
+        q2 = _CTX.Queue()
         hold_seconds = 0.5
 
-        p1 = _CTX.Process(target=_hold_debounce_lock, args=(str(queue_path), hold_seconds, q))
+        p1 = _CTX.Process(target=_hold_debounce_lock, args=(str(queue_path), hold_seconds, q1))
         p1.start()
-        msg, p1_acquired = q.get(timeout=10)
+        msg, p1_acquired = q1.get(timeout=10)
         assert msg == "acquired"
 
-        p2 = _CTX.Process(target=_take_debounce_lock, args=(str(queue_path), q))
+        p2 = _CTX.Process(target=_take_debounce_lock, args=(str(queue_path), q2))
         p2.start()
-        msg, p2_requested = q.get(timeout=10)
+        msg, p2_requested = q2.get(timeout=10)
         assert msg == "requested"
 
-        msg, p1_released = q.get(timeout=10)
+        msg, p1_released = q1.get(timeout=10)
         assert msg == "released"
-        msg, p2_acquired = q.get(timeout=10)
+        msg, p2_acquired = q2.get(timeout=10)
         assert msg == "acquired"
 
         p1.join(timeout=5)
@@ -179,7 +188,17 @@ class TestLivenessProbeContention:
     def test_probe_returns_alive_when_holder_exists(self, tmp_path: Path):
         """Cross-platform pin: ``probe_pid_file`` detects a live writer on
         every OS, replacing the prior conservative assume-alive Windows
-        fallback (#448 → #625)."""
+        fallback (#448 → #625).
+
+        The pid value is best-effort: POSIX flock is advisory and the
+        probe can read the pid alongside the holder, but on Windows
+        ``LockFileEx``'s mandatory exclusive lock blocks reads of the
+        locked byte range. The production code degrades gracefully to
+        ``pid=None`` in that case (the user-facing message just says
+        "server alive" without a pid). The assertion here therefore
+        accepts both — the contract is ``alive=True``, not a specific
+        pid value.
+        """
         from memtomem.cli._liveness import probe_pid_file
 
         pid_file = tmp_path / "server.pid"
@@ -191,7 +210,8 @@ class TestLivenessProbeContention:
 
             state = probe_pid_file(pid_file)
             assert state.alive is True
-            assert state.pid == 4242
+            # Windows mandatory lock blocks the read; pid may be None.
+            assert state.pid in (4242, None)
             assert state.pid_file == pid_file
 
             assert q.get(timeout=10) == "released"
