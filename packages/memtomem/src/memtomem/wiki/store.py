@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,6 +51,18 @@ class WikiNotFoundError(RuntimeError):
 
 class WikiAlreadyExistsError(RuntimeError):
     """Raised when ``init`` or ``init_from_url`` would overwrite existing data."""
+
+
+class CommitNotFoundError(RuntimeError):
+    """Raised when a wiki operation references an unreachable commit.
+
+    Surfaces from :meth:`WikiStore.copy_asset_at_commit` when the target
+    SHA is not present in the wiki repo's object database (typical
+    cause: ``git push --force`` or local rebase past the lockfile pin).
+    Distinct from :class:`memtomem.context.install.AssetNotFoundError`
+    — that fires when the commit *exists* but the asset path is missing
+    at that commit (history rewrite that dropped the path).
+    """
 
 
 @dataclass(frozen=True)
@@ -204,6 +217,77 @@ class WikiStore:
         self.require_exists()
         result = _git(["status", "--porcelain"], cwd=self.root)
         return bool(result.stdout.strip())
+
+    def copy_asset_at_commit(
+        self,
+        commit: str,
+        asset_type: str,
+        name: str,
+        dest: Path,
+    ) -> int:
+        """Materialize ``<wiki>/<asset_type>/<name>/`` at *commit* into *dest*.
+
+        Implementation flow:
+
+        1. ``commit_is_reachable`` precheck — :class:`CommitNotFoundError`
+           if the SHA is not in the object database.
+        2. ``git ls-tree -r --name-only <commit> -- <asset_type>/<name>/``
+           enumerates the files at that commit. An empty result means
+           the asset path didn't exist at that revision — raises
+           :class:`memtomem.context.install.AssetNotFoundError` (deferred
+           import to avoid the install ↔ wiki cycle).
+        3. Per-file ``git show <commit>:<relpath>`` reads the bytes.
+        4. The bytes are written into a tmpdir adjacent to *dest* (same
+           filesystem, so subsequent ``copy_tree_atomic`` rename steps
+           don't span devices).
+        5. ``copy_tree_atomic(tmpdir, dest)`` mirrors the structure into
+           *dest* using the same per-file atomic semantics as
+           :func:`memtomem.context.install._install_asset`.
+
+        The wiki working tree is **never touched** — every read uses the
+        commit's git objects directly, so a concurrent ``git checkout``
+        / edit in ``~/.memtomem-wiki/`` cannot bleed through. Returns
+        the count of files written.
+        """
+        # Deferred import: install.py imports wiki.store at module load;
+        # the reverse import here would cycle. Local resolves at call time.
+        from memtomem.context._atomic import copy_tree_atomic
+        from memtomem.context.install import AssetNotFoundError
+
+        self.require_exists()
+        if not self.commit_is_reachable(commit):
+            raise CommitNotFoundError(f"commit {commit[:12]} is not reachable in {self.root}")
+
+        src_prefix = f"{asset_type}/{name}/"
+        ls_result = _git(
+            ["ls-tree", "-r", "--name-only", commit, "--", src_prefix],
+            cwd=self.root,
+        )
+        relpaths = [line for line in ls_result.stdout.splitlines() if line.startswith(src_prefix)]
+        if not relpaths:
+            raise AssetNotFoundError(
+                f"{asset_type}/{name} not present at commit {commit[:12]} in {self.root}"
+            )
+
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=dest.parent) as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            for relpath in relpaths:
+                inner = relpath[len(src_prefix) :]
+                if not inner:
+                    # The prefix itself; ls-tree -r shouldn't yield this
+                    # but guard against odd git versions.
+                    continue
+                target = tmpdir_path / inner
+                target.parent.mkdir(parents=True, exist_ok=True)
+                content = subprocess.run(
+                    ["git", "show", f"{commit}:{relpath}"],
+                    cwd=self.root,
+                    check=True,
+                    capture_output=True,
+                )
+                target.write_bytes(content.stdout)
+            return copy_tree_atomic(tmpdir_path, dest)
 
     def list_assets(self, asset_type: str | None = None) -> list[WikiAsset]:
         """Enumerate asset directories under the wiki.

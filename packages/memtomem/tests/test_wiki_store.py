@@ -10,6 +10,7 @@ import pytest
 from memtomem.wiki.store import (
     DEFAULT_WIKI_PATH,
     WIKI_ASSET_TYPES,
+    CommitNotFoundError,
     WikiAlreadyExistsError,
     WikiNotFoundError,
     WikiStore,
@@ -219,3 +220,122 @@ class TestIsDirty:
         store = WikiStore.at_default()
         with pytest.raises(WikiNotFoundError):
             store.is_dirty()
+
+
+# ── helpers for commit-bound tests ──────────────────────────────────────
+
+
+def _seed_skill(wiki_root_path: Path, name: str, files: dict[str, bytes]) -> str:
+    """Add ``skills/<name>/`` to wiki + commit. Returns the commit SHA."""
+    skill_dir = wiki_root_path / "skills" / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    for relpath, data in files.items():
+        target = skill_dir / relpath
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    subprocess.run(["git", "-C", str(wiki_root_path), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(wiki_root_path), "commit", "-m", f"add {name}"],
+        check=True,
+        capture_output=True,
+    )
+    return WikiStore.at_default().current_commit()
+
+
+class TestCommitIsReachable:
+    def test_head_is_reachable(self, wiki_root: Path) -> None:
+        store = WikiStore.at_default()
+        store.init()
+        head = store.current_commit()
+        assert store.commit_is_reachable(head) is True
+
+    def test_unknown_sha_is_not_reachable(self, wiki_root: Path) -> None:
+        store = WikiStore.at_default()
+        store.init()
+        assert store.commit_is_reachable("0" * 40) is False
+
+    def test_empty_string_is_not_reachable(self, wiki_root: Path) -> None:
+        store = WikiStore.at_default()
+        store.init()
+        assert store.commit_is_reachable("") is False
+
+    def test_raises_when_wiki_absent(self, wiki_root: Path) -> None:
+        store = WikiStore.at_default()
+        with pytest.raises(WikiNotFoundError):
+            store.commit_is_reachable("0" * 40)
+
+
+class TestCopyAssetAtCommit:
+    def test_copies_files_at_pin(self, wiki_root: Path, tmp_path: Path) -> None:
+        """Bytes at the pin land in dest, even after wiki HEAD advances."""
+        store = WikiStore.at_default()
+        store.init()
+        old_pin = _seed_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+
+        # Advance HEAD past the pin.
+        (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"v2\n")
+        subprocess.run(["git", "-C", str(wiki_root), "add", "."], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(wiki_root), "commit", "-m", "advance"],
+            check=True,
+            capture_output=True,
+        )
+
+        dest = tmp_path / "out" / "foo"
+        files_written = store.copy_asset_at_commit(old_pin, "skills", "foo", dest)
+
+        assert files_written == 1
+        assert (dest / "SKILL.md").read_bytes() == b"v1\n"  # NOT the v2 HEAD
+
+    def test_copies_nested_subdirs(self, wiki_root: Path, tmp_path: Path) -> None:
+        """Per-file enumeration via ``ls-tree -r`` recovers nested layout."""
+        store = WikiStore.at_default()
+        store.init()
+        pin = _seed_skill(
+            wiki_root,
+            "foo",
+            {
+                "SKILL.md": b"# foo\n",
+                "scripts/run.sh": b"#!/bin/bash\necho hi\n",
+                "references/a.md": b"a\n",
+            },
+        )
+
+        dest = tmp_path / "foo"
+        files_written = store.copy_asset_at_commit(pin, "skills", "foo", dest)
+
+        assert files_written == 3
+        assert (dest / "SKILL.md").read_bytes() == b"# foo\n"
+        assert (dest / "scripts" / "run.sh").read_bytes() == b"#!/bin/bash\necho hi\n"
+        assert (dest / "references" / "a.md").read_bytes() == b"a\n"
+
+    def test_unreachable_commit_raises(self, wiki_root: Path, tmp_path: Path) -> None:
+        store = WikiStore.at_default()
+        store.init()
+        with pytest.raises(CommitNotFoundError):
+            store.copy_asset_at_commit("0" * 40, "skills", "foo", tmp_path / "foo")
+
+    def test_asset_missing_at_pin_raises(self, wiki_root: Path, tmp_path: Path) -> None:
+        """Pin reachable but the path didn't exist at that commit."""
+        from memtomem.context.install import AssetNotFoundError
+
+        store = WikiStore.at_default()
+        store.init()
+        head = store.current_commit()  # initial scaffold; no skills/foo yet
+        with pytest.raises(AssetNotFoundError):
+            store.copy_asset_at_commit(head, "skills", "foo", tmp_path / "foo")
+
+    def test_dirty_wiki_does_not_bleed_through(self, wiki_root: Path, tmp_path: Path) -> None:
+        """`git show <pin>:<path>` reads from objects, not the working tree."""
+        store = WikiStore.at_default()
+        store.init()
+        pin = _seed_skill(wiki_root, "foo", {"SKILL.md": b"committed\n"})
+
+        # Modify the working tree without committing.
+        (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"uncommitted local\n")
+        assert store.is_dirty() is True
+
+        dest = tmp_path / "foo"
+        store.copy_asset_at_commit(pin, "skills", "foo", dest)
+
+        assert (dest / "SKILL.md").read_bytes() == b"committed\n"

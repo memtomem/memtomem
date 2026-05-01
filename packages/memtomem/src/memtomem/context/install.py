@@ -32,13 +32,14 @@ from memtomem.context._atomic import copy_tree_atomic
 from memtomem.context._names import validate_name
 from memtomem.context.dirty import DirtyReport, is_asset_dirty
 from memtomem.context.lockfile import Lockfile, LockfileVersionError, utcnow_iso8601_z
-from memtomem.wiki.store import WikiStore
+from memtomem.wiki.store import CommitNotFoundError, WikiStore
 
 __all__ = [
     "AlreadyInstalledError",
     "AssetNotFoundError",
     "InstallResult",
     "NotInstalledError",
+    "ProjectInstallClassification",
     "StaleInstallError",
     "UpdateResult",
     "install_agent",
@@ -578,3 +579,240 @@ def _classify_for_all_update(
         )
 
     return new_commit, out
+
+
+# ── install --all (PR-D C3) ─────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ProjectInstallClassification:
+    """Per-entry verdict for ``mm context install --all``.
+
+    Mirrors the cache-once-execute-once pattern of
+    :class:`ProjectClassification` (used by ``update --all``) but the
+    rows here represent ``(asset_type, name)`` *within a single project*
+    rather than across projects. The pin we install at is the entry's
+    stored ``wiki_commit`` — wiki HEAD plays no role (Option A).
+
+    State semantics:
+
+    - ``"install"`` — dest is missing. Will extract bytes at the pinned
+      commit and write the lockfile entry (``installed_at`` refreshes;
+      ``wiki_commit`` stays at the pin).
+    - ``"skip"`` — dest exists and is clean. Default behavior is no-op;
+      ``--force`` re-extracts at the pin (no ``.bak`` since there's
+      nothing to preserve).
+    - ``"refuse"`` — dest exists and has local edits. Without ``--force``
+      the entire batch refuses (no writes). With ``--force`` each dirty
+      file is preserved as ``<file>.bak`` then the pin is re-extracted.
+    - ``"orphan"`` — the pinned ``wiki_commit`` is not reachable in the
+      wiki repo (history rewrite, force-push past the pin). Per-entry
+      skip with a yellow warning row; the batch continues so the user
+      can recover the rest. v2 may add ``--force-head`` as a degraded
+      fallback.
+    - ``"error"`` — unrecoverable per-entry condition (corrupt
+      lockfile entry, IO error walking the dest tree, asset path
+      missing at the pinned commit). Batch continues; row is red.
+
+    ``lock_entry`` carries the live entry (``wiki_commit`` + ``installed_at``);
+    ``dirty_report`` is populated only when the dirty walk actually
+    ran (state ∈ {``skip``, ``refuse``}).
+    """
+
+    asset_type: Literal["skills", "agents", "commands"]
+    name: str
+    pin_commit: str
+    state: Literal["install", "skip", "refuse", "orphan", "error"]
+    reason: str | None
+    lock_entry: dict[str, Any] | None
+    dirty_report: DirtyReport | None
+
+
+def _classify_for_install_all(
+    project_root: Path,
+    *,
+    wiki: WikiStore,
+) -> list[ProjectInstallClassification]:
+    """Walk ``Lockfile.iter_entries()`` once and classify each row.
+
+    Per entry:
+
+    1. Read pin from the entry; missing/empty → state=``error``.
+    2. Reachability via :meth:`WikiStore.commit_is_reachable`; missing →
+       state=``orphan``.
+    3. Dest existence check:
+
+       - missing → state=``install`` (no dirty walk needed).
+       - present → run :func:`is_asset_dirty` against the cached entry:
+         clean → state=``skip``, dirty → state=``refuse``.
+
+    The ``lock_entry`` and ``dirty_report`` fields on the result are the
+    live read + walk; the execute phase consumes them without re-reading.
+    """
+    from memtomem.context.lockfile import Lockfile  # local: tested module-level too
+
+    wiki.require_exists()
+    lockfile = Lockfile.at(project_root)
+
+    out: list[ProjectInstallClassification] = []
+    for asset_type, name, entry in lockfile.iter_entries():
+        if asset_type not in ("skills", "agents", "commands"):
+            continue
+
+        pin = entry.get("wiki_commit", "") if isinstance(entry, dict) else ""
+        if not isinstance(pin, str) or not pin:
+            out.append(
+                ProjectInstallClassification(
+                    asset_type=asset_type,  # type: ignore[arg-type]
+                    name=name,
+                    pin_commit="",
+                    state="error",
+                    reason="lockfile entry missing wiki_commit",
+                    lock_entry=entry if isinstance(entry, dict) else None,
+                    dirty_report=None,
+                )
+            )
+            continue
+
+        if not wiki.commit_is_reachable(pin):
+            out.append(
+                ProjectInstallClassification(
+                    asset_type=asset_type,  # type: ignore[arg-type]
+                    name=name,
+                    pin_commit=pin,
+                    state="orphan",
+                    reason=f"pin {pin[:12]} not reachable",
+                    lock_entry=entry,
+                    dirty_report=None,
+                )
+            )
+            continue
+
+        dest = project_root / ".memtomem" / asset_type / name
+        if not dest.exists():
+            out.append(
+                ProjectInstallClassification(
+                    asset_type=asset_type,  # type: ignore[arg-type]
+                    name=name,
+                    pin_commit=pin,
+                    state="install",
+                    reason=None,
+                    lock_entry=entry,
+                    dirty_report=None,
+                )
+            )
+            continue
+
+        report = is_asset_dirty(project_root, asset_type, name, lock_entry=entry)
+        if report.reason == "dirty":
+            state: Literal["install", "skip", "refuse", "orphan", "error"] = "refuse"
+            reason: str | None = f"{len(report.dirty_files)} file(s) modified locally"
+        else:
+            # clean / missing_dest / never_installed all collapse to "skip" here:
+            # missing_dest is impossible (we already saw dest.exists()), and
+            # never_installed shouldn't happen (we read the entry above), so
+            # this is effectively the clean path.
+            state = "skip"
+            reason = "already installed"
+
+        out.append(
+            ProjectInstallClassification(
+                asset_type=asset_type,  # type: ignore[arg-type]
+                name=name,
+                pin_commit=pin,
+                state=state,
+                reason=reason,
+                lock_entry=entry,
+                dirty_report=report,
+            )
+        )
+
+    return out
+
+
+def _apply_pinned_install(
+    project_root: Path,
+    classification: ProjectInstallClassification,
+    *,
+    wiki: WikiStore,
+    force: bool,
+) -> InstallResult:
+    """Execute one install at the pinned commit.
+
+    Pre-conditions enforced by callers (CLI ``_run_install_all``):
+
+    - ``classification.state ∈ {"install", "skip", "refuse"}`` —
+      orphan/error rows are reported by the caller without invoking
+      this helper.
+    - ``classification.pin_commit`` is non-empty.
+    - For ``state ∈ {"skip", "refuse"}``, ``classification.dirty_report``
+      and ``classification.lock_entry`` are non-None.
+
+    Behavior:
+
+    - ``state="install"``: extract at pin → write lockfile (pin
+      preserved, ``installed_at`` refreshed).
+    - ``state="skip"`` + ``force=False``: caller skips; this helper
+      shouldn't be reached (defense in depth — raises if it is).
+    - ``state="skip"`` + ``force=True``: re-extract at pin, no ``.bak``
+      (clean dest had nothing to preserve).
+    - ``state="refuse"`` + ``force=False``: raise
+      :class:`StaleInstallError` (caller already aborted batch; defense
+      in depth).
+    - ``state="refuse"`` + ``force=True``: ``shutil.copy2`` each dirty
+      file to ``<file>.bak`` (mirroring ``_apply_update``), then extract
+      at pin.
+    """
+    pin = classification.pin_commit
+    asset_type = classification.asset_type
+    name = classification.name
+    dest = project_root / ".memtomem" / asset_type / name
+
+    if classification.state == "skip" and not force:
+        raise RuntimeError(
+            f"_apply_pinned_install called for skip state without --force "
+            f"(asset={asset_type}/{name}); caller should have skipped this row"
+        )
+
+    if classification.state == "refuse" and not force:
+        raise StaleInstallError(
+            f"{asset_type}/{name}: local edits would be clobbered; "
+            f"pass --force to overwrite (each dirty file gets a .bak sibling)"
+        )
+
+    bak_paths: list[Path] = []
+    if classification.state == "refuse" and force:
+        report = classification.dirty_report
+        assert report is not None  # state=refuse always carries a report
+        for f in report.dirty_files:
+            bak = f.with_suffix(f.suffix + ".bak")
+            shutil.copy2(f, bak)
+            bak_paths.append(bak)
+
+    files_written = wiki.copy_asset_at_commit(pin, asset_type, name, dest)
+
+    installed_at = utcnow_iso8601_z()
+    lock = Lockfile.at(project_root)
+    # CRITICAL: wiki_commit stays at the pin we just restored to —
+    # install --all is reproducibility (Option A), not "advance to HEAD".
+    lock.upsert_entry(
+        asset_type,
+        name,
+        wiki_commit=pin,
+        installed_at=installed_at,
+    )
+
+    return InstallResult(
+        asset_type=cast('Literal["skills", "agents", "commands"]', asset_type),
+        name=name,
+        wiki_commit=pin,
+        installed_at=installed_at,
+        dest=dest,
+        files_written=files_written,
+    )
+
+
+# Re-export for callers that want to ``except CommitNotFoundError``
+# without reaching into wiki.store directly.
+__all__.append("CommitNotFoundError")
+_ = CommitNotFoundError  # silence "imported but unused" — re-export
