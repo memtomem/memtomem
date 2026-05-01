@@ -119,11 +119,33 @@ mm context install <type> <name>
 mm context install --all                # lockfile-driven re-setup
 mm context update  <type> <name> [--all]
 mm context status
+mm context migrate [<type> [<name>]] [--apply] [--force] [--yes]
 ```
 
 `mm context sync --include=skills` (existing, ADR-0001 §3) is unchanged.
 The `mm wiki` group is single-asset; `mm context sync` remains the
 multi-asset bulk verb.
+
+`mm context migrate` converts agents and commands from the legacy flat
+layout (`<type>/<name>.md`) to the canonical directory layout
+(`<type>/<name>/agent.md` or `<type>/<name>/command.md`) introduced in
+PR-C. Skills are always directory layout; invoking the command on
+skills exits 0 with an informational message.
+
+The verb is **dry-run by default** — running it without `--apply` prints
+the migration plan and exits without writing. `--apply` mutates the
+filesystem with `os.replace` (atomic single-rename). The lockfile is
+untouched on every path: layout is inferred from the filesystem
+authoritatively (`list_canonical_agents` / `list_canonical_commands`),
+and `installed_at` is preserved so dirty detection (Invariant 2) keeps
+working across migrations.
+
+Per Invariant 2, dirty flat files (mtime > installed_at) are refused
+unless `--apply --force` is passed; `--force` writes a `.bak` sibling
+before mutation, mirroring `mm context update --force`. Manual flat
+files (no lockfile entry) and orphan lockfile entries (entry but no
+files on disk) are surfaced as `skip` rows and left untouched — those
+are out of scope for the install/upgrade lifecycle.
 
 ## Lockfile schema
 
