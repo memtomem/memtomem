@@ -20,13 +20,18 @@ module and covers ``~/.memtomem/config.json`` specifically.
 
 from __future__ import annotations
 
-import fcntl
 import logging
 import os
+import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 logger = logging.getLogger(__name__)
 
@@ -59,15 +64,31 @@ def _file_lock(lock_path: Path) -> Iterator[None]:
     so concurrent writers race on stale fds. The fix is to lock a sibling
     (``feedback_sidecar_lockfile_for_replaced_files.md``, PR #548). The
     lockfile itself is never renamed, so its inode is stable.
+
+    Cross-platform: POSIX uses ``fcntl.flock`` (advisory whole-file lock);
+    Windows uses ``msvcrt.locking`` (mandatory byte-range lock at offset 0).
+    Semantic differences (advisory vs mandatory, whole-file vs single byte)
+    don't matter here because the lockfile is private — only this
+    contextmanager opens it — so all contenders see the same lock.
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        if sys.platform == "win32":
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
         try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            if sys.platform == "win32":
+                # msvcrt.locking acts on the byte range starting at the
+                # current file position; reset to 0 so we unlock the
+                # same byte we locked above.
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
 
@@ -80,14 +101,18 @@ def _lock_path_for(data_path: Path) -> Path:
 def atomic_write_bytes(path: Path, data: bytes, mode: int = 0o600) -> None:
     """Atomically write *data* to *path* with an explicit file mode.
 
-    ``mode`` is applied via ``os.fchmod`` on the tempfile before the rename,
-    so the result is independent of the process umask.
+    ``mode`` is applied via ``os.fchmod`` on the tempfile before the rename
+    where available, so the result is independent of the process umask.
+    Windows Python < 3.13 lacks ``os.fchmod``; on those interpreters the
+    file is created with the process default permissions, which NTFS
+    largely ignores beyond the read-only flag.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     tmp_path = Path(tmp_name)
     try:
-        os.fchmod(tmp_fd, mode)
+        if hasattr(os, "fchmod"):
+            os.fchmod(tmp_fd, mode)
         with os.fdopen(tmp_fd, "wb") as f:
             f.write(data)
             f.flush()
