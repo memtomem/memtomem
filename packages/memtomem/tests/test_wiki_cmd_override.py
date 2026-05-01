@@ -52,6 +52,27 @@ def test_wiki_skill_override_happy_path(wiki_root: Path) -> None:
     assert target.read_bytes() == canonical_bytes
 
 
+def test_wiki_skill_override_no_stderr_warning(wiki_root: Path) -> None:
+    """Helper-collapse safety gate: ``_run_seed_override`` adds a stderr
+    dropped-fields warning, but skills always seed via byte-copy of the
+    canonical (``SeedResult.dropped == []``), so the warning path must
+    stay quiescent for skills. The other skill tests only assert on
+    stdout via ``result.output``, so a silent regression here would not
+    surface elsewhere.
+
+    Click 8.3 keeps ``result.stderr`` separate by default — earlier
+    ``mix_stderr=False`` constructor arg was removed.
+    """
+    _initialized_wiki()
+    _seed_skill(wiki_root, "hello")
+    runner = CliRunner()
+
+    result = runner.invoke(wiki_group, ["skill", "override", "hello", "--vendor", "gemini"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
+
+
 # ── refuse vs force ────────────────────────────────────────────────────
 
 

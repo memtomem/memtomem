@@ -5,6 +5,8 @@ See ADR-0008 for the wiki layer's role in the context-gateway pipeline.
 
 from __future__ import annotations
 
+from typing import Literal
+
 import click
 
 from memtomem.context._names import InvalidNameError
@@ -23,6 +25,66 @@ from memtomem.wiki.override import (
 @click.group("wiki")
 def wiki() -> None:
     """Manage the local memtomem wiki (skills/agents/commands library)."""
+
+
+def _run_seed_override(
+    asset_type: Literal["skills", "agents", "commands"],
+    name: str,
+    vendor: str,
+    *,
+    force: bool,
+    editor: bool,
+) -> None:
+    """Shared body for ``mm wiki {skill,agent,command} override``.
+
+    Mirrors the seed → stdout summary → optional stderr warning →
+    optional ``$EDITOR`` flow across all three asset types so the trust-UX
+    is identical: classified ClickException for known errors, no Python
+    traceback leaks, and any vendor-renderer drops surface as a yellow
+    stderr line so the user knows what the runtime won't see in the
+    override.
+    """
+    store = WikiStore.at_default()
+    try:
+        result = seed_override(store, asset_type, name, vendor, force=force)
+    except (
+        WikiNotFoundError,
+        OverrideExistsError,
+        FileNotFoundError,
+        InvalidNameError,
+        NotImplementedError,
+    ) as exc:
+        # 5 sibling classes (verified disjoint: WikiNotFoundError /
+        # OverrideExistsError / NotImplementedError -> RuntimeError;
+        # FileNotFoundError -> OSError; InvalidNameError -> ValueError —
+        # no cross-inheritance, ordering irrelevant). NotImplementedError
+        # carries the ("commands", "codex") placeholder message from
+        # seed_override; surfacing it as ClickException prints a classified
+        # error rather than a Python traceback.
+        raise click.ClickException(str(exc)) from exc
+
+    # ``seed_override`` invariant: target lives under ``store.root``.
+    # No is_relative_to fallback — a violation is a real bug worth
+    # surfacing as ValueError, not a silent path mismatch to mask.
+    rel = result.path.relative_to(store.root)
+    ext = result.path.suffix.lstrip(".")
+    click.secho(f"Seeded {rel}", fg="green")
+    click.echo(str(result.path))
+    click.echo(
+        f"# next: cd {store.root} && "
+        f"git add {asset_type}/{name}/overrides/{vendor}.{ext} && git commit"
+    )
+
+    if result.dropped:
+        click.secho(
+            f"warning: vendor {vendor!r} will not represent these fields: "
+            f"{', '.join(result.dropped)}",
+            fg="yellow",
+            err=True,
+        )
+
+    if editor:
+        click.edit(filename=str(result.path), require_save=False)
 
 
 @wiki.command("init")
@@ -121,24 +183,4 @@ def skill_override_cmd(name: str, vendor: str, force: bool, editor: bool) -> Non
     ``$EDITOR``) and commit it inside the wiki repo so that future
     ``mm context install`` snapshots pick it up.
     """
-    store = WikiStore.at_default()
-    try:
-        target = seed_override(store, "skills", name, vendor, force=force)
-    except WikiNotFoundError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except OverrideExistsError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except FileNotFoundError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except InvalidNameError as exc:
-        raise click.ClickException(str(exc)) from exc
-
-    rel = target.relative_to(store.root) if target.is_relative_to(store.root) else target
-    click.secho(f"Seeded {rel}", fg="green")
-    click.echo(str(target))
-    click.echo(
-        f"# next: cd {store.root} && git add skills/{name}/overrides/{vendor}.md && git commit"
-    )
-
-    if editor:
-        click.edit(filename=str(target), require_save=False)
+    _run_seed_override("skills", name, vendor, force=force, editor=editor)
