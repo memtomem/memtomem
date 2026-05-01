@@ -590,8 +590,6 @@ def _step_embedding(state: dict) -> None:
         else:
             click.secho("  API key test failed. Check your key and try again.", fg="red")
             if not nav_confirm("  Continue anyway?", default=False):
-                # Was ``raise SystemExit(1)`` — switched to ``WizardCancel``
-                # so the wizard exits via the same path as ``q`` (#626).
                 raise WizardCancel()
 
     state["provider"] = provider

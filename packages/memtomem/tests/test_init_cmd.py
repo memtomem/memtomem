@@ -6463,3 +6463,102 @@ class TestStepEmbeddingOllamaGuards:
         # The whole point of #626: a failed pull does NOT silently
         # advance to the next step.
         assert next_step_called == []
+
+    def test_has_model_none_r_retries_then_succeeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``has_model=None`` (server returned an error) → 'r' → outer
+        retry loop re-runs the server check and ``_ollama_has_model``;
+        on the second call the model is detected and the step completes.
+        Symmetric counterpart to ``test_pull_failure_r_retries_pull_only``
+        for the tri-state ambiguous branch."""
+        import click
+        from click.testing import CliRunner
+
+        from memtomem.cli import init_cmd
+
+        has_model_calls = {"n": 0}
+
+        def fake_has_model(model: str) -> bool | None:
+            has_model_calls["n"] += 1
+            # First call: server errored. Second call: model is ready.
+            return None if has_model_calls["n"] == 1 else True
+
+        self._patch_ollama_env(monkeypatch, running=True, has_model=fake_has_model)
+
+        state: dict = {}
+
+        @click.command()
+        def cmd() -> None:
+            init_cmd._step_embedding(state)
+
+        # choice=3 → model 1 → has_model None → r → model 1 (re-prompted) → ready
+        result = CliRunner().invoke(cmd, [], input="3\n1\nr\n1\n")
+        assert result.exit_code == 0
+        assert "Could not verify whether" in result.output
+        assert "is ready" in result.output
+        assert state.get("provider") == "ollama"
+        assert state.get("model") == "nomic-embed-text"
+        assert has_model_calls["n"] == 2
+
+
+class TestStepEmbeddingOpenAIGuard:
+    """The OpenAI bad-key + decline path raises ``WizardCancel`` (was
+    ``SystemExit(1)`` pre-#626) so cancellation is uniform with the
+    ``q`` shortcut. The exit-code change (1 → 0 via ``run_steps``) is
+    deliberate: the user actively chose to cancel, not error out."""
+
+    def test_invalid_key_decline_continue_raises_wizard_cancel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import click
+        from click.testing import CliRunner
+
+        from memtomem.cli import init_cmd
+        from memtomem.cli.wizard import WizardCancel
+
+        monkeypatch.setattr(init_cmd, "_have_module", lambda mod: True)
+        monkeypatch.setattr(init_cmd, "_test_openai_key", lambda key: False)
+
+        captured: dict[str, BaseException | None] = {"exc": None}
+
+        @click.command()
+        def cmd() -> None:
+            try:
+                init_cmd._step_embedding({})
+            except WizardCancel as exc:
+                captured["exc"] = exc
+
+        # choice=4 (OpenAI) → model 1 → fake-key → "Continue anyway?" N
+        result = CliRunner().invoke(cmd, [], input="4\n1\nfake-key\nN\n")
+        assert "API key test failed" in result.output
+        assert isinstance(captured["exc"], WizardCancel)
+
+    def test_invalid_key_decline_does_not_advance_to_next_step(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Composed pin: when the user declines to continue with a bad
+        OpenAI key, the wizard cancels via the ``q`` path — the next
+        step does NOT run, and ``run_steps`` exits 0 (deliberate cancel,
+        not an error)."""
+        import click
+        from click.testing import CliRunner
+
+        from memtomem.cli import init_cmd
+        from memtomem.cli.wizard import run_steps
+
+        monkeypatch.setattr(init_cmd, "_have_module", lambda mod: True)
+        monkeypatch.setattr(init_cmd, "_test_openai_key", lambda key: False)
+
+        next_step_called: list[bool] = []
+
+        def sentinel_next_step(state: dict) -> None:
+            next_step_called.append(True)
+
+        @click.command()
+        def cmd() -> None:
+            run_steps([init_cmd._step_embedding, sentinel_next_step])
+
+        result = CliRunner().invoke(cmd, [], input="4\n1\nfake-key\nN\n")
+        assert "Wizard cancelled" in result.output
+        assert next_step_called == []
+        # ``run_steps`` exits 0 on WizardCancel (was 1 under SystemExit(1)).
+        assert result.exit_code == 0
