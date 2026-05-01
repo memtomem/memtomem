@@ -117,7 +117,11 @@ def _counts_for(root: Path) -> dict[str, int]:
 
     try:
         names = {name for _runtime, name, _status in diff_commands(root)}
-        names.update(p.stem for p in list_canonical_commands(root))
+        # ``list_canonical_commands`` returns ``list[tuple[Path, Layout]]``
+        # since ADR-0008 PR-C (#624) added directory layout. Unpack the
+        # tuple — ``p.stem`` on the raw tuple raised AttributeError and
+        # the blanket ``except Exception`` below silently zeroed the count.
+        names.update(p.stem for p, _layout in list_canonical_commands(root))
         counts["commands"] = len(names)
     except Exception:
         logger.warning("counts: commands failed for %s", root, exc_info=True)
@@ -125,7 +129,9 @@ def _counts_for(root: Path) -> dict[str, int]:
 
     try:
         names = {name for _runtime, name, _status in diff_agents(root)}
-        names.update(p.stem for p in list_canonical_agents(root))
+        # Same tuple-unpack as commands above; ``list_canonical_agents``
+        # also returns ``list[tuple[Path, Layout]]`` post PR-C.
+        names.update(p.stem for p, _layout in list_canonical_agents(root))
         counts["agents"] = len(names)
     except Exception:
         logger.warning("counts: agents failed for %s", root, exc_info=True)
