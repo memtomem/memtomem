@@ -173,6 +173,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **`mm init` wizard now prompts on failed steps instead of silently
+  advancing (#626).** When `_step_embedding`'s Ollama branch hits a
+  failure (server unreachable, model status indeterminate, `ollama pull`
+  errored), the wizard surfaces a red `✗` line and a
+  `Retry, back, or quit? [R/b/q]` prompt — pre-fix it printed a warning
+  and walked into the next step (Reranker), which masked the real
+  problem. Mechanism is reusable: new `StepRetry` exception +
+  `fail_step()` helper in `memtomem.cli.wizard`. Tri-state
+  `_ollama_has_model` returns `bool | None` so server-error is no longer
+  conflated with "model absent". **Behavior change**: the OpenAI
+  `--provider openai` "API key invalid + decline to continue" path now
+  exits **0** (cancelled by user) instead of **1** (error). Scripts
+  parsing the exit code to detect a bad-key cancel must switch to
+  parsing stdout for `Wizard cancelled.` or use `--yes` mode (which
+  retains the non-zero exit on missing extras). Other wizard steps
+  still use the pre-#626 silent-continue pattern; an audit and follow-up
+  PR will migrate them onto `fail_step` next.
+
 - **`embedding.threads` default flipped from `0` (= ORT default = all
   physical cores) to `4`** so a bulk reindex doesn't pin every core and
   starve the web server / other apps. Live diagnosis of #640 confirmed

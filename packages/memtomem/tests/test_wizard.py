@@ -13,16 +13,25 @@ from typing import Callable
 import click
 from click.testing import CliRunner
 
-from memtomem.cli.wizard import StepBack, run_steps, silent_step
+from memtomem.cli.wizard import (
+    StepBack,
+    StepRetry,
+    WizardCancel,
+    fail_step,
+    run_steps,
+    silent_step,
+)
 
 
 def _make_step(
     name: str,
     log: list[str],
     raise_back_on_call: int | None = None,
+    raise_retry_on_call: int | None = None,
 ) -> Callable[[dict], None]:
     """Build an interactive step. Counts its own invocations in ``log`` and
-    optionally raises ``StepBack`` on the Nth invocation (1-indexed)."""
+    optionally raises ``StepBack`` / ``StepRetry`` on the Nth invocation
+    (1-indexed)."""
     calls = {"n": 0}
 
     def step(state: dict) -> None:
@@ -30,6 +39,8 @@ def _make_step(
         log.append(name)
         if raise_back_on_call is not None and calls["n"] == raise_back_on_call:
             raise StepBack()
+        if raise_retry_on_call is not None and calls["n"] == raise_retry_on_call:
+            raise StepRetry()
 
     step.__name__ = name
     return step
@@ -198,3 +209,139 @@ class TestRunStepsRegressions:
 
         assert log == ["a", "b1", "a", "b2"]
         assert final.get("a_ran") is True
+
+
+class TestRunStepsRetry:
+    """``StepRetry`` re-invokes the same step; back-nav semantics are
+    unaffected. Recovery hook for the #626 wizard guardrails."""
+
+    def test_retry_re_invokes_same_step(self) -> None:
+        """``StepRetry`` from step N re-invokes step N — no advance, no
+        back-nav. Surrounding steps are unaffected."""
+        log: list[str] = []
+        step0 = _make_step("s0", log)
+        step1 = _make_step("s1", log, raise_retry_on_call=1)
+        step2 = _make_step("s2", log)
+
+        run_steps([step0, step1, step2])
+
+        # s1 fires twice (retry, then complete), s0/s2 once.
+        assert log == ["s0", "s1", "s1", "s2"]
+
+    def test_retry_does_not_skip_silent_predecessors(self) -> None:
+        """Unlike ``StepBack``, ``StepRetry`` does not move the cursor —
+        silent predecessors stay where they are and are not re-fired."""
+        log: list[str] = []
+        step0 = _make_step("s0", log)
+        silent1 = _make_silent("silent", log)
+        step2 = _make_step("s2", log, raise_retry_on_call=1)
+
+        run_steps([step0, silent1, step2])
+
+        # silent fires once on forward; s2 fires twice (retry + complete).
+        assert log == ["s0", "silent", "s2", "s2"]
+
+    def test_retry_message_emitted(self) -> None:
+        """``run_steps`` echoes a dim ``(retrying...)`` line so the user
+        sees that the re-run was their own choice, not a hung loop."""
+        log: list[str] = []
+        step0 = _make_step("s0", log, raise_retry_on_call=1)
+
+        runner = CliRunner()
+
+        @click.command()
+        def cmd() -> None:
+            run_steps([step0])
+
+        result = runner.invoke(cmd, [])
+        assert result.exit_code == 0
+        assert "(retrying...)" in result.output
+        assert log == ["s0", "s0"]
+
+
+class TestFailStep:
+    """``fail_step`` is the primitive that turns a recoverable failure
+    into an explicit user choice (#626). Verify the choice→exception
+    mapping and the ``retryable`` gate."""
+
+    @staticmethod
+    def _invoke(input_text: str, *, retryable: bool = True) -> Exception | None:
+        """Run ``fail_step`` under a CliRunner with the given stdin and
+        return the raised exception (or None if it returned cleanly,
+        which it must never do)."""
+        runner = CliRunner()
+        captured: dict[str, Exception | None] = {"exc": None}
+
+        @click.command()
+        def cmd() -> None:
+            try:
+                fail_step("test message", retryable=retryable)
+            except (StepRetry, StepBack, WizardCancel) as exc:
+                captured["exc"] = exc
+
+        runner.invoke(cmd, [], input=input_text)
+        return captured["exc"]
+
+    def test_retry_choice_raises_step_retry(self) -> None:
+        assert isinstance(self._invoke("r\n"), StepRetry)
+
+    def test_retry_long_form_also_works(self) -> None:
+        assert isinstance(self._invoke("retry\n"), StepRetry)
+
+    def test_back_choice_raises_step_back(self) -> None:
+        assert isinstance(self._invoke("b\n"), StepBack)
+
+    def test_back_long_form_also_works(self) -> None:
+        assert isinstance(self._invoke("back\n"), StepBack)
+
+    def test_quit_choice_raises_wizard_cancel(self) -> None:
+        assert isinstance(self._invoke("q\n"), WizardCancel)
+
+    def test_quit_long_form_also_works(self) -> None:
+        assert isinstance(self._invoke("quit\n"), WizardCancel)
+
+    def test_default_when_retryable_is_retry(self) -> None:
+        """Empty input (just Enter) accepts the default — for
+        ``retryable=True`` that's retry."""
+        assert isinstance(self._invoke("\n"), StepRetry)
+
+    def test_default_when_not_retryable_is_back(self) -> None:
+        """For ``retryable=False`` the default is back."""
+        assert isinstance(self._invoke("\n", retryable=False), StepBack)
+
+    def test_retryable_false_rejects_r_choice(self) -> None:
+        """When the action is not retryable, 'r' is not a valid answer.
+        The prompt must reject it and accept a fallback (here: 'b' on
+        the next line)."""
+        exc = self._invoke("r\nb\n", retryable=False)
+        assert isinstance(exc, StepBack)
+
+    def test_invalid_input_reprompts(self) -> None:
+        """Garbage input loops the prompt — the helper must not silently
+        coerce to an unintended choice."""
+        runner = CliRunner()
+        captured: dict[str, Exception | None] = {"exc": None}
+
+        @click.command()
+        def cmd() -> None:
+            try:
+                fail_step("test message", retryable=True)
+            except (StepRetry, StepBack, WizardCancel) as exc:
+                captured["exc"] = exc
+
+        result = runner.invoke(cmd, [], input="x\nq\n")
+        assert isinstance(captured["exc"], WizardCancel)
+        assert "Please answer r, b, or q." in result.output
+
+    def test_message_rendered_in_output(self) -> None:
+        runner = CliRunner()
+
+        @click.command()
+        def cmd() -> None:
+            try:
+                fail_step("specific failure detail", retryable=True)
+            except (StepRetry, StepBack, WizardCancel):
+                pass
+
+        result = runner.invoke(cmd, [], input="q\n")
+        assert "specific failure detail" in result.output

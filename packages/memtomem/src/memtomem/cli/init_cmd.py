@@ -17,7 +17,16 @@ from typing import Literal
 import click
 
 from memtomem.cli.init_presets import PRESETS, _VALID_PRESETS, get_preset
-from memtomem.cli.wizard import nav_confirm, nav_prompt, run_steps, silent_step, step_header
+from memtomem.cli.wizard import (
+    StepRetry,
+    WizardCancel,
+    fail_step,
+    nav_confirm,
+    nav_prompt,
+    run_steps,
+    silent_step,
+    step_header,
+)
 
 InstallType = Literal["source", "project", "tool", "uvx"]
 CwdInstallType = Literal["source", "project", "pypi"]
@@ -61,11 +70,23 @@ def _ollama_running() -> bool:
         return False
 
 
-def _ollama_has_model(model: str) -> bool:
+def _ollama_has_model(model: str) -> bool | None:
+    """Tri-state: True/False/None.
+
+    ``None`` = couldn't reach the Ollama server (timeout, non-zero exit,
+    binary missing). The caller must distinguish this from ``False``
+    (server reachable, model not installed) — silently treating ``None``
+    as ``False`` was the original #626 bug, where a server timeout was
+    misread as "model absent" and the wizard offered a doomed
+    ``ollama pull`` instead of surfacing the real error.
+    """
     try:
-        return model in _run(["ollama", "list"], timeout=5).stdout
+        result = _run(["ollama", "list"], timeout=5)
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+        return None
+    if result.returncode != 0:
+        return None
+    return model in result.stdout
 
 
 def _test_openai_key(api_key: str) -> bool:
@@ -471,33 +492,73 @@ def _step_embedding(state: dict) -> None:
                 click.echo(_y_refuse_hint("--provider ollama", "ollama"))
                 click.echo()
                 state.setdefault("_extras_warned_inline", set()).add("ollama")
-            if not _ollama_running():
-                click.secho("  Ollama not running. Starting 'ollama serve'...", fg="yellow")
-                click.echo("  Run 'ollama serve' in another terminal if this fails.")
-                click.echo()
+            # Server reachability + model selection + pull are guarded so
+            # a failed step doesn't silently advance the wizard (#626).
+            # ``StepRetry`` is caught locally so the user doesn't have to
+            # re-pick the provider; ``StepBack`` / ``WizardCancel`` bubble
+            # to ``run_steps``.
+            model = ""
+            dimension = 0
+            while True:
+                try:
+                    if not _ollama_running():
+                        click.secho("  Ollama not running.", fg="yellow")
+                        click.echo("  Start it with 'ollama serve' in another terminal.")
+                        fail_step(
+                            "Ollama server is not reachable.",
+                            retryable=True,
+                        )
 
-            click.echo("  Available models:")
-            click.echo("    [1] nomic-embed-text — English, fast (768d)")
-            click.echo("    [2] bge-m3 — multilingual, higher accuracy (1024d)")
-            model_choice = nav_prompt("  Select", type=click.IntRange(1, 2), default=1)
+                    click.echo("  Available models:")
+                    click.echo("    [1] nomic-embed-text — English, fast (768d)")
+                    click.echo("    [2] bge-m3 — multilingual, higher accuracy (1024d)")
+                    model_choice = nav_prompt("  Select", type=click.IntRange(1, 2), default=1)
 
-            models = {1: ("nomic-embed-text", 768), 2: ("bge-m3", 1024)}
-            model, dimension = models[model_choice]
+                    models = {1: ("nomic-embed-text", 768), 2: ("bge-m3", 1024)}
+                    model, dimension = models[model_choice]
 
-            if _ollama_has_model(model):
-                click.secho(f"  Model '{model}' is ready.", fg="green")
-            else:
-                pull = nav_confirm(f"  Model '{model}' not found. Pull now?", default=True)
-                if pull:
-                    click.echo(f"  Pulling {model}... (this may take a few minutes)")
-                    result = _run(["ollama", "pull", model], timeout=600)
-                    if result.returncode == 0:
-                        click.secho(f"  Model '{model}' pulled successfully.", fg="green")
-                    else:
-                        click.secho(f"  Pull failed: {result.stderr.strip()}", fg="red")
-                        click.echo("  You can pull manually: ollama pull " + model)
-                else:
-                    click.echo(f"  Remember to run: ollama pull {model}")
+                    has_model = _ollama_has_model(model)
+                    if has_model is None:
+                        # Tri-state ``None`` = server unreachable / errored.
+                        # Surface this distinctly instead of falling through
+                        # to a doomed pull (the original #626 misread).
+                        fail_step(
+                            f"Could not verify whether '{model}' is installed — "
+                            "Ollama server returned an error or timed out.",
+                            retryable=True,
+                        )
+
+                    if has_model:
+                        click.secho(f"  Model '{model}' is ready.", fg="green")
+                        break
+
+                    pull = nav_confirm(f"  Model '{model}' not found. Pull now?", default=True)
+                    if not pull:
+                        click.echo(f"  Remember to run: ollama pull {model}")
+                        break
+
+                    # Inner retry loop: re-run only the pull action so a
+                    # transient network failure doesn't drop the user back
+                    # to model selection.
+                    while True:
+                        try:
+                            click.echo(f"  Pulling {model}... (this may take a few minutes)")
+                            result = _run(["ollama", "pull", model], timeout=600)
+                            if result.returncode == 0:
+                                click.secho(
+                                    f"  Model '{model}' pulled successfully.",
+                                    fg="green",
+                                )
+                                break
+                            fail_step(
+                                f"Pull failed: {result.stderr.strip()}",
+                                retryable=True,
+                            )
+                        except StepRetry:
+                            continue
+                    break
+                except StepRetry:
+                    continue
 
     else:
         provider = "openai"
@@ -529,7 +590,7 @@ def _step_embedding(state: dict) -> None:
         else:
             click.secho("  API key test failed. Check your key and try again.", fg="red")
             if not nav_confirm("  Continue anyway?", default=False):
-                raise SystemExit(1)
+                raise WizardCancel()
 
     state["provider"] = provider
     state["model"] = model
