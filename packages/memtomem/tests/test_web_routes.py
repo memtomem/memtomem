@@ -1937,6 +1937,7 @@ class TestRequireConfigured:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_symlinks
 class TestFsList:
     """Exercise the picker endpoint's allow-list, symlink, and i18n
     boundary handling. The endpoint isn't a security gate — ``mm web`` is

@@ -30,17 +30,50 @@ def _ollama_available() -> bool:
         return False
 
 
+def _can_create_symlink() -> bool:
+    """Probe whether the test runner can create filesystem symlinks.
+
+    On Windows, ``os.symlink`` requires either Developer Mode or
+    administrator privileges; without them every symlink-touching test
+    raises ``OSError: [WinError 1314]`` ("client does not hold the
+    required privilege"). CI is Linux-only, so this probe exists purely
+    to keep the suite runnable for contributors on a locked-down Windows
+    shell — they get a tidy SKIPPED row instead of a hard error in
+    fixture setup.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        target = Path(td) / "probe-target"
+        link = Path(td) / "probe-link"
+        target.touch()
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError):
+            return False
+    return True
+
+
 _OLLAMA_UP = _ollama_available()
+_CAN_SYMLINK = _can_create_symlink()
 
 
 def pytest_collection_modifyitems(config, items):
-    """Auto-skip tests marked with @pytest.mark.ollama when Ollama is down."""
-    if _OLLAMA_UP:
-        return
-    skip = pytest.mark.skip(reason="Ollama not running")
+    """Auto-skip tests whose marker prerequisites aren't met:
+
+    - ``@pytest.mark.ollama`` when Ollama isn't reachable.
+    - ``@pytest.mark.requires_symlinks`` when the filesystem can't make
+      symlinks (Windows without Developer Mode / admin shell).
+    """
+    skip_ollama = pytest.mark.skip(reason="Ollama not running")
+    skip_symlink = pytest.mark.skip(
+        reason="Filesystem cannot create symlinks (Windows without Developer Mode/admin)"
+    )
     for item in items:
-        if "ollama" in item.keywords:
-            item.add_marker(skip)
+        if not _OLLAMA_UP and "ollama" in item.keywords:
+            item.add_marker(skip_ollama)
+        if not _CAN_SYMLINK and "requires_symlinks" in item.keywords:
+            item.add_marker(skip_symlink)
 
 
 @pytest.fixture

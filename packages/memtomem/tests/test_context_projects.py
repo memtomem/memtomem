@@ -219,6 +219,7 @@ def test_discover_dedup_cwd_overlap_with_known(tmp_path: Path) -> None:
     assert scopes[0].label == "Server CWD"
 
 
+@pytest.mark.requires_symlinks
 def test_discover_symlink_dedup(tmp_path: Path) -> None:
     real = tmp_path / "real_project"
     real.mkdir()
