@@ -1580,7 +1580,7 @@ class TestMemoryDirsStatus:
         # ``STATE.memoryDirs`` keys come from ``/api/config`` (resolved),
         # so the status response must also return the resolved form or
         # the per-row badge lookup misses (#666).
-        real = (tmp_path / "real").resolve()
+        real = tmp_path / "real"
         real.mkdir()
         link = tmp_path / "link"
         link.symlink_to(real, target_is_directory=True)
@@ -1591,7 +1591,36 @@ class TestMemoryDirsStatus:
         assert resp.status_code == 200, resp.text
         dirs = resp.json()["dirs"]
         assert len(dirs) == 1
-        assert dirs[0]["path"] == str(real)
+        assert dirs[0]["path"] == str(real.resolve())
+
+    async def test_path_matches_config_endpoint(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        # Cross-endpoint parity guard. ``/api/config`` and
+        # ``/api/memory-dirs/status`` are read by the same frontend
+        # render pass (``STATE.memoryDirs`` keyed against
+        # ``STATE.memoryStatusByPath``); any future divergence in their
+        # path canonicalization re-introduces #666 with the same
+        # symptoms (per-row badge missing). Pin the parity invariant
+        # directly so the regression doesn't have to surface through
+        # the UI again.
+        real = tmp_path / "x"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+
+        app.state.config.indexing.memory_dirs = [link]
+
+        cfg_resp = await client.get("/api/config")
+        sts_resp = await client.get("/api/memory-dirs/status")
+        assert cfg_resp.status_code == 200, cfg_resp.text
+        assert sts_resp.status_code == 200, sts_resp.text
+
+        cfg_dirs = cfg_resp.json()["indexing"]["memory_dirs"]
+        sts_dirs = sts_resp.json()["dirs"]
+        assert len(cfg_dirs) == 1
+        assert len(sts_dirs) == 1
+        assert sts_dirs[0]["path"] == cfg_dirs[0]
 
     async def test_response_path_resolves_tilde(
         self,
