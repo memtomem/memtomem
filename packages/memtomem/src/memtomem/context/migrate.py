@@ -179,6 +179,21 @@ def _classify_row(
     asset_filename = ASSET_DIR_FILENAMES[asset_type]
     flat_exists = flat_path.is_file()
     dir_exists = (dir_path / asset_filename).is_file()
+
+    # Treat a lockfile entry without a usable ``installed_at`` as "no
+    # entry" — mirrors :func:`memtomem.context.dirty.is_asset_dirty`,
+    # which collapses both "no entry" and "entry but missing/non-string
+    # installed_at" into ``never_installed``. Otherwise migrate would
+    # silently proceed against a corrupt entry (no dirty check possible)
+    # and could overwrite user edits.
+    if lock_entry is not None and not isinstance(lock_entry.get("installed_at"), str):
+        logger.warning(
+            "migrate: %s/%s lockfile entry missing or invalid installed_at; "
+            "treating as never installed",
+            asset_type,
+            name,
+        )
+        lock_entry = None
     has_lock_entry = lock_entry is not None
 
     if not flat_exists and not dir_exists and not has_lock_entry:
@@ -340,7 +355,16 @@ def _execute_migrate(row: MigrateRow, *, force: bool) -> Path | None:
     target_dir = row.dir_path
     target_dir.mkdir(parents=True, exist_ok=True)
     asset_filename = ASSET_DIR_FILENAMES[row.asset_type]
-    os.replace(row.flat_path, target_dir / asset_filename)
+    target_file = target_dir / asset_filename
+    # Race defensive: classify ran with ``dir_exists=False`` but an
+    # external mutation between classify and execute could have created
+    # ``target_file``. ``os.replace`` would silently overwrite it; abort
+    # instead. The race policy (decision #11) accepts this gap as
+    # batch-level, not per-asset — surfacing it as an error keeps the
+    # other rows in the batch isolated and lets the user re-run.
+    if target_file.exists():
+        raise OSError(f"target {target_file} appeared after classify; refusing to overwrite")
+    os.replace(row.flat_path, target_file)
     return bak_path
 
 

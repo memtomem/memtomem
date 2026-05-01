@@ -559,23 +559,6 @@ def test_cli_force_without_apply_usage_error(tmp_path: Path, monkeypatch) -> Non
     assert "only valid with --apply" in result.output
 
 
-def test_cli_name_without_type_usage_error(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n")
-
-    runner = CliRunner()
-    # Click's `nargs` consumes the single token as TYPE, so to trigger the
-    # "name requires type" branch we use `--` to force two positionals.
-    # In practice the misuse `mm context migrate -- foo` is detected here.
-    # If Click absorbs the token as TYPE it will fall through to the
-    # Choice() validator first; that's also acceptable behaviour.
-    result = runner.invoke(context_group, ["migrate", "agents", "missing"])
-
-    # `agents missing` parses cleanly; just verify no crash. The name-w/o-type
-    # branch is exercised programmatically via classify_migrate above.
-    assert result.exit_code == 0
-
-
 def test_cli_yes_force_prints_warning(tmp_path: Path, monkeypatch) -> None:
     flat = _write_flat(tmp_path, "agents", "foo", b"v1\n")
     _add_lock_entry(tmp_path, "agents", "foo")
@@ -634,3 +617,106 @@ def test_cli_targeted_missing_asset(tmp_path: Path, monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert "No matching asset" in result.output
+
+
+# ── corrupt lockfile + race + adjacent-files defensive coverage ──────────
+
+
+def test_classify_lockfile_entry_missing_installed_at(tmp_path: Path) -> None:
+    """Corrupt lockfile entry (no installed_at) is treated as never_installed.
+
+    Mirrors ``dirty.is_asset_dirty`` semantics: a malformed entry must
+    NOT silently let migrate proceed with no dirty check. The flat file
+    falls through to ``skip_manual`` (manual provenance) instead.
+    """
+    import json
+
+    _write_flat(tmp_path, "agents", "foo", b"v1\n")
+    # Hand-craft a lockfile entry without ``installed_at`` — bypasses
+    # ``Lockfile.upsert_entry`` which would have written one.
+    lock_path = tmp_path / ".memtomem" / "lock.json"
+    lock_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "agents": {"foo": {"wiki_commit": "0" * 40}},
+            }
+        )
+    )
+
+    rows = classify_migrate(tmp_path)
+
+    assert len(rows) == 1
+    # No installed_at → entry treated as missing → flat falls into manual
+    assert rows[0].state == "skip_manual"
+    assert rows[0].has_lock_entry is False
+
+
+def test_migrate_one_target_appears_mid_execution(tmp_path: Path) -> None:
+    """Race between classify and execute: target_file appears, refuse to overwrite.
+
+    Builds a clean classify result (state=migrate, dir absent) and then
+    materializes ``dir/agent.md`` before calling ``migrate_one``. The
+    execute path must surface the race rather than silently overwriting
+    the new bytes.
+    """
+    flat = _write_flat(tmp_path, "agents", "foo", b"flat-bytes\n")
+    installed_at = _add_lock_entry(tmp_path, "agents", "foo")
+    epoch = datetime.fromisoformat(installed_at).timestamp()
+    os.utime(flat, (epoch, epoch))
+
+    rows = classify_migrate(tmp_path)
+    assert rows[0].state == "migrate"
+
+    # Simulate an external writer creating the target between classify
+    # and execute.
+    target_dir = tmp_path / ".memtomem" / "agents" / "foo"
+    target_dir.mkdir(parents=True)
+    target_file = target_dir / "agent.md"
+    target_file.write_bytes(b"raced bytes\n")
+
+    result = migrate_one(tmp_path, rows[0], force=False)
+
+    assert result.ok is False
+    assert "appeared after classify" in (result.error or "")
+    # Raced bytes preserved (NOT overwritten by flat content).
+    assert target_file.read_bytes() == b"raced bytes\n"
+    # Flat preserved too (operation atomic — either both move or neither).
+    assert flat.read_bytes() == b"flat-bytes\n"
+
+
+def test_migrate_one_keeps_unrelated_dir_contents(tmp_path: Path) -> None:
+    """Empty target dir with unrelated siblings is fine; non-target files survive.
+
+    Edge case: ``target_dir`` already exists (e.g. partial install left
+    ``scripts/`` or other extras) but does not contain ``agent.md`` /
+    ``command.md``. Migration should proceed and leave the unrelated
+    files untouched — only the asset manifest file is created.
+    """
+    flat = _write_flat(tmp_path, "agents", "foo", b"agent body\n")
+    installed_at = _add_lock_entry(tmp_path, "agents", "foo")
+    epoch = datetime.fromisoformat(installed_at).timestamp()
+    os.utime(flat, (epoch, epoch))
+
+    # Pre-create the dir with a sibling file (simulates a previous
+    # partial install / user-created scaffolding).
+    target_dir = tmp_path / ".memtomem" / "agents" / "foo"
+    target_dir.mkdir(parents=True)
+    sibling = target_dir / "scripts" / "helper.sh"
+    sibling.parent.mkdir(parents=True)
+    sibling.write_bytes(b"#!/bin/sh\necho hi\n")
+    pre_sibling_bytes = sibling.read_bytes()
+    pre_sibling_mtime = sibling.stat().st_mtime
+
+    rows = classify_migrate(tmp_path)
+    assert rows[0].state == "migrate"
+    result = migrate_one(tmp_path, rows[0], force=False)
+
+    assert result.ok is True
+    # Asset manifest landed
+    assert (target_dir / "agent.md").read_bytes() == b"agent body\n"
+    # Unrelated sibling untouched
+    assert sibling.read_bytes() == pre_sibling_bytes
+    assert sibling.stat().st_mtime == pre_sibling_mtime
+    # Flat removed
+    assert not flat.exists()
