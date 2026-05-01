@@ -26,7 +26,7 @@ from memtomem.models import Chunk, ChunkMetadata
 
 def _make_chunk_with(
     content: str,
-    source: str = "/tmp/test.md",
+    source: str = "test.md",
     heading: tuple[str, ...] = (),
     namespace: str = "default",
 ) -> Chunk:
@@ -1065,14 +1065,14 @@ class TestApplyNamespace:
         """Other metadata fields should be preserved."""
         chunk = _make_chunk_with(
             "content",
-            source="/tmp/src.md",
+            source="src.md",
             heading=("H1", "H2"),
         )
         chunk_list = [chunk]
         result = IndexEngine._apply_namespace(chunk_list, "project")
 
         r = result[0]
-        assert r.metadata.source_file == Path("/tmp/src.md")
+        assert r.metadata.source_file == Path("src.md")
         assert r.metadata.heading_hierarchy == ("H1", "H2")
         assert r.content == "content"
         assert r.metadata.namespace == "project"
@@ -1128,8 +1128,8 @@ class TestMergeShortChunks:
 
     def test_no_merge_different_sources(self):
         """Chunks from different source files should NOT merge."""
-        c1 = _make_chunk_with("file A", source="/tmp/a.md", heading=("H1",))
-        c2 = _make_chunk_with("file B", source="/tmp/b.md", heading=("H1",))
+        c1 = _make_chunk_with("file A", source="a.md", heading=("H1",))
+        c2 = _make_chunk_with("file B", source="b.md", heading=("H1",))
 
         result = _merge_short_chunks([c1, c2], min_tokens=50, max_tokens=2000)
         assert len(result) == 2
@@ -1173,7 +1173,7 @@ class TestMergeShortChunks:
         c1 = Chunk(
             content="first",
             metadata=ChunkMetadata(
-                source_file=Path("/tmp/t.md"),
+                source_file=Path("t.md"),
                 heading_hierarchy=("H1",),
                 start_line=1,
                 end_line=5,
@@ -1182,7 +1182,7 @@ class TestMergeShortChunks:
         c2 = Chunk(
             content="second",
             metadata=ChunkMetadata(
-                source_file=Path("/tmp/t.md"),
+                source_file=Path("t.md"),
                 heading_hierarchy=("H1",),
                 start_line=6,
                 end_line=10,
@@ -1277,8 +1277,8 @@ class TestAddOverlap:
 
     def test_different_sources_no_overlap(self):
         """Chunks from different files should NOT get overlap."""
-        c1 = _make_chunk_with("File A", source="/tmp/a.md")
-        c2 = _make_chunk_with("File B", source="/tmp/b.md")
+        c1 = _make_chunk_with("File A", source="a.md")
+        c2 = _make_chunk_with("File B", source="b.md")
 
         result = _add_overlap([c1, c2], overlap_tokens=10)
         assert result[0].metadata.overlap_after == 0

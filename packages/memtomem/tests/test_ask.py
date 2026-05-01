@@ -6,7 +6,7 @@ from uuid import uuid4
 from memtomem.models import Chunk, ChunkMetadata, SearchResult
 
 
-def _make_chunk(content, source="/tmp/test.md", tags=(), heading=()):
+def _make_chunk(content, source="test.md", tags=(), heading=()):
     return Chunk(
         content=content,
         metadata=ChunkMetadata(
@@ -19,7 +19,7 @@ def _make_chunk(content, source="/tmp/test.md", tags=(), heading=()):
     )
 
 
-def _make_result(content, score, rank, source="/tmp/test.md", tags=(), heading=()):
+def _make_result(content, score, rank, source="test.md", tags=(), heading=()):
     chunk = _make_chunk(content, source, tags, heading)
     return SearchResult(chunk=chunk, score=score, rank=rank, source="fused")
 
@@ -45,7 +45,7 @@ class TestMemAskFormatting:
                 if r.chunk.metadata.heading_hierarchy
                 else ""
             )
-            source = str(r.chunk.metadata.source_file).split("/")[-1]
+            source = Path(r.chunk.metadata.source_file).name
             label = heading or source
             lines.append(f"### [{r.rank}] {label} (relevance: {r.score:.2f})")
             lines.append(r.chunk.content.strip())

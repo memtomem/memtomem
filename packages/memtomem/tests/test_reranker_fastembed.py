@@ -79,7 +79,7 @@ async def test_unknown_model_error_surfaces_supported_hint() -> None:
     )
     chunk = Chunk(
         content="any content",
-        metadata=ChunkMetadata(source_file=Path("/tmp/test.md")),
+        metadata=ChunkMetadata(source_file=Path("test.md")),
         id=uuid4(),
         embedding=[],
     )

@@ -1,0 +1,17 @@
+# Pin LF line endings on text files so a Windows checkout (default
+# `core.autocrlf=true`) doesn't normalize to CRLF and break byte-exact
+# comparisons. The motivating case is `test_install_skill_copies_tree`,
+# which asserts `read_bytes() == b"#!/bin/bash\necho hi\n"` against a
+# tracked fixture file — under autocrlf the bytes become `\r\n` and the
+# assertion fails. Source has no `\r\n` literals today; this just
+# preserves the existing on-disk contract across platforms.
+
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.py   text eol=lf
+*.md   text eol=lf
+*.toml text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf

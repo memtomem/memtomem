@@ -249,8 +249,8 @@ class TestBinaryHintPerOrigin:
         fake_profile = init_cmd.RuntimeProfile(
             cwd_install_type="pypi",
             cwd_install_dir=None,
-            runtime_interpreter=Path("/usr/bin/python3"),
-            workspace_venv_path=Path("/tmp/foo/.venv") if origin == "venv-relative" else None,
+            runtime_interpreter=Path("python3"),
+            workspace_venv_path=Path("foo/.venv") if origin == "venv-relative" else None,
             mm_binary_origin=origin,
             runtime_matches_workspace=(origin == "venv-relative"),
         )
