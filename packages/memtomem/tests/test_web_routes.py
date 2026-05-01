@@ -1631,8 +1631,12 @@ class TestMemoryDirsStatus:
     ) -> None:
         # Pins the invariant the docstring originally guarded — a config
         # entry like ``~/memories`` must come back as the expanded
-        # absolute path, not the literal tilde form (#666).
+        # absolute path, not the literal tilde form (#666). ``HOME`` is
+        # the POSIX home var; Windows ``Path.expanduser()`` reads
+        # ``USERPROFILE`` first and ignores ``HOME``, so monkeypatch
+        # both for cross-platform coverage.
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
         target = tmp_path / "memories"
         target.mkdir()
 
