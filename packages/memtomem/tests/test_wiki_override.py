@@ -55,7 +55,7 @@ def test_render_seed_bytes_for_agents_uses_vendor_generator(wiki_root: Path) -> 
     agent_dir.mkdir(parents=True)
     (agent_dir / "agent.md").write_text(_AGENT_CANONICAL, encoding="utf-8")
 
-    seed = render_seed_bytes(store, "agents", "bar", "codex")
+    seed, dropped = render_seed_bytes(store, "agents", "bar", "codex")
 
     text = seed.decode("utf-8")
     assert "name = " in text, "TOML name key absent — generator did not emit TOML?"
@@ -63,6 +63,8 @@ def test_render_seed_bytes_for_agents_uses_vendor_generator(wiki_root: Path) -> 
     assert not text.lstrip().startswith("---"), (
         "seed starts with Markdown frontmatter — codex generator returned Markdown?"
     )
+    # Minimal canonical (no skills/isolation/temperature/kind) → codex drops nothing.
+    assert dropped == []
 
 
 def test_render_seed_bytes_for_commands_uses_vendor_generator(wiki_root: Path) -> None:
@@ -75,7 +77,7 @@ def test_render_seed_bytes_for_commands_uses_vendor_generator(wiki_root: Path) -
     cmd_dir.mkdir(parents=True)
     (cmd_dir / "command.md").write_text(_COMMAND_CANONICAL, encoding="utf-8")
 
-    seed = render_seed_bytes(store, "commands", "baz", "gemini")
+    seed, dropped = render_seed_bytes(store, "commands", "baz", "gemini")
 
     text = seed.decode("utf-8")
     assert "prompt = " in text, "TOML prompt key absent — generator did not emit TOML?"
@@ -83,6 +85,8 @@ def test_render_seed_bytes_for_commands_uses_vendor_generator(wiki_root: Path) -
     assert not text.lstrip().startswith("---"), (
         "seed starts with Markdown frontmatter — gemini generator returned Markdown?"
     )
+    # Minimal canonical (no argument-hint/allowed-tools/model) → gemini drops nothing.
+    assert dropped == []
 
 
 def test_render_seed_bytes_codex_commands_raises_not_implemented(
