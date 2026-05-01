@@ -6207,3 +6207,259 @@ class TestOllamaWindowsHangFix:
         assert captured.get("stdout") is _sp.DEVNULL
         assert captured.get("stderr") is _sp.DEVNULL
         assert not captured.get("capture_output")
+
+
+class TestOllamaHasModelTriState:
+    """``_ollama_has_model`` returns ``bool | None`` so callers can
+    distinguish "server unreachable" from "model not installed" (#626).
+    The original ``False``-on-error conflation was the root of the
+    "server timeout misread as model absent" bug."""
+
+    def test_returncode_nonzero_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``ollama list`` exiting non-zero (e.g. server unreachable) must
+        return ``None``, not ``False``."""
+        import subprocess as _sp
+
+        from memtomem.cli import init_cmd
+
+        def _fake_run(cmd: list, **kw: object) -> _sp.CompletedProcess:
+            return _sp.CompletedProcess(cmd, returncode=1, stdout="", stderr="Error: timed out")
+
+        monkeypatch.setattr(init_cmd, "_run", _fake_run)
+        assert init_cmd._ollama_has_model("nomic-embed-text") is None
+
+    def test_timeout_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from memtomem.cli import init_cmd
+
+        def _fake_run(cmd: list, **kw: object) -> object:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=5)
+
+        monkeypatch.setattr(init_cmd, "_run", _fake_run)
+        assert init_cmd._ollama_has_model("nomic-embed-text") is None
+
+    def test_filenotfound_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from memtomem.cli import init_cmd
+
+        def _fake_run(cmd: list, **kw: object) -> object:
+            raise FileNotFoundError()
+
+        monkeypatch.setattr(init_cmd, "_run", _fake_run)
+        assert init_cmd._ollama_has_model("nomic-embed-text") is None
+
+    def test_model_present_returns_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import subprocess as _sp
+
+        from memtomem.cli import init_cmd
+
+        def _fake_run(cmd: list, **kw: object) -> _sp.CompletedProcess:
+            return _sp.CompletedProcess(
+                cmd, returncode=0, stdout="nomic-embed-text:latest    768d ..."
+            )
+
+        monkeypatch.setattr(init_cmd, "_run", _fake_run)
+        assert init_cmd._ollama_has_model("nomic-embed-text") is True
+
+    def test_model_absent_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Server reachable but model missing — ``False``, distinct from
+        ``None``."""
+        import subprocess as _sp
+
+        from memtomem.cli import init_cmd
+
+        def _fake_run(cmd: list, **kw: object) -> _sp.CompletedProcess:
+            return _sp.CompletedProcess(cmd, returncode=0, stdout="other-model:latest")
+
+        monkeypatch.setattr(init_cmd, "_run", _fake_run)
+        assert init_cmd._ollama_has_model("nomic-embed-text") is False
+
+
+class TestStepEmbeddingOllamaGuards:
+    """``_step_embedding`` Ollama branch must surface failures via
+    ``fail_step`` instead of silently advancing the wizard (#626).
+
+    These tests drive the step directly with monkeypatched probes and
+    fed-in input. The precise pin is: when an action fails, the wizard
+    either retries, returns to the previous step, or cancels — it does
+    NOT fall through to subsequent steps."""
+
+    @staticmethod
+    def _patch_ollama_env(
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        running: object,
+        has_model: object,
+    ) -> None:
+        """Patch the Ollama probes so the step exercises only the path
+        under test. ``running`` and ``has_model`` are callables (allowing
+        per-call sequencing) or constants."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd, "_ollama_available", lambda: True)
+        monkeypatch.setattr(init_cmd, "_have_module", lambda mod: True)
+        monkeypatch.setattr(
+            init_cmd,
+            "_ollama_running",
+            running if callable(running) else (lambda r=running: r),
+        )
+        monkeypatch.setattr(
+            init_cmd,
+            "_ollama_has_model",
+            has_model if callable(has_model) else (lambda model, hm=has_model: hm),
+        )
+
+    def test_server_not_running_q_cancels_wizard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Server unreachable + user picks 'q' → ``WizardCancel``. The
+        wizard must NOT advance past ``_step_embedding``."""
+        import click
+        from click.testing import CliRunner
+
+        from memtomem.cli import init_cmd
+        from memtomem.cli.wizard import WizardCancel
+
+        self._patch_ollama_env(monkeypatch, running=False, has_model=True)
+
+        captured: dict[str, BaseException | None] = {"exc": None}
+
+        @click.command()
+        def cmd() -> None:
+            try:
+                init_cmd._step_embedding({})
+            except WizardCancel as exc:
+                captured["exc"] = exc
+
+        # choice=3 (Ollama) → server check fails → 'q'
+        result = CliRunner().invoke(cmd, [], input="3\nq\n")
+        assert "Ollama server is not reachable" in result.output
+        assert isinstance(captured["exc"], WizardCancel)
+
+    def test_server_not_running_r_retries_until_up(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Server down → 'r' → server up on retry → step completes
+        normally without re-prompting the provider choice."""
+        import click
+        from click.testing import CliRunner
+
+        from memtomem.cli import init_cmd
+
+        running_calls = {"n": 0}
+
+        def fake_running() -> bool:
+            running_calls["n"] += 1
+            return running_calls["n"] >= 2
+
+        self._patch_ollama_env(monkeypatch, running=fake_running, has_model=True)
+
+        state: dict = {}
+
+        @click.command()
+        def cmd() -> None:
+            init_cmd._step_embedding(state)
+
+        # choice=3 → server fails → r → server up → model 1
+        result = CliRunner().invoke(cmd, [], input="3\nr\n1\n")
+        assert result.exit_code == 0
+        assert "Ollama server is not reachable" in result.output
+        assert state.get("provider") == "ollama"
+        assert state.get("model") == "nomic-embed-text"
+        assert running_calls["n"] >= 2
+
+    def test_has_model_none_b_raises_step_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Tri-state ``None`` from ``_ollama_has_model`` (server returned
+        an error / timed out) surfaces explicitly — user picks 'b' to
+        return to the embedding choice."""
+        import click
+        from click.testing import CliRunner
+
+        from memtomem.cli import init_cmd
+        from memtomem.cli.wizard import StepBack
+
+        self._patch_ollama_env(monkeypatch, running=True, has_model=None)
+
+        captured: dict[str, BaseException | None] = {"exc": None}
+
+        @click.command()
+        def cmd() -> None:
+            try:
+                init_cmd._step_embedding({})
+            except StepBack as exc:
+                captured["exc"] = exc
+
+        # choice=3 → model 1 → has_model None → 'b'
+        result = CliRunner().invoke(cmd, [], input="3\n1\nb\n")
+        assert "Could not verify whether" in result.output
+        assert isinstance(captured["exc"], StepBack)
+
+    def test_pull_failure_r_retries_pull_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Pull fails → 'r' → second pull succeeds. The retry must NOT
+        re-prompt the model choice (inner retry loop)."""
+        import click
+        import subprocess as _sp
+
+        from click.testing import CliRunner
+
+        from memtomem.cli import init_cmd
+
+        # Server up, model not yet installed → pull path.
+        self._patch_ollama_env(monkeypatch, running=True, has_model=False)
+
+        pull_calls = {"n": 0}
+
+        def fake_run(cmd: list, **kw: object) -> _sp.CompletedProcess:
+            pull_calls["n"] += 1
+            if pull_calls["n"] == 1:
+                return _sp.CompletedProcess(cmd, returncode=1, stdout="", stderr="Error: timed out")
+            return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(init_cmd, "_run", fake_run)
+
+        state: dict = {}
+
+        @click.command()
+        def cmd() -> None:
+            init_cmd._step_embedding(state)
+
+        # choice=3 → model 1 → pull yes → fail → r → success
+        result = CliRunner().invoke(cmd, [], input="3\n1\nY\nr\n")
+        assert result.exit_code == 0
+        assert "Pull failed" in result.output
+        assert "pulled successfully" in result.output
+        assert state.get("provider") == "ollama"
+        assert pull_calls["n"] == 2
+
+    def test_pull_failure_q_does_not_advance_to_next_step(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The core #626 invariant: when ``ollama pull`` fails and the
+        user picks 'q', the wizard does NOT silently advance to the next
+        step. Pinned by composing ``_step_embedding`` with a sentinel
+        next step that must never run."""
+        import click
+        import subprocess as _sp
+
+        from click.testing import CliRunner
+
+        from memtomem.cli import init_cmd
+        from memtomem.cli.wizard import run_steps
+
+        self._patch_ollama_env(monkeypatch, running=True, has_model=False)
+
+        def fake_run(cmd: list, **kw: object) -> _sp.CompletedProcess:
+            return _sp.CompletedProcess(cmd, returncode=1, stdout="", stderr="Error: timed out")
+
+        monkeypatch.setattr(init_cmd, "_run", fake_run)
+
+        next_step_called: list[bool] = []
+
+        def sentinel_next_step(state: dict) -> None:
+            next_step_called.append(True)
+
+        @click.command()
+        def cmd() -> None:
+            run_steps([init_cmd._step_embedding, sentinel_next_step])
+
+        # choice=3 → model 1 → pull yes → fail → q
+        result = CliRunner().invoke(cmd, [], input="3\n1\nY\nq\n")
+        assert "Pull failed" in result.output
+        assert "Wizard cancelled" in result.output
+        # The whole point of #626: a failed pull does NOT silently
+        # advance to the next step.
+        assert next_step_called == []
