@@ -1,22 +1,22 @@
 """Server liveness probe shared by ``mm uninstall`` and ``mm upgrade``.
 
 Both commands need to know whether a ``memtomem-server`` process is currently
-holding the pid lock file. The probe uses ``fcntl.flock(LOCK_EX | LOCK_NB)`` —
-if we can acquire it, no live writer is holding the file (it's a stale
+holding the pid lock file. The probe uses ``portalocker.lock(LOCK_EX | LOCK_NB)``
+— if we can acquire it, no live writer is holding the file (it's a stale
 leftover or fresh and unowned). If we cannot, a writer is alive, regardless
 of whether the recorded PID is still valid or has been recycled.
 
-On Windows ``fcntl`` is unavailable; the probe falls back to conservative
-"pid file exists → assume alive" so callers can decide how to treat the
-ambiguity (uninstall: refuse without ``--force``; upgrade: skip kill stage
-and warn).
+Cross-platform via ``portalocker`` (POSIX ``fcntl.flock`` / Windows
+``LockFileEx``); both surface the same non-blocking-acquire contract, so
+the probe is real on every supported OS.
 """
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+import portalocker
 
 from memtomem._runtime_paths import legacy_server_pid_path, server_pid_path
 
@@ -29,16 +29,17 @@ class ServerState:
 
 
 def probe_pid_file(pid_file: Path) -> ServerState:
-    """Probe a single pid file via ``fcntl.flock``.
+    """Probe a single pid file via ``portalocker``.
 
     ``server/__init__.py:main`` opens this file and holds an exclusive
-    flock for the entire server lifetime. If we can acquire
+    lock for the entire server lifetime. If we can acquire
     ``LOCK_EX | LOCK_NB`` on it, no live writer is holding it. If we
     cannot, a writer is alive — regardless of whether the recorded PID
     is still valid (kernel may have recycled it; see #387).
 
-    On Windows ``fcntl`` is unavailable; falls back to "pid file exists →
-    assume alive". See #448.
+    Real probe on every OS; portalocker dispatches to ``fcntl.flock`` on
+    POSIX and ``LockFileEx`` on Windows. Replaces the prior conservative
+    "pid file exists → assume alive" Windows fallback (see #448, #625).
     """
     if not pid_file.exists():
         return ServerState(alive=False, pid=None, pid_file=None)
@@ -50,24 +51,26 @@ def probe_pid_file(pid_file: Path) -> ServerState:
     except (OSError, ValueError):
         pid = None
 
-    if sys.platform == "win32":
-        return ServerState(alive=True, pid=pid, pid_file=pid_file)
-
-    import fcntl
-
+    # ``"rb+"`` (read-write) not ``"rb"``: portalocker's default Windows
+    # backend (``MsvcrtLocker``) calls ``msvcrt.locking``, which the C
+    # runtime requires to be opened for writing — read-only handles fail
+    # with ``EACCES`` and look indistinguishable from a real holder.
+    # POSIX ``flock`` doesn't care about access mode, but the file is
+    # already user-owned, so always opening R/W keeps both backends happy.
     try:
-        fp = open(pid_file, "rb")
+        fp = open(pid_file, "rb+")
     except OSError:
         return ServerState(alive=True, pid=pid, pid_file=pid_file)
 
     try:
         try:
-            fcntl.flock(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+            portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
+        except (portalocker.LockException, BlockingIOError, OSError):
+            # POSIX raises BlockingIOError; portalocker's Windows backend
+            # wraps Win32 errors as LockException. Treat any of them as
+            # "another holder, server is alive."
             return ServerState(alive=True, pid=pid, pid_file=pid_file)
-        except OSError:
-            return ServerState(alive=True, pid=pid, pid_file=pid_file)
-        fcntl.flock(fp, fcntl.LOCK_UN)
+        portalocker.unlock(fp)
         return ServerState(alive=False, pid=pid, pid_file=pid_file)
     finally:
         fp.close()

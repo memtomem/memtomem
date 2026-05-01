@@ -37,12 +37,13 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sys
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import IO, Awaitable, Callable, Iterable
+
+import portalocker
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +140,7 @@ def _save(path: Path, entries: dict[str, QueueEntry]) -> None:
 
 
 class _Lock:
-    """``flock(LOCK_EX)`` on a sidecar lockfile next to the queue.
+    """``portalocker.lock(LOCK_EX)`` on a sidecar lockfile next to the queue.
 
     The lockfile is deliberately *not* the queue file itself. ``_save``
     replaces the queue via ``os.replace``, which rebinds the path to a
@@ -152,9 +153,10 @@ class _Lock:
     process locks the same inode for the duration of its critical
     section, so serialization is correct.
 
-    POSIX only; on Windows the lock is a no-op and concurrent callers
-    may interleave (acceptable: hooks fire serially per Claude Code
-    session, the supported case).
+    Cross-platform via ``portalocker``; concurrent callers serialize
+    on Windows the same as POSIX (replaces the prior Windows-no-op
+    fallback that relied on hooks firing serially per Claude Code
+    session — see #625).
     """
 
     def __init__(self, path: Path) -> None:
@@ -164,19 +166,13 @@ class _Lock:
     def __enter__(self) -> "_Lock":
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
         self._fp = open(self._lock_path, "a+b")
-        if sys.platform != "win32":
-            import fcntl
-
-            fcntl.flock(self._fp, fcntl.LOCK_EX)
+        portalocker.lock(self._fp, portalocker.LOCK_EX)
         return self
 
     def __exit__(self, *exc) -> None:
         if self._fp is None:
             return
-        if sys.platform != "win32":
-            import fcntl
-
-            fcntl.flock(self._fp, fcntl.LOCK_UN)
+        portalocker.unlock(self._fp)
         self._fp.close()
         self._fp = None
 

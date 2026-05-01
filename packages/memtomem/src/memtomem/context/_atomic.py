@@ -22,16 +22,12 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-if sys.platform == "win32":
-    import msvcrt
-else:
-    import fcntl
+import portalocker
 
 logger = logging.getLogger(__name__)
 
@@ -65,41 +61,31 @@ def _file_lock(lock_path: Path) -> Iterator[None]:
     (``feedback_sidecar_lockfile_for_replaced_files.md``, PR #548). The
     lockfile itself is never renamed, so its inode is stable.
 
-    Cross-platform: POSIX uses ``fcntl.flock`` (advisory whole-file lock);
-    Windows uses ``msvcrt.locking`` (mandatory byte-range lock at offset 0).
-    Semantic differences (advisory vs mandatory, whole-file vs single byte)
-    don't matter here because the lockfile is private — only this
-    contextmanager opens it — so all contenders see the same lock.
-
-    Windows note: ``msvcrt.locking(LK_LOCK)`` blocks for ~10 seconds before
-    raising ``OSError``, unlike POSIX ``flock(LOCK_EX)`` which blocks
-    indefinitely. The lock window here is intentionally narrow (see callers
-    in :mod:`memtomem.context.lockfile` / :mod:`memtomem.context.projects`
-    — only the ``load → mutate dict → atomic_write_bytes`` triple), so the
-    timeout is generous; heavy contention (antivirus scans, interactive
-    debuggers) could still surface as a transient ``OSError`` rather than
-    a wait.
+    Cross-platform via ``portalocker`` (POSIX ``fcntl.flock`` / Windows
+    ``LockFileEx``). Both backends block indefinitely on ``LOCK_EX``,
+    matching POSIX semantics; the call sites in
+    :mod:`memtomem.context.lockfile` / :mod:`memtomem.context.projects`
+    keep the lock window narrow (``load → mutate dict → atomic_write_bytes``)
+    so contention is bounded even without an explicit timeout.
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # os.open + os.fdopen: pin 0o600 mode while still handing portalocker
+    # a file object — its Windows backend calls .fileno() on the argument,
+    # so a bare fd int won't do.
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        if sys.platform == "win32":
-            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-        else:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
+        fp = os.fdopen(fd, "rb+")
+    except BaseException:
+        os.close(fd)
+        raise
+    try:
+        portalocker.lock(fp, portalocker.LOCK_EX)
         try:
-            if sys.platform == "win32":
-                # msvcrt.locking acts on the byte range starting at the
-                # current file position; reset to 0 so we unlock the
-                # same byte we locked above.
-                os.lseek(fd, 0, os.SEEK_SET)
-                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(fd, fcntl.LOCK_UN)
+            yield
         finally:
-            os.close(fd)
+            portalocker.unlock(fp)
+    finally:
+        fp.close()
 
 
 def _lock_path_for(data_path: Path) -> Path:
