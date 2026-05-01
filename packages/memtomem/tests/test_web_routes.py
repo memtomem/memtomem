@@ -1571,6 +1571,50 @@ class TestMemoryDirsStatus:
         assert by_path[str(plans)]["provider"] == "claude"
         assert by_path[str(claude_mem)]["provider"] == "claude"
 
+    async def test_response_path_resolves_symlink(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        # Wizard-written config never goes through ``/api/memory-dirs/add``,
+        # so a symlinked prefix (e.g. macOS ``/tmp`` → ``/private/tmp``)
+        # lands in ``config.indexing.memory_dirs`` unresolved. Frontend
+        # ``STATE.memoryDirs`` keys come from ``/api/config`` (resolved),
+        # so the status response must also return the resolved form or
+        # the per-row badge lookup misses (#666).
+        real = (tmp_path / "real").resolve()
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+
+        app.state.config.indexing.memory_dirs = [link]
+
+        resp = await client.get("/api/memory-dirs/status")
+        assert resp.status_code == 200, resp.text
+        dirs = resp.json()["dirs"]
+        assert len(dirs) == 1
+        assert dirs[0]["path"] == str(real)
+
+    async def test_response_path_resolves_tilde(
+        self,
+        app,
+        client: AsyncClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Pins the invariant the docstring originally guarded — a config
+        # entry like ``~/memories`` must come back as the expanded
+        # absolute path, not the literal tilde form (#666).
+        monkeypatch.setenv("HOME", str(tmp_path))
+        target = tmp_path / "memories"
+        target.mkdir()
+
+        app.state.config.indexing.memory_dirs = ["~/memories"]
+
+        resp = await client.get("/api/memory-dirs/status")
+        assert resp.status_code == 200, resp.text
+        dirs = resp.json()["dirs"]
+        assert len(dirs) == 1
+        assert dirs[0]["path"] == str(target.resolve())
+
 
 class TestOpenMemoryDir:
     """``POST /api/memory-dirs/open`` reveals a registered dir in the OS

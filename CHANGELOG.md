@@ -254,6 +254,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm web` Sources page per-row stats badge now renders for
+  config-raw memory_dirs.** `/api/memory-dirs/status` was the only
+  `/api/memory-dirs/*` endpoint that returned the path with
+  `expanduser()` only — every sibling endpoint and `/api/config` use
+  `expanduser().resolve()`. When `mm init` (or any wizard pass) wrote
+  a tilde-prefixed entry like `~/memories` or a path under a symlinked
+  prefix like macOS `/tmp` to `config.indexing.memory_dirs`, the
+  frontend's `STATE.memoryDirs` (resolved) and
+  `STATE.memoryStatusByPath` keys (unresolved) diverged, the per-row
+  lookup missed, and the file/chunk/created badge was skipped. Status
+  now resolves on read so the badge renders regardless of how the
+  config row was originally persisted. (#666)
 - **`mm web` Sources tab now shows orphan-indexed files instead of
   silently dropping them.** The `/api/sources` response carries rows
   with `memory_dir=null, kind=null` for two paths — Index-tab uploads

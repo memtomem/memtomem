@@ -258,7 +258,7 @@ async def memory_dir_stats(
 
     out: list[dict[str, object]] = []
     for d, file_count in zip(dir_list, file_counts):
-        dir_path = Path(d).expanduser()
+        dir_path = Path(d).expanduser().resolve()
         exists = dir_path.exists()
         prefix = norm_dir_prefix(d)
 
@@ -279,13 +279,11 @@ async def memory_dir_stats(
         category = categorize_memory_dir(d)
         out.append(
             {
-                # Return the expanded path so the response shape matches
-                # the other ``/api/memory-dirs/*`` endpoints (all of which
-                # use ``str(Path(p).expanduser().resolve())``). Returning
-                # the config-raw form (e.g. ``~/memories``) caused the web
-                # UI's per-row lookup to miss tilde-prefixed entries —
-                # every other dir rendered file/chunk/created badges
-                # while ``~/memories`` came back blank.
+                # Return the resolved form so per-row keys match the
+                # sibling ``/api/memory-dirs/*`` and ``/api/config``
+                # endpoints (all use ``str(Path(p).expanduser().resolve())``).
+                # Reverting to expanduser-only makes Web UI badge lookup
+                # miss tilde- or symlink-prefixed entries (#666).
                 "path": str(dir_path),
                 "chunk_count": chunk_count,
                 "source_file_count": source_file_count,
