@@ -184,3 +184,89 @@ def skill_override_cmd(name: str, vendor: str, force: bool, editor: bool) -> Non
     ``mm context install`` snapshots pick it up.
     """
     _run_seed_override("skills", name, vendor, force=force, editor=editor)
+
+
+# ── Agent subgroup ──────────────────────────────────────────────────────
+
+
+@wiki.group("agent")
+def agent_group() -> None:
+    """Per-agent operations on the wiki (override seeding, ...)."""
+
+
+@agent_group.command("override")
+@click.argument("name")
+@click.option(
+    "--vendor",
+    "-v",
+    type=click.Choice(["claude", "gemini", "codex"]),
+    required=True,
+    help="Which runtime this override targets.",
+)
+@click.option(
+    "--force",
+    "-f",
+    is_flag=True,
+    help="Overwrite existing override file in the wiki (creates .bak).",
+)
+@click.option(
+    "--editor",
+    "-e",
+    is_flag=True,
+    help="Open $EDITOR on the seeded file after writing.",
+)
+def agent_override_cmd(name: str, vendor: str, force: bool, editor: bool) -> None:
+    """Seed a wiki override file from the canonical agent content.
+
+    ``mm wiki agent override <name> --vendor <claude|gemini|codex>`` writes
+    ``<wiki>/agents/<name>/overrides/<vendor>.<ext>``. Bytes come from the
+    vendor renderer applied to the canonical ``agent.md`` so the seed
+    matches what the runtime would produce. Fields the vendor format
+    cannot represent (e.g. gemini agents drop ``skills`` / ``isolation``)
+    are surfaced via a stderr warning so the editor knows what the
+    runtime won't see.
+    """
+    _run_seed_override("agents", name, vendor, force=force, editor=editor)
+
+
+# ── Command subgroup ────────────────────────────────────────────────────
+
+
+@wiki.group("command")
+def command_group() -> None:
+    """Per-command operations on the wiki (override seeding, ...)."""
+
+
+@command_group.command("override")
+@click.argument("name")
+@click.option(
+    "--vendor",
+    "-v",
+    type=click.Choice(["claude", "gemini", "codex"]),
+    required=True,
+    help="Which runtime this override targets.",
+)
+@click.option(
+    "--force",
+    "-f",
+    is_flag=True,
+    help="Overwrite existing override file in the wiki (creates .bak).",
+)
+@click.option(
+    "--editor",
+    "-e",
+    is_flag=True,
+    help="Open $EDITOR on the seeded file after writing.",
+)
+def command_override_cmd(name: str, vendor: str, force: bool, editor: bool) -> None:
+    """Seed a wiki override file from the canonical command content.
+
+    ``mm wiki command override <name> --vendor <claude|gemini|codex>`` writes
+    ``<wiki>/commands/<name>/overrides/<vendor>.<ext>``. ``--vendor codex``
+    is a permanent placeholder (no ``codex_commands`` generator); the
+    command surfaces a classified error rather than silently failing.
+    Fields the vendor format cannot represent (e.g. gemini commands drop
+    ``argument-hint`` / ``allowed-tools`` / ``model``) are surfaced via a
+    stderr warning so the editor knows what the runtime won't see.
+    """
+    _run_seed_override("commands", name, vendor, force=force, editor=editor)
