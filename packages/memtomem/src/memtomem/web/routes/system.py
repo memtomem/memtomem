@@ -1,4 +1,14 @@
-"""Stats, indexing, and memory-add endpoints."""
+"""Stats, indexing, and memory-add endpoints.
+
+Path canonicalization invariant: every site in this module that accepts
+or returns a ``memory_dir`` path uses ``str(Path(p).expanduser().resolve())``.
+The Web UI keys per-row state on the resolved string (see
+``static/app.js`` ``_renderMemoryDirGroup``), so reverting any single
+site to ``expanduser``-only re-introduces #666 — the per-row stats
+badge silently disappears for tilde-prefixed (``~/memories``) or
+symlinked-prefix entries (macOS ``/tmp`` → ``/private/tmp``). Mirrored
+on the read side at ``memtomem.indexing.engine.memory_dir_stats``.
+"""
 
 from __future__ import annotations
 
