@@ -37,6 +37,10 @@ def _make_safe_xdg(tmp_path: Path) -> Path:
     return xdg
 
 
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid"),
+    reason="XDG/mode-bit semantics are POSIX-only; Windows-equivalent tracked in #637",
+)
 class TestRuntimeDir:
     def test_uses_xdg_runtime_dir_when_set(self, tmp_path, monkeypatch):
         xdg = _make_safe_xdg(tmp_path)
@@ -122,6 +126,10 @@ class TestRuntimeDir:
         assert result.parent == Path(tempfile.gettempdir())
 
 
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid"),
+    reason="0o700 mode bits + umask + chmod don't translate to NTFS; tracked in #637",
+)
 class TestEnsureRuntimeDir:
     def test_creates_directory_with_owner_only_mode(self, tmp_path, monkeypatch):
         xdg = _make_safe_xdg(tmp_path)
@@ -232,6 +240,10 @@ class TestEnsureRuntimeDir:
             ensure_runtime_dir()
 
 
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid"),
+    reason="depends on _make_safe_xdg fixture's POSIX chmod; tracked in #637",
+)
 class TestServerPidPath:
     def test_resolves_to_runtime_dir_server_pid(self, tmp_path, monkeypatch):
         xdg = _make_safe_xdg(tmp_path)
