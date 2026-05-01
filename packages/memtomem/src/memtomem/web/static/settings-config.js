@@ -10,7 +10,8 @@
 
 const _CONFIG_LABELS = {
   embedding: { provider: 'Provider', model: 'Model', dimension: 'Dimension',
-                base_url: 'Base URL', batch_size: 'Batch Size', api_key: 'API Key' },
+                base_url: 'Base URL', batch_size: 'Batch Size', api_key: 'API Key',
+                threads: 'ONNX Threads' },
   storage:   { backend: 'Backend', sqlite_path: 'SQLite Path', collection_name: 'Collection' },
   search:    { default_top_k: 'Default top-k', bm25_candidates: 'BM25 Candidates',
                 dense_candidates: 'Dense Candidates', rrf_k: 'RRF k',
@@ -471,6 +472,7 @@ const _CONFIG_GUIDES = {
       { label: 'Base URL', text: 'API endpoint. Ollama: http://localhost:11434. OpenAI: https://api.openai.com/v1 (or compatible endpoint).' },
       { label: 'Batch Size', text: 'Number of texts embedded per API call. Higher = faster indexing but more memory. Default 64.' },
       { label: 'API Key', text: 'Required for OpenAI provider. Not needed for local Ollama. Masked in UI for security.' },
+      { label: 'ONNX Threads', text: 'ONNX Runtime intra-op thread cap for the local fastembed provider. 0 = ORT default (all physical cores). Set to a small integer (e.g. 4) to keep indexing from monopolising the CPU while you use other apps. Ignored for ollama/openai. Restart required.' },
     ],
     envs: [
       'MEMTOMEM_EMBEDDING__PROVIDER=ollama',
@@ -479,6 +481,7 @@ const _CONFIG_GUIDES = {
       'MEMTOMEM_EMBEDDING__BASE_URL=http://localhost:11434',
       'MEMTOMEM_EMBEDDING__API_KEY=sk-...',
       'MEMTOMEM_EMBEDDING__BATCH_SIZE=64',
+      'MEMTOMEM_EMBEDDING__THREADS=4',
     ],
     howto: {
       title: 'Embedding Model Change',

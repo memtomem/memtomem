@@ -14,6 +14,11 @@ class ConfigEmbeddingOut(BaseModel):
     base_url: str
     batch_size: int
     api_key: str = "***"
+    # ONNX Runtime intra-op thread cap; 0 = ORT default (all physical cores).
+    # Surfaced read-only here so users can discover the knob in the Config tab
+    # before they edit ``~/.memtomem/config.json``. Restart-required and
+    # excluded from ``MUTABLE_FIELDS`` per ``EmbeddingConfig`` in config.py.
+    threads: int = 0
 
 
 class ConfigStorageOut(BaseModel):

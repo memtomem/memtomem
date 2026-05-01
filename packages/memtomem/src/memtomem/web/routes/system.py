@@ -177,6 +177,7 @@ def _build_config_response(
             base_url=cfg.embedding.base_url,
             batch_size=cfg.embedding.batch_size,
             api_key="***" if cfg.embedding.api_key else "",
+            threads=cfg.embedding.threads,
         ),
         storage=ConfigStorageOut(
             backend=cfg.storage.backend,
