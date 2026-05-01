@@ -1096,6 +1096,20 @@ async function mdReindexOne(path, btn) {
   // Cache the original button label so we can restore it after the run —
   // ``btnLoading`` only toggles disabled+spinner, it doesn't snapshot text.
   const _origText = btn ? btn.textContent : '';
+  // Slot-reuse for chunk_progress (#654): the meta row already carries
+  // mutable count text ("12 files · 1,847 chunks"), already has the
+  // nowrap+ellipsis CSS guards, and is the only single-line slot near
+  // the button that won't shift adjacent dirs cards when its content
+  // grows. We borrow it for in-flight ``file.md — N/M chunks`` ticks
+  // and snap back via ``_origMeta`` on file boundary / cleanup.
+  const _item = btn ? btn.closest('.memory-dirs-item') : null;
+  const metaEl = _item ? _item.querySelector('.memory-dirs-item-meta') : null;
+  const _origMeta = metaEl ? metaEl.textContent : '';
+  // Throttle state — function-local so two concurrent reindex clicks
+  // (one per dir) don't share each other's clocks. Mirrors the
+  // ``runIndexStream`` closure scope in ``app.js``.
+  let _lastChunkRender = 0;
+  let _metaIsChunkLabel = false;
   showToast(t('toast.memory_dir.reindex_started', { path }), 'info');
 
   const _cleanup = () => {
@@ -1103,6 +1117,7 @@ async function mdReindexOne(path, btn) {
       btn.textContent = _origText;
       btnLoading(btn, false);
     }
+    if (metaEl) metaEl.textContent = _origMeta;
     if (typeof _indexingEnd === 'function') _indexingEnd();
     if (typeof loadSources === 'function') loadSources();
   };
@@ -1140,9 +1155,40 @@ async function mdReindexOne(path, btn) {
     }
     _sseFailCount = 0;
     if (event.type === 'progress') {
+      // File boundary: reset chunk throttle so the next file's first
+      // chunk renders immediately, and close the [big, small, ...]
+      // residue case (#654) — once a 250-chunk file ends, a stream of
+      // small files won't emit ``chunk_progress`` (server-side
+      // ``progress_threshold`` gate), which would otherwise leave the
+      // meta row stuck on "CHANGELOG.md — 250/250" through the rest
+      // of the run. The flag avoids a sub-100ms flash on big→big
+      // transitions because the next ``chunk_progress`` overwrites.
+      _lastChunkRender = 0;
+      if (metaEl && _metaIsChunkLabel) {
+        metaEl.textContent = _origMeta;
+        _metaIsChunkLabel = false;
+      }
       if (btn) {
         btn.textContent = `${event.files_done}/${event.files_total}`;
       }
+    } else if (event.type === 'chunk_progress') {
+      // Mirrors ``app.js:runIndexStream`` — 100ms throttle on
+      // intermediate ticks, final tick (done >= total) bypasses so
+      // ``(N/N)`` lands before the next file boundary. ``isConnected``
+      // guards against late events arriving after ``loadSources()``
+      // detached the row (silent no-op today, but cheap insurance).
+      if (!metaEl || !metaEl.isConnected) return;
+      const now = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now() : Date.now();
+      const isFinal = event.chunks_done >= event.chunks_total;
+      if (!isFinal && now - _lastChunkRender < 100) return;
+      _lastChunkRender = now;
+      metaEl.textContent = t('index.file_chunk_progress', {
+        file: basename(event.file),
+        done: event.chunks_done,
+        total: event.chunks_total,
+      });
+      _metaIsChunkLabel = true;
     } else if (event.type === 'complete') {
       _completed = true;
       es.close();
