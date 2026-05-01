@@ -201,7 +201,16 @@ class TestLivenessProbeContention:
 
     def test_probe_returns_dead_when_no_holder(self, tmp_path: Path):
         """Negative pin: a stale pid file with no live writer probes as
-        dead — the lock is acquirable, so the recorded PID is gone."""
+        dead — the lock is acquirable, so the recorded PID is gone.
+
+        Doubles as a regression pin for the Windows ``msvcrt.locking``
+        access-mode trap: read-only file handles fail with ``EACCES``
+        regardless of contention, which would make every probe return
+        ``alive=True`` on Windows. ``probe_pid_file`` therefore opens
+        the pid file ``"rb+"`` (R/W). If a future refactor weakens that
+        to ``"rb"``, this test fails on Windows because lock acquire
+        becomes unreachable on an uncontended file.
+        """
         from memtomem.cli._liveness import probe_pid_file
 
         pid_file = tmp_path / "server.pid"

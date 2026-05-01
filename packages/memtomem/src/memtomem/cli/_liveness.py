@@ -51,8 +51,14 @@ def probe_pid_file(pid_file: Path) -> ServerState:
     except (OSError, ValueError):
         pid = None
 
+    # ``"rb+"`` (read-write) not ``"rb"``: portalocker's default Windows
+    # backend (``MsvcrtLocker``) calls ``msvcrt.locking``, which the C
+    # runtime requires to be opened for writing — read-only handles fail
+    # with ``EACCES`` and look indistinguishable from a real holder.
+    # POSIX ``flock`` doesn't care about access mode, but the file is
+    # already user-owned, so always opening R/W keeps both backends happy.
     try:
-        fp = open(pid_file, "rb")
+        fp = open(pid_file, "rb+")
     except OSError:
         return ServerState(alive=True, pid=pid, pid_file=pid_file)
 
