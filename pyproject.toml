@@ -26,6 +26,7 @@ markers = [
     "ollama: requires a running Ollama instance (auto-skipped when unavailable)",
     "llm: requires a live LLM API key (OpenAI/Anthropic); CI runs these in the nightly job only",
     "multilingual: multilingual/large-corpus regression tests (runs in the test-golden-path CI job)",
+    "requires_symlinks: needs a filesystem that can create symlinks (auto-skipped on Windows without Developer Mode/admin)",
 ]
 
 [tool.mypy]

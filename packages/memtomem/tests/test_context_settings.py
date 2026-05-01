@@ -605,6 +605,7 @@ class TestGenerateAllSettingsHostWriteGate:
         project = self._setup(tmp_path)
         assert host_write_targets(project) == []
 
+    @pytest.mark.requires_symlinks
     def test_symlink_target_is_treated_as_host_write(self, claude_home, tmp_path):
         """A symlink whose project-relative path *appears* under the project
         root must be classified by the resolved location (review item 4):

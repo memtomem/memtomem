@@ -184,6 +184,7 @@ def test_install_skips_dsstore_and_pycache(wiki_root: Path, tmp_path: Path) -> N
     assert not (dest / "__pycache__").exists()
 
 
+@pytest.mark.requires_symlinks
 def test_install_skips_symlinks_in_source(
     wiki_root: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

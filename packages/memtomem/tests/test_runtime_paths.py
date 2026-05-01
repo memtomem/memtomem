@@ -75,6 +75,7 @@ class TestRuntimeDir:
 
         assert result.parent == Path(tempfile.gettempdir())
 
+    @pytest.mark.requires_symlinks
     def test_falls_back_when_xdg_is_symlink(self, tmp_path, monkeypatch):
         """Attacker on a shared host pre-creates ``$XDG_RUNTIME_DIR`` as a
         symlink into the user's home. ``_is_safe_dir`` must reject it —
@@ -155,6 +156,7 @@ class TestEnsureRuntimeDir:
         # must return the same path.
         ensure_runtime_dir()
 
+    @pytest.mark.requires_symlinks
     def test_refuses_existing_symlink(self, tmp_path, monkeypatch):
         """Symlink-at-the-runtime-path attack: attacker symlinks
         ``$XDG_RUNTIME_DIR/memtomem`` into the user's home. Pre-M1 fix,
