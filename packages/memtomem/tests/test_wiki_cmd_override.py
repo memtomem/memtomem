@@ -42,9 +42,15 @@ def _seed_agent(
     block — pass e.g. ``"skills:\\n  - foo\\nisolation: workspace\\n"``
     to trigger gemini's drop set (``skills`` / ``isolation``).
     """
+    # Defensive: silent break if a future fixture forgets the trailing
+    # newline — closing ``---`` would merge into the previous line and
+    # YAML parse fails with a cryptic error.
+    fm_extra = frontmatter_extra
+    if fm_extra and not fm_extra.endswith("\n"):
+        fm_extra += "\n"
     agent_dir = wiki_root_path / "agents" / name
     agent_dir.mkdir(parents=True)
-    canonical = f"---\nname: {name}\ndescription: a test agent\n{frontmatter_extra}---\n\n{body}"
+    canonical = f"---\nname: {name}\ndescription: a test agent\n{fm_extra}---\n\n{body}"
     (agent_dir / "agent.md").write_text(canonical, encoding="utf-8")
     _git_commit(wiki_root_path, f"add agent {name}")
 
@@ -63,9 +69,13 @@ def _seed_command(
     to trigger gemini's drop set (``argument-hint`` / ``allowed-tools`` /
     ``model``).
     """
+    # Defensive: see _seed_agent for the silent-break rationale.
+    fm_extra = frontmatter_extra
+    if fm_extra and not fm_extra.endswith("\n"):
+        fm_extra += "\n"
     cmd_dir = wiki_root_path / "commands" / name
     cmd_dir.mkdir(parents=True)
-    canonical = f"---\ndescription: a test command\n{frontmatter_extra}---\n\n{body}"
+    canonical = f"---\ndescription: a test command\n{fm_extra}---\n\n{body}"
     (cmd_dir / "command.md").write_text(canonical, encoding="utf-8")
     _git_commit(wiki_root_path, f"add command {name}")
 
