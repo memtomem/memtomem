@@ -88,6 +88,40 @@ async def test_get_projects_cwd_only(client) -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_projects_counts_directory_layout_commands_agents(client, cwd_root: Path) -> None:
+    """Counts include canonical commands/agents authored in directory layout.
+
+    Regression: ADR-0008 PR-C (#624) changed
+    ``list_canonical_{commands,agents}`` to return ``list[tuple[Path,
+    Layout]]``, but ``web/routes/context_projects.py:_counts_for``
+    still iterated as ``p.stem for p in ...`` — ``p`` was the tuple,
+    so ``p.stem`` raised ``AttributeError``. The blanket
+    ``except Exception`` hid the failure and silently returned
+    ``count=0``, so the UI showed wrong counts without an error
+    surface. This test seeds canonical entries in directory layout
+    (the new shape that exercises the tuple unpack) and asserts the
+    count reflects them.
+    """
+    # Directory layout: .memtomem/commands/<name>/command.md
+    cmd_dir = cwd_root / ".memtomem" / "commands" / "deploy"
+    cmd_dir.mkdir(parents=True)
+    (cmd_dir / "command.md").write_text("# deploy\n", encoding="utf-8")
+
+    # Directory layout: .memtomem/agents/<name>/agent.md
+    agent_dir = cwd_root / ".memtomem" / "agents" / "reviewer"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "agent.md").write_text("# reviewer\n", encoding="utf-8")
+
+    resp = await client.get("/api/context/projects")
+    assert resp.status_code == 200
+    scope = resp.json()["scopes"][0]
+    counts = scope["counts"]
+    # With the bug, both would be 0 (blanket except masks AttributeError).
+    assert counts["commands"] >= 1, f"commands count should include 'deploy' (got {counts})"
+    assert counts["agents"] >= 1, f"agents count should include 'reviewer' (got {counts})"
+
+
+@pytest.mark.asyncio
 async def test_get_projects_after_add(client, tmp_path: Path) -> None:
     other = tmp_path / "inflearn"
     other.mkdir()
