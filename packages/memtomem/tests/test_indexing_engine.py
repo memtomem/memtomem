@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -541,6 +542,84 @@ class TestActiveRunsCounter:
             assert engine._active_runs == 0
         finally:
             engine._index_file = orig  # type: ignore[method-assign]
+
+    async def test_decrements_on_task_cancellation(self, components, memory_dir):
+        """SSE client-disconnect path: when the consumer task is cancelled
+        mid-stream, the async generator's ``finally`` must still run so the
+        counter returns to 0. ``test_decrements_on_stream_aclose`` covers
+        the explicit ``aclose()`` call; this case exercises the path where
+        cancellation propagates from outside the generator (the realistic
+        Starlette ``StreamingResponse`` shape — #640).
+        """
+        (memory_dir / "a.md").write_text("# A\n\nfirst")
+        (memory_dir / "b.md").write_text("# B\n\nsecond")
+        engine = components.index_engine
+
+        async def consume():
+            async for _ in engine.index_path_stream(memory_dir, recursive=True):
+                # Yield so the cancel can land between yields rather than
+                # racing the generator to completion.
+                await asyncio.sleep(0)
+
+        task = asyncio.create_task(consume())
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if engine._active_runs == 1:
+                break
+        assert engine._active_runs == 1, "stream should have entered before cancel"
+
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        # Cleanup may need the generator's ``finally`` to run on stack
+        # unwind; give the loop a few ticks before asserting.
+        for _ in range(50):
+            if engine._active_runs == 0:
+                break
+            await asyncio.sleep(0)
+        assert engine.is_active is False
+        assert engine._active_runs == 0
+
+    async def test_decrements_through_generator_wrapper_on_cancel(self, components, memory_dir):
+        """Mirrors the SSE route's ``_generate()`` wrapper shape: an outer
+        async generator that wraps ``index_path_stream`` and catches
+        ``Exception`` (but not ``BaseException`` / ``CancelledError``).
+        Pins that this stacked-generator path is also clean under task
+        cancellation — the production code shape behind #640.
+        """
+        (memory_dir / "a.md").write_text("# A\n\nfirst")
+        (memory_dir / "b.md").write_text("# B\n\nsecond")
+        engine = components.index_engine
+
+        async def wrapper():
+            try:
+                async for event in engine.index_path_stream(memory_dir, recursive=True):
+                    yield f"data: {event}"
+            except Exception:
+                yield "data: error"
+
+        async def consume():
+            async for _ in wrapper():
+                await asyncio.sleep(0)
+
+        task = asyncio.create_task(consume())
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if engine._active_runs == 1:
+                break
+        assert engine._active_runs == 1, "stream should have entered before cancel"
+
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        for _ in range(50):
+            if engine._active_runs == 0:
+                break
+            await asyncio.sleep(0)
+        assert engine.is_active is False
+        assert engine._active_runs == 0
 
 
 # ===========================================================================
