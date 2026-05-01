@@ -75,6 +75,14 @@ class EmbeddingConfig(BaseSettings):
     #     event flows at all).
     # Runtime-mutable: the gate lives in the engine, not in cached
     # embedder state, so a config change takes effect on the next file.
+    #
+    # Why 32 (vs ``batch_size`` default 64)? Files producing ≤ batch_size
+    # chunks finish in one batch — there's no mid-progress to show, so
+    # any threshold ≥ batch_size would suppress them naturally. Picking
+    # 32 = batch_size/2 means "1-batch files stay quiet, 2+-batch files
+    # start ticking", which is the natural break-point between "instant"
+    # and "user wonders if anything is happening". Adjustable per
+    # operator preference.
     progress_threshold: int = 32
 
     @field_validator("dimension")

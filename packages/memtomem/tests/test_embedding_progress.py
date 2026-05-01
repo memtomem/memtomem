@@ -237,3 +237,66 @@ async def test_onnx_progress_kwarg_omitted_works():
     embedder._embed_sync = fake_sync  # type: ignore[method-assign]
     result = await embedder.embed_texts(["a", "b", "c"])
     assert len(result) == 3
+
+
+@pytest.mark.anyio
+async def test_onnx_numerical_parity_across_batch_sizes():
+    """Splitting a single ``embed(all_texts)`` call into batched
+    ``embed(batch_n)`` calls must NOT change the resulting vectors.
+
+    fastembed's tokenizer pads dynamically per ONNX session call (longest
+    sequence in the batch wins). Different batch boundaries → different
+    padding shapes → ONNX runtime can produce numerically different
+    outputs even though the attention mask should mask them out. This
+    test pins the "vector-stable across batch_size" invariant so a
+    silent embedding drift (which would degrade search quality across
+    the entire DB after a reindex, with no error to point at) is caught
+    in CI rather than discovered by a user.
+
+    Skipped when fastembed isn't installed — the in-process fake
+    embedders elsewhere in this file can't exercise real tokenizer/ORT
+    behavior, so the test is meaningful only in environments with the
+    real backend (e.g. the ``golden-path (ONNX bge-m3)`` CI job, which
+    already pulls fastembed for end-to-end indexing).
+    """
+    pytest.importorskip("fastembed")
+    pytest.importorskip("numpy")
+    import numpy as np
+
+    # Use the small all-MiniLM-L6-v2 (384d, ~25MB ONNX) so the test
+    # downloads quickly the first time and stays under typical CI budgets.
+    # bge-m3 would also work but is 2.3GB — overkill for a parity check.
+    config_small = _onnx_config(model="all-MiniLM-L6-v2", dimension=384, batch_size=2)
+    config_large = _onnx_config(model="all-MiniLM-L6-v2", dimension=384, batch_size=64)
+    emb_small = OnnxEmbedder(config_small)
+    emb_large = OnnxEmbedder(config_large)
+
+    # Mixed-length texts — different padding decisions per batch
+    # boundary are exactly what we want to stress-test.
+    texts = [
+        "short one",
+        "this is a slightly longer sentence to skew padding shape",
+        "tiny",
+        "another medium length sentence with some content to embed",
+        "x",
+        "a final reasonably long sentence ending the parity probe set",
+    ]
+
+    try:
+        vecs_small = await emb_small.embed_texts(texts)
+        vecs_large = await emb_large.embed_texts(texts)
+    finally:
+        await emb_small.close()
+        await emb_large.close()
+
+    assert len(vecs_small) == len(vecs_large) == len(texts)
+    arr_small = np.array(vecs_small)
+    arr_large = np.array(vecs_large)
+    # Tight tolerance — ORT floating-point determinism on the same model
+    # + input across batch shapes should hold to ~1e-5. If this fails,
+    # something in the batch-shape → padding → output pipeline shifted.
+    assert np.allclose(arr_small, arr_large, rtol=1e-5, atol=1e-6), (
+        "ONNX embeddings drifted across batch_size boundary — silent "
+        "embedding regression risk; investigate fastembed tokenizer "
+        "padding policy or ORT session options."
+    )
