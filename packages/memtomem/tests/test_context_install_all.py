@@ -425,5 +425,62 @@ def test_mixed_asset_types(wiki_root: Path, tmp_path: Path, monkeypatch) -> None
     assert (tmp_path / ".memtomem" / "commands" / "baz" / "command.md").exists()
 
 
+# ── classify→execute race ───────────────────────────────────────────────
+
+
+def test_classify_execute_race_pin_pruned_mid_loop(
+    wiki_root: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """Pin reachable at classify time but pruned before extract → orphan row, batch continues.
+
+    The race window is real: ``_classify_for_install_all`` calls
+    ``commit_is_reachable`` once up front; if a concurrent ``git gc
+    --prune=now`` removes the commit before ``_apply_pinned_install`` runs,
+    the inner ``copy_asset_at_commit`` re-checks reachability and raises
+    ``CommitNotFoundError``. The CLI loop catches it (``context_cmd.py``
+    line 1218-1221) and reclassifies the row as orphan without crashing
+    the batch.
+
+    Simulated here by monkey-patching ``WikiStore.copy_asset_at_commit``
+    to raise ``CommitNotFoundError`` on the first call only — the second
+    call (a sibling that should succeed) goes through unmodified.
+    """
+    from memtomem.wiki.store import CommitNotFoundError, WikiStore as _WikiStore
+
+    _initialized_wiki(wiki_root)
+    _seed_wiki_asset(wiki_root, "skills", "raced", {"SKILL.md": b"raced\n"})
+    install_skill(tmp_path, "raced")
+    _seed_wiki_asset(wiki_root, "skills", "winner", {"SKILL.md": b"winner\n"})
+    install_skill(tmp_path, "winner")
+
+    # Both dests gone → both classify as state=install (no dirty walk).
+    shutil.rmtree(tmp_path / ".memtomem" / "skills" / "raced")
+    shutil.rmtree(tmp_path / ".memtomem" / "skills" / "winner")
+
+    real_copy = _WikiStore.copy_asset_at_commit
+    raise_for: dict[str, bool] = {"raced": True}
+
+    def flaky_copy(self, commit, asset_type, name, dest):
+        if raise_for.get(name, False):
+            raise CommitNotFoundError(f"simulated race: {commit[:12]} pruned")
+        return real_copy(self, commit, asset_type, name, dest)
+
+    monkeypatch.setattr(_WikiStore, "copy_asset_at_commit", flaky_copy)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["install", "--all", "--yes"])
+
+    # Race row reported as orphan; sibling installs successfully.
+    assert "raced" in result.output
+    assert "simulated race" in result.output
+    assert (tmp_path / ".memtomem" / "skills" / "winner" / "SKILL.md").exists()
+    assert not (tmp_path / ".memtomem" / "skills" / "raced" / "SKILL.md").exists()
+    assert "1 installed" in result.output
+    assert "1 orphaned" in result.output
+    # Orphan-only failures don't fail the batch (warning, not error).
+    assert result.exit_code == 0
+
+
 # silence "imported but unused" if a future test needs the fixture
 _ = pytest

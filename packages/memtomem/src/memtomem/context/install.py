@@ -32,11 +32,13 @@ from memtomem.context._atomic import copy_tree_atomic
 from memtomem.context._names import validate_name
 from memtomem.context.dirty import DirtyReport, is_asset_dirty
 from memtomem.context.lockfile import Lockfile, LockfileVersionError, utcnow_iso8601_z
-from memtomem.wiki.store import CommitNotFoundError, WikiStore
+from memtomem.wiki.store import CommitNotFoundError as CommitNotFoundError
+from memtomem.wiki.store import WikiStore
 
 __all__ = [
     "AlreadyInstalledError",
     "AssetNotFoundError",
+    "CommitNotFoundError",
     "InstallResult",
     "NotInstalledError",
     "ProjectInstallClassification",
@@ -810,9 +812,3 @@ def _apply_pinned_install(
         dest=dest,
         files_written=files_written,
     )
-
-
-# Re-export for callers that want to ``except CommitNotFoundError``
-# without reaching into wiki.store directly.
-__all__.append("CommitNotFoundError")
-_ = CommitNotFoundError  # silence "imported but unused" — re-export
