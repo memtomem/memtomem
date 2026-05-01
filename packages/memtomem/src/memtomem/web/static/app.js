@@ -25,8 +25,16 @@ const STATE = {
   detailViewSource: '',
   detailViewMode: 'view',
   allSources: [],
+  memoryStatusByPath: {},
   sourcesSortBy: 'name',
   sourcesNsFilter: '',
+  // Path the next ``_renderMemorySourceTree`` should focus + browse
+  // after rendering the tree. ``_navigateToSource`` sets this and
+  // ``activateTab('sources')`` triggers ``loadSources`` →
+  // ``renderSourceTree`` → render handles activation. Cleared
+  // immediately on consume so a follow-up filter/sort re-render
+  // doesn't re-scrollIntoView an item the user already navigated past.
+  pendingActivatePath: '',
   // Active Sources vendor sub-tab (one of ``user`` / ``claude`` /
   // ``openai``). Lazily populated from localStorage on first render so
   // the value survives reloads. Keeping it on STATE means re-renders
@@ -969,17 +977,39 @@ async function loadDashboard() {
     // /api/sessions and /api/scratch are dev-only — gated below. The
     // namespaces list endpoint is prod-mounted via namespaces_read so
     // the donut + count card render real values in both tiers.
-    const [stats, sourcesData, nsData, configData, embStatus, timelineData] = await Promise.all([
+    const [stats, sourcesData, nsData, configData, embStatus, timelineData, memDirsResp] = await Promise.all([
       api('GET', '/api/stats'),
       api('GET', '/api/sources'),
       api('GET', '/api/namespaces').catch(() => ({ namespaces: [] })),
       api('GET', '/api/config'),
       api('GET', '/api/embedding-status').catch(() => null),
       api('GET', '/api/timeline?days=365&limit=1000').catch(() => ({ chunks: [] })),
+      api('GET', '/api/memory-dirs/status').catch(() => ({ dirs: [] })),
     ]);
 
     const allSources = sourcesData.sources || [];
     const namespaces = nsData.namespaces || [];
+
+    // Mirror onto STATE so a Home → recent-source click can resolve
+    // the target vendor sub-tab before activating the Sources tab —
+    // otherwise ``_navigateToSource`` falls through to a stale
+    // localStorage vendor on the cold-load path. ``loadSources`` will
+    // overwrite both fields with a fresh fetch (``?limit=10000``) when
+    // the Sources tab is actually opened, so the dashboard's snapshot
+    // is just a fast path, never a source of truth — the
+    // ``/api/sources`` call here uses the server's default limit, so
+    // on instances with more sources than that default the mirror is
+    // a partial set. Eager resolve in ``_navigateToSource`` will miss
+    // the unseen tail and fall through to the cold-load branch in
+    // ``_renderMemorySourceTree``, which re-resolves vendor against
+    // the post-``loadSources`` STATE — so partiality stays a perf
+    // hint, not a correctness issue.
+    STATE.allSources = allSources;
+    const _memStatusByPath = {};
+    for (const entry of (memDirsResp && memDirsResp.dirs) || []) {
+      if (entry && typeof entry.path === 'string') _memStatusByPath[entry.path] = entry;
+    }
+    STATE.memoryStatusByPath = _memStatusByPath;
 
     // A. Stats cards
     qs('home-chunks').textContent = stats.total_chunks.toLocaleString();
@@ -1268,16 +1298,17 @@ function _renderStorageHealth(config, sources, embStatus) {
 }
 
 function _navigateToSource(path) {
-  // Resolve target vendor before switching so a Claude/OpenAI source
-  // clicked from Home recent or the command palette doesn't land on
-  // whichever vendor sub-tab the user last viewed — the
-  // ``.source-item[title=path]`` lookup below would silently miss
-  // because non-active vendors aren't rendered into the DOM. Same
-  // root cause as the navigateToSourcesByNs auto-switch in
-  // ``_renderMemorySourceTree``: a navigation entry-point sets one
-  // axis (path) without aligning the vendor sub-tab axis. Fall through
-  // when the source isn't in ``allSources`` yet (cold load) — current
-  // behaviour preserved, no regression.
+  // Two-phase navigation:
+  //   1. Eager vendor resolve when the dashboard already cached the
+  //      data we need (``loadDashboard`` mirrors /api/sources +
+  //      /api/memory-dirs/status into STATE on Home render). Switching
+  //      the sub-tab before ``activateTab`` means the right tree shape
+  //      lands on first paint instead of flashing the previous vendor.
+  //   2. Always set ``pendingActivatePath`` so the actual focus +
+  //      scroll + browseSource is performed by the renderer once the
+  //      tree exists. Replaces the old setTimeout(300) gamble that
+  //      missed on cold loads (Home was the entry point and the data
+  //      hadn't been fetched yet) and on stale-localStorage vendors.
   const src = (STATE.allSources || []).find(s => s.path === path);
   const status = src && src.memory_dir
     ? (STATE.memoryStatusByPath || {})[src.memory_dir]
@@ -1291,16 +1322,8 @@ function _navigateToSource(path) {
       _syncSourcesVendorTabs(provider);
     }
   }
+  STATE.pendingActivatePath = path;
   activateTab('sources');
-  setTimeout(() => {
-    document.querySelectorAll('.source-item').forEach(el => {
-      if (el.title === path) {
-        el.classList.add('active');
-        el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        browseSource(path);
-      }
-    });
-  }, 300);
 }
 
 // C. Quick Search from Home
@@ -2814,6 +2837,62 @@ function _renderMemorySourceTree(sources, list) {
     list.innerHTML = '<div class="empty-state">' + emptyState('📁', 'No memory directories', 'Add one with the + Add path button') + '</div>';
   } else if (filterActive && !plan.totalFiles && !plan.isEmptyVendor) {
     list.innerHTML = '<div class="empty-state">' + emptyState('🔍', 'No matches for that filter') + '</div>';
+  }
+
+  // Pending source activation set by ``_navigateToSource``. The tree
+  // exists now, so we can resolve the source-item, switch the vendor
+  // sub-tab if the cold-load eager resolve guessed wrong (or missed
+  // because STATE was empty), and trigger the chunk browser. Cleared
+  // immediately on consume so a follow-up filter/sort/reindex render
+  // doesn't re-scrollIntoView an item the user has navigated past.
+  if (STATE.pendingActivatePath) {
+    const path = STATE.pendingActivatePath;
+    // Path-based navigation is an explicit user intent override —
+    // drop any pre-existing namespace chip so (a) the source isn't
+    // hidden by a filter that has nothing to do with this click, and
+    // (b) NS auto-switch up top doesn't fight the pending vendor
+    // resolve below in a loop (NS picks the best-NS-match vendor;
+    // pending picks the source's vendor; if they disagree the two
+    // ping-pong on every re-render).
+    if (STATE.sourcesNsFilter) {
+      STATE.sourcesNsFilter = '';
+      _renderSourcesNsChip();
+      renderSourceTree(_getFilteredSorted());
+      return;
+    }
+    const src = (STATE.allSources || []).find(s => s.path === path);
+    const status = src && src.memory_dir
+      ? (STATE.memoryStatusByPath || {})[src.memory_dir]
+      : null;
+    const wantedProvider = (status && _SOURCES_VENDORS.includes(status.provider))
+      ? status.provider : null;
+    if (wantedProvider && STATE.sourcesActiveVendor !== wantedProvider) {
+      // Eager resolve in ``_navigateToSource`` couldn't see the data
+      // (cold load — Home → Sources first time, before
+      // ``loadDashboard``'s STATE mirror landed) so we land here on
+      // the wrong vendor's tree. Switch and re-render once; the
+      // re-entry will hit the matching tree and consume the pending
+      // path. Guarded by the vendor-mismatch check so we don't loop.
+      STATE.sourcesActiveVendor = wantedProvider;
+      _syncSourcesVendorTabs(wantedProvider);
+      renderSourceTree(_getFilteredSorted());
+      return;
+    }
+    const target = list.querySelector(`.source-item[title="${CSS.escape(path)}"]`);
+    if (target) {
+      target.classList.add('active');
+      target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      if (typeof browseSource === 'function') browseSource(path);
+    } else if (STATE.uiMode === 'dev') {
+      // Path made it through the vendor + filter resolves but the
+      // ``.source-item`` isn't in the rendered list — most likely an
+      // edge case the cold-load fix didn't anticipate (orphan source,
+      // path normalisation drift like #675, etc.). Surface it in dev
+      // so the next bug report has a breadcrumb instead of "click did
+      // nothing"; prod stays silent because users can't act on it.
+      console.warn('[memtomem] pendingActivatePath found no .source-item:', path);
+    }
+    STATE.pendingActivatePath = '';
   }
 }
 
