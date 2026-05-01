@@ -2400,10 +2400,19 @@ function renderSourceTree(sources) {
   // The active-vendor scoping makes the number always match what the
   // user is currently looking at; global totals can be inferred by
   // summing the three sub-tab badges.
+  // Stats compute is deferred to ``_renderMemorySourceTree`` so it can
+  // observe the *post-auto-switch* active vendor. Reading
+  // ``STATE.sourcesActiveVendor`` here would race the NS-filter
+  // follow-through that shifts the sub-tab inside the tree pass \u2014 the
+  // stats line would then briefly show the pre-switch vendor's totals
+  // sitting above a post-switch tree (review feedback on PR #673).
+  _renderMemorySourceTree(sources, list);
+}
+
+function _renderSourcesStats(activeVendor) {
   const statsEl = qs('sources-stats');
+  if (!statsEl) return;
   const statusByPath = STATE.memoryStatusByPath || {};
-  const activeVendor = STATE.sourcesActiveVendor
-    || (typeof _readActiveSourcesVendor === 'function' ? _readActiveSourcesVendor() : 'user');
   let indexedFiles = 0;
   let totalChunks = 0;
   for (const s of Object.values(statusByPath)) {
@@ -2424,8 +2433,6 @@ function renderSourceTree(sources) {
   } else {
     statsEl.hidden = true;
   }
-
-  _renderMemorySourceTree(sources, list);
 }
 
 
@@ -2638,6 +2645,12 @@ function _renderMemorySourceTree(sources, list) {
   if (STATE.sourcesNsFilter) {
     const curPlan = vendorPlans[activeVendor];
     if (!curPlan || curPlan.totalFiles === 0) {
+      // Tie-break leans on stable sort + ``PROVIDER_ORDER`` =
+      // ``['user', 'claude', 'openai']``: when two vendors hold the
+      // same number of NS matches, the earlier vendor in the order
+      // wins. Intentional — ``user`` is the conventional primary
+      // surface, so a tie shouldn't bury the user's own dirs behind
+      // a less-frequented vendor.
       const best = PROVIDER_ORDER
         .map(p => [p, vendorPlans[p] ? vendorPlans[p].totalFiles : 0])
         .filter(([, n]) => n > 0)
@@ -2649,6 +2662,12 @@ function _renderMemorySourceTree(sources, list) {
       }
     }
   }
+
+  // Stats line uses the *post-auto-switch* vendor so the "N files ·
+  // M chunks" caption above the tree always matches what's rendered
+  // below. Doing this in the caller (``renderSourceTree``) would race
+  // the NS-filter follow-through that mutates ``activeVendor`` here.
+  _renderSourcesStats(activeVendor);
 
   // Helpers shared by the active-vendor render branches. Lifted out of
   // the per-vendor loop because they don't close over the iteration.
