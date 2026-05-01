@@ -471,9 +471,14 @@ class TestOnnxEmbedder:
         await embedder.close()
         assert embedder._model is None
 
-    def test_threads_default_is_zero(self):
-        """Default preserves prior behavior — ORT picks all physical cores."""
-        assert _onnx_config().threads == 0
+    def test_threads_default_is_four(self):
+        """Default caps ONNX at 4 cores so a bulk reindex doesn't pin every
+        physical core. #640 follow-up: pre-flip the default was 0 (= ORT
+        default = all cores) which made indexing feel like a hang because
+        nothing else on the machine could respond. Users on dedicated
+        servers can opt back into all-cores by explicitly setting threads=0.
+        """
+        assert _onnx_config().threads == 4
 
     def test_threads_rejects_negative(self):
         """Validator catches typos like -1 at config-load time."""

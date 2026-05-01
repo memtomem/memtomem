@@ -173,6 +173,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **`embedding.threads` default flipped from `0` (= ORT default = all
+  physical cores) to `4`** so a bulk reindex doesn't pin every core and
+  starve the web server / other apps. Live diagnosis of #640 confirmed
+  the prior default made a normal indexing run feel like a hang because
+  nothing else on the machine could respond. Existing installs without
+  a `threads` override will see ONNX use 4 cores after upgrade — slower
+  on machines with > 4 cores but visibly responsive. To restore the
+  previous behavior on dedicated machines, set
+  `embedding.threads = 0` in `~/.memtomem/config.json` (or
+  `MEMTOMEM_EMBEDDING__THREADS=0`) and restart `mm web`. Network-bound
+  providers (Ollama, OpenAI) ignore the field. Field is restart-required
+  per the `MUTABLE_FIELDS` exclusion noted in `EmbeddingConfig`.
+
 - **Force-reindex preserves chunk identity and per-chunk personalization
   (`mem_edit` / `mem_delete` / `mm index --force` / `POST /reindex`).**
   Pre-fix the force path called `delete_by_source` followed by fresh

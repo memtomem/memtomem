@@ -47,9 +47,14 @@ class EmbeddingConfig(BaseSettings):
     batch_size: int = 64
     max_concurrent_batches: int = 4
     # ONNX Runtime intra-op thread cap for the local fastembed provider.
-    # 0 = use ORT's default (typically all physical CPU cores). Set to a
-    # small integer (e.g. 4) to keep seeding from monopolising the machine.
-    # Forwarded to ``fastembed.TextEmbedding(threads=...)``; ignored by the
+    # Default 4 — caps ONNX so a bulk reindex doesn't pin every physical
+    # core and starve the web server / other apps. Live diagnosis of #640
+    # showed the prior default (0 = ORT default = all cores) made a normal
+    # indexing run feel like a hang because nothing else on the machine
+    # could respond. Set to 0 to opt back into ORT's default (all physical
+    # cores) for maximum throughput on dedicated machines; set to any
+    # other small integer for finer control. Forwarded to
+    # ``fastembed.TextEmbedding(threads=...)``; ignored by the
     # network-bound providers (Ollama, OpenAI). Bounds ORT's intra-op pool
     # only — does not affect numpy/scipy thread pools (use OMP_NUM_THREADS
     # for those).
@@ -58,7 +63,7 @@ class EmbeddingConfig(BaseSettings):
     # ``TextEmbedding`` instance is cached on first use, so a runtime change
     # would not take effect until restart anyway. Same precedent as
     # ``rerank.provider``/``model``/``api_key`` below.
-    threads: int = 0
+    threads: int = 4
 
     @field_validator("dimension")
     @classmethod

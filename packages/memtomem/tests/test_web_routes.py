@@ -63,7 +63,7 @@ class FakeConfig:
         base_url = "http://localhost:11434"
         batch_size = 64
         api_key = ""
-        threads = 0
+        threads = 4
 
     class _Storage:
         backend = "sqlite"
@@ -299,9 +299,10 @@ class TestConfig:
         # ``embedding.threads`` exposed read-only so the Config tab can
         # render the ORT intra-op cap. Pinning the field's presence here
         # so a future schema trim doesn't silently re-hide it (#640
-        # discoverability follow-up).
+        # discoverability follow-up). Default 4 since the #640 follow-up
+        # default flip — pre-flip the assertion was ``== 0``.
         assert "threads" in data["embedding"]
-        assert data["embedding"]["threads"] == 0
+        assert data["embedding"]["threads"] == 4
         assert "search" in data
         assert "indexing" in data
         assert "decay" in data

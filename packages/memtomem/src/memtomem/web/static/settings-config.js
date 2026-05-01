@@ -472,7 +472,7 @@ const _CONFIG_GUIDES = {
       { label: 'Base URL', text: 'API endpoint. Ollama: http://localhost:11434. OpenAI: https://api.openai.com/v1 (or compatible endpoint).' },
       { label: 'Batch Size', text: 'Number of texts embedded per API call. Higher = faster indexing but more memory. Default 64.' },
       { label: 'API Key', text: 'Required for OpenAI provider. Not needed for local Ollama. Masked in UI for security.' },
-      { label: 'ONNX Threads', text: 'ONNX Runtime intra-op thread cap for the local fastembed provider. 0 = ORT default (all physical cores). Set to a small integer (e.g. 4) to keep indexing from monopolising the CPU while you use other apps. Ignored for ollama/openai. Restart required.' },
+      { label: 'ONNX Threads', text: 'ONNX Runtime intra-op thread cap for the local fastembed provider. Default 4 — caps ONNX so a bulk reindex stays responsive on the same machine. Set to 0 to opt back into ORT default (all physical cores) for maximum throughput on dedicated machines, or any other small integer for finer control. Ignored for ollama/openai. Restart required.' },
     ],
     envs: [
       'MEMTOMEM_EMBEDDING__PROVIDER=ollama',
