@@ -189,3 +189,33 @@ class TestRequireExists:
         store = WikiStore.at_default()
         store.init()
         store.require_exists()  # no exception
+
+
+class TestIsDirty:
+    def test_clean_after_init(self, wiki_root: Path) -> None:
+        """Fresh ``init`` leaves the working tree clean — no dirty marker."""
+        store = WikiStore.at_default()
+        store.init()
+        assert store.is_dirty() is False
+
+    def test_dirty_with_untracked_file(self, wiki_root: Path) -> None:
+        """An untracked file inside the wiki flips ``is_dirty`` to True."""
+        store = WikiStore.at_default()
+        store.init()
+        (wiki_root / "untracked_marker.txt").write_text("wip", encoding="utf-8")
+        assert store.is_dirty() is True
+
+    def test_dirty_with_modified_tracked_file(self, wiki_root: Path) -> None:
+        """A modification to a tracked file flips ``is_dirty`` to True."""
+        store = WikiStore.at_default()
+        store.init()
+        readme = wiki_root / "README.md"
+        readme.write_text(readme.read_text() + "\nlocal note\n", encoding="utf-8")
+        assert store.is_dirty() is True
+
+    def test_raises_when_wiki_absent(self, wiki_root: Path) -> None:
+        """``is_dirty`` calls ``require_exists`` first, surfacing the
+        usual ``WikiNotFoundError`` when the wiki itself is missing."""
+        store = WikiStore.at_default()
+        with pytest.raises(WikiNotFoundError):
+            store.is_dirty()

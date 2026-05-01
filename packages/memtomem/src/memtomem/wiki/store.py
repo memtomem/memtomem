@@ -157,6 +157,23 @@ class WikiStore:
         result = _git(["rev-parse", "HEAD"], cwd=self.root)
         return result.stdout.strip()
 
+    def is_dirty(self) -> bool:
+        """``True`` when the wiki working tree has uncommitted modifications.
+
+        Wraps ``git status --porcelain`` — true on any combination of
+        modified-tracked, staged, or untracked files. Used by ``mm
+        context update`` to warn the user that the install/update will
+        reflect HEAD only, not the dirty working tree.
+
+        Returns ``False`` if the wiki is clean. Raises ``WikiNotFoundError``
+        if the wiki itself is missing (no ``.git`` directory) — caller
+        should ``require_exists()`` first if the missing-wiki path is
+        not desired.
+        """
+        self.require_exists()
+        result = _git(["status", "--porcelain"], cwd=self.root)
+        return bool(result.stdout.strip())
+
     def list_assets(self, asset_type: str | None = None) -> list[WikiAsset]:
         """Enumerate asset directories under the wiki.
 

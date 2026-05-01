@@ -31,7 +31,10 @@ from memtomem.context.install import (
     AlreadyInstalledError,
     AssetNotFoundError,
     NotInstalledError,
+    ProjectClassification,
     StaleInstallError,
+    _apply_update,
+    _classify_for_all_update,
     install_agent,
     install_command,
     install_skill,
@@ -39,6 +42,7 @@ from memtomem.context.install import (
     update_command,
     update_skill,
 )
+from memtomem.context.projects import KnownProjectsStore
 from memtomem.context.lockfile import LockfileVersionError
 from memtomem.context.generator import (
     GENERATORS,
@@ -55,7 +59,8 @@ from memtomem.context.skills import (
     extract_skills_to_canonical,
     generate_all_skills,
 )
-from memtomem.wiki.store import WikiNotFoundError
+from memtomem.wiki.store import WikiNotFoundError, WikiStore
+from memtomem.config import ContextGatewayConfig
 
 # Phase 1-3 supports skills/agents/commands; Phase D adds settings.
 _KNOWN_INCLUDES: frozenset[str] = frozenset({"skills", "agents", "commands", "settings"})
@@ -693,31 +698,75 @@ def install_cmd(asset_type: str, name: str) -> None:
     click.echo(f"  {result.files_written} file(s) copied")
 
 
+_WIKI_DIRTY_WARN = "warning: wiki has uncommitted changes; using HEAD which doesn't include them"
+
+
 @context.command("update")
 @click.argument("asset_type", type=click.Choice(["skill", "agent", "command"]))
 @click.argument("name")
 @click.option(
+    "--all",
+    "all_projects",
+    is_flag=True,
+    help="Apply across every known project that has this asset installed.",
+)
+@click.option(
+    "--yes",
+    is_flag=True,
+    help="Skip the confirmation prompt — intended for automation (cron / CI).",
+)
+@click.option(
     "--force",
     is_flag=True,
-    help="Overwrite local edits; each dirty file is preserved as <file>.bak",
+    help="Overwrite local edits; each dirty file is preserved as <file>.bak.",
 )
-def update_cmd(asset_type: str, name: str, force: bool) -> None:
+def update_cmd(
+    asset_type: str,
+    name: str,
+    all_projects: bool,
+    yes: bool,
+    force: bool,
+) -> None:
     """Refresh an installed wiki asset from the wiki HEAD.
 
-    No-op when the wiki commit pinned in ``.memtomem/lock.json`` already
-    matches the wiki HEAD — the lockfile is not touched and ``unchanged``
-    is reported. Refuses to write when local edits are detected, unless
-    ``--force`` is passed (which preserves each dirty file as a sibling
-    ``.bak`` before overwriting with wiki bytes).
+    Without ``--all``: refresh in the current project only. No-op when
+    the wiki commit pinned in ``.memtomem/lock.json`` already matches
+    the wiki HEAD — the lockfile is not touched and ``unchanged`` is
+    reported. Refuses to write when local edits are detected, unless
+    ``--force`` is passed (each dirty file is preserved as ``<file>.bak``
+    before overwriting with wiki bytes).
+
+    With ``--all``: classify the asset across every known project, print
+    a 4-state preview (update / unchanged / refuse / error), prompt for
+    confirmation, then refresh each project that needs it. ``--yes``
+    skips the prompt for automation. ``--yes --force`` is the
+    automation invariant — destructive batch with WARNING on stderr,
+    no prompt.
     """
     root = _find_project_root()
+
+    # Pin wiki + dirty warn — applies to both single-asset and --all paths.
+    # Warn timing: at update entry, BEFORE classification, BEFORE prompt.
+    try:
+        wiki = WikiStore.at_default()
+        wiki.require_exists()
+    except WikiNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if wiki.is_dirty():
+        click.secho(_WIKI_DIRTY_WARN, fg="yellow", err=True)
+
+    if all_projects:
+        _run_update_all(asset_type, name, root, wiki=wiki, yes=yes, force=force)
+        return
+
     try:
         if asset_type == "skill":
-            result = update_skill(root, name, force=force)
+            result = update_skill(root, name, wiki=wiki, force=force)
         elif asset_type == "agent":
-            result = update_agent(root, name, force=force)
+            result = update_agent(root, name, wiki=wiki, force=force)
         elif asset_type == "command":
-            result = update_command(root, name, force=force)
+            result = update_command(root, name, wiki=wiki, force=force)
         else:  # pragma: no cover — guarded by click.Choice
             raise click.ClickException(f"unknown asset type: {asset_type}")
     except WikiNotFoundError as exc:
@@ -753,3 +802,176 @@ def update_cmd(asset_type: str, name: str, force: bool) -> None:
             f"  {len(result.bak_files_written)} dirty file(s) preserved as .bak",
             fg="yellow",
         )
+
+
+def _run_update_all(
+    asset_type: str,
+    name: str,
+    root: Path,
+    *,
+    wiki: WikiStore,
+    yes: bool,
+    force: bool,
+) -> None:
+    """Orchestrate ``mm context update <type> <name> --all``.
+
+    Flow (matches plan locked decisions):
+    1. Load known projects (``KnownProjectsStore.load()`` — gap E
+       correction; the design's earlier ``list_entries()`` reference does
+       not exist in the actual API).
+    2. Classify across all roots in one pass — ``current_commit`` and
+       ``is_asset_dirty`` each run at most once per project, all cached
+       on :class:`ProjectClassification` for the execute phase.
+    3. Print a 4-state preview table.
+    4. Empty store / "no projects have asset" exit 0 informationally —
+       cron/CI safety so a first-run before any registration succeeds.
+    5. ``refuse`` without ``--force`` aborts the entire batch (no partial
+       writes).
+    6. ``--yes --force`` prints WARNING + skips prompt + executes.
+    7. Serial execute consumes cached ``dirty_report`` / ``lock_entry``;
+       no second walk per project.
+    """
+    cfg = ContextGatewayConfig()
+    store = KnownProjectsStore(Path(cfg.known_projects_path).expanduser())
+    project_entries = store.load()
+
+    if not project_entries:
+        click.echo(
+            "No known projects registered. Add via the `mm web` UI "
+            "or directly in known_projects.json.",
+            err=True,
+        )
+        return
+
+    project_roots = [e.root for e in project_entries if e.root.is_dir()]
+    if not project_roots:
+        click.echo(
+            "No registered projects exist on disk; nothing to update.",
+            err=True,
+        )
+        return
+
+    asset_type_plural = f"{asset_type}s"
+
+    try:
+        new_commit, classifications = _classify_for_all_update(
+            asset_type_plural,
+            name,
+            wiki=wiki,
+            projects=project_roots,
+        )
+    except AssetNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except InvalidNameError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if not classifications:
+        click.echo(
+            f"No projects have {asset_type_plural}/{name} installed.",
+            err=True,
+        )
+        return
+
+    _print_classification_table(classifications, asset_type_plural, name, new_commit)
+
+    needs_update = [c for c in classifications if c.state == "update"]
+    needs_force = [c for c in classifications if c.state == "refuse"]
+    has_errors = [c for c in classifications if c.state == "error"]
+
+    if not needs_update and not needs_force and not has_errors:
+        click.echo("\nAll projects are up to date.")
+        return
+
+    if needs_force and not force:
+        click.secho(
+            f"\n{len(needs_force)} project(s) have local edits; "
+            f"pass --force to overwrite (each dirty file gets a .bak sibling). "
+            f"Refusing to write any project — re-run with --force or resolve manually.",
+            fg="red",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+
+    if yes and force:
+        click.secho(
+            "WARNING: --yes --force is destructive — all dirty files will be "
+            "overwritten across the batch.",
+            fg="red",
+            err=True,
+        )
+
+    if not yes:
+        click.confirm("\nContinue?", abort=True)
+
+    successes = 0
+    failures = 0
+    for c in classifications:
+        if c.state == "unchanged":
+            click.secho(f"  - {c.project_root}: unchanged", fg="cyan")
+            continue
+        if c.state == "error":
+            click.secho(f"  ✗ {c.project_root}: {c.reason}", fg="red")
+            failures += 1
+            continue
+
+        # state in {"update", "refuse"} — execute via _apply_update with
+        # cached dirty_report + lock_entry (no re-walk).
+        assert c.lock_entry is not None
+        assert c.dirty_report is not None
+        src = wiki.root / asset_type_plural / name
+        dest = c.project_root / ".memtomem" / asset_type_plural / name
+        try:
+            _apply_update(
+                c.project_root,
+                asset_type_plural,
+                name,
+                src=src,
+                dest=dest,
+                wiki_commit=new_commit,
+                lock_entry=c.lock_entry,
+                dirty_report=c.dirty_report,
+                force=force,
+            )
+        except StaleInstallError as exc:
+            click.secho(f"  ✗ {c.project_root}: {exc}", fg="red")
+            failures += 1
+        except OSError as exc:
+            click.secho(f"  ✗ {c.project_root}: {exc}", fg="red")
+            failures += 1
+        else:
+            click.secho(f"  ✓ {c.project_root}: updated", fg="green")
+            successes += 1
+
+    click.echo(
+        f"\nSummary: {successes} updated, {failures} failed, "
+        f"{len(classifications) - successes - failures} unchanged."
+    )
+
+
+def _print_classification_table(
+    classifications: list[ProjectClassification],
+    asset_type_plural: str,
+    name: str,
+    new_commit: str,
+) -> None:
+    """Render the 4-state preview table for ``--all`` confirmation.
+
+    Columns: state · project root (relative when possible) · reason
+    (only shown for ``refuse`` and ``error`` rows where it carries info).
+    """
+    click.echo(
+        f"\n{asset_type_plural}/{name} — wiki HEAD {new_commit[:12]} — "
+        f"{len(classifications)} project(s):"
+    )
+    state_color = {
+        "update": "green",
+        "unchanged": "cyan",
+        "refuse": "yellow",
+        "error": "red",
+    }
+    for c in classifications:
+        color = state_color[c.state]
+        line = f"  {c.state:10s}  {c.project_root}"
+        if c.reason:
+            line += f"  ({c.reason})"
+        click.secho(line, fg=color)

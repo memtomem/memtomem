@@ -1,9 +1,13 @@
 """Tests for ``memtomem.context.install`` update path.
 
-Covers PR-D C2 commit 3: ``mm context update <type> <name>`` semantics —
-clean drift, dirty refuse, ``--force`` + ``.bak``, no-op invariant,
-``NotInstalledError``, and the flipped ``AlreadyInstalledError`` message
-that now points at update.
+Covers PR-D C2 commits 3 and 4:
+
+- Commit 3: ``mm context update <type> <name>`` semantics — clean drift,
+  dirty refuse, ``--force`` + ``.bak``, no-op invariant,
+  ``NotInstalledError``, the flipped ``AlreadyInstalledError`` message.
+- Commit 4: ``--all`` orchestration — 4-state classification,
+  batch-once ``current_commit``, cache reuse, refuse-blocks-batch,
+  ``--yes --force`` invariant, wiki-dirty warn timing.
 """
 
 from __future__ import annotations
@@ -17,11 +21,14 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+import memtomem.context.install as install_module
 from memtomem.cli.context_cmd import context as context_group
 from memtomem.context.install import (
     AlreadyInstalledError,
     NotInstalledError,
+    ProjectClassification,
     StaleInstallError,
+    _classify_for_all_update,
     install_skill,
     update_agent,
     update_command,
@@ -405,3 +412,469 @@ def test_update_agent_command_wrappers_dispatch(monkeypatch: pytest.MonkeyPatch)
     update_skill(Path("/tmp/p"), "s")
 
     assert seen == ["agents", "commands", "skills"]
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Commit 4 — --all + wiki dirty warn
+# ════════════════════════════════════════════════════════════════════════
+
+
+# ── helpers for --all tests ─────────────────────────────────────────────
+
+
+def _seed_known_projects(path: Path, project_roots: list[Path]) -> None:
+    """Write a ``known_projects.json`` listing the given roots."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = {
+        "version": 1,
+        "projects": [
+            {"root": str(p), "added_at": "2026-01-01T00:00:00.000000Z", "label": None}
+            for p in project_roots
+        ],
+    }
+    path.write_text(json.dumps(doc), encoding="utf-8")
+
+
+def _patch_known_projects_path(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
+    """Make ``ContextGatewayConfig()`` in the CLI return *path*."""
+
+    class _FakeCfg:
+        known_projects_path = path
+
+    monkeypatch.setattr(
+        "memtomem.cli.context_cmd.ContextGatewayConfig",
+        lambda: _FakeCfg(),
+    )
+
+
+# ── _classify_for_all_update: batch-once + 4-state coverage ─────────────
+
+
+def test_classify_for_all_update_calls_current_commit_once(
+    wiki_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``current_commit`` runs ONCE regardless of how many projects are scanned."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+
+    project_a = tmp_path / "proj_a"
+    project_a.mkdir()
+    project_b = tmp_path / "proj_b"
+    project_b.mkdir()
+    install_skill(project_a, "foo")
+    install_skill(project_b, "foo")
+
+    wiki = WikiStore.at_default()
+    real_current_commit = wiki.current_commit
+    call_count = {"n": 0}
+
+    def _spy_current_commit() -> str:
+        call_count["n"] += 1
+        return real_current_commit()
+
+    monkeypatch.setattr(WikiStore, "current_commit", lambda self: _spy_current_commit())
+
+    new_commit, classifications = _classify_for_all_update(
+        "skills", "foo", wiki=wiki, projects=[project_a, project_b]
+    )
+
+    # Wiki state read once for the whole batch.
+    assert call_count["n"] == 1
+    assert len(new_commit) == 40  # full SHA
+    assert len(classifications) == 2
+
+
+def test_classify_for_all_update_4_state_coverage(wiki_root: Path, tmp_path: Path) -> None:
+    """One project per state — verifies all 4 states are reachable.
+
+    Setup strategy: wiki has a single commit. All 4 projects install
+    against that commit. Then 3 of them have their lockfile entries
+    back-dated (or corrupted) to simulate drift / dirty / error states.
+    The 4th stays at the live HEAD and classifies as ``unchanged``.
+    """
+    from memtomem.context.lockfile import Lockfile
+
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+
+    wiki = WikiStore.at_default()
+    head_commit = wiki.current_commit()
+
+    # State 1: "unchanged" — fresh install, lockfile pin == HEAD.
+    proj_unchanged = tmp_path / "unchanged"
+    proj_unchanged.mkdir()
+    install_skill(proj_unchanged, "foo")
+
+    # State 2: "update" — install, then back-date lockfile pin so HEAD
+    # looks like a newer commit. Dest mtimes are ahead of installed_at
+    # (just installed → fresh), so we also back-date installed_at to
+    # ensure files are NOT classified dirty. Use a fixed past timestamp.
+    # Wait — we WANT the dest tree to be clean (= reason="clean"), but
+    # back-dating installed_at to far past makes ALL current files look
+    # dirty. We need the OPPOSITE: future installed_at OR explicit clean
+    # mtimes. Easiest: back-date both lockfile fields, then bump every
+    # dest file's mtime to BEFORE installed_at_epoch via os.utime.
+    proj_update = tmp_path / "update_clean"
+    proj_update.mkdir()
+    install_skill(proj_update, "foo")
+    Lockfile.at(proj_update).upsert_entry(
+        "skills",
+        "foo",
+        wiki_commit="0" * 40,  # ≠ HEAD → drift
+        installed_at="2030-01-01T00:00:00.000000Z",  # future → all current files are clean
+    )
+
+    # State 3: "refuse" — drift + dirty.
+    proj_refuse = tmp_path / "refuse"
+    proj_refuse.mkdir()
+    install_skill(proj_refuse, "foo")
+    Lockfile.at(proj_refuse).upsert_entry(
+        "skills",
+        "foo",
+        wiki_commit="0" * 40,
+        # Past installed_at so every current file is dirty.
+        installed_at="2020-01-01T00:00:00.000000Z",
+    )
+
+    # State 4: "error" — unknown lockfile version.
+    proj_error = tmp_path / "error"
+    proj_error.mkdir()
+    (proj_error / ".memtomem").mkdir()
+    (proj_error / ".memtomem" / "lock.json").write_text(
+        json.dumps({"version": 99, "skills": {"foo": {"wiki_commit": "x", "installed_at": "y"}}}),
+        encoding="utf-8",
+    )
+
+    new_commit, classifications = _classify_for_all_update(
+        "skills",
+        "foo",
+        wiki=wiki,
+        projects=[proj_unchanged, proj_update, proj_refuse, proj_error],
+    )
+
+    assert new_commit == head_commit
+    states = {c.project_root.name: c.state for c in classifications}
+    assert states == {
+        "unchanged": "unchanged",
+        "update_clean": "update",
+        "refuse": "refuse",
+        "error": "error",
+    }
+    # Cache pin: unchanged + error have no dirty_report; update + refuse do.
+    by_name = {c.project_root.name: c for c in classifications}
+    assert by_name["unchanged"].dirty_report is None
+    assert by_name["error"].dirty_report is None
+    assert by_name["update_clean"].dirty_report is not None
+    assert by_name["update_clean"].dirty_report.reason == "clean"
+    assert by_name["refuse"].dirty_report is not None
+    assert by_name["refuse"].dirty_report.reason == "dirty"
+
+
+def test_classify_skips_projects_without_lockfile_entry(wiki_root: Path, tmp_path: Path) -> None:
+    """Projects without a lockfile entry for this asset are silently
+    skipped — no ``"skipped"`` row clutters the preview table."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+
+    proj_with = tmp_path / "with_foo"
+    proj_with.mkdir()
+    install_skill(proj_with, "foo")
+
+    proj_without = tmp_path / "without_foo"
+    proj_without.mkdir()  # no lockfile, no install
+
+    wiki = WikiStore.at_default()
+    new_commit, classifications = _classify_for_all_update(
+        "skills", "foo", wiki=wiki, projects=[proj_with, proj_without]
+    )
+
+    assert len(classifications) == 1
+    assert classifications[0].project_root == proj_with
+
+
+# ── CLI --all: empty store + no-projects-have-asset ─────────────────────
+
+
+def test_cli_update_all_empty_known_projects_exits_zero(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--all`` with empty known_projects.json exits 0 with an info message.
+
+    cron/CI safety: a first-run before any project registration must
+    not fail with a non-zero exit.
+    """
+    _initialized_wiki(wiki_root)
+    known = tmp_path / "known.json"
+    _seed_known_projects(known, [])
+    _patch_known_projects_path(monkeypatch, known)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--all"])
+
+    assert result.exit_code == 0, result.output
+    assert "No known projects" in result.output
+
+
+def test_cli_update_all_no_projects_have_asset_exits_zero(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All registered projects exist on disk but none has the asset → exit 0."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+
+    proj = tmp_path / "no_lock"
+    proj.mkdir()  # exists but no install
+    known = tmp_path / "known.json"
+    _seed_known_projects(known, [proj])
+    _patch_known_projects_path(monkeypatch, known)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--all"])
+
+    assert result.exit_code == 0, result.output
+    assert "No projects have skills/foo" in result.output
+
+
+# ── CLI --all: refuse blocks batch ──────────────────────────────────────
+
+
+def test_cli_update_all_refuse_without_force_blocks_batch(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When any project is dirty and ``--force`` is absent, the entire
+    batch refuses — no per-project writes happen."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+
+    # Install in two projects; dirty one of them.
+    proj_clean = tmp_path / "clean"
+    proj_clean.mkdir()
+    install_skill(proj_clean, "foo")
+
+    proj_dirty = tmp_path / "dirty"
+    proj_dirty.mkdir()
+    install_skill(proj_dirty, "foo")
+    edited = proj_dirty / ".memtomem" / "skills" / "foo" / "SKILL.md"
+    edited.write_bytes(b"local\n")
+    _bump_mtime(edited)
+
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    known = tmp_path / "known.json"
+    _seed_known_projects(known, [proj_clean, proj_dirty])
+    _patch_known_projects_path(monkeypatch, known)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--all"])
+
+    assert result.exit_code != 0
+    assert "local edits" in result.output
+    assert "--force" in result.output
+
+    # Critical: the clean project's lockfile MUST NOT have been bumped.
+    # If a partial write happened, this would catch the regression.
+    lock_doc = json.loads((proj_clean / ".memtomem" / "lock.json").read_text())
+    # wiki_commit on lockfile entry should still match the original install
+    # (not the new wiki HEAD) — the entire batch refused before any write.
+    assert (proj_clean / ".memtomem" / "skills" / "foo" / "SKILL.md").read_bytes() == b"v1\n"
+    assert lock_doc["skills"]["foo"]["wiki_commit"] != WikiStore.at_default().current_commit()
+
+
+# ── CLI --all: --yes invariants (no WARN unless --force) ────────────────
+
+
+def test_cli_update_all_yes_skips_prompt_and_no_destructive_warning(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--yes`` (without ``--force``) skips the confirm prompt and does
+    NOT print the destructive WARNING. Plain ``--yes`` is non-destructive
+    automation; the WARNING only fires for ``--force``-laden batches."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+
+    proj_clean = tmp_path / "clean"
+    proj_clean.mkdir()
+    install_skill(proj_clean, "foo")
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    known = tmp_path / "known.json"
+    _seed_known_projects(known, [proj_clean])
+    _patch_known_projects_path(monkeypatch, known)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--all", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    # Prompt-skip pin: input was empty but the command didn't hang.
+    assert "Continue?" not in result.output
+    # WARN-pin (negative): no destructive warning for plain --yes.
+    assert "WARNING:" not in result.output
+    # Update happened.
+    assert "updated" in result.output
+    assert (proj_clean / ".memtomem" / "skills" / "foo" / "SKILL.md").read_bytes() == b"v2\n"
+
+
+def test_cli_update_all_yes_force_three_way_invariant(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--yes --force`` invariant: WARNING printed AND prompt skipped AND
+    batch executed (3-way conjunction). Tested as a single block so a
+    regression in any one of the three is caught."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+
+    proj_dirty = tmp_path / "dirty"
+    proj_dirty.mkdir()
+    install_skill(proj_dirty, "foo")
+    edited = proj_dirty / ".memtomem" / "skills" / "foo" / "SKILL.md"
+    edited.write_bytes(b"local\n")
+    _bump_mtime(edited)
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    known = tmp_path / "known.json"
+    _seed_known_projects(known, [proj_dirty])
+    _patch_known_projects_path(monkeypatch, known)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--all", "--yes", "--force"])
+
+    assert result.exit_code == 0, result.output
+    # 1. WARNING printed.
+    assert "WARNING:" in result.output
+    # 2. Prompt skipped.
+    assert "Continue?" not in result.output
+    # 3. Batch executed — bytes changed and .bak survived the dirty edit.
+    bak = edited.with_suffix(edited.suffix + ".bak")
+    assert bak.is_file()
+    assert bak.read_bytes() == b"local\n"
+    assert edited.read_bytes() == b"v2\n"
+
+
+# ── CLI --all: cache reuse pin ──────────────────────────────────────────
+
+
+def test_cli_update_all_does_not_re_walk_for_dirty(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Execute phase MUST consume the cached ``dirty_report`` from
+    classification — no second ``is_asset_dirty`` call per project.
+
+    Spy counts ``is_asset_dirty`` invocations during the whole flow:
+    classify calls it once for the dirty project (state=refuse with
+    --force allowed), and execute reuses the cached report. Total = 1
+    per project that needed classification. Without the cache, total
+    would be 2 per project.
+    """
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+
+    proj_dirty = tmp_path / "dirty"
+    proj_dirty.mkdir()
+    install_skill(proj_dirty, "foo")
+    edited = proj_dirty / ".memtomem" / "skills" / "foo" / "SKILL.md"
+    edited.write_bytes(b"local\n")
+    _bump_mtime(edited)
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    known = tmp_path / "known.json"
+    _seed_known_projects(known, [proj_dirty])
+    _patch_known_projects_path(monkeypatch, known)
+
+    real_is_asset_dirty = install_module.is_asset_dirty
+    call_count = {"n": 0}
+
+    def _spy(*args: object, **kwargs: object):
+        call_count["n"] += 1
+        return real_is_asset_dirty(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(install_module, "is_asset_dirty", _spy)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--all", "--yes", "--force"])
+
+    assert result.exit_code == 0, result.output
+    # 1 = classification's call only. Execute used the cached DirtyReport
+    # from ProjectClassification — no second walk.
+    assert call_count["n"] == 1
+
+
+# ── CLI: wiki dirty warn timing (single-asset & --all) ──────────────────
+
+
+def test_cli_update_wiki_dirty_warn_single_asset(
+    wiki_root: Path,
+    project_cwd: Path,
+) -> None:
+    """Single-asset path: wiki dirty → warn on stderr at update entry."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    install_skill(project_cwd, "foo")
+
+    # Make the wiki dirty.
+    (wiki_root / "untracked_marker.txt").write_text("wip", encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo"])
+
+    assert result.exit_code == 0, result.output
+    assert "wiki has uncommitted changes" in result.output
+
+
+def test_cli_update_wiki_dirty_warn_all(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--all path: wiki dirty → warn on stderr BEFORE classification."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    proj = tmp_path / "p"
+    proj.mkdir()
+    install_skill(proj, "foo")
+
+    (wiki_root / "untracked_marker.txt").write_text("wip", encoding="utf-8")
+
+    known = tmp_path / "known.json"
+    _seed_known_projects(known, [proj])
+    _patch_known_projects_path(monkeypatch, known)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--all", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert "wiki has uncommitted changes" in result.output
+
+
+def test_cli_update_no_wiki_dirty_warn_when_clean(
+    wiki_root: Path,
+    project_cwd: Path,
+) -> None:
+    """Negative pin: clean wiki → no dirty warn line."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    install_skill(project_cwd, "foo")
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo"])
+
+    assert result.exit_code == 0, result.output
+    assert "wiki has uncommitted changes" not in result.output

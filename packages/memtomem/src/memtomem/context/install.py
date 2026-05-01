@@ -31,7 +31,7 @@ from typing import Any, Literal, cast
 from memtomem.context._atomic import copy_tree_atomic
 from memtomem.context._names import validate_name
 from memtomem.context.dirty import DirtyReport, is_asset_dirty
-from memtomem.context.lockfile import Lockfile, utcnow_iso8601_z
+from memtomem.context.lockfile import Lockfile, LockfileVersionError, utcnow_iso8601_z
 from memtomem.wiki.store import WikiStore
 
 __all__ = [
@@ -112,6 +112,39 @@ class UpdateResult:
     bak_files_written: tuple[Path, ...]
     dest: Path
     files_written: int
+
+
+@dataclass(frozen=True)
+class ProjectClassification:
+    """Per-project classification produced by :func:`_classify_for_all_update`.
+
+    The dataclass *caches* the per-project lockfile read and the dirty walk
+    so the execute phase can reuse them — the same expensive operations
+    must not run twice between preview and write.
+
+    State semantics:
+
+    - ``"update"`` — wiki HEAD ≠ lockfile pin AND dest is clean. Will
+      copy wiki bytes when the user confirms.
+    - ``"unchanged"`` — wiki HEAD == lockfile pin. No-op; ``dirty_report``
+      stays ``None`` because the dirty walk was skipped (cheap by design).
+    - ``"refuse"`` — wiki HEAD ≠ lockfile pin AND dest has local edits.
+      Without ``--force`` the entire batch refuses.
+    - ``"error"`` — the project's lockfile is corrupt or unreadable;
+      ``reason`` carries the detail. Propagates as a row-level failure
+      in the execute summary.
+
+    ``lock_entry`` is the live lockfile entry (carries ``installed_at``
+    and ``wiki_commit``). ``dirty_report`` is populated only for
+    ``"update"`` and ``"refuse"`` states — the two cases where the
+    dirty walk actually ran.
+    """
+
+    project_root: Path
+    state: Literal["update", "unchanged", "refuse", "error"]
+    reason: str | None
+    lock_entry: dict[str, Any] | None
+    dirty_report: DirtyReport | None
 
 
 def install_skill(
@@ -421,3 +454,118 @@ def _apply_update(
         dest=dest,
         files_written=files_written,
     )
+
+
+def _classify_for_all_update(
+    asset_type: str,
+    name: str,
+    *,
+    wiki: WikiStore,
+    projects: list[Path],
+) -> tuple[str, list[ProjectClassification]]:
+    """Classify ``asset_type/name`` across many project roots in one pass.
+
+    Returns ``(new_commit, classifications)`` — the wiki HEAD pinned at
+    the start of the call, paired with the per-project verdicts. The
+    caller is expected to thread ``new_commit`` into each subsequent
+    :func:`_apply_update` invocation so the execute phase writes against
+    the same snapshot the user confirmed.
+
+    Used by ``mm context update --all``. The wiki state is read **once**
+    up front: ``wiki.current_commit()`` and the source-asset existence
+    check both happen before the per-project loop, so every project is
+    classified against the same snapshot. This guarantees the preview
+    table the user confirms against matches what the execute phase will
+    actually see.
+
+    Per-project work cached on the resulting :class:`ProjectClassification`:
+
+    - ``lock_entry`` — the lockfile read result (avoids a second read
+      during the execute phase).
+    - ``dirty_report`` — the :func:`is_asset_dirty` walk for the dest tree
+      (only populated when ``state in {"update", "refuse"}``; the
+      ``unchanged`` short-circuit skips the walk entirely since the
+      lockfile pin matches HEAD and the dest tree is, by definition,
+      what was installed at that pin).
+
+    Projects without a lockfile entry for this asset are silently
+    skipped (no result row): they were never in scope for this
+    asset_type/name, so a "you skipped me" row would just clutter the
+    preview. A corrupt lockfile is the exception — it produces an
+    explicit ``"error"`` row so the user can see and triage.
+
+    The wiki source asset is read once up front. If it's missing,
+    callers get :class:`AssetNotFoundError` here, *before* any project
+    loop runs — preventing a confusing per-project "asset not found"
+    storm.
+    """
+    new_commit = wiki.current_commit()
+    src = wiki.root / asset_type / name
+    if not src.is_dir():
+        raise AssetNotFoundError(f"{asset_type}/{name} not in wiki at {wiki.root}")
+
+    out: list[ProjectClassification] = []
+    for project_root in projects:
+        try:
+            lock = Lockfile.at(project_root)
+            lock_entry = lock.read_entry(asset_type, name)
+        except LockfileVersionError as exc:
+            out.append(
+                ProjectClassification(
+                    project_root=project_root,
+                    state="error",
+                    reason=str(exc),
+                    lock_entry=None,
+                    dirty_report=None,
+                )
+            )
+            continue
+        except OSError as exc:
+            out.append(
+                ProjectClassification(
+                    project_root=project_root,
+                    state="error",
+                    reason=str(exc),
+                    lock_entry=None,
+                    dirty_report=None,
+                )
+            )
+            continue
+
+        if lock_entry is None:
+            # Asset never installed in this project — silently skip
+            # (no preview-table row).
+            continue
+
+        if lock_entry.get("wiki_commit") == new_commit:
+            out.append(
+                ProjectClassification(
+                    project_root=project_root,
+                    state="unchanged",
+                    reason=None,
+                    lock_entry=lock_entry,
+                    dirty_report=None,
+                )
+            )
+            continue
+
+        # Wiki advanced — classify dirty/clean for this project.
+        report = is_asset_dirty(project_root, asset_type, name, lock_entry=lock_entry)
+        if report.reason == "dirty":
+            state: Literal["update", "unchanged", "refuse", "error"] = "refuse"
+            reason: str | None = f"{len(report.dirty_files)} file(s) modified locally since install"
+        else:
+            state = "update"
+            reason = None
+
+        out.append(
+            ProjectClassification(
+                project_root=project_root,
+                state=state,
+                reason=reason,
+                lock_entry=lock_entry,
+                dirty_report=report,
+            )
+        )
+
+    return new_commit, out
