@@ -1082,30 +1082,99 @@ async function mdOpenOne(path, btn) {
   }
 }
 
+// SSE-streamed since #640: the previous ``POST /api/index`` was synchronous
+// and held the JS request open for the full ``index_path`` walk — many
+// minutes for a large memory_dir on CPU-only ONNX. The user saw the header
+// "indexing" indicator on the whole time with no signal that progress was
+// happening, which read like a leak (it wasn't — the engine was legitimately
+// busy embedding). Switching to ``/api/index/stream`` reuses the per-file
+// ``progress`` events the Index tab already consumes and surfaces them as a
+// live ``done/total`` counter on the reindex button itself.
 async function mdReindexOne(path, btn) {
   if (typeof _indexingTryStart === 'function' && !_indexingTryStart()) return;
   if (btn) btnLoading(btn, true);
+  // Cache the original button label so we can restore it after the run —
+  // ``btnLoading`` only toggles disabled+spinner, it doesn't snapshot text.
+  const _origText = btn ? btn.textContent : '';
   showToast(t('toast.memory_dir.reindex_started', { path }), 'info');
-  try {
-    const resp = await api(
-      'POST', '/api/index',
-      { path, recursive: true, force: false },
-      { timeout: 300_000 },
-    );
-    const count = (resp && resp.indexed_chunks) || 0;
-    showToast(
-      t('toast.memory_dir.reindex_done', { path, count }),
-      (resp && resp.errors && resp.errors.length) ? 'error' : 'success',
-    );
-    if (typeof _markDataStale === 'function') _markDataStale();
-    if (typeof loadStats === 'function') loadStats();
-  } catch (err) {
-    showToast(t('toast.memory_dir.reindex_failed', { error: _mdApiErrorText(err) }), 'error');
-  } finally {
-    if (btn) btnLoading(btn, false);
+
+  const _cleanup = () => {
+    if (btn) {
+      btn.textContent = _origText;
+      btnLoading(btn, false);
+    }
     if (typeof _indexingEnd === 'function') _indexingEnd();
     if (typeof loadSources === 'function') loadSources();
+  };
+
+  // EventSource construction can throw synchronously (malformed URL, browser
+  // storage policy edge cases). Mirrors the defensive guard in
+  // ``runIndexStream`` (app.js) — without it a sync throw would leave the
+  // header indicator stuck on and block every subsequent reindex.
+  let es;
+  try {
+    const params = new URLSearchParams({ path, recursive: 'true', force: 'false' });
+    es = new EventSource(`/api/index/stream?${params}`);
+  } catch (err) {
+    showToast(t('toast.memory_dir.reindex_failed', { error: String(err) }), 'error');
+    _cleanup();
+    return;
   }
+
+  let _sseFailCount = 0;
+  const _SSE_MAX_FAILS = 3;
+  let _completed = false;
+
+  es.onmessage = (e) => {
+    let event;
+    try { event = JSON.parse(e.data); }
+    catch {
+      _sseFailCount++;
+      console.warn(`[memory-dir-reindex] malformed SSE (${_sseFailCount}/${_SSE_MAX_FAILS}):`, e.data);
+      if (_sseFailCount >= _SSE_MAX_FAILS) {
+        es.close();
+        showToast(t('toast.stream_fallback'), 'error');
+        _cleanup();
+      }
+      return;
+    }
+    _sseFailCount = 0;
+    if (event.type === 'progress') {
+      if (btn) {
+        btn.textContent = `${event.files_done}/${event.files_total}`;
+      }
+    } else if (event.type === 'complete') {
+      _completed = true;
+      es.close();
+      const indexed = event.indexed_chunks || 0;
+      const errs = Array.isArray(event.errors) ? event.errors : [];
+      showToast(
+        t('toast.memory_dir.reindex_done', { path, count: indexed }),
+        errs.length ? 'error' : 'success',
+      );
+      if (typeof _markDataStale === 'function') _markDataStale();
+      if (typeof loadStats === 'function') loadStats();
+      _cleanup();
+    } else if (event.type === 'error') {
+      _completed = true;
+      es.close();
+      showToast(
+        t('toast.memory_dir.reindex_failed', { error: event.message || 'stream error' }),
+        'error',
+      );
+      _cleanup();
+    }
+  };
+
+  es.onerror = () => {
+    // ``onerror`` also fires when the server closes the stream cleanly after
+    // the last event in some browsers — only treat it as a failure if we
+    // didn't already see ``complete``/``error``.
+    if (_completed) return;
+    es.close();
+    showToast(t('toast.stream_fallback'), 'error');
+    _cleanup();
+  };
 }
 
 async function mdReindexAll(btn) {
