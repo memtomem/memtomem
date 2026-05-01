@@ -44,6 +44,7 @@ from memtomem.context.install import (
 )
 from memtomem.context.projects import KnownProjectsStore
 from memtomem.context.lockfile import LockfileVersionError
+from memtomem.context.status import classify_status, load_with_recovery
 from memtomem.context.generator import (
     GENERATORS,
     extract_sections_from_agent_file,
@@ -977,3 +978,80 @@ def _print_classification_table(
         if c.reason:
             line += f"  ({c.reason})"
         click.secho(line, fg=color)
+
+
+_STATUS_GLYPH: dict[str, tuple[str, str]] = {
+    # state -> (glyph, click color)
+    "ok": ("✓", "green"),
+    "behind": ("↑", "cyan"),
+    "dirty": ("✗", "yellow"),
+    "missing": ("!", "red"),
+    "stale-pin": ("⚠", "red"),
+}
+
+
+@context.command("status")
+def status_cmd() -> None:
+    """Show installed wiki assets and their drift state.
+
+    Read-only. Walks ``<project>/.memtomem/lock.json`` and classifies
+    each entry against the dest tree and the wiki. Always exits 0 for
+    normal runs (cron-friendly chaining via ``mm context status && mm
+    context update --all``); only a corrupt / version-mismatched
+    lockfile produces a non-zero exit.
+    """
+    root = _find_project_root()
+
+    # Diagnostic lockfile read — surfaces a version mismatch as an
+    # error row at the top without crashing on the strict-mode path.
+    _doc, lockfile_error = load_with_recovery(root)
+
+    wiki = WikiStore.at_default()
+    wiki_head, rows = classify_status(root, wiki=wiki)
+
+    if lockfile_error is not None:
+        click.secho(f"  ✗ lock.json: {lockfile_error}", fg="red", err=True)
+
+    # Header — counts + wiki HEAD (or "wiki not present" annotation).
+    if wiki_head is None:
+        wiki_root = wiki.root
+        click.echo(
+            f".memtomem/ — {len(rows)} asset(s) installed — "
+            f"wiki not present at {wiki_root}; pin reachability not checked"
+        )
+    else:
+        click.echo(f".memtomem/ — {len(rows)} asset(s) installed — wiki HEAD {wiki_head[:12]}")
+
+    if not rows and lockfile_error is None:
+        click.echo("\nNo wiki assets installed in this project.")
+        return
+
+    # Sectioned by asset type, preserving iter_entries() order
+    # (alphabetical: agents → commands → skills, names alpha within).
+    last_type: str | None = None
+    summary: dict[str, int] = {"ok": 0, "behind": 0, "dirty": 0, "missing": 0, "stale-pin": 0}
+    for row in rows:
+        if row.asset_type != last_type:
+            click.secho(f"\n{row.asset_type}", fg="cyan")
+            last_type = row.asset_type
+        glyph, color = _STATUS_GLYPH[row.state]
+        installed_date = row.installed_at[:10] if row.installed_at else "—"
+        line = (
+            f"  {glyph}  {row.name:24s}  {(row.pin_commit or '?')[:12]}  installed {installed_date}"
+        )
+        if row.reason:
+            line += f"  ({row.reason})"
+        click.secho(line, fg=color)
+        summary[row.state] += 1
+
+    if rows:
+        parts = [
+            f"{summary[k]} {k}"
+            for k in ("ok", "behind", "dirty", "missing", "stale-pin")
+            if summary[k] > 0
+        ]
+        if parts:
+            click.echo("\nSummary: " + ", ".join(parts) + ".")
+
+    if lockfile_error is not None:
+        raise click.exceptions.Exit(1)

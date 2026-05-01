@@ -157,6 +157,37 @@ class WikiStore:
         result = _git(["rev-parse", "HEAD"], cwd=self.root)
         return result.stdout.strip()
 
+    def commit_is_reachable(self, commit: str) -> bool:
+        """``True`` when *commit* resolves to an object in this wiki repo.
+
+        Uses ``git cat-file -e <commit>^{commit}`` and inspects the exit
+        code only — no exception is raised for an unreachable commit.
+        Used by ``mm context status`` to flag entries whose lockfile pin
+        was rebased / force-pushed away (the ``stale-pin`` state) and
+        by ``mm context install --all`` to classify orphan entries
+        before attempting per-file extraction.
+
+        Returns ``False`` when the commit is missing OR when *commit*
+        is malformed (empty string, non-hex chars, etc.) — the caller
+        should not need to validate the SHA shape upfront.
+
+        Raises :class:`WikiNotFoundError` if the wiki itself is missing
+        — the caller decides whether that's a hard error or a
+        graceful-degradation path (status renders rows without
+        reachability info; install --all refuses).
+        """
+        self.require_exists()
+        if not commit:
+            return False
+        result = subprocess.run(
+            ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+            cwd=self.root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0
+
     def is_dirty(self) -> bool:
         """``True`` when the wiki working tree has uncommitted modifications.
 
