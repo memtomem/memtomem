@@ -142,6 +142,7 @@
   "sources.empty_icon": "📄",
   "sources.empty_text": "소스를 선택하면 청크를 탐색할 수 있습니다",
   "sources.discovered_label": "발견됨",
+  "sources.orphan_label": "기타 (등록되지 않은 위치)",
   "sources.empty_vendor_placeholder": "{vendor} 메모리 없음",
   "sources.add_manually_btn": "+ 수동 추가",
   "sources.default_pill": "기본",
