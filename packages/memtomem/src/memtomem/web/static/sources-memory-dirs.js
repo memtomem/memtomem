@@ -1096,14 +1096,19 @@ async function mdReindexOne(path, btn) {
   // Cache the original button label so we can restore it after the run —
   // ``btnLoading`` only toggles disabled+spinner, it doesn't snapshot text.
   const _origText = btn ? btn.textContent : '';
-  // Slot-reuse for chunk_progress (#654): the meta row already carries
-  // mutable count text ("12 files · 1,847 chunks"), already has the
+  // Slot-reuse for chunk_progress (#654): the stats badge already carries
+  // mutable count text ("0/9 files, 0 chunks"), already has the
   // nowrap+ellipsis CSS guards, and is the only single-line slot near
   // the button that won't shift adjacent dirs cards when its content
   // grows. We borrow it for in-flight ``file.md — N/M chunks`` ticks
   // and snap back via ``_origMeta`` on file boundary / cleanup.
-  const _item = btn ? btn.closest('.memory-dirs-item') : null;
-  const metaEl = _item ? _item.querySelector('.memory-dirs-item-meta') : null;
+  // Renderer lives in ``app.js:_renderMemoryDirGroup`` — ``.source-group``
+  // wraps the row, ``.source-group-stats`` is the count badge. The
+  // ``_buildItemRow`` renderer in this file (with the historic
+  // ``.memory-dirs-item`` classes) is dead since #568 (Memory/General
+  // sub-toggle removal) — tracked separately for cleanup.
+  const _item = btn ? btn.closest('.source-group') : null;
+  const metaEl = _item ? _item.querySelector('.source-group-stats') : null;
   const _origMeta = metaEl ? metaEl.textContent : '';
   // Throttle state — function-local so two concurrent reindex clicks
   // (one per dir) don't share each other's clocks. Mirrors the
