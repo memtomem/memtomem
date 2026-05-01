@@ -15,6 +15,7 @@ These guarantees are what the SSE indexing stream relies on to forward
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -208,6 +209,12 @@ async def test_onnx_streams_progress_per_yield():
     calls, cb = _record()
     result = await embedder.embed_texts(["a", "b", "c", "d", "e"], on_progress=cb)
     assert len(result) == 5
+    # Flush ``call_soon_threadsafe`` callbacks the worker scheduled but
+    # the loop hasn't dequeued yet by the time ``to_thread`` resumed —
+    # macOS exposes the race ~30% of the time on a 5-text burst (#667).
+    # Production behavior is fire-and-forget; tightening that contract
+    # would be a separate PR.
+    await asyncio.sleep(0)
     _assert_progress_contract(calls, total=5, expected_calls=5)
     assert [d for d, _ in calls] == [1, 2, 3, 4, 5]
 
@@ -235,6 +242,11 @@ async def test_onnx_throttles_thread_hops_for_large_input():
     embedder._embed_sync = fake_sync  # type: ignore[method-assign]
     calls, cb = _record()
     await embedder.embed_texts(["x"] * n, on_progress=cb)
+    # Same threadsafe-callback flush as test_onnx_streams_progress_per_yield
+    # — defensive here, since 200 ticks throttled to ~20 hasn't been seen
+    # to flake in CI (only the 5-text burst does), but the race window is
+    # the same code path.
+    await asyncio.sleep(0)
     # Throttle step = max(1, n // 20) = 10 → ~20 ticks + final
     # (final-tick bypass guarantees one extra if the last-step boundary
     # doesn't land exactly on N).
