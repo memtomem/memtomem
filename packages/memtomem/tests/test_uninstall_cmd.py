@@ -625,11 +625,13 @@ class TestWindowsFcntlGuard:
     """(#448) ``import fcntl`` at module level broke ``cli/__init__.py:_register``
     on Windows — every ``mm`` subcommand crashed before even parsing argv.
 
-    The fix moves ``fcntl`` to a lazy import inside ``_probe_pid_file``, gated
-    by ``sys.platform != "win32"``. On Windows the probe returns conservative
-    ``alive=True`` when the pid file exists (matching the existing
-    unsupported-filesystem fallback) so ``mm uninstall`` still refuses unless
-    ``--force``.
+    The fix originally moved ``fcntl`` to a lazy import inside
+    ``_probe_pid_file``. As of #625 the probe routes through
+    ``portalocker``, which is cross-platform, so the Windows fallback
+    that returned conservative ``alive=True`` is gone — the probe now
+    runs the same lock-acquire on every OS. The single regex pin below
+    survives until PR-3 replaces it with an AST scan over all of
+    ``packages/memtomem/src/``.
     """
 
     def test_no_module_level_fcntl_import(self):
@@ -651,66 +653,3 @@ class TestWindowsFcntlGuard:
             "uninstall_cmd.py must not import fcntl at module level — "
             "that crashes `mm` on Windows at CLI registration time (#448)."
         )
-
-    def test_probe_returns_alive_on_win32_when_pid_file_exists(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        """With ``sys.platform`` patched to ``"win32"``, ``_probe_pid_file``
-        must return ``alive=True`` without ever touching ``fcntl``. The pid
-        value is still read (for the user-facing message) but the live/dead
-        decision is conservative."""
-        from memtomem.cli import uninstall_cmd
-
-        pid_file = tmp_path / "server.pid"
-        pid_file.write_text("4242", encoding="utf-8")
-
-        monkeypatch.setattr(uninstall_cmd.sys, "platform", "win32")
-
-        state = uninstall_cmd._probe_pid_file(pid_file)
-
-        assert state.alive is True
-        assert state.pid == 4242
-        assert state.pid_file == pid_file
-
-    def test_probe_returns_dead_on_win32_when_pid_file_missing(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        """Windows fallback must not invent liveness out of nothing — an
-        absent pid file means the generic ``not pid_file.exists()`` branch
-        fires first and returns ``alive=False``. Guards against a future
-        refactor that hoists the Windows guard above the existence check.
-        """
-        from memtomem.cli import uninstall_cmd
-
-        pid_file = tmp_path / "missing.pid"
-        monkeypatch.setattr(uninstall_cmd.sys, "platform", "win32")
-
-        state = uninstall_cmd._probe_pid_file(pid_file)
-
-        assert state.alive is False
-        assert state.pid is None
-        assert state.pid_file is None
-
-    def test_force_overrides_win32_conservative_liveness(
-        self, home, monkeypatch: pytest.MonkeyPatch
-    ):
-        """End-to-end: under the Windows fallback, ``mm uninstall -y`` refuses
-        (conservative alive=True) but ``--force`` completes cleanup. Matches
-        the documented escape hatch for unsupported-filesystem cases."""
-        from memtomem.cli import uninstall_cmd
-
-        state = _seed_state(home)
-        pid_file = state / ".server.pid"
-        pid_file.write_text("0", encoding="utf-8")
-
-        monkeypatch.setattr(uninstall_cmd.sys, "platform", "win32")
-
-        refused = CliRunner().invoke(cli, ["uninstall", "-y"])
-        assert refused.exit_code == 2, refused.output
-        assert "Server still running" in refused.output
-        assert state.exists(), "refused uninstall must not touch state dir"
-
-        forced = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
-        assert forced.exit_code == 0, forced.output
-        assert not state.exists()
-        assert not (state / "memtomem.db").exists()
