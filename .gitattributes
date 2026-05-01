@@ -3,15 +3,12 @@
 # comparisons. The motivating case is `test_install_skill_copies_tree`,
 # which asserts `read_bytes() == b"#!/bin/bash\necho hi\n"` against a
 # tracked fixture file — under autocrlf the bytes become `\r\n` and the
-# assertion fails. Source has no `\r\n` literals today; this just
-# preserves the existing on-disk contract across platforms.
+# assertion fails. Source has no `\r\n` literals today (verified via
+# `git ls-files --eol`: 494 LF, 0 CRLF, 0 mixed); this just preserves
+# the existing on-disk contract across platforms.
+#
+# A single global rule is sufficient — git's `text=auto` reliably
+# detects text vs binary for the file types in this repo, and `eol=lf`
+# overrides any developer's `core.autocrlf` setting on checkout.
 
 * text=auto eol=lf
-
-*.sh   text eol=lf
-*.py   text eol=lf
-*.md   text eol=lf
-*.toml text eol=lf
-*.yml  text eol=lf
-*.yaml text eol=lf
-*.json text eol=lf

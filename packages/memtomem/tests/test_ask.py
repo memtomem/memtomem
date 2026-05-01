@@ -45,7 +45,7 @@ class TestMemAskFormatting:
                 if r.chunk.metadata.heading_hierarchy
                 else ""
             )
-            source = Path(r.chunk.metadata.source_file).name
+            source = r.chunk.metadata.source_file.name
             label = heading or source
             lines.append(f"### [{r.rank}] {label} (relevance: {r.score:.2f})")
             lines.append(r.chunk.content.strip())
