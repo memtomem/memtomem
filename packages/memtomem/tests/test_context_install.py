@@ -11,6 +11,7 @@ import json
 import multiprocessing as mp
 import shutil
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -99,6 +100,47 @@ def test_install_records_lockfile_entry(wiki_root: Path, tmp_path: Path) -> None
     assert lock_doc["version"] == LOCKFILE_VERSION
     assert lock_doc["skills"]["foo"]["wiki_commit"] == expected_commit
     assert lock_doc["skills"]["foo"]["installed_at"] == result.installed_at
+
+
+def test_installed_at_after_all_writes(wiki_root: Path, tmp_path: Path) -> None:
+    """``installed_at`` is captured *after* every dest file is written.
+
+    Regression for ADR-0008 PR-D's ``mtime > installed_at`` dirty check.
+    If ``installed_at`` were captured before ``copy_tree_atomic``, a large
+    copytree could leave dest files with mtimes later than ``installed_at``,
+    false-positiving as dirty on the very next ``mm context update``.
+    """
+    _initialized_wiki(wiki_root)
+    _seed_skill(
+        wiki_root,
+        "foo",
+        {
+            "SKILL.md": b"# foo skill\n",
+            "scripts/run.sh": b"#!/bin/bash\necho hi\n",
+            "scripts/helper.py": b"print('helper')\n",
+            "overrides/claude.md": b"claude-only override\n",
+        },
+    )
+    project = tmp_path
+
+    result = install_skill(project, "foo")
+
+    installed_at_epoch = datetime.fromisoformat(result.installed_at).timestamp()
+
+    dest = project / ".memtomem" / "skills" / "foo"
+    file_mtimes = [f.stat().st_mtime for f in dest.rglob("*") if f.is_file()]
+    assert file_mtimes, "expected dest tree to contain files"
+
+    max_mtime = max(file_mtimes)
+    # installed_at MUST be >= max(dest file mtime). Allow 1ms slack to absorb
+    # fs precision differences between the kernel's mtime clock and Python's
+    # datetime.now() — both are wallclock-derived but may round at different
+    # resolutions on some platforms.
+    assert installed_at_epoch + 0.001 >= max_mtime, (
+        f"installed_at ({result.installed_at}, epoch={installed_at_epoch:.6f}) "
+        f"earlier than newest dest file mtime ({max_mtime:.6f}); "
+        f"diff={max_mtime - installed_at_epoch:.6f}s"
+    )
 
 
 def test_install_skips_dotgit_in_source(wiki_root: Path, tmp_path: Path) -> None:

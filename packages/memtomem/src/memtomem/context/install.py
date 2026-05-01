@@ -113,6 +113,11 @@ def _install_asset(
     individual files consistent, so byte content under ``dest`` converges
     even if the workers interleave. Distinct-asset writers serialize
     cleanly on the lockfile sidecar lock and both entries survive.
+
+    ``installed_at`` is captured at the lockfile-upsert boundary (after the
+    copytree completes) so that a subsequent ``mm context update``'s
+    ``mtime > installed_at`` dirty check cannot false-positive on the
+    install's own writes.
     """
     validated = validate_name(name, kind=f"{asset_type.removesuffix('s')} name")
     project_root = Path(project_root).expanduser()
@@ -127,7 +132,6 @@ def _install_asset(
         raise AssetNotFoundError(f"{asset_type}/{validated} not in wiki at {wiki.root}")
 
     wiki_commit = wiki.current_commit()
-    installed_at = utcnow_iso8601_z()
 
     dest = project_root / ".memtomem" / asset_type / validated
     lock = Lockfile.at(project_root)
@@ -147,6 +151,7 @@ def _install_asset(
     dest.parent.mkdir(parents=True, exist_ok=True)
     files_written = copy_tree_atomic(src, dest)
 
+    installed_at = utcnow_iso8601_z()
     lock.upsert_entry(
         asset_type,
         validated,
