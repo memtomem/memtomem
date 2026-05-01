@@ -2630,6 +2630,11 @@ function _renderMemorySourceTree(sources, list) {
   // chunks drill-in works identically to indexed dirs. Rendered only
   // when ``activeVendor === 'user'`` because ``orphans`` is populated
   // exclusively for that vendor in the stats pass above.
+  //
+  // Bar normalisation: passes the outer ``maxChunks`` (tree-wide max,
+  // line ~2477) rather than a local max so the chunk-bar widths stay
+  // visually comparable to the indexed groups above — same chunk_count
+  // → same bar length regardless of which sub-section a row sits in.
   const renderOrphanBlock = (items) => {
     if (!items.length) return null;
     const det = document.createElement('details');
@@ -2645,8 +2650,7 @@ function _renderMemorySourceTree(sources, list) {
     cnt.textContent = String(items.length);
     sum.appendChild(cnt);
     det.appendChild(sum);
-    const localMax = Math.max(1, ...items.map(s => s.chunk_count || 0));
-    for (const s of items) det.appendChild(_renderMemorySourceItem(s, localMax));
+    for (const s of items) det.appendChild(_renderMemorySourceItem(s, maxChunks));
     return det;
   };
 
@@ -2709,7 +2713,12 @@ function _renderMemorySourceTree(sources, list) {
       if (disc) section.appendChild(disc);
       products.appendChild(section);
     }
-    list.appendChild(products);
+    // Skip the wrapper when every category was filtered out — happens
+    // when a ``user`` vendor has only orphan rows (no indexed / no
+    // discovered dirs). Without this guard an empty
+    // ``.source-vendor-products`` div would still ship its CSS margin
+    // before the orphan block sits below.
+    if (products.children.length) list.appendChild(products);
   }
 
   // Append the orphan block last so indexed groups stay primary. Only
