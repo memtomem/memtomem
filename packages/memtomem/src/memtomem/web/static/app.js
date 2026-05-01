@@ -994,9 +994,16 @@ async function loadDashboard() {
     // the target vendor sub-tab before activating the Sources tab —
     // otherwise ``_navigateToSource`` falls through to a stale
     // localStorage vendor on the cold-load path. ``loadSources`` will
-    // overwrite both fields with a fresh fetch when the Sources tab
-    // is actually opened, so the dashboard's snapshot is just a fast
-    // path, never a source of truth.
+    // overwrite both fields with a fresh fetch (``?limit=10000``) when
+    // the Sources tab is actually opened, so the dashboard's snapshot
+    // is just a fast path, never a source of truth — the
+    // ``/api/sources`` call here uses the server's default limit, so
+    // on instances with more sources than that default the mirror is
+    // a partial set. Eager resolve in ``_navigateToSource`` will miss
+    // the unseen tail and fall through to the cold-load branch in
+    // ``_renderMemorySourceTree``, which re-resolves vendor against
+    // the post-``loadSources`` STATE — so partiality stays a perf
+    // hint, not a correctness issue.
     STATE.allSources = allSources;
     const _memStatusByPath = {};
     for (const entry of (memDirsResp && memDirsResp.dirs) || []) {
@@ -2876,6 +2883,14 @@ function _renderMemorySourceTree(sources, list) {
       target.classList.add('active');
       target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       if (typeof browseSource === 'function') browseSource(path);
+    } else if (STATE.uiMode === 'dev') {
+      // Path made it through the vendor + filter resolves but the
+      // ``.source-item`` isn't in the rendered list — most likely an
+      // edge case the cold-load fix didn't anticipate (orphan source,
+      // path normalisation drift like #675, etc.). Surface it in dev
+      // so the next bug report has a breadcrumb instead of "click did
+      // nothing"; prod stays silent because users can't act on it.
+      console.warn('[memtomem] pendingActivatePath found no .source-item:', path);
     }
     STATE.pendingActivatePath = '';
   }
