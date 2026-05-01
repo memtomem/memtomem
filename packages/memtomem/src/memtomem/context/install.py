@@ -498,7 +498,16 @@ def _classify_for_all_update(
     callers get :class:`AssetNotFoundError` here, *before* any project
     loop runs — preventing a confusing per-project "asset not found"
     storm.
+
+    ``name`` is validated at the boundary (defense in depth) — even
+    though the CLI ``update_cmd`` is the expected upstream caller, this
+    helper also accepts ``name`` as input to a ``Path`` join (``src =
+    wiki.root / asset_type / name``) and the per-project ``dest``, so
+    a malicious ``../escape`` would escape both. ``feedback_public_api_
+    ship_time_validation`` — validate at the function entry, not just
+    at the convenience caller.
     """
+    name = validate_name(name, kind=f"{asset_type.removesuffix('s')} name")
     new_commit = wiki.current_commit()
     src = wiki.root / asset_type / name
     if not src.is_dir():

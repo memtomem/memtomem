@@ -23,10 +23,10 @@ from click.testing import CliRunner
 
 import memtomem.context.install as install_module
 from memtomem.cli.context_cmd import context as context_group
+from memtomem.context._names import InvalidNameError
 from memtomem.context.install import (
     AlreadyInstalledError,
     NotInstalledError,
-    ProjectClassification,
     StaleInstallError,
     _classify_for_all_update,
     install_skill,
@@ -570,6 +570,31 @@ def test_classify_for_all_update_4_state_coverage(wiki_root: Path, tmp_path: Pat
     assert by_name["refuse"].dirty_report.reason == "dirty"
 
 
+def test_classify_rejects_path_traversal_name(wiki_root: Path, tmp_path: Path) -> None:
+    """``_classify_for_all_update`` validates ``name`` at its boundary —
+    a traversal name like ``../escape`` raises ``InvalidNameError``
+    *before* any per-project loop runs.
+
+    Defense in depth (`feedback_public_api_ship_time_validation`):
+    even though the CLI ``update_cmd`` is the expected upstream caller
+    and the single-asset path goes through ``_update_asset`` which
+    already validates, the ``--all`` path reaches ``_classify_for_all_
+    update`` directly and would feed ``name`` into ``Path`` joins
+    (``src = wiki.root / asset_type / name``) without this check.
+    """
+    _initialized_wiki(wiki_root)
+    proj = tmp_path / "p"
+    proj.mkdir()
+
+    wiki = WikiStore.at_default()
+    with pytest.raises(InvalidNameError):
+        _classify_for_all_update("skills", "../etc", wiki=wiki, projects=[proj])
+    with pytest.raises(InvalidNameError):
+        _classify_for_all_update("skills", "../../escape", wiki=wiki, projects=[proj])
+    with pytest.raises(InvalidNameError):
+        _classify_for_all_update("skills", "foo/bar", wiki=wiki, projects=[proj])
+
+
 def test_classify_skips_projects_without_lockfile_entry(wiki_root: Path, tmp_path: Path) -> None:
     """Projects without a lockfile entry for this asset are silently
     skipped — no ``"skipped"`` row clutters the preview table."""
@@ -593,6 +618,29 @@ def test_classify_skips_projects_without_lockfile_entry(wiki_root: Path, tmp_pat
 
 
 # ── CLI --all: empty store + no-projects-have-asset ─────────────────────
+
+
+def test_cli_update_all_rejects_path_traversal_name(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI surfaces ``InvalidNameError`` as a non-zero exit before
+    touching any project. Pins that the validation gate is reachable
+    through the user-facing path, not just from direct calls."""
+    _initialized_wiki(wiki_root)
+    proj = tmp_path / "p"
+    proj.mkdir()
+    known = tmp_path / "known.json"
+    _seed_known_projects(known, [proj])
+    _patch_known_projects_path(monkeypatch, known)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "../etc", "--all", "--yes"])
+
+    assert result.exit_code != 0
+    assert "invalid" in result.output.lower()
 
 
 def test_cli_update_all_empty_known_projects_exits_zero(
@@ -766,6 +814,57 @@ def test_cli_update_all_yes_force_three_way_invariant(
 
 
 # ── CLI --all: cache reuse pin ──────────────────────────────────────────
+
+
+def test_cli_update_all_mid_loop_fs_error_continues(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A per-project ``OSError`` during execute marks that row ✗ and
+    proceeds to the next project — the batch is not aborted on the
+    first row's failure. The summary reflects the partial outcome.
+    """
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+
+    proj_a = tmp_path / "proj_a"
+    proj_a.mkdir()
+    install_skill(proj_a, "foo")
+
+    proj_b = tmp_path / "proj_b"
+    proj_b.mkdir()
+    install_skill(proj_b, "foo")
+
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    known = tmp_path / "known.json"
+    _seed_known_projects(known, [proj_a, proj_b])
+    _patch_known_projects_path(monkeypatch, known)
+
+    real_apply_update = install_module._apply_update
+    call_count = {"n": 0}
+
+    def _apply_update_first_fails(*args: object, **kwargs: object) -> object:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise OSError("simulated fs error on first project")
+        return real_apply_update(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("memtomem.cli.context_cmd._apply_update", _apply_update_first_fails)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--all", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    # First project marked ✗, second project marked ✓ — both rows reached.
+    assert "✗" in result.output
+    assert "simulated fs error" in result.output
+    assert "✓" in result.output
+    # Summary: 1 updated, 1 failed.
+    assert "1 updated" in result.output
+    assert "1 failed" in result.output
 
 
 def test_cli_update_all_does_not_re_walk_for_dirty(

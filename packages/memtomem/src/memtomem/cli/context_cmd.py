@@ -860,9 +860,11 @@ def _run_update_all(
             wiki=wiki,
             projects=project_roots,
         )
-    except AssetNotFoundError as exc:
-        raise click.ClickException(str(exc)) from exc
     except InvalidNameError as exc:
+        # Validation gate fires before any per-project loop runs; surface
+        # the message verbatim so the user knows which name was rejected.
+        raise click.ClickException(str(exc)) from exc
+    except AssetNotFoundError as exc:
         raise click.ClickException(str(exc)) from exc
 
     if not classifications:
