@@ -64,6 +64,18 @@ class EmbeddingConfig(BaseSettings):
     # would not take effect until restart anyway. Same precedent as
     # ``rerank.provider``/``model``/``api_key`` below.
     threads: int = 4
+    # Per-chunk progress emission gate for the SSE indexing stream.
+    # The index engine only forwards ``chunk_progress`` events to the
+    # stream when a single file produces more than this many chunks —
+    # avoids spamming the UI with one event per tiny file. Semantics:
+    #   * ``> 0`` (default): emit only when ``chunks_total > threshold``.
+    #   * ``0``: always emit (debug affordance — useful when validating
+    #     the SSE plumbing on small fixtures, or when a user reports
+    #     "I never see chunk_progress" and you want to confirm the
+    #     event flows at all).
+    # Runtime-mutable: the gate lives in the engine, not in cached
+    # embedder state, so a config change takes effect on the next file.
+    progress_threshold: int = 32
 
     @field_validator("dimension")
     @classmethod
@@ -84,6 +96,13 @@ class EmbeddingConfig(BaseSettings):
     def threads_non_negative(cls, v: int) -> int:
         if v < 0:
             raise ValueError("threads must be non-negative (0 = ORT default)")
+        return v
+
+    @field_validator("progress_threshold")
+    @classmethod
+    def progress_threshold_non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("progress_threshold must be non-negative (0 = always emit)")
         return v
 
 
@@ -765,7 +784,7 @@ MUTABLE_FIELDS: dict[str, set[str]] = {
         "auto_discover",
         "supported_extensions",
     },
-    "embedding": {"batch_size"},
+    "embedding": {"batch_size", "progress_threshold"},
     "decay": {"enabled", "half_life_days"},
     "mmr": {"enabled", "lambda_param"},
     "namespace": {"default_namespace", "enable_auto_ns", "rules"},
@@ -795,6 +814,7 @@ FIELD_CONSTRAINTS: dict[str, dict] = {
     },
     "indexing.auto_discover": {"type": bool},
     "embedding.batch_size": {"type": int, "min": 1, "max": 1024},
+    "embedding.progress_threshold": {"type": int, "min": 0, "max": 100000},
     "decay.enabled": {"type": bool},
     "decay.half_life_days": {"type": float, "min": 0.1},
     "mmr.enabled": {"type": bool},

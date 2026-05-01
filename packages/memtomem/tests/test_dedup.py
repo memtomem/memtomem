@@ -60,10 +60,12 @@ class _FakeEmbedder:
         self._storage = storage
         self._next_batch: list[str] = []
 
-    async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+    async def embed_texts(self, texts: list[str], **_kwargs) -> list[list[float]]:
         # Return dummy vectors; stash each query content on the storage so
         # the next dense_search call can look it up (works because scan()
         # alternates embed -> dense_search per chunk, not in parallel).
+        # ``**_kwargs`` absorbs ``on_progress`` from the EmbeddingProvider
+        # Protocol; this fake doesn't fire progress.
         self._next_batch = list(texts)
         return [[1.0, 0.0, 0.0] for _ in texts]
 
@@ -79,7 +81,7 @@ def scanner_factory():
         original_embed = embedder.embed_texts
         original_dense = storage.dense_search
 
-        async def wrapped_embed(texts: list[str]) -> list[list[float]]:
+        async def wrapped_embed(texts: list[str], **_kwargs) -> list[list[float]]:
             storage._pending_markers = list(texts)  # type: ignore[attr-defined]
             return await original_embed(texts)
 

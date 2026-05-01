@@ -402,6 +402,210 @@ class TestExcludePatterns:
 
 
 # ===========================================================================
+# 1.a.2 Per-chunk progress: chunk_progress events + threshold gate
+# ===========================================================================
+
+
+class _FakeProgressEmbedder:
+    """Fires ``on_progress`` at 25/50/75/100% milestones — driven enough
+    to exercise stream forwarding without leaning on a real backend."""
+
+    def __init__(self, dim: int = 4) -> None:
+        self._dim = dim
+
+    @property
+    def dimension(self) -> int:
+        return self._dim
+
+    @property
+    def model_name(self) -> str:
+        return "fake-progress"
+
+    async def embed_texts(self, texts, *, on_progress=None):
+        n = len(texts)
+        if on_progress is not None and n >= 4:
+            for ratio in (0.25, 0.5, 0.75, 1.0):
+                on_progress(max(1, int(n * ratio)), n)
+        return [[0.0] * self._dim for _ in texts]
+
+    async def embed_query(self, query: str):
+        return [0.0] * self._dim
+
+    async def close(self) -> None:
+        pass
+
+
+def _many_chunk_md(num_headings: int = 30) -> str:
+    """Build a markdown body that reliably produces many chunks.
+
+    Each H1 gets a body well above the chunker's ``min_chunk_tokens`` so
+    the post-merge pass doesn't collapse them. Used by chunk_progress
+    tests where a low-but-non-trivial chunk count is the only fixture
+    invariant we care about.
+    """
+    body = " ".join(["lorem ipsum dolor sit amet"] * 30)
+    return "\n\n".join(f"# Heading {i}\n\n{body}" for i in range(num_headings))
+
+
+class TestChunkProgressStream:
+    """Tests for ``chunk_progress`` events emitted by ``index_path_stream``
+    during embedding of a single large file. The stream forwards each
+    ``on_progress(done, total)`` call from the embedder via a per-file
+    ``asyncio.Queue`` — see ``index_path_stream`` for the producer/consumer
+    split. These tests pin both the wiring (events flow) and the gate
+    (small files stay quiet).
+    """
+
+    async def test_emits_chunk_progress_above_threshold(self, components, memory_dir):
+        """Big file + low threshold → mid-file ``chunk_progress`` events
+        flow with monotonic non-decreasing ``chunks_done`` ending at total.
+        """
+        (memory_dir / "big.md").write_text(_many_chunk_md(20))
+        engine = components.index_engine
+        engine._progress_threshold = 1  # always emit for any non-trivial file
+        engine._embedder = _FakeProgressEmbedder()
+
+        events = [ev async for ev in engine.index_path_stream(memory_dir, recursive=True)]
+        chunk_events = [e for e in events if e["type"] == "chunk_progress"]
+        assert chunk_events, "expected at least one chunk_progress event for big.md"
+
+        dones = [e["chunks_done"] for e in chunk_events]
+        assert dones == sorted(dones), f"chunks_done not monotonic: {dones}"
+        total = chunk_events[0]["chunks_total"]
+        assert all(e["chunks_total"] == total for e in chunk_events)
+        # Final tick must equal total — UI's final-tick render bypass
+        # depends on this invariant (otherwise users see "(N-1)/N" right
+        # before the file row is replaced).
+        assert dones[-1] == total
+
+    async def test_chunk_progress_ordered_before_progress(self, components, memory_dir):
+        """Strong invariant: every ``chunk_progress`` event for a file
+        must yield BEFORE that file's ``progress`` event. Separated from
+        the monotonic test so a future regression in either property is
+        immediately attributable.
+        """
+        (memory_dir / "big.md").write_text(_many_chunk_md(20))
+        engine = components.index_engine
+        engine._progress_threshold = 1
+        engine._embedder = _FakeProgressEmbedder()
+
+        events = [ev async for ev in engine.index_path_stream(memory_dir, recursive=True)]
+        progress_idx = next(
+            i
+            for i, e in enumerate(events)
+            if e["type"] == "progress" and e["file"].endswith("big.md")
+        )
+        chunk_indices = [
+            i
+            for i, e in enumerate(events)
+            if e["type"] == "chunk_progress" and e["file"].endswith("big.md")
+        ]
+        assert chunk_indices, "expected chunk_progress events to assert ordering on"
+        assert all(ci < progress_idx for ci in chunk_indices), (
+            f"chunk_progress (indices {chunk_indices}) must yield before "
+            f"file's progress (index {progress_idx})"
+        )
+
+    async def test_no_chunk_progress_below_threshold(self, components, memory_dir):
+        """Small file under threshold → no ``chunk_progress`` events emitted.
+        Avoids spamming the SSE stream for trivial files.
+        """
+        (memory_dir / "tiny.md").write_text("# Heading\n\nshort body")
+        engine = components.index_engine
+        engine._progress_threshold = 100  # well above any realistic chunk count
+        engine._embedder = _FakeProgressEmbedder()
+
+        events = [ev async for ev in engine.index_path_stream(memory_dir, recursive=True)]
+        chunk_events = [e for e in events if e["type"] == "chunk_progress"]
+        assert chunk_events == [], (
+            f"expected no chunk_progress for small file under threshold, got {chunk_events}"
+        )
+
+    async def test_threshold_zero_emits_for_any_file(self, components, memory_dir):
+        """``progress_threshold == 0`` is the explicit "always emit" debug
+        affordance — useful when validating the SSE plumbing on small
+        fixtures or chasing a "I never see chunk_progress" report.
+        """
+        (memory_dir / "any.md").write_text(_many_chunk_md(8))
+        engine = components.index_engine
+        engine._progress_threshold = 0
+        engine._embedder = _FakeProgressEmbedder()
+
+        events = [ev async for ev in engine.index_path_stream(memory_dir, recursive=True)]
+        chunk_events = [e for e in events if e["type"] == "chunk_progress"]
+        assert chunk_events, "threshold=0 must emit chunk_progress even for small files"
+
+    async def test_chunk_progress_preserves_complete_errors_contract(self, components, memory_dir):
+        """Adding ``chunk_progress`` events must not regress the #590
+        ``complete.errors`` silent-drop guard. A file that fails embedding
+        must still surface its error in ``complete.errors``.
+        """
+
+        class _RaisingEmbedder(_FakeProgressEmbedder):
+            async def embed_texts(self, texts, *, on_progress=None):
+                # Fire one progress event so the chunk path is exercised,
+                # then fail — mirrors a partial OpenAI rate-limit failure.
+                if on_progress is not None and len(texts) >= 4:
+                    on_progress(max(1, len(texts) // 4), len(texts))
+                from memtomem.errors import EmbeddingError
+
+                raise EmbeddingError("simulated mid-batch failure")
+
+        (memory_dir / "doomed.md").write_text(_many_chunk_md(20))
+        engine = components.index_engine
+        engine._progress_threshold = 1
+        engine._embedder = _RaisingEmbedder()
+
+        events = [ev async for ev in engine.index_path_stream(memory_dir, recursive=True)]
+        complete = next(e for e in events if e.get("type") == "complete")
+        assert complete["errors"], (
+            "complete.errors must surface the embedding failure even when "
+            "chunk_progress events were emitted earlier (#590 regression guard)"
+        )
+        # ``_index_file`` reports embedding failures as
+        # ``"Embedding failed: <exc>"`` — the file path is logged separately
+        # via ``logger.error`` (see engine.py near the embedding try/except).
+        assert any("Embedding failed" in err for err in complete["errors"])
+
+    async def test_consumer_aclose_cancels_inflight_task(self, components, memory_dir):
+        """Generator close (SSE client disconnect) must cancel the in-flight
+        ``_index_file`` task so we don't leak embedding work past the SSE
+        response lifetime. ``_active_runs`` must return to 0 — same
+        invariant as ``test_decrements_on_stream_aclose`` but exercised on
+        the new task+queue path.
+        """
+
+        class _SlowEmbedder(_FakeProgressEmbedder):
+            async def embed_texts(self, texts, *, on_progress=None):
+                # Fire one progress event to suspend the generator past
+                # the queue.get(), then wait long enough for aclose() to
+                # land while the inner task is still parked.
+                if on_progress is not None and len(texts) >= 4:
+                    on_progress(1, len(texts))
+                await asyncio.sleep(60)  # long enough that aclose lands first
+                return [[0.0] * self._dim for _ in texts]
+
+        (memory_dir / "slow.md").write_text(_many_chunk_md(20))
+        engine = components.index_engine
+        engine._progress_threshold = 1
+        engine._embedder = _SlowEmbedder()
+        assert engine._active_runs == 0
+
+        gen = engine.index_path_stream(memory_dir, recursive=True)
+        first = await gen.__anext__()
+        # First yield must be the chunk_progress event (chunker + first
+        # progress fire happen before _index_file completes).
+        assert first["type"] == "chunk_progress"
+        assert engine._active_runs == 1
+
+        await gen.aclose()
+        # ``_active_runs`` must return to 0 even though the inner task
+        # was cancelled mid-embedding.
+        assert engine._active_runs == 0
+        assert engine.is_active is False
+
+
+# ===========================================================================
 # 1.b _active_runs / is_active counter
 # ===========================================================================
 
@@ -430,7 +634,10 @@ class TestActiveRunsCounter:
         gate = asyncio.Event()
         orig = engine._index_file
 
-        async def blocked(fp, force=False, namespace=None):
+        async def blocked(fp, force=False, namespace=None, **_kwargs):
+            # ``**_kwargs`` absorbs ``on_chunk_progress`` (added in the
+            # per-chunk progress feature) so the patch stays compatible
+            # with both stream and non-stream callers.
             await gate.wait()
             return await orig(fp, force, namespace=namespace)
 
@@ -480,7 +687,7 @@ class TestActiveRunsCounter:
         gate = asyncio.Event()
         orig = engine._index_file
 
-        async def blocked(fp, force=False, namespace=None):
+        async def blocked(fp, force=False, namespace=None, **_kwargs):
             await gate.wait()
             return await orig(fp, force, namespace=namespace)
 
@@ -531,7 +738,7 @@ class TestActiveRunsCounter:
         engine = components.index_engine
         orig = engine._index_file
 
-        async def boom(fp, force=False, namespace=None):
+        async def boom(fp, force=False, namespace=None, **_kwargs):
             raise RuntimeError("simulated failure")
 
         engine._index_file = boom  # type: ignore[method-assign]
@@ -1429,7 +1636,7 @@ class TestIndexFile:
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
-            side_effect=lambda texts: [[0.1] * 1024 for _ in texts]
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
         )
         mock_embedder.dimension = 1024
         components.index_engine._embedder = mock_embedder
@@ -1448,7 +1655,7 @@ class TestIndexFile:
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
-            side_effect=lambda texts: [[0.1] * 1024 for _ in texts]
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
         )
         mock_embedder.dimension = 1024
         components.index_engine._embedder = mock_embedder
@@ -1473,7 +1680,7 @@ class TestIndexFile:
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
-            side_effect=lambda texts: [[0.1] * 1024 for _ in texts]
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
         )
         mock_embedder.dimension = 1024
         components.index_engine._embedder = mock_embedder
@@ -1492,7 +1699,7 @@ class TestIndexFile:
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
-            side_effect=lambda texts: [[0.1] * 1024 for _ in texts]
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
         )
         mock_embedder.dimension = 1024
         components.index_engine._embedder = mock_embedder
@@ -1505,7 +1712,7 @@ class TestIndexFile:
         """Non-existent file should return zero counts, not raise."""
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
-            side_effect=lambda texts: [[0.1] * 1024 for _ in texts]
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
         )
         mock_embedder.dimension = 1024
         components.index_engine._embedder = mock_embedder
@@ -1522,7 +1729,7 @@ class TestIndexFile:
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
-            side_effect=lambda texts: [[0.1] * 1024 for _ in texts]
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
         )
         mock_embedder.dimension = 1024
         components.index_engine._embedder = mock_embedder
@@ -1549,7 +1756,7 @@ class TestIndexFile:
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
-            side_effect=lambda texts: [[0.1] * 1024 for _ in texts]
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
         )
         mock_embedder.dimension = 1024
         components.index_engine._embedder = mock_embedder
@@ -1585,7 +1792,7 @@ class TestIndexFile:
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
-            side_effect=lambda texts: [[0.1] * 1024 for _ in texts]
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
         )
         mock_embedder.dimension = 1024
         components.index_engine._embedder = mock_embedder
@@ -1622,7 +1829,7 @@ class TestIndexFile:
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
-            side_effect=lambda texts: [[0.1] * 1024 for _ in texts]
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
         )
         mock_embedder.dimension = 1024
         components.index_engine._embedder = mock_embedder
@@ -1668,7 +1875,7 @@ class TestIndexFile:
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
-            side_effect=lambda texts: [[0.1] * 1024 for _ in texts]
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
         )
         mock_embedder.dimension = 1024
         components.index_engine._embedder = mock_embedder
@@ -1712,7 +1919,7 @@ class TestIndexFile:
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
-            side_effect=lambda texts: [[0.1] * 1024 for _ in texts]
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
         )
         mock_embedder.dimension = 1024
         components.index_engine._embedder = mock_embedder
@@ -1757,7 +1964,7 @@ class TestIndexPath:
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
-            side_effect=lambda texts: [[0.1] * 1024 for _ in texts]
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
         )
         mock_embedder.dimension = 1024
         components.index_engine._embedder = mock_embedder
@@ -1772,7 +1979,7 @@ class TestIndexPath:
         """Non-existent path returns zeroed stats."""
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
-            side_effect=lambda texts: [[0.1] * 1024 for _ in texts]
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
         )
         mock_embedder.dimension = 1024
         components.index_engine._embedder = mock_embedder
@@ -1788,7 +1995,7 @@ class TestIndexPath:
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
-            side_effect=lambda texts: [[0.1] * 1024 for _ in texts]
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
         )
         mock_embedder.dimension = 1024
         components.index_engine._embedder = mock_embedder
@@ -1815,7 +2022,7 @@ class TestIncrementalIndexing:
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
-            side_effect=lambda texts: [[0.1] * 1024 for _ in texts]
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
         )
         mock_embedder.dimension = 1024
         components.index_engine._embedder = mock_embedder
@@ -1843,7 +2050,7 @@ class TestIncrementalIndexing:
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
-            side_effect=lambda texts: [[0.1] * 1024 for _ in texts]
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
         )
         mock_embedder.dimension = 1024
         components.index_engine._embedder = mock_embedder
@@ -1867,7 +2074,7 @@ class TestIncrementalIndexing:
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_texts = AsyncMock(
-            side_effect=lambda texts: [[0.1] * 1024 for _ in texts]
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
         )
         mock_embedder.dimension = 1024
         components.index_engine._embedder = mock_embedder

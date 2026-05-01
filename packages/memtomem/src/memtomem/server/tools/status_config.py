@@ -296,6 +296,7 @@ def _revert_to_stored(app: AppContext) -> str:
         embedder=new_embedder,
         config=config.indexing,
         namespace_config=config.namespace,
+        progress_threshold=config.embedding.progress_threshold,
     )
 
     storage.clear_embedding_mismatch()

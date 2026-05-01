@@ -3713,6 +3713,12 @@ async function runIndexStream() {
   }
   let _sseFailCount = 0;
   const _SSE_MAX_FAILS = 3;
+  // Throttle ``chunk_progress`` DOM writes — a 250-chunk file at batch_size=64
+  // emits ~4 events; a 2000-chunk pathological case would emit ~32. 100ms gap
+  // covers both without making the human eye work. The final tick (done==total)
+  // bypasses this so the user actually sees "(N/N)" land before the file row
+  // is replaced by the next file.
+  let _lastChunkRender = 0;
 
   es.onmessage = (e) => {
     let event;
@@ -3730,7 +3736,21 @@ async function runIndexStream() {
       return;
     }
     _sseFailCount = 0;
+    if (event.type === 'chunk_progress') {
+      const now = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now() : Date.now();
+      const isFinal = event.chunks_done >= event.chunks_total;
+      if (!isFinal && now - _lastChunkRender < 100) return;
+      _lastChunkRender = now;
+      fileEl.textContent = t('index.file_chunk_progress', {
+        file: basename(event.file),
+        done: event.chunks_done,
+        total: event.chunks_total,
+      });
+      return;
+    }
     if (event.type === 'progress') {
+      _lastChunkRender = 0;  // reset on file boundary so first chunk of next file renders immediately
       const pct = event.files_total > 0
         ? Math.round((event.files_done / event.files_total) * 100) : 0;
       barEl.style.width = pct + '%';

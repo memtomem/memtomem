@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
@@ -327,10 +328,17 @@ class IndexEngine:
         config: IndexingConfig,
         registry: ChunkerRegistry | None = None,
         namespace_config: NamespaceConfig | None = None,
+        progress_threshold: int = 32,
     ) -> None:
         self._storage = storage
         self._embedder = embedder
         self._config = config
+        # ``chunk_progress`` SSE events are only emitted when a single file
+        # produces more than this many chunks (or always when set to 0).
+        # Sourced from ``EmbeddingConfig.progress_threshold`` by callers
+        # (``component_factory``, ``status_config`` reset path); defaults
+        # to 32 here so test-only direct constructors stay quiet.
+        self._progress_threshold = progress_threshold
         self._ns_config = namespace_config or NamespaceConfig()
         self._ns_rule_specs: list[tuple[pathspec.GitIgnoreSpec, NamespacePolicyRule]] = [
             (_build_exclude_spec([rule.path_glob]), rule) for rule in self._ns_config.rules
@@ -655,6 +663,8 @@ class IndexEngine:
         file_path: Path,
         force: bool,
         namespace: str | None = None,
+        *,
+        on_chunk_progress: Callable[[int, int], None] | None = None,
     ) -> IndexFileResult:
         # Return shape: total/indexed/skipped/deleted (ints), errors (list[str]),
         # new_chunk_ids (list[UUID]). Early zero-result paths may omit
@@ -760,8 +770,19 @@ class IndexEngine:
         # Skip embedding entirely when using the noop provider (BM25-only mode).
         if diff_result.to_upsert and self._embedder.dimension > 0:
             texts = [c.retrieval_content for c in diff_result.to_upsert]
+            # Threshold gate lives here, not inside the embedder, so callers
+            # without a callback (CLI ``index_path``, direct test invocations)
+            # never even compute the gating predicate. ``threshold == 0`` is
+            # the explicit "always emit" debug semantic — see
+            # ``EmbeddingConfig.progress_threshold`` docstring.
+            emit_progress = on_chunk_progress is not None and (
+                self._progress_threshold == 0 or len(texts) > self._progress_threshold
+            )
             try:
-                embeddings = await self._embedder.embed_texts(texts)
+                embeddings = await self._embedder.embed_texts(
+                    texts,
+                    on_progress=on_chunk_progress if emit_progress else None,
+                )
                 for chunk, emb in zip(diff_result.to_upsert, embeddings):
                     chunk.embedding = emb
             except Exception as exc:
@@ -807,6 +828,13 @@ class IndexEngine:
         """Like index_path(), but yields progress dicts as each file is processed.
 
         Yields dicts with ``type`` key:
+        - ``"chunk_progress"``: emitted *during* a single file's embedding
+          when the file produces more chunks than
+          ``EmbeddingConfig.progress_threshold``. Fields: ``file,
+          chunks_done, chunks_total, files_done, files_total``. ``chunks_done``
+          is a monotonically non-decreasing **count** of texts whose embeddings
+          have completed — NOT a positional index, since concurrent batches
+          (OpenAI/Ollama) finish in arbitrary order.
         - ``"progress"``: emitted after each file with fields
           ``file, files_done, files_total, indexed, skipped``.
         - ``"complete"``: final summary — ``total_files, total_chunks,
@@ -852,21 +880,76 @@ class IndexEngine:
             all_errors: list[str] = []
 
             for i, fp in enumerate(files, start=1):
+                # Per-file queue forwards ``chunk_progress`` ticks from the
+                # embedder (running inside the ``runner`` task) back to this
+                # generator in real time. Without the queue+task split the
+                # ``await self._index_file`` would block until the file is
+                # fully embedded, defeating the purpose of mid-file progress.
+                queue: asyncio.Queue = asyncio.Queue()
+                DONE = object()
+
+                # ``fp=fp, idx=i`` default-bind at definition so any future
+                # refactor lifting ``runner`` out of the loop or fanning out
+                # tasks won't silently regress to late-bound closure capture.
+                async def runner(
+                    fp: Path = fp,
+                    idx: int = i,
+                ) -> IndexFileResult:
+                    def cb(done: int, total: int) -> None:
+                        queue.put_nowait(
+                            {
+                                "type": "chunk_progress",
+                                "file": str(fp),
+                                "chunks_done": done,
+                                "chunks_total": total,
+                                "files_done": idx - 1,
+                                "files_total": total_files,
+                            }
+                        )
+
+                    try:
+                        return await self._index_file(
+                            fp,
+                            force,
+                            namespace=namespace,
+                            on_chunk_progress=cb,
+                        )
+                    finally:
+                        queue.put_nowait(DONE)
+
+                task = asyncio.create_task(runner())
                 try:
-                    result = await self._index_file(fp, force, namespace=namespace)
-                except Exception as exc:
-                    logger.error("Stream indexing failed for %s: %s", fp, exc)
-                    # Path-prefix matches non-stream's ``asyncio.gather(return_exceptions=True)``
-                    # branch in ``_index_path_inner`` so consumers see the same error
-                    # shape regardless of whether they used the stream or non-stream
-                    # endpoint.
-                    result = {
-                        "total": 0,
-                        "indexed": 0,
-                        "skipped": 0,
-                        "deleted": 0,
-                        "errors": [f"{fp.name}: {exc}"],
-                    }
+                    while True:
+                        event = await queue.get()
+                        if event is DONE:
+                            break
+                        yield event
+                    try:
+                        result = await task
+                    except Exception as exc:
+                        logger.error("Stream indexing failed for %s: %s", fp, exc)
+                        # Same shape as non-stream's
+                        # ``asyncio.gather(return_exceptions=True)`` branch
+                        # in ``_index_path_inner`` so consumers see the same
+                        # error shape regardless of stream vs non-stream.
+                        result = {
+                            "total": 0,
+                            "indexed": 0,
+                            "skipped": 0,
+                            "deleted": 0,
+                            "errors": [f"{fp.name}: {exc}"],
+                        }
+                except BaseException:
+                    # Generator was closed (HTTPException, client disconnect,
+                    # consumer ``aclose()``). Cancel the in-flight embedding
+                    # task so we don't leak an OpenAI request / ONNX inference
+                    # past the lifetime of the SSE response. The outer
+                    # ``finally`` below still decrements ``_active_runs``.
+                    task.cancel()
+                    with contextlib.suppress(BaseException):
+                        await task
+                    raise
+
                 agg["total_chunks"] += result["total"]
                 agg["indexed"] += result["indexed"]
                 agg["skipped"] += result["skipped"]

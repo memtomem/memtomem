@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import Sequence
 
 from memtomem.config import EmbeddingConfig
@@ -108,15 +109,44 @@ class OnnxEmbedder:
         # event loop with lazy evaluation.
         return [vec.tolist() for vec in model.embed(texts)]
 
-    async def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
+    async def embed_texts(
+        self,
+        texts: Sequence[str],
+        *,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> list[list[float]]:
         if not texts:
             return []
+        # Batch into ``EmbeddingConfig.batch_size`` slices so per-batch
+        # ``on_progress`` ticks can flow back to the index stream. The model
+        # is lazily cached on first ``_get_model()`` call, so only the first
+        # batch in a run pays the cold-start cost; subsequent batches reuse
+        # the same ``TextEmbedding`` instance + tokenizer + ORT session.
+        bs = max(self._config.batch_size, 1)
+        text_list = list(texts)
+        total = len(text_list)
+        results: list[list[float]] = []
+        progress_warned = False
         try:
-            return await asyncio.to_thread(self._embed_sync, list(texts))
+            for start in range(0, total, bs):
+                batch = text_list[start : start + bs]
+                batch_embs = await asyncio.to_thread(self._embed_sync, batch)
+                results.extend(batch_embs)
+                if on_progress is not None:
+                    try:
+                        on_progress(len(results), total)
+                    except Exception:
+                        if not progress_warned:
+                            progress_warned = True
+                            logger.debug(
+                                "on_progress raised; further failures silenced",
+                                exc_info=True,
+                            )
         except EmbeddingError:
             raise
         except Exception as exc:
             raise EmbeddingError(f"ONNX embedding failed: {exc}") from exc
+        return results
 
     async def embed_query(self, query: str) -> list[float]:
         if not query or not query.strip():

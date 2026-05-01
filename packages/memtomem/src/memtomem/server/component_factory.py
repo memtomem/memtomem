@@ -136,6 +136,7 @@ async def create_components(config: Mem2MemConfig | None = None) -> Components:
         config=config.indexing,
         registry=registry,
         namespace_config=config.namespace,
+        progress_threshold=config.embedding.progress_threshold,
     )
     # Create optional reranker
     reranker = None

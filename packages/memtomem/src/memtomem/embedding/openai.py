@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Sequence
 
 import httpx
@@ -73,7 +74,12 @@ class OpenAIEmbedder:
         data.sort(key=lambda x: x["index"])
         return [item["embedding"] for item in data]
 
-    async def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
+    async def embed_texts(
+        self,
+        texts: Sequence[str],
+        *,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> list[list[float]]:
         import asyncio
 
         if not texts:
@@ -82,10 +88,30 @@ class OpenAIEmbedder:
         bs = self._config.batch_size
         batches = [list(texts[i : i + bs]) for i in range(0, len(texts), bs)]
         sem = asyncio.Semaphore(self._config.max_concurrent_batches)
+        # ``done`` is a single-cell list so the inner closure can mutate it
+        # without ``nonlocal``. asyncio is single-threaded so the ``+=`` is
+        # race-free across concurrent batch coroutines. ``done`` is monotonic
+        # but does NOT track batch-position — concurrent batches finish in
+        # arbitrary order; consumers should treat it as a count, not an index.
+        done = [0]
+        total = len(texts)
+        progress_warned = [False]
 
         async def _safe_embed(batch: list[str]) -> list[list[float]]:
             async with sem:
-                return await self._embed_batch_with_retry(batch)
+                result = await self._embed_batch_with_retry(batch)
+                done[0] += len(batch)
+                if on_progress is not None:
+                    try:
+                        on_progress(done[0], total)
+                    except Exception:
+                        if not progress_warned[0]:
+                            progress_warned[0] = True
+                            logger.debug(
+                                "on_progress raised; further failures silenced",
+                                exc_info=True,
+                            )
+                return result
 
         try:
             batch_results = await asyncio.gather(*[_safe_embed(b) for b in batches])

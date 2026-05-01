@@ -42,7 +42,8 @@ class _FakeEmbedder:
     dimension = 1024
     model_name = "bge-m3"
 
-    async def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
+    async def embed_texts(self, texts: Sequence[str], **_kwargs) -> list[list[float]]:
+        # ``**_kwargs`` absorbs ``on_progress`` from the EmbeddingProvider Protocol.
         return [[0.0] * 1024 for _ in texts]
 
     async def embed_query(self, query: str) -> list[float]:
