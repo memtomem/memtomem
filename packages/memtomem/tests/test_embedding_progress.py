@@ -171,50 +171,117 @@ async def test_ollama_progress_callback_exception_swallowed():
 
 # ---------------------------------------------------------------------------
 # ONNX (mocked _embed_sync; no fastembed dependency at test time)
+#
+# Note on ONNX progress shape: the implementation uses a SINGLE
+# ``model.embed(texts)`` call (so fastembed's default internal batching
+# stays in effect — a 250-text run = 1 ORT session.run instead of 4
+# with our config.batch_size=64). Per-yield progress is then surfaced
+# via a thread-safe callback. Earlier versions did Python-side chunking
+# at ``config.batch_size``; benchmarking caught a +20% wall-clock
+# regression vs the single-call path, so the implementation switched
+# to streaming. As a result, ``on_progress`` fires per-text (throttled
+# to ~20 ticks per file), NOT per-config.batch_size batch.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.anyio
-async def test_onnx_fires_progress_per_batch():
-    """5 texts at batch_size=2 → 3 batches via the new internal loop."""
-    config = _onnx_config(batch_size=2)
+async def test_onnx_streams_progress_per_yield():
+    """5 texts → callback fires per yielded vector ending at (5, 5).
+
+    Mocks ``_embed_sync`` so we can directly verify the per-yield
+    contract without touching fastembed/ORT.
+    """
+    config = _onnx_config()
     embedder = OnnxEmbedder(config)
 
-    def fake_sync(texts: list[str]) -> list[list[float]]:
-        return [[0.0, 0.1, 0.2] for _ in texts]
+    def fake_sync(texts, on_progress=None):
+        # Mimic the real _embed_sync's per-yield progress fire
+        out = []
+        total = len(texts)
+        for t in texts:
+            out.append([0.0, 0.1, 0.2])
+            if on_progress is not None:
+                on_progress(len(out), total)
+        return out
 
     embedder._embed_sync = fake_sync  # type: ignore[method-assign]
     calls, cb = _record()
     result = await embedder.embed_texts(["a", "b", "c", "d", "e"], on_progress=cb)
     assert len(result) == 5
-    # ONNX runs sequentially (one to_thread per batch), so done counts
-    # are exactly 2, 4, 5 — no concurrent reordering possible.
-    _assert_progress_contract(calls, total=5, expected_calls=3)
-    assert [d for d, _ in calls] == [2, 4, 5]
+    _assert_progress_contract(calls, total=5, expected_calls=5)
+    assert [d for d, _ in calls] == [1, 2, 3, 4, 5]
 
 
 @pytest.mark.anyio
-async def test_onnx_single_batch_still_fires_once():
-    """When all texts fit in one batch, callback fires once with (N, N)."""
-    config = _onnx_config(batch_size=64)
+async def test_onnx_throttles_thread_hops_for_large_input():
+    """A 200-text input must NOT fire 200 cross-thread hops — the
+    ONNX path throttles to ~20 ticks per file (``total // 20``), with
+    the final tick (``done == total``) always emitted so the UI's
+    final-render contract holds.
+    """
+    config = _onnx_config()
     embedder = OnnxEmbedder(config)
+    n = 200
 
-    def fake_sync(texts: list[str]) -> list[list[float]]:
-        return [[0.0] for _ in texts]
+    def fake_sync(texts, on_progress=None):
+        out = []
+        total = len(texts)
+        for t in texts:
+            out.append([0.0])
+            if on_progress is not None:
+                on_progress(len(out), total)
+        return out
 
     embedder._embed_sync = fake_sync  # type: ignore[method-assign]
     calls, cb = _record()
-    await embedder.embed_texts(["a", "b", "c"], on_progress=cb)
-    assert calls == [(3, 3)]
+    await embedder.embed_texts(["x"] * n, on_progress=cb)
+    # Throttle step = max(1, n // 20) = 10 → ~20 ticks + final
+    # (final-tick bypass guarantees one extra if the last-step boundary
+    # doesn't land exactly on N).
+    assert 15 <= len(calls) <= 25, (
+        f"expected ~20 throttled ticks for n={n}, got {len(calls)}: {calls}"
+    )
+    # Final tick must equal n — UI render contract.
+    assert calls[-1] == (n, n)
+    # Monotonic
+    assert [d for d, _ in calls] == sorted(d for d, _ in calls)
+
+
+@pytest.mark.anyio
+async def test_onnx_no_progress_skips_callback_plumbing():
+    """When ``on_progress`` is omitted, ``_embed_sync`` is called with
+    ``on_progress=None`` — the fast path. Pin this so a future refactor
+    that always wraps the callback (paying ``call_soon_threadsafe``
+    cost on every yield) is caught.
+    """
+    config = _onnx_config()
+    embedder = OnnxEmbedder(config)
+    received_cb_arg: list = []
+
+    def fake_sync(texts, on_progress=None):
+        received_cb_arg.append(on_progress)
+        return [[0.0] for _ in texts]
+
+    embedder._embed_sync = fake_sync  # type: ignore[method-assign]
+    await embedder.embed_texts(["a", "b", "c"])
+    assert received_cb_arg == [None], (
+        "fast path must pass on_progress=None to _embed_sync to skip the per-yield callback wrap"
+    )
 
 
 @pytest.mark.anyio
 async def test_onnx_progress_callback_exception_swallowed():
-    config = _onnx_config(batch_size=2)
+    config = _onnx_config()
     embedder = OnnxEmbedder(config)
 
-    def fake_sync(texts: list[str]) -> list[list[float]]:
-        return [[0.0] for _ in texts]
+    def fake_sync(texts, on_progress=None):
+        out = []
+        total = len(texts)
+        for t in texts:
+            out.append([0.0])
+            if on_progress is not None:
+                on_progress(len(out), total)
+        return out
 
     embedder._embed_sync = fake_sync  # type: ignore[method-assign]
 
@@ -228,10 +295,10 @@ async def test_onnx_progress_callback_exception_swallowed():
 @pytest.mark.anyio
 async def test_onnx_progress_kwarg_omitted_works():
     """Regression: existing ``embed_texts(texts)`` call sites still work."""
-    config = _onnx_config(batch_size=2)
+    config = _onnx_config()
     embedder = OnnxEmbedder(config)
 
-    def fake_sync(texts: list[str]) -> list[list[float]]:
+    def fake_sync(texts, on_progress=None):
         return [[0.0] for _ in texts]
 
     embedder._embed_sync = fake_sync  # type: ignore[method-assign]
@@ -240,39 +307,22 @@ async def test_onnx_progress_kwarg_omitted_works():
 
 
 @pytest.mark.anyio
-async def test_onnx_numerical_parity_across_batch_sizes():
-    """Splitting a single ``embed(all_texts)`` call into batched
-    ``embed(batch_n)`` calls must NOT change the resulting vectors.
+async def test_onnx_numerical_parity_with_and_without_progress():
+    """The progress-streaming code path must produce identical vectors
+    to the no-progress fast path on the same input. Catches accidental
+    drift if a future refactor reorders the per-yield iteration or
+    introduces an inadvertent transformation in the callback wrap.
 
-    fastembed's tokenizer pads dynamically per ONNX session call (longest
-    sequence in the batch wins). Different batch boundaries → different
-    padding shapes → ONNX runtime can produce numerically different
-    outputs even though the attention mask should mask them out. This
-    test pins the "vector-stable across batch_size" invariant so a
-    silent embedding drift (which would degrade search quality across
-    the entire DB after a reindex, with no error to point at) is caught
-    in CI rather than discovered by a user.
-
-    Skipped when fastembed isn't installed — the in-process fake
-    embedders elsewhere in this file can't exercise real tokenizer/ORT
-    behavior, so the test is meaningful only in environments with the
-    real backend (e.g. the ``golden-path (ONNX bge-m3)`` CI job, which
-    already pulls fastembed for end-to-end indexing).
+    Skipped without fastembed; runs in the ``golden-path (ONNX bge-m3)``
+    CI job and any local env with fastembed installed.
     """
     pytest.importorskip("fastembed")
     pytest.importorskip("numpy")
     import numpy as np
 
-    # Use the small all-MiniLM-L6-v2 (384d, ~25MB ONNX) so the test
-    # downloads quickly the first time and stays under typical CI budgets.
-    # bge-m3 would also work but is 2.3GB — overkill for a parity check.
-    config_small = _onnx_config(model="all-MiniLM-L6-v2", dimension=384, batch_size=2)
-    config_large = _onnx_config(model="all-MiniLM-L6-v2", dimension=384, batch_size=64)
-    emb_small = OnnxEmbedder(config_small)
-    emb_large = OnnxEmbedder(config_large)
-
-    # Mixed-length texts — different padding decisions per batch
-    # boundary are exactly what we want to stress-test.
+    config = _onnx_config(model="all-MiniLM-L6-v2", dimension=384)
+    emb_a = OnnxEmbedder(config)
+    emb_b = OnnxEmbedder(config)
     texts = [
         "short one",
         "this is a slightly longer sentence to skew padding shape",
@@ -281,22 +331,20 @@ async def test_onnx_numerical_parity_across_batch_sizes():
         "x",
         "a final reasonably long sentence ending the parity probe set",
     ]
-
     try:
-        vecs_small = await emb_small.embed_texts(texts)
-        vecs_large = await emb_large.embed_texts(texts)
+        vecs_no_progress = await emb_a.embed_texts(texts)
+        vecs_with_progress = await emb_b.embed_texts(texts, on_progress=lambda d, t: None)
     finally:
-        await emb_small.close()
-        await emb_large.close()
+        await emb_a.close()
+        await emb_b.close()
 
-    assert len(vecs_small) == len(vecs_large) == len(texts)
-    arr_small = np.array(vecs_small)
-    arr_large = np.array(vecs_large)
-    # Tight tolerance — ORT floating-point determinism on the same model
-    # + input across batch shapes should hold to ~1e-5. If this fails,
-    # something in the batch-shape → padding → output pipeline shifted.
-    assert np.allclose(arr_small, arr_large, rtol=1e-5, atol=1e-6), (
-        "ONNX embeddings drifted across batch_size boundary — silent "
-        "embedding regression risk; investigate fastembed tokenizer "
-        "padding policy or ORT session options."
-    )
+    assert len(vecs_no_progress) == len(vecs_with_progress) == len(texts)
+    # Bit-exact: both paths call the same underlying model.embed() in
+    # the same order; the only difference is whether each yield triggers
+    # a callback. No floating-point reordering involved.
+    assert np.allclose(
+        np.array(vecs_no_progress),
+        np.array(vecs_with_progress),
+        rtol=1e-7,
+        atol=1e-8,
+    ), "fast path and progress path must produce identical embeddings"

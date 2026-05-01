@@ -101,13 +101,35 @@ class OnnxEmbedder:
     def model_name(self) -> str:
         return self._config.model
 
-    def _embed_sync(self, texts: list[str]) -> list[list[float]]:
-        """Run inference synchronously — called inside ``to_thread``."""
+    def _embed_sync(
+        self,
+        texts: list[str],
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> list[list[float]]:
+        """Run inference synchronously — called inside ``to_thread``.
+
+        When ``on_progress`` is provided, iterate fastembed's generator
+        and fire after each yielded vector. The callback is called from
+        the worker thread; callers running on an asyncio loop must wrap
+        with ``loop.call_soon_threadsafe`` (see ``embed_texts``).
+        """
         model = self._get_model()
-        # model.embed() returns a generator of numpy arrays;
-        # materialize fully inside the thread to avoid blocking the
-        # event loop with lazy evaluation.
-        return [vec.tolist() for vec in model.embed(texts)]
+        # Single ``model.embed()`` call — fastembed batches internally
+        # (default batch_size=256) so a 250-text input becomes ONE
+        # ORT session.run. Earlier we did Python-side chunking
+        # (``for batch in batches: model.embed(batch)``); benchmark
+        # showed +20% wall-clock regression vs single call because
+        # each ``model.embed()`` invocation pays per-call ORT setup
+        # cost. Stream-iterating the default-batched call recovers
+        # that to +2.3% while still surfacing per-yield progress.
+        if on_progress is None:
+            return [vec.tolist() for vec in model.embed(texts)]
+        total = len(texts)
+        out: list[list[float]] = []
+        for vec in model.embed(texts):
+            out.append(vec.tolist())
+            on_progress(len(out), total)
+        return out
 
     async def embed_texts(
         self,
@@ -117,36 +139,58 @@ class OnnxEmbedder:
     ) -> list[list[float]]:
         if not texts:
             return []
-        # Batch into ``EmbeddingConfig.batch_size`` slices so per-batch
-        # ``on_progress`` ticks can flow back to the index stream. The model
-        # is lazily cached on first ``_get_model()`` call, so only the first
-        # batch in a run pays the cold-start cost; subsequent batches reuse
-        # the same ``TextEmbedding`` instance + tokenizer + ORT session.
-        bs = max(self._config.batch_size, 1)
         text_list = list(texts)
         total = len(text_list)
-        results: list[list[float]] = []
-        progress_warned = False
+
+        if on_progress is None:
+            # Fast path — no callback plumbing, no cross-thread hops.
+            try:
+                return await asyncio.to_thread(self._embed_sync, text_list, None)
+            except EmbeddingError:
+                raise
+            except Exception as exc:
+                raise EmbeddingError(f"ONNX embedding failed: {exc}") from exc
+
+        # ``on_progress`` was provided. ``_embed_sync`` runs in a worker
+        # thread but ``on_progress`` (e.g. ``queue.put_nowait`` into the
+        # SSE stream) is event-loop-bound and not thread-safe. Wrap with
+        # ``call_soon_threadsafe`` and throttle to at most ~20 ticks per
+        # file so a 1000-text input doesn't fire 1000 cross-thread hops.
+        loop = asyncio.get_running_loop()
+        last_reported = [0]
+        step = max(1, total // 20)
+        progress_warned = [False]
+
+        def _safe_on_progress(done: int, t: int) -> None:
+            try:
+                on_progress(done, t)
+            except Exception:
+                if not progress_warned[0]:
+                    progress_warned[0] = True
+                    logger.debug(
+                        "on_progress raised; further failures silenced",
+                        exc_info=True,
+                    )
+
+        def _thread_cb(done: int, t: int) -> None:
+            # Throttle thread→loop hops; always emit the final tick so
+            # the SSE consumer's "(N/N)" final-render contract holds.
+            if done - last_reported[0] < step and done != t:
+                return
+            last_reported[0] = done
+            try:
+                loop.call_soon_threadsafe(_safe_on_progress, done, t)
+            except RuntimeError:
+                # Event loop is closed (shutdown / cancel). Drop the
+                # tick — embedding work itself continues unaffected.
+                pass
+
         try:
-            for start in range(0, total, bs):
-                batch = text_list[start : start + bs]
-                batch_embs = await asyncio.to_thread(self._embed_sync, batch)
-                results.extend(batch_embs)
-                if on_progress is not None:
-                    try:
-                        on_progress(len(results), total)
-                    except Exception:
-                        if not progress_warned:
-                            progress_warned = True
-                            logger.debug(
-                                "on_progress raised; further failures silenced",
-                                exc_info=True,
-                            )
+            return await asyncio.to_thread(self._embed_sync, text_list, _thread_cb)
         except EmbeddingError:
             raise
         except Exception as exc:
             raise EmbeddingError(f"ONNX embedding failed: {exc}") from exc
-        return results
 
     async def embed_query(self, query: str) -> list[float]:
         if not query or not query.strip():
