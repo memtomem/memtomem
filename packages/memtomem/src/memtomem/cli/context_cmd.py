@@ -46,6 +46,11 @@ from memtomem.context.install import (
     update_command,
     update_skill,
 )
+from memtomem.context.migrate import (
+    MigrateRow,
+    classify_migrate,
+    migrate_one,
+)
 from memtomem.context.projects import KnownProjectsStore
 from memtomem.context.lockfile import LockfileVersionError
 from memtomem.context.status import classify_status, load_with_recovery
@@ -1264,3 +1269,263 @@ def _print_install_classification_table(
         if c.reason:
             line += f"  ({c.reason})"
         click.secho(line, fg=color)
+
+
+# ── migrate (PR-D C4) ───────────────────────────────────────────────────
+
+
+_MIGRATE_GLYPH: dict[str, tuple[str, str]] = {
+    # state -> (glyph, click color)
+    "migrate": ("→", "green"),
+    "noop": ("·", "white"),
+    "cleanup_flat": ("±", "yellow"),
+    "refuse_dirty": ("✗", "red"),
+    "skip_manual": ("?", "yellow"),
+    "skip_orphan": ("?", "yellow"),
+}
+
+# Glyphs are intentionally distinct from `_STATUS_GLYPH` for cleanup_flat
+# (`±` vs status's `⚠`) so users running `mm context status` and `mm
+# context migrate` back-to-back don't conflate "stale-pin (red)" with
+# "flat+dir collision (yellow)". `✗` is shared but the colour differs
+# (status: yellow=dirty in dest tree; migrate: red=blocked by --force).
+
+
+_MIGRATE_ACTION_LABEL: dict[str, str] = {
+    "migrate": "flat → dir",
+    "noop": "no-op",
+    "cleanup_flat": "flat+dir collision",
+    "skip_manual": "skip (manual)",
+    "skip_orphan": "skip (orphan)",
+}
+
+
+def _migrate_action_label(row: MigrateRow) -> str:
+    if row.state == "refuse_dirty":
+        return "flat+dir collision" if row.dir_exists else "flat → dir"
+    return _MIGRATE_ACTION_LABEL.get(row.state, row.state)
+
+
+def _print_migrate_preview(rows: list[MigrateRow], *, skills_section: bool) -> None:
+    """Render the migrate dry-run / pre-apply preview.
+
+    Sectioned by asset_type alphabetically (matches `_classify_for_install_all`
+    convention). When ``skills_section`` is true, print an informational
+    footer noting that skills are always directory layout.
+    """
+    click.echo("\nWill migrate (review; pass --apply to execute):")
+    last_type: str | None = None
+    for row in rows:
+        if row.asset_type != last_type:
+            click.secho(f"\n{row.asset_type}", fg="cyan")
+            last_type = row.asset_type
+        glyph, color = _MIGRATE_GLYPH[row.state]
+        action = _migrate_action_label(row)
+        line = f"  {glyph}  {row.name:24s}  {action:24s}  ({row.reason})"
+        click.secho(line, fg=color)
+    if skills_section:
+        click.secho("\nskills", fg="cyan")
+        click.secho(
+            "  i  always directory layout — no migration needed",
+            fg="cyan",
+        )
+
+
+def _summarize_migrate_rows(rows: list[MigrateRow]) -> str:
+    """Build the post-preview summary line."""
+    counts: dict[str, int] = {s: 0 for s in _MIGRATE_GLYPH}
+    for row in rows:
+        counts[row.state] += 1
+    parts: list[str] = []
+    if counts["migrate"]:
+        parts.append(f"{counts['migrate']} ready")
+    if counts["cleanup_flat"]:
+        parts.append(f"{counts['cleanup_flat']} cleanup (flat+dir)")
+    if counts["refuse_dirty"]:
+        parts.append(f"{counts['refuse_dirty']} need --force")
+    if counts["skip_manual"]:
+        parts.append(f"{counts['skip_manual']} skip (manual)")
+    if counts["skip_orphan"]:
+        parts.append(f"{counts['skip_orphan']} skip (orphan)")
+    if counts["noop"]:
+        parts.append(f"{counts['noop']} no-op")
+    return ", ".join(parts) if parts else "0 actions"
+
+
+@context.command("migrate")
+@click.argument(
+    "asset_type",
+    type=click.Choice(["agents", "commands", "skills"]),
+    required=False,
+)
+@click.argument("name", required=False)
+@click.option(
+    "--apply",
+    "apply_",
+    is_flag=True,
+    default=False,
+    help="Execute the migration (default is a dry-run preview).",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Migrate dirty flat files; each gets a .bak sibling. Requires --apply.",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    default=False,
+    help="Skip the confirmation prompt. Requires --apply.",
+)
+def migrate_cmd(
+    asset_type: str | None,
+    name: str | None,
+    apply_: bool,
+    force: bool,
+    yes: bool,
+) -> None:
+    """Convert flat-layout context assets to canonical directory layout.
+
+    PR-C made the directory layout canonical for agents and commands;
+    pre-PR-C installs and reverse-imports leave behind flat files
+    (``agents/<name>.md``). This command renames each such file to
+    ``agents/<name>/agent.md`` (and the equivalent for commands) atomically
+    via ``os.replace``.
+
+    Skills are always directory layout (Agent Skills spec) and are not
+    in scope. Invoking ``migrate skills`` exits 0 with an informational
+    message rather than an error.
+
+    Default mode is a dry-run preview; pass ``--apply`` to execute. Dirty
+    flat files (mtime > installed_at) require ``--force`` and produce a
+    ``.bak`` sibling before mutation, mirroring ``mm context update --force``.
+    """
+    if (force or yes) and not apply_:
+        raise click.UsageError("--force / --yes are only valid with --apply")
+    if name is not None and asset_type is None:
+        raise click.UsageError("name argument requires asset_type")
+
+    if asset_type == "skills":
+        click.secho(
+            "skills are always directory layout (Agent Skills spec) — no migration needed.",
+            fg="cyan",
+        )
+        return
+
+    root = _find_project_root()
+
+    try:
+        rows = classify_migrate(root, asset_type=asset_type, name=name)
+    except (FileNotFoundError, ValueError, InvalidNameError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    # When the user passes no asset_type, mention skills in the preview
+    # footer so the absence is explicit rather than silent.
+    skills_section = asset_type is None
+
+    if not rows:
+        if name is not None:
+            click.echo(
+                f"No matching asset to migrate (checked {asset_type}/{name}).",
+                err=True,
+            )
+        else:
+            click.echo("No flat-layout assets to migrate.")
+        if skills_section:
+            click.secho(
+                "  (skills are always directory layout — no migration needed.)",
+                fg="cyan",
+            )
+        return
+
+    _print_migrate_preview(rows, skills_section=skills_section)
+    summary = _summarize_migrate_rows(rows)
+    click.echo(f"\nSummary: {summary}.")
+
+    needs_force = [r for r in rows if r.state == "refuse_dirty"]
+    actionable = [r for r in rows if r.state in {"migrate", "cleanup_flat"}]
+
+    if not apply_:
+        click.echo("\nRun with --apply to execute.")
+        if needs_force:
+            click.echo("Dirty/collision assets need --apply --force (creates .bak per dirty file).")
+        return
+
+    # --apply path
+    if needs_force and not force:
+        click.secho(
+            f"\n{len(needs_force)} entry(ies) have local edits since install; "
+            f"pass --force to migrate (each dirty flat file gets a .bak sibling). "
+            f"Refusing to write any entry — re-run with --force or resolve manually.",
+            fg="red",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+
+    if not actionable and not (force and needs_force):
+        click.echo("\nNothing to migrate.")
+        return
+
+    if yes and force:
+        click.secho(
+            "WARNING: --yes --force will migrate dirty flat files without prompting.",
+            fg="red",
+            err=True,
+        )
+
+    if not yes:
+        plan_count = len(actionable) + (len(needs_force) if force else 0)
+        click.confirm(f"\nMigrate {plan_count} asset(s)? Continue?", abort=True)
+
+    successes = 0
+    failures = 0
+    skipped = 0
+    for row in rows:
+        if row.state in {"noop", "skip_manual", "skip_orphan"}:
+            glyph, color = _MIGRATE_GLYPH[row.state]
+            click.secho(
+                f"  {glyph}  {row.asset_type}/{row.name}: {row.reason}",
+                fg=color,
+            )
+            skipped += 1
+            continue
+        if row.state == "refuse_dirty" and not force:
+            # Already gated above; defense in depth.
+            click.secho(
+                f"  ✗  {row.asset_type}/{row.name}: dirty without --force",
+                fg="red",
+            )
+            failures += 1
+            continue
+
+        result = migrate_one(root, row, force=force)
+        if result.ok:
+            tag = "migrated"
+            if row.state == "cleanup_flat" or (row.state == "refuse_dirty" and row.dir_exists):
+                tag = "flat removed (dir wins)"
+            bak_note = f" (.bak: {result.bak_path.name})" if result.bak_path is not None else ""
+            click.secho(
+                f"  ✓  {row.asset_type}/{row.name}: {tag}{bak_note}",
+                fg="green",
+            )
+            successes += 1
+        else:
+            click.secho(
+                f"  ✗  {row.asset_type}/{row.name}: {result.error}",
+                fg="red",
+            )
+            failures += 1
+
+    parts: list[str] = []
+    if successes:
+        parts.append(f"{successes} migrated")
+    if skipped:
+        parts.append(f"{skipped} skipped")
+    if failures:
+        parts.append(f"{failures} failed")
+    click.echo("\nSummary: " + (", ".join(parts) if parts else "0 actions") + ".")
+
+    if failures:
+        raise click.exceptions.Exit(1)

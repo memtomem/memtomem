@@ -7,6 +7,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`mm context migrate` (PR-D C4, ADR-0008)** — converts agents and
+  commands from the legacy flat layout (`<type>/<name>.md`) to the
+  canonical directory layout (`<type>/<name>/agent.md` or
+  `<type>/<name>/command.md`) introduced in PR-C. Pre-PR-C installs and
+  reverse-imports left flat files on disk; this verb normalizes them so
+  the dir-only paths can simplify in a future cleanup PR.
+
+  - **Three signatures**: `mm context migrate` (every flat asset across
+    `agents/` and `commands/`), `mm context migrate <type>` (one type),
+    `mm context migrate <type> <name>` (single asset). Skills are always
+    directory layout (Agent Skills spec); invoking the verb on
+    `skills` exits 0 with an informational message rather than an error.
+  - **Dry-run by default**; `--apply` mutates the filesystem via
+    `os.replace` (atomic single-rename). The lockfile is not touched —
+    layout is inferred from the filesystem authoritatively
+    (`list_canonical_agents` / `list_canonical_commands`), and
+    `installed_at` is preserved so dirty detection (Invariant 2) keeps
+    working across migrations.
+  - **Eight-row truth table**: the classifier surfaces every combination
+    of `flat? × dir? × lockfile-entry? × dirty?` as one of six states
+    (`migrate`, `noop`, `cleanup_flat`, `refuse_dirty`, `skip_manual`,
+    `skip_orphan`). Manual flat files (no lockfile entry) and orphan
+    lockfile entries are surfaced and left untouched — those are out of
+    scope for the install/upgrade lifecycle.
+  - **Dirty handling mirrors `mm context update --force`** — flat files
+    with `mtime > installed_at` are refused unless `--apply --force` is
+    passed. With `--force`, a `.bak` sibling is written before mutation
+    so the user's edits survive in a forensic snapshot. For `flat+dir`
+    collisions the dir layout is left untouched (it carries the
+    canonical wiki bytes per PR-C policy); the user reviews the `.bak`
+    manually if they want to merge.
+  - Pairs with `mm context status`: status walks the dir-only dest tree
+    (`is_asset_dirty` is dir-scoped) and so flat-only installs surface
+    as `missing` rows; `mm context migrate` is the verb to normalize
+    them in place.
+
 - **Multi-project read-only discovery for `mm web` Skills/Commands/Agents
   (PR2 of the multi-project context UI series).** Each tab now renders
   collapsible scope groups so a user running `mm web` from `memtomem`
