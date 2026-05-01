@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -135,6 +136,36 @@ class Lockfile:
         if not isinstance(entry, dict):
             return None
         return entry
+
+    def iter_entries(self) -> Iterator[tuple[str, str, dict[str, Any]]]:
+        """Yield ``(asset_type, name, entry)`` triples in deterministic order.
+
+        Ordering contract: alphabetical by ``(asset_type, name)``. With the
+        current asset matrix this means ``agents`` → ``commands`` →
+        ``skills``, and within each section the names sort alphabetically.
+
+        The iteration is deliberately schema-flexible: any top-level key
+        whose value is a ``dict[str, dict[str, Any]]`` (asset section
+        shape) is yielded — a future asset_type works without code
+        changes here. Top-level scalars like ``version``, and unknown
+        per-entry shapes, are skipped silently so this remains
+        round-trip-safe per ADR-0008.
+
+        Caller surfaces that want a different display order (e.g. ``mm
+        context status`` may prefer a functional order with skills
+        first) should re-sort the output. This method's contract is
+        *deterministic*, not *display-optimal*.
+        """
+        doc = self.load()
+        for asset_type in sorted(doc):
+            section = doc.get(asset_type)
+            if not isinstance(section, dict):
+                continue
+            for name in sorted(section):
+                entry = section[name]
+                if not isinstance(entry, dict):
+                    continue
+                yield asset_type, name, entry
 
     def upsert_entry(
         self,
