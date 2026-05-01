@@ -197,6 +197,30 @@ def test_skip_symlinks(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None
     assert any("skipping symlink" in r.message for r in caplog.records)
 
 
+def test_skip_dot_bak_files(tmp_path: Path) -> None:
+    """``.bak`` siblings (from prior ``--force``) do NOT trip the next
+    update into ``reason='dirty'``.
+
+    Regression for the manual-smoke finding: scenario 3 of the PR-D C2
+    smoke run left ``SKILL.md.bak`` carrying the user's pre-update mtime,
+    which then caused scenario 4's ``--all`` classification to refuse
+    proj-a forever. ``.bak`` files are intentional artifacts of the
+    update flow itself; they must not feed back into dirty detection.
+    """
+    _setup_installed(tmp_path, "skills", "foo", {"SKILL.md": b"x"})
+    dest = tmp_path / ".memtomem" / "skills" / "foo"
+
+    bak = dest / "SKILL.md.bak"
+    bak.write_bytes(b"prior dirty edit")
+    _bump_mtime(bak)  # absolutely future mtime — would 100% be dirty if checked
+
+    report = is_asset_dirty(tmp_path, "skills", "foo")
+
+    assert report.reason == "clean"
+    assert report.dirty_files == ()
+    assert report.checked_files == 1  # SKILL.md only — SKILL.md.bak skipped
+
+
 # ── Lockfile.iter_entries ────────────────────────────────────────────────
 
 

@@ -38,12 +38,29 @@ from memtomem.context._atomic import COPY_SKIP_NAMES
 from memtomem.context.lockfile import Lockfile
 
 __all__ = [
+    "DIRTY_SKIP_SUFFIXES",
     "DirtyReason",
     "DirtyReport",
     "is_asset_dirty",
 ]
 
 logger = logging.getLogger(__name__)
+
+
+DIRTY_SKIP_SUFFIXES: frozenset[str] = frozenset({".bak"})
+"""Suffix patterns the dirty walker skips beyond :data:`COPY_SKIP_NAMES`.
+
+``.bak`` — sibling files created by ``mm context update --force`` to
+preserve user edits before overwriting with wiki bytes. They live in
+the dest tree by design and carry the user's pre-update mtime, so
+without this skip they would trip the next ``mm context update`` into
+``reason="dirty"`` purely on the prior backup, refusing every future
+update until the user manually deletes the ``.bak``.
+
+This is a *dirty-walk* skip only — ``copy_tree_atomic`` does not need
+the same exclusion (the wiki is not expected to carry ``.bak`` files
+under normal operation).
+"""
 
 
 DirtyReason = Literal["clean", "dirty", "never_installed", "missing_dest"]
@@ -149,6 +166,8 @@ def _iter_files(root: Path) -> Iterator[Path]:
     """
     for entry in root.iterdir():
         if entry.name in COPY_SKIP_NAMES:
+            continue
+        if entry.suffix in DIRTY_SKIP_SUFFIXES:
             continue
         if entry.is_symlink():
             logger.warning("is_asset_dirty: skipping symlink %s", entry)
