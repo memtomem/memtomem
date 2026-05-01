@@ -2431,9 +2431,26 @@ function _renderMemorySourceTree(sources, list) {
   const memDirs = STATE.memoryDirs || [];
   const statusByPath = STATE.memoryStatusByPath || {};
 
+  // Orphan = indexed source whose ``memory_dir`` is null on the
+  // ``/api/sources`` row. Two paths feed into this bucket:
+  //   1. Index tab uploads land in ``~/.memtomem/uploads/`` (see
+  //      ``system.py:upload_files``), which isn't a configured
+  //      ``memory_dir`` — server returns ``memory_dir=null, kind=null``.
+  //   2. A configured dir was removed from ``memory_dirs`` after its
+  //      files were indexed; the chunks survive but no longer have an
+  //      owning dir. Server-side intent (sources.py: "orphans ride
+  //      along with general") is to surface these so users can find and
+  //      prune them — without the bucket below they vanish entirely.
+  // Rendered as a collapsed sub-section under the ``user`` vendor since
+  // both feed paths are user-driven.
   const sourcesByDir = {};
+  const orphanItems = [];
   for (const s of sources) {
-    const key = s.memory_dir || '';
+    if (!s.memory_dir) {
+      orphanItems.push(s);
+      continue;
+    }
+    const key = s.memory_dir;
     if (!sourcesByDir[key]) sourcesByDir[key] = [];
     sourcesByDir[key].push(s);
   }
@@ -2534,15 +2551,25 @@ function _renderMemorySourceTree(sources, list) {
       return [cat, indexedSorted, discovered];
     });
 
-    const isEmptyVendor = !visibleCats.some(([, indexed, discovered]) => indexed.length || discovered.length);
+    // Orphan rows ride along with the ``user`` vendor (see comment on
+    // ``orphanItems`` above for why). Counted toward both the sub-tab
+    // badge and the vendor's emptiness check so a user with only
+    // uploaded files sees a populated tab instead of "user memory not
+    // found".
+    const vendorOrphans = (provider === 'user') ? orphanItems : [];
+    const isEmptyVendor = !visibleCats.some(([, indexed, discovered]) => indexed.length || discovered.length)
+      && vendorOrphans.length === 0;
     const totalFiles = visibleCats.reduce(
       (sum, [, indexed]) => sum + indexed.reduce((s, d) => s + (sourcesByDir[d] || []).length, 0),
       0,
-    );
+    ) + vendorOrphans.length;
     const visibleIndexedCats = visibleCats.filter(([, indexed]) => indexed.length);
     const isSingleLeaf = visibleIndexedCats.length === 1
       || (visibleIndexedCats.length === 0 && visibleCats.length === 1);
-    vendorPlans[provider] = { visibleCats, visibleIndexedCats, isEmptyVendor, totalFiles, isSingleLeaf };
+    vendorPlans[provider] = {
+      visibleCats, visibleIndexedCats, isEmptyVendor, totalFiles, isSingleLeaf,
+      orphans: vendorOrphans,
+    };
 
     // Update the sub-tab badge + empty class so all three vendor tabs
     // reflect current state, not just the active one.
@@ -2594,6 +2621,32 @@ function _renderMemorySourceTree(sources, list) {
     sum.appendChild(cnt);
     det.appendChild(sum);
     for (const d of dirs) det.appendChild(renderDir(d));
+    return det;
+  };
+
+  // Orphan section: rows whose owning ``memory_dir`` is null on the
+  // server response (Index tab uploads + chunks whose dir was removed
+  // from config). Reuses the ``source-item`` card shape so file-click →
+  // chunks drill-in works identically to indexed dirs. Rendered only
+  // when ``activeVendor === 'user'`` because ``orphans`` is populated
+  // exclusively for that vendor in the stats pass above.
+  const renderOrphanBlock = (items) => {
+    if (!items.length) return null;
+    const det = document.createElement('details');
+    det.className = 'source-vendor-orphan';
+    const sum = document.createElement('summary');
+    sum.className = 'source-vendor-orphan-summary';
+    const lbl = document.createElement('span');
+    lbl.className = 'source-vendor-orphan-label';
+    lbl.textContent = (typeof t === 'function') ? t('sources.orphan_label') : 'Other (unregistered)';
+    sum.appendChild(lbl);
+    const cnt = document.createElement('span');
+    cnt.className = 'source-vendor-count';
+    cnt.textContent = String(items.length);
+    sum.appendChild(cnt);
+    det.appendChild(sum);
+    const localMax = Math.max(1, ...items.map(s => s.chunk_count || 0));
+    for (const s of items) det.appendChild(_renderMemorySourceItem(s, localMax));
     return det;
   };
 
@@ -2659,13 +2712,22 @@ function _renderMemorySourceTree(sources, list) {
     list.appendChild(products);
   }
 
+  // Append the orphan block last so indexed groups stay primary. Only
+  // shows up when ``activeVendor === 'user'`` because ``plan.orphans``
+  // is populated for that vendor only.
+  const orphanBlock = renderOrphanBlock(plan.orphans || []);
+  if (orphanBlock) list.appendChild(orphanBlock);
+
   // Empty-state fallbacks scoped to the active vendor. If no memory
   // dirs exist anywhere, show the "Add one with + Add path" hint
-  // regardless of which tab is active. If a filter is active and the
-  // active vendor has no matches but other vendors do, the muted "no
-  // matches" hint sits inside the panel — the populated badge on
-  // sibling tabs tells the user where to look.
-  if (!allDirs.size) {
+  // regardless of which tab is active. The orphan check keeps a user
+  // who has only Index-tab uploads (no configured dirs) from seeing
+  // the "No memory directories" hint — their uploads are real content.
+  // If a filter is active and the active vendor has no matches but
+  // other vendors do, the muted "no matches" hint sits inside the
+  // panel — the populated badge on sibling tabs tells the user where
+  // to look.
+  if (!allDirs.size && !orphanItems.length) {
     list.innerHTML = '<div class="empty-state">' + emptyState('📁', 'No memory directories', 'Add one with the + Add path button') + '</div>';
   } else if (filterActive && !plan.totalFiles && !plan.isEmptyVendor) {
     list.innerHTML = '<div class="empty-state">' + emptyState('🔍', 'No matches for that filter') + '</div>';

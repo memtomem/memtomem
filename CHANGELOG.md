@@ -187,6 +187,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm web` Sources tab now shows orphan-indexed files instead of
+  silently dropping them.** The `/api/sources` response carries rows
+  with `memory_dir=null, kind=null` for two paths — Index-tab uploads
+  saved to `~/.memtomem/uploads/` (which isn't a configured
+  `memory_dir`) and chunks whose owning dir was removed from
+  `memory_dirs` post-indexing. The server already grouped these as
+  "general" with the explicit intent that orphans "ride along" so
+  users can find and prune them, but the Sources tab's
+  `_renderMemorySourceTree` keyed grouping by `s.memory_dir || ''` and
+  then filtered out the empty key (`if (k) allDirs.add(k)`), so the
+  orphan rows ended up assigned to no vendor group at all and never
+  rendered. The user-facing failure mode: a file uploaded via Index
+  tab appeared in `mem_search` and the namespaces tab, but clicking
+  its source link from namespaces landed on a Sources tab that didn't
+  contain it. The renderer now collects orphan rows separately and
+  appends them as a collapsed "Other (unregistered)" sub-section under
+  the `user` vendor's active panel, with file rows sharing the same
+  click-to-browse-chunks behaviour as indexed dirs. The user vendor's
+  sub-tab badge and the empty-state guard count orphans too, so a
+  user with only Index-tab uploads sees a populated `user` tab
+  instead of "user memory not found".
 - **`mm web` now starts a `FileWatcher` and runs a startup backfill.**
   Two gaps fixed together because they presented as one bug ("files
   added to a `memory_dir` don't show up in Sources"):
