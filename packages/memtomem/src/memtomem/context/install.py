@@ -23,12 +23,14 @@ clobbered") without depending on PR-D's mtime/dirty detection. PR-D's
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from memtomem.context._atomic import copy_tree_atomic
 from memtomem.context._names import validate_name
+from memtomem.context.dirty import DirtyReport, is_asset_dirty
 from memtomem.context.lockfile import Lockfile, utcnow_iso8601_z
 from memtomem.wiki.store import WikiStore
 
@@ -36,9 +38,15 @@ __all__ = [
     "AlreadyInstalledError",
     "AssetNotFoundError",
     "InstallResult",
+    "NotInstalledError",
+    "StaleInstallError",
+    "UpdateResult",
     "install_agent",
     "install_command",
     "install_skill",
+    "update_agent",
+    "update_command",
+    "update_skill",
 ]
 
 
@@ -50,6 +58,24 @@ class AlreadyInstalledError(RuntimeError):
     """Raised when install would overwrite an existing lockfile entry or dest."""
 
 
+class NotInstalledError(RuntimeError):
+    """Raised by ``_update_asset`` when there is no lockfile entry to refresh.
+
+    Distinguishes "you forgot to install first" from "the wiki asset moved" —
+    the CLI maps both to a non-zero exit code, but the message points the
+    user at ``mm context install`` rather than implying an internal error.
+    """
+
+
+class StaleInstallError(RuntimeError):
+    """Raised by ``_update_asset`` when local edits would be clobbered.
+
+    The dest tree has at least one file with ``mtime > installed_at`` and
+    ``--force`` was not set. The message includes the count and points
+    the user at ``--force`` (which preserves dirty files as ``.bak``).
+    """
+
+
 @dataclass(frozen=True)
 class InstallResult:
     """Outcome of a successful install. Display-oriented; not persisted."""
@@ -58,6 +84,32 @@ class InstallResult:
     name: str
     wiki_commit: str
     installed_at: str
+    dest: Path
+    files_written: int
+
+
+@dataclass(frozen=True)
+class UpdateResult:
+    """Outcome of an ``mm context update`` call. Display-oriented; not persisted.
+
+    - ``was_no_op=True`` means the wiki HEAD already matched the
+      lockfile pin — the lockfile bytes were *not* touched, so
+      ``installed_at`` is the value previously recorded (echoed for
+      display) and ``files_written``/``bak_files_written`` are empty.
+    - ``was_no_op=False`` means a real refresh happened: the dest tree
+      was overwritten with wiki bytes, ``installed_at`` was re-captured
+      after the copy, and any dirty files were preserved at the listed
+      ``.bak`` paths (only populated when ``--force`` was used against
+      a dirty asset).
+    """
+
+    asset_type: Literal["skills", "agents", "commands"]
+    name: str
+    old_wiki_commit: str
+    new_wiki_commit: str
+    installed_at: str
+    was_no_op: bool
+    bak_files_written: tuple[Path, ...]
     dest: Path
     files_written: int
 
@@ -139,13 +191,13 @@ def _install_asset(
     has_lock = existing is not None
     has_dest = dest.exists()
     if has_lock or has_dest:
+        asset_type_singular = asset_type.removesuffix("s")
         raise AlreadyInstalledError(
             f"{asset_type}/{validated}: "
             f"lockfile_entry={'yes' if has_lock else 'no'}, "
             f"dest={'yes' if has_dest else 'no'}; "
-            f"`mm context update` is reserved for PR-D — "
-            f"to reinstall now, remove BOTH .memtomem/{asset_type}/{validated}/ "
-            f"AND the `{asset_type}.{validated}` entry from .memtomem/lock.json"
+            f"run `mm context update {asset_type_singular} {validated}` "
+            f"to refresh from wiki HEAD"
         )
 
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -164,6 +216,208 @@ def _install_asset(
         name=validated,
         wiki_commit=wiki_commit,
         installed_at=installed_at,
+        dest=dest,
+        files_written=files_written,
+    )
+
+
+def update_skill(
+    project_root: Path | str,
+    name: str,
+    *,
+    wiki: WikiStore | None = None,
+    force: bool = False,
+) -> UpdateResult:
+    """Refresh ``<wiki>/skills/<name>/`` snapshot at ``<project>/.memtomem/skills/<name>/``.
+
+    No-op when wiki HEAD already matches the lockfile pin. Refuses when
+    local edits would be clobbered, unless ``force=True`` (which preserves
+    each dirty file as ``<file>.bak`` before overwriting).
+    """
+    return _update_asset(project_root, "skills", name, wiki=wiki, force=force)
+
+
+def update_agent(
+    project_root: Path | str,
+    name: str,
+    *,
+    wiki: WikiStore | None = None,
+    force: bool = False,
+) -> UpdateResult:
+    """Refresh ``<wiki>/agents/<name>/`` snapshot at ``<project>/.memtomem/agents/<name>/``."""
+    return _update_asset(project_root, "agents", name, wiki=wiki, force=force)
+
+
+def update_command(
+    project_root: Path | str,
+    name: str,
+    *,
+    wiki: WikiStore | None = None,
+    force: bool = False,
+) -> UpdateResult:
+    """Refresh ``<wiki>/commands/<name>/`` snapshot at ``<project>/.memtomem/commands/<name>/``."""
+    return _update_asset(project_root, "commands", name, wiki=wiki, force=force)
+
+
+def _update_asset(
+    project_root: Path | str,
+    asset_type: str,
+    name: str,
+    *,
+    wiki: WikiStore | None,
+    force: bool = False,
+) -> UpdateResult:
+    """Internal: refresh a single installed asset of any type.
+
+    Pipeline:
+
+    1. Validate ``name`` and project root.
+    2. Locate the wiki + the source asset directory (``AssetNotFoundError``
+       if the wiki has dropped the asset entirely).
+    3. Read the existing lockfile entry — ``NotInstalledError`` if absent.
+    4. Pin wiki HEAD as ``new_commit`` once (concurrent ``git pull`` in the
+       wiki cannot make the recorded commit drift mid-update).
+    5. **True no-op short-circuit**: when ``new_commit`` matches the lockfile
+       pin, return early *without touching the lockfile*. ``installed_at``
+       is echoed from the existing entry; ``was_no_op=True``.
+    6. Classify the dest tree via :func:`is_asset_dirty` (using the lock
+       entry we already loaded — no second lockfile read).
+    7. Delegate to :func:`_apply_update` for the refuse-or-write step.
+
+    The split lets ``mm context update --all`` (commit 4) reuse step 7
+    after performing classification across all known projects up front.
+    """
+    validated = validate_name(name, kind=f"{asset_type.removesuffix('s')} name")
+    project_root = Path(project_root).expanduser()
+    if not project_root.is_dir():
+        raise FileNotFoundError(f"project root does not exist: {project_root}")
+
+    wiki = wiki if wiki is not None else WikiStore.at_default()
+    wiki.require_exists()
+
+    # NotInstalled check before asset check: if the user never installed,
+    # the most useful error points at `mm context install`, not at
+    # `wiki has lost the asset`.
+    lock = Lockfile.at(project_root)
+    lock_entry = lock.read_entry(asset_type, validated)
+    if lock_entry is None:
+        asset_type_singular = asset_type.removesuffix("s")
+        raise NotInstalledError(
+            f"{asset_type}/{validated}: no lockfile entry; "
+            f"run `mm context install {asset_type_singular} {validated}` first"
+        )
+
+    src = wiki.root / asset_type / validated
+    if not src.is_dir():
+        raise AssetNotFoundError(f"{asset_type}/{validated} not in wiki at {wiki.root}")
+
+    new_commit = wiki.current_commit()
+    dest = project_root / ".memtomem" / asset_type / validated
+
+    if lock_entry.get("wiki_commit") == new_commit:
+        # True no-op: lockfile bytes untouched, installed_at echoed.
+        return UpdateResult(
+            asset_type=cast('Literal["skills", "agents", "commands"]', asset_type),
+            name=validated,
+            old_wiki_commit=new_commit,
+            new_wiki_commit=new_commit,
+            installed_at=cast(str, lock_entry.get("installed_at", "")),
+            was_no_op=True,
+            bak_files_written=(),
+            dest=dest,
+            files_written=0,
+        )
+
+    dirty_report = is_asset_dirty(project_root, asset_type, validated, lock_entry=lock_entry)
+
+    return _apply_update(
+        project_root,
+        asset_type,
+        validated,
+        src=src,
+        dest=dest,
+        wiki_commit=new_commit,
+        lock_entry=lock_entry,
+        dirty_report=dirty_report,
+        force=force,
+    )
+
+
+def _apply_update(
+    project_root: Path,
+    asset_type: str,
+    name: str,
+    *,
+    src: Path,
+    dest: Path,
+    wiki_commit: str,
+    lock_entry: dict[str, Any],
+    dirty_report: DirtyReport,
+    force: bool,
+) -> UpdateResult:
+    """Execute an already-classified update.
+
+    Pre-conditions enforced by callers (``_update_asset`` for the single-
+    asset path, ``mm context update --all`` orchestration for the batch
+    path):
+
+    - ``lock_entry`` is non-None (``NotInstalledError`` is raised earlier).
+    - The no-op case (``lock_entry["wiki_commit"] == wiki_commit``) was
+      already short-circuited; this helper unconditionally writes.
+    - ``dirty_report`` was already computed; this helper does **not**
+      re-walk the dest tree.
+
+    Refuses with :class:`StaleInstallError` when ``dirty_report.reason ==
+    "dirty"`` and ``force=False``. With ``force=True`` and a dirty tree,
+    each dirty file is preserved alongside the wiki bytes as
+    ``<file>.bak`` before the copy. ``shutil.copy2`` is used so the
+    user's edit-mtime survives onto the ``.bak`` (atomic_write_bytes
+    would lose it). ``installed_at`` is captured *after* the copy
+    completes, mirroring the C2a (#630) install invariant so a
+    follow-up dirty check can't false-positive on this update's own
+    writes.
+    """
+    if dirty_report.reason == "dirty" and not force:
+        raise StaleInstallError(
+            f"{asset_type}/{name}: {len(dirty_report.dirty_files)} file(s) "
+            f"modified locally since install at {dirty_report.installed_at}; "
+            f"pass --force to overwrite "
+            f"(each dirty file gets a .bak sibling)"
+        )
+
+    bak_paths: list[Path] = []
+    if force and dirty_report.reason == "dirty":
+        for f in dirty_report.dirty_files:
+            bak = f.with_suffix(f.suffix + ".bak")
+            # shutil.copy2 preserves user edit's mtime — atomic_write_bytes
+            # would lose it. Race window between copy2 and copy_tree_atomic
+            # is sub-ms; acceptable for v1. Overwrite-if-exists policy
+            # (prior .bak from earlier --force gets replaced).
+            shutil.copy2(f, bak)
+            bak_paths.append(bak)
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    files_written = copy_tree_atomic(src, dest)
+
+    installed_at = utcnow_iso8601_z()
+    lock = Lockfile.at(project_root)
+    lock.upsert_entry(
+        asset_type,
+        name,
+        wiki_commit=wiki_commit,
+        installed_at=installed_at,
+    )
+
+    old_wiki_commit = cast(str, lock_entry.get("wiki_commit", ""))
+
+    return UpdateResult(
+        asset_type=cast('Literal["skills", "agents", "commands"]', asset_type),
+        name=name,
+        old_wiki_commit=old_wiki_commit,
+        new_wiki_commit=wiki_commit,
+        installed_at=installed_at,
+        was_no_op=False,
+        bak_files_written=tuple(bak_paths),
         dest=dest,
         files_written=files_written,
     )

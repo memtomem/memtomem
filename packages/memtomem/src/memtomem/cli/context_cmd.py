@@ -30,9 +30,14 @@ from memtomem.context.detector import (
 from memtomem.context.install import (
     AlreadyInstalledError,
     AssetNotFoundError,
+    NotInstalledError,
+    StaleInstallError,
     install_agent,
     install_command,
     install_skill,
+    update_agent,
+    update_command,
+    update_skill,
 )
 from memtomem.context.lockfile import LockfileVersionError
 from memtomem.context.generator import (
@@ -686,3 +691,65 @@ def install_cmd(asset_type: str, name: str) -> None:
     rel_dest = result.dest.relative_to(root) if result.dest.is_relative_to(root) else result.dest
     click.echo(f"  → {rel_dest}/")
     click.echo(f"  {result.files_written} file(s) copied")
+
+
+@context.command("update")
+@click.argument("asset_type", type=click.Choice(["skill", "agent", "command"]))
+@click.argument("name")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Overwrite local edits; each dirty file is preserved as <file>.bak",
+)
+def update_cmd(asset_type: str, name: str, force: bool) -> None:
+    """Refresh an installed wiki asset from the wiki HEAD.
+
+    No-op when the wiki commit pinned in ``.memtomem/lock.json`` already
+    matches the wiki HEAD — the lockfile is not touched and ``unchanged``
+    is reported. Refuses to write when local edits are detected, unless
+    ``--force`` is passed (which preserves each dirty file as a sibling
+    ``.bak`` before overwriting with wiki bytes).
+    """
+    root = _find_project_root()
+    try:
+        if asset_type == "skill":
+            result = update_skill(root, name, force=force)
+        elif asset_type == "agent":
+            result = update_agent(root, name, force=force)
+        elif asset_type == "command":
+            result = update_command(root, name, force=force)
+        else:  # pragma: no cover — guarded by click.Choice
+            raise click.ClickException(f"unknown asset type: {asset_type}")
+    except WikiNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except AssetNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except NotInstalledError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except StaleInstallError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except InvalidNameError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except LockfileVersionError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if result.was_no_op:
+        click.secho(
+            f"{result.asset_type}/{result.name} unchanged (wiki {result.new_wiki_commit[:12]})",
+            fg="cyan",
+        )
+        return
+
+    click.secho(
+        f"Updated {result.asset_type}/{result.name} "
+        f"({result.old_wiki_commit[:12]} → {result.new_wiki_commit[:12]})",
+        fg="green",
+    )
+    rel_dest = result.dest.relative_to(root) if result.dest.is_relative_to(root) else result.dest
+    click.echo(f"  → {rel_dest}/")
+    click.echo(f"  {result.files_written} file(s) updated")
+    if result.bak_files_written:
+        click.secho(
+            f"  {len(result.bak_files_written)} dirty file(s) preserved as .bak",
+            fg="yellow",
+        )
