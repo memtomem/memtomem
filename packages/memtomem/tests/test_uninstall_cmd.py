@@ -621,35 +621,9 @@ class TestConfigFallback:
         assert "Removed:" in result.output
 
 
-class TestWindowsFcntlGuard:
-    """(#448) ``import fcntl`` at module level broke ``cli/__init__.py:_register``
-    on Windows — every ``mm`` subcommand crashed before even parsing argv.
-
-    The fix originally moved ``fcntl`` to a lazy import inside
-    ``_probe_pid_file``. As of #625 the probe routes through
-    ``portalocker``, which is cross-platform, so the Windows fallback
-    that returned conservative ``alive=True`` is gone — the probe now
-    runs the same lock-acquire on every OS. The single regex pin below
-    survives until PR-3 replaces it with an AST scan over all of
-    ``packages/memtomem/src/``.
-    """
-
-    def test_no_module_level_fcntl_import(self):
-        """Source-scan pin: ``fcntl`` must not appear as a top-level import
-        in ``uninstall_cmd.py``. A future refactor that re-hoists the
-        import would silently reintroduce the Windows crash — CI runs on
-        Linux so a runtime test can't catch it.
-        """
-        import inspect
-        import re
-
-        from memtomem.cli import uninstall_cmd
-
-        src = inspect.getsource(uninstall_cmd)
-        # Top-of-file block only — anything nested (``    import fcntl``)
-        # inside a function is fine and in fact the intended layout.
-        top_level = re.findall(r"(?m)^import fcntl\b", src)
-        assert top_level == [], (
-            "uninstall_cmd.py must not import fcntl at module level — "
-            "that crashes `mm` on Windows at CLI registration time (#448)."
-        )
+# (#448 / #625) The single-file regex pin that used to live here is
+# superseded by ``test_no_posix_only_imports.py``, which AST-scans every
+# module under ``packages/memtomem/src/memtomem/`` for module-level
+# POSIX-only imports — fcntl, pwd, grp, termios, resource. The earlier
+# regex covered only ``cli/uninstall_cmd.py``, which is exactly why
+# PR #623's regression in ``context/_atomic.py`` slipped past it.
