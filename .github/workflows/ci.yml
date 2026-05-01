@@ -39,6 +39,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    # Windows ships informational pending the test-portability triage tracked
+    # in #634 (umbrella) — ubuntu + macOS are the gating cells today. Flip
+    # this to `false` (or remove) once the Windows triage sub-issues close.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v7

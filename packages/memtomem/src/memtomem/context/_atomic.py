@@ -70,6 +70,15 @@ def _file_lock(lock_path: Path) -> Iterator[None]:
     Semantic differences (advisory vs mandatory, whole-file vs single byte)
     don't matter here because the lockfile is private — only this
     contextmanager opens it — so all contenders see the same lock.
+
+    Windows note: ``msvcrt.locking(LK_LOCK)`` blocks for ~10 seconds before
+    raising ``OSError``, unlike POSIX ``flock(LOCK_EX)`` which blocks
+    indefinitely. The lock window here is intentionally narrow (see callers
+    in :mod:`memtomem.context.lockfile` / :mod:`memtomem.context.projects`
+    — only the ``load → mutate dict → atomic_write_bytes`` triple), so the
+    timeout is generous; heavy contention (antivirus scans, interactive
+    debuggers) could still surface as a transient ``OSError`` rather than
+    a wait.
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
@@ -105,7 +114,12 @@ def atomic_write_bytes(path: Path, data: bytes, mode: int = 0o600) -> None:
     where available, so the result is independent of the process umask.
     Windows Python < 3.13 lacks ``os.fchmod``; on those interpreters the
     file is created with the process default permissions, which NTFS
-    largely ignores beyond the read-only flag.
+    largely ignores beyond the read-only flag. The user-private intent of
+    ``mode=0o600`` for state files (e.g. ``~/.memtomem/config.json``) is
+    preserved on Windows in practice via NTFS ACL inheritance from
+    user-private parents like ``%LOCALAPPDATA%`` — the on-disk ACL is
+    user-only by default in those locations, providing functionally
+    equivalent access control.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
