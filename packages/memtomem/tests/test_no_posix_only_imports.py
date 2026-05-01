@@ -17,12 +17,22 @@ library's POSIX-only modules at module scope:
 
   fcntl    pwd    grp    termios    resource
 
-Lazy imports inside functions / methods / nested ``if sys.platform``
-branches do not appear at module scope and are therefore allowed. That
-is the documented pattern for ``server/__init__.py``, which keeps
-``fcntl`` (server is POSIX-only by design — no SIGTERM, different pid
-semantics on Windows — but the module is sometimes import-walked from
-Windows tooling, so the imports stay lazy).
+Two patterns are allowed because the scan walks ``tree.body`` only
+and does not recurse:
+
+- **Lazy imports inside functions / methods**: the documented pattern
+  in ``server/__init__.py:main``, where ``import fcntl`` lives inside
+  the function body and only evaluates on POSIX call paths. The
+  server is POSIX-only by design (no SIGTERM, different pid semantics
+  on Windows), but the module is import-walked from Windows tooling
+  via ``cli/__init__.py:_register``, so module-level imports must
+  stay safe.
+- **Gated ``if sys.platform`` branches**: ``import msvcrt`` /
+  ``import fcntl`` inside a top-level ``if/else`` is also fine — the
+  wrong-platform branch never executes. The 43ae140 half-fix that
+  preceded portalocker (PR #652) used exactly that shape. We do not
+  AST-verify gate correctness; the simpler "prefer functions"
+  convention is the project default.
 
 The negative pin (``test_scan_rejects_module_level_fcntl_in_fixture``)
 proves the assertion is symmetric: the scan logic must fail on a file
@@ -69,14 +79,22 @@ def _module_level_violations(tree: ast.Module) -> list[tuple[int, str]]:
             root = _root_module(node.module)
             if root in POSIX_ONLY_STDLIB:
                 violations.append((node.lineno, node.module or ""))
-        # Note: ``ast.If`` and other compound nodes nest their body items.
-        # We deliberately do NOT recurse — a top-level ``if sys.platform``
-        # block whose body imports POSIX-only modules is technically
-        # module-scope-executed, but that pattern was the source of #625's
-        # crash even with the gate (the import statement itself parses
-        # before the gate runs). The whole point of #625 is that no such
-        # imports should exist at module scope, gated or not — they go
-        # inside functions instead.
+        # Note: ``ast.If``, ``FunctionDef``, ``ClassDef`` etc. nest their
+        # body items. We deliberately do NOT recurse. Two consequences:
+        #
+        # - Properly gated ``if sys.platform == "win32": import msvcrt;
+        #   else: import fcntl`` is not flagged — the wrong-platform
+        #   branch never executes, so the import is safe. (43ae140 used
+        #   this shape; portalocker, PR #652, replaced it with a single
+        #   unconditional import.)
+        # - Lazy imports inside function / method bodies are not flagged
+        #   — that is the documented pattern in
+        #   ``server/__init__.py:main``.
+        #
+        # The regression we're catching is the unguarded module-level
+        # ``import fcntl`` from PR #623 — directly in ``tree.body``,
+        # neither gated nor lazy. A walk of just ``tree.body`` catches
+        # exactly that shape and nothing else.
     return violations
 
 
