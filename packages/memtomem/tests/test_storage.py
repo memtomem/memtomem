@@ -201,7 +201,10 @@ class TestNormPathUnicode:
 
     def test_norm_path_osError_fallback_still_normalizes(self, monkeypatch):
         # If ``Path.resolve`` raises, ``norm_path`` falls back to the input
-        # string — it must still NFC-normalize that fallback.
+        # string — it must still NFC-normalize that fallback. Comparison goes
+        # through ``as_posix()`` so the assertion is portable: norm_path uses
+        # ``str(p)`` on fallback which is platform-separator-dependent
+        # (backslash on Windows), but the NFC property under test is not.
         nfd = unicodedata.normalize("NFD", "/tmp/내 드라이브/file.md")
 
         def _boom(self, strict=False):
@@ -210,4 +213,4 @@ class TestNormPathUnicode:
         monkeypatch.setattr(Path, "resolve", _boom)
 
         out = norm_path(Path(nfd))
-        assert out == unicodedata.normalize("NFC", nfd)
+        assert Path(out).as_posix() == unicodedata.normalize("NFC", nfd)

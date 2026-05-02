@@ -182,7 +182,7 @@ class TestBoostSourcesHelper:
 
         pipeline = _make_pipeline(storage, session_summary_config=cfg)
         sources = await pipeline._session_summary_boost_sources("q")
-        assert sources == {"/tmp/src/a.md", "/tmp/src/b.md"}
+        assert {Path(s).as_posix() for s in sources} == {"/tmp/src/a.md", "/tmp/src/b.md"}
         # Walk used the correct link_type
         call_args = storage.get_chunks_shared_from.await_args
         assert call_args.kwargs.get("link_type") == "summarizes"

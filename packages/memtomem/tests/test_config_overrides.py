@@ -84,7 +84,7 @@ def test_env_var_wins_over_config_json_scalar(
     )
     cfg = Mem2MemConfig()
     load_config_overrides(cfg)
-    assert str(cfg.storage.sqlite_path) == "/from/env.db"
+    assert Path(cfg.storage.sqlite_path).as_posix() == "/from/env.db"
 
 
 def test_env_var_wins_over_config_json_list(
@@ -97,7 +97,7 @@ def test_env_var_wins_over_config_json_list(
     )
     cfg = Mem2MemConfig()
     load_config_overrides(cfg)
-    assert [str(p) for p in cfg.indexing.memory_dirs] == ["/from/env"]
+    assert [Path(p).as_posix() for p in cfg.indexing.memory_dirs] == ["/from/env"]
 
 
 def test_env_and_config_coexist_on_different_fields(
@@ -117,7 +117,7 @@ def test_env_and_config_coexist_on_different_fields(
     )
     cfg = Mem2MemConfig()
     load_config_overrides(cfg)
-    assert str(cfg.storage.sqlite_path) == "/from/env.db"
+    assert Path(cfg.storage.sqlite_path).as_posix() == "/from/env.db"
     assert cfg.embedding.model == "from-config"
 
 
@@ -142,8 +142,8 @@ def test_regression_pr247_mcp_json_env_block(
     )
     cfg = Mem2MemConfig()
     load_config_overrides(cfg)
-    assert str(cfg.storage.sqlite_path) == "~/.memtomem/memtomem.db"
-    assert [str(p) for p in cfg.indexing.memory_dirs] == ["~/notes"]
+    assert Path(cfg.storage.sqlite_path).as_posix() == "~/.memtomem/memtomem.db"
+    assert [Path(p).as_posix() for p in cfg.indexing.memory_dirs] == ["~/notes"]
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +221,7 @@ def test_config_d_env_wins_over_fragments(
     )
     cfg = Mem2MemConfig()
     load_config_d(cfg)
-    assert str(cfg.storage.sqlite_path) == "/from/env.db"
+    assert Path(cfg.storage.sqlite_path).as_posix() == "/from/env.db"
 
 
 def test_config_d_unknown_section_warned_but_not_fatal(
