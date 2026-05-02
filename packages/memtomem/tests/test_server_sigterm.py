@@ -373,6 +373,10 @@ def test_two_post_412_servers_coexist_with_shared_lock(tmp_path: Path) -> None:
             _cleanup_proc(proc2)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: fcntl module does not exist on Windows",
+)
 def test_legacy_lock_sh_allows_multiple_holders(tmp_path: Path) -> None:
     """Unit-level pin for the core fcntl semantics the fix relies on.
 

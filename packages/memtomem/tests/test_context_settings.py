@@ -7,6 +7,7 @@ Uses record-format hooks (Claude Code ≥ 2.1.104):
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 from click.testing import CliRunner
@@ -299,6 +300,10 @@ class TestClaudeSettingsAtomicWrite:
         siblings = [p for p in target.parent.iterdir() if p.name.startswith(".settings.json.")]
         assert siblings == []
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX file mode (stat.S_IMODE) — Windows ignores POSIX permission bits",
+    )
     def test_mode_is_0o600(self, claude_home, tmp_path):
         import stat as _stat
 

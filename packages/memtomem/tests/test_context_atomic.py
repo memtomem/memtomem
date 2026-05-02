@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,10 @@ def test_atomic_write_replaces_existing_file(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == "new"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX file mode (stat.S_IMODE) — Windows ignores POSIX permission bits",
+)
 def test_atomic_write_explicit_mode_0o600(tmp_path: Path) -> None:
     """Mode is applied via fchmod — independent of process umask."""
     target = tmp_path / "secret.json"
@@ -54,6 +59,10 @@ def test_atomic_write_explicit_mode_0o600(tmp_path: Path) -> None:
     assert perms == 0o600, f"expected 0o600, got {oct(perms)}"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX file mode (stat.S_IMODE) — Windows ignores POSIX permission bits",
+)
 def test_atomic_write_respects_custom_mode(tmp_path: Path) -> None:
     target = tmp_path / "public.md"
     atomic_write_text(target, "readable", mode=0o644)
