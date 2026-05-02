@@ -156,3 +156,108 @@ class TestDim0ProviderMismatch:
             assert vec_row is not None
         finally:
             db.close()
+
+
+class TestDuplicateChunksMigration:
+    """One-time cleanup of pre-#691 duplicate chunk rows on startup.
+
+    Real-world DBs that ran ``mm web`` watcher + ``mm`` MCP / CLI on the same
+    files accumulated rows that share
+    ``(namespace, source_file, content_hash, start_line)`` but differ only in
+    ``id``. ``create_tables`` must collapse those groups exactly once, then
+    install the UNIQUE index so future ``INSERT OR IGNORE`` writes block any
+    new ones at the storage layer.
+    """
+
+    @staticmethod
+    def _seed_dup_rows(db: sqlite3.Connection) -> None:
+        # Two identical-hash rows differing only in id, created_at, and access
+        # stats. The keeper must be the row with the higher
+        # ``access_count + use_count`` — that is the row the differ has been
+        # actively reusing across re-indexes; the loser is the silent ghost.
+        db.executemany(
+            """INSERT INTO chunks
+               (id, content, content_hash, source_file, namespace,
+                start_line, end_line, created_at, updated_at,
+                access_count, use_count)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (
+                    "00000000-0000-0000-0000-000000000001",
+                    "duplicate body",
+                    "hash-X",
+                    "/tmp/dup.md",
+                    "default",
+                    10,
+                    20,
+                    "2026-04-29T00:00:00+00:00",
+                    "2026-04-29T00:00:00+00:00",
+                    7,
+                    3,
+                ),
+                (
+                    "00000000-0000-0000-0000-000000000002",
+                    "duplicate body",
+                    "hash-X",
+                    "/tmp/dup.md",
+                    "default",
+                    10,
+                    20,
+                    "2026-04-30T00:00:00+00:00",
+                    "2026-04-30T00:00:00+00:00",
+                    0,
+                    0,
+                ),
+            ],
+        )
+        db.commit()
+
+    def test_collapses_existing_dup_rows_and_installs_unique_index(self) -> None:
+        db = _connect_with_vec()
+        try:
+            meta = MetaManager(lambda: db)
+            # First call sets up schema; on a fresh DB the cleanup loop has
+            # nothing to do but the UNIQUE index is created.
+            create_tables(db, meta, dimension=0, embedding_provider="none", embedding_model="")
+
+            # Drop the index so we can simulate an upgrade from a pre-#691
+            # DB that already accumulated duplicates.
+            db.execute("DROP INDEX idx_chunks_unique_content")
+            self._seed_dup_rows(db)
+
+            # Second call re-runs create_tables, which now sees the UNIQUE
+            # index missing and triggers the cleanup migration.
+            create_tables(db, meta, dimension=0, embedding_provider="none", embedding_model="")
+
+            rows = db.execute(
+                "SELECT id, access_count FROM chunks WHERE content_hash='hash-X'"
+            ).fetchall()
+            assert len(rows) == 1, f"expected 1 row after cleanup, got {len(rows)}"
+            kept_id, kept_access = rows[0]
+            # Keeper rule: highest (access_count + use_count) wins so we
+            # preserve the actively-reused row, not the older ghost.
+            assert kept_id == "00000000-0000-0000-0000-000000000001"
+            assert kept_access == 7
+
+            idx_row = db.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='index' AND name='idx_chunks_unique_content'"
+            ).fetchone()
+            assert idx_row is not None, "UNIQUE index must be present after migration"
+        finally:
+            db.close()
+
+    def test_migration_is_idempotent_after_first_run(self) -> None:
+        db = _connect_with_vec()
+        try:
+            meta = MetaManager(lambda: db)
+            create_tables(db, meta, dimension=0, embedding_provider="none", embedding_model="")
+            # No dups exist; second call must be a no-op (no errors, index stays).
+            create_tables(db, meta, dimension=0, embedding_provider="none", embedding_model="")
+            idx_row = db.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='index' AND name='idx_chunks_unique_content'"
+            ).fetchone()
+            assert idx_row is not None
+        finally:
+            db.close()

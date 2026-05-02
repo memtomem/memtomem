@@ -448,8 +448,18 @@ class SqliteBackend(
                     )
 
             if to_insert:
+                # ``INSERT OR IGNORE``: the UNIQUE index on
+                # ``(namespace, source_file, content_hash, start_line)`` is
+                # the multi-process race guard for #691. Two processes
+                # (mm web watcher + mm CLI / MCP) each call ``upsert_chunks``
+                # with their own freshly-generated chunk ids; whichever
+                # commits first wins, the loser's row is silently dropped.
+                # The follow-up ``SELECT id, rowid WHERE id IN (...)`` below
+                # then naturally skips dropped ids when populating
+                # ``chunks_fts`` and ``chunks_vec``, so no orphan sidecars
+                # are created for race losers.
                 db.executemany(
-                    """INSERT INTO chunks
+                    """INSERT OR IGNORE INTO chunks
                        (id, content, content_hash, source_file, heading_hierarchy,
                         chunk_type, start_line, end_line, language, tags,
                         namespace, created_at, updated_at,
@@ -489,40 +499,44 @@ class SqliteBackend(
 
                 # Defensive cleanup: remove orphaned FTS/vec entries for these
                 # rowids. Orphans can arise from interrupted concurrent operations
-                # (e.g. MCP + Web server sharing the same DB).
+                # (e.g. MCP + Web server sharing the same DB). Skipped when
+                # ``new_rowid_map`` is empty — that path fires when every row in
+                # ``to_insert`` was dropped by ``INSERT OR IGNORE`` (the #691
+                # race-loser case): there are no rowids to scrub or repopulate.
                 new_rowids = list(new_rowid_map.values())
-                db.execute(
-                    f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders(len(new_rowids))})",
-                    new_rowids,
-                )
-                if self._has_vec_table:
+                if new_rowids:
                     db.execute(
-                        f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(new_rowids))})",
+                        f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders(len(new_rowids))})",
                         new_rowids,
                     )
-
-                db.executemany(
-                    "INSERT INTO chunks_fts(rowid, content, source_file) VALUES (?,?,?)",
-                    [
-                        (
-                            new_rowid_map[str(c.id)],
-                            _fts.tokenize_for_fts(c.retrieval_content),
-                            norm_path(c.metadata.source_file),
+                    if self._has_vec_table:
+                        db.execute(
+                            f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(new_rowids))})",
+                            new_rowids,
                         )
-                        for c in to_insert
-                        if str(c.id) in new_rowid_map
-                    ],
-                )
-                vec_inserts = [
-                    (new_rowid_map[str(c.id)], serialize_f32(c.embedding))
-                    for c in to_insert
-                    if c.embedding and str(c.id) in new_rowid_map
-                ]
-                if vec_inserts and self._has_vec_table:
+
                     db.executemany(
-                        "INSERT INTO chunks_vec(rowid, embedding) VALUES (?,?)",
-                        vec_inserts,
+                        "INSERT INTO chunks_fts(rowid, content, source_file) VALUES (?,?,?)",
+                        [
+                            (
+                                new_rowid_map[str(c.id)],
+                                _fts.tokenize_for_fts(c.retrieval_content),
+                                norm_path(c.metadata.source_file),
+                            )
+                            for c in to_insert
+                            if str(c.id) in new_rowid_map
+                        ],
                     )
+                    vec_inserts = [
+                        (new_rowid_map[str(c.id)], serialize_f32(c.embedding))
+                        for c in to_insert
+                        if c.embedding and str(c.id) in new_rowid_map
+                    ]
+                    if vec_inserts and self._has_vec_table:
+                        db.executemany(
+                            "INSERT INTO chunks_vec(rowid, embedding) VALUES (?,?)",
+                            vec_inserts,
+                        )
 
             if not self._in_transaction:
                 db.commit()

@@ -233,6 +233,20 @@ def create_tables(
             USING vec0(embedding float[{dimension}])
         """)
 
+    # Idempotent migration (#691): collapse duplicate-hash rows and add a
+    # UNIQUE constraint so multi-process indexing (mm web watcher + mm CLI /
+    # MCP) cannot insert ghost rows that share
+    # ``(namespace, source_file, content_hash, start_line)``. The cleanup
+    # only runs once — its presence/absence is gated by
+    # ``idx_chunks_unique_content`` so subsequent startups are a no-op.
+    has_vec_table = (
+        db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunks_vec'"
+        ).fetchone()
+        is not None
+    )
+    _migrate_chunks_uniqueness(db, has_vec_table=has_vec_table)
+
     db.execute("""
         CREATE INDEX IF NOT EXISTS idx_chunks_source
         ON chunks(source_file)
@@ -528,3 +542,90 @@ def _backfill_chunk_links(db: sqlite3.Connection, meta: MetaManager) -> int:
 
     meta.set_meta(_CHUNK_LINKS_BACKFILL_KEY, "done")
     return inserted
+
+
+def _migrate_chunks_uniqueness(db: sqlite3.Connection, *, has_vec_table: bool) -> None:
+    """One-time cleanup + UNIQUE constraint for ``chunks`` (#691).
+
+    Multi-process indexing (``mm web`` watcher + ``mm`` CLI / MCP) on a
+    shared SQLite DB used to insert duplicate rows that shared
+    ``(namespace, source_file, content_hash, start_line)`` but differed
+    only in ``id``. Each process holds its own ``asyncio.Lock`` and there
+    was no storage-layer guard, so both ``INSERT`` calls succeeded with
+    fresh UUIDs. The differ then reused only one of the IDs per
+    re-indexing round, leaving the others as silent ghosts.
+
+    Migration steps, gated on ``idx_chunks_unique_content`` so subsequent
+    startups are a no-op:
+
+    1. Group rows by ``(namespace, source_file, content_hash, start_line)``.
+    2. Within each group, keep the row with the most accumulated
+       personalization (``access_count + use_count``) — tie-break by oldest
+       ``created_at``, then by ``id`` — and mark the rest for deletion.
+    3. Delete the loser rowids from ``chunks_fts`` and ``chunks_vec``
+       (the latter only when present), then from ``chunks``.
+    4. Create the UNIQUE INDEX. Once present, future
+       ``INSERT OR IGNORE`` calls in ``upsert_chunks`` silently drop
+       race-loser rows at the storage layer.
+    """
+    already_migrated = (
+        db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_chunks_unique_content'"
+        ).fetchone()
+        is not None
+    )
+    if already_migrated:
+        return
+
+    # Collect rowids of duplicate losers in one pass. ``ROW_NUMBER()`` over
+    # the partition picks the keeper (rn=1) by usage then age then id; rn>1
+    # are ghosts. Returns ``[]`` on a clean DB so the rest of the migration
+    # is a single ``CREATE UNIQUE INDEX``.
+    loser_rowids = [
+        row[0]
+        for row in db.execute(
+            """
+            SELECT rowid FROM (
+                SELECT rowid, ROW_NUMBER() OVER (
+                    PARTITION BY namespace, source_file, content_hash, start_line
+                    ORDER BY (access_count + use_count) DESC,
+                             created_at ASC,
+                             id ASC
+                ) AS rn
+                FROM chunks
+            )
+            WHERE rn > 1
+            """
+        ).fetchall()
+    ]
+
+    if loser_rowids:
+        group_count = db.execute(
+            "SELECT COUNT(*) FROM ("
+            "SELECT 1 FROM chunks "
+            "GROUP BY namespace, source_file, content_hash, start_line "
+            "HAVING COUNT(*) > 1"
+            ")"
+        ).fetchone()[0]
+        # Chunked deletes keep the parameter list under SQLite's 999-host
+        # limit on older builds. Sidecars first so an interrupted run never
+        # leaves an FTS/vec entry pointing at a non-existent ``chunks.rowid``.
+        chunk_size = 500
+        for i in range(0, len(loser_rowids), chunk_size):
+            batch = loser_rowids[i : i + chunk_size]
+            placeholders = ",".join("?" * len(batch))
+            db.execute(f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders})", batch)
+            if has_vec_table:
+                db.execute(f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders})", batch)
+            db.execute(f"DELETE FROM chunks WHERE rowid IN ({placeholders})", batch)
+        logger.info(
+            "Cleaned up %d duplicate chunk row(s) across %d group(s) before "
+            "adding UNIQUE(namespace, source_file, content_hash, start_line) — see #691",
+            len(loser_rowids),
+            group_count,
+        )
+
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_unique_content "
+        "ON chunks(namespace, source_file, content_hash, start_line)"
+    )
