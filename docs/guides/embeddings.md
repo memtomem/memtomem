@@ -87,7 +87,7 @@ export MEMTOMEM_EMBEDDING__DIMENSION=3072
 
 ## Switching Models on an Existing Index
 
-If you switch the embedding model after indexing, run `mm embedding-reset` to detect and resolve the dimension mismatch. See [`configuration.md#reset-flow`](configuration.md#reset-flow) for the full two-mode flow (`apply-current` vs `revert-to-stored`), the `mem_status` warning schema, and the equivalent `mem_embedding_reset` MCP tool.
+If you switch the embedding model after indexing, run `mm embedding-reset` to detect and resolve the dimension mismatch. **Stop any running `mm web` / MCP server / `mm index` first** — running `embedding-reset` against a live DB can leave a mix of old- and new-model vectors silently coexisting (issue #707). See [`configuration.md#reset-flow`](configuration.md#reset-flow) for the full two-mode flow (`apply-current` vs `revert-to-stored`), the `mem_status` warning schema, and the equivalent `mem_embedding_reset` MCP tool.
 
 ## Troubleshooting
 
