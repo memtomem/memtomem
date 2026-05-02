@@ -50,6 +50,13 @@ def set_home(monkeypatch: pytest.MonkeyPatch, path: Path | str) -> None:
     runners and tests end up reading/writing the real user home. Setting
     both env vars is harmless on POSIX (stdlib ignores ``USERPROFILE``)
     and correct on Windows.
+
+    A handful of pre-existing call sites still set ``HOME`` and
+    ``USERPROFILE`` by hand (``test_context_settings.py``,
+    ``test_web_routes.py``, ``test_web_routes_extended.py``,
+    ``test_context_agents.py``, ``test_server_tools_context_settings_gate.py``);
+    they should migrate to ``set_home`` in the follow-up that sweeps the
+    remaining ~130 ``monkeypatch.setenv("HOME", ...)`` sites.
     """
     monkeypatch.setenv("HOME", str(path))
     monkeypatch.setenv("USERPROFILE", str(path))
