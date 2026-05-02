@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import io
+import sys
+
 import click
 
 
@@ -16,6 +19,16 @@ CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 )
 def cli() -> None:
     """memtomem — markdown-first memory infrastructure for AI agents."""
+    # Windows console default codepage (cp1252/cp437) can't encode the
+    # box-drawing and em-dash glyphs the wizard uses. Reconfigure to UTF-8
+    # with `replace` errors so a missing glyph degrades to `?` instead of
+    # crashing mid-output. POSIX no-op via the sys.platform guard.
+    if sys.platform == "win32":
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (AttributeError, io.UnsupportedOperation):
+                pass
 
 
 @cli.command()

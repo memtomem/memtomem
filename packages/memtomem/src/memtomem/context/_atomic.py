@@ -24,6 +24,7 @@ import logging
 import os
 import tempfile
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -33,9 +34,12 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "COPY_SKIP_NAMES",
+    "DIRTY_SKIP_SUFFIXES",
     "atomic_write_bytes",
     "atomic_write_text",
     "copy_tree_atomic",
+    "installed_at_from_dest",
+    "iter_installed_files",
 ]
 
 
@@ -48,6 +52,24 @@ COPY_SKIP_NAMES: frozenset[str] = frozenset({".git", ".DS_Store", "__pycache__"}
   clean even when curated through the GUI.
 - ``__pycache__`` — Python bytecode caches that test/automation runs may
   drop into a wiki tree; never wanted in a project's canonical surface.
+"""
+
+
+DIRTY_SKIP_SUFFIXES: frozenset[str] = frozenset({".bak"})
+"""Suffix patterns the installed-file walker excludes.
+
+Shared by :func:`copy_tree_atomic` (no-op there in practice; wikis don't
+carry ``.bak`` files under normal operation) and
+:func:`iter_installed_files` (the real filter for
+:func:`memtomem.context.dirty.is_asset_dirty` and the install-time
+capture helper).
+
+``.bak`` — sibling files created by ``mm context update --force`` to
+preserve user edits before overwriting with wiki bytes. They live in the
+dest tree by design and carry the user's pre-update mtime, so without
+this skip they would trip the next ``mm context update`` into
+``reason="dirty"`` purely on the prior backup, refusing every future
+update until the user manually deletes the ``.bak``.
 """
 
 
@@ -163,3 +185,76 @@ def copy_tree_atomic(src: Path, dst: Path, *, mode: int = 0o644) -> int:
         elif entry.is_dir():
             written += copy_tree_atomic(entry, target, mode=mode)
     return written
+
+
+def iter_installed_files(root: Path) -> Iterator[Path]:
+    """Yield non-skipped, non-symlink files under *root* recursively.
+
+    Mirrors :func:`copy_tree_atomic` traversal rules: skip entries named
+    in :data:`COPY_SKIP_NAMES`, skip suffixes in
+    :data:`DIRTY_SKIP_SUFFIXES`, skip symlinks with a warning. Shared by
+    :func:`memtomem.context.dirty.is_asset_dirty` (the dirty walker) and
+    :func:`installed_at_from_dest` (the install-timestamp capture
+    helper), so both consume the exact same set of files —
+    ``installed_at`` cannot reference a file the dirty-checker will
+    later ignore, and vice versa.
+    """
+    for entry in root.iterdir():
+        if entry.name in COPY_SKIP_NAMES:
+            continue
+        if entry.suffix in DIRTY_SKIP_SUFFIXES:
+            continue
+        if entry.is_symlink():
+            logger.warning("iter_installed_files: skipping symlink %s", entry)
+            continue
+        if entry.is_file():
+            yield entry
+        elif entry.is_dir():
+            yield from iter_installed_files(entry)
+
+
+def installed_at_from_dest(dst: Path) -> str:
+    """Return ISO-8601Z timestamp >= max(st_mtime) of files under *dst*.
+
+    Two-layer fix for the Windows dirty-cluster (#634):
+
+    1. **Source** — read ``st_mtime_ns`` (int, lossless) from the
+       filesystem rather than Python's wall clock. NTFS records mtimes
+       from ``FILETIME``, a different timer from ``time.time()``;
+       just-written files can carry mtimes strictly later than a
+       wall-clock-captured timestamp, breaking the strict
+       ``mtime > installed_at_epoch`` invariant in
+       :func:`memtomem.context.dirty.is_asset_dirty`.
+    2. **Precision** — ceiling-divide ``st_mtime_ns`` to microseconds
+       before formatting. ISO-8601Z's ``%f`` directive is microsecond
+       only, so truncating NTFS's 100-ns residual would leave the
+       formatted ``installed_at`` up to 1µs **less than** some files'
+       round-tripped mtimes, defeating the same invariant.
+
+    Combined: the formatted timestamp round-trips through
+    ``datetime.fromisoformat().timestamp()`` to a value ``>=`` every
+    walked file's ``st_mtime`` — byte-identical to today on POSIX
+    (where ``st_mtime_ns % 1000 == 0`` for ordinary writes; ceil is a
+    no-op) and with a ``<= 1µs`` safety margin on NTFS.
+
+    The walker is :func:`iter_installed_files`, so capture and
+    dirty-check observe the same file set: a file the dirty-checker
+    will later ignore (``.git``, ``.DS_Store``, ``__pycache__``,
+    ``.bak``, symlinks) cannot bump the captured timestamp, and a
+    file we walk here is one the dirty-checker will walk later.
+
+    Empty install (0 files) — fall back to wall clock. With no
+    filesystem source there is nothing to skew off, so the format
+    still matches :func:`memtomem.context.lockfile.utcnow_iso8601_z`
+    byte-for-byte. The strftime call is duplicated here rather than
+    importing the helper to avoid a circular import (``lockfile``
+    already imports from ``_atomic``).
+    """
+    files = list(iter_installed_files(dst))
+    if not files:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    max_ns = max(p.stat().st_mtime_ns for p in files)
+    max_us = -(-max_ns // 1000)  # math.ceil(max_ns / 1000) without the import
+    return datetime.fromtimestamp(max_us / 1_000_000, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )

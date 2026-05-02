@@ -28,10 +28,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from memtomem.context._atomic import copy_tree_atomic
+from memtomem.context._atomic import copy_tree_atomic, installed_at_from_dest
 from memtomem.context._names import validate_name
 from memtomem.context.dirty import DirtyReport, is_asset_dirty
-from memtomem.context.lockfile import Lockfile, LockfileVersionError, utcnow_iso8601_z
+from memtomem.context.lockfile import Lockfile, LockfileVersionError
 from memtomem.wiki.store import CommitNotFoundError as CommitNotFoundError
 from memtomem.wiki.store import WikiStore
 
@@ -239,7 +239,7 @@ def _install_asset(
     dest.parent.mkdir(parents=True, exist_ok=True)
     files_written = copy_tree_atomic(src, dest)
 
-    installed_at = utcnow_iso8601_z()
+    installed_at = installed_at_from_dest(dest)
     lock.upsert_entry(
         asset_type,
         validated,
@@ -435,7 +435,7 @@ def _apply_update(
     dest.parent.mkdir(parents=True, exist_ok=True)
     files_written = copy_tree_atomic(src, dest)
 
-    installed_at = utcnow_iso8601_z()
+    installed_at = installed_at_from_dest(dest)
     lock = Lockfile.at(project_root)
     lock.upsert_entry(
         asset_type,
@@ -793,7 +793,7 @@ def _apply_pinned_install(
 
     files_written = wiki.copy_asset_at_commit(pin, asset_type, name, dest)
 
-    installed_at = utcnow_iso8601_z()
+    installed_at = installed_at_from_dest(dest)
     lock = Lockfile.at(project_root)
     # CRITICAL: wiki_commit stays at the pin we just restored to —
     # install --all is reproducibility (Option A), not "advance to HEAD".
