@@ -288,6 +288,25 @@ function relativeTime(dateStr) {
   return t('time.relative.years_ago', { y: Math.floor(mo / 12) });
 }
 
+// Bucketing/display by chunk timestamp must reflect the browser's local
+// zone, not the literal UTC ISO string. Slicing ``created_at.slice(0,10)``
+// puts users east of UTC into the previous calendar day for hours after
+// local midnight (and shifts ``HH:MM`` by the offset). Both helpers
+// round-trip through ``new Date(iso)`` so callers — Timeline grouping,
+// Timeline ``HH:MM`` display, Home activity heatmap counts — share one
+// local-zone source of truth.
+function localDateKey(iso) {
+  const d = new Date(iso);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+function localTimeShort(iso) {
+  const d = new Date(iso);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
 // ── Temporal-validity badge (RFC §Goal 7) ──
 // Renders ``Valid: 2025-08-15 → 2026-03-31`` (∞ for unbounded sides) when
 // either bound is set. Always-valid chunks (both bounds null) hide the
@@ -1074,8 +1093,9 @@ function _renderActivityMap(chunks) {
   // Count chunks per date
   const countByDate = {};
   chunks.forEach(c => {
-    const key = (c.created_at || '').slice(0, 10);
-    if (key) countByDate[key] = (countByDate[key] || 0) + 1;
+    if (!c.created_at) return;
+    const key = localDateKey(c.created_at);
+    countByDate[key] = (countByDate[key] || 0) + 1;
   });
 
   // Start from Sunday before 364 days ago

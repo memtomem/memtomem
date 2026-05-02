@@ -11,21 +11,9 @@
 let tlViewMode = 'chunks';
 let currentTlChunks = null;
 
-// created_at arrives as a UTC ISO string. Slicing the literal string would
-// bucket chunks by UTC calendar date, so users east of UTC see entries land
-// on the previous day for hours after local midnight (and times display in
-// UTC). Convert to the browser's local zone before grouping/displaying.
-function localDateKey(iso) {
-  const d = new Date(iso);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-function localTimeShort(iso) {
-  const d = new Date(iso);
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-}
+// localDateKey / localTimeShort live in app.js (loaded first) so the
+// Home activity heatmap can share the same local-zone helpers. See the
+// comment block above their definition.
 
 function resetTimelinePanel() {
   hide(qs('tl-list'));
