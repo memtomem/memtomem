@@ -19,7 +19,8 @@ class FastEmbedReranker:
     Runs on the CPU via ONNX Runtime — no external server and no PyTorch
     dependency. Reuses the ``memtomem[onnx]`` extra so enabling this provider
     adds no new packages. The model is downloaded on first use and cached in
-    ``~/.cache/fastembed/``.
+    the path returned by ``resolve_fastembed_cache_dir()`` (default
+    ``~/.memtomem/cache/fastembed``).
     """
 
     def __init__(self, config: RerankConfig) -> None:
@@ -40,8 +41,11 @@ class FastEmbedReranker:
                 "Install it with: pip install memtomem[onnx]"
             ) from exc
 
+        from memtomem.embedding._fastembed_cache import resolve_fastembed_cache_dir
+
+        cache_dir = resolve_fastembed_cache_dir()
         try:
-            self._model = TextCrossEncoder(model_name=self._config.model)
+            self._model = TextCrossEncoder(model_name=self._config.model, cache_dir=str(cache_dir))
         except ValueError as exc:
             supported = [m.get("model", "") for m in TextCrossEncoder.list_supported_models()]
             raise ValueError(
