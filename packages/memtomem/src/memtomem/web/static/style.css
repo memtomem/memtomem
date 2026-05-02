@@ -354,6 +354,21 @@ header h1 { font-size: 1.2rem; font-weight: 700; color: var(--accent); letter-sp
   transition: background 0.15s; flex-shrink: 0; position: relative;
 }
 .results-divider:hover, .results-divider.dragging { background: var(--accent); }
+.results-divider::before,
+.sources-divider::before {
+  content: ''; position: absolute;
+  left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: 2px; height: 24px; border-radius: 2px;
+  background: var(--muted); opacity: 0.35;
+  pointer-events: none;
+  transition: opacity 0.15s, background 0.15s;
+}
+.results-divider:hover::before,
+.sources-divider:hover::before,
+.results-divider.dragging::before,
+.sources-divider.dragging::before {
+  background: var(--bg); opacity: 1;
+}
 
 /* Detail code view */
 .detail-code-view {
@@ -526,7 +541,7 @@ mark {
 .sources-sidebar { border-right: none; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
 .sources-divider {
   width: 4px; cursor: col-resize; background: var(--border);
-  transition: background 0.15s; flex-shrink: 0;
+  transition: background 0.15s; flex-shrink: 0; position: relative;
 }
 .sources-divider:hover, .sources-divider.dragging { background: var(--accent); }
 .sources-header { display: flex; align-items: center; justify-content: space-between; }
@@ -2318,7 +2333,11 @@ select:focus-visible {
 #score-threshold { width: 120px; accent-color: var(--accent); cursor: pointer; }
 
 /* ── Sprint 6: Advanced toggle active ── */
-.btn-ghost.btn-active { color: var(--accent); border-color: var(--accent); }
+.btn-ghost.btn-active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.1);
+}
 
 /* ── Sprint 6: List view ── */
 #results-list.list-view .result-item { padding: 5px 16px; }
