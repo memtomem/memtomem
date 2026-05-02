@@ -591,6 +591,25 @@ def test_detect_provider_dirs_categories_are_fixed() -> None:
     assert set(grouped) == {"claude-memory", "claude-plans", "codex"}
 
 
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        (r"C:\Users\foo\.claude\projects\abc\memory", "claude-memory"),
+        (r"C:\Users\foo\.claude\plans", "claude-plans"),
+        (r"C:\Users\foo\.codex\memories", "codex"),
+        (r"C:\Users\foo\Documents\notes", "user"),
+        (r"C:\Users\foo/.claude/plans", "claude-plans"),
+        (r"C:\Users\foo\.claude\plans" + "\\", "claude-plans"),
+        (r"\\server\share\.codex\memories", "codex"),
+    ],
+)
+def test_categorize_memory_dir_accepts_windows_separators(
+    path: str, expected: _cfg.ProviderCategory
+) -> None:
+    """Provider category matching is path-separator agnostic (#316)."""
+    assert _cfg.categorize_memory_dir(path) == expected
+
+
 def test_detect_provider_dirs_excludes_gemini(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

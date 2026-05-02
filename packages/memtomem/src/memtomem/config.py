@@ -1344,12 +1344,11 @@ def categorize_memory_dir(path: str | Path) -> ProviderCategory:
 
     Returns one of ``ProviderCategory``'s literal values, defaulting to
     ``"user"`` for anything that doesn't match a known provider layout.
-    Classification only — does not check existence or validity. Uses
-    forward-slash regex, so on Windows a backslash-normalised path will
-    fall through to ``"user"`` until a future path-sep-agnostic pass
-    lands (tracked in #316).
+    Classification only — does not check existence or validity. Matching
+    normalizes separators to forward slashes first, so POSIX, Windows,
+    UNC, and mixed-separator strings hit the same provider patterns.
     """
-    s = str(path).rstrip("/")
+    s = str(path).replace("\\", "/").rstrip("/")
     for cat, pat in _PROVIDER_CATEGORY_PATTERNS:
         if pat.search(s):
             return cat
