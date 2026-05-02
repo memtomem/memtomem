@@ -562,7 +562,7 @@
   "toast.indexed_count": "{count}개 청크 인덱싱 완료",
   "toast.upload_complete": "업로드 완료 \u2014 {count}개 청크 인덱싱",
   "toast.upload_complete_with_path": "{count}개 청크 인덱싱 \u2192 {path} 에 저장됨",
-  "toast.action.register_persistent": "Source 로 등록",
+  "toast.action.register_persistent": "소스로 등록",
   "toast.index_registered_as_source": "{path} 를 소스로 등록했습니다",
   "toast.index_register_failed": "소스 등록 실패: {error}",
   "toast.saved_to_file": "{path} 에 저장됨 \u2014 {count}개 청크 인덱싱",
