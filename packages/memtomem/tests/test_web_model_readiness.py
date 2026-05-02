@@ -182,4 +182,5 @@ def test_reranker_states_when_enabled(fake_cache_present):
     body = resp.json()
     assert body["embedder"]["state"] == "ready"
     assert body["reranker"]["state"] == "loading"
-    assert body["reranker"]["approx_size_mb"] == 1100
+    # 1110 MB matches fastembed's reported size_in_GB for jina-reranker-v2.
+    assert body["reranker"]["approx_size_mb"] == 1110

@@ -435,10 +435,21 @@ def _step_embedding(state: dict) -> None:
             click.echo()
             state.setdefault("_extras_warned_inline", set()).add("onnx")
 
+        # Sizes are pulled from ``embedding/aliases.py`` so this wizard
+        # text and the runtime "Downloading {model} (~{size} MB)…" banner
+        # surfaced by ``GET /api/system/model-readiness`` agree exactly.
+        from memtomem.embedding.aliases import ONNX_EMBEDDER_MODELS, format_size
+
+        _all_minilm_size = format_size(ONNX_EMBEDDER_MODELS["all-MiniLM-L6-v2"][2])
+        _bge_small_size = format_size(ONNX_EMBEDDER_MODELS["bge-small-en-v1.5"][2])
+        _bge_m3_size = format_size(ONNX_EMBEDDER_MODELS["bge-m3"][2])
+
         click.echo("  Available models:")
-        click.echo("    [1] all-MiniLM-L6-v2 — English, fast, tiny (~22 MB, 384d)")
-        click.echo("    [2] bge-small-en-v1.5 — English, better accuracy (~33 MB, 384d)")
-        click.echo("    [3] bge-m3 — multilingual KR/EN/JP/CN (~1.2 GB, 1024d)")
+        click.echo(f"    [1] all-MiniLM-L6-v2 — English, fast, tiny (~{_all_minilm_size}, 384d)")
+        click.echo(
+            f"    [2] bge-small-en-v1.5 — English, better accuracy (~{_bge_small_size}, 384d)"
+        )
+        click.echo(f"    [3] bge-m3 — multilingual KR/EN/JP/CN (~{_bge_m3_size}, 1024d)")
         model_choice = nav_prompt("  Select", type=click.IntRange(1, 3), default=1)
 
         models = {
@@ -450,7 +461,7 @@ def _step_embedding(state: dict) -> None:
 
         if model_choice == 3:
             click.secho(
-                "  Note: bge-m3 is ~1.2 GB (similar to Ollama models). "
+                f"  Note: bge-m3 is ~{_bge_m3_size} (substantial download). "
                 "For lightweight EN-only search, choose option 1 or 2.",
                 fg="yellow",
             )
@@ -609,10 +620,17 @@ def _step_reranker(state: dict) -> None:
         click.echo()
         return
 
+    # Sizes pulled from ``embedding/aliases.py:FASTEMBED_RERANKER_SIZES``
+    # so the wizard and the readiness banner agree.
+    from memtomem.embedding.aliases import FASTEMBED_RERANKER_SIZES, format_size
+
+    _en_size = format_size(FASTEMBED_RERANKER_SIZES["Xenova/ms-marco-MiniLM-L-6-v2"])
+    _multi_size = format_size(FASTEMBED_RERANKER_SIZES["jinaai/jina-reranker-v2-base-multilingual"])
+
     click.echo()
     click.echo("  Available models:")
-    click.echo("    [1] English (Xenova/ms-marco-MiniLM-L-6-v2) — 80 MB")
-    click.echo("    [2] Multilingual (jinaai/jina-reranker-v2-base-multilingual) — 1.1 GB")
+    click.echo(f"    [1] English (Xenova/ms-marco-MiniLM-L-6-v2) — {_en_size}")
+    click.echo(f"    [2] Multilingual (jinaai/jina-reranker-v2-base-multilingual) — {_multi_size}")
     click.echo("        Recommended for Korean/Chinese/Japanese/mixed content.")
     choice = nav_prompt("  Select", type=click.IntRange(1, 2), default=1)
 

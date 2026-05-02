@@ -1,4 +1,4 @@
-"""Readiness helpers for the lazy-loaded fastembed models.
+"""Cache-presence helper for the lazy-loaded fastembed models.
 
 Used by the ``GET /api/system/model-readiness`` endpoint to distinguish
 "download in flight" from "loaded" from "cold cache, no work started"
@@ -18,24 +18,18 @@ where ``<sanitized-id>`` = ``model_id.replace("/", "--")``. A snapshot
 is considered complete when ``config.json``, ``tokenizer.json``, and
 either flat or nested ``model.onnx`` are all present (``Path.exists``
 follows symlinks, so the underlying blobs must be there too).
+
+Approximate-size lookups for the readiness banner live in the sibling
+``aliases`` module — see ``embedding/aliases.py:approx_size_mb``.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-# Approximate sizes for the model identifiers documented in
-# ``cli/init_cmd.py``. Used by the readiness endpoint to populate banner
-# copy ("Downloading bge-m3 (~2.3 GB)…"). Unknown models map to None;
-# the banner falls back to a size-less message.
-_APPROX_SIZE_MB: dict[str, int] = {
-    "BAAI/bge-m3": 2300,
-    "BAAI/bge-small-en-v1.5": 130,
-    "sentence-transformers/all-MiniLM-L6-v2": 90,
-    "nomic-ai/nomic-embed-text-v1.5": 280,
-    "jinaai/jina-reranker-v2-base-multilingual": 1100,
-    "Xenova/ms-marco-MiniLM-L-6-v2": 80,
-}
+# Re-exported for backwards compatibility with the readiness endpoint
+# import site. Source of truth is ``embedding/aliases.py``.
+from memtomem.embedding.aliases import approx_size_mb as approx_size_mb  # noqa: F401
 
 
 def model_snapshot_present(cache_dir: Path, model_id: str) -> bool:
@@ -61,8 +55,3 @@ def model_snapshot_present(cache_dir: Path, model_id: str) -> bool:
         if (snap / "model.onnx").exists() or (snap / "onnx" / "model.onnx").exists():
             return True
     return False
-
-
-def approx_size_mb(model_id: str) -> int | None:
-    """Return the documented approximate size for ``model_id`` in MB, or ``None``."""
-    return _APPROX_SIZE_MB.get(model_id)

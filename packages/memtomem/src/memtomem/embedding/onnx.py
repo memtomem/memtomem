@@ -8,26 +8,11 @@ from collections.abc import Callable
 from typing import Sequence
 
 from memtomem.config import EmbeddingConfig
+from memtomem.embedding.aliases import resolve_embedder_id
 from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
 from memtomem.errors import EmbeddingError
 
 logger = logging.getLogger(__name__)
-
-# Short name -> (fastembed model ID, dimension).
-# Users may also pass a raw fastembed model ID via config.model.
-_ONNX_MODELS: dict[str, tuple[str, int]] = {
-    "all-MiniLM-L6-v2": ("sentence-transformers/all-MiniLM-L6-v2", 384),
-    "bge-small-en-v1.5": ("BAAI/bge-small-en-v1.5", 384),
-    "bge-m3": ("BAAI/bge-m3", 1024),
-}
-
-
-def _resolve_model(name: str) -> str:
-    """Map a short model name to the fastembed model ID."""
-    entry = _ONNX_MODELS.get(name)
-    if entry:
-        return entry[0]
-    return name  # pass through as raw fastembed model ID
 
 
 def _register_custom_models_if_needed() -> None:
@@ -88,7 +73,7 @@ class OnnxEmbedder:
             ) from exc
 
         _register_custom_models_if_needed()
-        model_id = _resolve_model(self._config.model)
+        model_id = resolve_embedder_id(self._config.model)
         # threads=0 → leave ORT default (all physical cores); threads>0 caps
         # the intra-op pool so seeding doesn't saturate the machine.
         threads = self._config.threads or None

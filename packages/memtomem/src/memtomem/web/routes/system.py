@@ -753,21 +753,6 @@ async def get_embedding_status(storage=Depends(get_storage)) -> EmbeddingStatusR
     )
 
 
-def _resolve_fastembed_model_id(model: str) -> str:
-    """Map a memtomem short name to the fastembed model id, when known.
-
-    Mirrors ``memtomem.embedding.onnx._resolve_model`` without importing the
-    ONNX module — the readiness check must work even if fastembed is not
-    installed (the endpoint just reports a ``cold`` / ``error`` state).
-    """
-    aliases = {
-        "all-MiniLM-L6-v2": "sentence-transformers/all-MiniLM-L6-v2",
-        "bge-small-en-v1.5": "BAAI/bge-small-en-v1.5",
-        "bge-m3": "BAAI/bge-m3",
-    }
-    return aliases.get(model, model)
-
-
 # Providers that route through the lazy fastembed loaders we instrumented
 # for #696 — i.e. ones where introspecting ``_model`` / ``_loading`` /
 # ``_load_error`` is meaningful. The embedder advertises this path as
@@ -791,13 +776,18 @@ def _component_for(
     or ``None`` when the component is disabled. ``enabled=False`` short-
     circuits to ``state="skipped"`` regardless of the holder.
     """
+    from memtomem.embedding.aliases import approx_size_mb, resolve_embedder_id
     from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
-    from memtomem.embedding.readiness import approx_size_mb, model_snapshot_present
+    from memtomem.embedding.readiness import model_snapshot_present
 
     if not enabled or provider not in _INTROSPECTABLE_PROVIDERS or holder is None:
         return ModelComponent(state="skipped", provider=provider, model=model)
 
-    fastembed_id = _resolve_fastembed_model_id(model) if model else None
+    # Embedder config stores either a short alias (``bge-m3``) or the
+    # raw fastembed id; the reranker config always stores the full
+    # fastembed id directly. ``resolve_embedder_id`` is a no-op for
+    # already-resolved ids, so it's safe to apply uniformly.
+    fastembed_id = resolve_embedder_id(model) if model else None
     cache_present = False
     if fastembed_id:
         try:

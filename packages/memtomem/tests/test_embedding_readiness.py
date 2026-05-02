@@ -79,8 +79,13 @@ def test_snapshots_dir_missing(tmp_path: Path) -> None:
 
 
 def test_approx_size_known() -> None:
+    # Sizes match fastembed's own ``list_supported_models()`` /
+    # ``size_in_GB`` field (and ``size_in_gb=2.3`` declared on bge-m3's
+    # ``add_custom_model`` call). Bumping these here without bumping
+    # ``embedding/aliases.py`` will fail the assertion.
     assert approx_size_mb("BAAI/bge-m3") == 2300
-    assert approx_size_mb("jinaai/jina-reranker-v2-base-multilingual") == 1100
+    assert approx_size_mb("bge-m3") == 2300  # short-name alias also works
+    assert approx_size_mb("jinaai/jina-reranker-v2-base-multilingual") == 1110
 
 
 def test_approx_size_unknown() -> None:
