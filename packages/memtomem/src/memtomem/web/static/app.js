@@ -2913,7 +2913,15 @@ function _renderMemorySourceTree(sources, list) {
     if (target) {
       target.classList.add('active');
       target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-      if (typeof browseSource === 'function') browseSource(path);
+      // ``pendingActivateChunkId`` means the caller (Timeline → Source jump
+      // in PR #676) wants a specific chunk highlighted. Default ``limit=100``
+      // would silently miss any target past position 100 in a large source —
+      // bumping to 500 covers ~99% of indexed sources without making the
+      // source-level Home/recent jump pay the larger fetch. The chunk-side
+      // consumer in ``browseSource`` shows a toast if it still can't find
+      // the card after the 500-row fetch.
+      const browseLimit = STATE.pendingActivateChunkId ? 500 : undefined;
+      if (typeof browseSource === 'function') browseSource(path, browseLimit);
     } else if (STATE.uiMode === 'dev') {
       // Path made it through the vendor + filter resolves but the
       // ``.source-item`` isn't in the rendered list — most likely an
@@ -3064,6 +3072,13 @@ function _renderMemorySourceItem(s, maxChunks) {
   `;
   item.setAttribute('tabindex', '0');
   item.addEventListener('click', () => {
+    // Manual source-item click is an explicit user pivot — drop any
+    // chunk-highlight target left over from a prior ``_navigateToSource``
+    // (Timeline jump → Source render → user reroutes mid-render). The
+    // stale id wouldn't cause a wrong card to highlight (chunk ids are
+    // UUIDs), but it would silently no-op the next ``browseSource`` flash
+    // path until something else clears it. PR #676 review follow-up.
+    STATE.pendingActivateChunkId = '';
     document.querySelectorAll('.source-item').forEach(el => el.classList.remove('active'));
     item.classList.add('active');
     browseSource(s.path);
@@ -3243,7 +3258,18 @@ async function browseSource(path, limit = 100) {
         const card = content.querySelector(
           `.chunk-card[data-chunk-id="${CSS.escape(String(targetId))}"]`,
         );
-        if (!card) return;
+        if (!card) {
+          // Caller asked for a specific chunk highlight but the card isn't
+          // in this fetch. ``_renderMemorySourceTree`` already bumps the
+          // limit to 500 when ``pendingActivateChunkId`` is set, so reaching
+          // here means the source has 500+ chunks (rare) — surface a toast
+          // so the user knows why the jump landed on the source without a
+          // flash, rather than reading it as a regression.
+          if (typeof showToast === 'function' && typeof t === 'function') {
+            showToast(t('toast.chunk_target_missing'), 'info');
+          }
+          return;
+        }
         card.scrollIntoView({ behavior: 'smooth', block: 'center' });
         const contentDiv = card.querySelector('.chunk-card-content');
         if (contentDiv && card.classList.contains('chunk-card-collapsible')) {

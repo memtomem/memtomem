@@ -454,6 +454,7 @@
   "timeline.empty_icon": "🕐",
   "timeline.empty_text": "불러오기를 클릭하면 타임라인이 표시됩니다",
   "timeline.open_in_source": "소스에서 보기",
+  "timeline.copy": "복사",
 
   "modal.settings_title": "설정",
   "modal.default_tab_label": "기본 탭",
@@ -549,6 +550,7 @@
   "toast.update_failed": "업데이트 실패: {error}",
   "toast.error": "오류: {error}",
 
+  "toast.chunk_target_missing": "이 화면에서는 해당 청크를 찾을 수 없습니다.",
   "toast.ns_deleted": "'{name}'에서 {count}개 청크 삭제됨",
   "toast.ns_renamed": "'{oldName}' \u2192 '{newName}' 이름 변경",
   "toast.indexed_count": "{count}개 청크 인덱싱 완료",
