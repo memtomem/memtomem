@@ -173,9 +173,14 @@ async def import_chunks(
       * ``"update"``: records matching an existing hash overwrite that
         existing row's metadata (tags, namespace, heading hierarchy,
         source_file, created_at). The existing UUID is preserved.
-      * ``"duplicate"``: no hash check — every record is inserted with a
-        fresh UUID. This is the pre-v2 behaviour and produces row-level
-        duplicates when re-importing or merging overlapping bundles.
+      * ``"duplicate"``: no hash check at the import layer — every record
+        is sent to ``upsert_chunks`` with a fresh UUID. This was the
+        pre-v2 behaviour, but since #691 the storage layer now enforces
+        ``UNIQUE(namespace, source_file, content_hash, start_line)`` via
+        ``INSERT OR IGNORE``: rows that would have produced duplicates
+        are silently dropped at insert time. The mode is kept for
+        back-compat with existing callers but no longer materialises
+        duplicate rows on disk.
 
     For non-conflicting records, UUID assignment is controlled by
     ``preserve_ids``: when True *and* the bundle is v2 (carries
@@ -237,7 +242,12 @@ async def import_chunks(
     updated = 0
 
     if on_conflict == "duplicate":
-        # Back-compat path: every record gets a fresh UUID, no hash check.
+        # Back-compat path: every record gets a fresh UUID, no hash check
+        # at this layer. Since #691 the storage UNIQUE index +
+        # ``INSERT OR IGNORE`` collapses any rows that would have shared
+        # ``(namespace, source_file, content_hash, start_line)``, so this
+        # mode no longer materialises duplicate rows even though the
+        # caller surface still accepts it.
         to_upsert = [c for c, _ in parsed]
     else:
         all_hashes = [c.content_hash for c, _ in parsed]

@@ -42,11 +42,14 @@ async def backend(tmp_path):
 def _seed_chunk(backend: SqliteBackend, chunk_id: UUID, *, namespace: str = "default") -> None:
     """Insert a minimal ``chunks`` row so FK checks pass without indexing."""
     db = backend._get_db()
+    # ``content_hash`` keyed off ``chunk_id`` so multiple seeded chunks under
+    # the same namespace + (empty) source_file don't collide on the
+    # ``UNIQUE(namespace, source_file, content_hash, start_line)`` index (#691).
     db.execute(
         "INSERT INTO chunks (id, content, content_hash, source_file, namespace, "
         "tags, created_at, updated_at) "
-        "VALUES (?, '', '', '', ?, '[]', '2026-01-01T00:00:00', '2026-01-01T00:00:00')",
-        (str(chunk_id), namespace),
+        "VALUES (?, '', ?, '', ?, '[]', '2026-01-01T00:00:00', '2026-01-01T00:00:00')",
+        (str(chunk_id), str(chunk_id), namespace),
     )
     db.commit()
 

@@ -410,8 +410,17 @@ class TestRoundtripBaseline:
 class TestOnConflictModes:
     """Pin each ``on_conflict`` mode individually."""
 
-    async def test_duplicate_mode_backcompat(self, tmp_path):
-        """``on_conflict="duplicate"`` reproduces pre-v2 row-duplication."""
+    async def test_duplicate_mode_dedups_at_storage_layer(self, tmp_path):
+        """``on_conflict="duplicate"`` used to force fresh UUIDs without
+        any hash check — pre-v2 row-duplication semantics. Since #691
+        added ``UNIQUE(namespace, source_file, content_hash, start_line)``
+        plus ``INSERT OR IGNORE`` in ``upsert_chunks``, the storage layer
+        is authoritative: a second import's attempted inserts are silently
+        dropped, and the DB ends up with one row per content_hash even
+        when the caller asks for the legacy "duplicate" behaviour. The
+        mode is kept so existing callers don't break, but it no longer
+        produces row duplication.
+        """
         comp_a, mem_a = await _make_onnx_components(tmp_path, "pc_a_dup")
         comp_b, _ = await _make_onnx_components(tmp_path, "pc_b_dup")
         try:
@@ -421,21 +430,17 @@ class TestOnConflictModes:
             bundle_path = tmp_path / "bundle.json"
             await export_chunks(comp_a.storage, output_path=bundle_path)
 
-            s1 = await import_chunks(
+            await import_chunks(
                 comp_b.storage, comp_b.embedder, bundle_path, on_conflict="duplicate"
             )
-            s2 = await import_chunks(
+            await import_chunks(
                 comp_b.storage, comp_b.embedder, bundle_path, on_conflict="duplicate"
             )
             b2 = await comp_b.storage.recall_chunks(limit=10_000)
             dup_counter = Counter(c.content_hash for c in b2)
 
-            assert s1.imported_chunks == len(chunks_a)
-            assert s2.imported_chunks == len(chunks_a)
-            assert s1.conflict_skipped_chunks == 0
-            assert s2.conflict_skipped_chunks == 0
-            assert len(b2) == 2 * len(chunks_a)
-            assert max(dup_counter.values()) == 2
+            assert len(b2) == len(chunks_a)
+            assert max(dup_counter.values()) == 1
         finally:
             await close_components(comp_a)
             await close_components(comp_b)

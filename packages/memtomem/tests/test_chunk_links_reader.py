@@ -35,11 +35,17 @@ async def backend(tmp_path):
 
 def _seed_chunk(backend: SqliteBackend, chunk_id: UUID, *, namespace: str = "default") -> None:
     db = backend._get_db()
+    # ``content_hash`` per-row uniqueness here is incidental: chunk_links
+    # tests don't care about the chunk body, but the
+    # ``UNIQUE(namespace, source_file, content_hash, start_line)`` index on
+    # ``chunks`` (#691) refuses two seeded rows that collide on those four
+    # columns. Keying ``content_hash`` off ``chunk_id`` keeps every seed row
+    # distinct without making the test setup any more interesting.
     db.execute(
         "INSERT INTO chunks (id, content, content_hash, source_file, namespace, "
         "tags, created_at, updated_at) "
-        "VALUES (?, '', '', '', ?, '[]', '2026-01-01T00:00:00', '2026-01-01T00:00:00')",
-        (str(chunk_id), namespace),
+        "VALUES (?, '', ?, '', ?, '[]', '2026-01-01T00:00:00', '2026-01-01T00:00:00')",
+        (str(chunk_id), str(chunk_id), namespace),
     )
     db.commit()
 

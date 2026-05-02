@@ -58,11 +58,14 @@ def _insert_chunk(
     tags_json: str = "[]",
 ) -> None:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # ``content_hash`` keyed off ``chunk_id`` so multiple seeded chunks under
+    # the same namespace + (empty) source_file don't collide on the
+    # ``UNIQUE(namespace, source_file, content_hash, start_line)`` index (#691).
     db.execute(
         "INSERT INTO chunks (id, content, content_hash, source_file, namespace, "
         "tags, created_at, updated_at) "
-        "VALUES (?, '', '', '', ?, ?, ?, ?)",
-        (chunk_id, namespace, tags_json, now, now),
+        "VALUES (?, '', ?, '', ?, ?, ?, ?)",
+        (chunk_id, chunk_id, namespace, tags_json, now, now),
     )
 
 
