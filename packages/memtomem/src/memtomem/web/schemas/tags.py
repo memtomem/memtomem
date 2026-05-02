@@ -9,6 +9,7 @@ __all__ = [
     "TagsListResponse",
     "AutoTagRequest",
     "AutoTagResponse",
+    "AutoTagSample",
     "TagsUpdateRequest",
     "TagsUpdateResponse",
 ]
@@ -33,11 +34,20 @@ class AutoTagRequest(BaseModel):
     dry_run: bool = True
 
 
+class AutoTagSample(BaseModel):
+    chunk_id: str
+    source_file: str
+    content_preview: str
+    current_tags: list[str]
+    suggested_tags: list[str]
+
+
 class AutoTagResponse(BaseModel):
     total_chunks: int
     tagged_chunks: int
     skipped_chunks: int
     dry_run: bool
+    samples: list[AutoTagSample] = []
 
 
 class TagsUpdateRequest(BaseModel):

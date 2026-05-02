@@ -939,6 +939,49 @@ button:active { opacity: 0.7; }
 .autotag-result table td:first-child { color: var(--muted); font-size: 0.82rem; }
 .autotag-result table td:last-child  { font-weight: 600; text-align: right; }
 
+.autotag-samples { margin-top: 14px; }
+.autotag-samples-title {
+  display: flex; gap: 6px; align-items: baseline;
+  font-size: 0.78rem; font-weight: 600; color: var(--muted); margin-bottom: 6px;
+}
+.autotag-samples-count { font-weight: 400; }
+.autotag-samples-list {
+  display: flex; flex-direction: column; gap: 6px;
+  max-height: 320px; overflow-y: auto;
+}
+.autotag-sample-card {
+  padding: 8px 10px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  font-size: 0.78rem;
+}
+.autotag-sample-header {
+  display: flex; gap: 8px; align-items: baseline; margin-bottom: 4px;
+}
+.autotag-sample-source {
+  font-family: var(--mono); font-weight: 600; color: var(--text);
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.autotag-sample-id { font-family: var(--mono); font-size: 0.7rem; color: var(--muted); }
+.autotag-sample-preview {
+  font-family: var(--mono); font-size: 0.7rem; color: var(--text);
+  padding: 4px 6px; background: var(--bg); border-radius: 3px;
+  margin-bottom: 6px; max-height: 50px; overflow: hidden; line-height: 1.35;
+}
+.autotag-sample-tag-row {
+  display: flex; flex-wrap: wrap; gap: 4px; align-items: baseline; margin-bottom: 2px;
+}
+.autotag-sample-label { font-size: 0.7rem; color: var(--muted); margin-right: 4px; }
+.autotag-tag {
+  display: inline-flex; padding: 1px 6px; font-size: 0.68rem;
+  border-radius: 8px; font-family: var(--mono);
+}
+.autotag-tag-current { background: var(--bg); color: var(--muted); border: 1px solid var(--border); }
+.autotag-tag-suggested {
+  background: rgba(var(--accent-rgb), 0.15); color: var(--accent);
+  border: 1px solid rgba(var(--accent-rgb), 0.3);
+}
+.autotag-no-tags { font-size: 0.7rem; color: var(--muted); font-style: italic; }
+
 /* Index progress bar */
 .index-progress { margin: 12px 0; }
 .progress-bar-wrap { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; margin-bottom: 6px; }

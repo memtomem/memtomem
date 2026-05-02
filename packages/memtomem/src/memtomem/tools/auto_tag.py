@@ -258,12 +258,31 @@ async def _extract_tags_with_fallback(
 
 
 @dataclass(frozen=True)
+class AutoTagSample:
+    """Per-chunk preview returned to UIs that want to inspect what a
+    dry-run would write. Populated only when ``auto_tag_storage`` is
+    called with ``sample_limit > 0`` so callers that don't care pay no
+    extra storage allocation.
+    """
+
+    chunk_id: str
+    source_file: str
+    content_preview: str
+    current_tags: tuple[str, ...]
+    suggested_tags: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class AutoTagStats:
     """Statistics returned by auto_tag_storage."""
 
     total_chunks: int
     tagged_chunks: int
     skipped_chunks: int
+    samples: tuple[AutoTagSample, ...] = ()
+
+
+_SAMPLE_PREVIEW_MAX = 200
 
 
 async def auto_tag_storage(
@@ -274,6 +293,7 @@ async def auto_tag_storage(
     overwrite: bool = False,
     dry_run: bool = False,
     llm_provider: LLMProvider | None = None,
+    sample_limit: int = 0,
 ) -> AutoTagStats:
     """Apply keyword-based tags to chunks in storage.
 
@@ -293,6 +313,9 @@ async def auto_tag_storage(
 
     Returns:
         AutoTagStats with total_chunks, tagged_chunks, skipped_chunks counts.
+        When ``sample_limit > 0`` the first N chunks that would be tagged
+        are also returned in ``samples`` for UI preview (cheap to capture
+        because the keyword/LLM extraction has already run by then).
     """
     from memtomem.models import Chunk, ChunkMetadata
 
@@ -303,6 +326,7 @@ async def auto_tag_storage(
     total = 0
     tagged = 0
     skipped = 0
+    samples: list[AutoTagSample] = []
 
     for source in sorted(sources):
         chunks: list[Chunk] = await storage.list_chunks_by_source(source, limit=10_000)
@@ -349,9 +373,23 @@ async def auto_tag_storage(
                 await storage.upsert_chunks([updated])
 
             tagged += 1
+            if sample_limit > 0 and len(samples) < sample_limit:
+                preview = chunk.content[:_SAMPLE_PREVIEW_MAX]
+                if len(chunk.content) > _SAMPLE_PREVIEW_MAX:
+                    preview += "…"
+                samples.append(
+                    AutoTagSample(
+                        chunk_id=str(chunk.id),
+                        source_file=str(chunk.metadata.source_file),
+                        content_preview=preview,
+                        current_tags=tuple(chunk.metadata.tags or ()),
+                        suggested_tags=tuple(new_tags),
+                    )
+                )
 
     return AutoTagStats(
         total_chunks=total,
         tagged_chunks=tagged,
         skipped_chunks=skipped,
+        samples=tuple(samples),
     )
