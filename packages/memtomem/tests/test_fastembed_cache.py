@@ -8,6 +8,7 @@ the directory-creation contract; they do not exercise fastembed itself.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -81,6 +82,11 @@ def test_tilde_in_env_is_expanded(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert resolved.is_dir()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: simulates pwd.getpwuid failure mode of expanduser; "
+    "Windows expanduser uses USERPROFILE/HOMEDRIVE+HOMEPATH instead of pwent",
+)
 def test_unexpandable_home_raises_actionable_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """When ``$HOME`` is unset and pwent lookup fails, ``Path.expanduser()`` on
     Python 3.12+ raises ``RuntimeError("Could not determine home directory.")``
