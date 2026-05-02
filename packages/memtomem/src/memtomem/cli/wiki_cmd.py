@@ -68,7 +68,8 @@ def _run_seed_override(
     # surfacing as ValueError, not a silent path mismatch to mask.
     rel = result.path.relative_to(store.root)
     ext = result.path.suffix.lstrip(".")
-    click.secho(f"Seeded {rel}", fg="green")
+    # ``as_posix()`` matches the hardcoded ``/`` in the ``git add`` hint below.
+    click.secho(f"Seeded {rel.as_posix()}", fg="green")
     click.echo(str(result.path))
     click.echo(
         f"# next: cd {store.root} && "
