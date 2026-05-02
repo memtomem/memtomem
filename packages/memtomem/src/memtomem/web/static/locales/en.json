@@ -550,7 +550,7 @@
   "toast.update_failed": "Update failed: {error}",
   "toast.error": "Error: {error}",
 
-  "toast.chunk_target_missing": "Couldn't locate the linked chunk — try Load All.",
+  "toast.chunk_target_missing": "Couldn't locate the linked chunk in this view.",
   "toast.ns_deleted": "Deleted {count} chunks from '{name}'",
   "toast.ns_renamed": "Renamed '{oldName}' \u2192 '{newName}'",
   "toast.indexed_count": "Indexed {count} chunks",

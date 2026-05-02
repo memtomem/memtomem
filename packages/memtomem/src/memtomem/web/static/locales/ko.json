@@ -550,7 +550,7 @@
   "toast.update_failed": "업데이트 실패: {error}",
   "toast.error": "오류: {error}",
 
-  "toast.chunk_target_missing": "해당 청크를 찾을 수 없습니다 — Load All 을 시도해보세요.",
+  "toast.chunk_target_missing": "이 화면에서는 해당 청크를 찾을 수 없습니다.",
   "toast.ns_deleted": "'{name}'에서 {count}개 청크 삭제됨",
   "toast.ns_renamed": "'{oldName}' \u2192 '{newName}' 이름 변경",
   "toast.indexed_count": "{count}개 청크 인덱싱 완료",
