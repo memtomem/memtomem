@@ -185,6 +185,8 @@ function renderChunkView(list, groups) {
       const time = c.created_at.slice(11, 16); // HH:MM
       const tagsHtml = c.tags.map(t => `<span class="timeline-tag">${escapeHtml(t)}</span>`).join('');
       const dot = `<span class="tl-type-dot" style="background:${fileTypeColor(c.source_file)}"></span>`;
+      const openLabel = (typeof t === 'function')
+        ? t('timeline.open_in_source') : 'Open in source';
       item.innerHTML = `
         <div class="timeline-item-header">
           <span class="timeline-item-source">${dot}${escapeHtml(truncate(c.source_file, 60))}</span>
@@ -193,11 +195,11 @@ function renderChunkView(list, groups) {
         <div class="timeline-item-snippet">${escapeHtml(c.content)}</div>
         <div class="tl-expand-tags">${tagsHtml}</div>
         <div class="tl-expand-actions">
-          <button class="tl-btn-open">Open</button>
+          <button class="tl-btn-open" data-i18n="timeline.open_in_source">${escapeHtml(openLabel)}</button>
           <button class="tl-btn-copy">Copy</button>
         </div>
       `;
-      // (C) Inline expansion: first click expand/collapse, "Open" button navigates
+      // (C) Inline expansion: first click expand/collapse, action buttons navigate
       item.addEventListener('click', (e) => {
         // If click is on an action button, handle separately
         if (e.target.closest('.tl-expand-actions')) return;
@@ -206,7 +208,7 @@ function renderChunkView(list, groups) {
       });
       item.querySelector('.tl-btn-open').addEventListener('click', (e) => {
         e.stopPropagation();
-        showDetailFromChunk(c);
+        _navigateToSource(c.source_file, c.id);
       });
       item.querySelector('.tl-btn-copy').addEventListener('click', (e) => {
         e.stopPropagation();
@@ -255,13 +257,20 @@ function renderFileView(list, groups) {
       const header = document.createElement('div');
       header.className = 'timeline-file-header';
       const dot = `<span class="tl-type-dot" style="background:${fileTypeColor(filePath)}"></span>`;
+      const openSourceLabel = (typeof t === 'function')
+        ? t('timeline.open_in_source') : 'Open in source';
       header.innerHTML = `
         <span class="tl-file-chevron">▶</span>
         ${dot}<span class="timeline-file-name" title="${escapeHtml(filePath)}">${escapeHtml(fname)}</span>
         <span class="timeline-file-dir">${escapeHtml(truncate(fdir, 50))}</span>
         <span class="tl-file-count">${fileChunks.length}</span>
         <span class="tl-file-time">${lastTime}</span>
+        <button class="tl-file-open-source" data-i18n="timeline.open_in_source">${escapeHtml(openSourceLabel)}</button>
       `;
+      header.querySelector('.tl-file-open-source').addEventListener('click', (e) => {
+        e.stopPropagation();
+        _navigateToSource(filePath);
+      });
       fileItem.appendChild(header);
 
       const preview = document.createElement('div');
@@ -286,7 +295,7 @@ function renderFileView(list, groups) {
           <div class="tl-fci-snippet">${escapeHtml(truncate(c.content, 150))}</div>
           ${tagsHtml ? `<div class="timeline-item-tags">${tagsHtml}</div>` : ''}
         `;
-        ci.addEventListener('click', e => { e.stopPropagation(); showDetailFromChunk(c); });
+        ci.addEventListener('click', e => { e.stopPropagation(); _navigateToSource(c.source_file, c.id); });
         chunkList.appendChild(ci);
       }
       fileItem.appendChild(chunkList);
