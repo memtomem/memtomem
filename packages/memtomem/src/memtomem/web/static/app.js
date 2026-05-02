@@ -4907,6 +4907,7 @@ qs('saved-queries-select').addEventListener('change', () => {
   if (qs('chunk-type-filter')) qs('chunk-type-filter').value = q.typeFilter || '';
   if (qs('tag-filter')) qs('tag-filter').value = q.tagFilter || '';
   qs('saved-queries-select').value = '';
+  _updateFilterCountBadge();
   doSearch();
 });
 
@@ -4943,6 +4944,7 @@ function _renderSavedBar() {
       qs('search-input').value = q.query;
       if (qs('chunk-type-filter')) qs('chunk-type-filter').value = q.typeFilter || '';
       if (qs('tag-filter')) qs('tag-filter').value = q.tagFilter || '';
+      _updateFilterCountBadge();
       doSearch();
     });
   });
