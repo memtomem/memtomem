@@ -16,6 +16,13 @@
 
   "banner.emb_reset": "Reset with current settings (deletes vectors)",
   "banner.dismiss_title": "Dismiss for this session",
+  "banner.model_loading": "Loading model…",
+  "banner.model_downloading_one": "Downloading {model} (~{size} MB)…",
+  "banner.model_downloading_one_no_size": "Downloading {model}…",
+  "banner.model_downloading_both": "Downloading {emb} (~{emb_size} MB) and {rer} (~{rer_size} MB)…",
+  "banner.model_error": "Model failed to load — check Settings.",
+  "banner.model_fallback_embedder": "embedder",
+  "banner.model_fallback_reranker": "reranker",
 
   "home.quick_search_placeholder": "Quick search memories...",
   "home.search_btn": "Search",

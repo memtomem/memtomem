@@ -16,6 +16,13 @@
 
   "banner.emb_reset": "현재 설정으로 초기화 (벡터 삭제)",
   "banner.dismiss_title": "이 세션에서 닫기",
+  "banner.model_loading": "모델 로딩 중…",
+  "banner.model_downloading_one": "{model} 다운로드 중 (~{size} MB)…",
+  "banner.model_downloading_one_no_size": "{model} 다운로드 중…",
+  "banner.model_downloading_both": "{emb} 다운로드 중 (~{emb_size} MB) · {rer} 다운로드 중 (~{rer_size} MB)…",
+  "banner.model_error": "모델 로드 실패 — 설정 확인.",
+  "banner.model_fallback_embedder": "임베더",
+  "banner.model_fallback_reranker": "리랭커",
 
   "home.quick_search_placeholder": "기억 빠른 검색...",
   "home.search_btn": "검색",

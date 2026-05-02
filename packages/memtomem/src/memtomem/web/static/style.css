@@ -74,6 +74,17 @@ body { background: var(--bg); color: var(--text); font-family: var(--font); heig
 .dev-mode-banner-icon { font-size: 0.95rem; flex-shrink: 0; }
 .dev-mode-banner-msg { flex: 1; min-width: 0; }
 
+.model-readiness-banner {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 6px 16px;
+  background: color-mix(in srgb, var(--accent, #3498db) 14%, var(--surface));
+  border-bottom: 1px solid color-mix(in srgb, var(--accent, #3498db) 40%, var(--border));
+  flex-shrink: 0;
+  font-size: 0.82rem; color: var(--text);
+}
+.model-readiness-icon { font-size: 0.95rem; flex-shrink: 0; }
+.model-readiness-msg { flex: 1; min-width: 0; }
+
 header {
   display: flex; align-items: center; gap: 12px;
   padding: 0 16px; height: 52px;

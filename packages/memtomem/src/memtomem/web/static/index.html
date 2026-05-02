@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=76" />
+  <link rel="stylesheet" href="/style.css?v=77" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" />
 </head>
 <body>
@@ -39,6 +39,11 @@
   <div id="dev-mode-banner" class="dev-mode-banner" role="status" hidden>
     <span class="dev-mode-banner-icon" aria-hidden="true">🛠</span>
     <span class="dev-mode-banner-msg" data-i18n="banner.dev_mode">Maintainer mode — all pages are visible. Run <code>mm web</code> without <code>--dev</code> for the polished surface.</span>
+  </div>
+
+  <div id="model-readiness-banner" class="model-readiness-banner" role="status" aria-live="polite" hidden>
+    <span class="model-readiness-icon" aria-hidden="true">⏳</span>
+    <span id="model-readiness-msg" class="model-readiness-msg" data-i18n="banner.model_loading">Loading model…</span>
   </div>
 
   <nav class="tab-nav" role="tablist" aria-label="Navigation">
@@ -1303,7 +1308,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js"></script>
   <script src="/i18n.js?v=3"></script>
-  <script src="/app.js?v=95"></script>
+  <script src="/app.js?v=96"></script>
   <script src="/settings-config.js?v=9"></script>
   <script src="/sources-memory-dirs.js?v=11"></script>
   <script src="/settings-maintenance.js?v=1"></script>

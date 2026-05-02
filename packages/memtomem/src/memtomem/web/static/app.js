@@ -115,9 +115,19 @@ const STATE = {
     // header pill if a run is in flight (page-reload survival, second-
     // tab visibility) — see ``_indexingHydrateFromServer``.
     _indexingHydrateFromServer();
+    // #696: hydrate the model-readiness banner so a cold-cache install
+    // sees "Loading model…" / "Downloading bge-m3 (~2.3 GB)…" instead
+    // of a frozen Search button. Hydrate is a no-op when the model is
+    // already loaded.
+    _modelReadinessHydrate();
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible' && !STATE.indexing) {
-        _indexingHydrateFromServer();
+      if (document.visibilityState === 'visible') {
+        if (!STATE.indexing) {
+          _indexingHydrateFromServer();
+        }
+        // Re-hydrate readiness on tab focus so a load that completed in
+        // a backgrounded tab doesn't leave the banner stuck up.
+        _modelReadinessHydrate();
       }
     });
     // Re-apply i18n when language changes (dynamic JS strings)
@@ -521,6 +531,122 @@ function _indexingPollUntilIdle() {
     }
   };
   STATE._indexingPollHandle = setTimeout(tick, _INDEXING_POLL_MS);
+}
+
+// ── Model readiness banner (issue #696) ──
+// Surfaces the lazy fastembed loader's state in the header so users
+// don't watch a frozen Search button during a multi-GB first-load. The
+// banner copy is built from ``GET /api/system/model-readiness``; see
+// ``packages/memtomem/src/memtomem/web/routes/system.py``.
+const _MODEL_READINESS_POLL_MS = 4000;
+// Cap the poll loop so a stuck server doesn't yield infinite background
+// fetches. 200 × 4s ≈ 13 min — comfortably above the worst observed
+// bge-m3 + reranker cold-download. Visibilitychange + the doSearch
+// pre-flight re-arm the poll if the user comes back later.
+const _MODEL_READINESS_MAX_TICKS = 200;
+
+function _modelComponentActive(c) {
+  return !!c && (c.state === 'loading' || c.state === 'downloading');
+}
+
+function _modelComponentDone(c) {
+  // ``cold`` is intentionally NOT terminal here — when the doSearch
+  // pre-flight kicks the poll, the backend's ``_loading`` flag flips
+  // True only after our request reaches the lazy loader, so the first
+  // poll tick can race the request and see ``cold``. Continuing the
+  // loop lets the next tick catch the transition.
+  return !!c && (c.state === 'ready' || c.state === 'skipped');
+}
+
+function _isModelPollTerminal(d) {
+  if (!d) return false;
+  if (d.embedder?.state === 'error' || d.reranker?.state === 'error') return true;
+  return _modelComponentDone(d.embedder) && _modelComponentDone(d.reranker);
+}
+
+function _renderModelReadinessBanner(d) {
+  const banner = qs('model-readiness-banner');
+  const msg = qs('model-readiness-msg');
+  if (!banner || !msg) return;
+  const emb = (d && d.embedder) || {};
+  const rer = (d && d.reranker) || {};
+  const hasError = emb.state === 'error' || rer.state === 'error';
+  const embDl = emb.state === 'downloading';
+  const rerDl = rer.state === 'downloading';
+  const anyLoading = emb.state === 'loading' || rer.state === 'loading';
+
+  const fallbackEmbName = t('banner.model_fallback_embedder', 'embedder');
+  const fallbackRerName = t('banner.model_fallback_reranker', 'reranker');
+
+  if (hasError) {
+    msg.textContent = t('banner.model_error');
+    banner.removeAttribute('hidden');
+  } else if (embDl && rerDl) {
+    msg.textContent = t('banner.model_downloading_both', {
+      emb: emb.model || fallbackEmbName,
+      emb_size: emb.approx_size_mb != null ? emb.approx_size_mb : '?',
+      rer: rer.model || fallbackRerName,
+      rer_size: rer.approx_size_mb != null ? rer.approx_size_mb : '?',
+    });
+    banner.removeAttribute('hidden');
+  } else if (embDl || rerDl) {
+    const c = embDl ? emb : rer;
+    const fallback = embDl ? fallbackEmbName : fallbackRerName;
+    if (c.approx_size_mb != null) {
+      msg.textContent = t('banner.model_downloading_one', {
+        model: c.model || fallback,
+        size: c.approx_size_mb,
+      });
+    } else {
+      msg.textContent = t('banner.model_downloading_one_no_size', {
+        model: c.model || fallback,
+      });
+    }
+    banner.removeAttribute('hidden');
+  } else if (anyLoading) {
+    msg.textContent = t('banner.model_loading');
+    banner.removeAttribute('hidden');
+  } else {
+    banner.setAttribute('hidden', '');
+  }
+}
+
+async function _modelReadinessHydrate() {
+  // Fire-and-forget single fetch. Renders the banner once and starts the
+  // continuous poll only if a load is actually in flight (or has
+  // errored). Cold + ready paths leave the banner hidden and skip the
+  // background loop — saves a needless 4s/tick on freshly booted setups
+  // where the model is already cached.
+  try {
+    const d = await api('GET', '/api/system/model-readiness');
+    _renderModelReadinessBanner(d);
+    if (_modelComponentActive(d?.embedder) || _modelComponentActive(d?.reranker)) {
+      _modelReadinessPoll();
+    }
+  } catch (err) {
+    console.warn('[model-readiness]', err);
+  }
+}
+
+function _modelReadinessPoll() {
+  if (STATE._modelReadinessPollHandle) return; // single-flight
+  let ticks = 0;
+  const tick = async () => {
+    STATE._modelReadinessPollHandle = null;
+    ticks += 1;
+    try {
+      const d = await api('GET', '/api/system/model-readiness');
+      _renderModelReadinessBanner(d);
+      if (_isModelPollTerminal(d)) return; // ready / skipped / error
+    } catch (err) {
+      // Transient fetch failure — keep last banner state and retry.
+      console.warn('[model-readiness poll]', err);
+    }
+    if (ticks < _MODEL_READINESS_MAX_TICKS) {
+      STATE._modelReadinessPollHandle = setTimeout(tick, _MODEL_READINESS_POLL_MS);
+    }
+  };
+  STATE._modelReadinessPollHandle = setTimeout(tick, _MODEL_READINESS_POLL_MS);
 }
 function panelLoading(container) {
   container.innerHTML = '<div class="loading-panel"><div class="spinner-panel"></div></div>';
@@ -1543,6 +1669,14 @@ let _searchAbortCtrl = null;
 async function doSearch() {
   const q = qs('search-input').value.trim();
   if (!q) return;
+  // #696: kick the readiness poll. Fire-and-forget; the search request
+  // proceeds normally — its response covers the spinner. The poll's job
+  // is to surface "Downloading bge-m3 (~2.3 GB)…" while the backend's
+  // lazy loader blocks our request on a multi-GB cold-cache load. The
+  // first tick may race the request and observe ``cold``; the poll
+  // continues until a terminal state because ``cold`` is intentionally
+  // non-terminal for this entry point (see ``_modelComponentDone``).
+  _modelReadinessPoll();
   STATE.lastQuery = q;
   saveToHistory(q);
   hide(qs('search-history-dropdown'));
