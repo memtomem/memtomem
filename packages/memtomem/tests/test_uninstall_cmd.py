@@ -537,6 +537,15 @@ class TestDbWriterLockRefuses:
             conn.rollback()
             conn.close()
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason=(
+            "Test relies on POSIX unlink-while-open semantics — Windows refuses "
+            "to unlink a file held by an open handle (WinError 32), so --force "
+            "cannot wipe the dir while the lock-holding connection lives in "
+            "the same process. Sibling tests cover the lock-detection path."
+        ),
+    )
     def test_force_overrides_db_lock(self, home):
         db_path, conn = self._make_real_db(home)
         try:
