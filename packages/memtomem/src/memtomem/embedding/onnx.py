@@ -68,6 +68,12 @@ class OnnxEmbedder:
     def __init__(self, config: EmbeddingConfig) -> None:
         self._config = config
         self._model: object | None = None  # fastembed.TextEmbedding
+        # Observability flags read by ``GET /api/system/model-readiness``.
+        # Plain attribute reads/writes — bool/Optional[str] assignment is
+        # atomic under CPython, and the readiness endpoint is allowed to
+        # observe transient states without taking a lock.
+        self._loading: bool = False
+        self._load_error: str | None = None
 
     def _get_model(self) -> object:
         """Lazily initialise the fastembed model (downloads on first use)."""
@@ -93,7 +99,17 @@ class OnnxEmbedder:
             threads if threads is not None else "ORT default",
             cache_dir,
         )
-        self._model = TextEmbedding(model_name=model_id, threads=threads, cache_dir=str(cache_dir))
+        self._loading = True
+        self._load_error = None
+        try:
+            self._model = TextEmbedding(
+                model_name=model_id, threads=threads, cache_dir=str(cache_dir)
+            )
+        except Exception as exc:
+            self._load_error = str(exc)
+            raise
+        finally:
+            self._loading = False
         return self._model
 
     @property

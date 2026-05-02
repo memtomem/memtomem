@@ -28,6 +28,11 @@ class FastEmbedReranker:
     def __init__(self, config: RerankConfig) -> None:
         self._config = config
         self._model: object | None = None
+        # Observability flags read by ``GET /api/system/model-readiness``.
+        # Match ``OnnxEmbedder`` so the endpoint can introspect both via a
+        # single contract without each provider having a bespoke surface.
+        self._loading: bool = False
+        self._load_error: str | None = None
 
     def _get_model(self) -> object:
         """Lazily construct the ``TextCrossEncoder`` — downloads on first use."""
@@ -49,10 +54,13 @@ class FastEmbedReranker:
             self._config.model,
             cache_dir,
         )
+        self._loading = True
+        self._load_error = None
         try:
             self._model = TextCrossEncoder(model_name=self._config.model, cache_dir=str(cache_dir))
         except ValueError as exc:
             supported = [m.get("model", "") for m in TextCrossEncoder.list_supported_models()]
+            self._load_error = str(exc)
             raise ValueError(
                 f"fastembed reranker model {self._config.model!r} is not supported. "
                 f"Built-in options: {', '.join(sorted(s for s in supported if s))}. "
@@ -62,6 +70,11 @@ class FastEmbedReranker:
                 "must be registered via TextCrossEncoder.add_custom_model() before the "
                 "reranker is invoked."
             ) from exc
+        except Exception as exc:
+            self._load_error = str(exc)
+            raise
+        finally:
+            self._loading = False
         return self._model
 
     def _rerank_sync(self, query: str, documents: list[str]) -> list[float]:
