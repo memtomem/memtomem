@@ -250,7 +250,7 @@ def test_wiki_skill_override_invokes_editor(
 
     assert result.exit_code == 0, result.output
     assert len(captured) == 1
-    assert captured[0].endswith("/skills/hello/overrides/claude.md")
+    assert Path(captured[0]).as_posix().endswith("/skills/hello/overrides/claude.md")
 
 
 def test_wiki_skill_override_does_not_invoke_editor_by_default(
@@ -287,11 +287,13 @@ def test_wiki_skill_override_stdout_contract(wiki_root: Path) -> None:
     result = runner.invoke(wiki_group, ["skill", "override", "hello", "--vendor", "codex"])
 
     assert result.exit_code == 0, result.output
-    out = result.output
+    # Normalize Windows backslashes so substring assertions on POSIX-style
+    # path literals stay portable. Mirrors PR #711 (#643).
+    out = result.output.replace("\\", "/")
     assert "Seeded skills/hello/overrides/codex.md" in out
     # Bare absolute path on its own line for shell capture.
     target_path = wiki_root / "skills" / "hello" / "overrides" / "codex.md"
-    assert str(target_path) in out
+    assert target_path.as_posix() in out
     # Commit hint mentioning git commit.
     assert "git commit" in out
     assert "git add skills/hello/overrides/codex.md" in out
@@ -341,7 +343,7 @@ def test_wiki_agent_override_warns_on_dropped_fields(wiki_root: Path) -> None:
     assert "skills" in err
     assert "isolation" in err
     # Stdout retains the seed summary independently of the warning.
-    assert "Seeded agents/demo/overrides/gemini.md" in result.output
+    assert "Seeded agents/demo/overrides/gemini.md" in result.output.replace("\\", "/")
 
 
 def test_wiki_agent_override_refuses_existing(wiki_root: Path) -> None:
@@ -436,7 +438,7 @@ def test_wiki_agent_override_invokes_editor(
 
     assert result.exit_code == 0, result.output
     assert len(captured) == 1
-    assert captured[0].endswith("/agents/demo/overrides/claude.md")
+    assert Path(captured[0]).as_posix().endswith("/agents/demo/overrides/claude.md")
 
 
 def test_wiki_agent_override_does_not_invoke_editor_by_default(
@@ -468,12 +470,14 @@ def test_wiki_agent_override_stdout_contract(wiki_root: Path) -> None:
     result = runner.invoke(wiki_group, ["agent", "override", "demo", "--vendor", "codex"])
 
     assert result.exit_code == 0, result.output
-    out = result.output
+    # Normalize Windows backslashes so substring assertions on POSIX-style
+    # path literals stay portable. Mirrors PR #711 (#643).
+    out = result.output.replace("\\", "/")
     # Codex agents extension is .toml (not .md) — verifies extension propagated
     # through OVERRIDE_FORMATS into the helper's stdout summary.
     assert "Seeded agents/demo/overrides/codex.toml" in out
     target_path = wiki_root / "agents" / "demo" / "overrides" / "codex.toml"
-    assert str(target_path) in out
+    assert target_path.as_posix() in out
     assert "git commit" in out
     assert "git add agents/demo/overrides/codex.toml" in out
 
@@ -518,7 +522,7 @@ def test_wiki_command_override_warns_on_dropped_fields(wiki_root: Path) -> None:
     assert "argument-hint" in err
     assert "allowed-tools" in err
     assert "model" in err
-    assert "Seeded commands/demo/overrides/gemini.toml" in result.output
+    assert "Seeded commands/demo/overrides/gemini.toml" in result.output.replace("\\", "/")
 
 
 def test_wiki_command_override_codex_classified_error(wiki_root: Path) -> None:
@@ -627,7 +631,7 @@ def test_wiki_command_override_invokes_editor(
 
     assert result.exit_code == 0, result.output
     assert len(captured) == 1
-    assert captured[0].endswith("/commands/demo/overrides/claude.md")
+    assert Path(captured[0]).as_posix().endswith("/commands/demo/overrides/claude.md")
 
 
 def test_wiki_command_override_does_not_invoke_editor_by_default(
@@ -659,9 +663,11 @@ def test_wiki_command_override_stdout_contract(wiki_root: Path) -> None:
     result = runner.invoke(wiki_group, ["command", "override", "demo", "--vendor", "gemini"])
 
     assert result.exit_code == 0, result.output
-    out = result.output
+    # Normalize Windows backslashes so substring assertions on POSIX-style
+    # path literals stay portable. Mirrors PR #711 (#643).
+    out = result.output.replace("\\", "/")
     assert "Seeded commands/demo/overrides/gemini.toml" in out
     target_path = wiki_root / "commands" / "demo" / "overrides" / "gemini.toml"
-    assert str(target_path) in out
+    assert target_path.as_posix() in out
     assert "git commit" in out
     assert "git add commands/demo/overrides/gemini.toml" in out
