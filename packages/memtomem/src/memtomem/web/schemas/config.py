@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -137,3 +137,35 @@ class EmbeddingStatusResponse(BaseModel):
 class EmbeddingResetResponse(BaseModel):
     ok: bool
     message: str
+
+
+# ── Model readiness (issue #696) ─────────────────────────────────────
+# Surfaces lazy-load state of the fastembed embedder + reranker so the
+# Web UI can render a "Downloading…" / "Loading…" banner instead of
+# leaving the user staring at a frozen Search button while a multi-GB
+# model snapshot streams in. See ``GET /api/system/model-readiness``.
+
+ModelComponentState = Literal[
+    "ready",  # model is loaded in memory and ready to serve
+    "loading",  # cache is on disk; constructor in flight
+    "downloading",  # cache absent; constructor in flight
+    "cold",  # nothing in flight; cache may or may not be present
+    "error",  # last constructor attempt raised
+    "skipped",  # provider not fastembed, or component disabled
+]
+
+
+class ModelComponent(BaseModel):
+    """Per-component (embedder OR reranker) readiness snapshot."""
+
+    state: ModelComponentState
+    provider: str
+    model: str | None = None
+    cache_present: bool = False
+    approx_size_mb: int | None = None
+    error: str | None = None
+
+
+class ModelReadinessResponse(BaseModel):
+    embedder: ModelComponent
+    reranker: ModelComponent
