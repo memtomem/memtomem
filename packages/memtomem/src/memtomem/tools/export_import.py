@@ -99,15 +99,15 @@ async def export_chunks(
     Returns:
         ExportBundle with the selected chunks.
     """
+    from memtomem.search.pipeline import match_source_filter_substring
+
     source_files = await storage.get_all_source_files()
 
-    # Fold separators on both sides so a POSIX-typed substring like
-    # ``/tmp/keep/`` still matches Windows-stored ``\tmp\keep\...``
-    # paths (#720). Substring-only by contract.
-    norm_filter = source_filter.replace("\\", "/") if source_filter else None
+    # Substring-only contract with negation — see
+    # ``match_source_filter_substring`` for the separator-fold rule (#720).
     records: list[dict] = []
     for source in sorted(source_files):
-        if norm_filter and norm_filter not in str(source).replace("\\", "/"):
+        if source_filter and not match_source_filter_substring(source_filter, str(source)):
             continue
         chunks = await storage.list_chunks_by_source(source, limit=100_000)
         for chunk in chunks:

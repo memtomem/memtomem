@@ -34,8 +34,6 @@ async def mem_entity_scan(
         overwrite: Replace existing entities for scanned chunks (default: false, skip already-scanned)
         dry_run: Preview extraction without saving (default: false)
     """
-    from fnmatch import fnmatch
-
     from memtomem.tools.entity_extraction import extract_entities_with_llm
 
     app = await _get_app_initialized(ctx)
@@ -50,13 +48,13 @@ async def mem_entity_scan(
     scanned_sources = 0
     entity_type_counts: dict[str, int] = {}
 
-    # Fold separators on both sides so a POSIX-typed glob like
-    # ``/tmp/keep/*`` still matches Windows-stored ``\tmp\keep\...``
-    # paths (#720). Glob-only by contract — substring inputs are handled
-    # by ``match_source_filter`` elsewhere; entity scan stays glob.
-    norm_filter = source_filter.replace("\\", "/") if source_filter else None
+    # Glob-only contract — see ``match_source_filter_glob`` for the
+    # separator-fold rule (#720) and rationale for not sharing the
+    # substring-aware ``match_source_filter``.
+    from memtomem.search.pipeline import match_source_filter_glob
+
     for source in sources:
-        if norm_filter and not fnmatch(str(source).replace("\\", "/"), norm_filter):
+        if source_filter and not match_source_filter_glob(source_filter, str(source)):
             continue
 
         chunks = await storage.list_chunks_by_source(source)

@@ -47,13 +47,13 @@ def match_source_filter(filter_str: str, source_path: str) -> bool:
     paths don't contain backslashes.
 
     The ``source_filter`` parameter is shared across the search pipeline
-    and several MCP tools (``mem_list``, ``mem_consolidate``,
-    ``mem_export_chunks``, ``mem_auto_tag``, ``mem_extract_entities``,
-    ``mem_decay``); this helper is the canonical substring + glob matcher
-    for the substring + glob contract. The substring-only and glob-only
-    callers apply the same separator fold inline at their call sites
-    rather than calling this helper, so the contract differences stay
-    explicit.
+    and several MCP tools (``mem_list``, ``mem_consolidate``); this
+    helper is the canonical matcher for callers whose contract is
+    "substring or glob, autodetected by pattern chars". Callers with a
+    stricter contract use one of the two siblings below
+    (``match_source_filter_substring``, ``match_source_filter_glob``)
+    so the separator-fold rule still lives in one module per contract
+    while the contract differences stay explicit at the call site.
 
     POSIX edge case: backslash is a legal filename character on POSIX, so
     a chunk indexed under ``foo\\bar.md`` would match a filter
@@ -66,6 +66,36 @@ def match_source_filter(filter_str: str, source_path: str) -> bool:
     if any(c in norm_filter for c in ("*", "?", "[")):
         return fnmatch(norm_source, norm_filter)
     return norm_filter in norm_source
+
+
+def match_source_filter_substring(filter_str: str, source_path: str) -> bool:
+    """Substring-only variant of :func:`match_source_filter`.
+
+    Same separator-fold rule (#720), no glob fallback. Used by callers
+    whose contract is substring-only (``mem_decay`` /
+    :func:`~memtomem.search.decay.expire_chunks`, ``mem_auto_tag``,
+    ``mem_export_chunks``). Sharing the substring + glob auto-detecting
+    helper would silently broaden their behaviour to glob, which is a
+    contract change. The fold lives in this single helper so a future
+    "tidy-up" that strips the ``.replace("\\", "/")`` calls fails the
+    POSIX-runnable pin in ``TestMatchSourceFilterSubstring`` instead of
+    only the Windows CI leg.
+    """
+    return filter_str.replace("\\", "/") in source_path.replace("\\", "/")
+
+
+def match_source_filter_glob(filter_str: str, source_path: str) -> bool:
+    """Glob-only variant of :func:`match_source_filter`.
+
+    Same separator-fold rule (#720), no substring fallback. Used by
+    callers whose contract is glob-only (``mem_entity_scan``); a
+    substring filter that lacks ``*?[`` characters returns ``False``
+    here unless it happens to be an exact-match glob, mirroring the
+    pre-fix behaviour. The fold lives in this single helper so the
+    POSIX-runnable pin in ``TestMatchSourceFilterGlob`` catches a
+    revert without depending on the Windows CI leg.
+    """
+    return fnmatch(source_path.replace("\\", "/"), filter_str.replace("\\", "/"))
 
 
 def _apply_validity_filter(results: list[SearchResult], as_of_unix: int) -> list[SearchResult]:

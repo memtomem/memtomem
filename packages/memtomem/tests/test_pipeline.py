@@ -47,6 +47,70 @@ class TestMatchSourceFilter:
         assert match_source_filter(filter_str, source_path) is expected
 
 
+class TestMatchSourceFilterSubstring:
+    """Pin: ``match_source_filter_substring`` folds separators on both
+    sides before comparing — covers ``mem_decay`` /
+    ``expire_chunks``, ``mem_auto_tag``, ``mem_export_chunks`` (#720).
+
+    Substring-only contract: glob characters in the filter are treated
+    as literals (no ``fnmatch`` fallback). The pin lets POSIX CI catch
+    a future revert of the ``.replace("\\", "/")`` calls without
+    depending on the Windows CI leg.
+    """
+
+    @pytest.mark.parametrize(
+        "filter_str,source_path,expected",
+        [
+            # POSIX shape (identity on POSIX).
+            ("/tmp/keep/", "/tmp/keep/policy.md", True),
+            ("/tmp/other/", "/tmp/keep/policy.md", False),
+            # POSIX filter, Windows-shape source — the #720 case.
+            ("/tmp/keep/", "\\tmp\\keep\\policy.md", True),
+            ("/tmp/other/", "\\tmp\\keep\\policy.md", False),
+            # Windows filter, POSIX-shape source.
+            ("\\tmp\\keep\\", "/tmp/keep/policy.md", True),
+            # Windows-shape both sides.
+            ("\\tmp\\keep\\", "\\tmp\\keep\\policy.md", True),
+            # Glob characters in filter are literal — no fnmatch fallback.
+            ("*.md", "\\tmp\\keep\\policy.md", False),
+        ],
+    )
+    def test_separator_normalised_both_sides(self, filter_str, source_path, expected):
+        from memtomem.search.pipeline import match_source_filter_substring
+
+        assert match_source_filter_substring(filter_str, source_path) is expected
+
+
+class TestMatchSourceFilterGlob:
+    """Pin: ``match_source_filter_glob`` folds separators on both sides
+    before ``fnmatch`` — covers ``mem_entity_scan`` (#720).
+
+    Glob-only contract: substring filters that lack ``*?[`` characters
+    only match exact filenames. The pin lets POSIX CI catch a future
+    revert of the ``.replace("\\", "/")`` calls without depending on
+    the Windows CI leg.
+    """
+
+    @pytest.mark.parametrize(
+        "filter_str,source_path,expected",
+        [
+            # POSIX glob, Windows-shape source — the #720 case.
+            ("/tmp/*/policy.md", "\\tmp\\keep\\policy.md", True),
+            ("/tmp/keep/*.txt", "\\tmp\\keep\\policy.md", False),
+            # Windows glob, POSIX-shape source.
+            ("\\tmp\\*\\policy.md", "/tmp/keep/policy.md", True),
+            # POSIX shape (identity on POSIX).
+            ("/tmp/*/policy.md", "/tmp/keep/policy.md", True),
+            # Substring-only filter — glob-only contract → no match.
+            ("/tmp/keep", "\\tmp\\keep\\policy.md", False),
+        ],
+    )
+    def test_separator_normalised_both_sides(self, filter_str, source_path, expected):
+        from memtomem.search.pipeline import match_source_filter_glob
+
+        assert match_source_filter_glob(filter_str, source_path) is expected
+
+
 class TestPipelineQueryExpansion:
     """Test that query expansion modifies queries before retrieval."""
 
