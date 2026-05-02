@@ -5,6 +5,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **Duplicate chunk inserts on shared SQLite DBs (#691, PR #705).** When
+  `mm web`'s file watcher and a separate `mm` MCP / CLI process indexed
+  the same file at the same time, both processes' independent
+  `asyncio.Lock`s let them each `INSERT` chunks with fresh UUIDs that
+  shared `(namespace, source_file, content_hash, start_line)`. The
+  differ then reused only one of the IDs per re-index, leaving the rest
+  as silent ghosts — one user's DB had 77 such groups (~5% of total
+  chunks) before the fix. The storage layer now enforces
+  `UNIQUE(namespace, source_file, content_hash, start_line)` and uses
+  `INSERT OR IGNORE` so race losers are silently dropped at insert time.
+
+  **Migration is automatic on first startup**: existing duplicate groups
+  are collapsed to one row each (keeper rule: highest accumulated
+  `access_count + use_count`, tie-break on oldest `created_at` then
+  `id`), with the matching `chunks_fts` and `chunks_vec` sidecar rows
+  removed in lockstep. The migration body is wrapped in
+  `BEGIN IMMEDIATE` / `COMMIT` so two processes booting simultaneously
+  don't both run the cleanup. A log line — `Cleaned up N duplicate
+  chunk row(s) across M group(s)` — is emitted once per DB; subsequent
+  startups short-circuit on the new `idx_chunks_unique_content` index.
+
+  `tools.export_import.import_chunks(on_conflict="duplicate")` is
+  preserved for back-compat but the storage invariant is now
+  authoritative — the mode no longer materialises duplicate rows.
+
 ## [0.1.34] — 2026-05-02
 
 ### Added
