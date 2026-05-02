@@ -1482,6 +1482,7 @@ function _renderActiveFilters() {
   if (ct) chips.push({ label: `type: ${ct.replace('_', ' ')}`, clear: () => { qs('chunk-type-filter').value = ''; } });
   if (STATE.scoreMin > 0) chips.push({ label: `score \u2265 ${STATE.scoreMin}`, clear: () => { qs('score-threshold').value = 0; STATE.scoreMin = 0; qs('score-val').textContent = '0.0'; } });
 
+  _updateFilterCountBadge();
   if (!chips.length) { hide(el); return; }
   el.innerHTML = chips.map((c, i) =>
     `<span class="active-filter-chip">${escapeHtml(c.label)}<button class="active-filter-remove" data-idx="${i}">\u2715</button></span>`
@@ -1490,11 +1491,45 @@ function _renderActiveFilters() {
     btn.addEventListener('click', e => {
       e.stopPropagation();
       chips[parseInt(btn.dataset.idx)].clear();
+      _updateFilterCountBadge();
       renderResults(STATE.lastResults);
       if (STATE.lastResults.length) doSearch();
     });
   });
   show(el);
+}
+
+// Count of currently-applied search filters. Kept in sync with the chip
+// set built by _renderActiveFilters above \u2014 same four categories so the
+// toggle-button badge and the chip row never disagree.
+function _countActiveFilters() {
+  let n = 0;
+  if (qs('ns-filter')?.value) n++;
+  if (qs('tag-filter')?.value.trim()) n++;
+  if (qs('chunk-type-filter')?.value) n++;
+  if (STATE.scoreMin > 0) n++;
+  return n;
+}
+
+function _updateFilterCountBadge() {
+  const badge = qs('filter-count-badge');
+  if (!badge) return;
+  const n = _countActiveFilters();
+  if (n > 0) {
+    badge.textContent = String(n);
+    badge.hidden = false;
+    const key = n === 1
+      ? 'search.filter_count_aria_one'
+      : 'search.filter_count_aria_other';
+    const aria = (typeof t === 'function')
+      ? t(key, { count: n })
+      : `${n} filter${n !== 1 ? 's' : ''} applied`;
+    badge.setAttribute('aria-label', aria);
+  } else {
+    badge.hidden = true;
+    badge.textContent = '';
+    badge.removeAttribute('aria-label');
+  }
 }
 
 let _searchAbortCtrl = null;
@@ -4352,7 +4387,12 @@ document.addEventListener('keydown', e => {
 // Chunk-type filter (C2) — client-side re-render
 // ---------------------------------------------------------------------------
 
-qs('chunk-type-filter').addEventListener('change', () => renderResults(STATE.lastResults));
+qs('chunk-type-filter').addEventListener('change', () => {
+  _updateFilterCountBadge();
+  renderResults(STATE.lastResults);
+});
+qs('ns-filter').addEventListener('change', _updateFilterCountBadge);
+qs('tag-filter').addEventListener('input', _updateFilterCountBadge);
 
 // URL query sync (C2)
 function _syncSearchToURL() {
@@ -4372,6 +4412,7 @@ function _syncSearchToURL() {
   if (q) qs('search-input').value = q;
   if (ct && qs('chunk-type-filter')) qs('chunk-type-filter').value = ct;
   // source multi-filter not synced from URL
+  _updateFilterCountBadge();
   if (q) {
     activateTab('search');
     doSearch();
@@ -4570,8 +4611,11 @@ qs('source-filter').addEventListener('change', () => renderResults(STATE.lastRes
 qs('score-threshold').addEventListener('input', () => {
   STATE.scoreMin = parseFloat(qs('score-threshold').value);
   qs('score-val').textContent = STATE.scoreMin.toFixed(1);
+  _updateFilterCountBadge();
   renderResults(STATE.lastResults);
 });
+
+window.addEventListener('langchange', _updateFilterCountBadge);
 
 // ---------------------------------------------------------------------------
 // Date Range Filter (Kibana-style)
@@ -4863,6 +4907,7 @@ qs('saved-queries-select').addEventListener('change', () => {
   if (qs('chunk-type-filter')) qs('chunk-type-filter').value = q.typeFilter || '';
   if (qs('tag-filter')) qs('tag-filter').value = q.tagFilter || '';
   qs('saved-queries-select').value = '';
+  _updateFilterCountBadge();
   doSearch();
 });
 
@@ -4899,6 +4944,7 @@ function _renderSavedBar() {
       qs('search-input').value = q.query;
       if (qs('chunk-type-filter')) qs('chunk-type-filter').value = q.typeFilter || '';
       if (qs('tag-filter')) qs('tag-filter').value = q.tagFilter || '';
+      _updateFilterCountBadge();
       doSearch();
     });
   });
