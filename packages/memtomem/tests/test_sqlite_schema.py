@@ -170,11 +170,14 @@ class TestDuplicateChunksMigration:
     """
 
     @staticmethod
-    def _seed_dup_rows(db: sqlite3.Connection) -> None:
+    def _seed_dup_rows(db: sqlite3.Connection) -> dict[str, int]:
         # Two identical-hash rows differing only in id, created_at, and access
         # stats. The keeper must be the row with the higher
         # ``access_count + use_count`` — that is the row the differ has been
         # actively reusing across re-indexes; the loser is the silent ghost.
+        # Returns ``{chunk_id: rowid}`` so callers can pin sidecar cleanup
+        # against the loser's rowid (chunks_fts entries here; no chunks_vec
+        # because this test path runs at dimension=0).
         db.executemany(
             """INSERT INTO chunks
                (id, content, content_hash, source_file, namespace,
@@ -210,7 +213,22 @@ class TestDuplicateChunksMigration:
                 ),
             ],
         )
+        rowid_by_id = {
+            row[0]: row[1]
+            for row in db.execute(
+                "SELECT id, rowid FROM chunks WHERE content_hash='hash-X'"
+            ).fetchall()
+        }
+        # Mirror the prod write path: every chunks row has a matching
+        # chunks_fts row at the same rowid. Without these the negative pin
+        # below couldn't tell whether the migration cleaned up the sidecar
+        # or whether it was simply never seeded.
+        db.executemany(
+            "INSERT INTO chunks_fts(rowid, content, source_file) VALUES (?, ?, ?)",
+            [(rowid, "duplicate body", "/tmp/dup.md") for rowid in rowid_by_id.values()],
+        )
         db.commit()
+        return rowid_by_id
 
     def test_collapses_existing_dup_rows_and_installs_unique_index(self) -> None:
         db = _connect_with_vec()
@@ -223,7 +241,8 @@ class TestDuplicateChunksMigration:
             # Drop the index so we can simulate an upgrade from a pre-#691
             # DB that already accumulated duplicates.
             db.execute("DROP INDEX idx_chunks_unique_content")
-            self._seed_dup_rows(db)
+            rowid_by_id = self._seed_dup_rows(db)
+            loser_rowid = rowid_by_id["00000000-0000-0000-0000-000000000002"]
 
             # Second call re-runs create_tables, which now sees the UNIQUE
             # index missing and triggers the cleanup migration.
@@ -238,6 +257,19 @@ class TestDuplicateChunksMigration:
             # preserve the actively-reused row, not the older ghost.
             assert kept_id == "00000000-0000-0000-0000-000000000001"
             assert kept_access == 7
+
+            # Negative pin (per ``feedback_pin_invert_symmetric_assertion``):
+            # asserting the keeper survived isn't enough — the loser must
+            # also be gone, in both ``chunks`` and the ``chunks_fts`` sidecar
+            # that production keeps in lockstep.
+            loser_present = db.execute(
+                "SELECT 1 FROM chunks WHERE id='00000000-0000-0000-0000-000000000002'"
+            ).fetchone()
+            assert loser_present is None, "loser chunk row must be deleted"
+            loser_fts = db.execute(
+                "SELECT 1 FROM chunks_fts WHERE rowid=?", (loser_rowid,)
+            ).fetchone()
+            assert loser_fts is None, "loser chunks_fts sidecar row must be deleted"
 
             idx_row = db.execute(
                 "SELECT 1 FROM sqlite_master "

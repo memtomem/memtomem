@@ -567,65 +567,98 @@ def _migrate_chunks_uniqueness(db: sqlite3.Connection, *, has_vec_table: bool) -
     4. Create the UNIQUE INDEX. Once present, future
        ``INSERT OR IGNORE`` calls in ``upsert_chunks`` silently drop
        race-loser rows at the storage layer.
+
+    **Concurrent-startup safety**: the same multi-process scenario that
+    caused #691 in the first place applies to the migration too — two
+    processes booting simultaneously could each see ``already_migrated=False``
+    on the cheap fast-path. We therefore wrap the migration body in
+    ``BEGIN IMMEDIATE`` / ``COMMIT`` (acquires SQLite's RESERVED lock so
+    the second process blocks until the first commits) and re-check the
+    index existence inside the transaction. The deletes themselves are
+    idempotent against missing rowids, so even an interrupted run on a
+    fresh process restart converges.
+
+    **SQLite version requirement**: the keeper-selection query uses
+    ``ROW_NUMBER()`` which needs SQLite ≥ 3.25 (2018-09). Python 3.12's
+    bundled ``sqlite3`` is well past that floor on every supported OS.
     """
-    already_migrated = (
+    # Cheap fast-path so already-migrated DBs don't take the lock.
+    if (
         db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_chunks_unique_content'"
         ).fetchone()
         is not None
-    )
-    if already_migrated:
+    ):
         return
 
-    # Collect rowids of duplicate losers in one pass. ``ROW_NUMBER()`` over
-    # the partition picks the keeper (rn=1) by usage then age then id; rn>1
-    # are ghosts. Returns ``[]`` on a clean DB so the rest of the migration
-    # is a single ``CREATE UNIQUE INDEX``.
-    loser_rowids = [
-        row[0]
-        for row in db.execute(
-            """
-            SELECT rowid FROM (
-                SELECT rowid, ROW_NUMBER() OVER (
-                    PARTITION BY namespace, source_file, content_hash, start_line
-                    ORDER BY (access_count + use_count) DESC,
-                             created_at ASC,
-                             id ASC
-                ) AS rn
-                FROM chunks
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        # Re-check inside the transaction in case another startup beat us
+        # to the index between our fast-path check and the lock acquisition.
+        if (
+            db.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='index' AND name='idx_chunks_unique_content'"
+            ).fetchone()
+            is not None
+        ):
+            db.execute("COMMIT")
+            return
+
+        # Collect rowids of duplicate losers in one pass. ``ROW_NUMBER()``
+        # over the partition picks the keeper (rn=1) by usage then age then
+        # id; rn>1 are ghosts. Returns ``[]`` on a clean DB so the rest of
+        # the migration is a single ``CREATE UNIQUE INDEX``.
+        loser_rowids = [
+            row[0]
+            for row in db.execute(
+                """
+                SELECT rowid FROM (
+                    SELECT rowid, ROW_NUMBER() OVER (
+                        PARTITION BY namespace, source_file, content_hash, start_line
+                        ORDER BY (access_count + use_count) DESC,
+                                 created_at ASC,
+                                 id ASC
+                    ) AS rn
+                    FROM chunks
+                )
+                WHERE rn > 1
+                """
+            ).fetchall()
+        ]
+
+        if loser_rowids:
+            group_count = db.execute(
+                "SELECT COUNT(*) FROM ("
+                "SELECT 1 FROM chunks "
+                "GROUP BY namespace, source_file, content_hash, start_line "
+                "HAVING COUNT(*) > 1"
+                ")"
+            ).fetchone()[0]
+            # Chunked deletes keep the parameter list under SQLite's 999-host
+            # limit on older builds. Sidecars first so an interrupted run
+            # never leaves an FTS/vec entry pointing at a non-existent
+            # ``chunks.rowid``.
+            chunk_size = 500
+            for i in range(0, len(loser_rowids), chunk_size):
+                batch = loser_rowids[i : i + chunk_size]
+                placeholders = ",".join("?" * len(batch))
+                db.execute(f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders})", batch)
+                if has_vec_table:
+                    db.execute(f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders})", batch)
+                db.execute(f"DELETE FROM chunks WHERE rowid IN ({placeholders})", batch)
+            logger.info(
+                "Cleaned up %d duplicate chunk row(s) across %d group(s) before "
+                "adding UNIQUE(namespace, source_file, content_hash, start_line) — see #691",
+                len(loser_rowids),
+                group_count,
             )
-            WHERE rn > 1
-            """
-        ).fetchall()
-    ]
 
-    if loser_rowids:
-        group_count = db.execute(
-            "SELECT COUNT(*) FROM ("
-            "SELECT 1 FROM chunks "
-            "GROUP BY namespace, source_file, content_hash, start_line "
-            "HAVING COUNT(*) > 1"
-            ")"
-        ).fetchone()[0]
-        # Chunked deletes keep the parameter list under SQLite's 999-host
-        # limit on older builds. Sidecars first so an interrupted run never
-        # leaves an FTS/vec entry pointing at a non-existent ``chunks.rowid``.
-        chunk_size = 500
-        for i in range(0, len(loser_rowids), chunk_size):
-            batch = loser_rowids[i : i + chunk_size]
-            placeholders = ",".join("?" * len(batch))
-            db.execute(f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders})", batch)
-            if has_vec_table:
-                db.execute(f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders})", batch)
-            db.execute(f"DELETE FROM chunks WHERE rowid IN ({placeholders})", batch)
-        logger.info(
-            "Cleaned up %d duplicate chunk row(s) across %d group(s) before "
-            "adding UNIQUE(namespace, source_file, content_hash, start_line) — see #691",
-            len(loser_rowids),
-            group_count,
+        db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_unique_content "
+            "ON chunks(namespace, source_file, content_hash, start_line)"
         )
-
-    db.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_unique_content "
-        "ON chunks(namespace, source_file, content_hash, start_line)"
-    )
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
