@@ -356,7 +356,13 @@ def test_config_d_namespace_rules_dedup_after_home_expansion(
     producing two rules and fail here.
     """
     _clear_all_memtomem_env(monkeypatch)
-    abs_form = str(Path("~/some/memtomem-test/**").expanduser())
+    # ``as_posix()`` matches the validator's normalization. Pre-#726 this was
+    # ``str(Path(...).expanduser())`` which dedup'd on POSIX by accident
+    # (``str`` of a POSIX absolute path is identical to its as_posix form).
+    # On Windows the raw ``str`` form leaks backslashes; the validator now
+    # normalizes both ``~/`` and absolute inputs to forward slashes so dedup
+    # works on every platform.
+    abs_form = Path("~/some/memtomem-test/**").expanduser().as_posix()
     (config_d_dir / "10-home.json").write_text(
         json.dumps(
             {
