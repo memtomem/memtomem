@@ -25,6 +25,7 @@ import pytest
 from click.testing import CliRunner
 
 from memtomem.cli import cli
+from .helpers import set_home
 
 
 def _make_memory_dir(home: str) -> str:
@@ -53,7 +54,7 @@ class TestFreshNoopIndexInline:
 
         home = tmp_path / "home"
         home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
+        set_home(monkeypatch, home)
         monkeypatch.setattr(_bootstrap, "_CONFIG_PATH", home / ".memtomem" / "config.json")
 
         mem_dir = _make_memory_dir(str(home))

@@ -17,6 +17,8 @@ import pytest
 from memtomem import config as _cfg
 from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
 
+from .helpers import set_home
+
 
 @pytest.fixture
 def override_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -599,7 +601,7 @@ def test_detect_provider_dirs_excludes_gemini(
     home = tmp_path / "home"
     (home / ".gemini").mkdir(parents=True)
     (home / ".gemini" / "GEMINI.md").write_text("# memory", encoding="utf-8")
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, home)
 
     grouped = _cfg._detect_provider_dirs()
     assert "gemini" not in grouped
@@ -618,7 +620,7 @@ def test_detect_provider_dirs_filters_empty_claude_memory(
     proj_with.mkdir(parents=True)
     (proj_with / "MEMORY.md").write_text("# index", encoding="utf-8")
     proj_without.mkdir(parents=True)  # empty memory dir
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, home)
 
     grouped = _cfg._detect_provider_dirs()
     paths = {str(p) for p in grouped["claude-memory"]}
@@ -636,7 +638,7 @@ def test_detect_provider_dirs_finds_claude_plans_and_codex(
     codex = home / ".codex" / "memories"
     plans.mkdir(parents=True)
     codex.mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, home)
 
     grouped = _cfg._detect_provider_dirs()
     assert grouped["claude-plans"] == [plans]

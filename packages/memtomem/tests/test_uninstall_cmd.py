@@ -20,6 +20,7 @@ import pytest
 from click.testing import CliRunner
 
 from memtomem.cli import cli
+from .helpers import set_home
 
 
 @contextlib.contextmanager
@@ -71,7 +72,7 @@ def home(tmp_path, monkeypatch):
     xdg = tmp_path / "xdg_runtime"
     xdg.mkdir()
     os.chmod(xdg, 0o700)  # _runtime_paths validator requires owner-only
-    monkeypatch.setenv("HOME", str(h))
+    set_home(monkeypatch, h)
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
     monkeypatch.setattr(_bootstrap, "_CONFIG_PATH", h / ".memtomem" / "config.json")
     monkeypatch.setattr(uninstall_cmd, "_DEFAULT_STATE_DIR", h / ".memtomem")

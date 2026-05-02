@@ -27,6 +27,7 @@ from httpx import ASGITransport, AsyncClient
 
 from memtomem.context.skills import SKILL_MANIFEST
 from memtomem.web.app import create_app
+from .helpers import set_home
 
 
 # ---------------------------------------------------------------------------
@@ -37,7 +38,7 @@ from memtomem.web.app import create_app
 @pytest.fixture
 def gateway_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Pin ``HOME`` to ``tmp_path`` so settings-sync writes stay sandboxed."""
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, tmp_path)
     # ClaudeSettingsGenerator.is_available() requires the dir to exist.
     (tmp_path / ".claude").mkdir(parents=True, exist_ok=True)
     return tmp_path

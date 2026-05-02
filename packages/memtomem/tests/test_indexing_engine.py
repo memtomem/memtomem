@@ -18,6 +18,7 @@ from memtomem.indexing.engine import (
     _estimate_tokens,
 )
 from memtomem.models import Chunk, ChunkMetadata
+from .helpers import set_home
 
 
 # ---------------------------------------------------------------------------
@@ -2452,7 +2453,7 @@ class TestMemoryDirStats:
         """
         from memtomem.indexing.engine import memory_dir_stats
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         (tmp_path / "memories").mkdir()
         storage = _FakeStorageForStats([])
 
@@ -2643,7 +2644,7 @@ class TestResolveOwningMemoryDir:
         configured dirs would never match concrete source paths."""
         from memtomem.indexing.engine import resolve_owning_memory_dir
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         (tmp_path / "memories").mkdir()
         f = tmp_path / "memories" / "note.md"
         f.write_text("#")

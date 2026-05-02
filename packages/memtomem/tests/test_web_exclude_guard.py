@@ -18,6 +18,7 @@ from httpx import ASGITransport, AsyncClient
 from memtomem.config import Mem2MemConfig
 from memtomem.server.component_factory import close_components, create_components
 from memtomem.web.app import create_app
+from .helpers import set_home
 
 
 @pytest.fixture
@@ -26,7 +27,7 @@ async def real_stack_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     for k in list(os.environ):
         if k.startswith("MEMTOMEM_"):
             monkeypatch.delenv(k, raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, tmp_path)
 
     # Mark the tmp HOME as ``mm init``-completed so the
     # ``require_configured`` gate (issue #577) lets

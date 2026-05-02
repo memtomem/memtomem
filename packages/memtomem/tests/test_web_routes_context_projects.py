@@ -18,6 +18,7 @@ from httpx import ASGITransport, AsyncClient
 from memtomem.config import ContextGatewayConfig, Mem2MemConfig
 from memtomem.context.projects import compute_scope_id
 from memtomem.web.app import create_app
+from .helpers import set_home
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────
@@ -26,7 +27,7 @@ from memtomem.web.app import create_app
 @pytest.fixture
 def cwd_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Sandbox HOME; return the cwd project root with a .claude marker."""
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, tmp_path)
     cwd = tmp_path / "cwd"
     cwd.mkdir()
     (cwd / ".claude").mkdir()

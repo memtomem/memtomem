@@ -19,6 +19,7 @@ from httpx import ASGITransport, AsyncClient
 
 from memtomem.models import Chunk, ChunkMetadata
 from memtomem.web.app import create_app
+from .helpers import set_home
 
 
 # ---------------------------------------------------------------------------
@@ -705,10 +706,7 @@ class TestSettingsSync:
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         (fake_home / ".claude").mkdir()
-        monkeypatch.setenv("HOME", str(fake_home))
-        monkeypatch.setenv("USERPROFILE", str(fake_home))
-
-        # Project lives in a sibling dir so the Claude target is a host write.
+        set_home(monkeypatch, fake_home)
         project = tmp_path / "proj"
         project.mkdir()
         canonical = project / ".memtomem" / "settings.json"
@@ -736,8 +734,7 @@ class TestSettingsSync:
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         (fake_home / ".claude").mkdir()
-        monkeypatch.setenv("HOME", str(fake_home))
-        monkeypatch.setenv("USERPROFILE", str(fake_home))
+        set_home(monkeypatch, fake_home)
 
         project = tmp_path / "proj"
         project.mkdir()

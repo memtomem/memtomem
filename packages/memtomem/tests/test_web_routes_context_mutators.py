@@ -27,6 +27,7 @@ from httpx import ASGITransport, AsyncClient
 
 from memtomem.context.skills import SKILL_MANIFEST
 from memtomem.web.app import create_app
+from .helpers import set_home
 
 
 # ---------------------------------------------------------------------------
@@ -37,7 +38,7 @@ from memtomem.web.app import create_app
 @pytest.fixture
 def gateway_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Sandbox ``HOME`` and return the project root."""
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, tmp_path)
     (tmp_path / ".claude").mkdir(parents=True, exist_ok=True)
     return tmp_path
 
