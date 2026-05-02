@@ -1408,6 +1408,12 @@ class TestRuntimeProfile:
         assert profile.runtime_matches_workspace is True
         assert profile.mm_binary_origin == "venv-relative"
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX-only fixture: monkeypatches sys.executable to "
+        "'/usr/local/bin/python' which Path() normalizes to backslashes "
+        "on Windows, breaking the system-path classifier",
+    )
     def test_project_install_profile_no_packages_dir(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1737,6 +1743,12 @@ class TestMmBinaryOriginDetection:
         )
         assert origin == "venv-relative"
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX-only: tests classification of POSIX system Python paths "
+        "(/usr/bin/, /opt/homebrew/, etc.) which don't exist on Windows; "
+        "Path() also normalizes them to backslashes, defeating the prefix match",
+    )
     def test_origin_system_paths(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Well-known system Python locations classify as ``system``."""
         from memtomem.cli import init_cmd
@@ -4611,7 +4623,10 @@ class TestInitialSeedThreshold:
     @staticmethod
     def _write_md(dir_: Path, name: str, body: str) -> Path:
         f = dir_ / name
-        f.write_text(body, encoding="utf-8")
+        # ``newline=""`` disables platform newline translation so byte-count
+        # assertions (e.g. ``len(body) == _collect_seed_scale(...)`` total)
+        # stay correct on Windows where ``\n`` would otherwise become ``\r\n``.
+        f.write_text(body, encoding="utf-8", newline="")
         return f
 
     def test_collect_seed_scale_counts_md_only_and_sums_bytes(self, tmp_path: Path) -> None:
