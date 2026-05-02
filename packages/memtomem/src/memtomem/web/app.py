@@ -12,7 +12,7 @@ from typing import Literal, get_args
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -130,15 +130,54 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
     if mode not in _VALID_WEB_MODES:
         raise ValueError(f"Invalid web mode {mode!r}; expected one of {sorted(_VALID_WEB_MODES)}")
 
+    # docs_url=None disables FastAPI's default ``/api/docs`` page so we can
+    # serve a Swagger UI built against the locally vendored
+    # ``swagger-ui-dist`` (web/static/vendor/swagger/) instead of the
+    # jsdelivr CDN. The redoc default is dropped entirely — it duplicates
+    # Swagger's purpose, also pulled from jsdelivr, and nothing in the SPA
+    # links to it. Re-introduce it the same way as ``/api/docs`` if a
+    # consumer asks for it.
     app = FastAPI(
         title="memtomem Web UI",
         description="Web UI for memtomem memory infrastructure",
         version=__version__,
         lifespan=lifespan,
-        docs_url="/api/docs",
-        redoc_url="/api/redoc",
+        docs_url=None,
+        redoc_url=None,
     )
     app.state.web_mode = mode
+
+    # Hand-rolled instead of ``fastapi.openapi.docs.get_swagger_ui_html``
+    # for two reasons that combine on the same page:
+    # * The default helper bakes a Swagger UI bootstrap into an inline
+    #   ``<script>`` block, which the locked-down CSP (``script-src
+    #   'self'``) blocks. Loading the bootstrap as an external file lets
+    #   the policy stay strict instead of growing back to ``'unsafe-inline'``.
+    # * The default helper also points the favicon at
+    #   ``https://fastapi.tiangolo.com/img/favicon.png`` — an external
+    #   image fetch that ``img-src 'self' data:`` would block in the
+    #   browser. Reusing the SPA's own ``favicon.svg`` keeps the page
+    #   first-party end-to-end.
+    _SWAGGER_HTML = (
+        "<!DOCTYPE html>\n"
+        '<html lang="en">\n'
+        "<head>\n"
+        '  <meta charset="UTF-8" />\n'
+        f"  <title>{app.title} — Swagger UI</title>\n"
+        '  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />\n'
+        '  <link rel="stylesheet" href="/vendor/swagger/swagger-ui.css?v=1" />\n'
+        "</head>\n"
+        "<body>\n"
+        '  <div id="swagger-ui"></div>\n'
+        '  <script src="/vendor/swagger/swagger-ui-bundle.js?v=1"></script>\n'
+        '  <script src="/vendor/swagger/swagger-init.js?v=1"></script>\n'
+        "</body>\n"
+        "</html>\n"
+    )
+
+    @app.get("/api/docs", include_in_schema=False)
+    async def custom_swagger_ui_html() -> HTMLResponse:
+        return HTMLResponse(_SWAGGER_HTML)
 
     for router_mod in _PROD_ROUTERS:
         app.include_router(router_mod.router, prefix="/api")
