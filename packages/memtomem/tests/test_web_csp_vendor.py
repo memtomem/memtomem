@@ -88,7 +88,11 @@ async def test_vendor_asset_served_locally(asset: str) -> None:
 
 def test_index_html_has_no_external_cdn_refs() -> None:
     """SPA must not re-introduce cdnjs / jsdelivr / unpkg in <script>/<link>."""
-    html = _INDEX_HTML.read_text()
+    # Pin encoding="utf-8": index.html ships UTF-8 (em-dashes in banner copy)
+    # but Path.read_text() defaults to ``locale.getpreferredencoding()``,
+    # which is cp1252 on Windows runners — that codec has no mapping for
+    # 0x8f and the read explodes before the assertion ever runs.
+    html = _INDEX_HTML.read_text(encoding="utf-8")
     for forbidden in ("cdnjs.cloudflare.com", "cdn.jsdelivr.net", "unpkg.com"):
         assert forbidden not in html, (
             f"index.html re-introduced an external CDN reference to {forbidden!r}; "
@@ -102,6 +106,6 @@ def test_index_html_references_every_vendor_asset() -> None:
     Catches the inverse of the deletion case: a vendor file is added but
     the SPA never loads it, or a rename drops a script tag.
     """
-    html = _INDEX_HTML.read_text()
+    html = _INDEX_HTML.read_text(encoding="utf-8")
     missing = [a for a in _VENDORED_ASSETS if f"/vendor/{a}" not in html]
     assert not missing, f"index.html does not reference vendored assets: {missing}"
