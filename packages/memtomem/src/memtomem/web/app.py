@@ -177,8 +177,8 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
             response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
             response.headers["Content-Security-Policy"] = (
                 "default-src 'self'; "
-                "script-src 'self' https://cdnjs.cloudflare.com; "
-                "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; "
+                "script-src 'self'; "
+                "style-src 'self' 'unsafe-inline'; "
                 "img-src 'self' data:; "
                 "connect-src 'self'; "
                 "frame-ancestors 'none'"
