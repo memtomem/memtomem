@@ -986,20 +986,20 @@
             <div class="export-card card">
               <h2 data-i18n="settings.export.title">Export</h2>
               <div class="export-filters">
-                <label class="field-label" for="exp-source">Source Filter</label>
-                <input id="exp-source" type="text" placeholder="optional path substring…" />
-                <label class="field-label" for="exp-tag">Tag Filter</label>
-                <input id="exp-tag" type="text" placeholder="exact tag…" />
-                <label class="field-label" for="exp-since">Since (ISO date)</label>
-                <input id="exp-since" type="text" placeholder="e.g. 2025-01-01" />
-                <label class="field-label" for="exp-namespace">Namespace</label>
+                <label class="field-label" for="exp-source" data-i18n="settings.export.source_label">Source Filter</label>
+                <input id="exp-source" type="text" data-i18n-placeholder="settings.export.source_placeholder" placeholder="optional path substring…" />
+                <label class="field-label" for="exp-tag" data-i18n="settings.export.tag_label">Tag Filter</label>
+                <input id="exp-tag" type="text" data-i18n-placeholder="settings.export.tag_placeholder" placeholder="exact tag…" />
+                <label class="field-label" for="exp-since" data-i18n="settings.export.since_label">Since (ISO date)</label>
+                <input id="exp-since" type="text" data-i18n-placeholder="settings.export.since_placeholder" placeholder="e.g. 2025-01-01" />
+                <label class="field-label" for="exp-namespace" data-i18n="settings.export.ns_label">Namespace</label>
                 <select id="exp-namespace">
-                  <option value="">All Namespaces</option>
+                  <option value="" data-i18n="settings.export.ns_all">All Namespaces</option>
                 </select>
               </div>
               <div class="export-btn-row">
-                <button id="exp-preview-btn" class="btn-ghost">Preview</button>
-                <button id="exp-download-btn" class="btn-primary">Download JSON</button>
+                <button id="exp-preview-btn" class="btn-ghost" data-i18n="settings.export.preview_btn">Preview</button>
+                <button id="exp-download-btn" class="btn-primary" data-i18n="settings.export.download_btn">Download JSON</button>
               </div>
               <div id="exp-preview" class="export-preview" hidden>
                 <span id="exp-count"></span> chunks will be exported
@@ -1009,7 +1009,7 @@
             <div class="export-card card">
               <h2 data-i18n="settings.import.title">Import</h2>
               <p class="export-hint" data-i18n="settings.import.hint">Upload a memtomem_export.json bundle to re-index its chunks.</p>
-              <label class="field-label">Bundle File (.json)</label>
+              <label class="field-label" data-i18n="settings.import.file_label">Bundle File (.json)</label>
               <div class="custom-file-input">
                 <input id="imp-file" type="file" accept=".json" hidden />
                 <button type="button" class="btn-ghost btn-xs" id="imp-file-trigger" data-i18n="settings.import.choose_btn">Choose File</button>
@@ -1019,10 +1019,10 @@
               <div id="imp-msg" class="status-msg" hidden></div>
               <div id="imp-result" class="import-result" hidden>
                 <table>
-                  <tr><td>Total chunks</td><td id="imp-total"></td></tr>
-                  <tr><td>Imported</td><td id="imp-imported"></td></tr>
-                  <tr><td>Skipped</td><td id="imp-skipped"></td></tr>
-                  <tr><td>Failed</td><td id="imp-failed"></td></tr>
+                  <tr><td data-i18n="settings.import.result.total">Total chunks</td><td id="imp-total"></td></tr>
+                  <tr><td data-i18n="settings.import.result.imported">Imported</td><td id="imp-imported"></td></tr>
+                  <tr><td data-i18n="settings.import.result.skipped">Skipped</td><td id="imp-skipped"></td></tr>
+                  <tr><td data-i18n="settings.import.result.failed">Failed</td><td id="imp-failed"></td></tr>
                 </table>
               </div>
             </div>
@@ -1052,10 +1052,10 @@
         </div>
         <input id="tags-search" type="text" data-i18n-placeholder="tags.filter_placeholder" placeholder="Filter tags..." autocomplete="off" />
         <div class="tags-sort-row">
-          <button class="tags-sort-btn btn-ghost btn-xs btn-active" data-sort="count-desc" title="Sort by count descending">Count&#8595;</button>
-          <button class="tags-sort-btn btn-ghost btn-xs" data-sort="count-asc" title="Sort by count ascending">Count&#8593;</button>
-          <button class="tags-sort-btn btn-ghost btn-xs" data-sort="az" title="Sort alphabetically A-Z">A-Z</button>
-          <button class="tags-sort-btn btn-ghost btn-xs" data-sort="za" title="Sort alphabetically Z-A">Z-A</button>
+          <button class="tags-sort-btn btn-ghost btn-xs btn-active" data-sort="count-desc" title="Sort by count descending" data-i18n="tags.sort_count_desc">Count&#8595;</button>
+          <button class="tags-sort-btn btn-ghost btn-xs" data-sort="count-asc" title="Sort by count ascending" data-i18n="tags.sort_count_asc">Count&#8593;</button>
+          <button class="tags-sort-btn btn-ghost btn-xs" data-sort="az" title="Sort alphabetically A-Z" data-i18n="tags.sort_az">A-Z</button>
+          <button class="tags-sort-btn btn-ghost btn-xs" data-sort="za" title="Sort alphabetically Z-A" data-i18n="tags.sort_za">Z-A</button>
         </div>
         <div id="tags-stats" class="tags-stats" hidden></div>
         <div id="tags-empty" class="empty-state"><div class="spinner-panel"></div></div>
@@ -1067,20 +1067,20 @@
         <h2 data-i18n="tags.autotag_title">Auto-Tag</h2>
         <p class="tags-form-desc" data-i18n="tags.autotag_desc">Analyze chunk content and extract keyword-based tags automatically.</p>
         <div class="tags-form">
-          <label class="field-label" for="autotag-source">Source Filter</label>
-          <input id="autotag-source" type="text" placeholder="optional path substring…" />
+          <label class="field-label" for="autotag-source" data-i18n="tags.autotag_source_label">Source Filter</label>
+          <input id="autotag-source" type="text" data-i18n-placeholder="tags.autotag_source_placeholder" placeholder="optional path substring…" />
 
-          <label class="field-label" for="autotag-max">Max Tags per Chunk</label>
+          <label class="field-label" for="autotag-max" data-i18n="tags.autotag_max_label">Max Tags per Chunk</label>
           <input id="autotag-max" type="number" value="5" min="1" max="20" />
 
           <div class="checkbox-row">
             <label>
               <input type="checkbox" id="autotag-overwrite" />
-              Overwrite existing
+              <span data-i18n="tags.autotag_overwrite">Overwrite existing</span>
             </label>
             <label>
               <input type="checkbox" id="autotag-dry-run" checked />
-              Dry run <span class="help-tip" data-help="Preview suggested tags without applying. Uncheck to apply immediately." tabindex="0" role="img" aria-label="Preview suggested tags without applying. Uncheck to apply immediately.">i</span>
+              <span data-i18n="tags.autotag_dryrun">Dry run</span> <span class="help-tip" data-help="Preview suggested tags without applying. Uncheck to apply immediately." tabindex="0" role="img" aria-label="Preview suggested tags without applying. Uncheck to apply immediately.">i</span>
             </label>
           </div>
 
@@ -1089,9 +1089,9 @@
 
           <div id="autotag-result" class="autotag-result" hidden>
             <table>
-              <tr><td>Total chunks</td><td id="at-total"></td></tr>
-              <tr><td>Tagged</td><td id="at-tagged"></td></tr>
-              <tr><td>Skipped</td><td id="at-skipped"></td></tr>
+              <tr><td data-i18n="tags.autotag_result.total">Total chunks</td><td id="at-total"></td></tr>
+              <tr><td data-i18n="tags.autotag_result.tagged">Tagged</td><td id="at-tagged"></td></tr>
+              <tr><td data-i18n="tags.autotag_result.skipped">Skipped</td><td id="at-skipped"></td></tr>
             </table>
             <div id="autotag-samples" class="autotag-samples" hidden>
               <div class="autotag-samples-title">
@@ -1116,13 +1116,13 @@
     <div class="timeline-controls">
       <div class="date-range-picker">
         <select id="tl-days" title="Time range for timeline">
-          <option value="1">Today</option>
-          <option value="7">Last 7 days</option>
-          <option value="30" selected>Last 30 days</option>
-          <option value="90">Last 90 days</option>
-          <option value="180">Last 180 days</option>
-          <option value="365">Last 365 days</option>
-          <option value="custom">Custom…</option>
+          <option value="1" data-i18n="timeline.today">Today</option>
+          <option value="7" data-i18n="timeline.7d">Last 7 days</option>
+          <option value="30" selected data-i18n="timeline.30d">Last 30 days</option>
+          <option value="90" data-i18n="timeline.90d">Last 90 days</option>
+          <option value="180" data-i18n="timeline.180d">Last 180 days</option>
+          <option value="365" data-i18n="timeline.365d">Last 365 days</option>
+          <option value="custom" data-i18n="timeline.custom">Custom…</option>
         </select>
         <div id="tl-date-custom" class="date-range-custom" hidden>
           <input id="tl-date-from" type="date" title="From date" />
@@ -1131,17 +1131,17 @@
         </div>
       </div>
       <label>
-        Source filter
-        <input id="tl-source" type="text" placeholder="optional substring…" />
+        <span data-i18n="timeline.source_label">Source filter</span>
+        <input id="tl-source" type="text" data-i18n-placeholder="timeline.source_placeholder" placeholder="optional substring…" />
       </label>
       <label>
-        Namespace
+        <span data-i18n="timeline.ns_label">Namespace</span>
         <select id="tl-namespace">
-          <option value="">All</option>
+          <option value="" data-i18n="timeline.ns_all">All</option>
         </select>
       </label>
       <label>
-        Limit
+        <span data-i18n="timeline.limit_label">Limit</span>
         <input id="tl-limit" type="number" value="200" min="1" max="1000" class="w-70" />
       </label>
       <button id="tl-load-btn" class="btn-primary" data-i18n="timeline.load_btn">Load</button>
