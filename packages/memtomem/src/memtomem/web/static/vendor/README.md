@@ -1,10 +1,19 @@
 # `web/static/vendor/` — third-party browser assets
 
 This directory holds version-pinned copies of the third-party JavaScript
-and CSS libraries the `mm web` SPA depends on (DOMPurify, marked, Prism).
-Vendoring keeps the Web UI functional offline / behind firewalls / in
+and CSS libraries that `mm web` depends on:
+
+- **SPA assets** (DOMPurify, marked, Prism + 5 language plugins): served
+  directly from `web/static/vendor/`.
+- **Swagger UI bundle** (`swagger/swagger-ui-bundle.js`,
+  `swagger/swagger-ui.css`): served from `web/static/vendor/swagger/`
+  and pulled in by the custom `/api/docs` route registered in
+  `memtomem.web.app.create_app`.
+
+Vendoring keeps both surfaces functional offline / behind firewalls / in
 air-gapped deployments, and lets the FastAPI Content-Security-Policy stay
-on `script-src 'self'` instead of allow-listing `cdnjs.cloudflare.com`.
+on `script-src 'self'` instead of allow-listing `cdnjs.cloudflare.com`
+or `cdn.jsdelivr.net`.
 
 See `THIRD_PARTY_LICENSES.md` (alongside this file) for the version pin
 table, source URLs, SHA-256 hashes, and full upstream license texts.
@@ -12,13 +21,13 @@ table, source URLs, SHA-256 hashes, and full upstream license texts.
 ## Updating a pinned version
 
 1. Update the `curl` URL list below to the new version and re-run the
-   block. cdnjs is the canonical fetch source — do not pull from arbitrary
-   mirrors.
+   block. cdnjs / jsdelivr are the canonical fetch sources — do not pull
+   from arbitrary mirrors.
 
    ```bash
    cd packages/memtomem/src/memtomem/web/static/vendor
 
-   # bump versions here, then run:
+   # SPA assets — bump versions here, then run:
    curl -sSfL -o prism-tomorrow.min.css   https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css
    curl -sSfL -o purify.min.js            https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js
    curl -sSfL -o marked.min.js            https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js
@@ -29,7 +38,12 @@ table, source URLs, SHA-256 hashes, and full upstream license texts.
    curl -sSfL -o prism-bash.min.js        https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js
    curl -sSfL -o prism-yaml.min.js        https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js
 
-   shasum -a 256 *.js *.css
+   # Swagger UI — pin the same version across all three files:
+   curl -sSfL -o swagger/swagger-ui-bundle.js                  https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.32.5/swagger-ui-bundle.js
+   curl -sSfL -o swagger/swagger-ui.css                        https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.32.5/swagger-ui.css
+   curl -sSfL -o swagger/swagger-ui-bundle.js.LICENSE.txt      https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.32.5/swagger-ui-bundle.js.LICENSE.txt
+
+   shasum -a 256 *.js *.css swagger/*.js swagger/*.css
    ```
 
    **Supply-chain check.** If you are *not* bumping a version (e.g. you
@@ -44,27 +58,35 @@ table, source URLs, SHA-256 hashes, and full upstream license texts.
    version's LICENSE has changed:
 
    ```bash
-   curl -sSfL https://raw.githubusercontent.com/markedjs/marked/v<NEW>/LICENSE.md -o marked-LICENSE.md
-   curl -sSfL https://raw.githubusercontent.com/PrismJS/prism/v<NEW>/LICENSE     -o prism-LICENSE.txt
-   curl -sSfL https://raw.githubusercontent.com/cure53/DOMPurify/<NEW>/LICENSE   -o dompurify-LICENSE.txt
+   curl -sSfL https://raw.githubusercontent.com/markedjs/marked/v<NEW>/LICENSE.md       -o marked-LICENSE.md
+   curl -sSfL https://raw.githubusercontent.com/PrismJS/prism/v<NEW>/LICENSE            -o prism-LICENSE.txt
+   curl -sSfL https://raw.githubusercontent.com/cure53/DOMPurify/<NEW>/LICENSE          -o dompurify-LICENSE.txt
+   curl -sSfL https://raw.githubusercontent.com/swagger-api/swagger-ui/v<NEW>/LICENSE   -o swagger/swagger-ui-LICENSE
    ```
 
 3. Update `THIRD_PARTY_LICENSES.md` — bump the version column, replace
    the SHA-256, and update the `Source` link's tag.
 
-4. Bump `?v=N` on the matching `<script>` / `<link>` tags in
-   `packages/memtomem/src/memtomem/web/static/index.html` so users get
-   the new bytes past their disk cache. (See
-   `feedback_static_asset_cache_bust.md`.)
+4. Bump `?v=N` on the matching `<script>` / `<link>` references so users
+   get the new bytes past their disk cache. The references live in:
+   - `packages/memtomem/src/memtomem/web/static/index.html` (SPA assets)
+   - `packages/memtomem/src/memtomem/web/app.py` (Swagger UI URLs passed
+     into `get_swagger_ui_html`)
 
-5. Smoke-test in a browser: open `mm web`, render a markdown chunk and a
-   syntax-highlighted code block, confirm no console errors and no CSP
-   violations.
+   See `feedback_static_asset_cache_bust.md`.
+
+5. Smoke-test in a browser:
+   - Open `mm web`, render a markdown chunk and a syntax-highlighted
+     code block, confirm no console errors and no CSP violations.
+   - Open `<host>:<port>/api/docs`, confirm the Swagger UI renders, the
+     "Try it out" buttons work, and DevTools shows no requests to
+     `cdn.jsdelivr.net` / `cdnjs.cloudflare.com`.
 
 ## Why vendor instead of an `npm`/build step
 
 The `memtomem` package has no JavaScript build pipeline — the SPA ships
-raw `.js` and `.css` files. Adding `npm install` purely to pin nine
-browser libraries would force every contributor (and `uv tool install`
-user via sdist) to also have Node available. Direct vendoring of the
-minified cdnjs builds keeps the install surface Python-only.
+raw `.js` and `.css` files, and `mm web` is a pure-Python install. Adding
+`npm install` purely to pin a handful of browser libraries would force
+every contributor (and `uv tool install` user via sdist) to also have
+Node available. Direct vendoring of the minified CDN builds keeps the
+install surface Python-only.
