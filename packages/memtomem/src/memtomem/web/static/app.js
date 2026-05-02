@@ -3990,6 +3990,7 @@ async function runIndexStream() {
   const recursive = qs('index-recursive').checked;
   const force     = qs('index-force').checked;
   const namespace = qs('index-namespace').value.trim();
+  const registerAsSource = qs('index-register-source')?.checked === true;
 
   const progressEl = qs('index-progress');
   const barEl      = qs('index-progress-bar');
@@ -4111,12 +4112,30 @@ async function runIndexStream() {
       } else {
         qs('r-errors').textContent = '';
         errRow.hidden = true;
-        showToast(t('toast.indexed_count', { count: event.indexed_chunks }), 'success', {
-          action: {
-            label: t('toast.action.register_persistent'),
-            onClick: goToSourcesAddPath,
-          },
-        });
+        if (registerAsSource) {
+          // Checkbox already opted in to persistent registration, so skip
+          // the toast's "Register as Source" action — it would just be a
+          // duplicate of what we're about to do.
+          showToast(t('toast.indexed_count', { count: event.indexed_chunks }), 'success');
+          api('POST', '/api/memory-dirs/add', { path, auto_index: false })
+            .then(() => {
+              showToast(t('toast.index_registered_as_source', { path }), 'success');
+              loadStats();
+            })
+            .catch(err => {
+              showToast(
+                t('toast.index_register_failed', { error: err?.message || String(err) }),
+                'error',
+              );
+            });
+        } else {
+          showToast(t('toast.indexed_count', { count: event.indexed_chunks }), 'success', {
+            action: {
+              label: t('toast.action.register_persistent'),
+              onClick: goToSourcesAddPath,
+            },
+          });
+        }
       }
 
       show(resultEl);
