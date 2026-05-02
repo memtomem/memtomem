@@ -6,6 +6,8 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
+from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
+
 if TYPE_CHECKING:
     from memtomem.config import RerankConfig
     from memtomem.models import SearchResult
@@ -19,7 +21,8 @@ class FastEmbedReranker:
     Runs on the CPU via ONNX Runtime — no external server and no PyTorch
     dependency. Reuses the ``memtomem[onnx]`` extra so enabling this provider
     adds no new packages. The model is downloaded on first use and cached in
-    ``~/.cache/fastembed/``.
+    the path returned by ``resolve_fastembed_cache_dir()`` (default
+    ``~/.memtomem/cache/fastembed``).
     """
 
     def __init__(self, config: RerankConfig) -> None:
@@ -40,8 +43,14 @@ class FastEmbedReranker:
                 "Install it with: pip install memtomem[onnx]"
             ) from exc
 
+        cache_dir = resolve_fastembed_cache_dir()
+        logger.info(
+            "Loading fastembed reranker %s (cache_dir=%s) …",
+            self._config.model,
+            cache_dir,
+        )
         try:
-            self._model = TextCrossEncoder(model_name=self._config.model)
+            self._model = TextCrossEncoder(model_name=self._config.model, cache_dir=str(cache_dir))
         except ValueError as exc:
             supported = [m.get("model", "") for m in TextCrossEncoder.list_supported_models()]
             raise ValueError(
@@ -53,7 +62,6 @@ class FastEmbedReranker:
                 "must be registered via TextCrossEncoder.add_custom_model() before the "
                 "reranker is invoked."
             ) from exc
-        logger.info("Loaded fastembed reranker: %s", self._config.model)
         return self._model
 
     def _rerank_sync(self, query: str, documents: list[str]) -> list[float]:

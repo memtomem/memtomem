@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import Sequence
 
 from memtomem.config import EmbeddingConfig
+from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
 from memtomem.errors import EmbeddingError
 
 logger = logging.getLogger(__name__)
@@ -85,12 +86,14 @@ class OnnxEmbedder:
         # threads=0 → leave ORT default (all physical cores); threads>0 caps
         # the intra-op pool so seeding doesn't saturate the machine.
         threads = self._config.threads or None
+        cache_dir = resolve_fastembed_cache_dir()
         logger.info(
-            "Loading ONNX embedding model %s (threads=%s) …",
+            "Loading ONNX embedding model %s (threads=%s, cache_dir=%s) …",
             model_id,
             threads if threads is not None else "ORT default",
+            cache_dir,
         )
-        self._model = TextEmbedding(model_name=model_id, threads=threads)
+        self._model = TextEmbedding(model_name=model_id, threads=threads, cache_dir=str(cache_dir))
         return self._model
 
     @property
