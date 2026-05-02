@@ -32,6 +32,14 @@ table, source URLs, SHA-256 hashes, and full upstream license texts.
    shasum -a 256 *.js *.css
    ```
 
+   **Supply-chain check.** If you are *not* bumping a version (e.g. you
+   are re-running the curl block to verify reproducibility), the new
+   `shasum` output **MUST** match the SHA-256 column in
+   `THIRD_PARTY_LICENSES.md` byte-for-byte. A mismatch on a same-version
+   re-fetch is a supply-chain red flag (cdnjs serving a different build
+   under the same version path) — do not commit. Investigate upstream
+   first, then file an issue before any update.
+
 2. Replace the upstream LICENSE files in this directory if the new
    version's LICENSE has changed:
 
