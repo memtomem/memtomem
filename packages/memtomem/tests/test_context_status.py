@@ -23,8 +23,8 @@ import pytest
 from click.testing import CliRunner
 
 from memtomem.cli.context_cmd import context as context_group
-from memtomem.context._atomic import atomic_write_bytes
-from memtomem.context.lockfile import Lockfile, utcnow_iso8601_z
+from memtomem.context._atomic import atomic_write_bytes, installed_at_from_dest
+from memtomem.context.lockfile import Lockfile
 from memtomem.context.status import StatusRow, classify_status
 from memtomem.wiki.store import WikiStore
 
@@ -85,7 +85,7 @@ def _setup_installed_at_pin(
         target = dest / relpath
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-    installed_at = utcnow_iso8601_z()
+    installed_at = installed_at_from_dest(dest)
     Lockfile.at(project).upsert_entry(asset_type, name, wiki_commit=pin, installed_at=installed_at)
     return installed_at
 

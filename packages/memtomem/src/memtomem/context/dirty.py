@@ -6,19 +6,20 @@ wiki state recorded in :class:`memtomem.context.lockfile.Lockfile`.
 
 The compare rule is **strict** ``mtime > installed_at_epoch`` — only files
 whose modification time is *strictly* later than the lockfile's
-``installed_at`` are flagged dirty. Equality is clean. PR-D C2a (#630)
-captures ``installed_at`` after :func:`copy_tree_atomic
-<memtomem.context._atomic.copy_tree_atomic>` finishes, so the install's
-own writes can never land at a strictly-later mtime than the captured
-timestamp; the dirty classifier therefore can't false-positive on a fresh
-install.
+``installed_at`` are flagged dirty. Equality is clean. ``installed_at``
+is captured from the filesystem itself by
+:func:`memtomem.context._atomic.installed_at_from_dest` (``max
+st_mtime_ns`` ceiled to microsecond), so on every platform the install's
+own writes round-trip to a value ``<= installed_at_epoch`` and the
+classifier can't false-positive on a fresh install — including Windows,
+where NTFS ``FILETIME`` is a different timer from Python's wall clock
+(#634).
 
-Skip rules mirror :data:`memtomem.context._atomic.COPY_SKIP_NAMES`:
-``.git``, ``.DS_Store``, ``__pycache__`` are not part of the canonical
+Skip rules live in :func:`memtomem.context._atomic.iter_installed_files`
+(shared with the capture helper above): ``.git``, ``.DS_Store``,
+``__pycache__``, ``.bak`` and symlinks are not part of the canonical
 install surface, so user edits to such entries don't make the asset
-dirty. Symlinks are skipped with a warning — ``copy_tree_atomic`` won't
-mirror them into dest in the first place, and dereferencing one here
-would defeat the byte-for-byte tree contract.
+dirty and don't perturb the captured ``installed_at`` either.
 
 This module is read-only. The execute path (``mm context update``)
 consumes a :class:`DirtyReport` and writes ``.bak`` files / overwrites

@@ -5,23 +5,27 @@ update``, plus the lockfile iteration helper introduced for batch flows.
 
 These tests construct lockfile + dest tree manually (no wiki / install
 roundtrip) so the dirty classifier is exercised in isolation. The
-"installed_at captured post-write" invariant from ADR-0008 PR-B/C2a
-(:func:`memtomem.context.install._install_asset`) is mirrored by
+"installed_at captured from filesystem after writes" invariant from
+ADR-0008 PR-B / C2a / #634
+(:func:`memtomem.context.install._install_asset` →
+:func:`memtomem.context._atomic.installed_at_from_dest`) is mirrored by
 :func:`_setup_installed` so equality cases land on the clean side of
-the strict ``>`` boundary.
+the strict ``>`` boundary on every platform.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
+from memtomem.context._atomic import installed_at_from_dest
 from memtomem.context.dirty import is_asset_dirty
-from memtomem.context.lockfile import Lockfile, utcnow_iso8601_z
+from memtomem.context.lockfile import Lockfile
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -45,7 +49,7 @@ def _setup_installed(
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
 
-    installed_at = utcnow_iso8601_z()
+    installed_at = installed_at_from_dest(dest)
     Lockfile.at(project).upsert_entry(
         asset_type,
         name,
@@ -254,3 +258,124 @@ def test_iter_entries_alphabetical_ordering(tmp_path: Path) -> None:
     ]
     # Per-entry payload is the live dict — value must round-trip through.
     assert all(e["wiki_commit"] == "0" * 40 for _, _, e in entries)
+
+
+# ── installed_at_from_dest: capture helper (#634) ────────────────────────
+
+
+class TestInstalledAtFromDest:
+    """Pin :func:`memtomem.context._atomic.installed_at_from_dest`.
+
+    Two-layer fix for the Windows dirty-cluster (#634):
+
+    1. Capture from the filesystem (not Python's wall clock).
+    2. Ceiling-divide ``st_mtime_ns`` to microseconds so the formatted
+       ISO-8601Z round-trips ``>=`` every walked file's actual mtime.
+
+    Each test exercises one or both layers. Mutation validation lives in
+    the PR description: reverting just the ceiling (``max_us = max_ns //
+    1000``) makes :meth:`test_us_residual_round_trips_monotonically`
+    fail; reverting capture to ``utcnow_iso8601_z()`` makes
+    :meth:`test_multi_file_returns_max_of_actual_mtimes` fail.
+    """
+
+    ISO_8601Z_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
+
+    @staticmethod
+    def _round_trip(ts: str) -> float:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+
+    def test_empty_dest_falls_back_to_wall_clock(self, tmp_path: Path) -> None:
+        """No files → wall-clock fallback; format matches utcnow_iso8601_z."""
+        dest = tmp_path / "empty"
+        dest.mkdir()
+        before = datetime.now(timezone.utc).timestamp()
+        result = installed_at_from_dest(dest)
+        after = datetime.now(timezone.utc).timestamp()
+        assert self.ISO_8601Z_RE.match(result), result
+        round_tripped = self._round_trip(result)
+        assert before <= round_tripped <= after
+
+    def test_single_file_round_trips_at_least_its_mtime(self, tmp_path: Path) -> None:
+        """Captured installed_at parses back >= the file's actual st_mtime."""
+        dest = tmp_path / "single"
+        dest.mkdir()
+        f = dest / "SKILL.md"
+        f.write_bytes(b"x")
+        round_tripped = self._round_trip(installed_at_from_dest(dest))
+        assert round_tripped >= f.stat().st_mtime
+
+    def test_multi_file_returns_max_of_actual_mtimes(self, tmp_path: Path) -> None:
+        """With heterogeneous mtimes the result is >= the latest one.
+
+        Reverting the helper to ``utcnow_iso8601_z()`` makes this fail —
+        the bumped mtime is in the future relative to wall clock.
+        """
+        dest = tmp_path / "multi"
+        dest.mkdir()
+        a = dest / "a.md"
+        b = dest / "b.md"
+        a.write_bytes(b"a")
+        b.write_bytes(b"b")
+        future_ns = a.stat().st_mtime_ns + 5_000_000_000  # +5 seconds
+        os.utime(b, ns=(future_ns, future_ns))
+        round_tripped = self._round_trip(installed_at_from_dest(dest))
+        assert round_tripped >= b.stat().st_mtime
+        assert round_tripped >= a.stat().st_mtime
+
+    def test_skip_rules_excluded_from_max(self, tmp_path: Path) -> None:
+        """``.git``, ``.DS_Store``, ``__pycache__``, ``.bak`` are ignored.
+
+        Each skipped entry gets a far-future mtime; if any leaked into the
+        ``max`` the result would round-trip past it.
+        """
+        dest = tmp_path / "skip"
+        dest.mkdir()
+        canonical = dest / "SKILL.md"
+        canonical.write_bytes(b"canonical")
+        skipped = [
+            dest / "SKILL.md.bak",
+            dest / ".DS_Store",
+            dest / ".git" / "config",
+            dest / "__pycache__" / "x.pyc",
+        ]
+        for s in skipped:
+            s.parent.mkdir(parents=True, exist_ok=True)
+            s.write_bytes(b"skip")
+        future_ns = canonical.stat().st_mtime_ns + 60_000_000_000  # +60s
+        for s in skipped:
+            os.utime(s, ns=(future_ns, future_ns))
+        round_tripped = self._round_trip(installed_at_from_dest(dest))
+        assert round_tripped < future_ns / 1_000_000_000
+        assert round_tripped >= canonical.stat().st_mtime
+
+    def test_us_residual_round_trips_monotonically(self, tmp_path: Path) -> None:
+        """The microsecond ceiling is load-bearing.
+
+        Models NTFS's 100-ns residual via ``os.utime(..., ns=base+750)``.
+        Truncating to µs (``max_ns // 1000``) would format ``base`` and
+        parse back to a value strictly less than the file's actual
+        ``st_mtime``, defeating the strict ``>`` invariant in
+        ``dirty.py:is_asset_dirty`` on the install's own writes. The
+        ceiling rounds up so round-trip stays monotonic.
+
+        On filesystems that quantise to µs (older ext4 / FAT-class
+        targets) ``os.utime`` rounds the ns down and the residual is 0
+        — the ceiling is then a no-op and the assertion still holds.
+        """
+        dest = tmp_path / "residual"
+        dest.mkdir()
+        f = dest / "a.md"
+        f.write_bytes(b"x")
+        base_ns = f.stat().st_mtime_ns - (f.stat().st_mtime_ns % 1000)
+        target_ns = base_ns + 750
+        os.utime(f, ns=(target_ns, target_ns))
+        result = installed_at_from_dest(dest)
+        round_tripped = self._round_trip(result)
+        actual_mtime = f.stat().st_mtime
+        assert round_tripped >= actual_mtime, (
+            f"installed_at {result} (round-tripped to {round_tripped}) is "
+            f"strictly less than the file's just-captured mtime "
+            f"{actual_mtime} ({f.stat().st_mtime_ns}ns) — the µs ceiling "
+            "regressed."
+        )
