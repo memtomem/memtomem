@@ -38,10 +38,18 @@ def _bg_task_error_cb(task: asyncio.Task) -> None:
 
 
 def _match_source(filter_str: str, source_path: str) -> bool:
-    """Match source_filter: glob when pattern chars present, substring otherwise."""
-    if any(c in filter_str for c in ("*", "?", "[")):
-        return fnmatch(source_path, filter_str)
-    return filter_str in source_path
+    """Match source_filter: glob when pattern chars present, substring otherwise.
+
+    Both sides are folded to forward-slash form before comparing so a
+    user-typed ``/tmp/keep/`` matches a Windows-stored
+    ``\\tmp\\keep\\file.md`` (#720, sibling of #647). On POSIX
+    ``str.replace("\\", "/")`` is identity, so behaviour is unchanged.
+    """
+    norm_filter = filter_str.replace("\\", "/")
+    norm_source = source_path.replace("\\", "/")
+    if any(c in norm_filter for c in ("*", "?", "[")):
+        return fnmatch(norm_source, norm_filter)
+    return norm_filter in norm_source
 
 
 def _apply_validity_filter(results: list[SearchResult], as_of_unix: int) -> list[SearchResult]:

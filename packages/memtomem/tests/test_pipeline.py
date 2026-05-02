@@ -8,6 +8,45 @@ from uuid import uuid4
 from memtomem.models import Chunk, ChunkMetadata, SearchResult
 
 
+class TestMatchSource:
+    """Pin: ``_match_source`` folds separators on both sides before
+    comparing, so a POSIX-typed ``/tmp/keep/`` matches a Windows-stored
+    ``\\tmp\\keep\\file.md`` (#720, sibling of #647).
+
+    Without this pin a regression where someone removes the
+    ``.replace("\\", "/")`` calls would still pass on POSIX (where
+    backslashes never appear in native path strings) and only break on
+    the Windows CI leg. Each row exercises a (filter shape, source
+    shape) cross-product so both code branches (substring + glob) are
+    covered with mixed separator inputs.
+    """
+
+    @pytest.mark.parametrize(
+        "filter_str,source_path,expected",
+        [
+            # Substring branch — POSIX shape (identity on POSIX).
+            ("/tmp/keep/", "/tmp/keep/policy.md", True),
+            ("/tmp/other/", "/tmp/keep/policy.md", False),
+            # Substring branch — POSIX filter, Windows-shape source.
+            ("/tmp/keep/", "\\tmp\\keep\\policy.md", True),
+            ("/tmp/other/", "\\tmp\\keep\\policy.md", False),
+            # Substring branch — Windows filter, POSIX-shape source.
+            ("\\tmp\\keep\\", "/tmp/keep/policy.md", True),
+            # Substring branch — Windows-shape both sides.
+            ("\\tmp\\keep\\", "\\tmp\\keep\\policy.md", True),
+            # Glob branch — POSIX pattern, Windows-shape source.
+            ("/tmp/*/policy.md", "\\tmp\\keep\\policy.md", True),
+            ("/tmp/keep/*.txt", "\\tmp\\keep\\policy.md", False),
+            # Glob branch — Windows pattern, POSIX-shape source.
+            ("\\tmp\\*\\policy.md", "/tmp/keep/policy.md", True),
+        ],
+    )
+    def test_separator_normalised_both_sides(self, filter_str, source_path, expected):
+        from memtomem.search.pipeline import _match_source
+
+        assert _match_source(filter_str, source_path) is expected
+
+
 class TestPipelineQueryExpansion:
     """Test that query expansion modifies queries before retrieval."""
 
