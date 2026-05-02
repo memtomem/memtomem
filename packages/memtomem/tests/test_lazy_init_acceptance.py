@@ -27,6 +27,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from memtomem.server import lifespan as lifespan_mod
+from .helpers import set_home
 
 
 @pytest.fixture
@@ -43,7 +44,7 @@ def isolated_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str,
     home = tmp_path / "home"
     home.mkdir()
     db_path = tmp_path / "memtomem.db"
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, home)
     monkeypatch.setenv("MEMTOMEM_STORAGE__SQLITE_PATH", str(db_path))
     monkeypatch.setenv("MEMTOMEM_INDEXING__MEMORY_DIRS", "[]")
     monkeypatch.setenv("MEMTOMEM_EMBEDDING__PROVIDER", "none")

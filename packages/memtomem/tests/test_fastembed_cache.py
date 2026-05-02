@@ -8,17 +8,19 @@ the directory-creation contract; they do not exercise fastembed itself.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
 
 from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
+from .helpers import set_home
 
 
 def test_default_is_under_memtomem_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("MEMTOMEM_FASTEMBED_CACHE", raising=False)
     monkeypatch.delenv("FASTEMBED_CACHE_PATH", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, tmp_path)
 
     resolved = resolve_fastembed_cache_dir()
 
@@ -62,7 +64,7 @@ def test_empty_env_falls_through_to_default(
     whichever directory the user happened to launch ``mm`` from."""
     monkeypatch.setenv("MEMTOMEM_FASTEMBED_CACHE", "")
     monkeypatch.setenv("FASTEMBED_CACHE_PATH", "")
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, tmp_path)
 
     resolved = resolve_fastembed_cache_dir()
 
@@ -70,7 +72,7 @@ def test_empty_env_falls_through_to_default(
 
 
 def test_tilde_in_env_is_expanded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, tmp_path)
     monkeypatch.setenv("MEMTOMEM_FASTEMBED_CACHE", "~/custom-cache")
     monkeypatch.delenv("FASTEMBED_CACHE_PATH", raising=False)
 
@@ -80,6 +82,11 @@ def test_tilde_in_env_is_expanded(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert resolved.is_dir()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: simulates pwd.getpwuid failure mode of expanduser; "
+    "Windows expanduser uses USERPROFILE/HOMEDRIVE+HOMEPATH instead of pwent",
+)
 def test_unexpandable_home_raises_actionable_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """When ``$HOME`` is unset and pwent lookup fails, ``Path.expanduser()`` on
     Python 3.12+ raises ``RuntimeError("Could not determine home directory.")``

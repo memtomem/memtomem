@@ -37,11 +37,65 @@ def _bg_task_error_cb(task: asyncio.Task) -> None:
         logger.warning("Background task %s failed: %s", task.get_name(), exc)
 
 
-def _match_source(filter_str: str, source_path: str) -> bool:
-    """Match source_filter: glob when pattern chars present, substring otherwise."""
-    if any(c in filter_str for c in ("*", "?", "[")):
-        return fnmatch(source_path, filter_str)
-    return filter_str in source_path
+def match_source_filter(filter_str: str, source_path: str) -> bool:
+    """Match source_filter: glob when pattern chars present, substring otherwise.
+
+    Both sides are folded to forward-slash form before comparing so a
+    user-typed ``/tmp/keep/`` matches a Windows-stored
+    ``\\tmp\\keep\\file.md`` (#720, sibling of #647). On POSIX
+    ``str.replace("\\", "/")`` is a no-op for the typical case where
+    paths don't contain backslashes.
+
+    The ``source_filter`` parameter is shared across the search pipeline
+    and several MCP tools (``mem_list``, ``mem_consolidate``); this
+    helper is the canonical matcher for callers whose contract is
+    "substring or glob, autodetected by pattern chars". Callers with a
+    stricter contract use one of the two siblings below
+    (``match_source_filter_substring``, ``match_source_filter_glob``)
+    so the separator-fold rule still lives in one module per contract
+    while the contract differences stay explicit at the call site.
+
+    POSIX edge case: backslash is a legal filename character on POSIX, so
+    a chunk indexed under ``foo\\bar.md`` would match a filter
+    ``foo/bar`` after the fold. This is rare in practice (most tools and
+    users avoid backslashes in POSIX filenames) and is the trade-off for
+    a Windows-portable comparison.
+    """
+    norm_filter = filter_str.replace("\\", "/")
+    norm_source = source_path.replace("\\", "/")
+    if any(c in norm_filter for c in ("*", "?", "[")):
+        return fnmatch(norm_source, norm_filter)
+    return norm_filter in norm_source
+
+
+def match_source_filter_substring(filter_str: str, source_path: str) -> bool:
+    """Substring-only variant of :func:`match_source_filter`.
+
+    Same separator-fold rule (#720), no glob fallback. Used by callers
+    whose contract is substring-only (``mem_decay`` /
+    :func:`~memtomem.search.decay.expire_chunks`, ``mem_auto_tag``,
+    ``mem_export_chunks``). Sharing the substring + glob auto-detecting
+    helper would silently broaden their behaviour to glob, which is a
+    contract change. The fold lives in this single helper so a future
+    "tidy-up" that strips the ``.replace("\\", "/")`` calls fails the
+    POSIX-runnable pin in ``TestMatchSourceFilterSubstring`` instead of
+    only the Windows CI leg.
+    """
+    return filter_str.replace("\\", "/") in source_path.replace("\\", "/")
+
+
+def match_source_filter_glob(filter_str: str, source_path: str) -> bool:
+    """Glob-only variant of :func:`match_source_filter`.
+
+    Same separator-fold rule (#720), no substring fallback. Used by
+    callers whose contract is glob-only (``mem_entity_scan``); a
+    substring filter that lacks ``*?[`` characters returns ``False``
+    here unless it happens to be an exact-match glob, mirroring the
+    pre-fix behaviour. The fold lives in this single helper so the
+    POSIX-runnable pin in ``TestMatchSourceFilterGlob`` catches a
+    revert without depending on the Windows CI leg.
+    """
+    return fnmatch(source_path.replace("\\", "/"), filter_str.replace("\\", "/"))
 
 
 def _apply_validity_filter(results: list[SearchResult], as_of_unix: int) -> list[SearchResult]:
@@ -605,7 +659,9 @@ class SearchPipeline:
         # Filter by source file if requested
         if source_filter:
             fused = [
-                r for r in fused if _match_source(source_filter, str(r.chunk.metadata.source_file))
+                r
+                for r in fused
+                if match_source_filter(source_filter, str(r.chunk.metadata.source_file))
             ]
 
         # Filter by tag if requested (comma-separated = OR matching)

@@ -29,7 +29,7 @@ async def mem_list(
         mem_list(source_filter="docs/")          — files with "docs/" in path (substring)
         mem_list(namespace="work")               — files in the "work" namespace
     """
-    from fnmatch import fnmatch
+    from memtomem.search.pipeline import match_source_filter
 
     app = await _get_app_initialized(ctx)
     rows = await app.storage.get_source_files_with_counts()
@@ -37,14 +37,11 @@ async def mem_list(
     if not rows:
         return "No indexed files."
 
-    # Apply source_filter
+    # Apply source_filter — same substring + glob contract as
+    # ``mem_search(source_filter=...)``, including separator-fold for
+    # Windows portability (#720).
     if source_filter:
-        has_glob = any(c in source_filter for c in ("*", "?", "["))
-        rows = [
-            r
-            for r in rows
-            if (fnmatch(str(r[0]), source_filter) if has_glob else source_filter in str(r[0]))
-        ]
+        rows = [r for r in rows if match_source_filter(source_filter, str(r[0]))]
 
     # Apply namespace filter
     if namespace:

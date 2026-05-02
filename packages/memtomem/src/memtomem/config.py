@@ -343,7 +343,20 @@ class NamespacePolicyRule(BaseSettings):
         if not v:
             raise ValueError("path_glob must be non-empty")
         if v == "~" or v.startswith("~/"):
-            v = str(Path(v).expanduser())
+            # ``as_posix()`` not ``str()``: ``pathspec.GitIgnoreSpec`` is the
+            # downstream consumer (engine.py:_build_exclude_spec) and gitignore
+            # patterns require ``/`` separators. On Windows ``str(Path(...))``
+            # would emit backslashes, which pathspec treats as escape characters
+            # and silently mismatches every file.
+            v = Path(v).expanduser().as_posix()
+        elif Path(v).is_absolute():
+            # Same normalization for already-absolute paths supplied directly
+            # (e.g. a config fragment that pre-expanded ``~/`` to ``C:\...``).
+            # Without this, two fragments declaring the equivalent rule via
+            # different forms (``~/foo`` and ``C:\Users\me\foo``) would dedupe
+            # on POSIX but not on Windows, since ``_dedup_key`` hashes the raw
+            # post-validator string.
+            v = Path(v).as_posix()
         return v
 
     @field_validator("namespace")
@@ -1344,12 +1357,11 @@ def categorize_memory_dir(path: str | Path) -> ProviderCategory:
 
     Returns one of ``ProviderCategory``'s literal values, defaulting to
     ``"user"`` for anything that doesn't match a known provider layout.
-    Classification only — does not check existence or validity. Uses
-    forward-slash regex, so on Windows a backslash-normalised path will
-    fall through to ``"user"`` until a future path-sep-agnostic pass
-    lands (tracked in #316).
+    Classification only — does not check existence or validity. Matching
+    normalizes separators to forward slashes first, so POSIX, Windows,
+    UNC, and mixed-separator strings hit the same provider patterns.
     """
-    s = str(path).rstrip("/")
+    s = str(path).replace("\\", "/").rstrip("/")
     for cat, pat in _PROVIDER_CATEGORY_PATTERNS:
         if pat.search(s):
             return cat

@@ -21,6 +21,7 @@ from memtomem.context.agents import (
     parse_canonical_agent,
 )
 from memtomem.context.detector import detect_agent_dirs
+from .helpers import set_home
 
 SAMPLE_FULL_AGENT = """---
 name: code-reviewer
@@ -58,8 +59,7 @@ def codex_home(tmp_path, monkeypatch):
     """
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
-    monkeypatch.setenv("USERPROFILE", str(fake_home))  # Windows safety (no-op on macOS)
+    set_home(monkeypatch, fake_home)
     return fake_home
 
 

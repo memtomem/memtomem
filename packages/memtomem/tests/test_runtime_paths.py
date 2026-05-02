@@ -22,6 +22,7 @@ from memtomem._runtime_paths import (
     runtime_dir,
     server_pid_path,
 )
+from .helpers import set_home
 
 
 def _make_safe_xdg(tmp_path: Path) -> Path:
@@ -268,7 +269,7 @@ class TestLegacyServerPidPath:
         """Import-time ``Path.home()`` would capture the developer's
         real home and leak across fixtures; the function must re-read
         ``$HOME`` every call."""
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
 
         assert legacy_server_pid_path() == tmp_path / ".memtomem" / ".server.pid"
 

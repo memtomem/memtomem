@@ -18,6 +18,7 @@ from memtomem.indexing.engine import (
     _estimate_tokens,
 )
 from memtomem.models import Chunk, ChunkMetadata
+from .helpers import set_home
 
 
 # ---------------------------------------------------------------------------
@@ -2452,7 +2453,7 @@ class TestMemoryDirStats:
         """
         from memtomem.indexing.engine import memory_dir_stats
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         (tmp_path / "memories").mkdir()
         storage = _FakeStorageForStats([])
 
@@ -2571,6 +2572,47 @@ class TestMemoryDirStats:
 
 
 # ===========================================================================
+# 11b. norm_dir_prefix — trailing separator pin (#647)
+# ===========================================================================
+
+
+class TestNormDirPrefix:
+    """Pin: the trailing separator must come from ``os.sep`` rather than
+    a hardcoded ``"/"``.
+
+    Without this pin a regression where someone "tidies" ``os.sep`` back
+    to ``"/"`` would still pass on POSIX (because ``os.sep == "/"`` there)
+    and only break on the Windows CI leg (#647). Each parameter row
+    monkey-patches ``norm_path`` and ``os.sep`` so the test exercises both
+    platform shapes from a single Linux/macOS dev box.
+    """
+
+    @pytest.mark.parametrize(
+        "fake_norm_path,fake_sep,expected",
+        [
+            # POSIX shape — append "/" if missing.
+            ("/foo/bar", "/", "/foo/bar/"),
+            # Already-trailing POSIX — no double separator.
+            ("/foo/bar/", "/", "/foo/bar/"),
+            # Windows shape — append "\\" (this is what os.sep == "\\" buys).
+            ("C:\\Users\\foo", "\\", "C:\\Users\\foo\\"),
+            # Already-trailing Windows — no double separator.
+            ("C:\\Users\\foo\\", "\\", "C:\\Users\\foo\\"),
+        ],
+    )
+    def test_appends_os_sep_not_hardcoded_slash(
+        self, monkeypatch, fake_norm_path, fake_sep, expected
+    ):
+        import os as _os
+
+        from memtomem.indexing import engine
+
+        monkeypatch.setattr("memtomem.storage.sqlite_helpers.norm_path", lambda _p: fake_norm_path)
+        monkeypatch.setattr(_os, "sep", fake_sep)
+        assert engine.norm_dir_prefix("ignored-by-mock") == expected
+
+
+# ===========================================================================
 # 12. resolve_owning_memory_dir — source → owning dir lookup
 # ===========================================================================
 
@@ -2643,7 +2685,7 @@ class TestResolveOwningMemoryDir:
         configured dirs would never match concrete source paths."""
         from memtomem.indexing.engine import resolve_owning_memory_dir
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         (tmp_path / "memories").mkdir()
         f = tmp_path / "memories" / "note.md"
         f.write_text("#")

@@ -34,6 +34,7 @@ from httpx import ASGITransport, AsyncClient
 
 from memtomem.web import hot_reload as _hot_reload
 from memtomem.web.app import create_app
+from .helpers import set_home
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +68,7 @@ def _write_fragment(home: Path, name: str, data: dict[str, Any]) -> Path:
 
 @pytest.fixture
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, tmp_path)
     # pydantic-settings reads env; clear any memtomem env vars that may leak
     # from the developer shell and make the test non-hermetic.
     for k in list(os.environ):

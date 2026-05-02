@@ -11,6 +11,7 @@ import json
 import multiprocessing as mp
 import shutil
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -213,6 +214,10 @@ def test_install_skips_symlinks_in_source(
     assert any("skipping symlink" in r.message for r in caplog.records)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX file mode (stat.S_IMODE) — Windows ignores POSIX permission bits",
+)
 def test_install_files_written_with_default_mode(wiki_root: Path, tmp_path: Path) -> None:
     """Asset content lands at 0o644 (readable by other tools), not at the
     0o600 atomic_write_bytes default reserved for state files."""

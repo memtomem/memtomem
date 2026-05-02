@@ -273,6 +273,12 @@ def test_discover_experimental_scan_disabled(
     assert "claude-projects" not in scopes[0].sources
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: relies on `/tmp` existing as a real directory and on "
+    "the claude-projects encoding (`-tmp` → `/tmp` via `replace('-', '/')`) "
+    "which is POSIX-only by production design (see _decode_claude_project_dirname)",
+)
 def test_discover_experimental_scan_enabled_filters_misdecoded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -306,6 +312,11 @@ def test_discover_experimental_scan_enabled_filters_misdecoded(
     assert all("no/such/place" not in str(s.root or "") for s in scopes)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: uses cwd=Path('/tmp') and the `-tmp` → `/tmp` encoding; "
+    "/tmp does not exist on Windows and the encoding scheme is POSIX-only",
+)
 def test_discover_experimental_dedup_with_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

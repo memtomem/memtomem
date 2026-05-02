@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from memtomem.models import Chunk, ChunkMetadata
 from memtomem.server.context import AppContext
 
@@ -36,6 +38,21 @@ def isolate_memtomem_env(monkeypatch) -> None:
     import memtomem.config as _cfg
 
     monkeypatch.setattr(_cfg, "load_config_overrides", lambda c: None)
+
+
+def set_home(monkeypatch: pytest.MonkeyPatch, path: Path | str) -> None:
+    """Override the home directory for tests that exercise ``Path.home()``
+    or ``Path("~/...").expanduser()``.
+
+    On POSIX, ``Path.home()`` reads ``HOME``. On Windows it reads
+    ``USERPROFILE`` first (then ``HOMEDRIVE``+``HOMEPATH``), so a bare
+    ``monkeypatch.setenv("HOME", ...)`` is silently ignored on Windows
+    runners and tests end up reading/writing the real user home. Setting
+    both env vars is harmless on POSIX (stdlib ignores ``USERPROFILE``)
+    and correct on Windows.
+    """
+    monkeypatch.setenv("HOME", str(path))
+    monkeypatch.setenv("USERPROFILE", str(path))
 
 
 class StubCtx:

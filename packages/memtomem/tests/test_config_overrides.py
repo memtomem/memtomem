@@ -17,6 +17,8 @@ import pytest
 from memtomem import config as _cfg
 from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
 
+from .helpers import set_home
+
 
 @pytest.fixture
 def override_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -84,7 +86,7 @@ def test_env_var_wins_over_config_json_scalar(
     )
     cfg = Mem2MemConfig()
     load_config_overrides(cfg)
-    assert str(cfg.storage.sqlite_path) == "/from/env.db"
+    assert Path(cfg.storage.sqlite_path).as_posix() == "/from/env.db"
 
 
 def test_env_var_wins_over_config_json_list(
@@ -97,7 +99,7 @@ def test_env_var_wins_over_config_json_list(
     )
     cfg = Mem2MemConfig()
     load_config_overrides(cfg)
-    assert [str(p) for p in cfg.indexing.memory_dirs] == ["/from/env"]
+    assert [Path(p).as_posix() for p in cfg.indexing.memory_dirs] == ["/from/env"]
 
 
 def test_env_and_config_coexist_on_different_fields(
@@ -117,7 +119,7 @@ def test_env_and_config_coexist_on_different_fields(
     )
     cfg = Mem2MemConfig()
     load_config_overrides(cfg)
-    assert str(cfg.storage.sqlite_path) == "/from/env.db"
+    assert Path(cfg.storage.sqlite_path).as_posix() == "/from/env.db"
     assert cfg.embedding.model == "from-config"
 
 
@@ -142,8 +144,8 @@ def test_regression_pr247_mcp_json_env_block(
     )
     cfg = Mem2MemConfig()
     load_config_overrides(cfg)
-    assert str(cfg.storage.sqlite_path) == "~/.memtomem/memtomem.db"
-    assert [str(p) for p in cfg.indexing.memory_dirs] == ["~/notes"]
+    assert Path(cfg.storage.sqlite_path).as_posix() == "~/.memtomem/memtomem.db"
+    assert [Path(p).as_posix() for p in cfg.indexing.memory_dirs] == ["~/notes"]
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +223,7 @@ def test_config_d_env_wins_over_fragments(
     )
     cfg = Mem2MemConfig()
     load_config_d(cfg)
-    assert str(cfg.storage.sqlite_path) == "/from/env.db"
+    assert Path(cfg.storage.sqlite_path).as_posix() == "/from/env.db"
 
 
 def test_config_d_unknown_section_warned_but_not_fatal(
@@ -354,7 +356,13 @@ def test_config_d_namespace_rules_dedup_after_home_expansion(
     producing two rules and fail here.
     """
     _clear_all_memtomem_env(monkeypatch)
-    abs_form = str(Path("~/some/memtomem-test/**").expanduser())
+    # ``as_posix()`` matches the validator's normalization. Pre-#726 this was
+    # ``str(Path(...).expanduser())`` which dedup'd on POSIX by accident
+    # (``str`` of a POSIX absolute path is identical to its as_posix form).
+    # On Windows the raw ``str`` form leaks backslashes; the validator now
+    # normalizes both ``~/`` and absolute inputs to forward slashes so dedup
+    # works on every platform.
+    abs_form = Path("~/some/memtomem-test/**").expanduser().as_posix()
     (config_d_dir / "10-home.json").write_text(
         json.dumps(
             {
@@ -589,6 +597,25 @@ def test_detect_provider_dirs_categories_are_fixed() -> None:
     assert set(grouped) == {"claude-memory", "claude-plans", "codex"}
 
 
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        (r"C:\Users\foo\.claude\projects\abc\memory", "claude-memory"),
+        (r"C:\Users\foo\.claude\plans", "claude-plans"),
+        (r"C:\Users\foo\.codex\memories", "codex"),
+        (r"C:\Users\foo\Documents\notes", "user"),
+        (r"C:\Users\foo/.claude/plans", "claude-plans"),
+        (r"C:\Users\foo\.claude\plans" + "\\", "claude-plans"),
+        (r"\\server\share\.codex\memories", "codex"),
+    ],
+)
+def test_categorize_memory_dir_accepts_windows_separators(
+    path: str, expected: _cfg.ProviderCategory
+) -> None:
+    """Provider category matching is path-separator agnostic (#316)."""
+    assert _cfg.categorize_memory_dir(path) == expected
+
+
 def test_detect_provider_dirs_excludes_gemini(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -599,7 +626,7 @@ def test_detect_provider_dirs_excludes_gemini(
     home = tmp_path / "home"
     (home / ".gemini").mkdir(parents=True)
     (home / ".gemini" / "GEMINI.md").write_text("# memory", encoding="utf-8")
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, home)
 
     grouped = _cfg._detect_provider_dirs()
     assert "gemini" not in grouped
@@ -618,7 +645,7 @@ def test_detect_provider_dirs_filters_empty_claude_memory(
     proj_with.mkdir(parents=True)
     (proj_with / "MEMORY.md").write_text("# index", encoding="utf-8")
     proj_without.mkdir(parents=True)  # empty memory dir
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, home)
 
     grouped = _cfg._detect_provider_dirs()
     paths = {str(p) for p in grouped["claude-memory"]}
@@ -636,7 +663,7 @@ def test_detect_provider_dirs_finds_claude_plans_and_codex(
     codex = home / ".codex" / "memories"
     plans.mkdir(parents=True)
     codex.mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, home)
 
     grouped = _cfg._detect_provider_dirs()
     assert grouped["claude-plans"] == [plans]

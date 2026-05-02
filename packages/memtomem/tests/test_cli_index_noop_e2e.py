@@ -18,6 +18,7 @@ Two variants are kept intentionally:
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 
@@ -25,6 +26,7 @@ import pytest
 from click.testing import CliRunner
 
 from memtomem.cli import cli
+from .helpers import set_home
 
 
 def _make_memory_dir(home: str) -> str:
@@ -53,7 +55,7 @@ class TestFreshNoopIndexInline:
 
         home = tmp_path / "home"
         home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
+        set_home(monkeypatch, home)
         monkeypatch.setattr(_bootstrap, "_CONFIG_PATH", home / ".memtomem" / "config.json")
 
         mem_dir = _make_memory_dir(str(home))
@@ -96,15 +98,19 @@ class TestFreshNoopIndexSubprocess:
         package has no ``__main__`` module, and the installed entry point is
         what real users hit.
         """
-        mm_bin = os.path.join(os.path.dirname(sys.executable), "mm")
+        # ``shutil.which`` adds the platform-correct suffix (``.exe`` on
+        # Windows via PATHEXT, none on POSIX), so the same lookup works
+        # against both ``.venv/bin/mm`` and ``.venv/Scripts/mm.exe``.
+        bin_dir = os.path.dirname(sys.executable)
+        mm_bin = shutil.which("mm", path=bin_dir)
         # Fail loudly instead of pytest.skip — any valid test environment
         # (``uv run pytest`` or ``uv pip install -e``) must provide the
         # ``mm`` entry point. A silent skip here would turn this subprocess
         # regression guard into CI false-green if the editable install is
         # ever dropped.
-        if not os.path.exists(mm_bin):
+        if mm_bin is None:
             pytest.fail(
-                f"mm binary not found at {mm_bin}. "
+                f"mm binary not found in {bin_dir}. "
                 "Run `uv pip install -e packages/memtomem[all]` before testing."
             )
 

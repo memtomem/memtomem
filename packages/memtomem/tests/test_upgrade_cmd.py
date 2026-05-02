@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 from click.testing import CliRunner
@@ -63,6 +64,10 @@ def _patch_liveness(monkeypatch, state: ServerState) -> None:
 # ---------------------------------------------------------------- tests
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Asserts the POSIX message; Windows takes the skipping-process-termination branch (covered by test_windows_skips_kill)",
+)
 def test_no_running_server_just_reinstalls(monkeypatch, fake_uv, force_tty):
     calls, _configure = fake_uv
     _patch_liveness(monkeypatch, ServerState(alive=False, pid=None, pid_file=None))
@@ -73,6 +78,10 @@ def test_no_running_server_just_reinstalls(monkeypatch, fake_uv, force_tty):
     assert calls == [["uv", "tool", "install", "--refresh", "--reinstall", "memtomem"]]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: SIGTERM kill path; Windows skips process termination entirely (covered by test_windows_skips_kill)",
+)
 def test_running_server_sigterm_path(monkeypatch, tmp_path, fake_uv, force_tty):
     calls, _configure = fake_uv
     pid_file = tmp_path / "server.pid"
@@ -96,6 +105,10 @@ def test_running_server_sigterm_path(monkeypatch, tmp_path, fake_uv, force_tty):
     assert calls  # uv was invoked
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: SIGKILL escalation path; Windows skips process termination entirely (covered by test_windows_skips_kill)",
+)
 def test_running_server_escalates_to_sigkill(monkeypatch, tmp_path, fake_uv, force_tty):
     _calls, _configure = fake_uv
     pid_file = tmp_path / "server.pid"
@@ -235,6 +248,10 @@ def test_extras_combined_with_version_pin(monkeypatch, fake_uv, force_tty):
     assert calls == [["uv", "tool", "install", "--refresh", "--reinstall", "memtomem[all]==0.1.32"]]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: exercises the SIGKILL respawn-detection path; Windows skips kill entirely (covered by test_windows_skips_kill)",
+)
 def test_pid_file_unlink_skipped_if_respawned(monkeypatch, tmp_path, fake_uv, force_tty):
     """SIGKILL path: a fresh server respawns at the same pid file path
     inside the settle window. We must NOT delete its lockfile."""

@@ -109,7 +109,12 @@ async def expire_chunks(
 
     sources = await storage.get_all_source_files()
     if source_filter:
-        sources = {s for s in sources if source_filter in str(s)}
+        from memtomem.search.pipeline import match_source_filter_substring
+
+        # Substring-only contract — see ``match_source_filter_substring``
+        # for the separator-fold rule (#720) and rationale for not
+        # sharing the glob-aware ``match_source_filter``.
+        sources = {s for s in sources if match_source_filter_substring(source_filter, str(s))}
 
     total = 0
     to_delete: list[UUID] = []

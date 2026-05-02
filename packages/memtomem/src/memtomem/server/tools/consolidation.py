@@ -45,14 +45,11 @@ async def mem_consolidate(
     # Group chunks by source file
     sources = await app.storage.get_source_files_with_counts()
     if source_filter:
-        from fnmatch import fnmatch
+        from memtomem.search.pipeline import match_source_filter
 
-        has_glob = any(c in source_filter for c in ("*", "?", "["))
-        sources = [
-            s
-            for s in sources
-            if (fnmatch(str(s[0]), source_filter) if has_glob else source_filter in str(s[0]))
-        ]
+        # Same substring + glob contract as ``mem_search(source_filter=...)``,
+        # including separator-fold for Windows portability (#720).
+        sources = [s for s in sources if match_source_filter(source_filter, str(s[0]))]
 
     # Filter by namespace if specified
     if effective_ns:
