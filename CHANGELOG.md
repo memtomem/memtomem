@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.34] — 2026-05-02
+
 ### Added
 
 - **`mm context migrate` (PR-D C4, ADR-0008)** — converts agents and
