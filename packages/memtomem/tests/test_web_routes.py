@@ -129,6 +129,7 @@ def app():
     storage.get_chunk = AsyncMock(return_value=_make_test_chunk())
     storage.get_all_source_files = AsyncMock(return_value=[Path("/tmp/test.md")])
     storage.list_chunks_by_source = AsyncMock(return_value=[_make_test_chunk()])
+    storage.count_chunks_by_source = AsyncMock(return_value=1)
     storage.delete_chunks = AsyncMock()
     storage.delete_by_source = AsyncMock(return_value=1)
     storage.get_source_files_with_counts = AsyncMock(
@@ -658,6 +659,18 @@ class TestChunksList:
         data = resp.json()
         assert data["total"] == 1
         assert data["chunks"][0]["content"] == "test chunk content"
+
+    async def test_list_chunks_total_reflects_source_count(self, app, client: AsyncClient):
+        app.state.storage.list_chunks_by_source.return_value = [_make_test_chunk()]
+        app.state.storage.count_chunks_by_source.return_value = 5
+        resp = await client.get(
+            "/api/chunks",
+            params={"source": "/tmp/test.md", "limit": 1},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["chunks"]) == 1
+        assert data["total"] == 5
 
     async def test_list_chunks_missing_source_returns_422(self, client: AsyncClient):
         resp = await client.get("/api/chunks")
