@@ -33,9 +33,11 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "COPY_SKIP_NAMES",
+    "DIRTY_SKIP_SUFFIXES",
     "atomic_write_bytes",
     "atomic_write_text",
     "copy_tree_atomic",
+    "iter_installed_files",
 ]
 
 
@@ -48,6 +50,24 @@ COPY_SKIP_NAMES: frozenset[str] = frozenset({".git", ".DS_Store", "__pycache__"}
   clean even when curated through the GUI.
 - ``__pycache__`` — Python bytecode caches that test/automation runs may
   drop into a wiki tree; never wanted in a project's canonical surface.
+"""
+
+
+DIRTY_SKIP_SUFFIXES: frozenset[str] = frozenset({".bak"})
+"""Suffix patterns the installed-file walker excludes.
+
+Shared by :func:`copy_tree_atomic` (no-op there in practice; wikis don't
+carry ``.bak`` files under normal operation) and
+:func:`iter_installed_files` (the real filter for
+:func:`memtomem.context.dirty.is_asset_dirty` and the install-time
+capture helper).
+
+``.bak`` — sibling files created by ``mm context update --force`` to
+preserve user edits before overwriting with wiki bytes. They live in the
+dest tree by design and carry the user's pre-update mtime, so without
+this skip they would trip the next ``mm context update`` into
+``reason="dirty"`` purely on the prior backup, refusing every future
+update until the user manually deletes the ``.bak``.
 """
 
 
@@ -163,3 +183,28 @@ def copy_tree_atomic(src: Path, dst: Path, *, mode: int = 0o644) -> int:
         elif entry.is_dir():
             written += copy_tree_atomic(entry, target, mode=mode)
     return written
+
+
+def iter_installed_files(root: Path) -> Iterator[Path]:
+    """Yield non-skipped, non-symlink files under *root* recursively.
+
+    Mirrors :func:`copy_tree_atomic` traversal rules: skip entries named
+    in :data:`COPY_SKIP_NAMES`, skip suffixes in
+    :data:`DIRTY_SKIP_SUFFIXES`, skip symlinks with a warning. Shared by
+    :func:`memtomem.context.dirty.is_asset_dirty` (the dirty walker) and
+    the install-timestamp capture helper, so both consume the exact same
+    set of files — ``installed_at`` cannot reference a file the
+    dirty-checker will later ignore, and vice versa.
+    """
+    for entry in root.iterdir():
+        if entry.name in COPY_SKIP_NAMES:
+            continue
+        if entry.suffix in DIRTY_SKIP_SUFFIXES:
+            continue
+        if entry.is_symlink():
+            logger.warning("iter_installed_files: skipping symlink %s", entry)
+            continue
+        if entry.is_file():
+            yield entry
+        elif entry.is_dir():
+            yield from iter_installed_files(entry)

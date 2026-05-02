@@ -27,40 +27,19 @@ the dest tree separately.
 
 from __future__ import annotations
 
-import logging
-from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from memtomem.context._atomic import COPY_SKIP_NAMES
+from memtomem.context._atomic import iter_installed_files
 from memtomem.context.lockfile import Lockfile
 
 __all__ = [
-    "DIRTY_SKIP_SUFFIXES",
     "DirtyReason",
     "DirtyReport",
     "is_asset_dirty",
 ]
-
-logger = logging.getLogger(__name__)
-
-
-DIRTY_SKIP_SUFFIXES: frozenset[str] = frozenset({".bak"})
-"""Suffix patterns the dirty walker skips beyond :data:`COPY_SKIP_NAMES`.
-
-``.bak`` — sibling files created by ``mm context update --force`` to
-preserve user edits before overwriting with wiki bytes. They live in
-the dest tree by design and carry the user's pre-update mtime, so
-without this skip they would trip the next ``mm context update`` into
-``reason="dirty"`` purely on the prior backup, refusing every future
-update until the user manually deletes the ``.bak``.
-
-This is a *dirty-walk* skip only — ``copy_tree_atomic`` does not need
-the same exclusion (the wiki is not expected to carry ``.bak`` files
-under normal operation).
-"""
 
 
 DirtyReason = Literal["clean", "dirty", "never_installed", "missing_dest"]
@@ -143,7 +122,7 @@ def is_asset_dirty(
 
     dirty: list[Path] = []
     checked = 0
-    for file_path in _iter_files(dest):
+    for file_path in iter_installed_files(dest):
         checked += 1
         if file_path.stat().st_mtime > installed_at_epoch:
             dirty.append(file_path)
@@ -154,25 +133,3 @@ def is_asset_dirty(
         dirty_files=tuple(dirty),
         checked_files=checked,
     )
-
-
-def _iter_files(root: Path) -> Iterator[Path]:
-    """Yield non-skipped, non-symlink files under *root* recursively.
-
-    Mirrors :func:`memtomem.context._atomic.copy_tree_atomic` traversal
-    rules: skip entries named in :data:`COPY_SKIP_NAMES`, skip symlinks
-    with a warning. Caller is responsible for the count semantics
-    (:attr:`DirtyReport.checked_files` reflects yielded entries only).
-    """
-    for entry in root.iterdir():
-        if entry.name in COPY_SKIP_NAMES:
-            continue
-        if entry.suffix in DIRTY_SKIP_SUFFIXES:
-            continue
-        if entry.is_symlink():
-            logger.warning("is_asset_dirty: skipping symlink %s", entry)
-            continue
-        if entry.is_file():
-            yield entry
-        elif entry.is_dir():
-            yield from _iter_files(entry)
