@@ -19,6 +19,8 @@ import pytest
 from memtomem.cli.init_cmd import MmBinaryOrigin, RuntimeProfile, _write_mcp_json
 from memtomem.config import Mem2MemConfig
 
+from .helpers import set_home
+
 
 def test_write_mcp_json_omits_env_when_empty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2957,7 +2959,7 @@ class TestProviderDirsStep:
         fresh wizard run on a legacy install doesn't keep migrating."""
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         provider_dir = tmp_path / "claude-mem"
         provider_dir.mkdir()
 
@@ -3270,7 +3272,7 @@ class TestIncludeProviderFlag:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         codex = tmp_path / "codex"
         codex.mkdir()
         monkeypatch.setattr(
@@ -3304,7 +3306,7 @@ class TestIncludeProviderFlag:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr(
             "memtomem.config._detect_provider_dirs",
             lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
@@ -3337,7 +3339,7 @@ class TestIncludeProviderFlag:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         # Pretend a Codex dir exists; the test asserts it's NOT pulled in.
         codex = tmp_path / "codex"
         codex.mkdir()
