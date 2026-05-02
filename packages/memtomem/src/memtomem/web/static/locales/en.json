@@ -28,6 +28,8 @@
   "home.section.namespaces": "Namespaces",
   "home.section.file_types": "File Types",
   "home.section.activity": "Activity (1 year)",
+  "home.activity.cell_aria_one": "{date}, {count} chunk. Click to view in Timeline.",
+  "home.activity.cell_aria_other": "{date}, {count} chunks. Click to view in Timeline.",
   "home.section.chunk_sizes": "Chunk Sizes",
   "home.section.chunk_sizes_unit": "(tokens)",
   "home.section.recent_sources": "Recent Sources",

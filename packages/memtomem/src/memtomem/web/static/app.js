@@ -1162,7 +1162,14 @@ function _renderActivityMap(chunks) {
       html += '<div class="activity-cell activity-empty"></div>';
     } else {
       const level = getLevel(cell.count);
-      html += `<div class="activity-cell activity-cell-link" data-level="${level}" data-date="${cell.date}" role="button" tabindex="0" title="${cell.date}: ${cell.count}"></div>`;
+      const ariaKey = cell.count === 1
+        ? 'home.activity.cell_aria_one'
+        : 'home.activity.cell_aria_other';
+      const ariaRaw = (typeof t === 'function')
+        ? t(ariaKey, { date: cell.date, count: cell.count })
+        : `${cell.date}, ${cell.count} chunks. View in Timeline.`;
+      const ariaSafe = ariaRaw.replace(/"/g, '&quot;');
+      html += `<div class="activity-cell activity-cell-link" data-level="${level}" data-date="${cell.date}" role="button" tabindex="0" title="${cell.date}: ${cell.count}" aria-label="${ariaSafe}"></div>`;
     }
   });
   html += '</div>';

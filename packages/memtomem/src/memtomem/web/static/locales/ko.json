@@ -28,6 +28,8 @@
   "home.section.namespaces": "네임스페이스",
   "home.section.file_types": "파일 유형",
   "home.section.activity": "활동 (1년)",
+  "home.activity.cell_aria_one": "{date}, 청크 {count}개. 클릭하면 타임라인에서 확인합니다.",
+  "home.activity.cell_aria_other": "{date}, 청크 {count}개. 클릭하면 타임라인에서 확인합니다.",
   "home.section.chunk_sizes": "청크 크기",
   "home.section.chunk_sizes_unit": "(토큰)",
   "home.section.recent_sources": "최근 소스",
