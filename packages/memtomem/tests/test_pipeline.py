@@ -8,8 +8,8 @@ from uuid import uuid4
 from memtomem.models import Chunk, ChunkMetadata, SearchResult
 
 
-class TestMatchSource:
-    """Pin: ``_match_source`` folds separators on both sides before
+class TestMatchSourceFilter:
+    """Pin: ``match_source_filter`` folds separators on both sides before
     comparing, so a POSIX-typed ``/tmp/keep/`` matches a Windows-stored
     ``\\tmp\\keep\\file.md`` (#720, sibling of #647).
 
@@ -42,9 +42,9 @@ class TestMatchSource:
         ],
     )
     def test_separator_normalised_both_sides(self, filter_str, source_path, expected):
-        from memtomem.search.pipeline import _match_source
+        from memtomem.search.pipeline import match_source_filter
 
-        assert _match_source(filter_str, source_path) is expected
+        assert match_source_filter(filter_str, source_path) is expected
 
 
 class TestPipelineQueryExpansion:

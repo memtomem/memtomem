@@ -321,7 +321,11 @@ async def auto_tag_storage(
 
     sources = await storage.get_all_source_files()
     if source_filter:
-        sources = {s for s in sources if source_filter in str(s)}
+        # Fold separators on both sides so a POSIX-typed substring like
+        # ``/tmp/keep/`` still matches Windows-stored ``\tmp\keep\...``
+        # paths (#720). Substring-only by contract.
+        norm_filter = source_filter.replace("\\", "/")
+        sources = {s for s in sources if norm_filter in str(s).replace("\\", "/")}
 
     total = 0
     tagged = 0

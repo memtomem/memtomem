@@ -37,13 +37,29 @@ def _bg_task_error_cb(task: asyncio.Task) -> None:
         logger.warning("Background task %s failed: %s", task.get_name(), exc)
 
 
-def _match_source(filter_str: str, source_path: str) -> bool:
+def match_source_filter(filter_str: str, source_path: str) -> bool:
     """Match source_filter: glob when pattern chars present, substring otherwise.
 
     Both sides are folded to forward-slash form before comparing so a
     user-typed ``/tmp/keep/`` matches a Windows-stored
     ``\\tmp\\keep\\file.md`` (#720, sibling of #647). On POSIX
-    ``str.replace("\\", "/")`` is identity, so behaviour is unchanged.
+    ``str.replace("\\", "/")`` is a no-op for the typical case where
+    paths don't contain backslashes.
+
+    The ``source_filter`` parameter is shared across the search pipeline
+    and several MCP tools (``mem_list``, ``mem_consolidate``,
+    ``mem_export_chunks``, ``mem_auto_tag``, ``mem_extract_entities``,
+    ``mem_decay``); this helper is the canonical substring + glob matcher
+    for the substring + glob contract. The substring-only and glob-only
+    callers apply the same separator fold inline at their call sites
+    rather than calling this helper, so the contract differences stay
+    explicit.
+
+    POSIX edge case: backslash is a legal filename character on POSIX, so
+    a chunk indexed under ``foo\\bar.md`` would match a filter
+    ``foo/bar`` after the fold. This is rare in practice (most tools and
+    users avoid backslashes in POSIX filenames) and is the trade-off for
+    a Windows-portable comparison.
     """
     norm_filter = filter_str.replace("\\", "/")
     norm_source = source_path.replace("\\", "/")
@@ -613,7 +629,9 @@ class SearchPipeline:
         # Filter by source file if requested
         if source_filter:
             fused = [
-                r for r in fused if _match_source(source_filter, str(r.chunk.metadata.source_file))
+                r
+                for r in fused
+                if match_source_filter(source_filter, str(r.chunk.metadata.source_file))
             ]
 
         # Filter by tag if requested (comma-separated = OR matching)

@@ -50,8 +50,13 @@ async def mem_entity_scan(
     scanned_sources = 0
     entity_type_counts: dict[str, int] = {}
 
+    # Fold separators on both sides so a POSIX-typed glob like
+    # ``/tmp/keep/*`` still matches Windows-stored ``\tmp\keep\...``
+    # paths (#720). Glob-only by contract — substring inputs are handled
+    # by ``match_source_filter`` elsewhere; entity scan stays glob.
+    norm_filter = source_filter.replace("\\", "/") if source_filter else None
     for source in sources:
-        if source_filter and not fnmatch(str(source), source_filter):
+        if norm_filter and not fnmatch(str(source).replace("\\", "/"), norm_filter):
             continue
 
         chunks = await storage.list_chunks_by_source(source)
