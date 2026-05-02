@@ -343,7 +343,12 @@ class NamespacePolicyRule(BaseSettings):
         if not v:
             raise ValueError("path_glob must be non-empty")
         if v == "~" or v.startswith("~/"):
-            v = str(Path(v).expanduser())
+            # ``as_posix()`` not ``str()``: ``pathspec.GitIgnoreSpec`` is the
+            # downstream consumer (engine.py:_build_exclude_spec) and gitignore
+            # patterns require ``/`` separators. On Windows ``str(Path(...))``
+            # would emit backslashes, which pathspec treats as escape characters
+            # and silently mismatches every file.
+            v = Path(v).expanduser().as_posix()
         return v
 
     @field_validator("namespace")
