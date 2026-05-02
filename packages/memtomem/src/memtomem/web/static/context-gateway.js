@@ -99,9 +99,45 @@ async function loadCtxOverview() {
       const d = data[typ.key] || {};
       const total = d.total || 0;
       const inSync = d.in_sync || 0;
-      const hasIssue = d.error || (total > 0 && inSync < total) || d.status === 'out_of_sync' || d.status === 'error';
+      // ``/api/context/overview`` aggregates ``(runtime, name, status)`` triples.
+      // ``total`` is the count of distinct names; status counts are per
+      // ``(runtime, name)`` pair, so when one artifact is tracked under
+      // multiple runtimes the per-status counts can sum above ``total``.
+      // Concrete: ``commands: {total: 3, in_sync: 3, missing_target: 3}``
+      // means 3 commands all in sync for one runtime AND all missing on
+      // another. ``inSync < total`` alone misses that case (#692). Treat
+      // any non-``in_sync`` count as a real issue so multi-runtime
+      // divergence doesn't hide behind a green ``3/3 synced`` badge.
+      const missingTarget = d.missing_target || 0;
+      const missingCanonical = d.missing_canonical || 0;
+      const outOfSync = d.out_of_sync || 0;
+      const parseError = d.parse_error || 0;
+      const issueCount = missingTarget + missingCanonical + outOfSync + parseError;
+      const hasIssue = d.error || issueCount > 0
+        || d.status === 'out_of_sync' || d.status === 'error';
       const badgeCls = d.error ? 'badge-danger' : (hasIssue ? 'badge-warning' : 'badge-success');
-      const badgeText = d.error ? 'Error' : (typ.key === 'settings' ? (d.status || '').replace('_', ' ') : `${inSync}/${total} synced`);
+
+      // Pick the most actionable status to surface in the badge. Order
+      // matters: ``parse_error`` is a hard failure (file is malformed),
+      // then unsynced-runtime states, then unimported-canonical, then
+      // out-of-sync content. Falling through to the historical
+      // ``{inSync}/{total} synced`` keeps the all-clear case unchanged.
+      let badgeText;
+      if (d.error) {
+        badgeText = 'Error';
+      } else if (typ.key === 'settings') {
+        badgeText = (d.status || '').replace('_', ' ');
+      } else if (parseError > 0) {
+        badgeText = `${parseError} ${t('settings.ctx.badge_parse_error', 'parse error')}`;
+      } else if (missingTarget > 0) {
+        badgeText = `${missingTarget} ${t('settings.ctx.badge_missing_target', 'missing')}`;
+      } else if (missingCanonical > 0) {
+        badgeText = `${missingCanonical} ${t('settings.ctx.badge_missing_canonical', 'not imported')}`;
+      } else if (outOfSync > 0) {
+        badgeText = `${outOfSync} ${t('settings.ctx.badge_out_of_sync', 'out of sync')}`;
+      } else {
+        badgeText = `${inSync}/${total} ${t('settings.ctx.badge_synced', 'synced')}`;
+      }
 
       html += `<div class="ctx-overview-stat" data-section="${typ.section}">
         <div class="ctx-overview-count">${typ.key === 'settings' ? (d.status === 'in_sync' ? '\u2714' : '\u26A0') : total}</div>
