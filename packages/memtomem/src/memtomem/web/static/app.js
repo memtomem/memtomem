@@ -1276,8 +1276,14 @@ function _renderNsChart(namespaces) {
   chart.innerHTML = sorted.map((ns, i) => {
     const pct = Math.round((ns.chunk_count / max) * 100);
     const color = ns.color || palette[i % palette.length];
-    return `<div class="home-bar-row">
-      <span class="home-bar-label">${escapeHtml(ns.namespace)}</span>
+    // ``.home-bar-label`` is CSS-clipped at 120px with text-overflow:ellipsis,
+    // which hides the tail of long auto-namespaces like
+    // ``claude:-Users-...-projectname``. The row-level ``title`` makes the
+    // full string visible on hover so users can identify which namespace is
+    // selected.
+    const fullNs = escapeHtml(ns.namespace);
+    return `<div class="home-bar-row" title="${fullNs}">
+      <span class="home-bar-label">${fullNs}</span>
       <div class="home-bar-track"><div class="home-bar-fill" style="width:${pct}%;background:${color}"></div></div>
       <span class="home-bar-count">${ns.chunk_count.toLocaleString()}</span>
     </div>`;
