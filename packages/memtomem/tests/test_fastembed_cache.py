@@ -13,12 +13,13 @@ from pathlib import Path
 import pytest
 
 from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
+from .helpers import set_home
 
 
 def test_default_is_under_memtomem_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("MEMTOMEM_FASTEMBED_CACHE", raising=False)
     monkeypatch.delenv("FASTEMBED_CACHE_PATH", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, tmp_path)
 
     resolved = resolve_fastembed_cache_dir()
 
@@ -62,7 +63,7 @@ def test_empty_env_falls_through_to_default(
     whichever directory the user happened to launch ``mm`` from."""
     monkeypatch.setenv("MEMTOMEM_FASTEMBED_CACHE", "")
     monkeypatch.setenv("FASTEMBED_CACHE_PATH", "")
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, tmp_path)
 
     resolved = resolve_fastembed_cache_dir()
 
@@ -70,7 +71,7 @@ def test_empty_env_falls_through_to_default(
 
 
 def test_tilde_in_env_is_expanded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, tmp_path)
     monkeypatch.setenv("MEMTOMEM_FASTEMBED_CACHE", "~/custom-cache")
     monkeypatch.delenv("FASTEMBED_CACHE_PATH", raising=False)
 

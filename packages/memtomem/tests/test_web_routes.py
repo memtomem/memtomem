@@ -20,6 +20,7 @@ from httpx import ASGITransport, AsyncClient
 from memtomem.models import Chunk, ChunkMetadata, IndexingStats, SearchResult
 from memtomem.search.pipeline import RetrievalStats
 from memtomem.web.app import create_app
+from .helpers import set_home
 
 
 # ---------------------------------------------------------------------------
@@ -511,7 +512,7 @@ class TestPrivacyPatterns:
         from memtomem.web.deps import require_configured
 
         del app.dependency_overrides[require_configured]
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
 
         resp = await client.get("/api/privacy/patterns")
         assert resp.status_code == 200, resp.text
@@ -1635,8 +1636,7 @@ class TestMemoryDirsStatus:
         # the POSIX home var; Windows ``Path.expanduser()`` reads
         # ``USERPROFILE`` first and ignores ``HOME``, so monkeypatch
         # both for cross-platform coverage.
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         target = tmp_path / "memories"
         target.mkdir()
 
@@ -1795,7 +1795,7 @@ class TestUploadsUsage:
         monkeypatch: pytest.MonkeyPatch,
     ):
         """Fresh install — ``~/.memtomem`` itself does not exist."""
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         resp = await client.get("/api/uploads/usage")
         assert resp.status_code == 200, resp.text
         assert resp.json() == {"file_count": 0, "total_bytes": 0, "oldest_mtime": None}
@@ -1809,7 +1809,7 @@ class TestUploadsUsage:
         """Config wizard ran but no upload yet — ``.memtomem/`` exists,
         ``uploads/`` does not. Same code path as the missing-HOME case
         but a distinct user state worth pinning."""
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         (tmp_path / ".memtomem").mkdir()
         resp = await client.get("/api/uploads/usage")
         assert resp.status_code == 200, resp.text
@@ -1823,7 +1823,7 @@ class TestUploadsUsage:
     ):
         import os
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         upload_dir = tmp_path / ".memtomem" / "uploads"
         upload_dir.mkdir(parents=True)
         a = upload_dir / "a.md"
@@ -1849,7 +1849,7 @@ class TestUploadsUsage:
     ):
         """``is_file()`` filter must skip nested dirs so a stray
         directory doesn't inflate ``file_count``."""
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         upload_dir = tmp_path / ".memtomem" / "uploads"
         upload_dir.mkdir(parents=True)
         (upload_dir / "real.md").write_bytes(b"hello")
@@ -1904,7 +1904,7 @@ class TestRequireConfigured:
         not be invoked (gate runs *before* indexing, so a regression
         that moves the gate after ``index_path`` would catch the
         artifact-only assertion but fail this one)."""
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         app.state.index_engine.index_path.reset_mock()
 
         target = tmp_path / "target"
@@ -1927,7 +1927,7 @@ class TestRequireConfigured:
     ):
         """``POST /api/index`` is the second path the issue calls out
         (the manual reindex trigger). Same gate, same message."""
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         app.state.index_engine.index_path.reset_mock()
 
         target = tmp_path / "target"
@@ -1949,7 +1949,7 @@ class TestRequireConfigured:
         of the indexing surface (``/index``, ``/index/stream``,
         ``/reindex``) — uniform 409 on a not-yet-configured server.
         """
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         resp = await client.get("/api/indexing/active")
         assert resp.status_code == 409, resp.text
         assert resp.json()["detail"] == ("memtomem is not configured. Run 'mm init' to set up.")
@@ -1964,7 +1964,7 @@ class TestRequireConfigured:
     ):
         """Same gate, configured HOME (``~/.memtomem/config.json``
         exists) → request proceeds normally."""
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         cfg_dir = tmp_path / ".memtomem"
         cfg_dir.mkdir()
         (cfg_dir / "config.json").write_text("{}")
@@ -2011,7 +2011,7 @@ class TestRequireConfigured:
         the dep on ``/reindex`` (say) without dropping it on
         ``/memory-dirs/add`` would still pass the deep tests above —
         these parametrized cases lock the perimeter."""
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         resp = await getattr(client, method)(path, **kwargs)
         assert resp.status_code == 409, resp.text
         assert resp.json()["detail"] == ("memtomem is not configured. Run 'mm init' to set up.")
@@ -2085,7 +2085,7 @@ class TestFsList:
     ):
         # HOME goes first, then memory_dirs in config order, deduped.
         memdir = fs_tree["memdir"]
-        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        set_home(monkeypatch, fs_tree["home"])
         # Same dir twice + Home (= tmp_path) — the dedup must collapse to two.
         self._wire_memory_dirs(app, [memdir, memdir], monkeypatch)
 
@@ -2113,7 +2113,7 @@ class TestFsList:
         monkeypatch: pytest.MonkeyPatch,
     ):
         memdir = fs_tree["memdir"]
-        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        set_home(monkeypatch, fs_tree["home"])
         self._wire_memory_dirs(app, [memdir], monkeypatch)
 
         resp = await client.get(f"/api/fs/list?path={memdir}")
@@ -2142,7 +2142,7 @@ class TestFsList:
     ):
         memdir = fs_tree["memdir"]
         # Pretend the memory_dir lives under a fake HOME.
-        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        set_home(monkeypatch, fs_tree["home"])
         self._wire_memory_dirs(app, [memdir], monkeypatch)
 
         rel = memdir.relative_to(fs_tree["home"])
@@ -2159,7 +2159,7 @@ class TestFsList:
         monkeypatch: pytest.MonkeyPatch,
     ):
         memdir = fs_tree["memdir"]
-        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        set_home(monkeypatch, fs_tree["home"])
         self._wire_memory_dirs(app, [memdir], monkeypatch)
 
         # /…/memdir/alpha/../beta resolves to /…/memdir/beta — inside.
@@ -2176,7 +2176,7 @@ class TestFsList:
         monkeypatch: pytest.MonkeyPatch,
     ):
         memdir = fs_tree["memdir"]
-        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        set_home(monkeypatch, fs_tree["home"])
         self._wire_memory_dirs(app, [memdir], monkeypatch)
 
         outside = fs_tree["outside"] / "target"
@@ -2192,7 +2192,7 @@ class TestFsList:
         monkeypatch: pytest.MonkeyPatch,
     ):
         memdir = fs_tree["memdir"]
-        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        set_home(monkeypatch, fs_tree["home"])
         self._wire_memory_dirs(app, [memdir], monkeypatch)
 
         resp = await client.get(f"/api/fs/list?path={memdir}/no_such_subdir")
@@ -2207,7 +2207,7 @@ class TestFsList:
         monkeypatch: pytest.MonkeyPatch,
     ):
         memdir = fs_tree["memdir"]
-        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        set_home(monkeypatch, fs_tree["home"])
         self._wire_memory_dirs(app, [memdir], monkeypatch)
 
         resp = await client.get(f"/api/fs/list?path={memdir}/a_file.md")
@@ -2222,7 +2222,7 @@ class TestFsList:
         monkeypatch: pytest.MonkeyPatch,
     ):
         memdir = fs_tree["memdir"]
-        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        set_home(monkeypatch, fs_tree["home"])
         self._wire_memory_dirs(app, [memdir], monkeypatch)
 
         resp = await client.get(f"/api/fs/list?path={memdir}")
@@ -2242,7 +2242,7 @@ class TestFsList:
         if sys.platform == "win32":
             pytest.skip("chmod 000 not meaningful on Windows")
         memdir = fs_tree["memdir"]
-        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        set_home(monkeypatch, fs_tree["home"])
         self._wire_memory_dirs(app, [memdir], monkeypatch)
 
         guarded = memdir / "guarded"
@@ -2267,7 +2267,7 @@ class TestFsList:
         monkeypatch: pytest.MonkeyPatch,
     ):
         memdir = fs_tree["memdir"]
-        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        set_home(monkeypatch, fs_tree["home"])
         self._wire_memory_dirs(app, [memdir], monkeypatch)
 
         resp = await client.get(f"/api/fs/list?path={memdir}")
@@ -2285,7 +2285,7 @@ class TestFsList:
         monkeypatch: pytest.MonkeyPatch,
     ):
         memdir = fs_tree["memdir"]
-        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        set_home(monkeypatch, fs_tree["home"])
         self._wire_memory_dirs(app, [memdir], monkeypatch)
 
         resp = await client.get(f"/api/fs/list?path={memdir}")
@@ -2313,7 +2313,7 @@ class TestFsList:
         than teleporting them to wherever the target lives.
         """
         memdir = fs_tree["memdir"]
-        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        set_home(monkeypatch, fs_tree["home"])
         self._wire_memory_dirs(app, [memdir], monkeypatch)
 
         ln = memdir / "ln_inside"
@@ -2333,7 +2333,7 @@ class TestFsList:
         monkeypatch: pytest.MonkeyPatch,
     ):
         memdir = fs_tree["memdir"]
-        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        set_home(monkeypatch, fs_tree["home"])
         self._wire_memory_dirs(app, [memdir], monkeypatch)
 
         resp = await client.get(f"/api/fs/list?path={memdir}")
@@ -2348,7 +2348,7 @@ class TestFsList:
         monkeypatch: pytest.MonkeyPatch,
     ):
         memdir = fs_tree["memdir"]
-        monkeypatch.setenv("HOME", str(fs_tree["home"]))
+        set_home(monkeypatch, fs_tree["home"])
         self._wire_memory_dirs(app, [memdir], monkeypatch)
 
         # Listing the memdir surfaces the Korean entry.

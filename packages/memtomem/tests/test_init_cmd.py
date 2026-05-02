@@ -141,7 +141,7 @@ class TestInitConfigMerge:
         from memtomem.cli.init_cmd import _write_config_and_summary
 
         # Redirect ~/.memtomem to tmp_path/.memtomem
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         config_dir = tmp_path / ".memtomem"
         config_dir.mkdir()
 
@@ -179,7 +179,7 @@ class TestInitConfigMerge:
         """First init (no config.json) must work exactly as before."""
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         config_dir = tmp_path / ".memtomem"
         config_dir.mkdir()
 
@@ -207,7 +207,7 @@ class TestStartupBackfillOptIn:
         the config file with redundant defaults."""
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         (tmp_path / ".memtomem").mkdir()
 
         state = _make_init_state(tmp_path)
@@ -224,7 +224,7 @@ class TestStartupBackfillOptIn:
         ``mm web`` / ``mm server`` startup honours it."""
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         (tmp_path / ".memtomem").mkdir()
 
         state = _make_init_state(tmp_path)
@@ -286,7 +286,7 @@ class TestRerankerStep:
         resurrect a stale enabled flag)."""
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         state = _make_init_state(tmp_path)
         _write_config_and_summary(state, tmp_path)
 
@@ -300,7 +300,7 @@ class TestRerankerStep:
         and the jina multilingual model ID."""
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         state = _make_init_state(tmp_path)
         state["rerank_enabled"] = True
         state["rerank_model"] = "jinaai/jina-reranker-v2-base-multilingual"
@@ -320,7 +320,7 @@ class TestRerankerStep:
         section the user added manually (e.g. custom top_k)."""
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         config_dir = tmp_path / ".memtomem"
         config_dir.mkdir()
         config_path = config_dir / "config.json"
@@ -350,7 +350,7 @@ def test_write_config_and_summary_without_base_dir_falls_back_to_home(
     """
     from memtomem.cli.init_cmd import _write_config_and_summary
 
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, tmp_path)
 
     state = _make_init_state(tmp_path)
     _write_config_and_summary(state)
@@ -520,7 +520,7 @@ class TestMissingExtrasWarning:
         from memtomem.cli import init_cmd
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr(
             "importlib.util.find_spec",
             lambda name: None if name == "fastembed" else object(),
@@ -691,7 +691,7 @@ class TestInstallAxesReconcile:
             lambda name: None if name == "fastembed" else object(),
         )
         monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: "fastapi", raising=False)
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
 
         state = _make_init_state(tmp_path)
         state["provider"] = "onnx"
@@ -773,7 +773,7 @@ class TestInstallAxesReconcile:
             "_probe_workspace_extras",
             lambda py: {"fastembed", "fastapi", "uvicorn"},
         )
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
 
         state = _make_init_state(tmp_path)
         state["provider"] = "onnx"
@@ -804,7 +804,7 @@ class TestInstallAxesReconcile:
 
         monkeypatch.setattr(init_cmd, "_probe_workspace_extras", lambda py: set())
         monkeypatch.setattr(init_cmd, "_install_extras", lambda *a, **kw: False)
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
 
         state = self._make_state_source_with_venv(tmp_path)
         state["provider"] = "onnx"
@@ -832,7 +832,7 @@ class TestInstallAxesReconcile:
 
         monkeypatch.setattr(init_cmd, "_probe_workspace_extras", lambda py: set())
         monkeypatch.setattr(init_cmd, "_install_extras", lambda *a, **kw: True)
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
 
         state = self._make_state_source_with_venv(tmp_path)
         state["provider"] = "onnx"
@@ -1199,7 +1199,7 @@ class TestMismatchBanner:
             "_probe_workspace_extras",
             lambda py: {"fastembed", "fastapi", "uvicorn"},
         )
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
 
         state = self._source_state_with_venv(tmp_path)
         init_cmd._write_config_and_summary(state, tmp_path)
@@ -1228,7 +1228,7 @@ class TestMismatchBanner:
             "_probe_workspace_extras",
             lambda py: {"fastembed", "fastapi", "uvicorn"},
         )
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
 
         state = _make_init_state(tmp_path)
         state["_profile"] = _make_test_profile(tmp_path, kind="project")
@@ -1259,7 +1259,7 @@ class TestMismatchBanner:
             "_probe_workspace_extras",
             lambda py: {"fastembed", "fastapi", "uvicorn"},
         )
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
 
         state = self._source_state_with_venv(tmp_path)
         init_cmd._write_config_and_summary(state, tmp_path)
@@ -1282,7 +1282,7 @@ class TestMismatchBanner:
         monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
         monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
         monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
 
         state = _make_init_state(tmp_path)
         init_cmd._write_config_and_summary(state, tmp_path)
@@ -1307,7 +1307,7 @@ class TestMismatchBanner:
         monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
         monkeypatch.setattr(init_cmd, "_probe_workspace_extras", lambda py: set())
         monkeypatch.setattr(init_cmd, "_install_extras", lambda *a, **kw: False)
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
 
         state = self._source_state_with_venv(tmp_path)
         init_cmd._write_config_and_summary(state, tmp_path)
@@ -1332,7 +1332,7 @@ class TestMismatchBanner:
         from memtomem.cli import init_cmd
 
         monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
 
         # NOTE: no .venv/ created — triggers _workspace_needs_sync branch.
         state = _make_init_state(tmp_path)
@@ -1362,7 +1362,7 @@ class TestMismatchBanner:
         monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
         monkeypatch.setattr(init_cmd, "_probe_workspace_extras", lambda py: set())
         monkeypatch.setattr(init_cmd, "_install_extras", lambda *a, **kw: True)
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
 
         state = self._source_state_with_venv(tmp_path)
         init_cmd._write_config_and_summary(state, tmp_path)
@@ -1803,7 +1803,7 @@ class TestProjectInstallE2E:
         monkeypatch.setattr(
             init_cmd, "_probe_workspace_extras", lambda py: {"fastembed", "fastapi", "uvicorn"}
         )
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
 
         state = self._project_state(tmp_path, with_venv=True)
         init_cmd._write_config_and_summary(state, tmp_path)
@@ -1827,7 +1827,7 @@ class TestProjectInstallE2E:
         monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
         monkeypatch.setattr(init_cmd, "_probe_workspace_extras", lambda py: set())
         monkeypatch.setattr(init_cmd, "_install_extras", lambda *a, **kw: False)
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
 
         state = self._project_state(tmp_path, with_venv=True)
         init_cmd._write_config_and_summary(state, tmp_path)
@@ -1851,7 +1851,7 @@ class TestProjectInstallE2E:
         from memtomem.cli import init_cmd
 
         monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
 
         state = self._project_state(tmp_path, with_venv=False)
         assert init_cmd._workspace_needs_sync(state) is True
@@ -1882,7 +1882,7 @@ class TestProjectInstallE2E:
             "_probe_workspace_extras",
             lambda py: {"fastembed", "fastapi", "uvicorn"},
         )
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
 
         # First run
         state1 = self._project_state(tmp_path, with_venv=True)
@@ -1933,7 +1933,7 @@ class TestUvxBranching:
         )
         monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
         monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
 
         state = _make_init_state(tmp_path)
         # Explicit uvx profile — pypi classification + uvx binary origin
@@ -2019,7 +2019,7 @@ class TestPreservedSummary:
         need to include ``mmr.*`` to avoid flagging the user's own choice)."""
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         state = _make_init_state(tmp_path)
         _write_config_and_summary(state, tmp_path)
 
@@ -2041,7 +2041,7 @@ class TestPreservedSummary:
 
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         config_dir = tmp_path / ".memtomem"
         config_dir.mkdir()
         (config_dir / "config.json").write_text(
@@ -2069,7 +2069,7 @@ class TestPreservedSummary:
 
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         config_dir = tmp_path / ".memtomem"
         config_dir.mkdir()
         (config_dir / "config.json").write_text(
@@ -2098,7 +2098,7 @@ class TestPreservedSummary:
 
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         config_dir = tmp_path / ".memtomem"
         config_dir.mkdir()
         (config_dir / "config.json").write_text(
@@ -2132,7 +2132,7 @@ class TestPreservedSummary:
 
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         config_dir = tmp_path / ".memtomem"
         config_dir.mkdir()
         config_path = config_dir / "config.json"
@@ -2176,7 +2176,7 @@ class TestFreshFlag:
 
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         config_dir = tmp_path / ".memtomem"
         config_dir.mkdir()
         config_path = config_dir / "config.json"
@@ -2240,7 +2240,7 @@ class TestFreshFlag:
         adding a new key to one without the other will fail this test."""
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         config_dir = tmp_path / ".memtomem"
         config_dir.mkdir()
         config_path = config_dir / "config.json"
@@ -2284,7 +2284,7 @@ class TestFreshFlag:
             _write_config_and_summary,
         )
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         config_dir = tmp_path / ".memtomem"
         config_dir.mkdir()
         config_path = config_dir / "config.json"
@@ -2329,7 +2329,7 @@ class TestFreshFlag:
         only considers canonical keys."""
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         config_dir = tmp_path / ".memtomem"
         config_dir.mkdir()
         config_path = config_dir / "config.json"
@@ -2363,7 +2363,7 @@ class TestFreshFlag:
 
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         config_dir = tmp_path / ".memtomem"
         config_dir.mkdir()
         # Seed only fields the wizard will overwrite — nothing untouched
@@ -2398,7 +2398,7 @@ class TestFreshFlag:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         config_dir = tmp_path / ".memtomem"
         config_dir.mkdir()
         config_path = config_dir / "config.json"
@@ -2434,7 +2434,7 @@ class TestFreshFlag:
 
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         config_dir = tmp_path / ".memtomem"
         config_dir.mkdir()
         config_path = config_dir / "config.json"
@@ -2466,7 +2466,7 @@ class TestFreshFlag:
         clock = {"t": 1_700_000_000}
         monkeypatch.setattr("memtomem.cli.init_cmd.time.time", lambda: clock["t"])
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         config_dir = tmp_path / ".memtomem"
         config_dir.mkdir()
         config_path = config_dir / "config.json"
@@ -2508,7 +2508,7 @@ class TestFreshFlag:
 
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         config_dir = tmp_path / ".memtomem"
         config_dir.mkdir()
         config_path = config_dir / "config.json"
@@ -2553,7 +2553,7 @@ class TestMcpPasteHints:
 
         from memtomem.cli.init_cmd import _claude_desktop_config_hint, _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.chdir(tmp_path)
 
         state = _make_init_state(tmp_path)
@@ -2581,7 +2581,7 @@ class TestMcpPasteHints:
 
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         state = _make_init_state(tmp_path)  # mcp_choice = 3 by default
         _write_config_and_summary(state, tmp_path)
 
@@ -2637,7 +2637,7 @@ class TestMcpChoiceOneClaudeAddBranches:
 
         from memtomem.cli import init_cmd
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(
             init_cmd,
@@ -2669,7 +2669,7 @@ class TestMcpChoiceOneClaudeAddBranches:
 
         from memtomem.cli import init_cmd
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(
             init_cmd,
@@ -2713,7 +2713,7 @@ class TestMcpChoiceOneClaudeAddBranches:
 
         from memtomem.cli import init_cmd
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(
             init_cmd,
@@ -2752,7 +2752,7 @@ class TestMcpChoiceOneClaudeAddBranches:
         def _missing(cmd: list[str], timeout: int = 10) -> subprocess.CompletedProcess:
             raise FileNotFoundError(2, "No such file or directory: 'claude'")
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(init_cmd, "_run", _missing)
 
@@ -2782,7 +2782,7 @@ class TestMcpChoiceOneClaudeAddBranches:
         def _hang(cmd: list[str], timeout: int = 10) -> subprocess.CompletedProcess:
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(init_cmd, "_run", _hang)
 
@@ -3129,7 +3129,7 @@ class TestDetectProviderDirsRoundtrip:
     ) -> None:
         from memtomem.config import _detect_provider_dirs, categorize_memory_dir
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
 
         # Populate one entry per category so every branch of detection
         # fires and every resulting Path goes through the classifier.
@@ -3459,7 +3459,7 @@ class TestProviderPresetRules:
         the persisted ``namespace.rules`` list."""
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         state = _make_init_state(tmp_path)
         state["provider_rules"] = [
             (
@@ -3485,7 +3485,7 @@ class TestProviderPresetRules:
         not duplicate rules — dedup is by ``path_glob``."""
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         state = _make_init_state(tmp_path)
         state["provider_rules"] = [
             ("codex", {"path_glob": "~/.codex/memories/**", "namespace": "codex"}),
@@ -3506,7 +3506,7 @@ class TestProviderPresetRules:
         ``namespace`` wins — the wizard does not overwrite it."""
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         # Seed config with a user-authored rule using the preset's glob.
         config_dir = tmp_path / ".memtomem"
         config_dir.mkdir()
@@ -3555,7 +3555,7 @@ class TestProviderPresetRules:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         codex = tmp_path / "codex"
         codex.mkdir()
         monkeypatch.setattr(
@@ -3590,7 +3590,7 @@ class TestProviderPresetRules:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr(
             "memtomem.config._detect_provider_dirs",
             lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
@@ -3622,7 +3622,7 @@ class TestProviderPresetRules:
 
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         # Seed: codex rule already present, claude-plans not.
         config_dir = tmp_path / ".memtomem"
         config_dir.mkdir()
@@ -3657,7 +3657,7 @@ class TestProviderPresetRules:
 
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         state = _make_init_state(tmp_path)
         state["provider_rules"] = []
         _write_config_and_summary(state, tmp_path)
@@ -3675,7 +3675,7 @@ class TestProviderPresetRules:
 
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         config_dir = tmp_path / ".memtomem"
         config_dir.mkdir()
         (config_dir / "config.json").write_text(
@@ -3789,7 +3789,7 @@ class TestPresetSelection:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr(
             "memtomem.config._detect_provider_dirs",
             lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
@@ -3826,7 +3826,7 @@ class TestPresetSelection:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         runner = CliRunner()
         result = runner.invoke(
             init,
@@ -3849,7 +3849,7 @@ class TestPresetSelection:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr(
             "memtomem.config._detect_provider_dirs",
             lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
@@ -3890,7 +3890,7 @@ class TestPresetSelection:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr(
             "memtomem.config._detect_provider_dirs",
             lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
@@ -3931,7 +3931,7 @@ class TestPresetSelection:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr(
             "memtomem.config._detect_provider_dirs",
             lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
@@ -3967,7 +3967,7 @@ class TestPresetSelection:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         runner = CliRunner()
         result = runner.invoke(
             init,
@@ -3985,7 +3985,7 @@ class TestPresetSelection:
 
         import memtomem.cli.init_cmd as init_cmd
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
 
         recorded: dict[str, object] = {}
 
@@ -4058,7 +4058,7 @@ class TestPresetSelection:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         runner = CliRunner()
         # CliRunner's stdin is a pipe → isatty() == False.
         result = runner.invoke(init, [])
@@ -4074,7 +4074,7 @@ class TestPresetSelection:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr(
             "memtomem.config._detect_provider_dirs",
             lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
@@ -4123,7 +4123,7 @@ class TestPresetSelection:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr(
             "memtomem.config._detect_provider_dirs",
             lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
@@ -4177,7 +4177,7 @@ class TestPresetWizardBackNav:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         # CliRunner swaps sys.stdin mid-invoke so `sys.stdin.isatty` can't be
         # patched through that boundary; init_cmd exposes the ``_isatty``
         # seam for exactly this case.
@@ -4214,7 +4214,7 @@ class TestPresetWizardBackNav:
 
         import memtomem.cli.init_cmd as init_cmd
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
 
         recorded: list[list[str]] = []
@@ -4329,7 +4329,7 @@ class TestPresetWizardBackNav:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
         monkeypatch.setattr(
             "memtomem.config._detect_provider_dirs",
@@ -4362,7 +4362,7 @@ class TestPresetWizardBackNav:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
         monkeypatch.setattr(
             "memtomem.config._detect_provider_dirs",
@@ -5257,7 +5257,7 @@ class TestInitialSeedThreshold:
 
         from memtomem.cli import init_cmd
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr(init_cmd, "_maybe_seed_initial_index", lambda paths, state: False)
 
         state = _make_init_state(tmp_path)
@@ -5298,7 +5298,7 @@ class TestInitialSeedThreshold:
 
         from memtomem.cli import init_cmd
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr(init_cmd, "_maybe_seed_initial_index", lambda paths, state: False)
 
         state = _make_init_state(tmp_path)
@@ -5332,7 +5332,7 @@ class TestInitialSeedThreshold:
 
         from memtomem.cli import init_cmd
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr(init_cmd, "_maybe_seed_initial_index", lambda paths, state: True)
 
         state = _make_init_state(tmp_path)
@@ -5403,7 +5403,7 @@ class TestNonInteractiveExtrasValidation:
 
         from memtomem.cli import cli, init_cmd
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         # Force the runtime profile to PyPI so the in-process find_spec probe
         # is authoritative (no workspace-python subprocess to consider).
         monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
@@ -5442,7 +5442,7 @@ class TestNonInteractiveExtrasValidation:
 
         from memtomem.cli import cli, init_cmd
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
         monkeypatch.setattr(
             "importlib.util.find_spec",
@@ -5466,7 +5466,7 @@ class TestNonInteractiveExtrasValidation:
 
         from memtomem.cli import cli, init_cmd
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
         monkeypatch.setattr(
             "importlib.util.find_spec",
@@ -5504,7 +5504,7 @@ class TestNonInteractiveExtrasValidation:
 
         from memtomem.cli import cli, init_cmd
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
         monkeypatch.setattr(
             "importlib.util.find_spec",
@@ -5524,7 +5524,7 @@ class TestNonInteractiveExtrasValidation:
 
         from memtomem.cli import cli, init_cmd
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
         monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
         monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
@@ -5549,7 +5549,7 @@ class TestNonInteractiveExtrasValidation:
 
         from memtomem.cli import cli, init_cmd
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
         monkeypatch.setattr(
             "importlib.util.find_spec",
@@ -5588,7 +5588,7 @@ class TestNonInteractiveExtrasValidation:
 
         from memtomem.cli import cli, init_cmd
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
         monkeypatch.setattr(
             "importlib.util.find_spec",
@@ -5631,7 +5631,7 @@ class TestNonInteractiveExtrasValidation:
 
         from memtomem.cli import cli, init_cmd
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
         monkeypatch.setattr(
             "importlib.util.find_spec",
@@ -5755,7 +5755,7 @@ class TestBackNavThroughSilentStep:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         # CliRunner substitutes sys.stdin; route through init_cmd._isatty seam
         # so the picker's non-TTY gate doesn't short-circuit (per
         # feedback_clirunner_isatty_seam.md).
@@ -5799,7 +5799,7 @@ class TestBackNavThroughSilentStep:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
         monkeypatch.setattr(
             "memtomem.config._detect_provider_dirs",
@@ -5937,7 +5937,7 @@ class TestStepHeaderPosition:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
 
         runner = CliRunner()
@@ -5986,7 +5986,7 @@ class TestStepHeaderPosition:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
         monkeypatch.setattr(
             "memtomem.config._detect_provider_dirs",
@@ -6017,7 +6017,7 @@ class TestStepHeaderPosition:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
         monkeypatch.setattr(
             "memtomem.config._detect_provider_dirs",
@@ -6060,7 +6060,7 @@ class TestPresetMcpFlagPreAnswer:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
         monkeypatch.setattr(
             "memtomem.config._detect_provider_dirs",
@@ -6096,7 +6096,7 @@ class TestPresetMcpFlagPreAnswer:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
         monkeypatch.setattr(
@@ -6131,7 +6131,7 @@ class TestPresetMcpFlagPreAnswer:
 
         from memtomem.cli.init_cmd import init
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
         monkeypatch.setattr(
             "memtomem.config._detect_provider_dirs",

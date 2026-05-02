@@ -14,6 +14,7 @@ import pytest
 
 from memtomem.context.settings import CANONICAL_SETTINGS_FILE
 from memtomem.server.tools.context import mem_context_generate, mem_context_sync
+from .helpers import set_home
 
 
 @pytest.fixture
@@ -22,8 +23,7 @@ def claude_home(tmp_path, monkeypatch):
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     (fake_home / ".claude").mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
-    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    set_home(monkeypatch, fake_home)
     return fake_home
 
 

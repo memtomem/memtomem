@@ -18,6 +18,7 @@ from memtomem.context.settings import (
     generate_all_settings,
     host_write_targets,
 )
+from .helpers import set_home
 
 
 # ── Helpers ────────────────────────────────────────────────────────
@@ -40,8 +41,7 @@ def claude_home(tmp_path, monkeypatch):
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     (fake_home / ".claude").mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
-    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    set_home(monkeypatch, fake_home)
     return fake_home
 
 
@@ -50,8 +50,7 @@ def claude_home_missing(tmp_path, monkeypatch):
     """Redirect HOME **without** creating ``~/.claude/``."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
-    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    set_home(monkeypatch, fake_home)
     return fake_home
 
 
