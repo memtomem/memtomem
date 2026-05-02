@@ -46,6 +46,8 @@
   "search.help": "Semantic search across indexed memories. Filters: tag, namespace, type, score. Pipeline: BM25 (keyword) + Dense (semantic) → RRF fusion.",
   "search.filter_toggle_title": "Show/hide tag, type, sort and other filters",
   "search.filter_toggle": "▾ Filters",
+  "search.filter_count_aria_one": "{count} filter applied",
+  "search.filter_count_aria_other": "{count} filters applied",
   "search.placeholder": "Search memories…",
   "search.search_btn": "Search",
   "search.search_btn_title": "Run semantic search (Enter)",
