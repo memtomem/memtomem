@@ -792,10 +792,33 @@ class TestAutoTag:
 
         stats = await auto_tag_storage(storage, dry_run=True)
         assert stats.tagged_chunks >= 1
+        # sample_limit defaults to 0 — preview list stays empty for callers
+        # that don't opt in (CLI / other tools that only need the counts).
+        assert stats.samples == ()
 
         # Verify no tags were actually written
         chunks = await storage.list_chunks_by_source(Path("/tmp/dry.md"))
         assert chunks[0].metadata.tags == ()
+
+    async def test_auto_tag_storage_dry_run_samples(self, storage):
+        """sample_limit > 0 should expose per-chunk previews so a UI can
+        show the user what an apply-run would write before they confirm."""
+        chunk = _chunk(
+            "Python data science framework with machine learning utilities",
+            source="sample.md",
+        )
+        await storage.upsert_chunks([chunk])
+
+        stats = await auto_tag_storage(storage, dry_run=True, sample_limit=5)
+        assert stats.tagged_chunks >= 1
+        assert len(stats.samples) >= 1
+        sample = stats.samples[0]
+        assert sample.chunk_id
+        assert "sample.md" in sample.source_file
+        assert sample.content_preview
+        assert sample.suggested_tags
+        # current_tags reflects the chunk's pre-run state (untagged here)
+        assert sample.current_tags == ()
 
     async def test_auto_tag_storage_source_filter(self, storage):
         c1 = _chunk("Python code example function", source="python.md")

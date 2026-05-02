@@ -439,6 +439,10 @@
   "tags.autotag_result.total": "Total chunks",
   "tags.autotag_result.tagged": "Tagged",
   "tags.autotag_result.skipped": "Skipped",
+  "tags.autotag_samples_title": "Preview",
+  "tags.autotag_sample_current": "Current:",
+  "tags.autotag_sample_suggested": "Suggested:",
+  "tags.autotag_sample_no_current_tags": "(none)",
 
   "timeline.help": "Activity timeline of indexed chunks. Heatmap shows daily activity. Toggle Chunks/Files view.",
   "timeline.source_label": "Source filter",

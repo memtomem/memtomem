@@ -3949,6 +3949,39 @@ document.querySelectorAll('.tags-sort-btn').forEach(btn => {
   });
 });
 
+function _renderAutoTagSample(s) {
+  const fname = (s.source_file || '').split('/').pop() || s.source_file || '';
+  const noneLabel = (typeof t === 'function')
+    ? t('tags.autotag_sample_no_current_tags')
+    : '(none)';
+  const currentLabel = (typeof t === 'function') ? t('tags.autotag_sample_current') : 'Current:';
+  const suggestedLabel = (typeof t === 'function') ? t('tags.autotag_sample_suggested') : 'Suggested:';
+  const current = (s.current_tags || []).length
+    ? s.current_tags
+        .map(tg => `<span class="autotag-tag autotag-tag-current">${escapeHtml(tg)}</span>`)
+        .join('')
+    : `<span class="autotag-no-tags">${escapeHtml(noneLabel)}</span>`;
+  const suggested = (s.suggested_tags || [])
+    .map(tg => `<span class="autotag-tag autotag-tag-suggested">${escapeHtml(tg)}</span>`)
+    .join('');
+  return `
+    <div class="autotag-sample-card">
+      <div class="autotag-sample-header">
+        <span class="autotag-sample-source" title="${escapeHtml(s.source_file || '')}">${escapeHtml(fname)}</span>
+        <span class="autotag-sample-id">${escapeHtml(s.chunk_id || '')}</span>
+      </div>
+      <div class="autotag-sample-preview">${escapeHtml(s.content_preview || '')}</div>
+      <div class="autotag-sample-tag-row">
+        <span class="autotag-sample-label">${escapeHtml(currentLabel)}</span>
+        ${current}
+      </div>
+      <div class="autotag-sample-tag-row">
+        <span class="autotag-sample-label">${escapeHtml(suggestedLabel)}</span>
+        ${suggested}
+      </div>
+    </div>`;
+}
+
 async function runAutoTag() {
   const source  = qs('autotag-source').value.trim() || null;
   const maxTags = parseInt(qs('autotag-max').value) || 5;
@@ -3969,6 +4002,19 @@ async function runAutoTag() {
     qs('at-tagged').textContent  = data.tagged_chunks;
     qs('at-skipped').textContent = data.skipped_chunks;
     show(qs('autotag-result'));
+
+    const samplesEl = qs('autotag-samples');
+    const samplesList = qs('autotag-samples-list');
+    const samplesCount = qs('autotag-samples-count');
+    if (samplesEl && samplesList && Array.isArray(data.samples) && data.samples.length) {
+      samplesCount.textContent = `(${data.samples.length})`;
+      samplesList.innerHTML = data.samples.map(_renderAutoTagSample).join('');
+      samplesEl.hidden = false;
+    } else if (samplesEl) {
+      samplesEl.hidden = true;
+      if (samplesList) samplesList.innerHTML = '';
+    }
+
     const label = dryRun ? '(dry run) ' : '';
     showToast(t('toast.tagged_count', { label, count: data.tagged_chunks }), 'success');
     if (!dryRun) { loadTags(); loadStats(); _markDataStale(); }
