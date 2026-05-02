@@ -904,6 +904,14 @@ class SqliteBackend(
         ).fetchall()
         return [self._row_to_chunk(row) for row in rows]
 
+    async def count_chunks_by_source(self, source_file: Path) -> int:
+        db = self._get_read_db()
+        row = db.execute(
+            "SELECT COUNT(*) FROM chunks WHERE source_file=?",
+            (norm_path(source_file),),
+        ).fetchone()
+        return int(row[0]) if row else 0
+
     async def list_chunks_by_sources(
         self,
         source_files: Sequence[Path],

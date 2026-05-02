@@ -34,7 +34,8 @@ async def list_chunks(
     request_path = require_indexed_source(source, indexed_sources)
     chunks = await storage.list_chunks_by_source(request_path, limit=limit)
     out = [chunk_to_out(c) for c in chunks]
-    return ChunksListResponse(chunks=out, total=len(out))
+    total = await storage.count_chunks_by_source(request_path)
+    return ChunksListResponse(chunks=out, total=total)
 
 
 @router.get("/{chunk_id}", response_model=ChunkOut)
