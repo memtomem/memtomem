@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import time
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
@@ -123,14 +124,23 @@ def _dir_creation_time_iso(p: Path) -> str | None:
 def norm_dir_prefix(d: str | Path) -> str:
     """Return the directory path normalized for ``str.startswith`` matching.
 
-    Adds a trailing slash so a configured dir ``/foo`` does not falsely
-    claim files under ``/foo-bar/...``. Always runs through
-    :func:`~memtomem.storage.sqlite_helpers.norm_path` (which resolves
-    symlinks and applies Unicode NFC) so the prefix shape matches the
-    source-side normalisation regardless of whether the dir currently
+    Adds a trailing ``os.sep`` (platform-native separator) so a configured
+    dir does not falsely claim files under a sibling sharing the same
+    prefix (e.g. ``/foo`` should not match ``/foo-bar/...``). Always runs
+    through :func:`~memtomem.storage.sqlite_helpers.norm_path` (which
+    resolves symlinks and applies Unicode NFC) so the prefix shape matches
+    the source-side normalisation regardless of whether the dir currently
     exists on disk — the chunks table holds resolved paths, and a
     configured-but-missing dir would otherwise compare in raw ``/tmp``
     form against resolved ``/private/tmp`` source paths on macOS.
+
+    The trailing-separator step uses ``os.sep`` rather than a hardcoded
+    ``"/"`` so the prefix is consistent with ``norm_path``'s output on
+    Windows, where ``Path.resolve()`` returns backslash-separated strings
+    (``C:\\Users\\foo``) — a hardcoded ``"/"`` would yield a mixed-form
+    prefix that never matches a native source path under
+    ``startswith`` (#647). On POSIX, ``os.sep == "/"`` so behaviour is
+    unchanged.
 
     Used by both :func:`memory_dir_stats` (which buckets chunks per
     configured dir) and :func:`resolve_owning_memory_dir` (which goes
@@ -142,8 +152,8 @@ def norm_dir_prefix(d: str | Path) -> str:
 
     p = Path(d).expanduser()
     base = norm_path(p)
-    if not base.endswith("/"):
-        base += "/"
+    if not base.endswith(os.sep):
+        base += os.sep
     return base
 
 
