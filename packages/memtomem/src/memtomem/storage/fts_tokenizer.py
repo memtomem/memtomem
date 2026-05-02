@@ -14,8 +14,11 @@ import re
 
 _log = logging.getLogger(__name__)
 
-# FTS5 special characters that must not appear in prefix-match tokens
-_FTS5_SPECIAL_RE = re.compile(r'[*"()\-+^:]')
+# FTS5 special characters that must not appear in prefix-match tokens.
+# Includes all unicode61 token-class characters that FTS5 treats as
+# operators or token separators.  Missing any of these causes
+# "fts5: syntax error" when the token reaches the query parser unquoted.
+_FTS5_SPECIAL_RE = re.compile(r'[-*\"()+^:\\./<>~`!@#%&=\'{}\[\];?]')
 
 # Active tokenizer backend: "unicode61" or "kiwipiepy"
 _active_tokenizer: str = "unicode61"
