@@ -1,4 +1,4 @@
-"""Tests for ``embedding._fastembed_cache.resolve_fastembed_cache_dir``.
+"""Tests for ``embedding.fastembed_cache.resolve_fastembed_cache_dir``.
 
 The helper exists to keep the fastembed model snapshot out of macOS's
 periodically-reaped ``/var/folders/.../T/`` tempdir (see the module
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from memtomem.embedding._fastembed_cache import resolve_fastembed_cache_dir
+from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
 
 
 def test_default_is_under_memtomem_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -78,3 +78,29 @@ def test_tilde_in_env_is_expanded(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
 
     assert resolved == tmp_path / "custom-cache"
     assert resolved.is_dir()
+
+
+def test_unexpandable_home_raises_actionable_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When ``$HOME`` is unset and pwent lookup fails, ``Path.expanduser()`` on
+    Python 3.12+ raises ``RuntimeError("Could not determine home directory.")``
+    — a correct fail-fast but with no hint at how to fix it. Wrap the error
+    in a message that names the env vars the operator can set."""
+    import pwd
+
+    monkeypatch.delenv("MEMTOMEM_FASTEMBED_CACHE", raising=False)
+    monkeypatch.delenv("FASTEMBED_CACHE_PATH", raising=False)
+    monkeypatch.delenv("HOME", raising=False)
+
+    def _no_pwent(_uid: int) -> object:
+        raise KeyError("simulated missing pwent")
+
+    monkeypatch.setattr(pwd, "getpwuid", _no_pwent)
+    # Precondition: bare expanduser surfaces the unhelpful Python error.
+    with pytest.raises(RuntimeError, match="Could not determine home directory"):
+        Path("~/foo").expanduser()
+
+    with pytest.raises(RuntimeError, match="MEMTOMEM_FASTEMBED_CACHE") as excinfo:
+        resolve_fastembed_cache_dir()
+    # Original Python error is preserved as __cause__ for debugging.
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert not (Path.cwd() / "~").exists(), "wrap must happen before mkdir"

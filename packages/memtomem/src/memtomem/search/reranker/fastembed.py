@@ -6,6 +6,8 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
+from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
+
 if TYPE_CHECKING:
     from memtomem.config import RerankConfig
     from memtomem.models import SearchResult
@@ -41,9 +43,12 @@ class FastEmbedReranker:
                 "Install it with: pip install memtomem[onnx]"
             ) from exc
 
-        from memtomem.embedding._fastembed_cache import resolve_fastembed_cache_dir
-
         cache_dir = resolve_fastembed_cache_dir()
+        logger.info(
+            "Loading fastembed reranker %s (cache_dir=%s) …",
+            self._config.model,
+            cache_dir,
+        )
         try:
             self._model = TextCrossEncoder(model_name=self._config.model, cache_dir=str(cache_dir))
         except ValueError as exc:
@@ -57,7 +62,6 @@ class FastEmbedReranker:
                 "must be registered via TextCrossEncoder.add_custom_model() before the "
                 "reranker is invoked."
             ) from exc
-        logger.info("Loaded fastembed reranker: %s", self._config.model)
         return self._model
 
     def _rerank_sync(self, query: str, documents: list[str]) -> list[float]:

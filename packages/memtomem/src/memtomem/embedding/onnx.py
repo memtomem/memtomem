@@ -8,7 +8,7 @@ from collections.abc import Callable
 from typing import Sequence
 
 from memtomem.config import EmbeddingConfig
-from memtomem.embedding._fastembed_cache import resolve_fastembed_cache_dir
+from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
 from memtomem.errors import EmbeddingError
 
 logger = logging.getLogger(__name__)
