@@ -571,10 +571,14 @@ async def remove_memory_dir(
                 # the schema's ``ON DELETE CASCADE``.
                 deleted_chunks = 0
                 if delete_chunks:
+                    from memtomem.indexing.engine import norm_dir_prefix
+
                     rows = await storage.get_source_files_with_counts()
-                    prefix = resolved_norm
-                    if not prefix.endswith("/"):
-                        prefix = prefix + "/"
+                    # Use the canonical helper so the trailing-separator
+                    # rule (``os.sep``, native form on Windows) stays in
+                    # one place; matches the comparison done by
+                    # :func:`resolve_owning_memory_dir` (#647).
+                    prefix = norm_dir_prefix(resolved)
                     for row in rows:
                         source_path = row[0]
                         if norm_path(source_path).startswith(prefix):
