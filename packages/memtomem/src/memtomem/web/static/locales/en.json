@@ -454,6 +454,7 @@
   "timeline.empty_icon": "🕐",
   "timeline.empty_text": "Click Load to view the timeline",
   "timeline.open_in_source": "Open in source",
+  "timeline.copy": "Copy",
 
   "modal.settings_title": "Settings",
   "modal.default_tab_label": "Default Tab",
@@ -549,6 +550,7 @@
   "toast.update_failed": "Update failed: {error}",
   "toast.error": "Error: {error}",
 
+  "toast.chunk_target_missing": "Couldn't locate the linked chunk — try Load All.",
   "toast.ns_deleted": "Deleted {count} chunks from '{name}'",
   "toast.ns_renamed": "Renamed '{oldName}' \u2192 '{newName}'",
   "toast.indexed_count": "Indexed {count} chunks",

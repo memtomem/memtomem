@@ -187,6 +187,8 @@ function renderChunkView(list, groups) {
       const dot = `<span class="tl-type-dot" style="background:${fileTypeColor(c.source_file)}"></span>`;
       const openLabel = (typeof t === 'function')
         ? t('timeline.open_in_source') : 'Open in source';
+      const copyLabel = (typeof t === 'function')
+        ? t('timeline.copy') : 'Copy';
       item.innerHTML = `
         <div class="timeline-item-header">
           <span class="timeline-item-source">${dot}${escapeHtml(truncate(c.source_file, 60))}</span>
@@ -196,7 +198,7 @@ function renderChunkView(list, groups) {
         <div class="tl-expand-tags">${tagsHtml}</div>
         <div class="tl-expand-actions">
           <button class="tl-btn-open" data-i18n="timeline.open_in_source">${escapeHtml(openLabel)}</button>
-          <button class="tl-btn-copy">Copy</button>
+          <button class="tl-btn-copy" data-i18n="timeline.copy">${escapeHtml(copyLabel)}</button>
         </div>
       `;
       // (C) Inline expansion: first click expand/collapse, action buttons navigate
