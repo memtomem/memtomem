@@ -208,10 +208,10 @@ Resolving it is a two-step process — pick **one** of:
 > different embedding models pointing at the same SQLite file, race-loser
 > chunk inserts are silently dropped at the storage layer (the unique key
 > is content-only, so different-model embeddings for the same content are
-> indistinguishable). The startup dimension gate (issue #298) catches the
-> common case where the new model has a different dimension, but **same-
-> dimension** model swaps slip past it. See issue #707 for the full
-> failure mode.
+> indistinguishable). The startup dimension gate (issue #298) catches
+> the common case where the new model has a different dimension, but
+> **same-dimension** model swaps slip past it. See issue #707 for the
+> full failure mode.
 
 `mem_status` emits a `warnings[]` array entry with this schema when a
 mismatch is detected:
