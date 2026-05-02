@@ -11,6 +11,22 @@
 let tlViewMode = 'chunks';
 let currentTlChunks = null;
 
+// created_at arrives as a UTC ISO string. Slicing the literal string would
+// bucket chunks by UTC calendar date, so users east of UTC see entries land
+// on the previous day for hours after local midnight (and times display in
+// UTC). Convert to the browser's local zone before grouping/displaying.
+function localDateKey(iso) {
+  const d = new Date(iso);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+function localTimeShort(iso) {
+  const d = new Date(iso);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
 function resetTimelinePanel() {
   hide(qs('tl-list'));
   hide(qs('tl-heatmap'));
@@ -75,8 +91,8 @@ async function loadTimeline() {
     if (daysVal === 'custom') {
       const fromVal = qs('tl-date-from').value;
       const toVal = qs('tl-date-to').value;
-      if (fromVal) chunks = chunks.filter(c => c.created_at.slice(0, 10) >= fromVal);
-      if (toVal) chunks = chunks.filter(c => c.created_at.slice(0, 10) <= toVal);
+      if (fromVal) chunks = chunks.filter(c => localDateKey(c.created_at) >= fromVal);
+      if (toVal) chunks = chunks.filter(c => localDateKey(c.created_at) <= toVal);
     }
     currentTlChunks = chunks;
     renderTimeline(chunks);
@@ -101,7 +117,7 @@ function renderTimeline(chunks) {
   // Group by calendar date (created_at)
   const groups = new Map();
   for (const c of chunks) {
-    const date = c.created_at.slice(0, 10); // YYYY-MM-DD
+    const date = localDateKey(c.created_at); // local YYYY-MM-DD
     if (!groups.has(date)) groups.set(date, []);
     groups.get(date).push(c);
   }
@@ -182,7 +198,7 @@ function renderChunkView(list, groups) {
     for (const c of items) {
       const item = document.createElement('div');
       item.className = 'timeline-item';
-      const time = c.created_at.slice(11, 16); // HH:MM
+      const time = localTimeShort(c.created_at); // local HH:MM
       const tagsHtml = c.tags.map(t => `<span class="timeline-tag">${escapeHtml(t)}</span>`).join('');
       const dot = `<span class="tl-type-dot" style="background:${fileTypeColor(c.source_file)}"></span>`;
       const openLabel = (typeof t === 'function')
@@ -247,7 +263,7 @@ function renderFileView(list, groups) {
 
     for (const [filePath, fileChunks] of fileGroups) {
       const sorted = [...fileChunks].sort((a, b) => a.created_at.localeCompare(b.created_at));
-      const lastTime = sorted[sorted.length - 1].created_at.slice(11, 16);
+      const lastTime = localTimeShort(sorted[sorted.length - 1].created_at);
       const fname = basename(filePath);
       const fdir = filePath.slice(0, filePath.length - fname.length - 1) || '/';
 
@@ -285,7 +301,7 @@ function renderFileView(list, groups) {
       for (const c of sorted) {
         const ci = document.createElement('div');
         ci.className = 'tl-file-chunk-item';
-        const time = c.created_at.slice(11, 16);
+        const time = localTimeShort(c.created_at);
         const tagsHtml = c.tags.map(t => `<span class="timeline-tag">${escapeHtml(t)}</span>`).join('');
         ci.innerHTML = `
           <div class="tl-fci-header">
