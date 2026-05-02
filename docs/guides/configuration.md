@@ -202,6 +202,17 @@ Resolving it is a two-step process — pick **one** of:
   stays untouched; the server swaps its embedder to match what the DB
   already contains.
 
+> **Stop other `mm` processes first.** Run `embedding-reset` against an
+> idle DB — shut down `mm web`, the MCP server, and any background `mm
+> index` runs before invoking it. If two processes briefly co-exist with
+> different embedding models pointing at the same SQLite file, race-loser
+> chunk inserts are silently dropped at the storage layer (the unique key
+> is content-only, so different-model embeddings for the same content are
+> indistinguishable). The startup dimension gate (issue #298) catches the
+> common case where the new model has a different dimension, but **same-
+> dimension** model swaps slip past it. See issue #707 for the full
+> failure mode.
+
 `mem_status` emits a `warnings[]` array entry with this schema when a
 mismatch is detected:
 
