@@ -1736,6 +1736,30 @@ kbd {
 }
 .tl-date-flash { animation: tl-flash 1.2s ease-out; }
 
+/* Files-view header "Open in source" — sits next to .tl-file-time on the
+   right edge. Click is stopPropagation()'d so it doesn't toggle the
+   row's expand/collapse. Sized to match the .tl-expand-actions buttons
+   in chunks-view so the two views feel consistent. */
+.tl-file-open-source {
+  font-size: 0.7rem; padding: 2px 8px; background: none;
+  border: 1px solid var(--accent); color: var(--accent);
+  border-radius: var(--radius); cursor: pointer; flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+}
+.tl-file-open-source:hover {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+/* Source-tab chunk card flash for Timeline → Source navigation. The
+   target chunk is scrolled into view and pulsed once so the user can
+   spot which card was the navigation target among the ~100-chunk list.
+   Reuses the same accent-on-surface palette as .tl-date-flash. */
+@keyframes tl-target-flash {
+  0%   { background: color-mix(in srgb, var(--accent) 30%, var(--surface)); }
+  100% { background: transparent; }
+}
+.chunk-card.tl-target-flash { animation: tl-target-flash 1.4s ease-out; }
+
 /* ── Graph ── */
 .graph-controls {
   display: flex; align-items: center; gap: 16px; flex-wrap: wrap;

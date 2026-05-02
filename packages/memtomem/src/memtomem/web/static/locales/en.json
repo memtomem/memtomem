@@ -453,6 +453,7 @@
   "timeline.title_tl": "Time range for timeline",
   "timeline.empty_icon": "🕐",
   "timeline.empty_text": "Click Load to view the timeline",
+  "timeline.open_in_source": "Open in source",
 
   "modal.settings_title": "Settings",
   "modal.default_tab_label": "Default Tab",

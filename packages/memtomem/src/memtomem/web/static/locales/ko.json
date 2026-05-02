@@ -453,6 +453,7 @@
   "timeline.title_tl": "타임라인 기간",
   "timeline.empty_icon": "🕐",
   "timeline.empty_text": "불러오기를 클릭하면 타임라인이 표시됩니다",
+  "timeline.open_in_source": "소스에서 보기",
 
   "modal.settings_title": "설정",
   "modal.default_tab_label": "기본 탭",

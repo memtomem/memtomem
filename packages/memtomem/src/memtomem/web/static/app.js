@@ -35,6 +35,13 @@ const STATE = {
   // immediately on consume so a follow-up filter/sort re-render
   // doesn't re-scrollIntoView an item the user already navigated past.
   pendingActivatePath: '',
+  // Chunk id the next ``browseSource`` should scroll/expand/flash after
+  // rendering the chunk list. Set by ``_navigateToSource`` when the
+  // caller knows the specific chunk (e.g. Timeline → Source jump);
+  // empty string means "source-level only, no chunk highlight".
+  // Cleared on consume in ``browseSource`` so a later same-source
+  // browse (e.g. Load All) doesn't re-flash an old target.
+  pendingActivateChunkId: '',
   // Active Sources vendor sub-tab (one of ``user`` / ``claude`` /
   // ``openai``). Lazily populated from localStorage on first render so
   // the value survives reloads. Keeping it on STATE means re-renders
@@ -1297,7 +1304,7 @@ function _renderStorageHealth(config, sources, embStatus) {
   `;
 }
 
-function _navigateToSource(path) {
+function _navigateToSource(path, chunkId = '') {
   // Two-phase navigation:
   //   1. Eager vendor resolve when the dashboard already cached the
   //      data we need (``loadDashboard`` mirrors /api/sources +
@@ -1309,6 +1316,10 @@ function _navigateToSource(path) {
   //      tree exists. Replaces the old setTimeout(300) gamble that
   //      missed on cold loads (Home was the entry point and the data
   //      hadn't been fetched yet) and on stale-localStorage vendors.
+  //   3. ``chunkId`` is optional — when present (Timeline jump knows
+  //      the exact chunk), ``browseSource`` scrolls + expands + flashes
+  //      that card after the source's chunk list renders.
+  STATE.pendingActivateChunkId = chunkId || '';
   const src = (STATE.allSources || []).find(s => s.path === path);
   const status = src && src.memory_dir
     ? (STATE.memoryStatusByPath || {})[src.memory_dir]
@@ -3196,6 +3207,33 @@ async function browseSource(path, limit = 100) {
       });
     }
     browser.appendChild(content);
+
+    // Consume ``pendingActivateChunkId`` (set by ``_navigateToSource``
+    // when the caller — e.g. Timeline — knows the specific chunk).
+    // Done after appendChild so the card is in the DOM. Cleared
+    // unconditionally so a later same-source browse (Load All, manual
+    // re-click) doesn't re-flash an old target. The accordion-expand
+    // listener attaches in the next rAF, so we run inside one too — but
+    // we don't depend on the listener: we set the ``expanded`` class
+    // directly when the card is collapsible.
+    if (STATE.pendingActivateChunkId) {
+      const targetId = STATE.pendingActivateChunkId;
+      STATE.pendingActivateChunkId = '';
+      requestAnimationFrame(() => {
+        const card = content.querySelector(
+          `.chunk-card[data-chunk-id="${CSS.escape(String(targetId))}"]`,
+        );
+        if (!card) return;
+        card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const contentDiv = card.querySelector('.chunk-card-content');
+        if (contentDiv && card.classList.contains('chunk-card-collapsible')) {
+          contentDiv.classList.add('expanded');
+          card.setAttribute('aria-expanded', 'true');
+        }
+        card.classList.add('tl-target-flash');
+        setTimeout(() => card.classList.remove('tl-target-flash'), 1400);
+      });
+    }
   } catch (err) {
     browser.innerHTML = `<div class="empty-state"><p>Error: ${escapeHtml(err.message)}</p></div>`;
   }
