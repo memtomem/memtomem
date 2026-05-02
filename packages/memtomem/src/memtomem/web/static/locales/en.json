@@ -142,6 +142,8 @@
   "search.prev_title": "Previous chunk in source",
   "search.next_title": "Next chunk in source",
 
+  "chunks.load_all": "Load All",
+
   "sources.help": "Indexed source files. Click a file to browse chunks. Drag the divider to resize. Sort by name, chunks, size, or recency.",
   "sources.title": "Sources",
   "sources.filter_placeholder": "Type to filter by path… e.g. .md, src/, utils",

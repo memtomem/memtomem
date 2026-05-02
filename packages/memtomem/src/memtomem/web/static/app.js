@@ -3324,7 +3324,10 @@ async function browseSource(path, limit = 100) {
     if (data.chunks.length < data.total) {
       const loadAllBtn = document.createElement('button');
       loadAllBtn.className = 'btn-ghost btn-xs chunks-load-all-btn';
-      loadAllBtn.textContent = 'Load All';
+      const loadAllLabel = (typeof t === 'function')
+        ? t('chunks.load_all') : 'Load All';
+      loadAllBtn.textContent = loadAllLabel;
+      loadAllBtn.setAttribute('data-i18n', 'chunks.load_all');
       loadAllBtn.addEventListener('click', () => browseSource(path, 500));
       header.appendChild(loadAllBtn);
     }
