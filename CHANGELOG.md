@@ -5,6 +5,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.35] — 2026-05-02
+
+### Added
+
+- **Model-readiness banner for `mm web` (PR #703, closes #696).** A new
+  `GET /api/system/model-readiness` endpoint reports per-component
+  (embedder + reranker) load state derived from `_loading` /
+  `_load_error` flags on `OnnxEmbedder` and `FastEmbedReranker`, plus a
+  filesystem probe of the fastembed cache. The header banner polls the
+  endpoint and renders `Downloading bge-m3 (~2300 MB)…` /
+  `Loading model…` / `Model failed to load — check Settings` so the
+  first search after a cold-cache boot no longer feels like a hung UI.
+  Boot hydrate, `visibilitychange` re-hydrate, and `doSearch()`
+  pre-flight cover the three entry points; non-onnx/fastembed providers
+  short-circuit to `skipped`.
+
+- **i18n wired up across Export, Import, Tags sort, Auto-Tag, and
+  Timeline (PR #695, PR #727).** All target keys already lived in
+  `en.json` / `ko.json`; the matching `data-i18n` /
+  `data-i18n-placeholder` attributes were missing on Export filters,
+  Import bundle/result rows, Tags sort buttons, the Auto-Tag form/result,
+  and Timeline date-range/filter labels — Korean-mode users saw mixed
+  English/Korean labels (`Source Filter`, `Today`, `Last 7 days`,
+  `Count↓`, `Dry run`, `Limit`, etc.). The "Load All" button on the
+  Sources chunk browser is also localized via a new
+  `chunks.load_all` key (closes #681).
+
 ### Fixed
 
 - **Duplicate chunk inserts on shared SQLite DBs (#691, PR #705).** When
@@ -31,6 +58,144 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `tools.export_import.import_chunks(on_conflict="duplicate")` is
   preserved for back-compat but the storage invariant is now
   authoritative — the mode no longer materialises duplicate rows.
+
+- **`mm web` SPA + `/api/docs` work fully offline (PR #706, PR #712,
+  closes #693).** The SPA pulled DOMPurify, marked, and Prism (core +
+  five language plugins + theme) from `cdnjs.cloudflare.com`, and
+  FastAPI's default `/api/docs` pulled Swagger UI bundle/css from
+  `cdn.jsdelivr.net` plus a favicon from `fastapi.tiangolo.com` — three
+  failure modes hit at once on every page load: (a) silent breakage on
+  offline / firewalled / air-gapped deployments, (b) per-load beacon to
+  the CDN with the visitor's IP / UA / request time, (c) no `integrity=`
+  hashes so a CDN compromise served arbitrary code into the same origin
+  as `/api/...`. All eleven assets (DOMPurify 3.1.6, marked 9.1.6, Prism
+  1.29.0 + 5 lang plugins + tomorrow theme, swagger-ui-dist 5.32.5
+  bundle.js + css) are now vendored under `web/static/vendor/` with
+  pinned SHA-256 in `THIRD_PARTY_LICENSES.md`. CSP tightens to
+  `default-src 'self'; script-src 'self'; style-src 'self'
+  'unsafe-inline'; img-src 'self' data:; connect-src 'self';
+  frame-ancestors 'none'` and a paired positive/negative regression
+  guard pins it. `/api/docs` is hand-rolled (instead of
+  `get_swagger_ui_html`) so the bootstrap is an external
+  `swagger-init.js` and the favicon reuses the SPA's own — no
+  `'unsafe-inline'` needed. Footprint: ~1.7 MB total minified
+  (~89 KB SPA + ~1.6 MB Swagger UI).
+
+- **Context overview badge surfaces non-`in_sync` states (PR #704,
+  closes #692).** The Context tab's overview badge previously checked
+  `inSync < total`, which under-counted multi-runtime divergence —
+  e.g. three commands tracked under both `claude_commands` (in sync)
+  and `gemini_commands` (no target) reported `3/3 synced` while
+  `missing_target` was 3. The badge now sums `missing_target +
+  missing_canonical + out_of_sync + parse_error` and surfaces the most
+  actionable status (precedence:
+  `parse_error → missing_target → missing_canonical → out_of_sync`) so
+  the user sees `3 missing` in `badge-warning` colour. Five new
+  `settings.ctx.badge_*` i18n keys (en + ko).
+
+- **Home bar chart shows full namespace on hover (PR #694).** Long
+  auto-namespaces like `claude:-Users-<user>-Work-<project>` truncated
+  to `claude:-Users-...` under the 120 px CSS clip with no way to see
+  the rest. A `title` attribute on each row makes the full string
+  reachable via the browser's native tooltip.
+
+- **Context: `installed_at` captured from filesystem mtime (PR #733,
+  closes #732).** On Windows, capturing `installed_at` via Python's
+  wall clock and comparing against NTFS `FILETIME` could place
+  just-installed files strictly *later* than the captured stamp,
+  false-positiving every fresh install as `dirty`. Capture now reads
+  `max(st_mtime_ns)` from the destination tree itself, and ceiling-
+  divides ns→µs before ISO-8601Z formatting so the round-trip stays
+  monotonic across NTFS's 100-ns residual. POSIX is byte-identical for
+  ordinary writes; the `dirty.py` strict-`>` invariant is preserved.
+
+- **`mm init` wizard no longer crashes on Windows consoles (PR #728,
+  cluster H-1 of #643).** The default Windows codepage (cp1252 / cp437)
+  cannot encode the box-drawing and em-dash glyphs the wizard prints,
+  so `mm init` raised `UnicodeEncodeError: 'charmap' codec can't encode
+  character '─' (U+2500)` at the very first banner line. The CLI entry
+  point now reconfigures `sys.stdout` / `sys.stderr` to UTF-8 with
+  `errors="replace"` on `sys.platform == "win32"` (POSIX is a no-op),
+  so missing glyphs degrade to `?` instead of crashing.
+
+- **Indexing: Windows memory_dir prefixes match stored chunk paths
+  (PR #717, closes #647).** `norm_dir_prefix` appended a hardcoded `/`
+  to a `Path.resolve()`-ed path, yielding `C:\Users\foo/` on Windows
+  that no `chunks.source_file` row could match under
+  `target.startswith(prefix)`. This bricked
+  `resolve_owning_memory_dir` (every chunk classified as orphan),
+  `memory_dir_stats` (all dirs returned 0), the `/api/sources` `kind`
+  attribution, and `delete_chunks=true` removal. Fix uses `os.sep` so
+  the prefix shape matches `norm_path`'s native-separator output. No
+  DB migration required.
+
+- **Search: `source_filter` normalises path separators across seven
+  MCP tools (PR #722, closes #720).** `source_filter` was substring
+  / glob-matched directly against stored paths with no separator fold,
+  so a caller-supplied filter like `/tmp/keep/` never matched a chunk
+  stored as `\tmp\keep\policy.md` on Windows. Three contract-specific
+  helpers in `search/pipeline.py`
+  (`match_source_filter` / `match_source_filter_substring` /
+  `match_source_filter_glob`) now centralise the fold across
+  `mem_search`, `mem_list`, `mem_consolidate`, `mem_decay`,
+  `mem_auto_tag`, `mem_export_chunks`, and `mem_entity_scan`. Persisted
+  `chunks.source_file` rows are unchanged — only the comparison picks
+  a canonical form.
+
+- **Config: Windows backslash paths in `categorize_memory_dir`
+  (PR #716, closes #316).** The provider-pattern table is forward-slash
+  regex (`r"/\.claude/projects/[^/]+/memory/?$"`, etc.) but
+  `categorize_memory_dir` matched against `str(path)` directly — on
+  Windows that's backslash-separated, so every Windows provider
+  directory silently fell through to `"user"` and the `mm init`
+  wizard could not auto-detect Claude Code / Codex / Gemini memory
+  folders. Fix normalises the input via `.replace("\\", "/")`; UNC
+  paths and mixed separators covered.
+
+- **Config: `~/...` `path_glob` rules expand via `as_posix()`
+  (PR #726, cluster E of #643).**
+  `NamespacePolicyRule._expand_and_validate_glob` stored the expanded
+  glob via `str(Path(v).expanduser())`, which yielded backslashes on
+  Windows. The downstream consumer `pathspec.GitIgnoreSpec` interprets
+  gitignore syntax — gitignore is POSIX-only and treats `\` as an
+  escape character, so any rule with a leading `~/` (a common config
+  shape: `~/.claude/projects/**`, `~/Documents/notes/**`) silently
+  matched zero files on Windows and fell back to `default_namespace`
+  with no warning. `Path.expanduser().as_posix()` keeps the tilde
+  expansion and forces `/` separators; POSIX no-op for absolute paths.
+
+- **Wiki: `mm wiki {skill,agent,command} override` prints consistent
+  separators (PR #719).** The `Seeded …` line interpolated a `Path`
+  object (native separator) while the adjacent `git add …` hint
+  hardcoded `/` — same logical path, two different shapes on Windows.
+  Now `Seeded {rel.as_posix()}`. Absolute paths handed to `$EDITOR`
+  via `click.edit(filename=str(...))` and shell pipelines via
+  `click.echo(str(result.path))` intentionally stay platform-native.
+
+### Documentation
+
+- **`mm embedding-reset` warns about the same-dim model-swap race
+  (PR #710, closes #707).** PR #705's `INSERT OR IGNORE` path keeps
+  whichever embedding commits first when two processes embed the same
+  chunk under *different* models; the dim-mismatch gate catches
+  cross-dimension swaps but not same-dimension model swaps. A callout
+  in `configuration.md#reset-flow` and a one-line warning in
+  `embeddings.md` "Switching Models on an Existing Index" document the
+  single-process invariant — stop `mm web` (and any other MCP / CLI
+  process) before invoking `mm embedding-reset`.
+
+### Internal
+
+- **Windows test compatibility sweep (refs #643, #644).** A
+  cross-cutting cleanup of POSIX-only assumptions in the test suite so
+  the Windows informational CI job can graduate to required: a
+  `set_home` helper plus a sweep of ~133 HOME monkeypatch sites
+  (PR #714); `skipif` markers on POSIX-only mode-bit / `fcntl` /
+  `signal` / `pwd.getpwuid` / unlink-semantics assertions (PR #713,
+  PR #721, PR #725, PR #729); path-separator normalisation in
+  cross-platform assertions (PR #711, PR #718); `shutil.which` for the
+  `mm` entry-point lookup (PR #723); and a Windows-friendly
+  `test_init_cmd.py` (PR #724).
 
 ## [0.1.34] — 2026-05-02
 
