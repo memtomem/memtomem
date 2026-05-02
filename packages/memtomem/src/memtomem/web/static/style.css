@@ -2130,6 +2130,12 @@ select:focus-visible {
 :root[data-theme="light"] .activity-cell[data-level="2"] { background: #40c463; }
 :root[data-theme="light"] .activity-cell[data-level="3"] { background: #30a14e; }
 :root[data-theme="light"] .activity-cell[data-level="4"] { background: #216e39; }
+.activity-cell-link { cursor: pointer; transition: outline-color 120ms ease; }
+.activity-cell-link:hover { outline: 1px solid var(--accent); outline-offset: 1px; }
+.activity-cell-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
 
 .home-chart-card { min-width: 0; }
 .home-bar-chart { display: flex; flex-direction: column; gap: 6px; }

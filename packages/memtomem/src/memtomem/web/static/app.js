@@ -1162,12 +1162,46 @@ function _renderActivityMap(chunks) {
       html += '<div class="activity-cell activity-empty"></div>';
     } else {
       const level = getLevel(cell.count);
-      html += `<div class="activity-cell" data-level="${level}" title="${cell.date}: ${cell.count}"></div>`;
+      html += `<div class="activity-cell activity-cell-link" data-level="${level}" data-date="${cell.date}" role="button" tabindex="0" title="${cell.date}: ${cell.count}"></div>`;
     }
   });
   html += '</div>';
 
   map.innerHTML = html;
+
+  // Wire cell click / Enter / Space to jump into the Timeline tab,
+  // pre-filled with a single-day custom range. Future / before-range
+  // cells are rendered without the .activity-cell-link class so they
+  // never receive a handler.
+  map.querySelectorAll('.activity-cell-link').forEach(cell => {
+    const date = cell.dataset.date;
+    const trigger = () => _jumpToTimelineDate(date);
+    cell.addEventListener('click', trigger);
+    cell.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        trigger();
+      }
+    });
+  });
+}
+
+function _jumpToTimelineDate(dateKey) {
+  const tlDays = qs('tl-days');
+  const tlCustom = qs('tl-date-custom');
+  const tlFrom = qs('tl-date-from');
+  const tlTo = qs('tl-date-to');
+  if (tlDays && tlCustom && tlFrom && tlTo) {
+    tlDays.value = 'custom';
+    tlCustom.hidden = false;
+    tlFrom.value = dateKey;
+    tlTo.value = dateKey;
+    const tlSource = qs('tl-source');
+    const tlNs = qs('tl-namespace');
+    if (tlSource) tlSource.value = '';
+    if (tlNs) tlNs.value = '';
+  }
+  activateTab('timeline');
 }
 
 // D. File Type Distribution
