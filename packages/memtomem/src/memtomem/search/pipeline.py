@@ -1,4 +1,18 @@
-"""Search pipeline: BM25 + Dense + RRF fusion."""
+"""Search pipeline: BM25 + Dense + RRF fusion.
+
+Stage order (keyword path, fixed — see ``CLAUDE.md`` invariants):
+expansion → BM25 + dense (parallel) → RRF fusion → cross-encoder
+rerank (optional) → source/tag filter → validity filter → time-decay
+→ MMR → access-freq boost → importance boost → context-window
+expansion.
+
+Empty-query path (``query=""`` / ``None`` with ``tag_filter`` /
+``source_filter`` set, #750) routes through ``_filter_only_search``
+and skips expansion / BM25 / dense / RRF / rerank / MMR — none of
+those have a meaningful signal without a query. Validity → decay →
+access → importance → context-window still apply so the rank
+reflects recency × access × importance.
+"""
 
 from __future__ import annotations
 
@@ -436,9 +450,20 @@ class SearchPipeline:
         )
 
         # Over-sample so the validity stage can prune without starving
-        # the response. Bounded so a tag with millions of chunks can't
-        # blow up memory — ``top_k * 5`` mirrors the rerank-pool floor
-        # logic and 500 is the route's hard cap on top_k.
+        # the response. ``top_k * 5`` mirrors the rerank-pool floor logic
+        # used in the keyword path; floored at 100 for tiny ``top_k``.
+        # Worst case ≈ 2500 candidates given the route's ``top_k <= 500``
+        # cap, which is the same order as ``bm25_candidates``.
+        #
+        # On a popular tag (chunk count > candidate_limit) older highly
+        # accessed/important chunks beyond this recency cutoff never reach
+        # the boost stages — ``recall_chunks`` orders ``created_at DESC``,
+        # so this is a "browse newest by tag" UX, not "rank everything by
+        # importance". The keyword path doesn't have this floor because
+        # BM25/dense pre-filter on relevance; here recency is the only
+        # signal we have to cap on. Acceptable for the click-the-pill
+        # workflow; revisit if a "show me old-but-important by tag" need
+        # surfaces.
         candidate_limit = max(top_k * 5, 100)
         chunks = await self._storage.recall_chunks(
             source_filter=source_filter,
