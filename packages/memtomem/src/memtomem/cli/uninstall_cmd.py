@@ -583,6 +583,34 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
     label, lines = _binary_uninstall_hint(profile)
     _print_binary_hint(label, lines)
 
+    is_windows = sys.platform == "win32"
+
+    # Windows can't unlink files held by an open handle (WinError 32), so
+    # `--force` cannot override a live writer — pretending it does would
+    # leave the state dir half-wiped after `_delete_inventory` crashes
+    # mid-run. Refuse cleanly with platform-specific guidance instead.
+    # Tracked in #730.
+    if force and is_windows and (server.alive or db_lock.locked):
+        click.echo("")
+        click.secho(
+            "--force cannot wipe an open SQLite database on Windows; stop the writer first.",
+            fg="red",
+        )
+        if server.alive and server.pid is not None:
+            click.secho(
+                f"  Stop the server (pid {server.pid}) and retry. Windows refuses to "
+                "unlink files held by an open handle (WinError 32).",
+                fg="red",
+            )
+        else:
+            click.secho(
+                "  Find the writer (Task Manager, `Get-Process`, or Sysinternals "
+                "`handle.exe`), stop it, and retry. Windows refuses to unlink files "
+                "held by an open handle (WinError 32).",
+                fg="red",
+            )
+        sys.exit(2)
+
     if (server.alive or db_lock.locked) and not force:
         click.echo("")
         if server.alive:
@@ -595,33 +623,55 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
                 # ``_probe_pid_file`` only returns alive=True with the
                 # ``pid_file`` field populated, so it is safe to dereference
                 # here without a fallback.
-                click.secho(
-                    "Server still running (pid unknown — flock is held by an active "
-                    "writer, but the recorded pid is missing). Refusing to delete "
-                    f"state. Find the holder with `lsof {server.pid_file}`.",
-                    fg="red",
-                )
+                if is_windows:
+                    click.secho(
+                        "Server still running (pid unknown — an active writer holds "
+                        "the lock, but the recorded pid is missing). Refusing to "
+                        "delete state. Find the holder via Sysinternals `handle.exe` "
+                        "or Resource Monitor.",
+                        fg="red",
+                    )
+                else:
+                    click.secho(
+                        "Server still running (pid unknown — flock is held by an active "
+                        "writer, but the recorded pid is missing). Refusing to delete "
+                        f"state. Find the holder with `lsof {server.pid_file}`.",
+                        fg="red",
+                    )
             else:
                 click.secho(
                     f"Server still running (pid {server.pid}). Refusing to delete state — "
                     "an active server holds the SQLite WAL and deleting it risks corruption.",
                     fg="red",
                 )
-            click.secho("  Stop the server first, or pass --force to override.", fg="red")
+            if is_windows:
+                # On Windows --force cannot override (see #730 / branch above),
+                # so don't suggest it.
+                click.secho("  Stop the server first.", fg="red")
+            else:
+                click.secho("  Stop the server first, or pass --force to override.", fg="red")
         else:
             # db_lock.locked only — writer without .server.pid (mm web,
-            # mm watchdog, ad-hoc script, ...). Point the user at lsof /
-            # ps so they can find it without another round-trip.
+            # mm watchdog, ad-hoc script, ...). Point the user at the
+            # platform-appropriate process inspection tool so they can
+            # find it without another round-trip.
             click.secho(
                 f"Another process holds a write lock on {db_path}. Refusing to delete "
                 "state — an active writer can corrupt the WAL.",
                 fg="red",
             )
-            click.secho(
-                f"  Find it with `lsof {db_path}` (or `ps aux | grep memtomem`), "
-                "stop it, or pass --force to override.",
-                fg="red",
-            )
+            if is_windows:
+                click.secho(
+                    "  Find the writer (Task Manager, `Get-Process`, or Sysinternals "
+                    "`handle.exe`) and stop it, then retry.",
+                    fg="red",
+                )
+            else:
+                click.secho(
+                    f"  Find it with `lsof {db_path}` (or `ps aux | grep memtomem`), "
+                    "stop it, or pass --force to override.",
+                    fg="red",
+                )
         sys.exit(2)
 
     if will_delete_bytes == 0 and not inv.other_files.paths:

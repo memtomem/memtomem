@@ -528,9 +528,22 @@ class TestDbWriterLockRefuses:
             assert result.exit_code == 2, result.output
             assert "holds a write lock" in result.output
             assert str(db_path) in result.output
-            assert "lsof" in result.output
             # "Server still running" path must NOT trigger — no .server.pid here.
             assert "Server still running" not in result.output
+            # Hint contents differ per platform (#730): POSIX advertises
+            # `lsof` + `--force`; Windows can't override --force, so it must
+            # NOT advertise it and must point at Windows-native tools.
+            if sys.platform == "win32":
+                assert "lsof" not in result.output
+                assert "pass --force" not in result.output
+                assert (
+                    "handle.exe" in result.output
+                    or "Task Manager" in result.output
+                    or "Get-Process" in result.output
+                )
+            else:
+                assert "lsof" in result.output
+                assert "pass --force" in result.output
             # Nothing deleted while the writer is alive.
             assert db_path.exists()
         finally:
@@ -540,13 +553,12 @@ class TestDbWriterLockRefuses:
     @pytest.mark.skipif(
         sys.platform == "win32",
         reason=(
-            "Test relies on POSIX unlink-while-open semantics — Windows refuses "
-            "to unlink a file held by an open handle (WinError 32), so --force "
-            "cannot wipe the dir while the lock-holding connection lives in "
-            "the same process. Sibling tests cover the lock-detection path."
+            "POSIX-only contract: --force wipes via unlink-while-open even "
+            "though the writer still holds the inode. Windows variant lives "
+            "in test_force_refuses_on_windows_when_writer_alive (#730)."
         ),
     )
-    def test_force_overrides_db_lock(self, home):
+    def test_force_overrides_db_lock_posix(self, home):
         db_path, conn = self._make_real_db(home)
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -560,6 +572,43 @@ class TestDbWriterLockRefuses:
                 conn.rollback()
             except sqlite3.ProgrammingError:
                 pass  # connection may be invalidated after the file vanished
+            conn.close()
+
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason=(
+            "Windows-only contract (#730): --force cannot wipe an open SQLite "
+            "DB on Windows (WinError 32 on unlink-while-open), so --force "
+            "must refuse cleanly instead of producing a half-wiped state dir."
+        ),
+    )
+    def test_force_refuses_on_windows_when_writer_alive(self, home):
+        db_path, conn = self._make_real_db(home)
+        # _make_real_db seeds config.json + memories/ alongside the DB.
+        # _delete_inventory wipes those BEFORE the DB, so checking they
+        # survive proves the refusal fired before any deletion ran (#730).
+        config_path = home / ".memtomem" / "config.json"
+        memories_dir = home / ".memtomem" / "memories"
+        assert config_path.exists()
+        assert memories_dir.exists()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
+            assert result.exit_code == 2, result.output
+            assert "Windows" in result.output
+            assert "stop the writer" in result.output.lower()
+            # Refusal fired BEFORE _delete_inventory: nothing wiped.
+            assert db_path.exists()
+            assert config_path.exists()
+            assert memories_dir.exists()
+            # Partial-wipe message must NOT appear — that would mean
+            # _delete_inventory ran and crashed mid-way.
+            assert "Deletion failed at" not in result.output
+        finally:
+            try:
+                conn.rollback()
+            except sqlite3.ProgrammingError:
+                pass
             conn.close()
 
     def test_proceeds_when_db_exists_but_no_writer(self, home):
