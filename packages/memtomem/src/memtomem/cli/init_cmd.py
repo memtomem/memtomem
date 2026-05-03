@@ -16,6 +16,12 @@ from typing import Literal
 
 import click
 
+from memtomem.cli._index_progress import (
+    _collect_seed_scale as _collect_seed_scale,
+)
+from memtomem.cli._index_progress import (
+    run_with_progress as _run_index_with_progress,
+)
 from memtomem.cli.init_presets import PRESETS, _VALID_PRESETS, get_preset
 from memtomem.cli.wizard import (
     StepRetry,
@@ -1513,31 +1519,6 @@ def _install_extras(
     return result.returncode == 0
 
 
-def _collect_seed_scale(memory_dir: Path) -> tuple[int, int]:
-    """Count ``.md`` files and total bytes under ``memory_dir``, recursive.
-
-    Two-axis decision input for :func:`_maybe_seed_initial_index`. ``.md``
-    only — other supported extensions (``.json``, ``.py``, etc.) exist but
-    the wizard's dominant workflow seeds human-written markdown memos, and
-    the embedder cost tuning lives in that regime. Silent on stat/permission
-    errors: a dir the user can't read is one the seed can't index either,
-    so return (0, 0) and fall through to "skip"."""
-    if not memory_dir.exists():
-        return 0, 0
-    count = 0
-    total = 0
-    try:
-        for f in memory_dir.rglob("*.md"):
-            try:
-                total += f.stat().st_size
-                count += 1
-            except OSError:
-                continue
-    except OSError:
-        return 0, 0
-    return count, total
-
-
 def _format_size(total_bytes: int) -> str:
     """Human-readable size — ``<1 KB`` for sub-KB totals (15 tiny memo
     files shouldn't display as "0 KB"), ``N KB`` up to 1024 KB, ``N MB``
@@ -1597,115 +1578,45 @@ def _seed_with_progress(paths: list[Path]) -> bool:
     Failure: any other ``Exception`` (missing config, embedder init
     error, IO) prints a yellow warning + manual-rerun hint and returns
     ``False``. The wizard already succeeded at writing config.json so a
-    seed-only failure must not abort the overall flow."""
+    seed-only failure must not abort the overall flow.
+
+    Streaming + bar lifecycle live in :mod:`memtomem.cli._index_progress`
+    (shared with ``mm index`` since #656); this function owns the
+    wizard-specific copy: green summary line vs ``mm index``'s legacy
+    "Indexed N file(s): …" shape, multi-path resume hint via
+    ``mm web``, zero-chunks yellow warning that gates the Next-steps
+    step-1 annotation."""
     import asyncio
 
     if not paths:
         return False
 
-    bar_state: dict = {"bar": None}
-    agg = {"total_files": 0, "indexed": 0, "skipped": 0}
     # Pre-compute so the progress bar length spans all paths, not just
     # the first one. Stays accurate across serial iteration.
     expected_total = sum(_collect_seed_scale(p)[0] for p in paths)
 
-    # Throttle clock for ``chunk_progress`` label refreshes. Mirrors the web
-    # Index tab (``web/static/app.js`` ~L4219-4256): 100ms gap between
-    # intermediate renders, final tick (chunks_done >= chunks_total) bypasses
-    # the throttle so ``(N/N)`` lands before the next file boundary, and the
-    # clock resets to 0 on every ``progress`` event so the next file's first
-    # chunk renders immediately. ``time.monotonic()`` (not ``time.time()``)
-    # so a wall-clock jump can't stall the bar. Issue #659 tracks extracting
-    # this into a shared helper once a third call-site appears
-    # (rule-of-three) — keep this implementation self-contained for now.
-    throttle_state: dict = {"last_render": 0.0}
-
-    def _format_item(item: object) -> str:
-        if not item:
-            return ""
-        if isinstance(item, tuple):
-            file, done, total = item
-            return f"{Path(file).name} ({done}/{total})"[:60]
-        # Legacy str case: the existing ``progress`` branch passes a path str.
-        # ``Path(...).name`` (not ``rsplit("/", 1)``) handles Windows
-        # backslash paths correctly.
-        return Path(str(item)).name[:40]
-
-    def _ensure_bar() -> None:
-        # Lazy creation: the bar can come into existence on EITHER the first
-        # ``chunk_progress`` OR the first ``progress`` event, whichever
-        # arrives first. ``chunk_progress`` for a given file is emitted before
-        # that file's ``progress`` summary, so for large files the bar appears
-        # at chunk-level rather than waiting for the first file to finish.
-        if bar_state["bar"] is None:
-            bar_state["bar"] = click.progressbar(
-                length=expected_total,
-                label="  Seeding",
-                item_show_func=_format_item,
-            ).__enter__()
-
-    def _close_bar() -> None:
-        if bar_state["bar"] is not None:
-            try:
-                bar_state["bar"].__exit__(None, None, None)
-            except Exception:  # pragma: no cover - click bar cleanup
-                pass
-            bar_state["bar"] = None
-
-    async def _stream() -> None:
-        from memtomem.cli._bootstrap import cli_components
-
-        async with cli_components() as comp:
-            for p in paths:
-                async for evt in comp.index_engine.index_path_stream(
-                    p, recursive=True, force=False
-                ):
-                    if evt["type"] == "chunk_progress":
-                        # Server-side gating in ``indexing/engine.py`` already
-                        # filters out small files (``progress_threshold``,
-                        # default 32), so we don't threshold here — small
-                        # files simply won't emit these events, matching the
-                        # web Index tab's quiet behavior.
-                        done = evt["chunks_done"]
-                        total = evt["chunks_total"]
-                        is_final = done >= total
-                        now = time.monotonic()
-                        if not is_final and now - throttle_state["last_render"] < 0.1:
-                            continue
-                        throttle_state["last_render"] = now
-                        _ensure_bar()
-                        # Refresh the sub-label without advancing the bar —
-                        # length is in **file units**, so chunks must not
-                        # double-count. ``update(0, item)`` re-renders with
-                        # the new ``current_item`` only.
-                        bar_state["bar"].update(0, (evt["file"], done, total))
-                    elif evt["type"] == "progress":
-                        # Reset throttle on file boundary so the next file's
-                        # first chunk_progress renders immediately.
-                        throttle_state["last_render"] = 0.0
-                        _ensure_bar()
-                        bar_state["bar"].update(1, evt["file"])
-                    elif evt["type"] == "complete":
-                        agg["total_files"] += evt["total_files"]
-                        agg["indexed"] += evt["indexed_chunks"]
-                        agg["skipped"] += evt["skipped_chunks"]
-
     resume_hint = f"mm index {paths[0]}" if len(paths) == 1 else "mm web  (Sources → Reindex All)"
 
     try:
-        asyncio.run(_stream())
+        agg = asyncio.run(
+            _run_index_with_progress(
+                paths,
+                label="  Seeding",
+                expected_total=expected_total,
+                recursive=True,
+                force=False,
+                namespace=None,
+            )
+        )
     except KeyboardInterrupt:
-        _close_bar()
         click.echo()
         click.secho(f"  Cancelled. Resume with: {resume_hint}", fg="yellow")
         return False
     except Exception as e:
-        _close_bar()
         click.secho(f"  Skipped initial seed: {e}", fg="yellow")
         click.echo(f"  Run manually later:   {resume_hint}")
         return False
 
-    _close_bar()
     if agg["total_files"] == 0:
         # No files discovered by the stream — shouldn't happen given the
         # callers already ensured file_count > 0, but handle defensively.
