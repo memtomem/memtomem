@@ -202,8 +202,14 @@ def app():
     application.state.index_engine = index_engine
     cfg = FakeConfig()
     # _Indexing is a class-level singleton — reset mutable fields so tests that
-    # mutate exclude_patterns don't leak into later tests.
+    # mutate exclude_patterns or memory_dirs don't leak into later tests.
+    # The memory_dirs reset matters for any test that reassigns the list to
+    # exercise a custom corpus shape (symlinked / tilde / nested / orphan
+    # cases): without it, the override persists across the fixture boundary
+    # and an unrelated test downstream sees the wrong default and fails the
+    # path-inside-memory_dirs gate (e.g. ``/api/index`` 403s).
     cfg.indexing.exclude_patterns = []
+    cfg.indexing.memory_dirs = [Path("/tmp/memories")]
     application.state.config = cfg
     application.state.dedup_scanner = dedup_scanner
 
@@ -637,7 +643,7 @@ class TestSources:
         assert resp.status_code == 200
         src = resp.json()["sources"][0]
         assert src["kind"] == "memory"
-        assert src["memory_dir"] == str(Path("/tmp/memories"))
+        assert src["memory_dir"] == str(Path("/tmp/memories").resolve())
 
         # Same source must round-trip through the kind=memory filter and
         # be excluded by kind=general.
@@ -645,6 +651,93 @@ class TestSources:
         assert resp_mem.json()["total"] == 1
         resp_gen = await client.get("/api/sources", params={"kind": "general"})
         assert resp_gen.json()["total"] == 0
+
+    async def test_memory_dir_resolves_symlink(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """``memory_dir`` in the response is resolved (not just expanded)
+        — same treatment ``/api/memory-dirs/status`` got in #668. A
+        wizard-written config under a symlinked prefix (macOS ``/tmp`` →
+        ``/private/tmp``, Docker bind mounts) would otherwise emit the
+        raw form here while the status endpoint emits the resolved form,
+        breaking the frontend's ``STATE.memoryStatusByPath[source.memory_dir]``
+        lookup. (#675)"""
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+
+        app.state.config.indexing.memory_dirs = [link]
+        # Storage returns source paths in their resolved form (chunks
+        # table is canonicalised via ``norm_path``), so the source lives
+        # under ``real`` even though the config still names ``link``.
+        source_file = real / "note.md"
+        app.state.storage.get_source_files_with_counts.return_value = [
+            (source_file, 3, "2026-04-29T10:00:00", "default", 100, 50, 200)
+        ]
+
+        resp = await client.get("/api/sources")
+        assert resp.status_code == 200
+        src = resp.json()["sources"][0]
+        assert src["memory_dir"] == str(real.resolve())
+
+    async def test_memory_dir_matches_status_endpoint(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """Cross-endpoint parity guard. ``/api/sources`` ``memory_dir``
+        and ``/api/memory-dirs/status`` ``path`` are both consumed by
+        the same frontend render pass — a divergence here re-introduces
+        #675 with the same symptoms (vendor inference falls through and
+        sources land under whichever sub-tab is active). Pin the
+        invariant directly so the regression doesn't have to surface
+        through the UI again."""
+        real = tmp_path / "x"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+
+        app.state.config.indexing.memory_dirs = [link]
+        source_file = real / "note.md"
+        app.state.storage.get_source_files_with_counts.return_value = [
+            (source_file, 1, "2026-04-29T10:00:00", "default", 100, 50, 200)
+        ]
+
+        sources_resp = await client.get("/api/sources")
+        status_resp = await client.get("/api/memory-dirs/status")
+        assert sources_resp.status_code == 200, sources_resp.text
+        assert status_resp.status_code == 200, status_resp.text
+
+        sources = sources_resp.json()["sources"]
+        dirs = status_resp.json()["dirs"]
+        assert len(sources) == 1
+        assert len(dirs) == 1
+        assert sources[0]["memory_dir"] == dirs[0]["path"]
+
+    async def test_memory_dir_resolves_tilde(
+        self,
+        app,
+        client: AsyncClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Symmetric counterpart to ``test_response_path_resolves_tilde``
+        in :class:`TestMemoryDirsStatus`. A config entry like
+        ``~/memories`` must come back through ``/api/sources`` as the
+        expanded absolute path, not the literal tilde form (#675)."""
+        set_home(monkeypatch, tmp_path)
+        target = tmp_path / "memories"
+        target.mkdir()
+
+        app.state.config.indexing.memory_dirs = ["~/memories"]
+        source_file = target / "note.md"
+        app.state.storage.get_source_files_with_counts.return_value = [
+            (source_file, 1, "2026-04-29T10:00:00", "default", 100, 50, 200)
+        ]
+
+        resp = await client.get("/api/sources")
+        assert resp.status_code == 200
+        src = resp.json()["sources"][0]
+        assert src["memory_dir"] == str(target.resolve())
 
 
 # ---------------------------------------------------------------------------

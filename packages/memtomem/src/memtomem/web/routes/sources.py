@@ -44,9 +44,17 @@ async def list_sources(
     # first match in the inner loop is the longest-prefix-wins one —
     # matches :func:`resolve_owning_memory_dir`'s tie-break rule for
     # nested configured dirs without repeating the comparison logic.
+    #
+    # ``dir_path`` is resolved (not just expanded) so the response
+    # ``memory_dir`` matches sibling ``/api/memory-dirs/status`` paths
+    # — both produce ``Path(d).expanduser().resolve()`` strings. Without
+    # this, frontend ``STATE.memoryStatusByPath[source.memory_dir]``
+    # lookups miss whenever a memory_dir is registered under a symlinked
+    # prefix (macOS ``/tmp`` → ``/private/tmp``, Docker bind mounts).
+    # Same one-line treatment as #668 / engine.py:memory_dir_stats. (#675)
     indexed_dirs: list[tuple[str, Path, MemoryDirKind]] = sorted(
         (
-            (norm_dir_prefix(d), Path(d).expanduser(), memory_dir_kind(d))
+            (norm_dir_prefix(d), Path(d).expanduser().resolve(), memory_dir_kind(d))
             for d in config.indexing.memory_dirs
         ),
         key=lambda t: -len(t[0]),
