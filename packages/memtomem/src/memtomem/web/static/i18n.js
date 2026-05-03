@@ -53,7 +53,15 @@ const I18N = (() => {
     });
   }
 
-  /** Switch language, persist, and update DOM. */
+  /** Switch language, persist, update DOM, and notify listeners.
+   *
+   * Dispatches ``langchange`` *after* ``_load`` + ``applyDOM`` so listeners
+   * (e.g. ``app.js``'s ``loadStats`` refresh) read the new locale's cache,
+   * not the previous one. Previously the dispatch happened in the click
+   * handler immediately after calling ``setLang`` without ``await``, which
+   * raced the locale fetch — listeners would fall back to English and
+   * write the wrong language into the DOM right before ``applyDOM`` here
+   * clobbered them with the placeholder. */
   async function setLang(lang) {
     if (!_SUPPORTED.includes(lang)) return;
     _lang = lang;
@@ -64,6 +72,7 @@ const I18N = (() => {
     // Update the toggle button label
     const btn = document.getElementById('lang-toggle');
     if (btn) btn.textContent = lang === 'ko' ? 'EN' : 'KO';
+    window.dispatchEvent(new CustomEvent('langchange', { detail: { lang } }));
   }
 
   /** Initialise: detect language, load locale, apply. */
@@ -78,9 +87,9 @@ const I18N = (() => {
     if (btn) {
       btn.textContent = lang === 'ko' ? 'EN' : 'KO';
       btn.addEventListener('click', () => {
+        // setLang dispatches langchange itself once the new locale is
+        // loaded and applyDOM has run.
         setLang(_lang === 'ko' ? 'en' : 'ko');
-        // Notify app.js that language changed
-        window.dispatchEvent(new CustomEvent('langchange', { detail: { lang: _lang } }));
       });
     }
     // JS-owned dynamic strings (Compose placeholder, header chip jump
