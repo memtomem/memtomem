@@ -27,6 +27,7 @@ markers = [
     "llm: requires a live LLM API key (OpenAI/Anthropic); CI runs these in the nightly job only",
     "multilingual: multilingual/large-corpus regression tests (runs in the test-golden-path CI job)",
     "requires_symlinks: needs a filesystem that can create symlinks (auto-skipped on Windows without Developer Mode/admin)",
+    "browser: requires pytest-playwright + a Chromium install (auto-skipped when unavailable)",
 ]
 
 [tool.mypy]
@@ -41,6 +42,7 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.25",
     "pytest-cov>=6.0",
+    "pytest-playwright>=0.5",
     "ruff>=0.9",
     "mypy>=1.14",
     "types-PyYAML>=6.0",
