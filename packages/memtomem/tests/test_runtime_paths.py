@@ -39,8 +39,8 @@ def _make_safe_xdg(tmp_path: Path) -> Path:
 
 
 @pytest.mark.skipif(
-    not hasattr(os, "geteuid"),
-    reason="XDG/mode-bit semantics are POSIX-only; Windows-equivalent tracked in #637",
+    os.name == "nt",
+    reason="XDG / POSIX mode-bit semantics; Windows coverage lives in TestWindowsRuntimeDir",
 )
 class TestRuntimeDir:
     def test_uses_xdg_runtime_dir_when_set(self, tmp_path, monkeypatch):
@@ -128,8 +128,9 @@ class TestRuntimeDir:
 
 
 @pytest.mark.skipif(
-    not hasattr(os, "geteuid"),
-    reason="0o700 mode bits + umask + chmod don't translate to NTFS; tracked in #637",
+    os.name == "nt",
+    reason="0o700 mode bits + umask + chmod don't translate to NTFS; "
+    "Windows coverage lives in TestWindowsRuntimeDir",
 )
 class TestEnsureRuntimeDir:
     def test_creates_directory_with_owner_only_mode(self, tmp_path, monkeypatch):
@@ -242,8 +243,9 @@ class TestEnsureRuntimeDir:
 
 
 @pytest.mark.skipif(
-    not hasattr(os, "geteuid"),
-    reason="depends on _make_safe_xdg fixture's POSIX chmod; tracked in #637",
+    os.name == "nt",
+    reason="depends on _make_safe_xdg fixture's POSIX chmod; "
+    "Windows path is covered indirectly in TestWindowsRuntimeDir",
 )
 class TestServerPidPath:
     def test_resolves_to_runtime_dir_server_pid(self, tmp_path, monkeypatch):
@@ -262,6 +264,130 @@ class TestServerPidPath:
             "server_pid_path() is a path resolver; use ensure_runtime_dir() "
             "explicitly when opening the file"
         )
+
+
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="NTFS-specific: tempdir-only resolution, mode-bit gate disabled",
+)
+class TestWindowsRuntimeDir:
+    """Windows counterpart to ``TestRuntimeDir`` / ``TestEnsureRuntimeDir``.
+
+    The runtime resolver collapses to one branch on Windows
+    (``tempfile.gettempdir() / 'memtomem-0'``) and the security gates
+    that depend on POSIX mode bits or ``geteuid`` are off — see the
+    module docstring of ``_runtime_paths``. These tests pin the
+    NTFS-equivalent behaviour so a future contributor can't silently
+    re-enable a check that doesn't have NTFS semantics.
+    """
+
+    def test_runtime_dir_uses_tempdir_with_uid_zero(self, monkeypatch):
+        """Windows has no ``geteuid``, so the suffix collapses to ``0``;
+        ``%LOCALAPPDATA%\\Temp\\`` is already per-user, so the cross-user
+        collision risk that motivates the suffix on shared ``/tmp`` does
+        not apply here."""
+        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+
+        result = runtime_dir()
+
+        assert result == Path(tempfile.gettempdir()) / "memtomem-0"
+
+    def test_runtime_dir_does_not_create(self, monkeypatch):
+        """Pure resolver — same contract as POSIX. The uninstall
+        inventory walk needs this to be side-effect free."""
+        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+
+        result = runtime_dir()
+        # Don't assert non-existence: a previous test in the session may
+        # have created it. The contract is "this call doesn't create",
+        # not "the path is missing".
+        before = result.exists()
+        runtime_dir()
+        assert result.exists() == before
+
+    def test_runtime_dir_ignores_xdg_on_windows(self, tmp_path, monkeypatch):
+        """``XDG_RUNTIME_DIR`` is a Linux/systemd convention; honoring
+        it on Windows would require validating the base without POSIX
+        mode bits, which is half-baked. Always fall through to tempdir
+        on Windows so behaviour is uniform regardless of environment."""
+        xdg = tmp_path / "xdg"
+        xdg.mkdir()
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
+
+        result = runtime_dir()
+
+        assert result.parent == Path(tempfile.gettempdir())
+        assert result.name == "memtomem-0"
+
+    def test_ensure_creates_directory(self, tmp_path, monkeypatch):
+        """``ensure_runtime_dir`` mkdirs the resolved path. Mode bits
+        are not asserted: NTFS synthesizes them and the ``chmod`` call
+        is effectively a no-op for POSIX-style permissions."""
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        monkeypatch.setenv("TEMP", str(tmp_path))
+        monkeypatch.setenv("TMP", str(tmp_path))
+        tempfile.tempdir = None  # invalidate the gettempdir() cache
+
+        try:
+            d = ensure_runtime_dir()
+            assert d.exists() and d.is_dir()
+            assert d == Path(tempfile.gettempdir()) / "memtomem-0"
+        finally:
+            tempfile.tempdir = None
+
+    def test_ensure_idempotent_on_windows(self, tmp_path, monkeypatch):
+        """Regression for #637 — pre-fix, the second call would refuse
+        the dir it had just created because NTFS reports synthesized
+        mode bits like ``0o666`` and ``stat.S_IMODE(...) & 0o077`` is
+        non-zero. After the fix the mode-bit gate is skipped on
+        Windows so successive calls are idempotent."""
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        monkeypatch.setenv("TEMP", str(tmp_path))
+        monkeypatch.setenv("TMP", str(tmp_path))
+        tempfile.tempdir = None
+
+        try:
+            ensure_runtime_dir()
+            # Must not raise on the second pass.
+            ensure_runtime_dir()
+        finally:
+            tempfile.tempdir = None
+
+    def test_ensure_refuses_non_directory(self, tmp_path, monkeypatch):
+        """Same contract as POSIX: a regular file at the runtime path
+        is rejected with a clear remediation hint, regardless of NTFS
+        mode-bit synthesis."""
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        monkeypatch.setenv("TEMP", str(tmp_path))
+        monkeypatch.setenv("TMP", str(tmp_path))
+        tempfile.tempdir = None
+
+        try:
+            (Path(tempfile.gettempdir()) / "memtomem-0").write_text("a file")
+            with pytest.raises(PermissionError, match="not a directory"):
+                ensure_runtime_dir()
+        finally:
+            tempfile.tempdir = None
+
+    @pytest.mark.requires_symlinks
+    def test_ensure_refuses_existing_symlink(self, tmp_path, monkeypatch):
+        """Windows symlinks need Developer Mode or admin to create,
+        but once present they are exploitable identically to POSIX
+        symlinks. Auto-skipped via ``requires_symlinks`` when the
+        runner can't create one (see conftest)."""
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        monkeypatch.setenv("TEMP", str(tmp_path))
+        monkeypatch.setenv("TMP", str(tmp_path))
+        tempfile.tempdir = None
+
+        try:
+            target = tmp_path / "real-target"
+            target.mkdir()
+            os.symlink(target, Path(tempfile.gettempdir()) / "memtomem-0")
+            with pytest.raises(PermissionError, match="symlink"):
+                ensure_runtime_dir()
+        finally:
+            tempfile.tempdir = None
 
 
 class TestLegacyServerPidPath:
