@@ -704,6 +704,12 @@ class TestTransactionalStaging:
         excluding any ``.uninstall-staging-*`` subtree (transient state
         we don't want included in the equality check).
 
+        Keys use ``as_posix()`` so the snapshot is comparable across
+        platforms — ``str(Path("memories/x.md"))`` is ``memories/x.md``
+        on POSIX but ``memories\\x.md`` on Windows, which would make
+        the hardcoded ``"memories/x.md" in before`` sanity check fail
+        on the Windows lane (caught in CI).
+
         ``config.json`` is recorded as a presence sentinel rather than
         its bytes because ``_load_config_safely`` may legitimately
         rewrite it (e.g. the ``auto_discover`` migration) before
@@ -719,10 +725,11 @@ class TestTransactionalStaging:
             rel = path.relative_to(root)
             if any(part.startswith(_STAGING_PREFIX) for part in rel.parts):
                 continue
-            if rel == Path("config.json"):
-                snap[str(rel)] = "<exists>"
+            key = rel.as_posix()
+            if key == "config.json":
+                snap[key] = "<exists>"
             else:
-                snap[str(rel)] = path.read_bytes()
+                snap[key] = path.read_bytes()
         return snap
 
     def test_rollback_restores_original_state_on_mid_stage_failure(self, home, monkeypatch):
