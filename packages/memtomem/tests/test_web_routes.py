@@ -542,9 +542,23 @@ class TestSearch:
         assert result["score"] == pytest.approx(0.95)
         assert result["chunk"]["content"] == "test chunk content"
 
-    async def test_search_missing_query_returns_422(self, client: AsyncClient):
+    async def test_search_no_axis_returns_400(self, client: AsyncClient):
+        """#750: ``q`` is now optional, but at least one of
+        ``q``/``tag_filter``/``source_filter`` must be present — search
+        needs *something* to scope by. A missing-everything call is
+        still rejected, just with a 400 + actionable detail rather than
+        FastAPI's default 422 for missing required params."""
         resp = await client.get("/api/search")
-        assert resp.status_code == 422
+        assert resp.status_code == 400
+        detail = resp.json().get("detail", "")
+        assert "tag_filter" in detail and "source_filter" in detail
+
+    async def test_search_tag_only_returns_results(self, client: AsyncClient):
+        """#750: ``tag_filter`` alone is a valid axis — the pipeline's
+        empty-query branch enumerates by filter and returns results
+        without needing a keyword."""
+        resp = await client.get("/api/search", params={"tag_filter": "redis"})
+        assert resp.status_code == 200
 
     async def test_search_with_filters(self, client: AsyncClient):
         resp = await client.get(

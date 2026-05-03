@@ -506,3 +506,106 @@ class TestRerankCandidatePool:
         assert FIELD_CONSTRAINTS["rerank.min_pool"]["type"] is int
         assert FIELD_CONSTRAINTS["rerank.max_pool"]["type"] is int
         assert FIELD_CONSTRAINTS["rerank.enabled"]["type"] is bool
+
+
+class TestFilterOnlySearch:
+    """Empty-query path (#750): tag/source filter is the primary selector.
+
+    Tag-pill click on a fresh session lands here — ``q`` is empty but
+    ``tag_filter`` is set, and the user expects "show me all memos with
+    this tag" rather than the pre-#750 no-op. The pipeline must skip
+    BM25/dense/rerank (they need a query) and enumerate via
+    ``recall_chunks`` so the filter can take over as the primary selector.
+    """
+
+    @staticmethod
+    def _make_chunk(name: str, tags: tuple[str, ...] = ()) -> Chunk:
+        return Chunk(
+            content=name,
+            metadata=ChunkMetadata(source_file=Path(f"/tmp/{name}.md"), tags=tags),
+            id=uuid4(),
+            embedding=[],
+        )
+
+    def _make_pipeline(self, recall_return: list[Chunk]):
+        from unittest.mock import AsyncMock
+
+        from memtomem.config import SearchConfig
+        from memtomem.search.pipeline import SearchPipeline
+
+        storage = AsyncMock()
+        storage.recall_chunks = AsyncMock(return_value=recall_return)
+        # bm25/dense should never be reached on the empty-q path — set
+        # them to raise so a regression that drops the early-return
+        # branch fails loudly instead of silently returning [].
+        storage.bm25_search = AsyncMock(side_effect=AssertionError("bm25 must not run"))
+        storage.dense_search = AsyncMock(side_effect=AssertionError("dense must not run"))
+        storage.increment_access = AsyncMock()
+        storage.get_access_counts = AsyncMock(return_value={})
+        storage.get_importance_scores = AsyncMock(return_value={})
+        storage.count_chunks_by_ns_prefix = AsyncMock(return_value=0)
+
+        embedder = AsyncMock()
+        embedder.embed_query = AsyncMock(side_effect=AssertionError("embed_query must not run"))
+
+        return storage, SearchPipeline(
+            storage=storage,
+            embedder=embedder,
+            config=SearchConfig(enable_bm25=True, enable_dense=True),
+        )
+
+    @pytest.mark.asyncio
+    async def test_empty_query_with_tag_filter_uses_recall(self):
+        """``q="" + tag_filter`` enumerates via ``recall_chunks`` and
+        forwards the tag through — not via BM25 with an empty query."""
+        chunks = [
+            self._make_chunk("a", tags=("redis",)),
+            self._make_chunk("b", tags=("redis",)),
+        ]
+        storage, pipeline = self._make_pipeline(chunks)
+
+        results, stats = await pipeline.search(query="", tag_filter="redis", top_k=5)
+
+        storage.recall_chunks.assert_awaited_once()
+        kwargs = storage.recall_chunks.await_args.kwargs
+        assert kwargs["tag_filter"] == "redis"
+        assert kwargs["source_filter"] is None
+        assert len(results) == 2
+        assert stats.fused_total == 2
+        assert stats.final_total == 2
+        assert all(r.source == "recall" for r in results)
+
+    @pytest.mark.asyncio
+    async def test_empty_query_with_source_filter_uses_recall(self):
+        """Source-only path mirrors tag-only — same enumeration branch."""
+        chunks = [self._make_chunk("notes")]
+        storage, pipeline = self._make_pipeline(chunks)
+
+        results, _ = await pipeline.search(query="  ", source_filter="notes.md", top_k=5)
+
+        storage.recall_chunks.assert_awaited_once()
+        kwargs = storage.recall_chunks.await_args.kwargs
+        assert kwargs["source_filter"] == "notes.md"
+        assert kwargs["tag_filter"] is None
+        assert len(results) == 1
+
+    @pytest.mark.asyncio
+    async def test_empty_query_no_filters_returns_empty(self):
+        """No keyword *and* no filter → return empty fast, do not enumerate."""
+        storage, pipeline = self._make_pipeline([])
+
+        results, stats = await pipeline.search(query="", top_k=5)
+
+        storage.recall_chunks.assert_not_awaited()
+        assert results == []
+        assert stats.final_total == 0
+
+    @pytest.mark.asyncio
+    async def test_empty_query_trims_to_top_k(self):
+        """Filter-only path honours ``top_k`` after the post-filter sort."""
+        chunks = [self._make_chunk(f"c{i}", tags=("redis",)) for i in range(15)]
+        _, pipeline = self._make_pipeline(chunks)
+
+        results, _ = await pipeline.search(query="", tag_filter="redis", top_k=5)
+
+        assert len(results) == 5

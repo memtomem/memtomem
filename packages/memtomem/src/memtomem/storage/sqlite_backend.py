@@ -948,6 +948,7 @@ class SqliteBackend(
         source_filter: str | None = None,
         limit: int = 20,
         namespace_filter: NamespaceFilter | None = None,
+        tag_filter: str | None = None,
     ) -> list[Chunk]:
         db = self._get_read_db()
         conditions: list[str] = []
@@ -967,6 +968,19 @@ class SqliteBackend(
             if frag:
                 conditions.append(frag)
                 params.extend(ns_params)
+        if tag_filter is not None:
+            # Comma-separated tags = OR matching, mirroring the
+            # post-fusion semantics in ``SearchPipeline.search`` so the
+            # tag-only path (#750) ranks the same set the keyword path
+            # would have filtered down to.
+            tags = [t.strip() for t in tag_filter.split(",") if t.strip()]
+            if tags:
+                placeholders = ",".join("?" for _ in tags)
+                conditions.append(
+                    f"EXISTS (SELECT 1 FROM json_each(chunks.tags) "
+                    f"WHERE json_each.value IN ({placeholders}))"
+                )
+                params.extend(tags)
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         params.append(limit)
