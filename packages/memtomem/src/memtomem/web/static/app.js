@@ -130,15 +130,6 @@ const STATE = {
         _modelReadinessHydrate();
       }
     });
-    // Re-apply i18n when language changes (dynamic JS strings).
-    // applyDOM() rewrites elements with data-i18n bindings to their
-    // locale value — for the header count pills that means clobbering
-    // the live "5 chunks" with the placeholder "— chunks". Re-fetch
-    // stats after so the live count reappears in the new language.
-    window.addEventListener('langchange', () => {
-      if (typeof I18N !== 'undefined') I18N.applyDOM();
-      loadStats();
-    });
     // Activate tab from URL hash now that i18n has loaded — tabs that
     // render JS-built UI (like the Sources tab's Memory Dirs panel) call
     // ``t()`` at build time, so they must run after the locale cache is
@@ -1074,6 +1065,19 @@ async function loadStats() {
   } catch (e) { console.warn('[stats]', e); }
 }
 
+// Registered at top level — mirrors the ``_updateFilterCountBadge``
+// langchange hook below. Must be registered before ``I18N.init()`` runs
+// (init dispatches a one-shot langchange after the locale cache loads),
+// so the placeholder data-i18n value applyDOM() writes into the count
+// pills gets immediately overwritten by the live count in the new
+// language. If we registered this inside the DOMContentLoaded handler
+// after ``await I18N.init()``, init's own dispatch would fire before
+// the listener exists and the pills would stay on "— chunks" until the
+// next user-driven toggle.
+window.addEventListener('langchange', () => {
+  if (typeof I18N !== 'undefined') I18N.applyDOM();
+  loadStats();
+});
 loadStats();
 checkEmbeddingMismatch();
 
