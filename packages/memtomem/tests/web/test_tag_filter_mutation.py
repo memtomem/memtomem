@@ -52,22 +52,26 @@ def _install_default_stubs(page) -> None:
             body=json.dumps(payload),
         )
 
+    # Order matters: ``page.route`` resolves last-registered-wins, so the
+    # catch-all has to go FIRST and the specific routes LAST. Inverting
+    # the order would silently shadow the specifics with the empty-{}
+    # default — harmless today (the SPA's boot fetches all use ``catch``
+    # blocks around ``api()``) but a foothold for confusing failures
+    # when a future spec adds a boot-time assertion.
+    page.route("**/api/**", lambda r: _ok(r, {}))
     page.route("**/api/system/ui-mode", lambda r: _ok(r, {"mode": "prod"}))
     page.route("**/api/system/model-readiness", lambda r: _ok(r, {"ready": True}))
     page.route("**/api/sources", lambda r: _ok(r, {"sources": []}))
     page.route("**/api/namespaces", lambda r: _ok(r, {"namespaces": []}))
     page.route("**/api/stats", lambda r: _ok(r, {}))
     # Default empty search response — specs that assert on the request
-    # shape override this with a capturing handler.
+    # shape override this with a capturing handler registered AFTER
+    # ``_install_default_stubs`` returns, so the same last-wins rule
+    # gives the spec-local handler precedence.
     page.route(
         "**/api/search?**",
         lambda r: _ok(r, {"results": [], "total": 0, "retrieval_stats": {}}),
     )
-    # Catch-all for everything else (boot fetches like /api/tags-info,
-    # /api/decay/policy, etc. that may exist in newer builds). The SPA's
-    # boot paths all use ``catch`` blocks around ``api()``, so an empty
-    # object is benign.
-    page.route("**/api/**", lambda r: _ok(r, {}))
 
 
 def test_searchByTag_does_not_pollute_search_input(page, mm_web_url: str) -> None:
@@ -266,9 +270,11 @@ def test_result_tag_remove_clears_only_matching_tag_filter(page, mm_web_url: str
         ),
     )
     page.evaluate("document.getElementById('tag-filter').value = 'unrelated'")
-    page.locator(".result-tag-remove").first.click()
-    # The handler doesn't touch ``tag-filter`` in this branch; assert it
-    # stays after a brief settle window so any async rollback path would
-    # have a chance to fire.
-    page.wait_for_timeout(200)
+    # ``expect_request`` lets us await the PATCH the handler fires *after*
+    # the conditional clear, without a hard sleep. The whole handler has
+    # then run to completion, so any rollback path would already have
+    # touched ``tag-filter`` if it was going to.
+    with page.expect_request("**/api/chunks/8/tags") as patch_info:
+        page.locator(".result-tag-remove").first.click()
+    patch_info.value
     assert page.locator("#tag-filter").input_value() == "unrelated"
