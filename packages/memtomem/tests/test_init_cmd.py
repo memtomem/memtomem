@@ -6731,3 +6731,242 @@ class TestStepEmbeddingOpenAIGuard:
         assert next_step_called == []
         # ``run_steps`` exits 0 on WizardCancel (was 1 under SystemExit(1)).
         assert result.exit_code == 0
+
+
+class TestStepMemoryDirFsGuards:
+    """``_step_memory_dir`` must surface ``mkdir`` failures via
+    ``fail_step`` instead of crashing the wizard with an uncaught
+    PermissionError / OSError stack trace (#664). Symmetric to the
+    Ollama-branch guards in ``TestStepEmbeddingOllamaGuards``."""
+
+    def test_mkdir_permission_error_q_cancels(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """``mkdir`` raises PermissionError → user picks 'q' → wizard
+        cancels with ``WizardCancel`` instead of crashing on the raw
+        exception."""
+        import click
+        from click.testing import CliRunner
+
+        from memtomem.cli import init_cmd
+        from memtomem.cli.wizard import WizardCancel
+
+        target = tmp_path / "nope"
+
+        def boom(self: Path, *a: object, **kw: object) -> None:
+            raise PermissionError(13, "Permission denied", str(self))
+
+        monkeypatch.setattr(Path, "mkdir", boom)
+
+        captured: dict[str, BaseException | None] = {"exc": None}
+
+        @click.command()
+        def cmd() -> None:
+            try:
+                init_cmd._step_memory_dir({})
+            except WizardCancel as exc:
+                captured["exc"] = exc
+
+        # path → confirm create → fail → q
+        result = CliRunner().invoke(cmd, [], input=f"{target}\nY\nq\n")
+        assert "Could not create" in result.output
+        assert "Permission denied" in result.output
+        assert isinstance(captured["exc"], WizardCancel)
+
+    def test_mkdir_permission_error_r_retries_until_success(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """``mkdir`` fails once, succeeds on retry — the wizard does NOT
+        re-prompt the directory path on retry (recovery is local to the
+        mkdir, not the whole step)."""
+        import click
+        from click.testing import CliRunner
+
+        from memtomem.cli import init_cmd
+
+        target = tmp_path / "memories"
+        calls = {"n": 0}
+
+        original_mkdir = Path.mkdir
+
+        def flaky_mkdir(self: Path, *a: object, **kw: object) -> None:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise PermissionError(13, "Permission denied", str(self))
+            return original_mkdir(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "mkdir", flaky_mkdir)
+
+        state: dict = {}
+
+        @click.command()
+        def cmd() -> None:
+            init_cmd._step_memory_dir(state)
+
+        # path → Y → mkdir fails → r → mkdir succeeds (no re-prompt)
+        result = CliRunner().invoke(cmd, [], input=f"{target}\nY\nr\n")
+        assert result.exit_code == 0
+        assert "Could not create" in result.output
+        assert f"Created {target}" in result.output
+        assert state.get("memory_dir") == str(target)
+        assert calls["n"] == 2
+
+    def test_mkdir_failure_does_not_advance_to_next_step(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Core #664 invariant: an uncaught crash is replaced by a
+        deliberate cancel. When mkdir fails and the user picks 'q',
+        the next step must NOT run."""
+        import click
+        from click.testing import CliRunner
+
+        from memtomem.cli import init_cmd
+        from memtomem.cli.wizard import run_steps
+
+        target = tmp_path / "nope"
+
+        def boom(self: Path, *a: object, **kw: object) -> None:
+            raise OSError(28, "No space left on device", str(self))
+
+        monkeypatch.setattr(Path, "mkdir", boom)
+
+        next_step_called: list[bool] = []
+
+        def sentinel_next_step(state: dict) -> None:
+            next_step_called.append(True)
+
+        @click.command()
+        def cmd() -> None:
+            run_steps([init_cmd._step_memory_dir, sentinel_next_step])
+
+        result = CliRunner().invoke(cmd, [], input=f"{target}\nY\nq\n")
+        assert "No space left on device" in result.output
+        assert "Wizard cancelled" in result.output
+        assert next_step_called == []
+        assert result.exit_code == 0
+
+
+class TestStepSettingsFsGuards:
+    """``_step_settings`` must surface ``mkdir`` / ``write_text`` failures
+    via ``fail_step`` instead of crashing on a read-only project root or
+    full disk (#664)."""
+
+    def test_write_oserror_q_cancels(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """``write_text`` raises OSError → user picks 'q' → wizard
+        cancels cleanly. Without the guard, the wizard would crash with
+        an uncaught stack trace mid-step."""
+        import click
+        from click.testing import CliRunner
+
+        from memtomem.cli import init_cmd
+        from memtomem.cli.wizard import WizardCancel
+
+        # ``_step_settings`` short-circuits if ``~/.claude`` is missing.
+        # Point HOME at a tmp dir with a fake ``.claude`` so the body runs.
+        home = tmp_path / "home"
+        (home / ".claude").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.chdir(tmp_path)
+
+        def boom(self: Path, *a: object, **kw: object) -> None:
+            raise PermissionError(13, "Permission denied", str(self))
+
+        monkeypatch.setattr(Path, "write_text", boom)
+
+        captured: dict[str, BaseException | None] = {"exc": None}
+
+        @click.command()
+        def cmd() -> None:
+            try:
+                init_cmd._step_settings({})
+            except WizardCancel as exc:
+                captured["exc"] = exc
+
+        # configure-hooks? Y → write fails → q
+        result = CliRunner().invoke(cmd, [], input="Y\nq\n")
+        assert "Could not write" in result.output
+        assert "Permission denied" in result.output
+        assert isinstance(captured["exc"], WizardCancel)
+
+    def test_write_oserror_r_retries_until_success(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """``write_text`` fails once, succeeds on retry — the wizard does
+        NOT re-prompt the hooks confirmation on retry."""
+        import click
+        from click.testing import CliRunner
+
+        from memtomem.cli import init_cmd
+
+        home = tmp_path / "home"
+        (home / ".claude").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.chdir(tmp_path)
+
+        calls = {"n": 0}
+        original_write = Path.write_text
+
+        def flaky_write(self: Path, *a: object, **kw: object) -> int:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise PermissionError(13, "Permission denied", str(self))
+            return original_write(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "write_text", flaky_write)
+        # ``generate_all_settings`` writes to ~/.claude/settings.json after
+        # the canonical write succeeds; stub it so the test stays scoped to
+        # the guard under test.
+        monkeypatch.setattr(
+            "memtomem.context.settings.generate_all_settings",
+            lambda root: {},
+        )
+
+        state: dict = {}
+
+        @click.command()
+        def cmd() -> None:
+            init_cmd._step_settings(state)
+
+        # confirm-hooks Y → write fails → r → write succeeds
+        result = CliRunner().invoke(cmd, [], input="Y\nr\n")
+        assert result.exit_code == 0
+        assert "Could not write" in result.output
+        assert state.get("settings_hooks") is True
+        # Two attempts: the first raises, the second writes the file.
+        assert calls["n"] == 2
+
+    def test_write_failure_does_not_advance_to_next_step(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Core #664 invariant for ``_step_settings``: a write failure
+        plus 'q' cancels deliberately — the next step does not run."""
+        import click
+        from click.testing import CliRunner
+
+        from memtomem.cli import init_cmd
+        from memtomem.cli.wizard import run_steps
+
+        home = tmp_path / "home"
+        (home / ".claude").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.chdir(tmp_path)
+
+        def boom(self: Path, *a: object, **kw: object) -> None:
+            raise OSError(28, "No space left on device", str(self))
+
+        monkeypatch.setattr(Path, "write_text", boom)
+
+        next_step_called: list[bool] = []
+
+        def sentinel_next_step(state: dict) -> None:
+            next_step_called.append(True)
+
+        @click.command()
+        def cmd() -> None:
+            run_steps([init_cmd._step_settings, sentinel_next_step])
+
+        result = CliRunner().invoke(cmd, [], input="Y\nq\n")
+        assert "No space left on device" in result.output
+        assert "Wizard cancelled" in result.output
+        assert next_step_called == []
+        assert result.exit_code == 0

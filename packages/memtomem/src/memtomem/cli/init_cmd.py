@@ -659,8 +659,28 @@ def _step_memory_dir(state: dict) -> None:
     if not memory_path.exists():
         create = nav_confirm(f"  '{memory_dir}' doesn't exist. Create it?", default=True)
         if create:
-            memory_path.mkdir(parents=True, exist_ok=True)
-            click.secho(f"  Created {memory_path}", fg="green")
+            # Symmetric counterpart to the Ollama-branch fail_step adoption
+            # in ``_step_embedding`` (#626 / #661): an uncaught
+            # PermissionError / OSError here would crash the wizard with a
+            # raw stack trace and force ``mm init`` from the top. Wrap the
+            # mkdir so the user gets the same retry/back/quit recovery as
+            # the rest of the wizard. The nested try is required because
+            # ``fail_step`` raises ``StepRetry`` from inside the
+            # ``except OSError`` handler — a sibling ``except StepRetry``
+            # on the same statement would not catch it. (#664)
+            while True:
+                try:
+                    try:
+                        memory_path.mkdir(parents=True, exist_ok=True)
+                    except OSError as exc:
+                        fail_step(
+                            f"Could not create '{memory_path}': {exc}",
+                            retryable=True,
+                        )
+                    click.secho(f"  Created {memory_path}", fg="green")
+                    break
+                except StepRetry:
+                    continue
     state["memory_dir"] = memory_dir
     click.echo()
 
@@ -910,13 +930,28 @@ def _step_settings(state: dict) -> None:
 
         project_root = Path.cwd()
         canonical = project_root / CANONICAL_SETTINGS_FILE
-        canonical.parent.mkdir(parents=True, exist_ok=True)
-        if not canonical.exists():
-            canonical.write_text(
-                json.dumps({"hooks": {}}, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            click.secho(f"  Created {CANONICAL_SETTINGS_FILE}", fg="green")
+        # Same fail_step adoption as ``_step_memory_dir`` (#664). A read-only
+        # project root or full disk would otherwise crash the wizard mid-step
+        # with a stack trace; wrap both filesystem ops so the user gets the
+        # standard retry/back/quit recovery path.
+        while True:
+            try:
+                try:
+                    canonical.parent.mkdir(parents=True, exist_ok=True)
+                    if not canonical.exists():
+                        canonical.write_text(
+                            json.dumps({"hooks": {}}, indent=2) + "\n",
+                            encoding="utf-8",
+                        )
+                        click.secho(f"  Created {CANONICAL_SETTINGS_FILE}", fg="green")
+                except OSError as exc:
+                    fail_step(
+                        f"Could not write '{CANONICAL_SETTINGS_FILE}': {exc}",
+                        retryable=True,
+                    )
+                break
+            except StepRetry:
+                continue
 
         results = generate_all_settings(project_root)
         for name, r in results.items():
