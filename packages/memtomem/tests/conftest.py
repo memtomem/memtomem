@@ -139,7 +139,10 @@ async def components(tmp_path):
 
     db_path = str(tmp_path / "test.db")
     mem_dir = str(tmp_path / "memories")
-    (tmp_path / "memories").mkdir()
+    # exist_ok: pytest reuses tmp_path roots; on Windows a previous session's
+    # SQLite/ONNX handle leak can leave this dir behind and trip WinError 183.
+    # See #206.
+    (tmp_path / "memories").mkdir(exist_ok=True)
 
     os.environ["MEMTOMEM_STORAGE__SQLITE_PATH"] = db_path
     os.environ["MEMTOMEM_INDEXING__MEMORY_DIRS"] = json.dumps([mem_dir])
@@ -208,7 +211,8 @@ async def bm25_only_components(tmp_path, monkeypatch):
     """
     db_path = tmp_path / "bm25.db"
     mem_dir = tmp_path / "memories"
-    mem_dir.mkdir()
+    # exist_ok: see ``components`` fixture above — Windows tmp_path reuse. #206.
+    mem_dir.mkdir(exist_ok=True)
 
     from helpers import isolate_memtomem_env
 
@@ -242,7 +246,8 @@ async def onnx_components(tmp_path, monkeypatch):
     """
     db_path = tmp_path / "golden.db"
     mem_dir = tmp_path / "memories"
-    mem_dir.mkdir()
+    # exist_ok: see ``components`` fixture above — Windows tmp_path reuse. #206.
+    mem_dir.mkdir(exist_ok=True)
 
     for var in (
         "MEMTOMEM_EMBEDDING__PROVIDER",
