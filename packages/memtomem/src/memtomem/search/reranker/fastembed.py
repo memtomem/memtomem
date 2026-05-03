@@ -109,4 +109,10 @@ class FastEmbedReranker:
         ]
 
     async def close(self) -> None:
+        # Same shape as ``OnnxEmbedder.close``: force-collect so the underlying
+        # ORT InferenceSession releases its mmap and thread-local arenas before
+        # pytest cleans up tmp_path on Windows. See #206.
+        import gc
+
         self._model = None
+        gc.collect()

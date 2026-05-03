@@ -205,4 +205,12 @@ class OnnxEmbedder:
         return embeddings[0]
 
     async def close(self) -> None:
+        # Force-collect after dropping the fastembed reference: the underlying
+        # ORT InferenceSession holds an mmap on the model file plus thread-local
+        # arenas, and on Windows that handle can outlive ``self._model = None``
+        # long enough for pytest's tmp_path rmtree to fail with WinError 183
+        # on the next session. See #206.
+        import gc
+
         self._model = None
+        gc.collect()

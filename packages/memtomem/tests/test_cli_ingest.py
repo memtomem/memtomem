@@ -551,8 +551,14 @@ class TestGeminiIngestIntegration:
 @pytest.mark.ollama
 class TestCodexIngestIntegration:
     async def test_happy_path_indexes_codex_memories(self, components, tmp_path):
+        import shutil
+
         mem_dir = tmp_path / "codex_memories"
-        mem_dir.mkdir()
+        # rmtree+exist_ok: pytest reuses tmp_path roots; on Windows a prior
+        # session's handle leak can leave this dir (with stale .md files)
+        # behind. See #206.
+        shutil.rmtree(mem_dir, ignore_errors=True)
+        mem_dir.mkdir(exist_ok=True)
         (mem_dir / "fact_a.md").write_text(
             "# Workspace preference\n\nAlways use workspace-write sandbox mode.\n", encoding="utf-8"
         )
@@ -581,8 +587,12 @@ class TestCodexIngestIntegration:
                 assert "codex-memory" in c.metadata.tags
 
     async def test_rerun_skips_unchanged(self, components, tmp_path):
+        import shutil
+
         mem_dir = tmp_path / "codex_memories"
-        mem_dir.mkdir()
+        # rmtree+exist_ok: see test_happy_path_indexes_codex_memories. #206.
+        shutil.rmtree(mem_dir, ignore_errors=True)
+        mem_dir.mkdir(exist_ok=True)
         (mem_dir / "fact.md").write_text("# Fact\n\nSome important fact.\n", encoding="utf-8")
 
         files = _codex_discover_files(mem_dir)
