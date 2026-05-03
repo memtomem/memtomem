@@ -5254,6 +5254,158 @@ class TestInitialSeedThreshold:
         assert f"mm index {dir_b}" not in out
 
     # ------------------------------------------------------------------
+    # chunk_progress sub-label refresh (issue #655) — wizard surfaces
+    # per-chunk progress so multi-minute embedder runs don't look hung.
+    # ------------------------------------------------------------------
+
+    def test_seed_with_progress_chunk_events_do_not_advance_bar(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``chunk_progress`` events refresh the progress bar's sub-label
+        without advancing ``pos``. Bar length is in **file units**, so the
+        final ``pos`` after a 1-file run with N intermediate chunk events
+        must equal 1 (the file count), not 1 + N. Regression guard for the
+        "label refresh, no advance" design — Option 1 from issue #655."""
+        from contextlib import asynccontextmanager
+
+        import click
+
+        from memtomem.cli import init_cmd
+
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+        self._write_md(memory_dir, "big.md", "lots of chunks")
+
+        captured: dict[str, object] = {}
+
+        class _FakeEngine:
+            async def index_path_stream(self, path, recursive=True, force=False):
+                file = str(memory_dir / "big.md")
+                # Server only emits chunk_progress when the file exceeds the
+                # ``progress_threshold`` (default 32). Mimic a 50-chunk file.
+                for done in (10, 25, 40, 50):
+                    yield {
+                        "type": "chunk_progress",
+                        "file": file,
+                        "chunks_done": done,
+                        "chunks_total": 50,
+                        "files_done": 0,
+                        "files_total": 1,
+                    }
+                yield {
+                    "type": "progress",
+                    "file": file,
+                    "files_done": 1,
+                    "files_total": 1,
+                    "indexed": 50,
+                    "skipped": 0,
+                }
+                yield {
+                    "type": "complete",
+                    "total_files": 1,
+                    "total_chunks": 50,
+                    "indexed_chunks": 50,
+                    "skipped_chunks": 0,
+                    "deleted_chunks": 0,
+                    "duration_ms": 1.0,
+                }
+
+        class _FakeComp:
+            index_engine = _FakeEngine()
+
+        @asynccontextmanager  # type: ignore[misc]
+        async def _fake_components():
+            yield _FakeComp()
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _fake_components)
+
+        # Wrap click.progressbar so we can read the bar's final state after
+        # ``__exit__`` is called inside _close_bar.
+        real_progressbar = click.progressbar
+
+        def _spy_progressbar(*args, **kwargs):
+            bar = real_progressbar(*args, **kwargs)
+            captured["bar"] = bar
+            return bar
+
+        monkeypatch.setattr("memtomem.cli.init_cmd.click.progressbar", _spy_progressbar)
+
+        assert init_cmd._seed_with_progress([memory_dir]) is True
+        bar = captured["bar"]
+        # 4 chunk_progress events + 1 progress event → only the progress
+        # event advances. Chunk events refresh the label only.
+        assert bar.pos == 1, f"expected pos==1 (file count), got {bar.pos}"
+
+    def test_seed_with_progress_no_chunk_events_unchanged(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Pre-existing behavior pin: a stream with no ``chunk_progress``
+        events behaves identically to today — final ``pos`` equals the file
+        count, label is the file basename. Small files (under
+        ``progress_threshold``) take this path; the wizard must stay quiet
+        for them, matching the web Index tab."""
+        from contextlib import asynccontextmanager
+
+        import click
+
+        from memtomem.cli import init_cmd
+
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+        self._write_md(memory_dir, "a.md", "small")
+        self._write_md(memory_dir, "b.md", "small too")
+
+        captured: dict[str, object] = {}
+
+        class _FakeEngine:
+            async def index_path_stream(self, path, recursive=True, force=False):
+                for name in ("a.md", "b.md"):
+                    yield {
+                        "type": "progress",
+                        "file": str(memory_dir / name),
+                        "files_done": 1,
+                        "files_total": 2,
+                        "indexed": 1,
+                        "skipped": 0,
+                    }
+                yield {
+                    "type": "complete",
+                    "total_files": 2,
+                    "total_chunks": 2,
+                    "indexed_chunks": 2,
+                    "skipped_chunks": 0,
+                    "deleted_chunks": 0,
+                    "duration_ms": 1.0,
+                }
+
+        class _FakeComp:
+            index_engine = _FakeEngine()
+
+        @asynccontextmanager  # type: ignore[misc]
+        async def _fake_components():
+            yield _FakeComp()
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _fake_components)
+
+        real_progressbar = click.progressbar
+
+        def _spy_progressbar(*args, **kwargs):
+            bar = real_progressbar(*args, **kwargs)
+            captured["bar"] = bar
+            return bar
+
+        monkeypatch.setattr("memtomem.cli.init_cmd.click.progressbar", _spy_progressbar)
+
+        assert init_cmd._seed_with_progress([memory_dir]) is True
+        bar = captured["bar"]
+        # 2 progress events advance the bar by 1 each → pos == 2 (file count).
+        assert bar.pos == 2, f"expected pos==2 (file count), got {bar.pos}"
+
+    # ------------------------------------------------------------------
     # Next-steps step 1 hint — seeded / single-dir / multi-dir branches
     # ------------------------------------------------------------------
 
