@@ -6862,10 +6862,11 @@ class TestStepSettingsFsGuards:
         from memtomem.cli.wizard import WizardCancel
 
         # ``_step_settings`` short-circuits if ``~/.claude`` is missing.
-        # Point HOME at a tmp dir with a fake ``.claude`` so the body runs.
+        # Patch ``Path.home`` so the body runs — the ``HOME`` env var isn't
+        # honored by ``Path.home()`` on Windows (it uses ``USERPROFILE``).
         home = tmp_path / "home"
         (home / ".claude").mkdir(parents=True)
-        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
         monkeypatch.chdir(tmp_path)
 
         def boom(self: Path, *a: object, **kw: object) -> None:
@@ -6900,7 +6901,7 @@ class TestStepSettingsFsGuards:
 
         home = tmp_path / "home"
         (home / ".claude").mkdir(parents=True)
-        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
         monkeypatch.chdir(tmp_path)
 
         calls = {"n": 0}
@@ -6948,7 +6949,7 @@ class TestStepSettingsFsGuards:
 
         home = tmp_path / "home"
         (home / ".claude").mkdir(parents=True)
-        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
         monkeypatch.chdir(tmp_path)
 
         def boom(self: Path, *a: object, **kw: object) -> None:
