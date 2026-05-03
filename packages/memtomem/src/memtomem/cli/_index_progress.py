@@ -2,21 +2,19 @@
 seed flow.
 
 Both call sites stream :meth:`IndexEngine.index_path_stream` and render the
-same ``click.progressbar`` shape: file-unit length pre-computed up front,
-``progress`` events advance the bar by one and reset the chunk-throttle clock,
-``chunk_progress`` events refresh the sub-label only (no advance), throttled
-to a 100 ms gap with a forced final-tick render so ``(N/N)`` lands before the
-next file boundary. Issue #659 tracks extracting the throttle into a helper
-shared with the web Index tab (``web/static/app.js``); that's deferred to
-rule-of-three on the JS side. The CLI side fires now (two callers: the
-wizard's :func:`_seed_with_progress` and ``mm index``'s ``_index``).
+same ``click.progressbar`` shape: file-unit length supplied by the engine's
+``discovery`` event, ``progress`` events advance the bar by one and reset
+the chunk-throttle clock, ``chunk_progress`` events refresh the sub-label
+only (no advance), throttled to a 100 ms gap with a forced final-tick render
+so ``(N/N)`` lands before the next file boundary. Issue #659 tracks
+extracting the throttle into a helper shared with the web Index tab
+(``web/static/app.js``); that's deferred to rule-of-three on the JS side.
+The CLI side fires now (two callers: the wizard's
+:func:`_seed_with_progress` and ``mm index``'s ``_index``).
 
 Caller responsibilities (deliberately split out so the two surfaces can keep
 their distinct UX):
 
-* Compute ``expected_total`` (file-unit bar length) — the wizard sums it
-  across multiple paths via :func:`_collect_seed_scale`; ``mm index`` passes
-  the single-path count.
 * Catch :class:`KeyboardInterrupt` for the resume hint (``mm index <path>``
   vs ``mm web`` Reindex All — different copy per surface).
 * Print the final summary line — ``mm index`` mirrors the legacy
@@ -27,7 +25,7 @@ their distinct UX):
 Helper guarantees: bar is always closed on exit (including raise), stream
 runs serially over the supplied ``paths``, returned aggregate dict has
 stable keys ``total_files``, ``indexed``, ``skipped``, ``deleted``,
-``total_chunks``, ``duration_ms``, ``errors``."""
+``total_chunks``, ``duration_ms``, ``errors``, ``bar_rendered``."""
 
 from __future__ import annotations
 
@@ -42,13 +40,14 @@ import click
 def _collect_seed_scale(memory_dir: Path) -> tuple[int, int]:
     """Count ``.md`` files and total bytes under ``memory_dir``, recursive.
 
-    Two-axis decision input for :func:`_maybe_seed_initial_index` and the
-    progress-bar length precomputation in :func:`run_with_progress`. ``.md``
-    only — other supported extensions (``.json``, ``.py``, etc.) exist but
-    the dominant CLI workflow indexes human-written markdown memos, and the
-    bar length is "good enough" so long as it doesn't undercount the common
-    case. Silent on stat/permission errors: a dir the user can't read is
-    one the index can't process either, so return (0, 0) and fall through.
+    Decision input for :func:`_maybe_seed_initial_index`'s seed-or-skip
+    threshold gate (file-count + size axis). ``.md`` only — other supported
+    extensions (``.json``, ``.py``, etc.) exist but the dominant wizard
+    workflow seeds human-written markdown memos. The progress-bar length is
+    no longer derived here; the engine emits a ``discovery`` event with the
+    actual file count it plans to process (issue #743). Silent on
+    stat/permission errors: a dir the user can't read is one the index
+    can't process either, so return (0, 0) and fall through.
     """
     if not memory_dir.exists():
         return 0, 0
@@ -70,7 +69,6 @@ async def run_with_progress(
     paths: Sequence[Path],
     *,
     label: str,
-    expected_total: int,
     recursive: bool = True,
     force: bool = False,
     namespace: str | None = None,
@@ -84,10 +82,6 @@ async def run_with_progress(
         in turn; complete-event counters aggregate across the run.
     label:
         Progress-bar label (e.g. ``"  Indexing"`` or ``"  Seeding"``).
-    expected_total:
-        Pre-computed bar length in **file units**. Caller uses
-        :func:`_collect_seed_scale` (or sums it across multiple paths) so
-        the percent indicator is stable from the first event onwards.
     recursive, force, namespace:
         Forwarded verbatim to ``index_path_stream``. ``namespace`` is
         ``None`` for the wizard seed (preserves prior behavior — namespace
@@ -99,7 +93,10 @@ async def run_with_progress(
     dict
         Aggregate of all ``complete`` events with keys ``total_files``,
         ``indexed``, ``skipped``, ``deleted``, ``total_chunks``,
-        ``duration_ms``, and ``errors`` (a list of human-readable strings).
+        ``duration_ms``, ``errors`` (a list of human-readable strings),
+        and ``bar_rendered`` (bool — whether any event triggered bar
+        creation; callers use this to gate trailing-newline output that
+        would otherwise leave a stray blank line on empty discovers).
         Caller renders its own summary line from this.
 
     Raises
@@ -121,6 +118,7 @@ async def run_with_progress(
         "total_chunks": 0,
         "duration_ms": 0.0,
         "errors": [],
+        "bar_rendered": False,
     }
 
     # Throttle clock for ``chunk_progress`` label refreshes. Mirrors the web
@@ -145,19 +143,28 @@ async def run_with_progress(
         # backslash paths correctly.
         return Path(str(item)).name[:40]
 
-    def _ensure_bar() -> None:
-        # Lazy creation: the bar can come into existence on EITHER the first
-        # ``chunk_progress`` OR the first ``progress`` event, whichever
-        # arrives first. ``chunk_progress`` for a given file is emitted before
-        # that file's ``progress`` summary, so for large files the bar
-        # appears at chunk-level rather than waiting for the first file to
-        # finish.
+    def _ensure_bar(length: int) -> None:
+        # Lazy creation. Callers pass the file-unit length they know about
+        # (engine ``discovery`` event → exact count for that stream;
+        # progress / chunk_progress fallback → ``files_total`` from the
+        # event, used when a stub engine doesn't emit ``discovery``).
         if bar_state["bar"] is None:
             bar_state["bar"] = click.progressbar(
-                length=expected_total,
+                length=length,
                 label=label,
                 item_show_func=_format_item,
             ).__enter__()
+            agg["bar_rendered"] = True
+
+    def _grow_bar(extra: int) -> None:
+        # Multi-path streams: each ``index_path_stream`` call emits its own
+        # ``discovery``. The first sets the bar length; subsequent ones
+        # extend it so the percent indicator stays accurate across the whole
+        # run instead of resetting per path.
+        if bar_state["bar"] is None:
+            _ensure_bar(extra)
+        else:
+            bar_state["bar"].length += extra
 
     def _close_bar() -> None:
         if bar_state["bar"] is not None:
@@ -175,7 +182,16 @@ async def run_with_progress(
                 async for evt in comp.index_engine.index_path_stream(
                     p, recursive=recursive, force=force, namespace=namespace
                 ):
-                    if evt["type"] == "chunk_progress":
+                    if evt["type"] == "discovery":
+                        # Authoritative bar-length source. Engine emits this
+                        # exactly once per stream call after ``_discover_files``
+                        # has run, so the bar appears immediately even when
+                        # the first file's embedding takes a while (no
+                        # ``chunk_progress`` for small files, ``progress``
+                        # only at file completion — without ``discovery``
+                        # the bar would stay invisible until that point).
+                        _grow_bar(evt["files_total"])
+                    elif evt["type"] == "chunk_progress":
                         # Server-side gating in ``indexing/engine.py`` already
                         # filters out small files (``progress_threshold``,
                         # default 32), so we don't threshold here — small
@@ -188,7 +204,11 @@ async def run_with_progress(
                         if not is_final and now - throttle_state["last_render"] < 0.1:
                             continue
                         throttle_state["last_render"] = now
-                        _ensure_bar()
+                        # Bar length normally comes from the discovery event
+                        # above; this is just the lazy-create fallback for
+                        # legacy stubs that skip discovery and jump straight
+                        # to chunk_progress.
+                        _ensure_bar(evt["files_total"])
                         # Refresh the sub-label without advancing the bar —
                         # length is in **file units**, so chunks must not
                         # double-count. ``update(0, item)`` re-renders with
@@ -198,7 +218,7 @@ async def run_with_progress(
                         # Reset throttle on file boundary so the next file's
                         # first chunk_progress renders immediately.
                         throttle_state["last_render"] = 0.0
-                        _ensure_bar()
+                        _ensure_bar(evt["files_total"])
                         bar_state["bar"].update(1, evt["file"])
                     elif evt["type"] == "complete":
                         agg["total_files"] += evt["total_files"]

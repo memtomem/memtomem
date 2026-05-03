@@ -1596,9 +1596,11 @@ def _seed_with_progress(paths: list[Path]) -> bool:
     union of ``memory_dir`` + ``provider_dirs`` (issue #360 followup).
 
     Paths are streamed serially and their complete-event counters are
-    aggregated into one green summary line. The progress bar length is
-    pre-computed via :func:`_collect_seed_scale` so the percent indicator
-    is stable even when the streamed file list spans multiple roots.
+    aggregated into one green summary line. The progress bar length comes
+    from each stream's ``discovery`` event (issue #743) — first path's
+    discovery creates the bar, subsequent paths' discoveries extend it so
+    the percent indicator stays accurate across the whole multi-root run
+    without a duplicate ``rglob`` walk up front.
 
     Cancellation: a ``KeyboardInterrupt`` inside the async stream escapes
     through ``asyncio.run`` as a regular ``KeyboardInterrupt`` — caught
@@ -1626,10 +1628,6 @@ def _seed_with_progress(paths: list[Path]) -> bool:
     if not paths:
         return False
 
-    # Pre-compute so the progress bar length spans all paths, not just
-    # the first one. Stays accurate across serial iteration.
-    expected_total = sum(_collect_seed_scale(p)[0] for p in paths)
-
     resume_hint = f"mm index {paths[0]}" if len(paths) == 1 else "mm web  (Sources → Reindex All)"
 
     try:
@@ -1637,7 +1635,6 @@ def _seed_with_progress(paths: list[Path]) -> bool:
             _run_index_with_progress(
                 paths,
                 label="  Seeding",
-                expected_total=expected_total,
                 recursive=True,
                 force=False,
                 namespace=None,

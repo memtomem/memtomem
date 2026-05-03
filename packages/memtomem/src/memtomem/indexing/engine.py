@@ -836,6 +836,15 @@ class IndexEngine:
         """Like index_path(), but yields progress dicts as each file is processed.
 
         Yields dicts with ``type`` key:
+        - ``"discovery"``: emitted exactly once after the file walk has
+          determined ``files_total`` and before any per-file work begins.
+          Fields: ``files_total``. Lets CLI progress bars set their length
+          without re-walking the tree (the helper would otherwise have to
+          pre-compute ``expected_total`` via its own ``rglob``, duplicating
+          I/O and undercounting non-``.md`` corpora — see issue #743).
+          Skipped only when the path doesn't resolve to a file or
+          directory (in which case the next event is ``complete`` with
+          ``total_files=0``).
         - ``"chunk_progress"``: emitted *during* a single file's embedding
           when the file produces more chunks than
           ``EmbeddingConfig.progress_threshold``. Fields: ``file,
@@ -880,6 +889,13 @@ class IndexEngine:
                 return
 
             total_files = len(files)
+            # Discovery event lets CLI progress bars set their length from the
+            # actual indexable file count instead of pre-computing via a
+            # duplicate ``rglob`` walk (issue #743). Emitted unconditionally
+            # so the helper's lazy-bar branch fires for empty discovers too
+            # (length=0 bar is still a valid render and avoids a special case
+            # downstream).
+            yield {"type": "discovery", "files_total": total_files}
             # Pre-compute the namespace echo so the complete event surfaces
             # what was actually applied — single render across both stream
             # and non-stream paths (see ``_index_path_inner``).

@@ -120,19 +120,14 @@ async def _index(path: str, recursive: bool, force: bool, namespace: str | None)
     pre-stream implementation since scripts may grep it; the helper
     aggregates ``deleted`` and ``duration_ms`` from the stream's
     ``complete`` events so the format is preserved verbatim."""
-    from memtomem.cli._index_progress import _collect_seed_scale, run_with_progress
+    from memtomem.cli._index_progress import run_with_progress
 
     resolved = Path(path).resolve()
-    # File-unit bar length. ``_collect_seed_scale`` counts ``.md`` only,
-    # which is the dominant case; a percent indicator that slightly
-    # under/over-shoots for non-md files is still useful UX vs a spinner.
-    expected_total = _collect_seed_scale(resolved)[0]
 
     try:
         agg = await run_with_progress(
             [resolved],
             label="  Indexing",
-            expected_total=expected_total,
             recursive=recursive,
             force=force,
             namespace=namespace,
@@ -148,8 +143,11 @@ async def _index(path: str, recursive: bool, force: bool, namespace: str | None)
     # duration). Summary line follows the bar so click's
     # progressbar.__exit__ has already cleaned up the trailing carriage
     # return; an explicit ``click.echo()`` separates them cleanly when the
-    # bar actually rendered.
-    if expected_total > 0:
+    # bar actually rendered. Bar-rendered comes from the helper (issue #743 —
+    # was previously gated on ``expected_total > 0``, which itself counted
+    # ``.md`` files only and thus suppressed the separator on legitimate
+    # non-``.md`` indexes).
+    if agg["bar_rendered"]:
         click.echo()
     click.echo(
         f"Indexed {agg['total_files']} file(s): "

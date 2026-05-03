@@ -212,3 +212,86 @@ class TestIndexFlagPassthrough:
         assert kwargs.get("recursive") is True
         assert kwargs.get("force") is False
         assert kwargs.get("namespace") is None
+
+
+class TestIndexBarLengthFromDiscovery:
+    """Issue #743: progress-bar length comes from the engine's ``discovery``
+    event, not from a pre-computed ``.md``-only ``rglob`` walk.
+    """
+
+    def test_no_collect_seed_scale_call_during_index(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``mm index`` must not invoke ``_collect_seed_scale`` (the
+        wizard's ``.md``-only counter). Regression guard for the duplicate
+        ``rglob`` walk that #743 removed — the engine's ``discovery`` event
+        is the only bar-length source on the indexing path now."""
+        target = tmp_path / "src"
+        target.mkdir()
+        (target / "module.py").write_text("def f():\n    return 1\n")
+
+        called = {"count": 0}
+
+        def _spy(p):
+            called["count"] += 1
+            return (0, 0)
+
+        monkeypatch.setattr("memtomem.cli._index_progress._collect_seed_scale", _spy)
+
+        events = [
+            {"type": "discovery", "files_total": 1},
+            _make_complete_event(total_files=1, indexed=1),
+        ]
+        _install_fake_engine(monkeypatch, events=events)
+
+        asyncio.run(_index(str(target), recursive=True, force=False, namespace=None))
+        assert called["count"] == 0, (
+            "_collect_seed_scale must not be called from mm index — "
+            "discovery event is the bar-length source (#743)"
+        )
+
+    def test_bar_renders_for_non_md_corpus(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``mm index ./src/`` (no ``.md`` files) must still render a
+        progress bar. Pre-#743 the bar was suppressed because
+        ``_collect_seed_scale`` returned 0 → ``expected_total=0`` → click
+        rendered nothing. With discovery driving length, the bar appears
+        with the engine's actual file count."""
+        target = tmp_path / "src"
+        target.mkdir()
+        (target / "module.py").write_text("def f():\n    return 1\n")
+
+        captured: dict = {}
+        events = [
+            {"type": "discovery", "files_total": 1},
+            {
+                "type": "progress",
+                "file": str(target / "module.py"),
+                "files_done": 1,
+                "files_total": 1,
+                "indexed": 1,
+                "skipped": 0,
+            },
+            _make_complete_event(total_files=1, indexed=1),
+        ]
+        _install_fake_engine(monkeypatch, events=events)
+
+        import click
+
+        from memtomem.cli import _index_progress as ip_mod
+
+        real_progressbar = click.progressbar
+
+        def _spy(*args, **kwargs):
+            bar = real_progressbar(*args, **kwargs)
+            captured["bar"] = bar
+            captured["initial_length"] = kwargs.get("length")
+            return bar
+
+        # Helper imports click at module scope — patch there.
+        monkeypatch.setattr(ip_mod.click, "progressbar", _spy)
+
+        asyncio.run(_index(str(target), recursive=True, force=False, namespace=None))
+        assert "bar" in captured, "bar must be created from discovery event"
+        assert captured["initial_length"] == 1

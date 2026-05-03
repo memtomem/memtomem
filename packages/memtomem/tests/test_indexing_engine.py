@@ -401,6 +401,61 @@ class TestExcludePatterns:
         )
         assert any("blob.md" in err for err in complete["errors"])
 
+    async def test_index_path_stream_emits_discovery_first(self, components, memory_dir):
+        """Issue #743: ``index_path_stream`` emits a ``discovery`` event with
+        ``files_total`` BEFORE any ``progress`` / ``chunk_progress`` /
+        ``complete`` event so CLI helpers can size their progress bar without
+        a duplicate ``rglob`` walk. Pinned ordering: discovery is the first
+        non-empty event whenever ``files_total > 0``.
+        """
+        # Two files, one excluded by the binary-detection branch — discovery
+        # counts what ``_discover_files`` returns (post-extension filter,
+        # pre-binary check), so this should report 2.
+        (memory_dir / "a.md").write_text("# a\n\nbody a")
+        (memory_dir / "b.md").write_text("# b\n\nbody b")
+
+        engine = components.index_engine
+        events = [ev async for ev in engine.index_path_stream(memory_dir, recursive=True)]
+
+        assert events, "expected at least one event"
+        assert events[0]["type"] == "discovery", (
+            f"first event must be discovery, got {events[0]['type']}"
+        )
+        assert events[0]["files_total"] == 2
+
+    async def test_index_path_stream_discovery_for_non_md_corpus(self, components, memory_dir):
+        """Discovery should reflect the engine's own extension filter, not the
+        ``.md``-only count that the wizard's ``_collect_seed_scale`` uses.
+        Regression for #743 — ``mm index ./src/`` (Python project) silently
+        rendered a length-0 bar because the helper pre-computed via
+        ``_collect_seed_scale``. Engine discovery covers all supported
+        extensions.
+        """
+        (memory_dir / "module.py").write_text("def f():\n    return 1\n")
+        (memory_dir / "notes.md").write_text("# n\n\nbody")
+
+        engine = components.index_engine
+        events = [ev async for ev in engine.index_path_stream(memory_dir, recursive=True)]
+
+        discovery = next(e for e in events if e["type"] == "discovery")
+        # Both files counted — the .md-only filter would have undercounted by 1.
+        assert discovery["files_total"] == 2
+
+    async def test_index_path_stream_no_discovery_for_invalid_path(self, components, memory_dir):
+        """When the path doesn't resolve to a file or directory the stream
+        shortcuts to a single ``complete`` event and skips ``discovery`` —
+        consumers should not see a discovery=0 event followed by complete=0
+        for nonexistent paths (would falsely create a 0-length bar).
+        """
+        engine = components.index_engine
+        events = [ev async for ev in engine.index_path_stream(memory_dir / "nope", recursive=False)]
+
+        assert all(e["type"] != "discovery" for e in events), (
+            "discovery must be skipped for nonexistent paths"
+        )
+        assert events[-1]["type"] == "complete"
+        assert events[-1]["total_files"] == 0
+
 
 # ===========================================================================
 # 1.a.2 Per-chunk progress: chunk_progress events + threshold gate
@@ -593,9 +648,12 @@ class TestChunkProgressStream:
         assert engine._active_runs == 0
 
         gen = engine.index_path_stream(memory_dir, recursive=True)
+        # Discovery event arrives first now (#743). Consume it and continue —
+        # the actual subject of this test is the chunk_progress event the
+        # slow embedder parks on.
         first = await gen.__anext__()
-        # First yield must be the chunk_progress event (chunker + first
-        # progress fire happen before _index_file completes).
+        assert first["type"] == "discovery"
+        first = await gen.__anext__()
         assert first["type"] == "chunk_progress"
         assert engine._active_runs == 1
 
@@ -670,7 +728,10 @@ class TestActiveRunsCounter:
 
         gen = engine.index_path_stream(memory_dir, recursive=True)
         first = await gen.__anext__()
-        assert first.get("type") in ("progress", "complete")
+        # ``discovery`` arrives first when the path resolves to a real
+        # file or directory (#743); ``progress`` / ``complete`` only when
+        # the dir is empty or the path is invalid (legacy paths).
+        assert first.get("type") in ("discovery", "progress", "complete")
         assert engine.is_active is True
 
         async for _ in gen:
@@ -721,6 +782,10 @@ class TestActiveRunsCounter:
         assert engine.is_active is False
 
         gen = engine.index_path_stream(memory_dir, recursive=True)
+        # Discovery arrives first (#743); skip past it to land on progress
+        # so the aclose still tests cancellation between per-file events.
+        ev = await gen.__anext__()
+        assert ev.get("type") == "discovery"
         ev = await gen.__anext__()
         assert ev.get("type") == "progress"
         assert engine._active_runs == 1

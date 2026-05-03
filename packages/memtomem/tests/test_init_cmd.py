@@ -4930,6 +4930,7 @@ class TestInitialSeedThreshold:
 
         class _FakeEngine:
             async def index_path_stream(self, path, recursive=True, force=False, namespace=None):
+                yield {"type": "discovery", "files_total": 1}
                 yield {
                     "type": "progress",
                     "file": str(memory_dir / "a.md"),
@@ -4985,6 +4986,7 @@ class TestInitialSeedThreshold:
 
         class _FakeEngine:
             async def index_path_stream(self, path, recursive=True, force=False, namespace=None):
+                yield {"type": "discovery", "files_total": 1}
                 yield {
                     "type": "progress",
                     "file": str(memory_dir / "a.md"),
@@ -5171,9 +5173,11 @@ class TestInitialSeedThreshold:
         dir_a.mkdir()
         dir_b = tmp_path / "b"
         dir_b.mkdir()
-        # _seed_with_progress pre-computes expected_total from
-        # _collect_seed_scale; write one .md each so the scan reports
-        # non-zero and the bar doesn't trip the "no files" fallback.
+        # Real source files for the on-disk roots — the fake engine returns
+        # synthetic event counts, but the directories still need to exist
+        # and contain something so any future assertion that walks the tree
+        # has something to find. (No longer load-bearing for the bar length
+        # since #743 — that comes from the engine's discovery event.)
         self._write_md(dir_a, "a.md", "hello")
         self._write_md(dir_b, "b.md", "world")
 
@@ -5186,6 +5190,7 @@ class TestInitialSeedThreshold:
             async def index_path_stream(self, path, recursive=True, force=False, namespace=None):
                 key = str(path)
                 counts = path_counts[key]
+                yield {"type": "discovery", "files_total": counts["total_files"]}
                 yield {
                     "type": "progress",
                     "file": f"{key}/file.md",
@@ -5282,6 +5287,7 @@ class TestInitialSeedThreshold:
 
         class _FakeEngine:
             async def index_path_stream(self, path, recursive=True, force=False, namespace=None):
+                yield {"type": "discovery", "files_total": 1}
                 file = str(memory_dir / "big.md")
                 # Server only emits chunk_progress when the file exceeds the
                 # ``progress_threshold`` (default 32). Mimic a 50-chunk file.
@@ -5363,6 +5369,7 @@ class TestInitialSeedThreshold:
 
         class _FakeEngine:
             async def index_path_stream(self, path, recursive=True, force=False, namespace=None):
+                yield {"type": "discovery", "files_total": 2}
                 for name in ("a.md", "b.md"):
                     yield {
                         "type": "progress",
