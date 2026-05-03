@@ -803,10 +803,8 @@ function activateTab(tabName, opts = {}) {
     b.setAttribute('tabindex', '-1');
   });
 
-  // Belt-and-braces with `display:none` from the absent `.active` class —
-  // without re-applying `hidden` here, visited panels leak into a11y /
-  // Playwright snapshots and a future CSS-only refactor would silently
-  // regress hiding.
+  // Re-apply `hidden` so DOM state matches CSS — without this, visited panels
+  // leak into a11y / Playwright snapshots (#699).
   document.querySelectorAll('.tab-panel').forEach(p => {
     p.classList.remove('active');
     p.hidden = true;
