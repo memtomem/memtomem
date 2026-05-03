@@ -16,8 +16,8 @@
       <span class="header-sys-info clickable" id="header-sys-info" role="button" tabindex="0"></span>
       <span class="header-sep" id="header-sep" hidden></span>
       <span class="stat-pill indexing-pill" id="indexing-indicator" hidden data-i18n="index.indicator" aria-live="polite">⏳ Indexing…</span>
-      <span class="stat-pill" id="stat-chunks">— chunks</span>
-      <span class="stat-pill" id="stat-sources">— sources</span>
+      <span class="stat-pill" id="stat-chunks" data-i18n="header.stat_chunks">— chunks</span>
+      <span class="stat-pill" id="stat-sources" data-i18n="header.stat_sources">— sources</span>
     </div>
     <div class="header-actions">
       <button id="settings-btn" class="btn-ghost btn-icon" data-i18n-title="header.settings_title" title="Settings">⚙️</button>
@@ -231,7 +231,7 @@
           <input id="date-to" type="date" title="To date" />
         </div>
       </div>
-      <button id="adv-toggle" class="btn-ghost btn-icon has-tip" title="Source multi-select, score threshold, saved searches, export">⚙ Advanced</button>
+      <button id="adv-toggle" class="btn-ghost btn-icon has-tip" data-i18n="search.adv_advanced" data-i18n-title="search.adv_title" title="Source multi-select, score threshold, saved searches, export">⚙ Advanced</button>
     </div>
     <div id="search-advanced" class="search-advanced" hidden>
       <div class="adv-row">
@@ -276,7 +276,7 @@
             <input type="checkbox" id="bulk-select-all" />
             <span id="bulk-count">0 selected</span>
           </label>
-          <button id="bulk-delete-btn" class="btn-danger btn-xs" disabled>Delete Selected</button>
+          <button id="bulk-delete-btn" class="btn-danger btn-xs" data-i18n="search.bulk_delete" disabled>Delete Selected</button>
           <span class="flex-1"></span>
           <select id="bulk-export-fmt" class="bulk-export-fmt-select">
             <option value="json">JSON</option>

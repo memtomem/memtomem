@@ -130,7 +130,7 @@ function _buildNsCard(ns, defaultNs) {
 
   const count = document.createElement('span');
   count.className = 'ns-count';
-  count.textContent = `${ns.chunk_count} chunks`;
+  count.textContent = t('settings.ns.group_chunks', { count: ns.chunk_count });
 
   const actions = document.createElement('span');
   actions.className = 'ns-actions';
