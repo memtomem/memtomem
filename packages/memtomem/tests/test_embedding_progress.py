@@ -59,6 +59,33 @@ def _record() -> tuple[list[tuple[int, int]], callable]:
     return calls, cb
 
 
+def _record_with_done_event() -> tuple[list[tuple[int, int]], callable, asyncio.Event]:
+    """Like :func:`_record`, but also returns an ``asyncio.Event`` set
+    when a callback fires with ``done == total`` — i.e. the final tick.
+
+    Used by the ONNX tests to wait for trailing
+    ``loop.call_soon_threadsafe`` callbacks to drain off the loop's
+    ready queue before asserting on call count. ``asyncio.to_thread``
+    can resume its awaiter before the worker thread's queued
+    callbacks dispatch — a single ``await asyncio.sleep(0)`` yields
+    only one loop iteration and the macOS GH runner under Python 3.14
+    has been observed to need more (#663). Awaiting an Event set by
+    the final callback is robust regardless of how many iterations
+    the loop needs to fully drain the FIFO queue: once the
+    ``done == total`` callback runs we know every earlier callback
+    has already run (FIFO ordering of ``call_soon_threadsafe``).
+    """
+    calls: list[tuple[int, int]] = []
+    done_event = asyncio.Event()
+
+    def cb(done: int, total: int) -> None:
+        calls.append((done, total))
+        if done == total:
+            done_event.set()
+
+    return calls, cb, done_event
+
+
 def _assert_progress_contract(calls: list[tuple[int, int]], total: int, expected_calls: int):
     assert len(calls) == expected_calls, f"expected {expected_calls} calls, got {calls}"
     # All totals match
@@ -206,15 +233,17 @@ async def test_onnx_streams_progress_per_yield():
         return out
 
     embedder._embed_sync = fake_sync  # type: ignore[method-assign]
-    calls, cb = _record()
+    calls, cb, done_event = _record_with_done_event()
     result = await embedder.embed_texts(["a", "b", "c", "d", "e"], on_progress=cb)
     assert len(result) == 5
     # Flush ``call_soon_threadsafe`` callbacks the worker scheduled but
-    # the loop hasn't dequeued yet by the time ``to_thread`` resumed —
-    # macOS exposes the race ~30% of the time on a 5-text burst (#667).
+    # the loop hasn't dequeued yet by the time ``to_thread`` resumed.
+    # Awaiting the final-tick Event drains the loop's FIFO queue
+    # however many iterations it takes — macOS Py3.14 has been
+    # observed to need more than a single ``sleep(0)`` yield (#663).
     # Production behavior is fire-and-forget; tightening that contract
     # would be a separate PR.
-    await asyncio.sleep(0)
+    await asyncio.wait_for(done_event.wait(), timeout=5.0)
     _assert_progress_contract(calls, total=5, expected_calls=5)
     assert [d for d, _ in calls] == [1, 2, 3, 4, 5]
 
@@ -240,13 +269,14 @@ async def test_onnx_throttles_thread_hops_for_large_input():
         return out
 
     embedder._embed_sync = fake_sync  # type: ignore[method-assign]
-    calls, cb = _record()
+    calls, cb, done_event = _record_with_done_event()
     await embedder.embed_texts(["x"] * n, on_progress=cb)
-    # Same threadsafe-callback flush as test_onnx_streams_progress_per_yield
-    # — defensive here, since 200 ticks throttled to ~20 hasn't been seen
-    # to flake in CI (only the 5-text burst does), but the race window is
-    # the same code path.
-    await asyncio.sleep(0)
+    # Wait for the final-tick (``done == n``) callback to drain off the
+    # loop's queue — same race as test_onnx_streams_progress_per_yield,
+    # but more visible at n=200 because the throttled run has more
+    # in-flight ``call_soon_threadsafe`` items pending when ``to_thread``
+    # resumes (#663).
+    await asyncio.wait_for(done_event.wait(), timeout=5.0)
     # Throttle step = max(1, n // 20) = 10 → ~20 ticks + final
     # (final-tick bypass guarantees one extra if the last-step boundary
     # doesn't land exactly on N).
