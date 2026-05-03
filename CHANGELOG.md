@@ -5,6 +5,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed
+
+- **Tag pill clicks no longer overwrite the search query (closes #672).**
+  Clicking a tag in the Tags Cloud or List view now sets only `tag-filter`,
+  leaving any text already in `search-input` intact. Previously
+  `_searchByTag` copied the tag string into both fields, so the backend
+  ran a confusing dual-axis search where the BM25 query and the tag
+  filter were the same string — documents that merely *mentioned* the
+  tag in prose got boosted on top of the tag-filter constraint, and the
+  search bar looked as if the user had typed the tag themselves. With
+  the BM25 query left alone, a tag pill click is now a pure narrowing
+  filter on whatever the user was already searching for. If
+  `search-input` is empty the click acts as a "filter prep": the Search
+  tab opens with `tag-filter` populated, but `doSearch()` early-returns
+  on the empty query so no results render until the user types one. A
+  follow-up will allow tag-only searches without a query.
+
 ## [0.1.35] — 2026-05-02
 
 ### Added

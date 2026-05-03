@@ -4057,10 +4057,10 @@ function _renderTagCloud(tags, maxCount) {
 }
 
 function _searchByTag(tag) {
-  // Navigate to Search tab with tag filter pre-filled
+  // Navigate to Search tab with tag filter pre-filled.
+  // search-input is intentionally left untouched so the tag is a filter axis
+  // only, not a duplicate BM25 query. doSearch early-returns on empty q.
   document.querySelector('[data-tab="search"]').click();
-  qs('search-input').value = tag;
-  // Open filters row if hidden
   const filters = document.querySelector('.search-filters');
   if (filters.hidden) qs('filter-toggle').click();
   qs('tag-filter').value = tag;
