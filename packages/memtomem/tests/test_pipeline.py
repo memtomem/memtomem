@@ -519,10 +519,20 @@ class TestFilterOnlySearch:
     """
 
     @staticmethod
-    def _make_chunk(name: str, tags: tuple[str, ...] = ()) -> Chunk:
+    def _make_chunk(
+        name: str,
+        tags: tuple[str, ...] = (),
+        valid_from_unix: int | None = None,
+        valid_to_unix: int | None = None,
+    ) -> Chunk:
         return Chunk(
             content=name,
-            metadata=ChunkMetadata(source_file=Path(f"/tmp/{name}.md"), tags=tags),
+            metadata=ChunkMetadata(
+                source_file=Path(f"/tmp/{name}.md"),
+                tags=tags,
+                valid_from_unix=valid_from_unix,
+                valid_to_unix=valid_to_unix,
+            ),
             id=uuid4(),
             embedding=[],
         )
@@ -609,3 +619,74 @@ class TestFilterOnlySearch:
         results, _ = await pipeline.search(query="", tag_filter="redis", top_k=5)
 
         assert len(results) == 5
+
+    @pytest.mark.asyncio
+    async def test_validity_filter_drops_expired_on_filter_only(self):
+        """Validity stage prunes expired chunks on the filter-only path
+        too — without this guard a tag-only click on a fresh session
+        could surface chunks whose ``valid_to`` has already passed,
+        which the keyword path always filters out. Regression pin for
+        the post-filter parity claim in the docstring."""
+        live = self._make_chunk("live", tags=("redis",))
+        expired = self._make_chunk(
+            "expired",
+            tags=("redis",),
+            valid_to_unix=1_000_000_000,  # 2001 — long expired by any ``as_of``
+        )
+        _, pipeline = self._make_pipeline([live, expired])
+
+        results, _ = await pipeline.search(query="", tag_filter="redis", top_k=10)
+
+        ids = {r.chunk.id for r in results}
+        assert live.id in ids
+        assert expired.id not in ids
+
+    @pytest.mark.asyncio
+    async def test_decay_re_ranks_fresh_above_ancient(self):
+        """The post-filter sort isn't just trim-then-truncate — decay
+        actually re-scores so the freshest chunk lands first. Pins the
+        "rank reflects recency × access × importance" contract: with
+        decay enabled, a brand-new chunk must outrank a 10-year-old one
+        even though both enter at score=1.0.
+        """
+        from datetime import datetime, timedelta, timezone
+        from memtomem.config import DecayConfig
+
+        from unittest.mock import AsyncMock
+        from memtomem.config import SearchConfig
+        from memtomem.search.pipeline import SearchPipeline
+
+        now = datetime.now(timezone.utc)
+        fresh = self._make_chunk("fresh", tags=("redis",))
+        fresh.created_at = now
+        fresh.updated_at = now
+        ancient = self._make_chunk("ancient", tags=("redis",))
+        ancient.created_at = now - timedelta(days=365 * 10)
+        ancient.updated_at = now - timedelta(days=365 * 10)
+
+        # Storage returns ancient first (mimicking ``ORDER BY created_at
+        # DESC LIMIT`` returning a recency-ordered slice that happens to
+        # not be in score order). The post-stages must re-rank.
+        storage = AsyncMock()
+        storage.recall_chunks = AsyncMock(return_value=[ancient, fresh])
+        storage.bm25_search = AsyncMock(side_effect=AssertionError("bm25 must not run"))
+        storage.dense_search = AsyncMock(side_effect=AssertionError("dense must not run"))
+        storage.increment_access = AsyncMock()
+        storage.get_access_counts = AsyncMock(return_value={})
+        storage.get_importance_scores = AsyncMock(return_value={})
+        storage.count_chunks_by_ns_prefix = AsyncMock(return_value=0)
+
+        embedder = AsyncMock()
+        embedder.embed_query = AsyncMock(side_effect=AssertionError("embed_query must not run"))
+
+        pipeline = SearchPipeline(
+            storage=storage,
+            embedder=embedder,
+            config=SearchConfig(enable_bm25=True, enable_dense=True),
+            decay_config=DecayConfig(enabled=True, half_life_days=30.0),
+        )
+
+        results, _ = await pipeline.search(query="", tag_filter="redis", top_k=10)
+
+        assert [r.chunk.id for r in results] == [fresh.id, ancient.id]
+        assert results[0].score > results[1].score
