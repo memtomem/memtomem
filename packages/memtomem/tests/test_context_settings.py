@@ -259,6 +259,18 @@ class TestClaudeSettingsMergeConcurrent:
                 target.write_text(
                     json.dumps({"hooks": {}, "_bumped": True}) + "\n", encoding="utf-8"
                 )
+                # Two writes inside the same system-clock tick can report the
+                # same ``st_mtime_ns`` on Windows (NTFS native resolution is
+                # 100ns but ``WriteFile``-induced metadata updates use the
+                # system clock, which often advances at ~15.6ms). Bump
+                # explicitly so the simulated concurrent-writer is
+                # distinguishable regardless of OS timer granularity — a
+                # real-world second writer is naturally well above this
+                # threshold, so this only covers the test-induced race.
+                import os as _os
+
+                st = target.stat()
+                _os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
             return result
 
         import unittest.mock
