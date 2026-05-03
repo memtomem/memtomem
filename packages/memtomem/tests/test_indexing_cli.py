@@ -196,10 +196,9 @@ class TestIndexFlagPassthrough:
     def test_default_recursive_true_no_namespace(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Default invocation: ``recursive=True``, ``force=False``, and no
-        ``namespace`` kwarg leaks through (the helper conditionally omits
-        it so stub engines without the param keep working). Pinned so the
-        defaults stay aligned with the click option declarations."""
+        """Default invocation: ``recursive=True``, ``force=False``, and
+        ``namespace=None`` are all forwarded verbatim to the engine. Pinned
+        so the defaults stay aligned with the click option declarations."""
         target = tmp_path / "memories"
         target.mkdir()
         (target / "a.md").write_text("# memo\n", encoding="utf-8")
@@ -212,6 +211,4 @@ class TestIndexFlagPassthrough:
         kwargs = record["kwargs"]
         assert kwargs.get("recursive") is True
         assert kwargs.get("force") is False
-        # ``namespace=None`` should NOT be forwarded — keeps stub-engine
-        # compat (existing wizard tests' fake engines predate the kwarg).
-        assert "namespace" not in kwargs
+        assert kwargs.get("namespace") is None

@@ -4929,7 +4929,7 @@ class TestInitialSeedThreshold:
         memory_dir.mkdir()
 
         class _FakeEngine:
-            async def index_path_stream(self, path, recursive=True, force=False):
+            async def index_path_stream(self, path, recursive=True, force=False, namespace=None):
                 yield {
                     "type": "progress",
                     "file": str(memory_dir / "a.md"),
@@ -4984,7 +4984,7 @@ class TestInitialSeedThreshold:
         memory_dir.mkdir()
 
         class _FakeEngine:
-            async def index_path_stream(self, path, recursive=True, force=False):
+            async def index_path_stream(self, path, recursive=True, force=False, namespace=None):
                 yield {
                     "type": "progress",
                     "file": str(memory_dir / "a.md"),
@@ -5183,7 +5183,7 @@ class TestInitialSeedThreshold:
         }
 
         class _FakeEngine:
-            async def index_path_stream(self, path, recursive=True, force=False):
+            async def index_path_stream(self, path, recursive=True, force=False, namespace=None):
                 key = str(path)
                 counts = path_counts[key]
                 yield {
@@ -5281,7 +5281,7 @@ class TestInitialSeedThreshold:
         captured: dict[str, object] = {}
 
         class _FakeEngine:
-            async def index_path_stream(self, path, recursive=True, force=False):
+            async def index_path_stream(self, path, recursive=True, force=False, namespace=None):
                 file = str(memory_dir / "big.md")
                 # Server only emits chunk_progress when the file exceeds the
                 # ``progress_threshold`` (default 32). Mimic a 50-chunk file.
@@ -5362,7 +5362,7 @@ class TestInitialSeedThreshold:
         captured: dict[str, object] = {}
 
         class _FakeEngine:
-            async def index_path_stream(self, path, recursive=True, force=False):
+            async def index_path_stream(self, path, recursive=True, force=False, namespace=None):
                 for name in ("a.md", "b.md"):
                     yield {
                         "type": "progress",

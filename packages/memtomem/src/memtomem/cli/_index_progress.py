@@ -171,16 +171,10 @@ async def run_with_progress(
         from memtomem.cli._bootstrap import cli_components
 
         async with cli_components() as comp:
-            # Namespace is only forwarded when the caller passed one — keeps
-            # us compatible with stream consumers (wizard tests' fake engine,
-            # third-party stubs) whose ``index_path_stream`` predates the
-            # namespace kwarg. The real ``IndexEngine.index_path_stream``
-            # accepts it; the conditional is purely for stub-compat.
-            stream_kwargs: dict[str, Any] = {"recursive": recursive, "force": force}
-            if namespace is not None:
-                stream_kwargs["namespace"] = namespace
             for p in paths:
-                async for evt in comp.index_engine.index_path_stream(p, **stream_kwargs):
+                async for evt in comp.index_engine.index_path_stream(
+                    p, recursive=recursive, force=force, namespace=namespace
+                ):
                     if evt["type"] == "chunk_progress":
                         # Server-side gating in ``indexing/engine.py`` already
                         # filters out small files (``progress_threshold``,
