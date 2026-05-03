@@ -803,8 +803,14 @@ function activateTab(tabName, opts = {}) {
     b.setAttribute('tabindex', '-1');
   });
 
-  // Hide all panels
-  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  // Belt-and-braces with `display:none` from the absent `.active` class —
+  // without re-applying `hidden` here, visited panels leak into a11y /
+  // Playwright snapshots and a future CSS-only refactor would silently
+  // regress hiding.
+  document.querySelectorAll('.tab-panel').forEach(p => {
+    p.classList.remove('active');
+    p.hidden = true;
+  });
 
   // Activate the correct button
   const btn = document.querySelector(`.tab-btn[data-tab="${tabName}"]`);
