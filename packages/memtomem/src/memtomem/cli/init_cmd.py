@@ -1609,6 +1609,41 @@ def _seed_with_progress(paths: list[Path]) -> bool:
     # the first one. Stays accurate across serial iteration.
     expected_total = sum(_collect_seed_scale(p)[0] for p in paths)
 
+    # Throttle clock for ``chunk_progress`` label refreshes. Mirrors the web
+    # Index tab (``web/static/app.js`` ~L4219-4256): 100ms gap between
+    # intermediate renders, final tick (chunks_done >= chunks_total) bypasses
+    # the throttle so ``(N/N)`` lands before the next file boundary, and the
+    # clock resets to 0 on every ``progress`` event so the next file's first
+    # chunk renders immediately. ``time.monotonic()`` (not ``time.time()``)
+    # so a wall-clock jump can't stall the bar. Issue #659 tracks extracting
+    # this into a shared helper once a third call-site appears
+    # (rule-of-three) — keep this implementation self-contained for now.
+    throttle_state: dict = {"last_render": 0.0}
+
+    def _format_item(item: object) -> str:
+        if not item:
+            return ""
+        if isinstance(item, tuple):
+            file, done, total = item
+            return f"{Path(file).name} ({done}/{total})"[:60]
+        # Legacy str case: the existing ``progress`` branch passes a path str.
+        # ``Path(...).name`` (not ``rsplit("/", 1)``) handles Windows
+        # backslash paths correctly.
+        return Path(str(item)).name[:40]
+
+    def _ensure_bar() -> None:
+        # Lazy creation: the bar can come into existence on EITHER the first
+        # ``chunk_progress`` OR the first ``progress`` event, whichever
+        # arrives first. ``chunk_progress`` for a given file is emitted before
+        # that file's ``progress`` summary, so for large files the bar appears
+        # at chunk-level rather than waiting for the first file to finish.
+        if bar_state["bar"] is None:
+            bar_state["bar"] = click.progressbar(
+                length=expected_total,
+                label="  Seeding",
+                item_show_func=_format_item,
+            ).__enter__()
+
     def _close_bar() -> None:
         if bar_state["bar"] is not None:
             try:
@@ -1625,13 +1660,30 @@ def _seed_with_progress(paths: list[Path]) -> bool:
                 async for evt in comp.index_engine.index_path_stream(
                     p, recursive=True, force=False
                 ):
-                    if evt["type"] == "progress":
-                        if bar_state["bar"] is None:
-                            bar_state["bar"] = click.progressbar(
-                                length=expected_total,
-                                label="  Seeding",
-                                item_show_func=lambda item: (item or "").rsplit("/", 1)[-1][:40],
-                            ).__enter__()
+                    if evt["type"] == "chunk_progress":
+                        # Server-side gating in ``indexing/engine.py`` already
+                        # filters out small files (``progress_threshold``,
+                        # default 32), so we don't threshold here — small
+                        # files simply won't emit these events, matching the
+                        # web Index tab's quiet behavior.
+                        done = evt["chunks_done"]
+                        total = evt["chunks_total"]
+                        is_final = done >= total
+                        now = time.monotonic()
+                        if not is_final and now - throttle_state["last_render"] < 0.1:
+                            continue
+                        throttle_state["last_render"] = now
+                        _ensure_bar()
+                        # Refresh the sub-label without advancing the bar —
+                        # length is in **file units**, so chunks must not
+                        # double-count. ``update(0, item)`` re-renders with
+                        # the new ``current_item`` only.
+                        bar_state["bar"].update(0, (evt["file"], done, total))
+                    elif evt["type"] == "progress":
+                        # Reset throttle on file boundary so the next file's
+                        # first chunk_progress renders immediately.
+                        throttle_state["last_render"] = 0.0
+                        _ensure_bar()
                         bar_state["bar"].update(1, evt["file"])
                     elif evt["type"] == "complete":
                         agg["total_files"] += evt["total_files"]
