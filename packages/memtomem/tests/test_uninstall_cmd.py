@@ -9,6 +9,7 @@ loud and immediate (MEDIUM 6 mitigation).
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import sqlite3
@@ -678,6 +679,164 @@ class TestConfigFallback:
         assert "fake permission denied" in result.output
         # default DB path used as fallback → DB still gets cleaned up
         assert "Removed:" in result.output
+
+
+# -------------------------------------------------------------------- 15
+#
+# Transactional staging (#757): the wipe is staged via os.replace into a
+# sibling .uninstall-staging-<pid>/ dir, then rmtree'd on success. A
+# mid-stage failure rolls back so the user's state dir is never left
+# half-gone, and a cross-FS layout is refused with a clean message
+# instead of being half-staged.
+
+
+class TestTransactionalStaging:
+    """Acceptance criteria from the issue:
+
+    - Mid-stage failure → original state dir intact (no half-state).
+    - --keep-config / --keep-data still work (covered by sibling tests
+      above; this class just adds the failure-injection cases).
+    - Cross-FS layout → refusal-or-fallback per the chosen design.
+    """
+
+    def _snapshot(self, root: Path) -> dict[str, bytes | str]:
+        """Return ``{relpath: contents}`` for every file under ``root``,
+        excluding any ``.uninstall-staging-*`` subtree (transient state
+        we don't want included in the equality check).
+
+        ``config.json`` is recorded as a presence sentinel rather than
+        its bytes because ``_load_config_safely`` may legitimately
+        rewrite it (e.g. the ``auto_discover`` migration) before
+        staging begins — that mutation is orthogonal to whether
+        staging is transactional. We still verify the file *exists*
+        post-rollback, which is the staging invariant."""
+        from memtomem.cli.uninstall_cmd import _STAGING_PREFIX
+
+        snap: dict[str, bytes | str] = {}
+        for path in sorted(root.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(root)
+            if any(part.startswith(_STAGING_PREFIX) for part in rel.parts):
+                continue
+            if rel == Path("config.json"):
+                snap[str(rel)] = "<exists>"
+            else:
+                snap[str(rel)] = path.read_bytes()
+        return snap
+
+    def test_rollback_restores_original_state_on_mid_stage_failure(self, home, monkeypatch):
+        """Inject an OSError on the Nth staging-direction os.replace and
+        assert every original file is back where it started.
+
+        Filters on the staging-prefix in ``dst`` so unrelated os.replace
+        calls (e.g. config-load's atomic rewrite of ``config.json``)
+        don't shift the call counter.
+
+        N=2 leaves at least one earlier move that needs to be rolled
+        back, so the test exercises the rollback path, not just the
+        first-call-fails edge case."""
+        from memtomem.cli import uninstall_cmd
+
+        state = _seed_state(home)
+        before = self._snapshot(state)
+        # Sanity: snapshot is non-trivial (catches a future _seed_state shrink).
+        assert "config.json" in before
+        assert "memtomem.db" in before
+        assert "memories/x.md" in before
+
+        real_replace = os.replace
+        stage_calls = {"n": 0}
+
+        def _flaky_replace(src, dst, **kwargs):
+            if uninstall_cmd._STAGING_PREFIX in str(dst):
+                stage_calls["n"] += 1
+                if stage_calls["n"] == 2:
+                    raise OSError(errno.EACCES, "fake permission denied during stage")
+            return real_replace(src, dst, **kwargs)
+
+        monkeypatch.setattr(uninstall_cmd.os, "replace", _flaky_replace)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 2, result.output
+        assert "Deletion failed" in result.output
+        assert "Rolled back" in result.output
+
+        after = self._snapshot(state)
+        assert after == before, (
+            f"rollback did not restore original layout.\n"
+            f"missing: {set(before) - set(after)}\n"
+            f"extra:   {set(after) - set(before)}"
+        )
+        # No staging dir leftovers (rollback cleans up empty roots).
+        leftover = sorted(
+            p.name for p in state.iterdir() if p.name.startswith(uninstall_cmd._STAGING_PREFIX)
+        )
+        assert leftover == [], f"unexpected staging leftovers: {leftover}"
+
+    def test_rollback_failure_surfaces_recovery_path(self, home, monkeypatch):
+        """When BOTH stage AND rollback fail, the user must see the
+        staging dir path so they can recover manually. Without this,
+        partial-state recovery is impractical (the issue's whole
+        motivation).
+
+        Setup: forward staging move #1 succeeds, #2 trips the failure
+        path, and the rollback move (recognized by ``_STAGING_PREFIX``
+        in ``src``, not ``dst``) ALSO fails — the disaster scenario."""
+        from memtomem.cli import uninstall_cmd
+
+        _seed_state(home)
+        real_replace = os.replace
+        stage_calls = {"n": 0}
+
+        def _broken_replace(src, dst, **kwargs):
+            src_str, dst_str = str(src), str(dst)
+            if uninstall_cmd._STAGING_PREFIX in dst_str:
+                # Forward stage move.
+                stage_calls["n"] += 1
+                if stage_calls["n"] == 2:
+                    raise OSError(errno.EACCES, "fake stage failure")
+                return real_replace(src, dst, **kwargs)
+            if uninstall_cmd._STAGING_PREFIX in src_str:
+                # Rollback move — refuse so the recovery path activates.
+                raise OSError(errno.EACCES, "fake rollback failure")
+            return real_replace(src, dst, **kwargs)
+
+        monkeypatch.setattr(uninstall_cmd.os, "replace", _broken_replace)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 2, result.output
+        assert "Deletion failed" in result.output
+        assert "Rollback also failed" in result.output
+        assert uninstall_cmd._STAGING_PREFIX in result.output, (
+            "user must be told the staging dir path for manual recovery"
+        )
+
+    def test_cross_fs_layout_refused_cleanly(self, home, monkeypatch):
+        """Simulate EXDEV from os.replace and assert the user sees a
+        cross-filesystem refusal — not a generic stage-failed error —
+        with the original state dir untouched.
+
+        Real cross-FS layouts (bind mount inside ~/.memtomem) are too
+        environment-dependent to set up in CI, so we monkeypatch the
+        EXDEV path instead. Same code path as a real cross-FS layout
+        would take."""
+        from memtomem.cli import uninstall_cmd
+
+        state = _seed_state(home)
+        before = self._snapshot(state)
+
+        def _exdev_replace(src, dst, **kwargs):
+            raise OSError(errno.EXDEV, "fake cross-device link")
+
+        monkeypatch.setattr(uninstall_cmd.os, "replace", _exdev_replace)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 2, result.output
+        assert "different" in result.output.lower() and "filesystem" in result.output.lower()
+        # Original state intact — refusal fires before any partial wipe.
+        after = self._snapshot(state)
+        assert after == before
 
 
 # (#448 / #625) The single-file regex pin that used to live here is
