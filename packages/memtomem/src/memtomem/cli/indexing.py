@@ -100,25 +100,64 @@ def index(
 
 
 async def _index(path: str, recursive: bool, force: bool, namespace: str | None) -> None:
-    from memtomem.cli._bootstrap import cli_components
+    """Stream-index ``path`` with a live progress bar (issue #656).
 
-    async with cli_components() as comp:
-        resolved = Path(path).resolve()
-        stats = await comp.index_engine.index_path(
-            resolved,
+    Uses the shared :func:`memtomem.cli._index_progress.run_with_progress`
+    helper introduced when the ``mm init`` wizard's seed flow was upgraded
+    to the streaming surface (#740) — same throttled chunk-progress label,
+    same lazy-bar creation, same per-file unit length. The non-stream
+    :meth:`IndexEngine.index_path` API is preserved for the debounce
+    closure (``_make_indexer``) and other internal callers (tests, MCP
+    ``mem_index``); progress UI in those paths would be noise rather
+    than signal.
+
+    Cancellation: ``Ctrl-C`` inside the stream propagates as
+    :class:`KeyboardInterrupt` through ``asyncio.run`` — caught here to
+    print the legacy resume hint pointing back at ``mm index <path>``
+    (idempotent re-run via content-hash dedup, same as before).
+
+    Summary line shape ("Indexed N file(s): …") is unchanged from the
+    pre-stream implementation since scripts may grep it; the helper
+    aggregates ``deleted`` and ``duration_ms`` from the stream's
+    ``complete`` events so the format is preserved verbatim."""
+    from memtomem.cli._index_progress import _collect_seed_scale, run_with_progress
+
+    resolved = Path(path).resolve()
+    # File-unit bar length. ``_collect_seed_scale`` counts ``.md`` only,
+    # which is the dominant case; a percent indicator that slightly
+    # under/over-shoots for non-md files is still useful UX vs a spinner.
+    expected_total = _collect_seed_scale(resolved)[0]
+
+    try:
+        agg = await run_with_progress(
+            [resolved],
+            label="  Indexing",
+            expected_total=expected_total,
             recursive=recursive,
             force=force,
             namespace=namespace,
         )
+    except KeyboardInterrupt:
+        click.echo()
+        click.secho(f"  Cancelled. Resume with: mm index {resolved}", fg="yellow")
+        return
 
+    # Format string preserved verbatim from the pre-stream implementation —
+    # downstream scripts may parse this. ``duration_ms`` accumulates across
+    # multi-path runs (single-path here, so it's just the one stream's
+    # duration). Summary line follows the bar so click's
+    # progressbar.__exit__ has already cleaned up the trailing carriage
+    # return; an explicit ``click.echo()`` separates them cleanly when the
+    # bar actually rendered.
+    if expected_total > 0:
+        click.echo()
     click.echo(
-        f"Indexed {stats.total_files} file(s): "
-        f"{stats.indexed_chunks} new, {stats.skipped_chunks} unchanged, "
-        f"{stats.deleted_chunks} deleted ({stats.duration_ms:.0f}ms)"
+        f"Indexed {agg['total_files']} file(s): "
+        f"{agg['indexed']} new, {agg['skipped']} unchanged, "
+        f"{agg['deleted']} deleted ({agg['duration_ms']:.0f}ms)"
     )
-    if stats.errors:
-        for err in stats.errors:
-            click.echo(click.style(f"  ERROR: {err}", fg="red"))
+    for err in agg["errors"]:
+        click.echo(click.style(f"  ERROR: {err}", fg="red"))
 
 
 def _print_status(*, as_json: bool) -> None:
