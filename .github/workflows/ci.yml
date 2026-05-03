@@ -55,6 +55,21 @@ jobs:
           -m "not ollama and not llm"
           --tb=short -q
 
+  test-browser:
+    name: browser (Playwright + Chromium)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+      - run: uv sync --frozen
+      # ``--with-deps`` pulls the headless-shell apt packages on Ubuntu so
+      # chromium can launch from a clean runner; the install also seeds the
+      # browser cache that ``_playwright_browser_available()`` probes.
+      - run: uv run playwright install --with-deps chromium
+      - run: uv run pytest packages/memtomem/tests/web -m browser --tb=short -q
+
   test-golden-path:
     name: golden-path (ONNX bge-m3)
     runs-on: ubuntu-latest

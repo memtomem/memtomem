@@ -5,6 +5,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **Browser test harness for tag-filter mutation sites (closes #751).** A
+  new `packages/memtomem/tests/web/` directory runs a tiny uvicorn-in-thread
+  server against a stub-routed `pytest-playwright` page and pins the
+  click → DOM-state contract for the three sites in `app.js` that mutate
+  `tag-filter` (`_attachResultTagRow`, `renderTagChips`,
+  `_searchByTag`). The #672 regression — the Tags Cloud pill click
+  silently writing the tag into `search-input` — is now caught
+  automatically; previously it relied on manual review. A `browser`
+  pytest marker auto-skips on machines without `pytest-playwright` or
+  Chromium, mirroring the existing `ollama` pattern, so
+  `uv run pytest -m "not ollama"` stays green for contributors who
+  haven't run `uv run playwright install chromium`. CI gets a new
+  `test-browser` job alongside `test-golden-path`.
+
 ### Changed
 
 - **Tag pill clicks no longer overwrite the search query (closes #672).**

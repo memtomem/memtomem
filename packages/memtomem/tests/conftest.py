@@ -71,8 +71,38 @@ def _can_create_symlink() -> bool:
     return True
 
 
+def _playwright_browser_available() -> bool:
+    """Probe whether ``pytest-playwright`` *and* a usable Chromium are
+    present.
+
+    Two failure modes are folded together because the symptom — a
+    ``@pytest.mark.browser`` test exploding in fixture setup — is the
+    same: ``pytest-playwright`` not installed (most contributor
+    laptops), or installed but ``playwright install chromium`` was
+    never run (the binary download is ~150 MB and is opt-in for that
+    reason). Either way, auto-skipping is the right behaviour.
+
+    The probe imports the sync API and launches headless chromium with
+    a short timeout; any failure means the marker should skip. Result
+    is cached in ``_PLAYWRIGHT_OK`` so the launch cost (a few hundred
+    ms) is paid once per session, not per item.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return False
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, timeout=2_000)
+            browser.close()
+        return True
+    except Exception:
+        return False
+
+
 _OLLAMA_UP = _ollama_available()
 _CAN_SYMLINK = _can_create_symlink()
+_PLAYWRIGHT_OK = _playwright_browser_available()
 
 
 def pytest_collection_modifyitems(config, items):
@@ -81,16 +111,24 @@ def pytest_collection_modifyitems(config, items):
     - ``@pytest.mark.ollama`` when Ollama isn't reachable.
     - ``@pytest.mark.requires_symlinks`` when the filesystem can't make
       symlinks (Windows without Developer Mode / admin shell).
+    - ``@pytest.mark.browser`` when ``pytest-playwright`` or Chromium
+      isn't installed (the harness in ``tests/web/`` needs both).
     """
     skip_ollama = pytest.mark.skip(reason="Ollama not running")
     skip_symlink = pytest.mark.skip(
         reason="Filesystem cannot create symlinks (Windows without Developer Mode/admin)"
+    )
+    skip_browser = pytest.mark.skip(
+        reason="pytest-playwright + Chromium not available "
+        "(install via `uv sync && uv run playwright install chromium`)"
     )
     for item in items:
         if not _OLLAMA_UP and "ollama" in item.keywords:
             item.add_marker(skip_ollama)
         if not _CAN_SYMLINK and "requires_symlinks" in item.keywords:
             item.add_marker(skip_symlink)
+        if not _PLAYWRIGHT_OK and "browser" in item.keywords:
+            item.add_marker(skip_browser)
 
 
 @pytest.fixture
