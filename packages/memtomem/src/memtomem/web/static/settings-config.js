@@ -182,9 +182,11 @@ function _syncIndexHints() {
     const parts = [];
     if (idx.supported_extensions) {
       const exts = Array.isArray(idx.supported_extensions) ? idx.supported_extensions : [idx.supported_extensions];
-      parts.push(`Extensions: ${exts.join(', ')}`);
+      parts.push(t('settings.config.hint_extensions', { exts: exts.join(', ') }));
     }
-    if (idx.max_chunk_tokens) parts.push(`Max chunk: ${idx.max_chunk_tokens} tokens`);
+    if (idx.max_chunk_tokens) {
+      parts.push(t('settings.config.hint_max_chunk', { tokens: idx.max_chunk_tokens }));
+    }
     if (parts.length) {
       hintEl.textContent = parts.join(' \u00B7 ');
       show(hintEl);

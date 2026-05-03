@@ -251,3 +251,83 @@ class TestNoHardcodedStrings:
         missing_ko = required - set(ko)
         assert not missing_en, f"Provider keys missing from en.json: {sorted(missing_en)}"
         assert not missing_ko, f"Provider keys missing from ko.json: {sorted(missing_ko)}"
+
+    def test_no_template_literal_textcontent_count(self) -> None:
+        """``el.textContent = `${expr} chunks/sources/files``` must route
+        through ``t()`` with a ``{count}`` placeholder so plural noun forms
+        can be localized. Added in #698 to extend the guard beyond
+        ``showToast``/``showConfirm`` into direct DOM assignments."""
+        pattern = re.compile(r"\.textContent\s*=\s*`\$\{[^`}]+\}\s+(chunks|sources|files)\b")
+        bad: list[str] = []
+        for name in self._SCANNED_FILES:
+            path = _STATIC_JS_DIR / name
+            if not path.exists():
+                continue
+            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if pattern.search(line):
+                    bad.append(f"  {name}:{lineno}: {line.strip()}")
+        assert not bad, (
+            "Found textContent assignments with hardcoded plural-noun template "
+            "literals — route through t('<key>', { count: ... }) instead:\n" + "\n".join(bad)
+        )
+
+    def test_no_hardcoded_tags_empty_state(self) -> None:
+        """``app.js`` ``loadTags()`` must not re-introduce the literal
+        ``'No tags yet'`` / ``'Run Auto-Tag to generate tags'`` empty state.
+        Replaced in #698 with ``t('tags.empty_msg')`` /
+        ``t('tags.empty_hint')``. Targeted regression guard — ``emptyState()``
+        has ~19 callers with similar shape that we are not sweeping yet."""
+        text = (_STATIC_JS_DIR / "app.js").read_text(encoding="utf-8")
+        forbidden = ["'No tags yet'", "'Run Auto-Tag to generate tags'"]
+        bad = [s for s in forbidden if s in text]
+        assert not bad, (
+            f"Found re-introduced #698 empty-state literals in app.js: {bad}. "
+            "Use t('tags.empty_msg') / t('tags.empty_hint') instead."
+        )
+
+    def test_named_html_offenders_have_i18n(self) -> None:
+        """``index.html`` elements claimed by #698 must carry ``data-i18n``
+        bindings. These IDs displayed English-only fallback text before the
+        fix; the bindings let ``applyDOM()`` swap them at language change."""
+        html = (_STATIC_JS_DIR / "index.html").read_text(encoding="utf-8")
+        required = [
+            ("stat-chunks", 'data-i18n="header.stat_chunks"'),
+            ("stat-sources", 'data-i18n="header.stat_sources"'),
+            ("adv-toggle", 'data-i18n="search.adv_advanced"'),
+            ("adv-toggle", 'data-i18n-title="search.adv_title"'),
+            ("bulk-delete-btn", 'data-i18n="search.bulk_delete"'),
+        ]
+        bad: list[str] = []
+        for el_id, must_have in required:
+            tag_re = re.compile(rf'<[^>]*\bid="{re.escape(el_id)}"[^>]*>')
+            m = tag_re.search(html)
+            if not m:
+                bad.append(f"  id={el_id!r} missing from index.html")
+                continue
+            if must_have not in m.group(0):
+                bad.append(f"  id={el_id!r} missing attribute: {must_have}")
+        assert not bad, (
+            "index.html elements named in #698 missing required i18n bindings:\n" + "\n".join(bad)
+        )
+
+    def test_issue_698_new_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
+        """Locale keys introduced for #698 must exist in both files. The
+        existing ``test_placeholder_parity`` will catch ``{count}`` /
+        ``{exts}`` / ``{tokens}`` / ``{files}`` / ``{chunks}`` mismatches
+        between en and ko, so no separate placeholder check is needed."""
+        required = {
+            "header.stat_chunks_count_one",
+            "header.stat_chunks_count_other",
+            "header.stat_sources_count_one",
+            "header.stat_sources_count_other",
+            "header.stat_files_chunks",
+            "tags.empty_msg",
+            "tags.empty_hint",
+            "search.adv_advanced",
+            "settings.config.hint_extensions",
+            "settings.config.hint_max_chunk",
+        }
+        missing_en = required - set(en)
+        missing_ko = required - set(ko)
+        assert not missing_en, f"#698 keys missing from en.json: {sorted(missing_en)}"
+        assert not missing_ko, f"#698 keys missing from ko.json: {sorted(missing_ko)}"

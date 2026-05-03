@@ -1058,8 +1058,14 @@ window.addEventListener('popstate', (e) => {
 async function loadStats() {
   try {
     const data = await api('GET', '/api/stats');
-    qs('stat-chunks').textContent = `${data.total_chunks} chunks`;
-    qs('stat-sources').textContent = `${data.total_sources} sources`;
+    qs('stat-chunks').textContent = t(
+      data.total_chunks === 1 ? 'header.stat_chunks_count_one' : 'header.stat_chunks_count_other',
+      { count: data.total_chunks },
+    );
+    qs('stat-sources').textContent = t(
+      data.total_sources === 1 ? 'header.stat_sources_count_one' : 'header.stat_sources_count_other',
+      { count: data.total_sources },
+    );
   } catch (e) { console.warn('[stats]', e); }
 }
 
@@ -2707,7 +2713,10 @@ function _renderSourcesStats(activeVendor) {
     totalChunks += s.chunk_count || 0;
   }
   if (indexedFiles || totalChunks) {
-    statsEl.textContent = `${indexedFiles} files \u00b7 ${totalChunks.toLocaleString()} chunks`;
+    statsEl.textContent = t('header.stat_files_chunks', {
+      files: indexedFiles,
+      chunks: totalChunks.toLocaleString(),
+    });
     statsEl.hidden = false;
   } else {
     statsEl.hidden = true;
@@ -3436,7 +3445,7 @@ async function browseSource(path, limit = 100) {
             // Update count badge
             const countEl = content.querySelector('.badge-blue');
             const remaining = content.querySelectorAll('.chunk-card').length;
-            if (countEl) countEl.textContent = `${remaining} chunks`;
+            if (countEl) countEl.textContent = t('settings.ns.group_chunks', { count: remaining });
             STATE.lastResults = STATE.lastResults.filter(r => String(r.chunk.id) !== String(c.id));
             renderResults(STATE.lastResults);
             _markDataStale();
@@ -3942,7 +3951,7 @@ async function loadTags() {
     listEl.innerHTML = '';
 
     if (data.tags.length === 0) {
-      emptyEl.innerHTML = emptyState('🏷', 'No tags yet', 'Run Auto-Tag to generate tags');
+      emptyEl.innerHTML = emptyState('🏷', t('tags.empty_msg'), t('tags.empty_hint'));
       return;
     }
 

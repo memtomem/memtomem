@@ -9,6 +9,11 @@
 
   "header.stat_chunks": "— chunks",
   "header.stat_sources": "— sources",
+  "header.stat_chunks_count_one": "{count} chunk",
+  "header.stat_chunks_count_other": "{count} chunks",
+  "header.stat_sources_count_one": "{count} source",
+  "header.stat_sources_count_other": "{count} sources",
+  "header.stat_files_chunks": "{files} files · {chunks} chunks",
   "header.sys_info_jump_title": "Open Embedding & Storage settings",
   "header.settings_title": "Settings",
   "header.theme_title": "Toggle theme",
@@ -90,6 +95,7 @@
   "search.date_90d": "Last 90 days",
   "search.date_custom": "Custom…",
   "search.date_title": "Filter results by date range",
+  "search.adv_advanced": "⚙ Advanced",
   "search.adv_title": "Source multi-select, score threshold, saved searches, export",
   "search.adv_sources": "Sources",
   "search.adv_loading": "Loading…",
@@ -342,6 +348,8 @@
   "settings.config.desc": "Server settings: embedding provider, storage backend, search and indexing parameters.",
   "settings.config.guide_title": "Configuration Guide",
   "settings.config.guide_text": "Select a config section to see its documentation.",
+  "settings.config.hint_extensions": "Extensions: {exts}",
+  "settings.config.hint_max_chunk": "Max chunk: {tokens} tokens",
 
   "settings.ns.desc": "Organize memories by namespace and review chunk counts per group.",
   "settings.ns.title": "Namespaces",
@@ -457,6 +465,8 @@
   "tags.autotag_sample_current": "Current:",
   "tags.autotag_sample_suggested": "Suggested:",
   "tags.autotag_sample_no_current_tags": "(none)",
+  "tags.empty_msg": "No tags yet",
+  "tags.empty_hint": "Run Auto-Tag to generate tags",
 
   "timeline.help": "Activity timeline of indexed chunks. Heatmap shows daily activity. Toggle Chunks/Files view.",
   "timeline.source_label": "Source filter",
