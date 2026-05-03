@@ -25,6 +25,8 @@ Design notes:
 
 from __future__ import annotations
 
+import errno
+import os
 import shutil
 import sqlite3
 import sys
@@ -446,68 +448,258 @@ def _print_binary_hint(label: str, lines: list[str]) -> None:
         click.echo(f"  {line}")
 
 
-# ---- ordered deletion ----------------------------------------------------
+# ---- transactional staging ----------------------------------------------
+#
+# The wipe is staged-then-finalized so a mid-run failure can't leave the
+# user's state dir half-gone (#757). Every to-be-deleted path is moved
+# via ``os.replace`` into a sibling ``.uninstall-staging-<pid>/`` dir
+# under its anchor (``state_dir`` / custom DB dir / runtime dir);
+# ``rename(2)`` is atomic on the same FS so each move either completes
+# or doesn't. Any failure rolls back the moves done so far, restoring
+# the original layout. After every group is staged, ``shutil.rmtree``
+# wipes the staging dirs — failures there leave only orphan staging
+# trash, not user-visible data.
 
 
-class _UninstallPartialError(Exception):
-    """Raised when deletion fails mid-flight, after some groups succeeded."""
+_STAGING_PREFIX = ".uninstall-staging-"
 
-    def __init__(self, last_completed: str, failing_path: Path, original: BaseException) -> None:
-        super().__init__(f"failed at {failing_path} after completing: {last_completed}")
-        self.last_completed = last_completed
+
+@dataclass(frozen=True)
+class _StagedMove:
+    """A single original→staging move recorded for rollback."""
+
+    original: Path
+    staged: Path
+
+
+class _UninstallStagingError(Exception):
+    """A stage move failed; rollback was attempted.
+
+    ``rollback_errors`` is empty when rollback fully restored the
+    original layout. When non-empty, the user is left with files split
+    between original locations and staging — ``staging_roots`` lists
+    the dirs they need to inspect to recover.
+    """
+
+    def __init__(
+        self,
+        failing_path: Path,
+        original: BaseException,
+        rollback_errors: list[tuple[Path, BaseException]],
+        staging_roots: list[Path],
+    ) -> None:
+        super().__init__(f"failed at {failing_path}: {original}")
         self.failing_path = failing_path
         self.original = original
+        self.rollback_errors = rollback_errors
+        self.staging_roots = staging_roots
 
 
-def _delete_paths(paths: list[Path]) -> None:
-    for path in paths:
-        if path.is_dir():
-            shutil.rmtree(path)
-        else:
-            path.unlink(missing_ok=True)
+class _UninstallCrossFsError(Exception):
+    """Layout spans filesystems — atomic staging via ``os.replace`` not
+    possible (raises ``EXDEV``). Surfaced as a clean refusal rather
+    than a fall-back to copy+delete: the whole point of staging is
+    atomicity, and copy+delete would just reintroduce the half-state
+    risk this module is designed to eliminate."""
+
+    def __init__(self, src: Path, anchor: Path) -> None:
+        super().__init__(f"cross-FS: {src} not on same FS as {anchor}")
+        self.src = src
+        self.anchor = anchor
+
+
+def _build_stage_plan(
+    inv: _Inventory, *, keep_config: bool, keep_data: bool
+) -> list[tuple[str, list[Path]]]:
+    """Return ordered ``[(group_label, paths_to_stage), ...]``.
+
+    Owned subdirs (``config.d``, ``memories``, ``uploads``) move as
+    whole directories — one ``rename`` instead of N — which is also
+    why ``_OWNED_SUBDIRS`` no longer needs a post-deletion empty-prune
+    pass for the no-keep-flag path.
+    """
+    state_dir = _DEFAULT_STATE_DIR
+    plan: list[tuple[str, list[Path]]] = []
+
+    plan.append(("session/pid", list(inv.other_files.paths)))
+
+    if not keep_config:
+        fragment_dir = state_dir / "config.d"
+        if fragment_dir.is_dir():
+            plan.append(("fragments", [fragment_dir]))
+        plan.append(("backups", list(inv.backup_files.paths)))
+        plan.append(("config.json", list(inv.config_files.paths)))
+
+    if not keep_data:
+        memory_dir = state_dir / "memories"
+        if memory_dir.is_dir():
+            plan.append(("memories", [memory_dir]))
+
+    upload_dir = state_dir / "uploads"
+    if upload_dir.is_dir():
+        plan.append(("uploads", [upload_dir]))
+
+    if not keep_data:
+        plan.append(("database", list(inv.db_files.paths)))
+
+    return plan
+
+
+def _stage_inventory(
+    inv: _Inventory, *, keep_config: bool, keep_data: bool
+) -> tuple[list[Path], list[str]]:
+    """Atomically move every to-be-deleted path into a staging sibling.
+
+    Returns ``(staging_roots, completed_labels)`` so the caller can
+    finalize via ``shutil.rmtree`` per root and report what was wiped.
+    On any failure, rolls back and raises ``_UninstallStagingError``;
+    on cross-FS layout, raises ``_UninstallCrossFsError`` instead.
+    """
+    state_dir = _DEFAULT_STATE_DIR
+    custom_db_dir = inv.db_path.parent if inv.db_path.parent != state_dir else None
+    rt = runtime_dir()
+
+    staging_name = f"{_STAGING_PREFIX}{os.getpid()}"
+    plan = _build_stage_plan(inv, keep_config=keep_config, keep_data=keep_data)
+
+    def _anchor_for(path: Path) -> Path:
+        for anchor in (state_dir, custom_db_dir, rt):
+            if anchor is None:
+                continue
+            try:
+                path.relative_to(anchor)
+                return anchor
+            except ValueError:
+                continue
+        raise ValueError(f"unanchored path: {path}")
+
+    # Cross-FS pre-check. ``os.replace`` raises ``EXDEV`` for cross-FS,
+    # so a same-``st_dev`` probe upfront keeps us from staging half the
+    # plan before the doomed move surfaces. The late-detection branch
+    # below still catches anything the pre-check misses (stat race,
+    # transient FS errors, etc.).
+    for _, paths in plan:
+        for src in paths:
+            if not src.exists():
+                continue
+            try:
+                anchor = _anchor_for(src)
+            except ValueError:
+                continue
+            try:
+                if src.stat().st_dev != anchor.stat().st_dev:
+                    raise _UninstallCrossFsError(src=src, anchor=anchor)
+            except OSError:
+                # Stat failure: defer to ``os.replace``'s own diagnostics.
+                continue
+
+    roots: dict[Path, Path] = {}
+    moves: list[_StagedMove] = []
+
+    def _staging_root_for(anchor: Path) -> Path:
+        if anchor not in roots:
+            root = anchor / staging_name
+            # exist_ok=False — the pid-suffixed name is per-process, so
+            # collision means somebody else parked a directory with our
+            # exact name and we should refuse rather than scribble in it.
+            root.mkdir(parents=True, exist_ok=False)
+            roots[anchor] = root
+        return roots[anchor]
+
+    def _rollback() -> list[tuple[Path, BaseException]]:
+        errors: list[tuple[Path, BaseException]] = []
+        for move in reversed(moves):
+            try:
+                os.replace(move.staged, move.original)
+            except OSError as exc:
+                errors.append((move.staged, exc))
+        # Best-effort cleanup of empty staging trees. If rollback
+        # partially failed, the not-rolled-back content survives — and
+        # the user is told the staging root path so they can recover.
+        for root in list(roots.values()):
+            if not root.exists():
+                continue
+            for sub in sorted(root.rglob("*"), reverse=True):
+                if sub.is_dir():
+                    try:
+                        sub.rmdir()
+                    except OSError:
+                        pass
+            try:
+                root.rmdir()
+            except OSError:
+                pass
+        return errors
+
+    completed_labels: list[str] = []
+    for label, paths in plan:
+        any_staged = False
+        for src in paths:
+            if not src.exists():
+                continue
+            try:
+                anchor = _anchor_for(src)
+                staging_root = _staging_root_for(anchor)
+                rel = src.relative_to(anchor)
+                dst = staging_root / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(src, dst)
+            except OSError as exc:
+                rollback_errors = _rollback()
+                if isinstance(exc, OSError) and exc.errno == errno.EXDEV:
+                    # Late-detected cross-FS — surface the dedicated
+                    # error so the user gets the layout-specific message
+                    # instead of a generic stage-failed report.
+                    raise _UninstallCrossFsError(src=src, anchor=anchor) from exc
+                raise _UninstallStagingError(
+                    failing_path=src,
+                    original=exc,
+                    rollback_errors=rollback_errors,
+                    staging_roots=list(roots.values()),
+                ) from exc
+            except ValueError as exc:
+                rollback_errors = _rollback()
+                raise _UninstallStagingError(
+                    failing_path=src,
+                    original=exc,
+                    rollback_errors=rollback_errors,
+                    staging_roots=list(roots.values()),
+                ) from exc
+            moves.append(_StagedMove(original=src, staged=dst))
+            any_staged = True
+        if any_staged:
+            completed_labels.append(label)
+
+    return list(roots.values()), completed_labels
 
 
 def _delete_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) -> str:
-    """Delete in low→high value order. Returns a summary of what was removed.
+    """Stage every to-be-deleted path, then ``rmtree`` the staging dirs.
 
-    Order: pid/session → fragments → backups → config → memories → uploads
-    → DB+WAL/SHM/journal. Each group is logged before moving on so partial
-    failures leave a recoverable trail.
+    The stage step is the atomic point — either every path is moved
+    out of its original location, or none are. The ``rmtree`` step
+    only operates on the staging dirs, so a failure there is benign
+    leftover trash (warned, not failed) rather than user-visible
+    half-state.
     """
-    completed: list[str] = []
+    staging_roots, completed = _stage_inventory(inv, keep_config=keep_config, keep_data=keep_data)
 
-    def step(group_label: str, paths: list[Path]) -> None:
-        if not paths:
-            return
+    for root in staging_roots:
+        if not root.exists():
+            continue
         try:
-            _delete_paths(paths)
-        except (OSError, PermissionError) as exc:
-            failing = paths[0] if len(paths) == 1 else _DEFAULT_STATE_DIR
-            raise _UninstallPartialError(
-                last_completed=", ".join(completed) or "nothing yet",
-                failing_path=failing,
-                original=exc,
-            ) from exc
-        completed.append(group_label)
+            shutil.rmtree(root)
+        except OSError as exc:
+            click.secho(
+                f"  Warning: could not remove staging dir {_format_path(root)}: {exc}. "
+                "Original data is already moved out of the way; you may delete the "
+                "staging dir manually.",
+                fg="yellow",
+            )
 
-    # transient first (always wiped — pid/session are runtime ephemera)
-    step("session/pid", inv.other_files.paths)
-    # config surface — fragments and backups are config too, so --keep-config
-    # preserves them along with config.json (matches the flag table in the plan)
-    if not keep_config:
-        step("fragments", inv.fragment_files.paths)
-        step("backups", inv.backup_files.paths)
-        step("config.json", inv.config_files.paths)
-    # data
-    if not keep_data:
-        step("memories", inv.memory_files.paths)
-    step("uploads", inv.upload_files.paths)
-    if not keep_data:
-        step("database", inv.db_files.paths)
-
-    # Prune now-empty subdirs we own (config.d, memories, uploads). _delete_paths
-    # only removes individual files within these, so we have to remove the
-    # skeleton dirs ourselves before the state-dir prune below can succeed.
+    # Owned-subdir prune — only matters when ``--keep-config`` /
+    # ``--keep-data`` left a now-empty subdir behind (we whole-dir-stage
+    # everything else, so those subdirs are gone via the rmtree above).
     for subdir in _OWNED_SUBDIRS:
         candidate = _DEFAULT_STATE_DIR / subdir
         if candidate.exists() and candidate.is_dir() and not any(candidate.iterdir()):
@@ -516,7 +708,6 @@ def _delete_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) ->
             except OSError:
                 pass
 
-    # If state dir is now empty (no custom storage outside it), prune it.
     if (
         _DEFAULT_STATE_DIR.exists()
         and not any(_DEFAULT_STATE_DIR.iterdir())
@@ -528,9 +719,6 @@ def _delete_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) ->
         except OSError:
             pass
 
-    # Prune the runtime subdir (``$XDG_RUNTIME_DIR/memtomem`` or
-    # ``$TMPDIR/memtomem-{uid}``) if we emptied it. We don't own the
-    # parent (the kernel / OS does), so we only rmdir our own subdir.
     rt = runtime_dir()
     if rt.exists() and rt.is_dir() and not any(rt.iterdir()):
         try:
@@ -694,15 +882,44 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
 
     try:
         summary = _delete_inventory(inv, keep_config=keep_config, keep_data=keep_data)
-    except _UninstallPartialError as exc:
+    except _UninstallCrossFsError as exc:
+        click.echo("")
+        click.secho(
+            f"Refusing to proceed: {_format_path(exc.src)} is on a different "
+            f"filesystem than {_format_path(exc.anchor)}.",
+            fg="red",
+        )
+        click.secho(
+            "  Transactional uninstall stages files via os.replace, which is "
+            "atomic only within a single filesystem. Move the contents to one "
+            "filesystem and retry, or remove the affected paths manually.",
+            fg="red",
+        )
+        sys.exit(2)
+    except _UninstallStagingError as exc:
         click.secho(
             f"\nDeletion failed at {_format_path(exc.failing_path)}: {exc.original}",
             fg="red",
         )
-        click.secho(
-            f"  Successfully removed up to: {exc.last_completed}",
-            fg="yellow",
-        )
+        if not exc.rollback_errors:
+            click.secho(
+                "  Rolled back — no files were deleted.",
+                fg="yellow",
+            )
+        else:
+            click.secho(
+                "  Rollback also failed; state is split between original "
+                "locations and staging dirs. Move the contents listed below "
+                "back to their original locations to recover:",
+                fg="red",
+            )
+            for staged_path, rb_exc in exc.rollback_errors:
+                click.secho(
+                    f"    - {_format_path(staged_path)}: {rb_exc}",
+                    fg="red",
+                )
+            for root in exc.staging_roots:
+                click.secho(f"  Staging dir: {_format_path(root)}", fg="red")
         sys.exit(2)
 
     click.secho(f"\nRemoved: {summary}.", fg="green")
