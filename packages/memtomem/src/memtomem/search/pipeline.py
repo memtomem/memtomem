@@ -408,6 +408,104 @@ class SearchPipeline:
             )
         return expanded
 
+    async def _filter_only_search(
+        self,
+        *,
+        top_k: int | None,
+        source_filter: str | None,
+        tag_filter: str | None,
+        namespace: str | list[str] | None,
+        context_window: int | None,
+        as_of_unix: int | None,
+    ) -> tuple[list[SearchResult], RetrievalStats]:
+        """Empty-query path (#750): enumerate by filter, skip retrievers.
+
+        Tag and/or source filter become the primary selectors via
+        ``recall_chunks``. Each candidate enters with ``score=1.0`` so
+        the post-filter stages (validity → decay → access → importance)
+        produce a meaningful order even without a keyword to rank by.
+        MMR and the reranker are skipped — both need a query/embedding
+        signal that doesn't exist in this mode.
+        """
+        import time
+
+        top_k = self._config.default_top_k if top_k is None else top_k
+        ns_filter = NamespaceFilter.parse(
+            namespace,
+            system_prefixes=tuple(self._config.system_namespace_prefixes),
+        )
+
+        # Over-sample so the validity stage can prune without starving
+        # the response. Bounded so a tag with millions of chunks can't
+        # blow up memory — ``top_k * 5`` mirrors the rerank-pool floor
+        # logic and 500 is the route's hard cap on top_k.
+        candidate_limit = max(top_k * 5, 100)
+        chunks = await self._storage.recall_chunks(
+            source_filter=source_filter,
+            tag_filter=tag_filter,
+            namespace_filter=ns_filter,
+            limit=candidate_limit,
+        )
+
+        fused: list[SearchResult] = [
+            SearchResult(chunk=c, score=1.0, rank=i + 1, source="recall")
+            for i, c in enumerate(chunks)
+        ]
+        stats = RetrievalStats(fused_total=len(fused))
+
+        effective_as_of = as_of_unix if as_of_unix is not None else int(time.time())
+        if fused:
+            fused = _apply_validity_filter(fused, effective_as_of)
+
+        if self._decay_config.enabled and fused:
+            from memtomem.search.decay import apply_score_decay
+
+            fused = apply_score_decay(fused, half_life_days=self._decay_config.half_life_days)
+
+        if self._access_config.enabled and fused:
+            from memtomem.search.access import apply_access_boost
+
+            access_chunk_ids = [r.chunk.id for r in fused]
+            access_counts = await self._storage.get_access_counts(access_chunk_ids)
+            fused = apply_access_boost(
+                fused, access_counts, max_boost=self._access_config.max_boost
+            )
+
+        if self._importance_config and getattr(self._importance_config, "enabled", False) and fused:
+            from memtomem.search.importance import apply_importance_boost
+
+            chunk_ids_imp = [r.chunk.id for r in fused]
+            imp_scores = await self._storage.get_importance_scores(chunk_ids_imp)
+            fused = apply_importance_boost(
+                fused,
+                imp_scores,
+                max_boost=getattr(self._importance_config, "max_boost", 1.5),
+            )
+
+        # Re-sort after boosts and trim to ``top_k``. Boost stages mutate
+        # scores but preserve list order; the keyword path relies on the
+        # reranker / RRF for final ordering, so this branch sorts here.
+        fused.sort(key=lambda r: r.score, reverse=True)
+        fused = fused[:top_k]
+
+        ctx_win = self._resolve_context_window(context_window)
+        if ctx_win > 0 and fused:
+            fused = await self._expand_context(fused, ctx_win)
+
+        stats.final_total = len(fused)
+
+        if fused:
+
+            async def _increment():
+                await self._storage.increment_access([r.chunk.id for r in fused])
+
+            t = asyncio.create_task(_increment())
+            t.add_done_callback(_bg_task_error_cb)
+            self._bg_tasks.add(t)
+            t.add_done_callback(self._bg_tasks.discard)
+
+        return fused, stats
+
     async def search(
         self,
         query: str,
@@ -419,6 +517,25 @@ class SearchPipeline:
         context_window: int | None = None,
         as_of_unix: int | None = None,
     ) -> tuple[list[SearchResult], RetrievalStats]:
+        # #750: tag/source-only branch — no keyword to rank by, so the
+        # filter takes over as the primary selector. We enumerate via
+        # ``recall_chunks`` and skip BM25/dense/expansion/rescue/rerank
+        # entirely; post-filter stages (validity, decay, access,
+        # importance, ctx-window) still apply so ranking reflects
+        # recency × access × importance.
+        query = (query or "").strip()
+        if not query:
+            if not (tag_filter or source_filter):
+                return [], RetrievalStats()
+            return await self._filter_only_search(
+                top_k=top_k,
+                source_filter=source_filter,
+                tag_filter=tag_filter,
+                namespace=namespace,
+                context_window=context_window,
+                as_of_unix=as_of_unix,
+            )
+
         top_k = self._config.default_top_k if top_k is None else top_k
         effective_weights = rrf_weights or self._config.rrf_weights
 

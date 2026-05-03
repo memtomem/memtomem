@@ -1672,7 +1672,12 @@ let _searchAbortCtrl = null;
 
 async function doSearch() {
   const q = qs('search-input').value.trim();
-  if (!q) return;
+  const tf = qs('tag-filter').value.trim();
+  // #750: tag-only search is a valid path — clicking a tag pill on a
+  // fresh session leaves ``q`` empty but populates ``tag-filter``, and
+  // the user expects "show me all memos with this tag" rather than a
+  // no-op. The early-return now only fires when both axes are empty.
+  if (!q && !tf) return;
   // #696: kick the readiness poll. Fire-and-forget; the search request
   // proceeds normally — its response covers the spinner. The poll's job
   // is to surface "Downloading bge-m3 (~2.3 GB)…" while the backend's
@@ -1682,13 +1687,13 @@ async function doSearch() {
   // non-terminal for this entry point (see ``_modelComponentDone``).
   _modelReadinessPoll();
   STATE.lastQuery = q;
-  saveToHistory(q);
+  if (q) saveToHistory(q);
   hide(qs('search-history-dropdown'));
   STATE.currentTopK = parseInt(qs('top-k').value, 10);
-  const tf  = qs('tag-filter').value.trim();
   const nsFilter = qs('ns-filter').value;
 
-  const params = new URLSearchParams({ q, top_k: STATE.currentTopK });
+  const params = new URLSearchParams({ top_k: STATE.currentTopK });
+  if (q) params.set('q', q);
   if (tf) params.set('tag_filter', tf);
   if (nsFilter) params.set('namespace', nsFilter);
   const ctxWin = parseInt((qs('context-window') || {}).value || '0', 10);
@@ -4637,10 +4642,12 @@ function _syncSearchToURL() {
 
 qs('load-more-btn').addEventListener('click', async () => {
   const q = qs('search-input').value.trim();
-  if (!q) return;
-  STATE.currentTopK = Math.min(STATE.currentTopK + 10, 100);
   const tf = qs('tag-filter').value.trim();
-  const params = new URLSearchParams({ q, top_k: STATE.currentTopK });
+  // #750: mirror doSearch — load-more is valid in tag-only mode too.
+  if (!q && !tf) return;
+  STATE.currentTopK = Math.min(STATE.currentTopK + 10, 100);
+  const params = new URLSearchParams({ top_k: STATE.currentTopK });
+  if (q) params.set('q', q);
   if (tf) params.set('tag_filter', tf);
   const btn = qs('load-more-btn');
   btnLoading(btn, true);

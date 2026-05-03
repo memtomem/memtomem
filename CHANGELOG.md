@@ -16,12 +16,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   tag in prose got boosted on top of the tag-filter constraint, and the
   search bar looked as if the user had typed the tag themselves. With
   the BM25 query left alone, a tag pill click is now a pure narrowing
-  filter on whatever the user was already searching for. If
-  `search-input` is empty the click acts as a "filter prep": the Search
-  tab opens with `tag-filter` populated, but `doSearch()` early-returns
-  on the empty query so no results render until the user types one.
-  Follow-up #750 tracks relaxing the empty-q guard so a fresh-session
-  click runs as a true tag-only search.
+  filter on whatever the user was already searching for.
+
+- **Tag pill click runs a tag-only search on a fresh session (closes #750).**
+  After #672 stopped `_searchByTag` from copying the clicked tag into
+  `search-input`, a fresh-session click left `search-input` empty and
+  the search early-returned — landing the user on the Search tab with
+  `tag-filter` populated but no results, requiring an extra keystroke
+  to actually run. The frontend `doSearch()` / `load-more-btn` guards
+  now allow a search whenever either `q` *or* `tag-filter` has a
+  value; the `/api/search` route's `q` parameter is optional
+  (rejecting only "no axis at all" with a 400); and
+  `SearchPipeline.search` routes empty-query calls through a new
+  `_filter_only_search` branch that enumerates via
+  `storage.recall_chunks(tag_filter=…)` and skips
+  BM25/dense/expansion/rescue/rerank — the post-filter stages
+  (validity → decay → access boost → importance boost → context
+  window) still apply so the rank reflects recency × access ×
+  importance. `recall_chunks` gained an optional `tag_filter` kwarg
+  with the same comma-separated OR semantics as the keyword path's
+  post-fusion tag filter.
 
 ## [0.1.35] — 2026-05-02
 

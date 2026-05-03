@@ -17,7 +17,7 @@ router = APIRouter(tags=["search"])
 
 @router.get("/search", response_model=SearchResponse)
 async def search(
-    q: str = Query(..., description="Search query", min_length=1, max_length=10_000),
+    q: str | None = Query(None, description="Search query", max_length=10_000),
     top_k: int | None = Query(None, ge=1, le=500),
     source_filter: str | None = Query(None),
     tag_filter: str | None = Query(None),
@@ -25,9 +25,16 @@ async def search(
     context_window: int = Query(0, ge=0, le=10, description="Expand ±N adjacent chunks"),
     pipeline=Depends(get_search_pipeline),
 ) -> SearchResponse:
-    q = q.strip()
-    if not q:
-        raise HTTPException(status_code=422, detail="Query cannot be empty or whitespace-only")
+    # #750: ``q`` is optional so a tag/source-only search (no keyword)
+    # is a first-class path. The pipeline handles the empty-query branch
+    # (filter becomes the primary selector); the API guard here only
+    # rejects "no axis at all" — search needs *something* to scope by.
+    q = (q or "").strip()
+    if not q and not (tag_filter or source_filter):
+        raise HTTPException(
+            status_code=400,
+            detail="Provide at least one of q, tag_filter, or source_filter.",
+        )
 
     try:
         results, rstats = await pipeline.search(

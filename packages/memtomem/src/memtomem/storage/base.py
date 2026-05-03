@@ -58,6 +58,7 @@ class StorageBackend(Protocol):
         source_filter: str | None = None,
         limit: int = 20,
         namespace_filter: NamespaceFilter | None = None,
+        tag_filter: str | None = None,
     ) -> list[Chunk]: ...
 
     # Namespace
