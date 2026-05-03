@@ -130,9 +130,14 @@ const STATE = {
         _modelReadinessHydrate();
       }
     });
-    // Re-apply i18n when language changes (dynamic JS strings)
+    // Re-apply i18n when language changes (dynamic JS strings).
+    // applyDOM() rewrites elements with data-i18n bindings to their
+    // locale value — for the header count pills that means clobbering
+    // the live "5 chunks" with the placeholder "— chunks". Re-fetch
+    // stats after so the live count reappears in the new language.
     window.addEventListener('langchange', () => {
       if (typeof I18N !== 'undefined') I18N.applyDOM();
+      loadStats();
     });
     // Activate tab from URL hash now that i18n has loaded — tabs that
     // render JS-built UI (like the Sources tab's Memory Dirs panel) call

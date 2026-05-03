@@ -256,7 +256,15 @@ class TestNoHardcodedStrings:
         """``el.textContent = `${expr} chunks/sources/files``` must route
         through ``t()`` with a ``{count}`` placeholder so plural noun forms
         can be localized. Added in #698 to extend the guard beyond
-        ``showToast``/``showConfirm`` into direct DOM assignments."""
+        ``showToast``/``showConfirm`` into direct DOM assignments.
+
+        Known regex limits (acceptable for a regression guard, not an
+        exhaustive scan): requires whitespace between the ``${...}`` and
+        the noun, and the inner expression must not contain ``}`` (so
+        ``${foo({k: 1})}`` slips through). Both shapes are uncommon and
+        would still produce English copy that a code reviewer should
+        catch — the regex's job is to lock in the specific
+        ``${count} chunks/sources/files`` regression."""
         pattern = re.compile(r"\.textContent\s*=\s*`\$\{[^`}]+\}\s+(chunks|sources|files)\b")
         bad: list[str] = []
         for name in self._SCANNED_FILES:
