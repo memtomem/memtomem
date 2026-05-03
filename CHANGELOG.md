@@ -19,8 +19,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   filter on whatever the user was already searching for. If
   `search-input` is empty the click acts as a "filter prep": the Search
   tab opens with `tag-filter` populated, but `doSearch()` early-returns
-  on the empty query so no results render until the user types one. A
-  follow-up will allow tag-only searches without a query.
+  on the empty query so no results render until the user types one.
+  Follow-up #750 tracks relaxing the empty-q guard so a fresh-session
+  click runs as a true tag-only search.
 
 ## [0.1.35] — 2026-05-02
 
