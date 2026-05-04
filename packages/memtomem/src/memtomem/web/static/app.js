@@ -571,8 +571,8 @@ function _renderModelReadinessBanner(d) {
   const rerDl = rer.state === 'downloading';
   const anyLoading = emb.state === 'loading' || rer.state === 'loading';
 
-  const fallbackEmbName = t('banner.model_fallback_embedder', 'embedder');
-  const fallbackRerName = t('banner.model_fallback_reranker', 'reranker');
+  const fallbackEmbName = t('banner.model_fallback_embedder');
+  const fallbackRerName = t('banner.model_fallback_reranker');
 
   if (hasError) {
     msg.textContent = t('banner.model_error');

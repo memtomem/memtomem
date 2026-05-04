@@ -34,10 +34,10 @@ async function loadHooksSync() {
 
     // Status badge
     const badges = {
-      in_sync: { cls: 'badge-success', text: t('settings.hooks.in_sync', 'All hooks are in sync') },
-      out_of_sync: { cls: 'badge-warning', text: `${data.hooks?.pending?.length || 0} ${t('settings.hooks.pending', 'hooks will be added on sync')}` },
-      conflicts: { cls: 'badge-danger', text: `${data.hooks?.conflicts?.length || 0} ${t('settings.hooks.conflicts', 'conflicts found')}` },
-      no_source: { cls: 'badge-muted', text: t('settings.hooks.no_source', 'No .memtomem/settings.json found') },
+      in_sync: { cls: 'badge-success', text: t('settings.hooks.in_sync') },
+      out_of_sync: { cls: 'badge-warning', text: `${data.hooks?.pending?.length || 0} ${t('settings.hooks.pending')}` },
+      conflicts: { cls: 'badge-danger', text: `${data.hooks?.conflicts?.length || 0} ${t('settings.hooks.conflicts')}` },
+      no_source: { cls: 'badge-muted', text: t('settings.hooks.no_source') },
       error: { cls: 'badge-danger', text: data.error || 'Error' },
     };
     const badge = badges[data.status] || badges.error;
@@ -69,7 +69,7 @@ async function loadHooksSync() {
           <div class="hooks-sync-card-header">
             <strong>${escapeHtml(label)}</strong>
             <button class="btn-sm btn-primary hooks-resolve-btn"
-              data-i18n="settings.hooks.use_proposed">${t('settings.hooks.use_proposed', "Use memtomem's")}</button>
+              data-i18n="settings.hooks.use_proposed">${t('settings.hooks.use_proposed')}</button>
           </div>
           <div class="diff-view">${renderDiff(ops)}</div>
         </div>`;
@@ -91,7 +91,7 @@ async function loadHooksSync() {
 
     // Synced
     if (data.hooks.synced.length) {
-      html += '<h3 style="margin:1rem 0 0.5rem">' + t('settings.hooks.synced', 'In sync') + '</h3>';
+      html += '<h3 style="margin:1rem 0 0.5rem">' + t('settings.hooks.synced') + '</h3>';
       html += '<div class="text-muted">';
       for (const s of data.hooks.synced) {
         html += `<div style="padding:0.25rem 0">${escapeHtml(_ruleLabel(s))}</div>`;
@@ -100,7 +100,7 @@ async function loadHooksSync() {
     }
 
     if (!html) {
-      html = emptyState('', t('settings.hooks.in_sync', 'All hooks are in sync'), 'No hooks defined in .memtomem/settings.json.');
+      html = emptyState('', t('settings.hooks.in_sync'), 'No hooks defined in .memtomem/settings.json.');
     }
 
     contentEl.innerHTML = html;
@@ -167,7 +167,7 @@ document.getElementById('hooks-sync-btn')?.addEventListener('click', async () =>
     if (warnings.length) {
       showToast(t('toast.hooks_warnings', { count: warnings.length }), 'warning');
     } else {
-      showToast(t('settings.hooks.sync_success', 'Sync completed'));
+      showToast(t('settings.hooks.sync_success'));
     }
     loadHooksSync();
   } catch (err) {

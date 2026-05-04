@@ -47,14 +47,14 @@ function renderRuntimeBadges(runtimes) {
 
 function renderDroppedChips(fields) {
   if (!fields || !fields.length) return '';
-  return fields.map(f => `<span class="ctx-dropped-chip">${escapeHtml(t('settings.ctx.dropped_fields', 'Dropped'))}: ${escapeHtml(f)}</span>`).join('');
+  return fields.map(f => `<span class="ctx-dropped-chip">${escapeHtml(t('settings.ctx.dropped_fields'))}: ${escapeHtml(f)}</span>`).join('');
 }
 
 function renderImportResult(data) {
   let html = `<div class="ctx-import-result">`;
   html += `<div class="ctx-import-priority">${t('settings.ctx.import_priority')}</div>`;
   if (data.imported && data.imported.length) {
-    html += `<h4>${t('settings.ctx.import_success', 'Imported')}</h4>`;
+    html += `<h4>${t('settings.ctx.import_success')}</h4>`;
     for (const item of data.imported) {
       html += `<div class="ctx-import-item"><span class="badge badge-success">${escapeHtml(item.name)}</span></div>`;
     }
@@ -86,12 +86,12 @@ async function loadCtxOverview() {
     // sync endpoint lives on the dev-only ``settings_sync`` router. Skip it
     // in prod so users don't see a card that navigates nowhere.
     const types = [
-      { key: 'skills',   label: t('settings.ctx.skills_title', 'Skills'),   section: 'ctx-skills' },
-      { key: 'commands', label: t('settings.ctx.commands_title', 'Commands'), section: 'ctx-commands' },
-      { key: 'agents',   label: t('settings.ctx.agents_title', 'Agents'),   section: 'ctx-agents' },
+      { key: 'skills',   label: t('settings.ctx.skills_title'),   section: 'ctx-skills' },
+      { key: 'commands', label: t('settings.ctx.commands_title'), section: 'ctx-commands' },
+      { key: 'agents',   label: t('settings.ctx.agents_title'),   section: 'ctx-agents' },
     ];
     if (STATE.uiMode === 'dev') {
-      types.push({ key: 'settings', label: t('settings.hooks.title', 'Settings'), section: 'hooks-sync' });
+      types.push({ key: 'settings', label: t('settings.hooks.title'), section: 'hooks-sync' });
     }
 
     let html = '<div class="ctx-overview-grid">';
@@ -128,15 +128,15 @@ async function loadCtxOverview() {
       } else if (typ.key === 'settings') {
         badgeText = (d.status || '').replace('_', ' ');
       } else if (parseError > 0) {
-        badgeText = `${parseError} ${t('settings.ctx.badge_parse_error', 'parse error')}`;
+        badgeText = `${parseError} ${t('settings.ctx.badge_parse_error')}`;
       } else if (missingTarget > 0) {
-        badgeText = `${missingTarget} ${t('settings.ctx.badge_missing_target', 'missing')}`;
+        badgeText = `${missingTarget} ${t('settings.ctx.badge_missing_target')}`;
       } else if (missingCanonical > 0) {
-        badgeText = `${missingCanonical} ${t('settings.ctx.badge_missing_canonical', 'not imported')}`;
+        badgeText = `${missingCanonical} ${t('settings.ctx.badge_missing_canonical')}`;
       } else if (outOfSync > 0) {
-        badgeText = `${outOfSync} ${t('settings.ctx.badge_out_of_sync', 'out of sync')}`;
+        badgeText = `${outOfSync} ${t('settings.ctx.badge_out_of_sync')}`;
       } else {
-        badgeText = `${inSync}/${total} ${t('settings.ctx.badge_synced', 'synced')}`;
+        badgeText = `${inSync}/${total} ${t('settings.ctx.badge_synced')}`;
       }
 
       html += `<div class="ctx-overview-stat" data-section="${typ.section}">
@@ -181,15 +181,14 @@ async function loadCtxOverview() {
 document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () => {
   const btn = document.getElementById('ctx-sync-all-btn');
   if (btn.dataset.runtimeOnly === 'true') {
-    showToast(t('settings.ctx.sync_all_disabled_tooltip',
-      'No canonical artifacts to fan out yet. Click Import in each section first.'),
+    showToast(t('settings.ctx.sync_all_disabled_tooltip'),
       'info');
     return;
   }
   const ok = await showConfirm({
-    title: t('settings.ctx.sync_all', 'Sync All'),
-    message: t('settings.ctx.confirm_sync', 'Fan out all artifacts to runtimes?').replace('{type}', 'all'),
-    confirmText: t('settings.ctx.sync', 'Sync'),
+    title: t('settings.ctx.sync_all'),
+    message: t('settings.ctx.confirm_sync').replace('{type}', 'all'),
+    confirmText: t('settings.ctx.sync'),
   });
   if (!ok) return;
   btnLoading(btn, true);
@@ -207,7 +206,7 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
       const settingsResp = await fetch('/api/context/settings/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
       if (!settingsResp.ok) throw new Error('Settings sync failed');
     }
-    showToast(t('settings.ctx.sync_success', 'Sync completed'));
+    showToast(t('settings.ctx.sync_success'));
     loadCtxOverview();
   } catch (err) {
     showToast(t('toast.sync_failed', { error: err.message }), 'error');
@@ -247,12 +246,11 @@ function _ctxScopeBadges(scope) {
   // walker would otherwise re-translate and clobber the rendered text.
   const parts = [];
   if (scope.experimental) {
-    const tip = t('settings.ctx.scope_experimental_tip',
-      'Discovered via the opt-in ~/.claude/projects scan; the path may be misdecoded.');
-    parts.push(`<span class="ctx-scope-badge ctx-scope-badge--experimental" title="${escapeHtml(tip)}">${escapeHtml(t('settings.ctx.scope_experimental', 'experimental'))}</span>`);
+    const tip = t('settings.ctx.scope_experimental_tip');
+    parts.push(`<span class="ctx-scope-badge ctx-scope-badge--experimental" title="${escapeHtml(tip)}">${escapeHtml(t('settings.ctx.scope_experimental'))}</span>`);
   }
   if (scope.missing) {
-    parts.push(`<span class="ctx-scope-badge ctx-scope-badge--missing">${escapeHtml(t('settings.ctx.scope_missing', '(missing)'))}</span>`);
+    parts.push(`<span class="ctx-scope-badge ctx-scope-badge--missing">${escapeHtml(t('settings.ctx.scope_missing'))}</span>`);
   }
   return parts.join('');
 }
@@ -264,14 +262,13 @@ function _ctxScopeCount(scope, type) {
 function _ctxRenderItemsHtml(items, type, projectRoot, { clickable }) {
   if (!items.length) {
     const canonical = `.memtomem/${type}`;
-    const hint = t('settings.ctx.empty_hint',
-      'Place {type} under {canonical}/<name>/ then click Sync, or click Import to pull existing {type} from {scan_dirs} within this project.')
+    const hint = t('settings.ctx.empty_hint')
       .replace(/\{type\}/g, type)
       .replace('{canonical}', canonical)
       .replace('{scan_dirs}', '');
     return emptyState(
       '',
-      t('settings.ctx.no_artifacts', 'No {type} found').replace('{type}', type),
+      t('settings.ctx.no_artifacts').replace('{type}', type),
       hint,
     );
   }
@@ -355,8 +352,7 @@ function _ctxRefreshSectionState(type, cwdItems, scannedDirs) {
   if (existing) existing.remove();
   if (canonicalCount === 0 && cwdItems.length > 0) {
     const scanList = (scannedDirs || []).join(', ') || `.${type}/`;
-    const msg = t('settings.ctx.runtime_only_banner',
-      '{count} {type} found in {scan_dirs}; none imported yet. Click Import to canonicalize.')
+    const msg = t('settings.ctx.runtime_only_banner')
       .replace('{count}', cwdItems.length)
       .replace(/\{type\}/g, type)
       .replace('{scan_dirs}', scanList);
@@ -400,7 +396,7 @@ async function loadCtxList(type) {
       const groupId = `ctx-${type}-group-${escapeHtml(scope.scope_id)}`;
       const removable = !isCwd;
       const removeBtn = removable
-        ? `<button class="ctx-scope-remove" data-scope-id="${escapeHtml(scope.scope_id)}" title="${escapeHtml(t('settings.ctx.remove_project', 'Remove project'))}">×</button>`
+        ? `<button class="ctx-scope-remove" data-scope-id="${escapeHtml(scope.scope_id)}" title="${escapeHtml(t('settings.ctx.remove_project'))}">×</button>`
         : '';
       // Full root path on the summary's title attribute lets the user
       // disambiguate same-name scopes (``Edu/inflearn`` vs ``Work/inflearn``)
@@ -438,11 +434,10 @@ async function loadCtxList(type) {
           ev.preventDefault();
           ev.stopPropagation();
           const ok = await showConfirm({
-            title: t('settings.ctx.remove_project', 'Remove project'),
-            message: t('settings.ctx.confirm_remove_project',
-              'Stop tracking "{label}"? Files on disk are unaffected.')
+            title: t('settings.ctx.remove_project'),
+            message: t('settings.ctx.confirm_remove_project')
               .replace('{label}', scope.label),
-            confirmText: t('settings.ctx.remove', 'Remove'),
+            confirmText: t('settings.ctx.remove'),
           });
           if (!ok) return;
           try {
@@ -487,21 +482,21 @@ async function loadCtxDetail(type, name) {
     html += `<div class="ctx-detail-header">
       <strong>${escapeHtml(name)}</strong>
       <div style="display:flex;gap:6px">
-        <button class="btn-ghost ctx-detail-edit-btn" data-i18n="settings.ctx.edit">${t('settings.ctx.edit', 'Edit')}</button>
-        <button class="btn-ghost ctx-detail-diff-btn" data-i18n="settings.ctx.diff_view">${t('settings.ctx.diff_view', 'Diff')}</button>
-        <button class="btn-ghost btn-danger ctx-detail-delete-btn" data-i18n="settings.ctx.delete">${t('settings.ctx.delete', 'Delete')}</button>
+        <button class="btn-ghost ctx-detail-edit-btn" data-i18n="settings.ctx.edit">${t('settings.ctx.edit')}</button>
+        <button class="btn-ghost ctx-detail-diff-btn" data-i18n="settings.ctx.diff_view">${t('settings.ctx.diff_view')}</button>
+        <button class="btn-ghost btn-danger ctx-detail-delete-btn" data-i18n="settings.ctx.delete">${t('settings.ctx.delete')}</button>
       </div>
     </div>`;
 
     html += '<div class="ctx-detail-tabs">';
-    html += `<div class="ctx-detail-tab active" data-pane="canonical">${t('settings.ctx.canonical_source', 'Canonical')}</div>`;
-    html += `<div class="ctx-detail-tab" data-pane="diff">${t('settings.ctx.diff_view', 'Diff')}</div>`;
+    html += `<div class="ctx-detail-tab active" data-pane="canonical">${t('settings.ctx.canonical_source')}</div>`;
+    html += `<div class="ctx-detail-tab" data-pane="diff">${t('settings.ctx.diff_view')}</div>`;
     html += '</div>';
 
     html += '<div class="ctx-detail-pane active" id="ctx-pane-canonical">';
     html += `<pre class="ctx-content-pre">${escapeHtml(data.content || '')}</pre>`;
     if (data.files && data.files.length) {
-      html += `<div style="margin-top:8px"><strong>${t('settings.ctx.auxiliary_files', 'Auxiliary files')}</strong>`;
+      html += `<div style="margin-top:8px"><strong>${t('settings.ctx.auxiliary_files')}</strong>`;
       for (const f of data.files) {
         html += `<div class="text-muted" style="font-size:0.78rem">${escapeHtml(f.path)} (${f.size} bytes)</div>`;
       }
@@ -514,8 +509,8 @@ async function loadCtxDetail(type, name) {
     html += `<div id="ctx-pane-edit" hidden>
       <textarea class="ctx-edit-area" id="ctx-edit-content">${escapeHtml(data.content || '')}</textarea>
       <div class="ctx-edit-actions">
-        <button class="btn-ghost ctx-edit-cancel">${t('settings.ctx.cancel', 'Cancel')}</button>
-        <button class="btn-primary ctx-edit-save">${t('settings.ctx.save', 'Save')}</button>
+        <button class="btn-ghost ctx-edit-cancel">${t('settings.ctx.cancel')}</button>
+        <button class="btn-primary ctx-edit-save">${t('settings.ctx.save')}</button>
       </div>
     </div>`;
 
@@ -578,7 +573,7 @@ async function loadCtxDetail(type, name) {
         }
         const result = await r.json();
         if (result.name) {
-          showToast(t('settings.ctx.save_success', '"{name}" saved').replace('{name}', name));
+          showToast(t('settings.ctx.save_success').replace('{name}', name));
           detailEl.dataset.mtimeNs = result.mtime_ns || '';
           loadCtxDetail(type, name);
         }
@@ -596,9 +591,9 @@ async function loadCtxDetail(type, name) {
     // Delete
     detailEl.querySelector('.ctx-detail-delete-btn')?.addEventListener('click', async () => {
       const ok = await showConfirm({
-        title: t('settings.ctx.confirm_delete', 'Delete "{name}"?').replace('{name}', name),
+        title: t('settings.ctx.confirm_delete').replace('{name}', name),
         message: t('settings.ctx.confirm_delete_msg'),
-        confirmText: t('settings.ctx.delete', 'Delete'),
+        confirmText: t('settings.ctx.delete'),
       });
       if (!ok) return;
       try {
@@ -610,7 +605,7 @@ async function loadCtxDetail(type, name) {
         }
         const result = await r.json();
         if (result.deleted) {
-          showToast(t('settings.ctx.delete_success', '"{name}" deleted').replace('{name}', name));
+          showToast(t('settings.ctx.delete_success').replace('{name}', name));
           detailEl.hidden = true;
           loadCtxList(type);
         }
@@ -680,10 +675,10 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl) {
       <strong>${escapeHtml(name)}</strong>
       ${_ctxBadge('missing canonical')}
     </div>`;
-    html += `<div class="text-muted" style="margin:6px 0 12px">${t('settings.ctx.runtime_only_detail_hint', 'Runtime preview — not yet in .memtomem/.')}</div>`;
+    html += `<div class="text-muted" style="margin:6px 0 12px">${t('settings.ctx.runtime_only_detail_hint')}</div>`;
 
     if (!data.runtimes || !data.runtimes.length) {
-      html += `<div class="text-muted">${t('settings.ctx.no_artifacts_hint', 'Create one or import from existing runtimes.')}</div>`;
+      html += `<div class="text-muted">${t('settings.ctx.no_artifacts_hint')}</div>`;
     } else {
       for (const rt of data.runtimes) {
         html += `<div style="margin-bottom:12px">`;
@@ -701,7 +696,7 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl) {
     const singular = type.endsWith('s') ? type.slice(0, -1) : type;
     html += `<div class="ctx-edit-actions" style="margin-top:12px">
       <button class="btn-primary ctx-runtime-only-import" data-type="${escapeHtml(type)}">
-        ${t('settings.ctx.import_this', 'Import this {type}').replace('{type}', singular)}
+        ${t('settings.ctx.import_this').replace('{type}', singular)}
       </button>
     </div>`;
 
@@ -724,7 +719,7 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl) {
         }
         const data = await r.json();
         if (data.imported && data.imported.length) {
-          showToast(t('settings.ctx.import_success', 'Import completed'));
+          showToast(t('settings.ctx.import_success'));
         } else if (data.skipped && data.skipped.length) {
           // ``reason`` is backend English (e.g. "canonical exists"); the user
           // still needs to know the import didn't run, so we surface it as-is
@@ -755,15 +750,14 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
     // shape of feedback for "this button does nothing right now."
     const section = btn.closest('.settings-section');
     if (section?.dataset.canonicalCount === '0') {
-      showToast(t('settings.ctx.sync_disabled_tooltip',
-        'No canonical {type} to fan out yet. Click Import first.').replace('{type}', type),
+      showToast(t('settings.ctx.sync_disabled_tooltip').replace('{type}', type),
         'info');
       return;
     }
     const ok = await showConfirm({
-      title: t('settings.ctx.sync', 'Sync'),
-      message: t('settings.ctx.confirm_sync', 'Fan out {type} to all runtimes?').replace('{type}', type),
-      confirmText: t('settings.ctx.sync', 'Sync'),
+      title: t('settings.ctx.sync'),
+      message: t('settings.ctx.confirm_sync').replace('{type}', type),
+      confirmText: t('settings.ctx.sync'),
     });
     if (!ok) return;
     btnLoading(btn, true);
@@ -781,18 +775,17 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
       const emptyCanonical = generated.length === 0
         && skipped.some(s => s && s.reason_code === 'no_canonical_root');
       if (emptyCanonical) {
-        const msg = t('settings.ctx.sync_empty_canonical',
-          'No canonical {type} under {canonical}. Create one first.')
+        const msg = t('settings.ctx.sync_empty_canonical')
           .replace('{type}', type)
           .replace('{canonical}', data.canonical_root || `.memtomem/${type}`);
         showToast(msg, 'info');
       } else if (dropped.length) {
         // commands/agents render dropped per-field omissions — keep the
         // existing warning so the user can investigate field-level loss.
-        showToast(t('settings.ctx.sync_dropped', '{count} field(s) dropped')
+        showToast(t('settings.ctx.sync_dropped')
           .replace('{count}', dropped.length), 'warning');
       } else {
-        showToast(t('settings.ctx.sync_success', 'Sync completed'));
+        showToast(t('settings.ctx.sync_success'));
       }
       loadCtxList(type);
     } catch (err) {
@@ -805,9 +798,9 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
   btn.addEventListener('click', async () => {
     const type = btn.dataset.type;
     const ok = await showConfirm({
-      title: t('settings.ctx.import', 'Import'),
-      message: t('settings.ctx.confirm_import', 'Import {type} from runtimes?').replace('{type}', type),
-      confirmText: t('settings.ctx.import', 'Import'),
+      title: t('settings.ctx.import'),
+      message: t('settings.ctx.confirm_import').replace('{type}', type),
+      confirmText: t('settings.ctx.import'),
     });
     if (!ok) return;
     btnLoading(btn, true);
@@ -834,18 +827,17 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
         // crowd the toast; scanned_dirs already gives full orientation.
         const scanList = (data.scanned_dirs || []).join(', ') || '—';
         const rootLabel = _ctxBasename(data.project_root) || '.';
-        const msg = t('settings.ctx.import_no_runtimes',
-          'No runtime {type} found in {root}. Scanned: {scan_dirs}.')
+        const msg = t('settings.ctx.import_no_runtimes')
           .replace('{type}', type)
           .replace('{root}', rootLabel)
           .replace('{scan_dirs}', scanList);
         showToast(msg, 'info');
       } else if (importedCount + skippedCount > 0) {
-        showToast(t('settings.ctx.import_result', '{imported} imported, {skipped} skipped')
+        showToast(t('settings.ctx.import_result')
           .replace('{imported}', importedCount)
           .replace('{skipped}', skippedCount));
       } else {
-        showToast(t('settings.ctx.import_success', 'Import completed'));
+        showToast(t('settings.ctx.import_success'));
       }
       loadCtxList(type);
     } catch (err) {
@@ -869,8 +861,8 @@ document.querySelectorAll('.ctx-create-btn').forEach(btn => {
       <label style="margin-top:8px">Content</label>
       <textarea class="ctx-edit-area ctx-create-content" rows="6" placeholder="# ${type.slice(0, -1).charAt(0).toUpperCase() + type.slice(0, -1).slice(1)} content..."></textarea>
       <div class="ctx-edit-actions">
-        <button class="btn-ghost ctx-create-cancel">${t('settings.ctx.cancel', 'Cancel')}</button>
-        <button class="btn-primary ctx-create-submit">${t('settings.ctx.create', 'Create')}</button>
+        <button class="btn-ghost ctx-create-cancel">${t('settings.ctx.cancel')}</button>
+        <button class="btn-primary ctx-create-submit">${t('settings.ctx.create')}</button>
       </div>`;
     listEl.prepend(form);
 
@@ -892,7 +884,7 @@ document.querySelectorAll('.ctx-create-btn').forEach(btn => {
           showToast(err.detail || t('toast.request_failed'), 'error');
           return;
         }
-        showToast(t('settings.ctx.create_success', '"{name}" created').replace('{name}', nameInput));
+        showToast(t('settings.ctx.create_success').replace('{name}', nameInput));
         form.remove();
         loadCtxList(type);
       } catch (err) {
@@ -913,8 +905,7 @@ document.querySelectorAll('.ctx-add-project-btn').forEach(btn => {
     // browser dialog is enough for PR2 (no native folder picker is reachable
     // from the SPA layer; per-RFC §Non-goals item 5 we don't try).
     const raw = window.prompt(
-      t('settings.ctx.add_project_prompt',
-        'Absolute path to a project root (e.g. /Users/me/Edu/inflearn):'),
+      t('settings.ctx.add_project_prompt'),
       '',
     );
     if (!raw) return;
@@ -936,7 +927,7 @@ document.querySelectorAll('.ctx-add-project-btn').forEach(btn => {
       if (data.warning) {
         showToast(data.warning, 'warning');
       } else {
-        showToast(t('settings.ctx.add_project_success', 'Project added'), 'success');
+        showToast(t('settings.ctx.add_project_success'), 'success');
       }
       loadCtxList(type);
     } catch (err) {
