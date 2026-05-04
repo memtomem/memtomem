@@ -318,6 +318,61 @@ class TestNoHardcodedStrings:
             "index.html elements named in #698 missing required i18n bindings:\n" + "\n".join(bad)
         )
 
+    def test_issue_775_settings_badge_keys_present(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """Settings overview badge i18n keys (#775). The wire statuses that
+        ``context_overview`` (``web/routes/context_gateway.py``) actually
+        emits for the ``settings`` slot are ``in_sync`` / ``out_of_sync`` /
+        ``error`` — collapsed from ``diff_settings`` results. Each must have
+        a ``settings.hooks.badge_*`` entry in both locales so the badge
+        renders localized text instead of falling back to
+        ``status.replace('_', ' ')``."""
+        required = {
+            "settings.hooks.badge_in_sync",
+            "settings.hooks.badge_out_of_sync",
+            "settings.hooks.badge_error",
+        }
+        missing_en = required - set(en)
+        missing_ko = required - set(ko)
+        assert not missing_en, f"#775 keys missing from en.json: {sorted(missing_en)}"
+        assert not missing_ko, f"#775 keys missing from ko.json: {sorted(missing_ko)}"
+
+    def test_issue_775_js_routes_through_t(self) -> None:
+        """``context-gateway.js`` settings overview branch must look up the
+        badge text via the ``_SETTINGS_STATUS_I18N`` map AND wrap the result
+        in ``t()``, not emit ``d.status.replace('_', ' ')`` directly. The
+        bug was the unconditional ``replace`` — guard the full
+        ``key ? t(key) : <fallback>`` shape so a regression that drops the
+        ``t()`` wrap or hardcodes a string still trips the test."""
+        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        assert "_SETTINGS_STATUS_I18N" in text, (
+            "context-gateway.js missing _SETTINGS_STATUS_I18N map (#775)"
+        )
+        # Two-pronged check: the lookup expression AND the t() wrap. The
+        # bug Codex flagged was that a regression could keep the lookup
+        # but drop ``t()`` — render ``key`` directly and emit a raw i18n
+        # key into the badge. Asserting ``t(key)`` separately catches
+        # that. Both substrings are unique enough in this file (verified
+        # via grep) to act as load-bearing markers.
+        assert "_SETTINGS_STATUS_I18N[d.status]" in text, (
+            "context-gateway.js settings branch must look up status via "
+            "_SETTINGS_STATUS_I18N[d.status] (#775)"
+        )
+        assert "t(key)" in text, (
+            "context-gateway.js settings branch must wrap the lookup "
+            "result in t(key) — dropping the t() wrap was the regression "
+            "shape #775 was filed for"
+        )
+
+        # All emitted statuses must have a map entry so no live status
+        # silently falls through to the raw ``replace('_', ' ')`` path.
+        # Sourced from web/routes/context_gateway.py:context_overview.
+        for status in ("in_sync", "out_of_sync", "error"):
+            assert f"{status}:" in text, (
+                f"_SETTINGS_STATUS_I18N missing entry for emitted status {status!r} (#775)"
+            )
+
     def test_issue_698_new_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
         """Locale keys introduced for #698 must exist in both files. The
         existing ``test_placeholder_parity`` will catch ``{count}`` /
