@@ -87,13 +87,26 @@ A Context Gateway phase graduates from `_DEV_ONLY_ROUTERS` to
 `_PROD_ROUTERS` (in `packages/memtomem/src/memtomem/web/app.py`) and
 removes its `STATE.uiMode === 'dev'` UI gate(s) when **all four** hold:
 
-1. **No P0/P1 issues open against the surface for ≥2 weeks.**  Verify
-   via `gh issue list --label context-gateway,P0,P1` scoped to the
-   phase.
-2. **Round-trip integration test** in the Python suite — write
-   canonical → diff via the read route → import back via
-   `extract_*_to_canonical()`, asserting that canonical state survives
-   the cycle.
+1. **No P0/P1 (or equivalent severity) open issues against the
+   surface for ≥2 weeks.**  Phase scope is determined by inspecting
+   open issues that reference the phase's routes, JS modules, or
+   `extract_*_to_canonical()` symbols — repository label convention
+   for context-gateway / severity is not yet fixed and may evolve.
+2. **Round-trip integration test** in the Python suite, scoped to the
+   phase's data flow:
+   - **Bidirectional phases** (Skills, Commands, Agents — runtime
+     edits flow back to canonical): write canonical → diff via the
+     read route → import-back via `extract_*_to_canonical()`; assert
+     canonical state survives the cycle.
+   - **Unidirectional phases** (Settings — canonical → runtime only,
+     no reverse-import API by design because additive-merge cannot
+     distinguish canonical-authored from user-authored entries): write
+     canonical → apply via the sync route (`POST
+     /api/context/<phase>/sync`) → re-read via the diff route (`GET
+     /api/context/<phase>`); assert the diff reports the expected
+     synced state and any target-side merge invariants (e.g., for
+     Settings: additive merge does not clobber user-authored hook
+     entries).
 3. **i18n key parity (en + ko)** verified by `tests/test_i18n.py`.
    The parity test is auto-discovery based, so adding the phase's keys
    to `en.json` + `ko.json` is sufficient — no test changes needed.
