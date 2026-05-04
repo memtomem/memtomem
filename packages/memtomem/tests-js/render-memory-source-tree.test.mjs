@@ -13,12 +13,11 @@ import { beforeEach, describe, it, expect } from 'vitest';
 import { bootApp } from './setup/jsdom-app.mjs';
 
 describe('_renderMemorySourceTree — orphan rendering', () => {
-  let dom;
   let window;
   let document;
 
   beforeEach(async () => {
-    dom = await bootApp({ scripts: ['i18n.js', 'app.js'] });
+    const dom = await bootApp({ scripts: ['i18n.js', 'app.js'] });
     window = dom.window;
     document = window.document;
     // The Sources sub-tab strip is rendered by the Python template into

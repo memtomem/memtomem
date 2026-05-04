@@ -57,7 +57,7 @@ function makeFetchStub() {
 
 function shimBrowserAPIs(window) {
   // ``initTheme`` in ``app.js`` queries ``matchMedia('(prefers-color-scheme:
-  // dark)')`` at top-level. JSDOM doesn't ship ``matchMedia``; missing it
+  // light)')`` at top-level. JSDOM doesn't ship ``matchMedia``; missing it
   // raises a TypeError mid-script which leaves later ``const`` bindings
   // (``_SOURCES_VENDORS`` etc.) in the temporal dead zone, breaking every
   // function that references them.
@@ -129,6 +129,10 @@ export async function bootApp({
   // ``var/function``-resolution lookup the handler does at fire-time
   // finds them. JSDOM defers DOMContentLoaded to a later microtask, so
   // setting the stubs synchronously here lands before the handler runs.
+  //
+  // Extend the stub list below when adding a new top-level call to the
+  // DCL handler in ``app.js`` — otherwise tests fail loudly with
+  // ``X is not a function`` mid-init rather than the actual assertion.
   const expose = window.document.createElement('script');
   expose.textContent = `
     try { window.STATE = STATE; } catch (e) {}
