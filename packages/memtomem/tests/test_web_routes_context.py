@@ -594,6 +594,7 @@ class TestCommandCRUD:
         assert r.status_code == 409
         data = r.json()
         assert data["status"] == "aborted"
+        assert data["mtime_ns"] == str(cmd_file.stat().st_mtime_ns)
         assert cmd_file.read_text(encoding="utf-8") == _CMD_CONTENT
 
 
