@@ -24,16 +24,15 @@ const _ctxStatusLabel = {
   'missing canonical': 'settings.ctx.status_missing_canonical',
 };
 
-// Settings overview badge i18n map. Keys are the wire status values produced
-// by ``_compare_hooks`` in ``web/routes/settings_sync.py`` (in_sync,
-// out_of_sync, conflicts, no_source, error). Unknown statuses fall through
+// Settings overview badge i18n map. Keys are the wire status values that
+// ``context_overview`` (web/routes/context_gateway.py) emits for the
+// ``settings`` slot — derived from ``diff_settings`` and collapsed to
+// ``in_sync`` / ``out_of_sync`` / ``error``. Unknown statuses fall through
 // to the legacy ``replace('_', ' ')`` path so a future status string still
-// renders something readable.
+// renders something readable instead of an empty badge.
 const _SETTINGS_STATUS_I18N = {
   in_sync:      'settings.hooks.badge_in_sync',
   out_of_sync:  'settings.hooks.badge_out_of_sync',
-  conflicts:    'settings.hooks.badge_conflicts',
-  no_source:    'settings.hooks.badge_no_source',
   error:        'settings.hooks.badge_error',
 };
 

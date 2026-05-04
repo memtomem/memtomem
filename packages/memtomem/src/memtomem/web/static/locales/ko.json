@@ -347,8 +347,6 @@
   "settings.hooks.no_source": ".memtomem/settings.json 없음",
   "settings.hooks.badge_in_sync": "동기화됨",
   "settings.hooks.badge_out_of_sync": "불일치",
-  "settings.hooks.badge_conflicts": "충돌",
-  "settings.hooks.badge_no_source": "원본 없음",
   "settings.hooks.badge_error": "오류",
 
   "settings.config.desc": "서버 설정: 임베딩 제공자, 스토리지 백엔드, 검색·인덱싱 파라미터를 조정합니다.",
