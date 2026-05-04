@@ -128,7 +128,13 @@ async def read_command(
     return {"name": name, "content": content, "mtime_ns": str(mtime_ns), "fields": fields}
 
 
-# ── Rendered (per-runtime output with dropped fields) ────────────────────
+# ── Rendered (per-runtime output with dropped fields + field map) ────────
+
+# Frontmatter keys that any command generator may drop. Hyphenated to match
+# the strings the renderers emit on ``dropped_fields`` (see
+# ``memtomem.context.commands._subcommand_to_gemini_toml``). Required fields
+# (``name``, ``description``) are never dropped, so they aren't tracked here.
+_ALL_OPTIONAL_FIELDS = ("argument-hint", "allowed-tools", "model")
 
 
 @router.get("/context/commands/{name}/rendered")
@@ -149,6 +155,10 @@ async def rendered_command(
     runtimes = []
     diffs = diff_commands(project_root)
     status_map: dict[tuple[str, str], str] = {(rt, n): s for rt, n, s in diffs}
+    # ``field_map[field][runtime] = bool`` — True when the runtime keeps the
+    # field, False when it drops it. Mirrors ``context_agents.rendered_agent``
+    # so the front-end can render a single matrix for either surface.
+    field_map: dict[str, dict[str, bool]] = {f: {} for f in _ALL_OPTIONAL_FIELDS}
 
     for gen_name, gen in COMMAND_GENERATORS.items():
         rendered_content, dropped_fields = gen.render(parsed)
@@ -161,12 +171,16 @@ async def rendered_command(
                 "status": status,
             }
         )
+        dropped_set = set(dropped_fields)
+        for f in _ALL_OPTIONAL_FIELDS:
+            field_map[f][gen_name] = f not in dropped_set
 
     return JSONResponse(
         content={
             "name": name,
             "canonical_content": content,
             "runtimes": runtimes,
+            "field_map": field_map,
         }
     )
 

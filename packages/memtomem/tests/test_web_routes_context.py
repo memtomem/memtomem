@@ -520,6 +520,33 @@ class TestRenderedCommand:
             assert gemini[0]["dropped_fields"]
             assert gemini[0]["content"]  # rendered TOML
 
+    @pytest.mark.anyio
+    async def test_rendered_shows_field_map(self, client: AsyncClient, tmp_path: Path):
+        # Mirrors ``TestRenderedAgent.test_rendered_shows_dropped_and_field_map``.
+        # The matrix surfaces "field × runtime → kept?" so the UI can render
+        # a single table across runtimes instead of forcing the user to scan
+        # per-runtime ``dropped_fields`` chips and reconstruct the picture.
+        _make_command(tmp_path, "review")
+        r = await client.get("/api/context/commands/review/rendered")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["field_map"], "field_map must be present in /rendered response"
+        # Required-fields-only rule: name + description are never tracked.
+        assert "name" not in data["field_map"]
+        assert "description" not in data["field_map"]
+        # Optional fields all expected (hyphenated form matching what the
+        # renderers emit on ``dropped_fields``).
+        for expected in ("argument-hint", "allowed-tools", "model"):
+            assert expected in data["field_map"], f"missing {expected!r} in field_map"
+        # Pin the contract: gemini drops all three optional fields, claude
+        # is pass-through. Without this assertion the field_map could ship
+        # as ``{}`` for every field and the structural check above would
+        # still pass.
+        assert data["field_map"]["argument-hint"].get("gemini_commands") is False
+        assert data["field_map"]["argument-hint"].get("claude_commands") is True
+        assert data["field_map"]["model"].get("gemini_commands") is False
+        assert data["field_map"]["model"].get("claude_commands") is True
+
 
 class TestCommandCRUD:
     @pytest.mark.anyio

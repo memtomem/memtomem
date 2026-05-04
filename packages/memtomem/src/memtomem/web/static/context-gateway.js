@@ -633,18 +633,78 @@ async function loadCtxDetail(type, name) {
   }
 }
 
+// Surfaces (agents, commands) whose ``/rendered`` endpoint emits a
+// ``field_map`` matrix. Skills don't produce per-runtime field drops,
+// so a matrix would be uniformly green and not worth the row.
+const _CTX_FIELD_MAP_TYPES = new Set(['agents', 'commands']);
+
+function _ctxRenderFieldMapHtml(fieldMap, runtimes) {
+  // ``fieldMap[field][runtime] = bool`` (True = kept). ``runtimes`` is the
+  // ordered list of runtime keys from the same response so column order
+  // matches the runtime sections rendered below.
+  if (!fieldMap || !runtimes || !runtimes.length) return '';
+  const fields = Object.keys(fieldMap);
+  if (!fields.length) return '';
+  const heading = escapeHtml(t('settings.ctx.field_map'));
+  let html = `<table class="ctx-field-map" aria-label="${heading}">`;
+  html += `<thead><tr><th scope="col">${heading}</th>`;
+  for (const rt of runtimes) {
+    html += `<th scope="col">${escapeHtml(rt)}</th>`;
+  }
+  html += '</tr></thead><tbody>';
+  for (const f of fields) {
+    html += `<tr><th scope="row">${escapeHtml(f)}</th>`;
+    for (const rt of runtimes) {
+      const kept = !!(fieldMap[f] && fieldMap[f][rt]);
+      // ✓ for kept, em-dash for dropped — high-contrast, locale-stable
+      // (no translation needed; the matrix headers carry the labels).
+      html += `<td>${kept ? '✓' : '—'}</td>`;
+    }
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  return html;
+}
+
+async function _ctxFetchFieldMap(type, name) {
+  // Fail-soft: a missing/invalid /rendered response should not break the
+  // diff pane. The diff fetch is the user-facing source of truth here;
+  // the field map is supplementary.
+  try {
+    const res = await fetch(`/api/context/${type}/${encodeURIComponent(name)}/rendered`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data || !data.field_map) return null;
+    const runtimes = (data.runtimes || []).map(rt => rt.runtime);
+    return { fieldMap: data.field_map, runtimes };
+  } catch (_err) {
+    return null;
+  }
+}
+
 async function _ctxLoadDiff(type, name, detailEl) {
   const pane = detailEl.querySelector('#ctx-pane-diff');
   if (!pane) return;
   pane.innerHTML = '<div class="empty-state"><div class="spinner-panel"></div></div>';
   try {
-    const res = await fetch(`/api/context/${type}/${encodeURIComponent(name)}/diff`);
+    // Diff is required, field map is optional + parallel-fetched. ``Promise.all``
+    // would fail the whole pane on a /rendered hiccup; the explicit
+    // fail-soft inside ``_ctxFetchFieldMap`` is what we want here.
+    const diffPromise = fetch(`/api/context/${type}/${encodeURIComponent(name)}/diff`);
+    const fieldMapPromise = _CTX_FIELD_MAP_TYPES.has(type)
+      ? _ctxFetchFieldMap(type, name)
+      : Promise.resolve(null);
+    const res = await diffPromise;
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Diff failed');
     const data = await res.json();
+    const fieldMapData = await fieldMapPromise;
 
     let html = '';
+    if (fieldMapData) {
+      html += _ctxRenderFieldMapHtml(fieldMapData.fieldMap, fieldMapData.runtimes);
+    }
     if (!data.runtimes || !data.runtimes.length) {
-      html = '<div class="text-muted">No runtime targets found.</div>';
+      html += '<div class="text-muted">No runtime targets found.</div>';
     } else {
       for (const rt of data.runtimes) {
         html += `<div style="margin-bottom:12px">`;
