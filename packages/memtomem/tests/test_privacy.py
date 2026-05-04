@@ -158,6 +158,56 @@ class TestEnforceWriteGuard:
         assert after["pass"] == before["pass"] + 1
         assert after["bypassed"] == before["bypassed"]
 
+    def test_secret_in_audit_context_value_is_redacted(self, caplog):
+        """User-controllable audit-context fields (file path, upload
+        filename, scratch key) can themselves embed the same secret
+        that's being bypassed. The helper must scrub those values
+        before they reach the audit log — otherwise the "matched bytes
+        never reach logs" goal is undermined exactly when a bypass
+        gets recorded.
+        """
+        secret = "sk-" + "a" * 30
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            privacy.enforce_write_guard(
+                f"the body contains {secret}",
+                surface="unit_ctx_redact",
+                force_unsafe=True,
+                audit_context={
+                    "file": f"/tmp/notes-{secret}.md",
+                    "namespace": "default",
+                    "filename": f"{secret}.md",
+                    "item_idx": 3,
+                },
+            )
+        line = next(
+            (r.getMessage() for r in caplog.records if "redaction bypass" in r.getMessage()),
+            "",
+        )
+        assert secret not in line, f"Audit log leaked the matched bytes: {line!r}"
+        # The redaction marker takes the value's place so operators see
+        # the field was scrubbed rather than missing.
+        assert "<redacted: secret-shape>" in line
+        # Non-secret context fields and non-string values pass through.
+        assert "namespace='default'" in line
+        assert "item_idx=3" in line
+
+    def test_long_audit_context_string_is_truncated(self, caplog):
+        long_clean = "x" * 5000
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            privacy.enforce_write_guard(
+                "secret = sk-" + "a" * 30,
+                surface="unit_ctx_truncate",
+                force_unsafe=True,
+                audit_context={"path": long_clean},
+            )
+        line = next(
+            (r.getMessage() for r in caplog.records if "redaction bypass" in r.getMessage()),
+            "",
+        )
+        assert "...(truncated)" in line
+        # Truncation cap keeps the line compact even with abusive context.
+        assert len(line) < 1000
+
     def test_audit_log_without_context_still_records_shape_metadata(self, caplog):
         """An ``audit_context=None`` bypass still emits the structured
         ``surface=…, content_chars=…, hits=…`` triple. The
