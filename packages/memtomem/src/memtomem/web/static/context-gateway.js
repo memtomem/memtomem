@@ -590,21 +590,35 @@ async function loadCtxDetail(type, name) {
 
     // Delete
     detailEl.querySelector('.ctx-detail-delete-btn')?.addEventListener('click', async () => {
-      const ok = await showConfirm({
+      // Cascade is opt-in: the canonical artifact is the ``.memtomem/``
+      // entry, runtime files are mirrored copies. Default-off keeps the
+      // dialog conservative — a stray click only removes the canonical,
+      // and the user has to consciously check the box to fan-out delete
+      // into ``~/.claude/skills/``, ``~/.codex/...``, etc.
+      const result = await showConfirm({
         title: t('settings.ctx.confirm_delete').replace('{name}', name),
         message: t('settings.ctx.confirm_delete_msg'),
         confirmText: t('settings.ctx.delete'),
+        extraOption: {
+          id: 'cascade',
+          label: t('settings.ctx.cascade_delete'),
+          defaultChecked: false,
+        },
       });
-      if (!ok) return;
+      if (!result || !result.ok) return;
+      const cascade = !!(result.extras && result.extras.cascade);
       try {
-        const r = await fetch(`/api/context/${type}/${encodeURIComponent(name)}?cascade=false`, { method: 'DELETE' });
+        const r = await fetch(
+          `/api/context/${type}/${encodeURIComponent(name)}?cascade=${cascade}`,
+          { method: 'DELETE' },
+        );
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
           showToast(err.detail || t('toast.request_failed'), 'error');
           return;
         }
-        const result = await r.json();
-        if (result.deleted) {
+        const data = await r.json();
+        if (data.deleted) {
           showToast(t('settings.ctx.delete_success').replace('{name}', name));
           detailEl.hidden = true;
           loadCtxList(type);
@@ -797,18 +811,30 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
 document.querySelectorAll('.ctx-import-btn').forEach(btn => {
   btn.addEventListener('click', async () => {
     const type = btn.dataset.type;
-    const ok = await showConfirm({
+    // Overwrite is opt-in: the default skip-when-canonical-exists rule
+    // protects user-maintained canonicals from a stray Import wiping
+    // them out with a stale runtime copy. The checkbox lets the user
+    // explicitly say "yes, the runtime is the source of truth this
+    // round" — used after editing in-place in ``~/.claude/skills/``
+    // and wanting to flow that back into ``.memtomem/``.
+    const result = await showConfirm({
       title: t('settings.ctx.import'),
       message: t('settings.ctx.confirm_import').replace('{type}', type),
       confirmText: t('settings.ctx.import'),
+      extraOption: {
+        id: 'overwrite',
+        label: t('settings.ctx.confirm_import_overwrite_label'),
+        defaultChecked: false,
+      },
     });
-    if (!ok) return;
+    if (!result || !result.ok) return;
+    const overwrite = !!(result.extras && result.extras.overwrite);
     btnLoading(btn, true);
     try {
       const r = await fetch(`/api/context/${type}/import`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ overwrite }),
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
@@ -899,11 +925,47 @@ document.querySelectorAll('.ctx-create-btn').forEach(btn => {
 // -- Add Project button (delegated) ------------------------------------------
 
 document.querySelectorAll('.ctx-add-project-btn').forEach(btn => {
-  btn.addEventListener('click', async () => {
+  btn.addEventListener('click', () => {
     const type = btn.dataset.type;
-    // Reuse showConfirm-with-input-style by handing the user a prompt — the
-    // browser dialog is enough for PR2 (no native folder picker is reachable
-    // from the SPA layer; per-RFC §Non-goals item 5 we don't try).
+    // Defer to the shared folder picker (``path-picker.js``) instead of
+    // ``window.prompt``: visual breadcrumb navigation, validation
+    // against the server's ``/api/fs/list`` allow-list, and no
+    // copy-paste path errors. ``PathPicker.open`` is async w.r.t.
+    // the user; we hand it a callback that runs the POST when the
+    // picker resolves a path. ``window.prompt`` fallback survives in
+    // case ``path-picker.js`` failed to load (vendor cache miss, etc.)
+    // — better than a non-functional Add Project button.
+    const onSelect = async (root) => {
+      if (!root) return;
+      btnLoading(btn, true);
+      try {
+        const r = await fetch('/api/context/known-projects', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ root }),
+        });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          showToast(err.detail || t('toast.request_failed'), 'error');
+          return;
+        }
+        const data = await r.json();
+        if (data.warning) {
+          showToast(data.warning, 'warning');
+        } else {
+          showToast(t('settings.ctx.add_project_success'), 'success');
+        }
+        loadCtxList(type);
+      } catch (err) {
+        showToast(t('toast.request_failed', { error: err.message }), 'error');
+      } finally {
+        btnLoading(btn, false);
+      }
+    };
+    if (window.PathPicker && typeof window.PathPicker.open === 'function') {
+      window.PathPicker.open({ onSelect });
+      return;
+    }
     const raw = window.prompt(
       t('settings.ctx.add_project_prompt'),
       '',
@@ -911,29 +973,6 @@ document.querySelectorAll('.ctx-add-project-btn').forEach(btn => {
     if (!raw) return;
     const root = raw.trim();
     if (!root) return;
-    btnLoading(btn, true);
-    try {
-      const r = await fetch('/api/context/known-projects', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ root }),
-      });
-      if (!r.ok) {
-        const err = await r.json().catch(() => ({}));
-        showToast(err.detail || t('toast.request_failed'), 'error');
-        return;
-      }
-      const data = await r.json();
-      if (data.warning) {
-        showToast(data.warning, 'warning');
-      } else {
-        showToast(t('settings.ctx.add_project_success'), 'success');
-      }
-      loadCtxList(type);
-    } catch (err) {
-      showToast(t('toast.request_failed', { error: err.message }), 'error');
-    } finally {
-      btnLoading(btn, false);
-    }
+    onSelect(root);
   });
 });

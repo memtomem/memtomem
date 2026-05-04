@@ -6,6 +6,12 @@
  * back into #index-path on Select. Navigation is bounded by the server's
  * allow-list (memory_dirs + ~); going outside requires closing the modal
  * and typing the path manually — the input itself stays free-form.
+ *
+ * Also exposes ``window.PathPicker.open({ onSelect })`` for other
+ * surfaces (Context Gateway "Add Project") so they can reuse the
+ * modal instead of falling back to ``window.prompt``. ``onSelect`` is
+ * invoked with the selected absolute path; ``close`` is called by the
+ * picker itself once the callback returns.
  */
 'use strict';
 
@@ -13,6 +19,10 @@
   let currentPath = null;     // null = roots view
   let currentEntries = [];
   let initialized = false;
+  // Per-open callback. Cleared on close so a stale callback from a
+  // previous invocation can't fire when the picker is reopened by the
+  // default Index-tab path.
+  let onSelectCb = null;
 
   function modal() { return qs('path-picker-modal'); }
   function listEl() { return qs('path-picker-list'); }
@@ -166,7 +176,8 @@
     (firstItem || cancelBtn()).focus();
   }
 
-  function open() {
+  function open(opts) {
+    onSelectCb = (opts && typeof opts.onSelect === 'function') ? opts.onSelect : null;
     modal().hidden = false;
     document.addEventListener('keydown', _onKey, true);
     modal().addEventListener('click', _onBackdrop);
@@ -180,6 +191,7 @@
     modal().removeEventListener('click', _onBackdrop);
     currentPath = null;
     currentEntries = [];
+    onSelectCb = null;
     listEl().textContent = '';
     crumbEl().textContent = '';
     emptyEl().hidden = true;
@@ -187,9 +199,19 @@
 
   function commit() {
     if (!currentPath) return;
+    const path = currentPath;
+    if (onSelectCb) {
+      // External caller supplied a sink — let them route the path
+      // (Context Gateway "Add Project" POSTs to /known-projects, etc.)
+      // instead of writing to ``#index-path``.
+      const cb = onSelectCb;
+      close();
+      cb(path);
+      return;
+    }
     const input = qs('index-path');
     if (input) {
-      input.value = currentPath;
+      input.value = path;
       input.dispatchEvent(new Event('input', { bubbles: true }));
       input.dispatchEvent(new Event('change', { bubbles: true }));
     }
@@ -229,7 +251,9 @@
     if (initialized) return;
     initialized = true;
     const browseBtn = qs('path-picker-browse-btn');
-    if (browseBtn) browseBtn.addEventListener('click', open);
+    // ``open`` takes an optional opts arg; pass none for the default
+    // Index-tab flow so it falls through to the ``#index-path`` writer.
+    if (browseBtn) browseBtn.addEventListener('click', () => open());
     if (cancelBtn()) cancelBtn().addEventListener('click', close);
     if (selectBtn()) selectBtn().addEventListener('click', commit);
   }
@@ -239,4 +263,9 @@
   } else {
     _init();
   }
+
+  // Public API for other surfaces (e.g. Context Gateway "Add Project"
+  // in ``context-gateway.js``). Keeping this small — open and close are
+  // enough; commit is internal.
+  window.PathPicker = { open, close };
 })();

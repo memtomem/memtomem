@@ -286,6 +286,7 @@
   "settings.ctx.confirm_cascade_codex": "This will also delete files in ~/.codex/ (user-scope). Continue?",
   "settings.ctx.confirm_sync": "Fan out {type} to all runtimes?",
   "settings.ctx.confirm_import": "Import {type} from runtimes into .memtomem/?",
+  "settings.ctx.confirm_import_overwrite_label": "Overwrite existing canonical files",
   "settings.ctx.sync_success": "Sync completed",
   "settings.ctx.sync_dropped": "{count} field(s) dropped during sync",
   "settings.ctx.import_priority": "Import priority: Claude \u2192 Gemini (Codex is forward-only)",
