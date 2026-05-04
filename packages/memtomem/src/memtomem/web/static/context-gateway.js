@@ -283,7 +283,14 @@ function _ctxRenderItemsHtml(items, type, projectRoot, { clickable }) {
     const canonAttr = item.canonical_path
       ? ` data-canonical-path="${escapeHtml(item.canonical_path)}"`
       : ' data-canonical-path=""';
-    html += `<div class="${cardClass}" data-name="${escapeHtml(item.name)}"${canonAttr}>
+    // ``data-out-of-sync`` lets the list-click handler hint to
+    // ``loadCtxDetail`` that the user should land on the Diff tab —
+    // otherwise the canonical pane is the default and the user has
+    // to click Diff to discover *what* is out of sync. Computed here
+    // because the list response carries the per-runtime statuses;
+    // ``loadCtxDetail`` would otherwise need a second fetch.
+    const outOfSync = (item.runtimes || []).some(r => r.status === 'out of sync');
+    html += `<div class="${cardClass}" data-name="${escapeHtml(item.name)}"${canonAttr} data-out-of-sync="${outOfSync}">
       <div class="ctx-card-header">
         <div>
           <div class="ctx-card-name">${escapeHtml(item.name)}</div>
@@ -324,7 +331,9 @@ async function _loadScopeGroupItems(type, scope, container) {
           // endpoint returns 404. Branch into the diff-backed renderer so the
           // user sees the actual runtime contents instead of a "not found".
           if (card.dataset.canonicalPath) {
-            loadCtxDetail(type, card.dataset.name);
+            loadCtxDetail(type, card.dataset.name, {
+              autoOpenDiff: card.dataset.outOfSync === 'true',
+            });
           } else {
             const detailEl = qs(`ctx-${type}-detail`);
             _ctxLoadRuntimeOnlyDetail(type, card.dataset.name, detailEl);
@@ -463,7 +472,15 @@ async function loadCtxList(type) {
 
 // -- Detail -------------------------------------------------------------------
 
-async function loadCtxDetail(type, name) {
+async function loadCtxDetail(type, name, opts = {}) {
+  // ``opts.autoOpenDiff`` (default false): when the list-click handler
+  // sees an "out of sync" runtime on the card, it passes ``true`` here
+  // so the detail view lands on the Diff tab pre-fetched, instead of
+  // forcing the user to discover what's drifted by clicking Diff
+  // themselves. Other call paths (post-save / post-delete reload at
+  // line ~575/588) leave it false to preserve their canonical-pane
+  // default.
+  const autoOpenDiff = opts.autoOpenDiff === true;
   const detailEl = qs(`ctx-${type}-detail`);
   detailEl.hidden = false;
   _ctxCurrentDetail = { type, name };
@@ -530,6 +547,15 @@ async function loadCtxDetail(type, name) {
         if (tab.dataset.pane === 'diff') _ctxLoadDiff(type, name, detailEl);
       });
     });
+
+    // Out-of-sync prefetch + tab activation. Uses a synthetic ``click()``
+    // on the Diff tab so the same handler above runs — keeps the active
+    // class + pane wiring in one place. ``click()`` is sync but the
+    // delegated ``_ctxLoadDiff`` is async; that's fine, we don't await.
+    if (autoOpenDiff) {
+      const diffTab = detailEl.querySelector('.ctx-detail-tab[data-pane="diff"]');
+      if (diffTab) diffTab.click();
+    }
 
     // Edit
     detailEl.querySelector('.ctx-detail-edit-btn')?.addEventListener('click', () => {
