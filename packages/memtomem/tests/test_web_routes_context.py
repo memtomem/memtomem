@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -766,6 +767,39 @@ class TestAgentCRUD:
         # Delete
         r = await client.delete("/api/context/agents/test-agent")
         assert r.status_code == 200
+
+    @pytest.mark.anyio
+    async def test_mtime_conflict_after_external_write(
+        self,
+        client: AsyncClient,
+        tmp_path: Path,
+    ):
+        agent_path = _make_agent(tmp_path, "reviewer")
+
+        sync = await client.post("/api/context/agents/sync", json={"on_drop": "warn"})
+        assert sync.status_code == 200
+        assert (tmp_path / ".claude" / "agents" / "reviewer.md").is_file()
+
+        read = await client.get("/api/context/agents/reviewer")
+        assert read.status_code == 200
+        mtime_ns = read.json()["mtime_ns"]
+
+        st = agent_path.stat()
+        bumped_ns = st.st_mtime_ns + 1_000_000
+        os.utime(agent_path, ns=(st.st_atime_ns, bumped_ns))
+
+        r = await client.put(
+            "/api/context/agents/reviewer",
+            json={
+                "content": "---\nname: reviewer\ndescription: overwritten\n---\nNew\n",
+                "mtime_ns": mtime_ns,
+            },
+        )
+        assert r.status_code == 409
+        data = r.json()
+        assert data["status"] == "aborted"
+        assert data["mtime_ns"] == str(agent_path.stat().st_mtime_ns)
+        assert "overwritten" not in agent_path.read_text(encoding="utf-8")
 
 
 class TestSyncAgents:
