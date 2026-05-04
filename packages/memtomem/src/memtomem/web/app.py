@@ -77,6 +77,7 @@ _PROD_ROUTERS: list[ModuleType] = [
     context_skills,
     context_commands,
     context_agents,
+    settings_sync,
 ]
 _DEV_ONLY_ROUTERS: list[ModuleType] = [
     namespaces,
@@ -85,7 +86,6 @@ _DEV_ONLY_ROUTERS: list[ModuleType] = [
     procedures,
     evaluation,
     watchdog,
-    settings_sync,
 ]
 
 
