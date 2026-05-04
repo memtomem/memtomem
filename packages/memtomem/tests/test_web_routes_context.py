@@ -574,6 +574,21 @@ class TestCommandCRUD:
         r = await client.delete("/api/context/commands/test-cmd")
         assert r.status_code == 200
 
+    @pytest.mark.anyio
+    async def test_mtime_conflict(self, client: AsyncClient, tmp_path: Path):
+        # ADR-0001 §5 c4: pin no-write semantics on the conflict path. Asserting
+        # the 409 response label alone would still pass a regression that wrote
+        # body.content and *then* returned the abort envelope.
+        cmd_file = _make_command(tmp_path, "conflict")
+        r = await client.put(
+            "/api/context/commands/conflict",
+            json={"content": "---\ndescription: changed\n---\nNew\n", "mtime_ns": "0"},
+        )
+        assert r.status_code == 409
+        data = r.json()
+        assert data["status"] == "aborted"
+        assert cmd_file.read_text(encoding="utf-8") == _CMD_CONTENT
+
 
 class TestSyncCommands:
     @pytest.mark.anyio
