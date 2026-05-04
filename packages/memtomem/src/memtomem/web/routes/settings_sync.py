@@ -259,10 +259,15 @@ async def resolve_conflict(
 
                 # mtime check before write — protects against cross-process
                 # writers (CLI, manual edit) that the in-process lock can't see.
-                if target_path.stat().st_mtime_ns != mtime_ns:
+                # Echo the current ``mtime_ns`` on abort so clients can refresh
+                # local state without an extra round-trip — matches the
+                # Skills/Commands/Agents 409 envelope contract.
+                current_mtime_ns = target_path.stat().st_mtime_ns
+                if current_mtime_ns != mtime_ns:
                     return {
                         "status": "aborted",
                         "reason": "Target file was modified by another process. Retry.",
+                        "mtime_ns": str(current_mtime_ns),
                     }
 
                 target_hooks[body.event] = rules

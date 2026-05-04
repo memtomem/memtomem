@@ -736,7 +736,14 @@ class TestSettingsHttpLayer:
         route captures ``target_path.stat().st_mtime_ns`` before the
         load and rechecks before write. We bump mtime as a side effect
         of the load so the recheck mismatches → HTTP 200 + ``{"status":
-        "aborted", "reason": <... modified by another process ...>}``.
+        "aborted", "reason": <... modified by another process ...>,
+        "mtime_ns": <current st_mtime_ns>}``.
+
+        Asserts the same triplet the Skills/Commands/Agents conflict
+        tests pin (status / no-write content / current mtime_ns echo)
+        — without all three a regression that wrote the proposed rule
+        before returning aborted, or dropped the mtime_ns echo from
+        the envelope, would still pass.
         """
         _make_canonical_settings(
             tmp_path,
@@ -782,3 +789,13 @@ class TestSettingsHttpLayer:
         body = resp.json()
         assert body["status"] == "aborted"
         assert "modified by another process" in body["reason"]
+        # mtime_ns echo — clients refresh local state without an extra
+        # round-trip; matches Skills/Commands/Agents 409 envelopes.
+        assert body["mtime_ns"] == str(target.stat().st_mtime_ns)
+        # No-write content — pinned both ways: the original user rule
+        # survives, and the canonical rule is *not* persisted to disk.
+        # A regression that wrote before returning aborted would flip
+        # the second assertion.
+        on_disk = target.read_text(encoding="utf-8")
+        assert "echo user" in on_disk
+        assert "echo canonical" not in on_disk
