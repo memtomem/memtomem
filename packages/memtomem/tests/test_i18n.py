@@ -318,6 +318,44 @@ class TestNoHardcodedStrings:
             "index.html elements named in #698 missing required i18n bindings:\n" + "\n".join(bad)
         )
 
+    def test_issue_775_settings_badge_keys_present(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """Settings overview badge i18n keys (#775). Each value produced by
+        ``_compare_hooks`` in ``web/routes/settings_sync.py`` (``in_sync``,
+        ``out_of_sync``, ``conflicts``, ``no_source``, ``error``) must have a
+        corresponding ``settings.hooks.badge_*`` entry in both locales — the
+        prior behavior fell through to ``status.replace('_', ' ')`` and
+        leaked English strings into ``ko``."""
+        required = {
+            "settings.hooks.badge_in_sync",
+            "settings.hooks.badge_out_of_sync",
+            "settings.hooks.badge_conflicts",
+            "settings.hooks.badge_no_source",
+            "settings.hooks.badge_error",
+        }
+        missing_en = required - set(en)
+        missing_ko = required - set(ko)
+        assert not missing_en, f"#775 keys missing from en.json: {sorted(missing_en)}"
+        assert not missing_ko, f"#775 keys missing from ko.json: {sorted(missing_ko)}"
+
+    def test_issue_775_js_routes_through_t(self) -> None:
+        """``context-gateway.js`` settings overview branch must look up the
+        badge text via the ``_SETTINGS_STATUS_I18N`` map and ``t()``, not
+        emit ``d.status.replace('_', ' ')`` directly. Regression guard for
+        #775 — the unconditional ``replace`` was the bug."""
+        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        assert "_SETTINGS_STATUS_I18N" in text, (
+            "context-gateway.js missing _SETTINGS_STATUS_I18N map (#775)"
+        )
+        # The settings branch must contain the i18n lookup. The fallback
+        # `replace('_', ' ')` may still appear (it's the unknown-status
+        # safety net) but must be guarded by `key ?` ternary.
+        assert "_SETTINGS_STATUS_I18N[d.status]" in text, (
+            "context-gateway.js settings branch must look up status via "
+            "_SETTINGS_STATUS_I18N (#775)"
+        )
+
     def test_issue_698_new_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
         """Locale keys introduced for #698 must exist in both files. The
         existing ``test_placeholder_parity`` will catch ``{count}`` /

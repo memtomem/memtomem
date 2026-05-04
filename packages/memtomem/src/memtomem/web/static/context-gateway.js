@@ -24,6 +24,19 @@ const _ctxStatusLabel = {
   'missing canonical': 'settings.ctx.status_missing_canonical',
 };
 
+// Settings overview badge i18n map. Keys are the wire status values produced
+// by ``_compare_hooks`` in ``web/routes/settings_sync.py`` (in_sync,
+// out_of_sync, conflicts, no_source, error). Unknown statuses fall through
+// to the legacy ``replace('_', ' ')`` path so a future status string still
+// renders something readable.
+const _SETTINGS_STATUS_I18N = {
+  in_sync:      'settings.hooks.badge_in_sync',
+  out_of_sync:  'settings.hooks.badge_out_of_sync',
+  conflicts:    'settings.hooks.badge_conflicts',
+  no_source:    'settings.hooks.badge_no_source',
+  error:        'settings.hooks.badge_error',
+};
+
 // Localized status text for a wire status value. Falls back to the raw
 // status string when no i18n key is mapped — keeps unknown/future statuses
 // visible instead of silently rendering an empty label.
@@ -121,7 +134,8 @@ async function loadCtxOverview() {
       if (d.error) {
         badgeText = 'Error';
       } else if (typ.key === 'settings') {
-        badgeText = (d.status || '').replace('_', ' ');
+        const key = _SETTINGS_STATUS_I18N[d.status];
+        badgeText = key ? t(key) : (d.status || '').replace('_', ' ');
       } else if (parseError > 0) {
         badgeText = `${parseError} ${t('settings.ctx.badge_parse_error')}`;
       } else if (missingTarget > 0) {

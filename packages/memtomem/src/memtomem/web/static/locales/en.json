@@ -345,6 +345,11 @@
   "settings.hooks.synced": "In sync",
   "settings.hooks.sync_success": "Sync completed",
   "settings.hooks.no_source": "No .memtomem/settings.json found",
+  "settings.hooks.badge_in_sync": "in sync",
+  "settings.hooks.badge_out_of_sync": "out of sync",
+  "settings.hooks.badge_conflicts": "conflicts",
+  "settings.hooks.badge_no_source": "no source",
+  "settings.hooks.badge_error": "error",
 
   "settings.config.desc": "Server settings: embedding provider, storage backend, search and indexing parameters.",
   "settings.config.guide_title": "Configuration Guide",
