@@ -174,7 +174,20 @@ async def _cmd_add(comp, args: list[str]) -> None:
     from datetime import datetime, timezone
     from pathlib import Path
 
+    from memtomem import privacy
     from memtomem.tools.memory_writer import append_entry
+
+    # Interactive shell has no inline ``--force-unsafe`` syntax; on a
+    # hit the user is told to retry via ``mm add --force-unsafe`` so
+    # the bypass remains an explicit, audit-logged action.
+    guard = privacy.enforce_write_guard(content, surface="cli_shell_add")
+    if guard.decision == "blocked":
+        click.secho(
+            f"Content matches {len(guard.hits)} privacy pattern(s); write rejected. "
+            "Retry via `mm add --force-unsafe '<content>'` to bypass (audit-logged).",
+            fg="red",
+        )
+        return
 
     if not comp.config.indexing.memory_dirs:
         click.secho("No memory directories configured. Run 'mm init' first.", fg="red")

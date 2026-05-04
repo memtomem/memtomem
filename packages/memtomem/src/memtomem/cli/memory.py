@@ -36,20 +36,51 @@ def _render_validity_window(valid_from_unix: int | None, valid_to_unix: int | No
 @click.option(
     "--file", "file_name", default=None, help="Target file (relative to ~/.memtomem/memories/)"
 )
-def add(content: str, title: str | None, tags: str | None, file_name: str | None) -> None:
+@click.option(
+    "--force-unsafe",
+    is_flag=True,
+    default=False,
+    help="Bypass the redaction guard for this call (audit-logged).",
+)
+def add(
+    content: str,
+    title: str | None,
+    tags: str | None,
+    file_name: str | None,
+    force_unsafe: bool,
+) -> None:
     """Add a memory entry and index it."""
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
     try:
-        asyncio.run(_add(content, title, tag_list, file_name))
+        asyncio.run(_add(content, title, tag_list, file_name, force_unsafe))
     except click.ClickException:
         raise
     except Exception as e:
         raise click.ClickException(str(e)) from e
 
 
-async def _add(content: str, title: str | None, tags: list[str], file_name: str | None) -> None:
+async def _add(
+    content: str,
+    title: str | None,
+    tags: list[str],
+    file_name: str | None,
+    force_unsafe: bool = False,
+) -> None:
+    from memtomem import privacy
     from memtomem.cli._bootstrap import cli_components
     from memtomem.tools.memory_writer import append_entry
+
+    guard = privacy.enforce_write_guard(
+        content,
+        surface="cli_mm_add",
+        force_unsafe=force_unsafe,
+        audit_context={"file": file_name},
+    )
+    if guard.decision == "blocked":
+        raise click.ClickException(
+            f"Content matches {len(guard.hits)} privacy pattern(s); write rejected. "
+            "Retry with --force-unsafe to bypass (audit-logged)."
+        )
 
     base = Path("~/.memtomem/memories").expanduser().resolve()
     if file_name:

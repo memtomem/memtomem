@@ -212,6 +212,7 @@ class MemtomemStore:
         file: str | None = None,
         namespace: str | None = None,
         template: str | None = None,
+        force_unsafe: bool = False,
     ) -> dict:
         """Add a memory entry. Returns dict with file path and chunk count.
 
@@ -219,9 +220,16 @@ class MemtomemStore:
         called), ``namespace=None`` defaults to the agent's private
         ``agent-runtime:<id>`` bucket. Pass an explicit ``namespace=`` to
         override (e.g. ``"shared"``).
+
+        Content passes through the trust-boundary redaction guard before
+        any filesystem write. On a hit the call returns ``{"error":
+        "redaction_blocked", "hits": N}`` instead of writing; pass
+        ``force_unsafe=True`` to bypass with audit logging.
         """
         comp = await self._ensure_init()
         from datetime import datetime, timezone
+
+        from memtomem import privacy
         from memtomem.tools.memory_writer import append_entry
 
         # Apply template
@@ -229,6 +237,19 @@ class MemtomemStore:
             from memtomem.templates import render_template
 
             content = render_template(template, content, title=title)
+
+        guard = privacy.enforce_write_guard(
+            content,
+            surface="langgraph_add",
+            force_unsafe=force_unsafe,
+            audit_context={"namespace": namespace, "file": file},
+        )
+        if guard.decision == "blocked":
+            return {
+                "error": "redaction_blocked",
+                "hits": len(guard.hits),
+                "surface": "langgraph_add",
+            }
 
         if file:
             target = Path(file).expanduser().resolve()

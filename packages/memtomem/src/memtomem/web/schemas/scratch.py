@@ -50,6 +50,10 @@ class ScratchPromoteRequest(BaseModel):
     title: str | None = None
     tags: list[str] | None = None
     file: str | None = None
+    # Bypass the trust-boundary redaction guard when promoting a
+    # scratch entry into long-term memory. Default False — the
+    # promotion flow asks the user to confirm before retrying.
+    force_unsafe: bool = False
 
 
 class ScratchPromoteResponse(BaseModel):

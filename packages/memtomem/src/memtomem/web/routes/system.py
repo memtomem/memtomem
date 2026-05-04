@@ -1063,10 +1063,19 @@ _ALLOWED_UPLOAD_EXTS = {".md", ".txt", ".json", ".yaml", ".yml", ".toml"}
 @router.post("/upload", response_model=UploadResponse, dependencies=[Depends(require_configured)])
 async def upload_files(
     files: list[UploadFile] = File(...),
+    force_unsafe: bool = False,
     index_engine=Depends(get_index_engine),
 ) -> UploadResponse:
-    """Upload one or more files, save to ~/.memtomem/uploads/, and index them."""
+    """Upload one or more files, save to ~/.memtomem/uploads/, and index them.
+
+    Each file's text content passes through the trust-boundary redaction
+    guard before being written to disk. A flagged file is rejected
+    (``error="redaction_blocked"``) and **not** persisted; ``force_unsafe=True``
+    (query param) bypasses for the whole batch with audit logging.
+    """
     _MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+
+    from memtomem import privacy
 
     upload_dir = Path("~/.memtomem/uploads").expanduser()
     upload_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -1098,6 +1107,39 @@ async def upload_files(
                     )
                 )
                 continue
+
+            # Decode text content for redaction scanning. The allowlist
+            # above limits this branch to UTF-8 markdown / config files;
+            # a decode failure here is a malformed file rather than a
+            # privacy bypass, so we surface it as a per-file error.
+            try:
+                text = content.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                results.append(
+                    UploadFileResult(
+                        filename=fname,
+                        indexed_chunks=0,
+                        error=f"Decode failed: {exc}",
+                    )
+                )
+                continue
+
+            guard = privacy.enforce_write_guard(
+                text,
+                surface="web_api_upload",
+                force_unsafe=force_unsafe,
+                audit_context={"filename": fname},
+            )
+            if guard.decision == "blocked":
+                results.append(
+                    UploadFileResult(
+                        filename=fname,
+                        indexed_chunks=0,
+                        error=f"redaction_blocked (hits={len(guard.hits)})",
+                    )
+                )
+                continue
+
             dest.write_bytes(content)
             stats = await index_engine.index_file(dest)
             results.append(
@@ -1151,6 +1193,28 @@ async def add_memory(
     storage=Depends(get_storage),
 ) -> AddMemoryResponse:
     from datetime import datetime, timezone
+
+    from memtomem import privacy
+
+    # Trust-boundary redaction guard. Mirrors MCP ``mem_add`` so the
+    # same secret patterns block writes regardless of which surface
+    # the agent or user came in through. ``force_unsafe`` is opt-in
+    # via the SPA's confirm-and-retry UX after the first 403.
+    guard = privacy.enforce_write_guard(
+        req.content,
+        surface="web_api_add",
+        force_unsafe=req.force_unsafe,
+        audit_context={"namespace": req.namespace, "file": req.file},
+    )
+    if guard.decision == "blocked":
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "detail": "redaction_blocked",
+                "hits": len(guard.hits),
+                "surface": "web_api_add",
+            },
+        )
 
     if req.file:
         raw = req.file

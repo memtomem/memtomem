@@ -45,6 +45,10 @@ class ChunksListResponse(BaseModel):
 
 class EditRequest(BaseModel):
     new_content: str
+    # Bypass the trust-boundary redaction guard. Default False — the SPA
+    # confirms the matched-pattern count with the user before retrying
+    # with this flag set.
+    force_unsafe: bool = False
 
 
 class ChunkSizeBucket(BaseModel):

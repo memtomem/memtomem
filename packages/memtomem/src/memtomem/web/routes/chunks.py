@@ -60,6 +60,25 @@ async def edit_chunk(
     meta = chunk.metadata
     if meta.source_file.is_symlink():
         raise HTTPException(status_code=403, detail="Cannot edit chunks from symlinked files.")
+
+    from memtomem import privacy
+
+    guard = privacy.enforce_write_guard(
+        body.new_content,
+        surface="web_api_chunk_edit",
+        force_unsafe=body.force_unsafe,
+        audit_context={"chunk_id": str(chunk_id)},
+    )
+    if guard.decision == "blocked":
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "detail": "redaction_blocked",
+                "hits": len(guard.hits),
+                "surface": "web_api_chunk_edit",
+            },
+        )
+
     try:
         # ``replace_chunk_body`` keeps the heading + section-leading
         # blockquote header (``> created:`` / ``> tags:``) intact when the

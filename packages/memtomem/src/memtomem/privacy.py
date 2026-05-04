@@ -321,3 +321,74 @@ def reset_for_tests() -> None:
         for o in _VALID_OUTCOMES:
             _outcomes[o] = 0
         _by_tool.clear()
+
+
+@dataclass(frozen=True)
+class WriteGuardResult:
+    """Outcome of a single ``enforce_write_guard`` call.
+
+    ``decision`` is one of ``_VALID_OUTCOMES``. ``hits`` is the raw
+    ``scan()`` result so callers can size-quote it in user-facing
+    errors (length only, never the matched bytes).
+    """
+
+    decision: str
+    hits: list[RedactionHit]
+
+
+def enforce_write_guard(
+    content: str,
+    *,
+    surface: str,
+    force_unsafe: bool = False,
+    audit_context: dict[str, object] | None = None,
+) -> WriteGuardResult:
+    """Trust-boundary content scan + counter increment + audit log.
+
+    Centralises the redaction guard so every ingress surface (MCP
+    ``mem_add`` / ``mem_edit``, Web ``POST /api/add`` / ``POST /upload``
+    / ``PATCH /chunks/{id}`` / scratch promote, CLI ``mm add`` / shell
+    ``add`` / agent share, and the LangGraph integration) shares one
+    scan-decide-log shape. ``surface`` is the audit identifier passed
+    to ``record()``.
+
+    On a hit:
+
+    - ``force_unsafe=True`` records ``"bypassed"`` and emits a
+      structured audit log line. Extra request shape (namespace, file,
+      route, item_idx, …) is rendered from ``audit_context`` as
+      ``key=value`` pairs **after** the ``surface=`` field. The
+      matched bytes are intentionally never echoed — error messages
+      and audit lines must never reflect secret content back.
+    - ``force_unsafe=False`` records ``"blocked"`` and returns a
+      result whose ``decision == "blocked"``. The caller picks the
+      user-facing error message (HTTP 403 / CLI exception / MCP error
+      string) so each surface keeps its native error shape.
+
+    The ``mem_batch_add`` path does not call this helper — its
+    per-entry decision shape (one rejection invalidates the whole
+    batch, but counters still attribute outcomes per item) is fiddly
+    enough that inlining the scan + record pattern there is clearer
+    than wrapping it in a sequence of helper calls. ``record(...)`` is
+    still the shared counter API.
+    """
+    hits = scan(content)
+    if not hits:
+        record("pass", surface)
+        return WriteGuardResult("pass", [])
+    if force_unsafe:
+        record("bypassed", surface)
+        if audit_context:
+            ctx_pairs = ", " + ", ".join(f"{k}={v!r}" for k, v in audit_context.items())
+        else:
+            ctx_pairs = ""
+        logger.warning(
+            "redaction bypass via force_unsafe=True (surface=%s%s, content_chars=%d, hits=%d)",
+            surface,
+            ctx_pairs,
+            len(content),
+            len(hits),
+        )
+        return WriteGuardResult("bypassed", hits)
+    record("blocked", surface)
+    return WriteGuardResult("blocked", hits)

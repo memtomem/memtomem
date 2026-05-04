@@ -214,7 +214,13 @@ async def _run_list(as_json: bool) -> None:
     show_default=True,
     help=("Target namespace — ``shared`` or ``agent-runtime:<agent_id>``."),
 )
-def share(chunk_id: str, target: str) -> None:
+@click.option(
+    "--force-unsafe",
+    is_flag=True,
+    default=False,
+    help="Bypass the redaction guard when copying the chunk (audit-logged).",
+)
+def share(chunk_id: str, target: str, force_unsafe: bool) -> None:
     """Copy a chunk's content into another namespace.
 
     Mirrors the ``mem_agent_share`` MCP tool. The new chunk gets a fresh
@@ -227,15 +233,21 @@ def share(chunk_id: str, target: str) -> None:
     #499. Hostile shapes like ``agent-runtime:foo:bar`` are rejected
     loudly so the CLI cannot smuggle a row past the contract that the
     direct ``agent_id`` and ``mem_agent_share`` MCP surfaces enforce.
+
+    The chunk's content is re-scanned by the trust-boundary redaction
+    guard before the copy is written. A chunk that originally landed
+    via ``force_unsafe`` will block again on share unless ``--force-unsafe``
+    is repeated here, so secret content does not silently propagate
+    into a wider namespace.
     """
     try:
         validate_namespace(target)
     except InvalidNameError as e:
         raise click.ClickException(str(e)) from e
-    asyncio.run(_run_share(chunk_id, target))
+    asyncio.run(_run_share(chunk_id, target, force_unsafe))
 
 
-async def _run_share(chunk_id: str, target: str) -> None:
+async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> None:
     from uuid import UUID
 
     from memtomem.cli._bootstrap import cli_components
@@ -263,7 +275,20 @@ async def _run_share(chunk_id: str, target: str) -> None:
             # before the helper lands.
             tags = list(chunk.metadata.tags) + [f"shared-from={chunk_id}"]
 
+        from memtomem import privacy
         from memtomem.tools.memory_writer import append_entry
+
+        guard = privacy.enforce_write_guard(
+            chunk.content,
+            surface="cli_agent_share",
+            force_unsafe=force_unsafe,
+            audit_context={"chunk_id": chunk_id, "target": target},
+        )
+        if guard.decision == "blocked":
+            raise click.ClickException(
+                f"Chunk content matches {len(guard.hits)} privacy pattern(s); share rejected. "
+                "Retry with --force-unsafe to bypass (audit-logged)."
+            )
 
         title = (
             "Shared: " + " > ".join(chunk.metadata.heading_hierarchy)

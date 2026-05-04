@@ -11,6 +11,22 @@ class AddMemoryRequest(BaseModel):
     tags: list[str] = []
     file: str | None = None
     namespace: str | None = None
+    # Bypass the trust-boundary redaction guard for this write. Default
+    # False so the server rejects accidental secret pastes; the SPA
+    # surfaces the matched-pattern count and asks the user to confirm
+    # before retrying with this flag set.
+    force_unsafe: bool = False
+
+
+class RedactionBlockedResponse(BaseModel):
+    """Body shape returned with HTTP 403 when the redaction guard blocks
+    a write. The matched bytes are intentionally not echoed; only the
+    hit count is exposed so the SPA can surface a confirm-and-retry UI.
+    """
+
+    detail: str = "redaction_blocked"
+    hits: int
+    surface: str
 
 
 class AddMemoryResponse(BaseModel):

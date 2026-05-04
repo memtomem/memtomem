@@ -75,33 +75,19 @@ async def _mem_add_core(
     # trace to clean up.
     from memtomem import privacy
 
-    hits = privacy.scan(content)
-    if hits:
-        if force_unsafe:
-            privacy.record("bypassed", "mem_add")
-            # Audit trail for forensic correlation. The matched bytes are
-            # never logged — only the request shape (counters answer "is
-            # bypass happening?"; this line answers "what specifically got
-            # through?"). The full chunk content stays in the on-disk
-            # markdown file the call is about to write.
-            logger.warning(
-                "redaction bypass via force_unsafe=True "
-                "(tool=mem_add, namespace=%r, file=%r, content_chars=%d, hits=%d)",
-                namespace,
-                file,
-                len(content),
-                len(hits),
-            )
-        else:
-            privacy.record("blocked", "mem_add")
-            return (
-                f"Error: content matches {len(hits)} privacy pattern(s); "
-                "write rejected. Retry with force_unsafe=True to bypass "
-                "(audit-logged).",
-                None,
-            )
-    else:
-        privacy.record("pass", "mem_add")
+    guard = privacy.enforce_write_guard(
+        content,
+        surface="mem_add",
+        force_unsafe=force_unsafe,
+        audit_context={"namespace": namespace, "file": file},
+    )
+    if guard.decision == "blocked":
+        return (
+            f"Error: content matches {len(guard.hits)} privacy pattern(s); "
+            "write rejected. Retry with force_unsafe=True to bypass "
+            "(audit-logged).",
+            None,
+        )
 
     from datetime import datetime, timezone
 
@@ -254,6 +240,7 @@ async def mem_add(
 async def mem_edit(
     chunk_id: str,
     new_content: str,
+    force_unsafe: bool = False,
     ctx: CtxType = None,
 ) -> str:
     """Edit an existing memory entry in its source markdown file.
@@ -264,15 +251,36 @@ async def mem_edit(
     prefix ``new_content`` with ``## `` and the call reverts to a
     full replacement of the chunk's line range.
 
+    ``new_content`` passes through the same trust-boundary redaction
+    guard as ``mem_add``. A match rejects the edit unless
+    ``force_unsafe=True``; bypass events are audit-logged. See
+    ``mem_add_redaction_stats`` for the counter snapshot.
+
     Args:
         chunk_id: The UUID of the chunk to edit (shown in mem_search results)
         new_content: The replacement body. Heading + per-entry metadata
             blockquote are preserved unless the value starts with ``## ``.
+        force_unsafe: When True, bypass the redaction guard for this call
+            even when ``new_content`` matches a secret pattern. Use only
+            when matches are known false positives.
     """
     if not new_content.strip():
         return "Error: new_content cannot be empty."
 
+    from memtomem import privacy
     from memtomem.tools.memory_writer import replace_chunk_body
+
+    guard = privacy.enforce_write_guard(
+        new_content,
+        surface="mem_edit",
+        force_unsafe=force_unsafe,
+        audit_context={"chunk_id": chunk_id},
+    )
+    if guard.decision == "blocked":
+        return (
+            f"Error: new_content matches {len(guard.hits)} privacy pattern(s); "
+            "edit rejected. Retry with force_unsafe=True to bypass (audit-logged)."
+        )
 
     app = await _get_app_initialized(ctx)
     mismatch_msg = _check_embedding_mismatch(app)

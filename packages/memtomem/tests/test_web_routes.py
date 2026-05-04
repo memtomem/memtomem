@@ -908,6 +908,64 @@ class TestEditChunk:
         assert "Old body line." not in on_disk
 
 
+class TestEditChunkRedaction:
+    @pytest.fixture(autouse=True)
+    def _reset_counters(self):
+        from memtomem import privacy
+
+        privacy.reset_for_tests()
+        yield
+        privacy.reset_for_tests()
+
+    async def test_secret_in_new_content_returns_403(self, app, client: AsyncClient):
+        from memtomem import privacy
+
+        chunk = _make_test_chunk()
+        app.state.storage.get_chunk.return_value = chunk
+        resp = await client.patch(
+            f"/api/chunks/{CHUNK_ID}",
+            json={"new_content": "token=sk-" + "a" * 30},
+        )
+        assert resp.status_code == 403, resp.text
+        snap = privacy.snapshot()["by_tool"]["web_api_chunk_edit"]
+        assert snap["blocked"] == 1
+
+    async def test_force_unsafe_passes_guard(self, app, client: AsyncClient, tmp_path: Path):
+        from memtomem import privacy
+
+        source = tmp_path / "memory.md"
+        source.write_text("## H\n\nbody\n", encoding="utf-8")
+        chunk = _make_test_chunk(source=str(source))
+        chunk = chunk.__class__(
+            content=chunk.content,
+            metadata=chunk.metadata.__class__(
+                source_file=source,
+                heading_hierarchy=("## H",),
+                tags=chunk.metadata.tags,
+                namespace=chunk.metadata.namespace,
+                start_line=1,
+                end_line=3,
+            ),
+            id=chunk.id,
+            content_hash=chunk.content_hash,
+            embedding=chunk.embedding,
+            created_at=chunk.created_at,
+            updated_at=chunk.updated_at,
+        )
+        app.state.storage.get_chunk.return_value = chunk
+
+        resp = await client.patch(
+            f"/api/chunks/{CHUNK_ID}",
+            json={
+                "new_content": "secret token=sk-" + "a" * 30,
+                "force_unsafe": True,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        snap = privacy.snapshot()["by_tool"]["web_api_chunk_edit"]
+        assert snap["bypassed"] == 1
+
+
 # ---------------------------------------------------------------------------
 # Temporal-validity exposure on ChunkOut (RFC §Goal 7 — Web UI badge)
 # ---------------------------------------------------------------------------
@@ -1086,6 +1144,70 @@ class TestAddMemory:
             json={"content": "test", "file": "../../etc/passwd"},
         )
         assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Redaction guard wire-in for the web write surfaces. The helper-level
+# contract lives in ``test_privacy.py``; these cases pin that each
+# surface actually invokes the guard with the right ``surface=`` label
+# and that the response shape lets the SPA distinguish a redaction
+# block from other 4xx outcomes (path validation, missing config, etc).
+# ---------------------------------------------------------------------------
+
+
+class TestAddMemoryRedaction:
+    @pytest.fixture(autouse=True)
+    def _reset_counters(self):
+        from memtomem import privacy
+
+        privacy.reset_for_tests()
+        yield
+        privacy.reset_for_tests()
+
+    async def test_secret_returns_403_with_hits_metadata(self, client: AsyncClient):
+        from memtomem import privacy
+
+        resp = await client.post(
+            "/api/add",
+            json={"content": "token=sk-" + "a" * 30},
+        )
+        assert resp.status_code == 403, resp.text
+        body = resp.json()
+        # FastAPI wraps the raised ``detail`` dict under ``detail`` again.
+        detail = body.get("detail") if isinstance(body.get("detail"), dict) else body
+        assert detail["detail"] == "redaction_blocked"
+        assert detail["hits"] >= 1
+        assert detail["surface"] == "web_api_add"
+
+        snap = privacy.snapshot()["by_tool"].get("web_api_add", {})
+        assert snap.get("blocked", 0) == 1
+
+    async def test_force_unsafe_records_bypassed(self, client: AsyncClient):
+        from memtomem import privacy
+
+        resp = await client.post(
+            "/api/add",
+            json={
+                "content": "token=sk-" + "a" * 30,
+                "force_unsafe": True,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        snap = privacy.snapshot()["by_tool"]["web_api_add"]
+        assert snap["bypassed"] == 1
+        assert snap["blocked"] == 0
+
+    async def test_clean_content_records_pass(self, client: AsyncClient):
+        from memtomem import privacy
+
+        resp = await client.post(
+            "/api/add",
+            json={"content": "Plain prose, nothing sensitive."},
+        )
+        assert resp.status_code == 200, resp.text
+        snap = privacy.snapshot()["by_tool"]["web_api_add"]
+        assert snap["pass"] == 1
+        assert snap["blocked"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1891,6 +2013,130 @@ class TestRemoveMemoryDirChunkCleanup:
         assert under_target_a in deleted_paths
         assert under_target_b in deleted_paths
         assert under_keep not in deleted_paths
+
+
+# ---------------------------------------------------------------------------
+# POST /api/upload — redaction guard wire-in
+# ---------------------------------------------------------------------------
+
+
+class TestUploadRedaction:
+    @pytest.fixture(autouse=True)
+    def _reset_counters(self):
+        from memtomem import privacy
+
+        privacy.reset_for_tests()
+        yield
+        privacy.reset_for_tests()
+
+    async def test_secret_file_rejected_per_file(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from memtomem import privacy
+
+        set_home(monkeypatch, tmp_path)
+        files = [
+            (
+                "files",
+                ("clean.md", b"Just regular notes.", "text/markdown"),
+            ),
+            (
+                "files",
+                ("secret.md", b"token=sk-" + b"a" * 30, "text/markdown"),
+            ),
+        ]
+        resp = await client.post("/api/upload", files=files)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+
+        per_file = {r["filename"]: r for r in body["files"]}
+        assert per_file["secret.md"]["error"].startswith("redaction_blocked")
+        assert per_file["secret.md"]["indexed_chunks"] == 0
+        assert per_file["clean.md"].get("error") in (None, "")
+
+        snap = privacy.snapshot()["by_tool"]["web_api_upload"]
+        assert snap["blocked"] == 1
+        assert snap["pass"] == 1
+        # The blocked file must not have been written.
+        assert not (tmp_path / ".memtomem" / "uploads" / "secret.md").exists()
+
+    async def test_force_unsafe_query_param_bypasses_for_batch(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from memtomem import privacy
+
+        set_home(monkeypatch, tmp_path)
+        files = [
+            (
+                "files",
+                ("secret.md", b"token=sk-" + b"a" * 30, "text/markdown"),
+            ),
+        ]
+        resp = await client.post(
+            "/api/upload?force_unsafe=true",
+            files=files,
+        )
+        assert resp.status_code == 200, resp.text
+        snap = privacy.snapshot()["by_tool"]["web_api_upload"]
+        assert snap["bypassed"] == 1
+
+
+# ---------------------------------------------------------------------------
+# POST /api/scratch/{key}/promote — redaction guard wire-in
+# ---------------------------------------------------------------------------
+
+
+class TestScratchPromoteRedaction:
+    @pytest.fixture(autouse=True)
+    def _reset_counters(self):
+        from memtomem import privacy
+
+        privacy.reset_for_tests()
+        yield
+        privacy.reset_for_tests()
+
+    async def test_secret_in_promoted_value_returns_403(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        from memtomem import privacy
+
+        # Promote pulls the value from storage; wire a secret through the mock.
+        app.state.storage.scratch_get = AsyncMock(
+            return_value={"key": "k", "value": "token=sk-" + "a" * 30},
+        )
+        app.state.storage.scratch_promote = AsyncMock()
+
+        target = tmp_path / "today.md"
+        app.state.config.indexing.memory_dirs = [tmp_path]
+
+        resp = await client.post(
+            "/api/scratch/k/promote",
+            json={"file": str(target)},
+        )
+        assert resp.status_code == 403, resp.text
+        snap = privacy.snapshot()["by_tool"]["web_api_scratch_promote"]
+        assert snap["blocked"] == 1
+        # The blocked promotion must NOT mark the entry promoted in storage.
+        app.state.storage.scratch_promote.assert_not_called()
+
+    async def test_clean_value_records_pass(self, app, client: AsyncClient, tmp_path: Path):
+        from memtomem import privacy
+
+        app.state.storage.scratch_get = AsyncMock(
+            return_value={"key": "k", "value": "Plain prose, nothing sensitive."},
+        )
+        app.state.storage.scratch_promote = AsyncMock()
+        app.state.config.indexing.memory_dirs = [tmp_path]
+        target = tmp_path / "today.md"
+
+        with patch("memtomem.tools.memory_writer.append_entry"):
+            resp = await client.post(
+                "/api/scratch/k/promote",
+                json={"file": str(target)},
+            )
+        assert resp.status_code == 200, resp.text
+        snap = privacy.snapshot()["by_tool"]["web_api_scratch_promote"]
+        assert snap["pass"] == 1
 
 
 # ---------------------------------------------------------------------------
