@@ -222,7 +222,11 @@ class TestUpdateSkill:
 
     @pytest.mark.anyio
     async def test_mtime_conflict(self, client: AsyncClient, tmp_path: Path):
+        # ADR-0001 §5 c4: pin no-write semantics on the conflict path. The
+        # response label alone would still pass a regression that wrote
+        # body.content and *then* returned the abort envelope.
         _make_skill(tmp_path, "conflict")
+        manifest_path = tmp_path / ".memtomem" / "skills" / "conflict" / SKILL_MANIFEST
         r = await client.put(
             "/api/context/skills/conflict",
             json={"content": "# Changed\n", "mtime_ns": "0"},  # wrong mtime_ns
@@ -230,6 +234,8 @@ class TestUpdateSkill:
         assert r.status_code == 409
         data = r.json()
         assert data["status"] == "aborted"
+        assert data["mtime_ns"] == str(manifest_path.stat().st_mtime_ns)
+        assert manifest_path.read_text(encoding="utf-8") == "# Test skill\n"
 
 
 # ---------------------------------------------------------------------------
