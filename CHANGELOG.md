@@ -53,6 +53,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   with the same comma-separated OR semantics as the keyword path's
   post-fusion tag filter.
 
+- **Settings Hooks sync surface promoted to prod web UI (refs #761).**
+  Phase D of the Context Gateway (additive merge of canonical
+  `.memtomem/settings.json` hooks into `~/.claude/settings.json`) is
+  now visible in the default `mm web` surface, alongside Skills /
+  Commands / Agents. Previously gated behind `MEMTOMEM_WEB__MODE=dev`.
+  The promotion satisfies ADR-0001 §5 readiness criteria — round-trip
+  + soft-abort HTTP-layer test fixtures pinned in PR #770; i18n
+  parity already covered by `test_i18n.py` auto-discovery; the
+  helper-level merge / mtime / atomic-write paths covered by the
+  existing 21 tests in `tests/test_context_settings.py`. Rollback:
+  `git revert` the gate-flip commit restores dev-only gating.
+
 ## [0.1.35] — 2026-05-02
 
 ### Added
