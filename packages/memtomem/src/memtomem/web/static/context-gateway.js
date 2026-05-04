@@ -150,9 +150,11 @@ async function loadCtxOverview() {
 
     // Gate the Sync All button: when every artifact type's items are
     // entirely runtime-only (no canonicals to fan out), Sync All resolves
-    // to a series of `no_canonical_root` skips. Surface that pre-click via
-    // a data attribute so CSS can dim the button and the click handler can
-    // short-circuit with a guidance toast.
+    // to a series of `no_canonical_root` skips. Surface that pre-click
+    // via a data attribute (CSS dims the button) plus a native ``title``
+    // hover tooltip + ``aria-disabled`` so the user understands the
+    // dimmed state without having to click first; the post-click toast
+    // stays as a fallback for users who don't hover (mobile, keyboard).
     const syncAllBtn = document.getElementById('ctx-sync-all-btn');
     if (syncAllBtn) {
       const totals = ['skills', 'commands', 'agents'].reduce((acc, k) => {
@@ -163,8 +165,12 @@ async function loadCtxOverview() {
       }, { total: 0, runtimeOnly: 0 });
       if (totals.total > 0 && totals.runtimeOnly === totals.total) {
         syncAllBtn.dataset.runtimeOnly = 'true';
+        syncAllBtn.title = t('settings.ctx.sync_all_disabled_tooltip');
+        syncAllBtn.setAttribute('aria-disabled', 'true');
       } else {
         delete syncAllBtn.dataset.runtimeOnly;
+        syncAllBtn.removeAttribute('title');
+        syncAllBtn.removeAttribute('aria-disabled');
       }
     }
 
@@ -176,6 +182,18 @@ async function loadCtxOverview() {
     el.innerHTML = emptyState('', 'Failed to load overview', err.message);
   }
 }
+
+// JS-owned ``title`` strings (as opposed to ``data-i18n-title`` which
+// I18N.applyDOM handles automatically) need a langchange refresh so the
+// hover tooltip stays in sync with the active locale. Only rewrites the
+// attribute when the gate is still active — clearing it during normal
+// state would erase any caller's title.
+window.addEventListener('langchange', () => {
+  const btn = document.getElementById('ctx-sync-all-btn');
+  if (btn && btn.dataset.runtimeOnly === 'true') {
+    btn.title = t('settings.ctx.sync_all_disabled_tooltip');
+  }
+});
 
 // Sync All button
 document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () => {
