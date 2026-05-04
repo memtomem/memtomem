@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import json
 import sys
+from unittest.mock import AsyncMock
 
 import pytest
 from click.testing import CliRunner
+from httpx import ASGITransport, AsyncClient
 
 from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
@@ -18,6 +20,7 @@ from memtomem.context.settings import (
     generate_all_settings,
     host_write_targets,
 )
+from memtomem.web.app import create_app
 from .helpers import set_home
 
 
@@ -635,3 +638,147 @@ class TestGenerateAllSettingsHostWriteGate:
         # settings.json (the host path), and that resolves outside ``project``.
         results = generate_all_settings(project)
         assert results["claude_settings"].status == "needs_confirmation"
+
+
+# ── HTTP-route contract tests (RFC #761 PR-2 — ADR-0001 §5 c2/c4) ────────────
+
+
+class TestSettingsHttpLayer:
+    """HTTP-route contract for ``/api/context/settings/*``.
+
+    Pins the FastAPI surface that wires up ``settings_sync`` per
+    ADR-0001 §5 c2 (round-trip, unidirectional shape) and §5 c4
+    (conflict path covered — soft-abort response). Helper-level merge
+    and mtime behavior is already covered by the merge / concurrent
+    classes above; these two tests pin the route layer that production
+    UI depends on.
+
+    PR-3 of RFC #761 will move ``settings_sync`` from
+    ``_DEV_ONLY_ROUTERS`` to ``_PROD_ROUTERS`` — these tests use
+    ``mode="dev"`` to stay correct against current ``main`` and remain
+    correct after that move (the router is mounted in either mode).
+    """
+
+    @pytest.fixture
+    def app(self, claude_home, tmp_path):
+        application = create_app(lifespan=None, mode="dev")
+        application.state.project_root = tmp_path
+        application.state.storage = AsyncMock()
+        application.state.config = None
+        application.state.search_pipeline = None
+        application.state.index_engine = None
+        application.state.embedder = None
+        application.state.dedup_scanner = None
+        application.state.last_reload_error = None
+        return application
+
+    @pytest.fixture
+    async def client(self, app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
+
+    async def test_sync_route_round_trip_unidirectional(self, client, claude_home, tmp_path):
+        """ADR-0001 §5 c2 — unidirectional round-trip via the route layer.
+
+        Settings has no reverse-import API by design (additive merge
+        cannot distinguish canonical-authored from user-authored
+        entries), so the round-trip is: write canonical → POST sync
+        route → GET diff confirms ``in_sync`` AND target file on disk
+        preserves user-authored hooks + non-hook keys.
+        """
+        _make_canonical_settings(
+            tmp_path,
+            {"hooks": {"PostToolUse": [_rule("Write|Edit", "echo canonical")]}},
+        )
+        target = claude_home / ".claude" / "settings.json"
+        user_authored = {
+            "permissions": {"allow": ["Read"]},
+            "env": {"FOO": "bar"},
+            "hooks": {
+                "PreToolUse": [_rule("Bash", "echo user")],
+            },
+        }
+        target.write_text(json.dumps(user_authored, indent=2) + "\n", encoding="utf-8")
+
+        resp = await client.post(
+            "/api/context/settings/sync",
+            json={"allow_host_writes": True},
+        )
+        assert resp.status_code == 200
+        results = resp.json()["results"]
+        claude_result = next(r for r in results if r["name"] == "claude_settings")
+        assert claude_result["status"] == "ok"
+
+        diff = await client.get("/api/context/settings")
+        assert diff.status_code == 200
+        diff_body = diff.json()
+        assert diff_body["status"] == "in_sync"
+        assert any(
+            h["event"] == "PostToolUse" and h["matcher"] == "Write|Edit"
+            for h in diff_body["hooks"]["synced"]
+        )
+
+        merged = json.loads(target.read_text(encoding="utf-8"))
+        assert merged["permissions"] == {"allow": ["Read"]}
+        assert merged["env"] == {"FOO": "bar"}
+        assert any(r.get("matcher") == "Bash" for r in merged["hooks"]["PreToolUse"])
+        assert any(r.get("matcher") == "Write|Edit" for r in merged["hooks"]["PostToolUse"])
+
+    async def test_resolve_route_returns_soft_abort_on_stale_mtime(
+        self, client, claude_home, tmp_path, monkeypatch
+    ):
+        """ADR-0001 §5 c4 — soft-abort response pinned at the route layer.
+
+        Mirrors the helper-level pattern from
+        ``TestClaudeSettingsMergeConcurrent.test_aborts_on_mtime_change``
+        but exercises ``POST /api/context/settings/resolve``: the
+        route captures ``target_path.stat().st_mtime_ns`` before the
+        load and rechecks before write. We bump mtime as a side effect
+        of the load so the recheck mismatches → HTTP 200 + ``{"status":
+        "aborted", "reason": <... modified by another process ...>}``.
+        """
+        _make_canonical_settings(
+            tmp_path,
+            {"hooks": {"PostToolUse": [_rule("Write", "echo canonical")]}},
+        )
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text(
+            json.dumps(
+                {"hooks": {"PostToolUse": [_rule("Write", "echo user")]}},
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        from memtomem.web.routes import settings_sync as routes_sync_mod
+
+        orig_load = routes_sync_mod._safe_load_json
+
+        def bumping_load(path):
+            result = orig_load(path)
+            if path == target:
+                # Same 1ms bump as the helper-level test — clears
+                # Windows NTFS WriteFile mtime granularity (~15.6ms
+                # tick) so the recheck reliably observes a mismatch.
+                import os as _os
+
+                st = path.stat()
+                _os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+            return result
+
+        monkeypatch.setattr(routes_sync_mod, "_safe_load_json", bumping_load)
+
+        resp = await client.post(
+            "/api/context/settings/resolve",
+            json={
+                "event": "PostToolUse",
+                "matcher": "Write",
+                "action": "use_proposed",
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "aborted"
+        assert "modified by another process" in body["reason"]
