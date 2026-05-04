@@ -163,7 +163,6 @@ def test_dev_routes_extend_prod_routes() -> None:
         ("/api/scratch", "GET"),
         ("/api/procedures", "GET"),
         ("/api/watchdog/status", "GET"),
-        ("/api/settings-sync", "GET"),
         ("/api/eval", "GET"),
     ],
 )
@@ -207,6 +206,7 @@ def test_prod_keeps_polished_routes_mounted() -> None:
         "/api/context/skills",
         "/api/context/commands",
         "/api/context/agents",
+        "/api/context/settings",
     ):
         assert expected in prod_paths, (
             f"{expected} is missing from prod — reclassify or the router list"
@@ -385,16 +385,22 @@ def test_app_js_pins_ui_mode_default_and_toast_copy() -> None:
     assert "if (STATE.uiMode === 'dev')" in js, (
         "Home dashboard lost its dev-only sessions+scratch fetch gate"
     )
-    # The Context Gateway (Artifact Sync) tab graduated to prod, but the
-    # settings_sync router stays dev-only — so the "Sync All" button and
-    # the overview's settings card must self-gate, otherwise prod users
-    # would see "Settings sync failed" after a successful artifact fanout.
-    # Both gates use the same predicate, so a count assertion catches a
-    # future refactor that drops one gate while leaving the other.
+    # The Context Gateway (Artifact Sync) tab is fully prod — Skills /
+    # Commands / Agents shipped first, and Settings Hooks (Phase D)
+    # graduated via RFC #761 (ADR-0001 §5 readiness criteria). The two
+    # historical ``STATE.uiMode === 'dev'`` gates around the settings
+    # overview-card push and the Sync All settings hop were removed
+    # together with the router move from _DEV_ONLY_ROUTERS to
+    # _PROD_ROUTERS. Symmetric pin per
+    # ``feedback_pin_invert_symmetric_assertion.md``: this assertion is
+    # inverted to ``== 0`` so a future re-gating attempt (e.g., a
+    # half-revert that adds a gate back without moving the router)
+    # fails loudly.
     cg_js = _read_static("context-gateway.js")
-    assert cg_js.count("STATE.uiMode === 'dev'") >= 2, (
-        "context-gateway.js lost one of the two dev-only gates around "
-        "settings_sync (overview card push + Sync All settings hop)"
+    assert cg_js.count("STATE.uiMode === 'dev'") == 0, (
+        "context-gateway.js gained a dev-mode gate after the RFC #761 "
+        "promotion — either the gate flip is being half-reverted, or a "
+        "new dev-only feature was added without updating this pin."
     )
     # And the locale entries themselves are pinned so a rename doesn't go
     # unnoticed by the i18n completeness check.
@@ -432,7 +438,9 @@ def test_html_classification_matches_router_lists() -> None:
         # dev-gated in JS (settings-namespaces.js _buildNsCard) because
         # their backend verbs stay on admin_router; this HTML check tracks
         # the section visibility, not the per-button gating.
-        "hooks-sync",
+        # ``hooks-sync`` graduated to prod via RFC #761 (ADR-0001 §5
+        # readiness criteria); the section's data-ui-tier was flipped
+        # together with the router move.
         "harness-sessions",
         "harness-scratch",
         "harness-procedures",
