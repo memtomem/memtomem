@@ -1,0 +1,17 @@
+{
+  "name": "memtomem-tests-js",
+  "private": true,
+  "version": "0.0.0",
+  "description": "JS unit tests for memtomem web/static modules. See ./README.md.",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "jsdom": "^25.0.1",
+    "vitest": "^2.1.9"
+  }
+}

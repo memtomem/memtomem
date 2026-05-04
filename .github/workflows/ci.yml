@@ -110,3 +110,19 @@ jobs:
           version: "latest"
       - run: uv sync --frozen
       - run: uv run pytest packages/memtomem/tests/test_notebooks.py --tb=short -q
+
+  test-js:
+    name: js-unit (vitest + jsdom)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/memtomem/tests-js
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: packages/memtomem/tests-js/package-lock.json
+      - run: npm ci
+      - run: npm test
