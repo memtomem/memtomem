@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends
 
+from memtomem.privacy import scan as _privacy_scan
 from memtomem.web.deps import get_project_root
 
 try:
@@ -26,6 +27,7 @@ router = APIRouter(tags=["context-gateway"])
 
 _HOME = str(Path.home())
 _ERROR_MESSAGE_LIMIT = 200
+_SECRET_REDACTED_MARKER = "<redacted: secret-shape>"
 
 
 def _count_statuses(triples: list[tuple[str, str, str]]) -> dict:
@@ -65,8 +67,26 @@ def _classify_exception(exc: BaseException) -> str:
 
 
 def _redact_message(message: str) -> str:
-    """Collapse ``$HOME`` to ``~`` and truncate to ``_ERROR_MESSAGE_LIMIT``."""
+    """Collapse ``$HOME`` → ``~``, drop secret-shape messages, then truncate.
+
+    The ``internal`` classification is a catch-all for unexpected
+    exceptions, so ``str(exc)`` may incidentally contain provider tokens,
+    PEM headers, or ``api_key=...`` fragments pulled from a config parse
+    or a third-party library's error. Truncation alone leaves the first
+    200 chars verbatim, which is not enough at this trust boundary.
+
+    We reuse the LTM secret-class scanner from ``memtomem.privacy``. If
+    *any* hit is detected, the whole message is replaced with a fixed
+    marker. Span-splicing was considered and rejected: several patterns
+    (notably ``api_key=...``) match the assignment anchor only, so the
+    secret *value* would survive a span splice. Whole-message replace
+    matches the convention already established in
+    ``privacy._sanitize_audit_value``. The ``error_kind`` field still
+    tells the operator which category the failure fell into.
+    """
     redacted = message.replace(_HOME, "~") if _HOME else message
+    if _privacy_scan(redacted):
+        return _SECRET_REDACTED_MARKER
     if len(redacted) > _ERROR_MESSAGE_LIMIT:
         redacted = redacted[:_ERROR_MESSAGE_LIMIT]
     return redacted

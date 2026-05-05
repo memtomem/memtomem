@@ -233,6 +233,57 @@ class TestContextOverviewErrorTaxonomy:
         assert "error_kind" in skills
         assert "error_message" in skills
 
+    @pytest.mark.anyio
+    async def test_error_message_redacts_api_key_assignment(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        # ``internal`` is a catch-all and exception text may incidentally
+        # contain secret-shape fragments. ``api_key=`` matches the privacy
+        # scanner's assignment anchor, so the whole message is replaced
+        # with the redaction marker — splicing alone would leave the
+        # value (``hunter2``) intact.
+        monkeypatch.setattr(
+            "memtomem.context.skills.diff_skills",
+            _raises(RuntimeError("parse failed near api_key=hunter2 in config")),
+        )
+        r = await client.get("/api/context/overview")
+        msg = r.json()["skills"]["error_message"]
+        assert "hunter2" not in msg
+        assert "api_key" not in msg
+        assert msg == "<redacted: secret-shape>"
+
+    @pytest.mark.anyio
+    async def test_error_message_redacts_provider_token(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Provider-prefixed token (``sk-`` / ``ghp_`` / ``github_pat_``)
+        # must not survive into ``error_message``.
+        secret = "sk-" + "A" * 40
+        monkeypatch.setattr(
+            "memtomem.context.commands.diff_commands",
+            _raises(RuntimeError(f"upstream returned {secret} in body")),
+        )
+        r = await client.get("/api/context/overview")
+        msg = r.json()["commands"]["error_message"]
+        assert secret not in msg
+        assert msg == "<redacted: secret-shape>"
+
+    @pytest.mark.anyio
+    async def test_error_message_clean_message_passes_through(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        # No secret-shape hits → message must pass through unchanged
+        # (modulo the existing ``$HOME`` collapse + 200-char cap). This
+        # pins the redaction so it doesn't accidentally swallow every
+        # ``internal`` error.
+        monkeypatch.setattr(
+            "memtomem.context.agents.diff_agents",
+            _raises(RuntimeError("disk full while reading agents dir")),
+        )
+        r = await client.get("/api/context/overview")
+        msg = r.json()["agents"]["error_message"]
+        assert msg == "disk full while reading agents dir"
+
 
 # ---------------------------------------------------------------------------
 # Skills — List
