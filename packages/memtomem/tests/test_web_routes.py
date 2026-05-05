@@ -1156,6 +1156,57 @@ class TestChunkValidityFields:
         assert app.state.storage.upsert_chunks.await_count == 0
         assert app.state.search_pipeline.invalidate_cache.call_count == 0
 
+    async def test_tag_update_delegates_to_service(self, app, client: AsyncClient, monkeypatch):
+        """Pin the single-service-path invariant for ``PATCH
+        /chunks/{id}/tags``. The side-effect tests above (invalidate /
+        no-op / 404) would still pass if a future refactor reintroduced
+        route-local read-modify-upsert that happened to mimic the same
+        side effects — losing the contract that
+        ``services.tag_management.replace_chunk_tags`` is the only place
+        per-chunk tag edits go through.
+
+        Stub the service and assert the route forwards storage,
+        chunk_id, body.tags, and search_pipeline verbatim.
+        """
+        from memtomem.models import Chunk, ChunkMetadata
+        from memtomem.web.routes import chunks as chunks_route
+
+        chunk = Chunk(
+            content="alpha",
+            metadata=ChunkMetadata(
+                source_file=Path("/tmp/test.md"),
+                tags=("new",),
+                namespace="default",
+            ),
+            id=CHUNK_ID,
+            content_hash="abc",
+            embedding=[0.1] * 768,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+
+        captured: dict = {}
+
+        async def fake_replace(storage, chunk_id, tags, *, search_pipeline=None):
+            captured["storage"] = storage
+            captured["chunk_id"] = chunk_id
+            captured["tags"] = list(tags)
+            captured["search_pipeline"] = search_pipeline
+            return chunk
+
+        monkeypatch.setattr(chunks_route.tag_svc, "replace_chunk_tags", fake_replace)
+
+        resp = await client.patch(
+            f"/api/chunks/{CHUNK_ID}/tags",
+            json={"tags": ["new"]},
+        )
+        assert resp.status_code == 200
+
+        assert captured["storage"] is app.state.storage
+        assert captured["chunk_id"] == CHUNK_ID
+        assert captured["tags"] == ["new"]
+        assert captured["search_pipeline"] is app.state.search_pipeline
+
 
 # ---------------------------------------------------------------------------
 # GET /api/sessions
