@@ -248,3 +248,66 @@ def test_api_upload_per_file_redaction_triggers_batch_retry_with_query_param(
         "() => document.getElementById('confirm-modal').hidden",
         timeout=2_000,
     )
+
+
+def test_api_add_403_cancel_does_not_retry_or_emit_bypass_toast(page, mm_web_url: str) -> None:
+    """``POST /api/add`` 403 → confirm dialog → click **Cancel** → no
+    retry POST, no ``toast.redaction_bypassed``.
+
+    The affirmative spec above pins that confirm triggers a retry; this
+    spec pins the symmetric negative per
+    ``feedback_pin_invert_symmetric_assertion.md`` — without it a
+    regression where ``showConfirm`` always resolves ``true`` (or the
+    helper's ``if (!ok) return null`` branch is dropped) would still
+    pass the affirmative assertion.
+    """
+    _install_default_stubs(page)
+
+    calls: list[dict] = []
+
+    def _add_handler(route):
+        body = route.request.post_data_json or {}
+        calls.append(body)
+        route.fulfill(
+            status=403,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "detail": {
+                        "detail": "redaction_blocked",
+                        "hits": 2,
+                        "surface": "web_api_add",
+                    }
+                }
+            ),
+        )
+
+    page.route("**/api/add", _add_handler)
+
+    page.goto(mm_web_url)
+    page.locator("#tabbtn-index").click()
+    page.locator("#index-mode-compose").click()
+    page.locator("#add-content").fill("sk-ant-test-fake-1234567890abcdef")
+    page.locator("#add-btn").click()
+
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    page.locator("#confirm-cancel-btn").click()
+
+    # Dialog dismisses, helper returns ``null``, the call site's
+    # ``if (data === null) return`` short-circuits before the success
+    # toast renders. Give the SPA a beat in case a stray retry is in
+    # flight, then assert call count stayed at 1.
+    page.wait_for_function(
+        "() => document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    page.wait_for_timeout(300)
+    assert len(calls) == 1, f"cancel must not trigger retry, saw {len(calls)} POSTs"
+
+    # No bypass toast — the affirmative spec asserts one renders, this
+    # one asserts none does. Together they pin the symmetric pair.
+    bypass_toasts = page.locator("#toast-container .toast", has_text="Bypassed")
+    assert bypass_toasts.count() == 0, "cancel must not emit toast.redaction_bypassed"

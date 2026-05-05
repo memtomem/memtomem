@@ -2315,13 +2315,16 @@ qs('d-save-btn').addEventListener('click', async () => {
   const btn = qs('d-save-btn');
   btnLoading(btn, true);
   try {
-    _pushHistory(STATE.selectedChunkId, STATE.selectedOriginal);
     const resp = await apiWithRedactionRetry(
       'PATCH',
       `/api/chunks/${STATE.selectedChunkId}`,
       { new_content: newContent },
     );
     if (resp === null) return;
+    // History push must follow a confirmed write — pushing before the
+    // request would pollute the undo stack with a no-op entry when the
+    // user cancels the redaction-blocked confirm dialog.
+    _pushHistory(STATE.selectedChunkId, STATE.selectedOriginal);
     showToast(t('toast.chunk_saved'), 'success');
     STATE.selectedOriginal = newContent;
     _syncResultContent(STATE.selectedChunkId, newContent);
