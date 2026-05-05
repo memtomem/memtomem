@@ -844,6 +844,46 @@ class TestAutoTag:
         assert a_chunks[0].metadata.tags  # tagged
         assert b_chunks[0].metadata.tags == ()  # untouched
 
+    async def test_auto_tag_storage_acquires_tag_write_lock(self, storage):
+        """``auto_tag_storage`` must serialize its read-modify-write window
+        with ``services.tag_management`` against the same lock — otherwise
+        a rename mid-LLM-extraction can be silently overwritten when
+        auto_tag finally upserts. Holding the lock externally proves
+        auto_tag waits for it (regression: dropping ``async with
+        storage._tag_write_lock:`` lets auto_tag finish ahead of the
+        timeout)."""
+        import asyncio
+
+        chunk = _chunk("Python data science framework", source="locktest.md")
+        await storage.upsert_chunks([chunk])
+
+        held = asyncio.Event()
+        can_release = asyncio.Event()
+
+        async def hold_lock():
+            async with storage._tag_write_lock:
+                held.set()
+                await can_release.wait()
+
+        holder = asyncio.create_task(hold_lock())
+        await held.wait()
+
+        auto = asyncio.create_task(auto_tag_storage(storage, max_tags=3))
+        try:
+            await asyncio.wait_for(asyncio.shield(auto), timeout=0.05)
+        except asyncio.TimeoutError:
+            pass  # expected — lock is held externally
+        else:
+            raise AssertionError(
+                "auto_tag_storage did not acquire the lock; it finished while "
+                "the lock was held externally"
+            )
+
+        can_release.set()
+        await holder
+        stats = await auto
+        assert stats.tagged_chunks >= 1
+
     async def test_auto_tag_storage_preserves_full_metadata(self, storage):
         """Regression: auto_tag_storage must not silently drop metadata
         fields when rebuilding ChunkMetadata around the new tags.
