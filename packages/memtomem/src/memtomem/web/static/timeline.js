@@ -129,7 +129,7 @@ function renderTimeline(chunks) {
     const short = date.slice(5); // MM-DD
     const fmtTip = new Date(date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
     const tipText = `${fmtTip} — ${items.length} chunk${items.length !== 1 ? 's' : ''}`;
-    return `<div class="tl-heatmap-col" data-tooltip="${escapeAttr(tipText)}" data-date="${date}">
+    return `<div class="tl-heatmap-col" data-tooltip="${escapeAttr(tipText)}" data-date="${date}" role="button" tabindex="0" aria-label="${escapeAttr(tipText)}">
       <span class="tl-heatmap-count">${items.length}</span>
       <div class="tl-heatmap-bar" style="height:${pct}%"></div>
       <span class="tl-heatmap-label">${short}</span>
@@ -137,7 +137,7 @@ function renderTimeline(chunks) {
   });
   heatmap.innerHTML = `<div class="tl-heatmap-track">${cols.join('')}</div>`;
   heatmap.querySelectorAll('.tl-heatmap-col').forEach(col => {
-    col.addEventListener('click', () => {
+    const activate = () => {
       heatmap.querySelectorAll('.tl-heatmap-col').forEach(c => c.classList.remove('active'));
       col.classList.add('active');
       const target = list.querySelector(`[data-tl-date="${col.dataset.date}"]`);
@@ -151,6 +151,10 @@ function renderTimeline(chunks) {
           heading.classList.add('tl-date-flash');
         }
       }
+    };
+    col.addEventListener('click', activate);
+    col.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); }
     });
   });
   show(heatmap);
@@ -186,7 +190,11 @@ function renderChunkView(list, groups) {
     for (const c of items) {
       const item = document.createElement('div');
       item.className = 'timeline-item';
+      item.setAttribute('role', 'button');
+      item.setAttribute('tabindex', '0');
+      item.setAttribute('aria-expanded', 'false');
       const time = localTimeShort(c.created_at); // local HH:MM
+      item.setAttribute('aria-label', `${basename(c.source_file)}, ${time}`);
       const tagsHtml = c.tags.map(t => `<span class="timeline-tag">${escapeHtml(t)}</span>`).join('');
       const dot = `<span class="tl-type-dot" style="background:${fileTypeColor(c.source_file)}"></span>`;
       const openLabel = (typeof t === 'function')
@@ -206,11 +214,21 @@ function renderChunkView(list, groups) {
         </div>
       `;
       // (C) Inline expansion: first click expand/collapse, action buttons navigate
+      const toggleExpand = () => {
+        item.classList.toggle('tl-item-expanded');
+        item.setAttribute('aria-expanded', item.classList.contains('tl-item-expanded'));
+      };
       item.addEventListener('click', (e) => {
         // If click is on an action button, handle separately
         if (e.target.closest('.tl-expand-actions')) return;
-        item.classList.toggle('tl-item-expanded');
-        item.setAttribute('aria-expanded', item.classList.contains('tl-item-expanded'));
+        toggleExpand();
+      });
+      item.addEventListener('keydown', (e) => {
+        if (e.target.closest('.tl-expand-actions')) return;
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          toggleExpand();
+        }
       });
       item.querySelector('.tl-btn-open').addEventListener('click', (e) => {
         e.stopPropagation();
@@ -259,6 +277,13 @@ function renderFileView(list, groups) {
 
       const fileItem = document.createElement('div');
       fileItem.className = 'timeline-file-item';
+      fileItem.setAttribute('role', 'button');
+      fileItem.setAttribute('tabindex', '0');
+      fileItem.setAttribute('aria-expanded', 'false');
+      fileItem.setAttribute(
+        'aria-label',
+        `${fname}, ${fileChunks.length} chunk${fileChunks.length !== 1 ? 's' : ''}, last ${lastTime}`,
+      );
 
       const header = document.createElement('div');
       header.className = 'timeline-file-header';
@@ -291,7 +316,10 @@ function renderFileView(list, groups) {
       for (const c of sorted) {
         const ci = document.createElement('div');
         ci.className = 'tl-file-chunk-item';
+        ci.setAttribute('role', 'button');
+        ci.setAttribute('tabindex', '0');
         const time = localTimeShort(c.created_at);
+        ci.setAttribute('aria-label', `${c.chunk_type}, ${time}`);
         const tagsHtml = c.tags.map(t => `<span class="timeline-tag">${escapeHtml(t)}</span>`).join('');
         ci.innerHTML = `
           <div class="tl-fci-header">
@@ -301,17 +329,33 @@ function renderFileView(list, groups) {
           <div class="tl-fci-snippet">${escapeHtml(truncate(c.content, 150))}</div>
           ${tagsHtml ? `<div class="timeline-item-tags">${tagsHtml}</div>` : ''}
         `;
-        ci.addEventListener('click', e => { e.stopPropagation(); _navigateToSource(c.source_file, c.id); });
+        const navigateChunk = () => _navigateToSource(c.source_file, c.id);
+        ci.addEventListener('click', e => { e.stopPropagation(); navigateChunk(); });
+        ci.addEventListener('keydown', e => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            e.stopPropagation();
+            navigateChunk();
+          }
+        });
         chunkList.appendChild(ci);
       }
       fileItem.appendChild(chunkList);
 
-      fileItem.addEventListener('click', () => {
+      const toggleFileExpand = () => {
         const expanded = !chunkList.hidden;
         chunkList.hidden = expanded;
         header.querySelector('.tl-file-chevron').textContent = expanded ? '▶' : '▼';
         fileItem.classList.toggle('tl-file-expanded', !expanded);
         fileItem.setAttribute('aria-expanded', !expanded);
+      };
+      fileItem.addEventListener('click', toggleFileExpand);
+      fileItem.addEventListener('keydown', e => {
+        if (e.target.closest('.tl-file-open-source, .tl-file-chunk-item')) return;
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          toggleFileExpand();
+        }
       });
 
       group.appendChild(fileItem);
