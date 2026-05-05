@@ -607,9 +607,10 @@ def test_api_upload_retry_with_extra_row_count_clamps_succeeded_count(
     This is the symmetric companion to the truncated-retry spec: same
     failure mode (length mismatch invalidates positional merge) from the
     other direction. The narrowed FormData carries one blocked file; the
-    server returns three rows. Without the clamp at app.js:434 the
-    partial toast would read "3 of 1 written" — nonsensical and worse,
-    suggests over-success rather than the underlying contract violation.
+    server returns three rows. Without the ``succeededCount`` clamp in
+    ``uploadFilesWithRedactionRetry`` (app.js), the partial toast would
+    read "3 of 1 written" — nonsensical and worse, suggests over-success
+    rather than the underlying contract violation.
     """
     _install_default_stubs(page)
 
@@ -787,23 +788,13 @@ def test_api_upload_mixed_batch_cancel_refreshes_stale_state(
     confirm dialog opened. The pre-fix early-return on ``cancelled``
     skipped the staleness refresh, leaving the result list showing a
     fresh row while sources / stats panels stayed pinned to their
-    pre-upload state. This spec counts ``GET /api/stats`` calls before
-    and after the cancel click; the post-cancel delta must be ≥ 1.
+    pre-upload state. ``page.expect_request`` deterministically waits
+    for the cancel click to dispatch ``GET /api/stats`` (the unified
+    refresh branch's call) — better than racing a fixed sleep against
+    arbitrary boot traffic. ``_install_default_stubs`` already fulfills
+    ``/api/stats``, so no explicit route is needed.
     """
     _install_default_stubs(page)
-
-    stats_calls: list[str] = []
-    page.route(
-        "**/api/stats",
-        lambda r: (
-            stats_calls.append(r.request.url),
-            r.fulfill(
-                status=200,
-                content_type="application/json",
-                body=json.dumps({}),
-            ),
-        )[1],
-    )
 
     def _upload_handler(route):
         # Single fulfillment — the user cancels, so no retry POST fires.
@@ -841,17 +832,20 @@ def test_api_upload_mixed_batch_cancel_refreshes_stale_state(
     page.locator("#index-mode-upload").click()
     page.locator("#upload-input").set_input_files([str(clean), str(secret)])
 
-    # Wait for boot ``/api/stats`` calls to settle so the post-cancel
-    # delta isn't fighting against late-arriving boot traffic.
-    page.wait_for_timeout(200)
-    pre_cancel = len(stats_calls)
-
     page.locator("#upload-btn").click()
     page.wait_for_function(
         "() => !document.getElementById('confirm-modal').hidden",
         timeout=2_000,
     )
-    page.locator("#confirm-cancel-btn").click()
+
+    # Staleness refresh must fire on cancel — the unified branch below
+    # the if/else in the upload-tab handler hits ``loadStats``. Wrapping
+    # the click in ``expect_request`` waits for that GET to dispatch
+    # rather than asserting a count delta after a fixed sleep, which
+    # races boot traffic on slow CI. Mutation check: restoring the
+    # early ``return`` on ``cancelled`` makes this expectation time out.
+    with page.expect_request("**/api/stats", timeout=2_000):
+        page.locator("#confirm-cancel-btn").click()
     page.wait_for_function(
         "() => document.getElementById('confirm-modal').hidden",
         timeout=2_000,
@@ -862,15 +856,6 @@ def test_api_upload_mixed_batch_cancel_refreshes_stale_state(
     page.wait_for_selector(
         "#toast-container .toast",
         timeout=2_000,
-    )
-
-    # Staleness refresh must fire on cancel — the unified branch below
-    # the if/else in the upload-tab handler hits ``loadStats``. Give the
-    # SPA a beat for the GET to dispatch.
-    page.wait_for_timeout(300)
-    post_cancel = len(stats_calls)
-    assert post_cancel > pre_cancel, (
-        f"cancel must trigger loadStats refresh; saw {pre_cancel} pre, {post_cancel} post"
     )
 
 
