@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=77" />
+  <link rel="stylesheet" href="/style.css?v=78" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -1283,6 +1283,33 @@
     </div>
   </div>
 
+  <!-- Context Gateway 409 mtime conflict dialog (issue #763). Three buttons:
+       Reload (discard buffer), Open diff (switch to diff tab with user-buffer
+       vs on-disk), Force save (overwrite — backend logs WARNING). -->
+  <div id="ctx-conflict-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="ctx-conflict-title">
+    <div class="modal-inner confirm-dialog ctx-conflict-dialog">
+      <div class="modal-header">
+        <span id="ctx-conflict-title" class="modal-title" data-i18n="settings.ctx.conflict_title">File changed on disk</span>
+      </div>
+      <p id="ctx-conflict-message" class="confirm-message" data-i18n="settings.ctx.conflict_msg">Someone else modified this file while you were editing. Choose how to resolve.</p>
+      <div id="ctx-conflict-preview-row">
+        <div class="ctx-conflict-col">
+          <div class="ctx-conflict-col-label" data-i18n="settings.ctx.conflict_your_edits">Your edits</div>
+          <pre id="ctx-conflict-yours" class="ctx-conflict-pre"></pre>
+        </div>
+        <div class="ctx-conflict-col">
+          <div class="ctx-conflict-col-label" data-i18n="settings.ctx.conflict_on_disk">Current on disk</div>
+          <pre id="ctx-conflict-theirs" class="ctx-conflict-pre"></pre>
+        </div>
+      </div>
+      <div class="confirm-actions">
+        <button id="ctx-conflict-reload-btn" class="btn-ghost" data-i18n="settings.ctx.conflict_reload">Reload (discard my edits)</button>
+        <button id="ctx-conflict-diff-btn" class="btn-ghost" data-i18n="settings.ctx.conflict_diff">Open diff editor</button>
+        <button id="ctx-conflict-force-btn" class="btn-danger" data-i18n="settings.ctx.conflict_force">Force save (overwrite)</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Folder picker (issue #582 4.12) -->
   <div id="path-picker-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" data-i18n-aria-label="picker.aria_label">
     <div class="modal-inner path-picker-dialog">
@@ -1316,7 +1343,7 @@
   <script src="/settings-harness.js?v=1"></script>
   <script src="/settings-hooks-watchdog.js?v=3"></script>
   <script src="/timeline.js?v=3"></script>
-  <script src="/context-gateway.js?v=15"></script>
+  <script src="/context-gateway.js?v=16"></script>
   <script src="/path-picker.js?v=2"></script>
 </body>
 </html>

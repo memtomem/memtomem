@@ -1987,7 +1987,21 @@ select:focus-visible {
   user-select: none;
 }
 .confirm-extra input[type="checkbox"] { cursor: pointer; }
-.confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+
+/* Context Gateway 409 conflict dialog (issue #763). Wider than a plain
+   confirm so the two side-by-side previews are legible without forcing the
+   user to scroll horizontally. */
+.ctx-conflict-dialog { max-width: 720px; width: 92vw; }
+#ctx-conflict-preview-row { display: flex; gap: 12px; margin-bottom: 16px; }
+.ctx-conflict-col { flex: 1; min-width: 0; }
+.ctx-conflict-col-label { font-size: 0.78rem; font-weight: 600; color: var(--muted); margin-bottom: 4px; }
+.ctx-conflict-pre {
+  font-family: var(--mono); font-size: 0.75rem; line-height: 1.45;
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 8px; max-height: 180px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  margin: 0;
+}
 
 /* ── Sprint 2: Copy / Markdown Preview / Syntax Highlight ── */
 .editor-label-row {
