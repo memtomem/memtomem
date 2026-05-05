@@ -177,8 +177,17 @@ async function loadCtxOverview() {
         syncAllBtn.setAttribute('aria-disabled', 'true');
       } else {
         delete syncAllBtn.dataset.runtimeOnly;
-        syncAllBtn.removeAttribute('title');
         syncAllBtn.removeAttribute('aria-disabled');
+        // The button has a default ``data-i18n-title`` (sync_all_tooltip);
+        // wiping the attribute outright would clobber the locale-driven
+        // hover tooltip that ``I18N.applyDOM`` set on page load.
+        // Restore it from the dataset key instead.
+        const titleKey = syncAllBtn.dataset.i18nTitle;
+        if (titleKey) {
+          syncAllBtn.title = t(titleKey);
+        } else {
+          syncAllBtn.removeAttribute('title');
+        }
       }
     }
 
