@@ -24,13 +24,22 @@ table, source URLs, SHA-256 hashes, and full upstream license texts.
    block. cdnjs / jsdelivr are the canonical fetch sources — do not pull
    from arbitrary mirrors.
 
+   `marked` is fetched from jsdelivr's npm proxy (`/npm/marked@<v>/lib/
+   marked.umd.js`) rather than cdnjs because cdnjs only mirrors marked up
+   to 16.x and the v18 npm tarball ships only an un-minified UMD file
+   (`lib/marked.umd.js`). The npm proxy serves that file byte-for-byte
+   from the immutable npm registry, which keeps the supply-chain check
+   below reproducible. Avoid `lib/marked.umd.min.js` on jsdelivr — that
+   path is dynamically Terser'd at request time and the SHA is not stable
+   across cache misses (their banner says "Do NOT use SRI").
+
    ```bash
    cd packages/memtomem/src/memtomem/web/static/vendor
 
    # SPA assets — bump versions here, then run:
    curl -sSfL -o prism-tomorrow.min.css   https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css
    curl -sSfL -o purify.min.js            https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js
-   curl -sSfL -o marked.min.js            https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js
+   curl -sSfL -o marked.umd.js            https://cdn.jsdelivr.net/npm/marked@18.0.3/lib/marked.umd.js
    curl -sSfL -o prism.min.js             https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js
    curl -sSfL -o prism-python.min.js      https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js
    curl -sSfL -o prism-typescript.min.js  https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-typescript.min.js
@@ -58,7 +67,7 @@ table, source URLs, SHA-256 hashes, and full upstream license texts.
    version's LICENSE has changed:
 
    ```bash
-   curl -sSfL https://raw.githubusercontent.com/markedjs/marked/v<NEW>/LICENSE.md       -o marked-LICENSE.md
+   curl -sSfL https://raw.githubusercontent.com/markedjs/marked/v<NEW>/LICENSE          -o marked-LICENSE
    curl -sSfL https://raw.githubusercontent.com/PrismJS/prism/v<NEW>/LICENSE            -o prism-LICENSE.txt
    curl -sSfL https://raw.githubusercontent.com/cure53/DOMPurify/<NEW>/LICENSE          -o dompurify-LICENSE.txt
    curl -sSfL https://raw.githubusercontent.com/swagger-api/swagger-ui/v<NEW>/LICENSE   -o swagger/swagger-ui-LICENSE

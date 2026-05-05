@@ -25,7 +25,7 @@ from memtomem.web.app import create_app
 
 _VENDORED_ASSETS = [
     "purify.min.js",
-    "marked.min.js",
+    "marked.umd.js",
     "prism.min.js",
     "prism-python.min.js",
     "prism-typescript.min.js",
