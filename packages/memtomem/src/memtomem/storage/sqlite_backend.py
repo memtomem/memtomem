@@ -935,6 +935,23 @@ class SqliteBackend(
         ).fetchone()
         return int(row[0]) if row else 0
 
+    async def count_chunks_by_any_tag(self, tags: Sequence[str]) -> int:
+        # Single-query union count for the merge dry-run path. Counting per
+        # tag and Python-side deduping would either cap at the per-tag scan
+        # limit (under-reports) or fetch every row (slow); the EXISTS+IN
+        # form lets SQLite de-dup once per chunk regardless of how many
+        # source tags overlap on the same row.
+        if not tags:
+            return 0
+        placeholders = ",".join("?" for _ in tags)
+        db = self._get_read_db()
+        row = db.execute(
+            "SELECT COUNT(*) FROM chunks WHERE EXISTS "
+            f"(SELECT 1 FROM json_each(chunks.tags) WHERE value IN ({placeholders}))",
+            tuple(tags),
+        ).fetchone()
+        return int(row[0]) if row else 0
+
     async def list_chunks_by_sources(
         self,
         source_files: Sequence[Path],

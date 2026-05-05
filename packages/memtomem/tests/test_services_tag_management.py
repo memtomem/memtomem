@@ -87,6 +87,34 @@ async def test_rename_rejects_empty_names(storage):
         await svc.rename_tag(storage, "old", "")
 
 
+@pytest.mark.asyncio
+async def test_rename_rejects_whitespace_only_names(storage):
+    """Whitespace-only names slipped past the ``not old`` truthiness check
+    before the service started ``.strip()``-ing inputs — the Web route
+    passed ``body.new_name`` raw and persisted blank-looking tags.
+    """
+    with pytest.raises(ValueError):
+        await svc.rename_tag(storage, "   ", "new")
+    with pytest.raises(ValueError):
+        await svc.rename_tag(storage, "old", "\t\n")
+
+
+@pytest.mark.asyncio
+async def test_rename_strips_surrounding_whitespace(storage):
+    """Web layer sends raw form input; service normalizes so storage sees
+    the same tag MCP would have passed after its own ``.strip()``.
+    """
+    c1 = _make_chunk(content="alpha", tags=("old_tag",))
+    await storage.upsert_chunks([c1])
+
+    result = await svc.rename_tag(storage, "  old_tag  ", "  new_tag  ", dry_run=False)
+    assert result.affected_chunks == 1
+    assert result.tag == "new_tag"
+    counts = dict(await storage.get_tag_counts())
+    assert counts.get("new_tag") == 1
+    assert "  new_tag  " not in counts
+
+
 # ---------------------------------------------------------------------------
 # delete
 # ---------------------------------------------------------------------------
@@ -127,6 +155,12 @@ async def test_delete_apply_mutates_and_invalidates(storage):
 async def test_delete_rejects_empty_name(storage):
     with pytest.raises(ValueError):
         await svc.delete_tag(storage, "")
+
+
+@pytest.mark.asyncio
+async def test_delete_rejects_whitespace_only_name(storage):
+    with pytest.raises(ValueError):
+        await svc.delete_tag(storage, "   ")
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +243,71 @@ async def test_merge_empty_sources_returns_zero(storage):
 async def test_merge_rejects_empty_target(storage):
     with pytest.raises(ValueError):
         await svc.merge_tags(storage, ["foo"], "")
+
+
+@pytest.mark.asyncio
+async def test_merge_rejects_whitespace_only_target(storage):
+    with pytest.raises(ValueError):
+        await svc.merge_tags(storage, ["foo"], "   ")
+
+
+@pytest.mark.asyncio
+async def test_merge_filters_whitespace_only_sources(storage):
+    """Whitespace-only entries in ``sources`` are skipped (matches MCP's
+    pre-strip behavior) and the rest are stripped before lookup.
+    """
+    c1 = _make_chunk(content="a", tags=("py",))
+    await storage.upsert_chunks([c1])
+
+    result = await svc.merge_tags(storage, ["  ", "  py  ", "\n"], "python", dry_run=True)
+    assert result.affected_chunks == 1
+    assert {s.chunk_id for s in result.samples} == {c1.id}
+
+
+@pytest.mark.asyncio
+async def test_merge_dry_run_count_uses_count_helper_not_list_scan(storage, monkeypatch):
+    """Regression guard for the ``_MERGE_CANDIDATE_SCAN_LIMIT`` undercount: a
+    source tag attached to more chunks than the per-tag scan limit used to
+    cap ``affected_chunks``, so the confirmation modal lied for big tag
+    sets. The dry-run path now asks storage for a single COUNT(*) over the
+    union and only fetches a small sample for previews. Pin the contract
+    by stubbing storage so the count source is unambiguous.
+    """
+    c1 = _make_chunk(content="a", tags=("py",))
+    await storage.upsert_chunks([c1])
+
+    async def _stub_count_any(tags):
+        return 12345
+
+    async def _stub_list_by_tag(tag, limit=10):
+        return []
+
+    monkeypatch.setattr(storage, "count_chunks_by_any_tag", _stub_count_any)
+    monkeypatch.setattr(storage, "list_chunks_by_tag", _stub_list_by_tag)
+
+    result = await svc.merge_tags(storage, ["py"], "python", dry_run=True)
+    assert result.affected_chunks == 12345
+
+
+@pytest.mark.asyncio
+async def test_count_chunks_by_any_tag_unions_correctly(storage):
+    """Storage helper backing the merge dry-run: chunks that hold *any*
+    of the given tags should be counted once, even when several source
+    tags overlap on the same row.
+    """
+    py_only = [_make_chunk(content=f"py{i}", tags=("py",)) for i in range(5)]
+    py3_only = [_make_chunk(content=f"py3-{i}", tags=("python3",)) for i in range(2)]
+    overlap = [_make_chunk(content="both", tags=("py", "python3"))]
+    other = [_make_chunk(content="rust", tags=("rust",))]
+    await storage.upsert_chunks(py_only + py3_only + overlap + other)
+
+    count = await storage.count_chunks_by_any_tag(["py", "python3"])
+    assert count == 8  # 5 + 2 + 1 (overlap counted once); rust excluded
+
+
+@pytest.mark.asyncio
+async def test_count_chunks_by_any_tag_empty_returns_zero(storage):
+    assert await storage.count_chunks_by_any_tag([]) == 0
 
 
 # ---------------------------------------------------------------------------

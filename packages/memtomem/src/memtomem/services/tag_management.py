@@ -34,7 +34,6 @@ if TYPE_CHECKING:
 
 
 _DRY_RUN_SAMPLE_CAP = 10
-_MERGE_CANDIDATE_SCAN_LIMIT = 10_000
 
 
 @dataclass(frozen=True)
@@ -104,7 +103,13 @@ async def rename_tag(
     Idempotent: if a chunk already has ``new`` alongside ``old``, the result
     is a single ``new`` tag. ``dry_run=True`` returns counts + sample chunks
     without writing.
+
+    Inputs are stripped before validation and lookup so Web/MCP/CLI all see
+    the same normalization — the Web route previously passed ``body.new_name``
+    raw, while MCP pre-stripped, and the asymmetry let whitespace-only names
+    persist via Web.
     """
+    old, new = old.strip(), new.strip()
     if not old or not new:
         raise ValueError("rename_tag requires non-empty old and new tag names")
 
@@ -133,6 +138,7 @@ async def delete_tag(
     to fill the gap. ``dry_run=True`` returns counts + sample chunks
     without writing.
     """
+    tag = tag.strip()
     if not tag:
         raise ValueError("delete_tag requires a non-empty tag name")
 
@@ -160,32 +166,40 @@ async def merge_tags(
 
     The resulting per-chunk tag list is deduplicated. ``dry_run=True``
     returns counts + sample chunks without writing.
+
+    ``target`` and each entry in ``sources`` are stripped before use so the
+    cross-surface contract matches the rename/delete entries.
     """
+    target = target.strip()
     if not target:
         raise ValueError("merge_tags requires a non-empty target tag name")
-    source_set = {s for s in sources if s and s != target}
+    source_set = {stripped for s in sources if s and (stripped := s.strip()) and stripped != target}
     if not source_set:
         # Nothing to do — empty sources, or sources collapsed to just the target.
         return TagOpResult(tag=target, affected_chunks=0, dry_run=dry_run)
 
     async with storage._tag_write_lock:
         if dry_run:
-            # Candidate count = chunks that hold *any* source tag (excluding
-            # target). The actual ``merge_tags`` storage helper will mutate
-            # exactly this set since every such chunk's tag list changes
-            # when a source is rewritten to target (target is not in
-            # source_set, so the rewrite always produces a new tags tuple).
+            # Use a single COUNT(DISTINCT chunk) query for affected_chunks so
+            # the dry-run number is accurate even when a single source tag
+            # is attached to a very large number of chunks. Sampling stays
+            # capped at _DRY_RUN_SAMPLE_CAP — the UI only renders that
+            # many previews.
+            count = await storage.count_chunks_by_any_tag(sorted(source_set))
             candidates: dict[UUID, Chunk] = {}
             for s in source_set:
-                chunks = await storage.list_chunks_by_tag(s, limit=_MERGE_CANDIDATE_SCAN_LIMIT)
+                if len(candidates) >= _DRY_RUN_SAMPLE_CAP:
+                    break
+                chunks = await storage.list_chunks_by_tag(s, limit=_DRY_RUN_SAMPLE_CAP)
                 for c in chunks:
-                    candidates.setdefault(c.id, c)
-            samples = tuple(
-                _chunk_to_sample(c) for c in list(candidates.values())[:_DRY_RUN_SAMPLE_CAP]
-            )
+                    if c.id not in candidates:
+                        candidates[c.id] = c
+                        if len(candidates) >= _DRY_RUN_SAMPLE_CAP:
+                            break
+            samples = tuple(_chunk_to_sample(c) for c in candidates.values())
             return TagOpResult(
                 tag=target,
-                affected_chunks=len(candidates),
+                affected_chunks=count,
                 dry_run=True,
                 samples=samples,
             )
