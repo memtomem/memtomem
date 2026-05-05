@@ -951,9 +951,7 @@ def test_api_upload_mixed_batch_cancel_prunes_landed_clean_file_from_selection(
     # The list must now show secret.md only — clean.md was indexed in
     # the first pass and re-sending it would dup via _{mtime_ns}.
     post_text = page.locator("#upload-file-list").text_content() or ""
-    assert "secret.md" in post_text, (
-        f"blocked file must remain selected for retry: {post_text!r}"
-    )
+    assert "secret.md" in post_text, f"blocked file must remain selected for retry: {post_text!r}"
     assert "clean.md" not in post_text, (
         f"already-indexed clean file must be pruned (issue #803 dup-write "
         f"prevention extended to user-driven re-upload): {post_text!r}"
