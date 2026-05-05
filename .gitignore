@@ -54,6 +54,7 @@ BUG_REPORT.md
 *.png
 main.py
 scripts/
+.agents-dev/
 
 # Experimental plugins kept private until promoted
 packages/memtomem-openclaw-plugin/
