@@ -609,41 +609,41 @@
 
         <button class="settings-nav-group" type="button" data-group="integrations" aria-expanded="true">
           <span class="nav-group-caret" aria-hidden="true">▾</span>
-          <span data-i18n="settings.nav.integrations">Integrations</span>
+          <span data-i18n="settings.nav.integrations">Agent Integrations</span>
         </button>
         <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-overview" data-group="integrations" role="tab" aria-selected="false">
           <span class="nav-icon" aria-hidden="true">🔄</span>
           <span class="nav-labels">
-            <span class="nav-label" data-i18n="settings.nav.ctx_overview">Artifact Sync</span>
-            <span class="nav-sub" data-i18n="settings.nav.ctx_overview_sub">Skills/Cmd/Agents status</span>
+            <span class="nav-label" data-i18n="settings.nav.ctx_overview">Context Gateway</span>
+            <span class="nav-sub" data-i18n="settings.nav.ctx_overview_sub">Sync overview</span>
           </span>
         </button>
         <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-skills" data-group="integrations" role="tab" aria-selected="false">
           <span class="nav-icon" aria-hidden="true">🧩</span>
           <span class="nav-labels">
             <span class="nav-label" data-i18n="settings.nav.ctx_skills">Skills</span>
-            <span class="nav-sub" data-i18n="settings.nav.ctx_skills_sub">Skill definitions</span>
+            <span class="nav-sub" data-i18n="settings.nav.ctx_skills_sub">Reusable workflows</span>
           </span>
         </button>
         <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-commands" data-group="integrations" role="tab" aria-selected="false">
           <span class="nav-icon" aria-hidden="true">⌘</span>
           <span class="nav-labels">
-            <span class="nav-label" data-i18n="settings.nav.ctx_commands">Commands</span>
-            <span class="nav-sub" data-i18n="settings.nav.ctx_commands_sub">Command definitions</span>
+            <span class="nav-label" data-i18n="settings.nav.ctx_commands">Slash Commands</span>
+            <span class="nav-sub" data-i18n="settings.nav.ctx_commands_sub">/ commands</span>
           </span>
         </button>
         <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-agents" data-group="integrations" role="tab" aria-selected="false">
           <span class="nav-icon" aria-hidden="true">🤖</span>
           <span class="nav-labels">
-            <span class="nav-label" data-i18n="settings.nav.ctx_agents">Agents</span>
-            <span class="nav-sub" data-i18n="settings.nav.ctx_agents_sub">Agent definitions</span>
+            <span class="nav-label" data-i18n="settings.nav.ctx_agents">Subagents</span>
+            <span class="nav-sub" data-i18n="settings.nav.ctx_agents_sub">Specialized agents</span>
           </span>
         </button>
         <button class="settings-nav-btn" data-ui-tier="prod" data-section="hooks-sync" data-group="integrations" role="tab" aria-selected="false">
           <span class="nav-icon" aria-hidden="true">📎</span>
           <span class="nav-labels">
-            <span class="nav-label" data-i18n="settings.nav.hooks_sync">Hook Files</span>
-            <span class="nav-sub" data-i18n="settings.nav.hooks_sync_sub">Settings hooks</span>
+            <span class="nav-label" data-i18n="settings.nav.hooks_sync">Hooks</span>
+            <span class="nav-sub" data-i18n="settings.nav.hooks_sync_sub">Lifecycle hooks</span>
           </span>
         </button>
 
@@ -767,12 +767,18 @@
 
         <!-- Context Gateway: Overview -->
         <div class="settings-section" id="settings-ctx-overview">
-          <p class="settings-section-desc" data-i18n="settings.ctx.overview_desc">Status of memtomem skills, commands, and agents across connected runtimes.</p>
+          <p class="settings-section-desc" data-i18n="settings.ctx.overview_desc">Sync memtomem Skills, Slash Commands, Subagents, and Hooks to Claude Code, Codex, and other agent runtimes.</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.overview_title">Context Gateway</h2>
             <div>
-              <button id="ctx-detect-btn" class="btn-ghost" data-i18n="settings.ctx.detect">Detect</button>
-              <button id="ctx-sync-all-btn" class="btn-primary" data-i18n="settings.ctx.sync_all">Sync All</button>
+              <button id="ctx-detect-btn" class="btn-ghost"
+                      data-i18n="settings.ctx.detect"
+                      data-i18n-title="settings.ctx.detect_tooltip"
+                      data-i18n-aria-label="settings.ctx.detect_aria">Detect</button>
+              <button id="ctx-sync-all-btn" class="btn-primary"
+                      data-i18n="settings.ctx.sync_all"
+                      data-i18n-title="settings.ctx.sync_all_tooltip"
+                      data-i18n-aria-label="settings.ctx.sync_all_aria">Sync All</button>
             </div>
           </div>
           <div id="ctx-overview-content"></div>

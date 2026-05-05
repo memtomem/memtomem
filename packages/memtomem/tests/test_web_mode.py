@@ -385,8 +385,8 @@ def test_app_js_pins_ui_mode_default_and_toast_copy() -> None:
     assert "if (STATE.uiMode === 'dev')" in js, (
         "Home dashboard lost its dev-only sessions+scratch fetch gate"
     )
-    # The Context Gateway (Artifact Sync) tab is fully prod — Skills /
-    # Commands / Agents shipped first, and Settings Hooks (Phase D)
+    # The Context Gateway tab is fully prod — Skills / Slash Commands /
+    # Subagents shipped first, and Hooks (Phase D)
     # graduated via RFC #761 (ADR-0001 §5 readiness criteria). The two
     # historical ``STATE.uiMode === 'dev'`` gates around the settings
     # overview-card push and the Sync All settings hop were removed
