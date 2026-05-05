@@ -103,6 +103,19 @@ def _resolve_pinned_ip(hostname: str) -> str | None:
     return pinned
 
 
+def _hostname_for_resolver(hostname: str) -> str:
+    """Return the form of `hostname` to pass to `socket.getaddrinfo`.
+
+    IP literals pass through unchanged. DNS names are IDNA-encoded — Python's
+    socket module is inconsistent across platforms about whether it auto-IDNA
+    encodes Unicode hostnames, so we do it ourselves to make IDN URLs work
+    portably (and to match what we'll later put on the wire).
+    """
+    if _is_ip_literal(hostname):
+        return hostname
+    return _ascii_hostname(hostname)
+
+
 def _validate_url(url: str) -> str:
     """Validate URL: require http(s), block internal/private IPs.
 
@@ -113,7 +126,7 @@ def _validate_url(url: str) -> str:
     """
     hostname = _check_syntax(urlparse(url))
     # Resolve as a side-effect so any private-IP DNS hit raises here.
-    _resolve_pinned_ip(hostname)
+    _resolve_pinned_ip(_hostname_for_resolver(hostname))
     return url
 
 
@@ -127,7 +140,7 @@ def _validate_and_pin(url: str) -> tuple[str, str]:
     the two calls (CWE-918 SSRF via DNS rebinding).
     """
     hostname = _check_syntax(urlparse(url))
-    pinned = _resolve_pinned_ip(hostname)
+    pinned = _resolve_pinned_ip(_hostname_for_resolver(hostname))
     if pinned is None:
         raise ValueError(f"DNS resolution failed for {hostname!r}; refusing to fetch.")
     return url, pinned
@@ -148,21 +161,72 @@ def _rewrite_to_pinned_ip(url: str, pinned_ip: str) -> str:
     return urlunparse(parsed._replace(netloc=netloc))
 
 
+def _is_ip_literal(host: str) -> bool:
+    """True if `host` is a bare IPv4/IPv6 address (no DNS lookup possible)."""
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def _ascii_hostname(host: str) -> str:
+    """IDNA-encode a DNS hostname to ASCII; pass already-ASCII hosts through.
+
+    HTTP headers and TLS SNI are ASCII-only — `bücher.example` must go on the
+    wire as `xn--bcher-kva.example`. `str.encode("idna")` is the stdlib path
+    (RFC 3490). We only call this for hostnames we've already classified as
+    DNS names (not IP literals).
+    """
+    try:
+        return host.encode("idna").decode("ascii")
+    except UnicodeError:
+        # `idna` codec rejects empty / overly-long / disallowed-codepoint
+        # labels. Fall back to the raw value — `_check_syntax` has already
+        # vetted the host shape, and a downstream encode error here is
+        # preferable to silently hiding a malformed hostname.
+        return host
+
+
 def _host_header(url: str) -> str:
     """Return the Host header value (host[:port], no userinfo) from url.
 
-    RFC 7230 §5.4: IPv6 address literals in `Host` must remain bracketed —
-    `urlparse(...).hostname` strips the brackets, so re-add them here for any
-    host that contains a colon (the unambiguous IPv6 marker; DNS hostnames
-    cannot contain `:` per RFC 952/1123).
+    Rules:
+    - IPv6 literal hosts keep their brackets (RFC 7230 §5.4) — `urlparse`
+      strips them, so re-add for any host that parses as an IP and contains
+      a colon. (DNS hostnames cannot contain `:`.)
+    - DNS hostnames are IDNA-encoded so a Unicode IDN like `bücher.example`
+      doesn't trip httpx's ASCII header encoder.
     """
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    if ":" in host:
-        host = f"[{host}]"
+    if _is_ip_literal(host):
+        if ":" in host:
+            host = f"[{host}]"
+    else:
+        host = _ascii_hostname(host)
     if parsed.port is None:
         return host
     return f"{host}:{parsed.port}"
+
+
+def _sni_hostname(url: str) -> str | None:
+    """Return the SNI hostname for HTTPS URLs, or None when SNI must be omitted.
+
+    RFC 6066 §3: SNI must be a DNS hostname, NOT an IP literal. When the user
+    supplied an IP-literal URL, return None so httpcore falls back to the
+    rewritten origin (= the pinned IP) — that matches what httpx does natively
+    for `https://1.2.3.4/` and the cert is validated against the IP. For DNS
+    hostnames we override SNI with the IDNA-encoded original so the TLS cert
+    is validated against the user-specified hostname rather than the pinned IP.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        return None
+    host = parsed.hostname
+    if _is_ip_literal(host):
+        return None
+    return _ascii_hostname(host)
 
 
 def _build_pinned_request(client: httpx.AsyncClient, url: str, pinned_ip: str) -> httpx.Request:
@@ -170,16 +234,17 @@ def _build_pinned_request(client: httpx.AsyncClient, url: str, pinned_ip: str) -
 
     The TCP connection goes to the IP literal in the rewritten URL. The Host
     header carries the original hostname so the upstream server still routes
-    correctly (vhosting). For HTTPS, the `sni_hostname` extension forces the
-    TLS handshake to use the original hostname for SNI + cert validation —
-    httpcore wires this into `start_tls(server_hostname=...)`.
+    correctly (vhosting). For HTTPS DNS URLs, the `sni_hostname` extension
+    forces the TLS handshake to use the original hostname for SNI + cert
+    validation — httpcore wires this into `start_tls(server_hostname=...)`.
+    For HTTPS IP-literal URLs we omit the override (RFC 6066 forbids IP-as-SNI).
     """
-    parsed = urlparse(url)
     connect_url = _rewrite_to_pinned_ip(url, pinned_ip)
     headers = {"Host": _host_header(url)}
-    extensions = (
-        {"sni_hostname": parsed.hostname} if parsed.scheme == "https" and parsed.hostname else {}
-    )
+    extensions: dict[str, str] = {}
+    sni = _sni_hostname(url)
+    if sni is not None:
+        extensions["sni_hostname"] = sni
     return client.build_request("GET", connect_url, headers=headers, extensions=extensions)
 
 

@@ -200,6 +200,38 @@ class TestBuildPinnedRequest:
         # SNI is meaningless for plain HTTP — must not be set.
         assert "sni_hostname" not in req.extensions
 
+    async def test_idn_hostname_idna_encoded_for_host_and_sni(self):
+        # Unicode IDN hostnames must hit the wire as ASCII (RFC 3490 / IDNA).
+        # Pre-fix httpx raised UnicodeEncodeError trying to ASCII-encode the
+        # raw Unicode Host header before the request even left the client.
+        async with httpx.AsyncClient() as client:
+            req = _build_pinned_request(client, "https://bücher.example/path", "93.184.216.34")
+        assert req.headers["host"] == "xn--bcher-kva.example"
+        assert req.extensions.get("sni_hostname") == "xn--bcher-kva.example"
+
+    async def test_idn_with_port_idna_encoded(self):
+        async with httpx.AsyncClient() as client:
+            req = _build_pinned_request(client, "https://bücher.example:8443/", "93.184.216.34")
+        assert req.headers["host"] == "xn--bcher-kva.example:8443"
+
+    async def test_ipv4_literal_https_omits_sni(self):
+        # RFC 6066 §3: SNI must be a DNS name, not an IP literal. When the
+        # user supplied an IP-literal URL, httpcore should fall back to the
+        # rewritten origin host (= the pinned IP) — that matches default httpx
+        # behaviour for `https://1.2.3.4/`.
+        async with httpx.AsyncClient() as client:
+            req = _build_pinned_request(client, "https://8.8.8.8/", "8.8.8.8")
+        assert req.headers["host"] == "8.8.8.8"
+        assert "sni_hostname" not in req.extensions
+
+    async def test_ipv6_literal_https_omits_sni_and_brackets_host(self):
+        async with httpx.AsyncClient() as client:
+            req = _build_pinned_request(
+                client, "https://[2001:4860:4860::8888]/", "2001:4860:4860::8888"
+            )
+        assert req.headers["host"] == "[2001:4860:4860::8888]"
+        assert "sni_hostname" not in req.extensions
+
 
 # ----------------------------------------------------------------------------
 # fetch_url — end-to-end with httpx.MockTransport
