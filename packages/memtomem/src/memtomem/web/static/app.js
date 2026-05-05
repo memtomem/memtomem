@@ -3758,13 +3758,10 @@ qs('add-btn').addEventListener('click', async () => {
   // clean input would be peak false security since the regex misses
   // many real secrets.
   //
-  // Scan-window asymmetry: ``re.test()`` here scans the entire
-  // textarea, while server-side ``privacy.scan()`` caps at the first
-  // 10K chars (``_SCAN_WINDOW`` in privacy.py). For very long content
-  // with a secret past that cap, the client warns and the server's
-  // ``enforce_write_guard`` does not — so the client is more
-  // permissive (covers more positions). The server boundary remains
-  // the source of truth; this client check is a UX-time hint.
+  // Both client ``re.test()`` and server ``privacy.scan()`` cover the
+  // entire content — there is no scan-window asymmetry. The server's
+  // ``enforce_write_guard`` remains the source of truth; this client
+  // check is a UX-time hint that fires before the request goes out.
   let forceUnsafe = false;
   const patterns = STATE.privacyPatterns;
   if (patterns && patterns.some(re => re.test(content))) {

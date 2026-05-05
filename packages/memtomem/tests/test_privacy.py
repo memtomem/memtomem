@@ -76,15 +76,31 @@ class TestScan:
     def test_clean_text_returns_empty_list(self):
         assert privacy.scan("Just a regular note about coffee.") == []
 
-    def test_scan_window_capped_at_10k(self):
-        # Secret beyond the scan window is invisible — parity with STM's
-        # compression-side scanner (10K-char window).
-        hidden = "a" * 10_001 + "AKIAIOSFODNN7EXAMPLE"
-        assert privacy.scan(hidden) == []
+    def test_secret_within_first_10k_is_seen(self):
+        # Baseline: a secret near the old 10 K boundary still hits. Pin
+        # both edges of the former cap so a future re-introduction of a
+        # truncation can't hide a regression behind "the test only used
+        # short inputs."
+        within = "a" * 9_900 + "sk-" + "a" * 30
+        assert privacy.scan(within)
 
-    def test_secret_just_within_window_is_seen(self):
-        visible = "a" * 9_900 + " AKIAIOSFODNN7EXAMPLE"
-        assert privacy.scan(visible)
+    def test_secret_past_former_10k_window_is_seen(self):
+        # Pin-and-invert (memory: pin_invert_symmetric_assertion): the
+        # earlier revision truncated at 10K chars and asserted ``== []``
+        # for a secret past that mark. ``scan()`` now covers the entire
+        # input, so the same shape must hit. A regression that re-adds
+        # the cap fails this assertion loudly.
+        #
+        # Uses the ``sk-`` prefix shape (DEFAULT_PATTERNS index 2)
+        # rather than the AWS AKIA shape — the latter is anchored with
+        # ``\b`` and would silently no-match against a leading run of
+        # word chars even when the scan does cover the position, which
+        # would conflate two distinct regression modes.
+        past = "a" * 10_001 + "sk-" + "a" * 30
+        assert privacy.scan(past), (
+            "scan() must cover the entire input — secrets past the former "
+            "10K window must not silently bypass the trust boundary"
+        )
 
     def test_explicit_empty_pattern_set_returns_no_hit(self):
         assert privacy.scan("AKIAIOSFODNN7EXAMPLE", patterns=()) == []

@@ -231,8 +231,6 @@ JS_PATTERNS_SHA: str = hashlib.sha256(
 ).hexdigest()
 
 
-_SCAN_WINDOW = 10_000
-
 # Outcome labels recorded for every gated content scan.
 #   blocked  — at least one hit; ``force_unsafe`` not set; write rejected.
 #   pass     — no hits; write proceeded.
@@ -266,19 +264,29 @@ def _compile(patterns: tuple[str, ...]) -> tuple[re.Pattern[str], ...]:
 
 
 def scan(text: str, patterns: tuple[str, ...] | None = None) -> list[RedactionHit]:
-    """Return all redaction hits in the first ``_SCAN_WINDOW`` chars of ``text``.
+    """Return all redaction hits in ``text``.
 
-    The 10 K-char window matches STM's compression-side scanner so the two
-    views of "is this content sensitive" stay aligned at the floor.
+    Scans the entire string. An earlier revision capped at the first 10 K
+    chars to mirror STM's compression-side scanner, but at the LTM trust
+    boundary that cap is a silent bypass: a secret pasted past the 10 K
+    mark wrote through unredacted. The asymmetry with STM is intentional
+    and one-directional — STM's window is a compression-routing signal
+    (does this block contain anything sensitive enough to skip), while
+    the LTM scan is a write-rejection gate. The two contracts diverge,
+    and the trust boundary lives here.
+
+    All current ``DEFAULT_PATTERNS`` are short, prefix-anchored regexes
+    (provider tokens, PEM headers, etc.); ``re.finditer`` over a 1 MB
+    input completes well under the 50 ms ceiling pinned by
+    ``test_privacy_long_content``.
     """
     effective = patterns if patterns is not None else DEFAULT_PATTERNS
     if not effective:
         return []
-    sample = text[:_SCAN_WINDOW]
     compiled = _compile(tuple(effective))
     hits: list[RedactionHit] = []
     for idx, pat in enumerate(compiled):
-        for m in pat.finditer(sample):
+        for m in pat.finditer(text):
             hits.append(RedactionHit(pattern_index=idx, span=(m.start(), m.end())))
     return hits
 
