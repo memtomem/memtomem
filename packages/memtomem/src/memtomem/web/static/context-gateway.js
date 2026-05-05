@@ -596,7 +596,12 @@ function _ctxResolveConflict(userBuffer, freshContent) {
     const diffBtn = qs('ctx-conflict-diff-btn');
     const forceBtn = qs('ctx-conflict-force-btn');
     show(modal);
-    forceBtn.focus();
+    // Focus the safest choice. Force-save is destructive (overwrites the
+    // other writer's edits) and the modal exists precisely to make that
+    // choice explicit — auto-focusing the danger button would let a
+    // reflexive Enter-press silently overwrite work. Reload preserves
+    // the on-disk content; the user can still tab to Force.
+    reloadBtn.focus();
 
     function cleanup(choice) {
       hide(modal);
@@ -633,7 +638,14 @@ function _ctxRenderConflictBanner(detailEl, userBuffer, freshContent) {
   banner.hidden = false;
 }
 
-async function _ctxHandleConflict(type, name, userBuffer, detailEl, headers) {
+async function _ctxHandleConflict(type, name, userBuffer, staleMtimeNs, detailEl, headers) {
+  // ``staleMtimeNs`` is the mtime_ns the user's first Save was already
+  // racing against — i.e. what they thought disk was. We thread it
+  // through to the force PUT body so the server-side WARNING log
+  // captures distinct ``client_mtime_ns`` / ``server_mtime_ns`` values;
+  // sending ``fresh.mtime_ns`` would make the two values nearly equal
+  // and defeat the audit trail's "what was being overridden" purpose.
+  //
   // Stash early so the buffer survives an Escape-out / tab close.
   _ctxStashDraft(type, name, userBuffer);
   const fresh = await _ctxFetchFresh(type, name);
@@ -658,7 +670,7 @@ async function _ctxHandleConflict(type, name, userBuffer, detailEl, headers) {
       const r2 = await fetch(`/api/context/${type}/${encodeURIComponent(name)}`, {
         method: 'PUT',
         headers,
-        body: JSON.stringify({ content: userBuffer, mtime_ns: fresh.mtime_ns, force: true }),
+        body: JSON.stringify({ content: userBuffer, mtime_ns: staleMtimeNs, force: true }),
       });
       if (!r2.ok) {
         const err = await r2.json().catch(() => ({}));
@@ -831,7 +843,7 @@ async function loadCtxDetail(type, name, opts = {}) {
           body: JSON.stringify({ content, mtime_ns }),
         });
         if (r.status === 409) {
-          await _ctxHandleConflict(type, name, content, detailEl, headers);
+          await _ctxHandleConflict(type, name, content, mtime_ns, detailEl, headers);
           return;
         }
         if (!r.ok) {
