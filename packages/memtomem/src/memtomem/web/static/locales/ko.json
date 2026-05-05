@@ -341,7 +341,7 @@
   "settings.ctx.diff_view": "비교",
   "settings.ctx.field_map": "필드 맵",
   "settings.ctx.auxiliary_files": "보조 파일",
-  "settings.ctx.overview_desc": "memtomem 의 스킬·슬래시 명령어·서브에이전트·훅을 Claude Code, Codex 등 에이전트 런타임으로 동기화합니다.",
+  "settings.ctx.overview_desc": "memtomem 의 스킬·서브에이전트·훅을 Claude Code, Codex 등 에이전트 런타임으로 동기화합니다.",
   "settings.ctx.detect_tooltip": "감지된 Claude Code · Codex 런타임 상태를 새로고침합니다",
   "settings.ctx.detect_aria": "감지된 런타임 상태 새로고침",
   "settings.ctx.sync_all_tooltip": "memtomem 정본 아티팩트를 감지된 모든 런타임으로 push 합니다",

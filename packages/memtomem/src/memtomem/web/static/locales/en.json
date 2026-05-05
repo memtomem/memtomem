@@ -341,7 +341,7 @@
   "settings.ctx.diff_view": "Diff",
   "settings.ctx.field_map": "Field Map",
   "settings.ctx.auxiliary_files": "Auxiliary files",
-  "settings.ctx.overview_desc": "Sync memtomem Skills, Slash Commands, Subagents, and Hooks to Claude Code, Codex, and other agent runtimes.",
+  "settings.ctx.overview_desc": "Sync memtomem Skills, Subagents, and Hooks to Claude Code, Codex, and other agent runtimes.",
   "settings.ctx.detect_tooltip": "Refresh detected Claude Code / Codex runtime status",
   "settings.ctx.detect_aria": "Refresh detected runtime status",
   "settings.ctx.sync_all_tooltip": "Push canonical memtomem artifacts to all detected runtimes",
