@@ -919,14 +919,12 @@ class SqliteBackend(
         return int(row[0]) if row else 0
 
     async def list_chunks_by_tag(self, tag: str, limit: int = 10) -> list[Chunk]:
-        db = self._get_read_db()
-        rows = db.execute(
-            "SELECT * FROM chunks WHERE EXISTS "
-            "(SELECT 1 FROM json_each(chunks.tags) WHERE value = ?) "
-            "ORDER BY created_at DESC LIMIT ?",
-            (tag, limit),
-        ).fetchall()
-        return [self._row_to_chunk(row) for row in rows]
+        # Thin wrapper over ``recall_chunks(tag_filter=...)`` — the post-fusion
+        # tag-filter path (#750) already implements the json_each EXISTS match
+        # and ORDER BY created_at DESC LIMIT shape this helper needs. Keeping
+        # the SQL in one place means the dry-run sample path inherits any
+        # future correctness fixes for free.
+        return await self.recall_chunks(tag_filter=tag, limit=limit)
 
     async def count_chunks_by_tag(self, tag: str) -> int:
         db = self._get_read_db()

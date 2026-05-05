@@ -317,7 +317,7 @@ async def auto_tag_storage(
         are also returned in ``samples`` for UI preview (cheap to capture
         because the keyword/LLM extraction has already run by then).
     """
-    from memtomem.models import Chunk, ChunkMetadata
+    from memtomem.models import Chunk
 
     sources = await storage.get_all_source_files()
     if source_filter:
@@ -355,15 +355,22 @@ async def auto_tag_storage(
                 continue
 
             if not dry_run:
-                new_meta = ChunkMetadata(
-                    source_file=chunk.metadata.source_file,
-                    heading_hierarchy=chunk.metadata.heading_hierarchy,
-                    chunk_type=chunk.metadata.chunk_type,
-                    start_line=chunk.metadata.start_line,
-                    end_line=chunk.metadata.end_line,
-                    language=chunk.metadata.language,
-                    tags=tuple(new_tags),
-                    namespace=chunk.metadata.namespace,
+                # Copy-with-override: spread every existing metadata field
+                # then replace only ``tags``. The previous explicit-list
+                # shape silently dropped any field not enumerated here —
+                # including ``overlap_before/after``, ``parent_context``,
+                # ``file_context``, and the temporal-validity columns
+                # (``valid_from_unix`` / ``valid_to_unix``). Mirrors the
+                # pattern already used by ``web/routes/chunks.py``
+                # (``update_chunk_tags``) and the mm CLI ``add`` command.
+                new_meta = chunk.metadata.__class__(
+                    **{
+                        **{
+                            f: getattr(chunk.metadata, f)
+                            for f in chunk.metadata.__dataclass_fields__
+                        },
+                        "tags": tuple(new_tags),
+                    }
                 )
                 updated = Chunk(
                     content=chunk.content,

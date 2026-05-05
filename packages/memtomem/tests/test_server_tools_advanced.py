@@ -844,6 +844,45 @@ class TestAutoTag:
         assert a_chunks[0].metadata.tags  # tagged
         assert b_chunks[0].metadata.tags == ()  # untouched
 
+    async def test_auto_tag_storage_preserves_full_metadata(self, storage):
+        """Regression: auto_tag_storage must not silently drop metadata
+        fields when rebuilding ChunkMetadata around the new tags.
+
+        The previous explicit-field reconstruction listed only 8 fields
+        and dropped overlap_before/after, valid_from_unix/to_unix, and
+        any future ChunkMetadata field. Mirrors the spread pattern
+        already in web/routes/chunks.py:update_chunk_tags.
+        """
+        from memtomem.models import Chunk, ChunkMetadata
+
+        chunk = Chunk(
+            content="Python data science framework",
+            metadata=ChunkMetadata(
+                source_file=Path("/tmp/preserve.md"),
+                start_line=10,
+                end_line=20,
+                namespace="default",
+                overlap_before=5,
+                overlap_after=3,
+                valid_from_unix=1_234_567_890,
+                valid_to_unix=9_999_999_999,
+            ),
+            embedding=[0.1] * 1024,
+        )
+        await storage.upsert_chunks([chunk])
+
+        stats = await auto_tag_storage(storage, overwrite=True)
+        assert stats.tagged_chunks == 1
+
+        reloaded = await storage.list_chunks_by_source(Path("/tmp/preserve.md"))
+        assert len(reloaded) == 1
+        meta = reloaded[0].metadata
+        assert meta.tags  # tagging happened
+        assert meta.overlap_before == 5
+        assert meta.overlap_after == 3
+        assert meta.valid_from_unix == 1_234_567_890
+        assert meta.valid_to_unix == 9_999_999_999
+
 
 # ===================================================================
 # Dedup (DedupScanner) - basic exact duplicate detection
