@@ -23,6 +23,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **Context Gateway editor surfaces a 3-button conflict dialog on 409
+  mtime mismatch instead of silently discarding the user's edits
+  (closes #763).** Previously `PUT /api/context/{type}/{name}` returning
+  409 (`status: aborted`, mismatched `mtime_ns`) reduced to a single
+  toast (`settings.ctx.mtime_conflict`) followed by a quiet
+  `loadCtxDetail` that overwrote whatever the user had typed. With
+  parallel sessions and the RFC-761 Settings prod expansion bringing
+  more concurrent writers, that default destroyed work whose only sin
+  was racing another editor. The save handler now opens
+  `#ctx-conflict-modal` with side-by-side previews (user buffer vs the
+  freshly-fetched on-disk content) and three explicit choices:
+  *Reload* (discard buffer, refresh detail), *Open diff editor*
+  (renders the user-buffer-vs-on-disk LCS diff inline above the
+  textarea so the user can hand-merge — `mtime_ns` is bumped to the
+  freshly-read value so the next Save no longer 409s), or
+  *Force save* (re-PUTs with the new opt-in `force: true` body field).
+  The buffer is stashed in `sessionStorage` on every 409 entry so an
+  Escape-out / accidental tab close does not destroy work — the next
+  mount of the same `(type, name)` rehydrates the textarea and shows
+  a `conflict_draft_restored` info toast. Backend: each of the three
+  PUT routes (`context_skills`, `context_agents`, `context_commands`)
+  gains a `force: bool = False` field on the Pydantic update model;
+  when `force=True` the mtime guard is bypassed and the bypass is
+  logged at `WARNING` with the path plus both client and server
+  `mtime_ns` values for an audit trail. The 409 response shape itself
+  is unchanged (RFC-761 PR-2 / #770 just pinned it). The legacy
+  `settings.ctx.mtime_conflict` i18n key is no longer used by code
+  but kept for one release as a deprecated alias to avoid churn for
+  downstream translators.
+
 - **Tag pill clicks no longer overwrite the search query (closes #672).**
   Clicking a tag in the Tags Cloud or List view now sets only `tag-filter`,
   leaving any text already in `search-input` intact. Previously

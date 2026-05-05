@@ -174,6 +174,11 @@ class SkillUpdateRequest(BaseModel):
     content: str
     # mtime_ns is transported as a string (JS bigint-unsafe); parsed to int in handler.
     mtime_ns: str
+    # Bypass the mtime guard. The Web UI sets this only after the user
+    # explicitly chose "Force save" in the conflict resolution dialog
+    # (see issue #763); every force-save emits a WARNING with both mtime
+    # values for the audit trail.
+    force: bool = False
 
 
 @router.put("/context/skills/{name}")
@@ -198,13 +203,23 @@ async def update_skill(
             async with _gateway_lock:
                 current_mtime_ns = manifest.stat().st_mtime_ns
                 if current_mtime_ns != body_mtime_ns:
-                    return JSONResponse(
-                        status_code=409,
-                        content={
-                            "status": "aborted",
-                            "reason": ("File was modified by another process. Reload and retry."),
-                            "mtime_ns": str(current_mtime_ns),
-                        },
+                    if not body.force:
+                        return JSONResponse(
+                            status_code=409,
+                            content={
+                                "status": "aborted",
+                                "reason": (
+                                    "File was modified by another process. Reload and retry."
+                                ),
+                                "mtime_ns": str(current_mtime_ns),
+                            },
+                        )
+                    logger.warning(
+                        "force-save bypassed mtime check on %s "
+                        "(client_mtime_ns=%s server_mtime_ns=%s)",
+                        manifest,
+                        body_mtime_ns,
+                        current_mtime_ns,
                     )
                 atomic_write_text(manifest, body.content)
                 new_mtime_ns = manifest.stat().st_mtime_ns

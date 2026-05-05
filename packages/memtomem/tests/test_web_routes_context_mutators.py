@@ -18,6 +18,7 @@ The matrix runs each test across agents / commands / skills via
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -423,6 +424,84 @@ async def test_PUT_concurrent_one_succeeds_other_409s(
 
     s1, s2 = await asyncio.gather(do_put("A"), do_put("B"))
     assert sorted([s1, s2]) == [200, 409], (adapter["type"], s1, s2)
+
+
+# ---------------------------------------------------------------------------
+# PUT force-save (issue #763) — bypass mtime guard after explicit user choice
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("adapter", TYPE_MATRIX)
+@pytest.mark.anyio
+async def test_PUT_force_bypasses_mtime_check(
+    adapter: dict,
+    client: AsyncClient,
+    gateway_root: Path,
+):
+    """``force: true`` accepts the write even when the server's mtime_ns
+    differs from the client's — the audit-trail comes from the WARNING log
+    (covered separately), not from rejecting the write."""
+    manifest = adapter["make_canonical"](gateway_root, "force-ok")
+    r = await client.put(
+        adapter["detail"]("force-ok"),
+        json={"content": "FORCED\n", "mtime_ns": "0", "force": True},
+    )
+    assert r.status_code == 200, r.text
+    assert manifest.read_text(encoding="utf-8") == "FORCED\n"
+    body = r.json()
+    assert body["name"] == "force-ok"
+    assert int(body["mtime_ns"]) > 0
+
+
+@pytest.mark.parametrize("adapter", TYPE_MATRIX)
+@pytest.mark.anyio
+async def test_PUT_force_logs_warning_with_both_mtimes(
+    adapter: dict,
+    client: AsyncClient,
+    gateway_root: Path,
+    caplog: pytest.LogCaptureFixture,
+):
+    """The audit-trail for force-save is the server log: every bypass emits
+    a WARNING containing the path plus *both* mtime values so the override
+    is reconstructable from logs alone."""
+    manifest = adapter["make_canonical"](gateway_root, "force-log")
+    server_mtime_ns = manifest.stat().st_mtime_ns
+
+    with caplog.at_level(logging.WARNING):
+        r = await client.put(
+            adapter["detail"]("force-log"),
+            json={"content": "X\n", "mtime_ns": "0", "force": True},
+        )
+    assert r.status_code == 200, r.text
+
+    bypass_records = [rec for rec in caplog.records if "force-save bypassed" in rec.getMessage()]
+    assert bypass_records, caplog.text
+    msg = bypass_records[-1].getMessage()
+    assert str(manifest) in msg
+    assert "client_mtime_ns=0" in msg
+    assert f"server_mtime_ns={server_mtime_ns}" in msg
+
+
+@pytest.mark.parametrize("adapter", TYPE_MATRIX)
+@pytest.mark.anyio
+async def test_PUT_force_default_false_still_409s(
+    adapter: dict,
+    client: AsyncClient,
+    gateway_root: Path,
+):
+    """Pin: the ``force`` field defaults to ``False``. A body that explicitly
+    sets ``force: false`` (or omits the field — covered by
+    ``test_PUT_stale_mtime_ns_rejected``) must still 409 on stale mtime, so
+    the override remains opt-in. Symmetric pair to
+    ``test_PUT_force_bypasses_mtime_check``."""
+    adapter["make_canonical"](gateway_root, "force-default-off")
+    r = await client.put(
+        adapter["detail"]("force-default-off"),
+        json={"content": "X", "mtime_ns": "0", "force": False},
+    )
+    assert r.status_code == 409
+    body = r.json()
+    assert body["status"] == "aborted"
 
 
 # ---------------------------------------------------------------------------

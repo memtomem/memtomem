@@ -1,8 +1,8 @@
 /**
  * Context Gateway — Skills / Commands / Agents CRUD, diff, sync, import.
  *
- * Depends on globals from app.js: qs, escapeHtml, t, showConfirm, showToast,
- * panelLoading, btnLoading, emptyState, diffLines, renderDiff,
+ * Depends on globals from app.js: qs, show, hide, escapeHtml, t, showConfirm,
+ * showToast, panelLoading, btnLoading, emptyState, diffLines, renderDiff,
  * switchSettingsSection.  Loaded AFTER app.js in index.html.
  */
 
@@ -538,6 +538,149 @@ async function loadCtxList(type) {
   }
 }
 
+// -- 409 mtime conflict resolution (issue #763) -------------------------------
+//
+// When PUT /context/{type}/{name} returns 409 the user has unsaved edits and
+// the on-disk file changed underneath them. Silent reload would discard the
+// buffer; instead we open a dialog with three explicit choices:
+//
+//   * Reload  — discard buffer, fetch fresh, drop draft.
+//   * Open diff editor — render user-buffer-vs-on-disk diff inline above the
+//     textarea so the user can hand-merge; keep the buffer hot, refresh
+//     mtime_ns to the freshly-read value so the next Save no longer 409s.
+//   * Force save — re-PUT with ``force: true``; backend logs WARNING with
+//     both mtime values for the audit trail.
+//
+// The buffer is stashed in sessionStorage on every 409 entry so that
+// closing the dialog (Escape / backdrop / accidental tab close) does not
+// destroy work — the next mount of the same detail rehydrates it.
+
+function _ctxStashKey(type, name) {
+  return `m2m-ctx-conflict-buffer:${type}:${encodeURIComponent(name)}`;
+}
+function _ctxStashDraft(type, name, content) {
+  try { sessionStorage.setItem(_ctxStashKey(type, name), content); } catch (_e) { /* quota / private mode */ }
+}
+function _ctxRestoreDraft(type, name) {
+  try { return sessionStorage.getItem(_ctxStashKey(type, name)); } catch (_e) { return null; }
+}
+function _ctxClearDraft(type, name) {
+  try { sessionStorage.removeItem(_ctxStashKey(type, name)); } catch (_e) { /* */ }
+}
+
+async function _ctxFetchFresh(type, name) {
+  // Returns ``{content, mtime_ns}`` from the canonical detail GET, or null
+  // on transport / decode failure (toast already shown).
+  try {
+    const res = await fetch(`/api/context/${type}/${encodeURIComponent(name)}`);
+    if (!res.ok) {
+      showToast(t('toast.request_failed'), 'error');
+      return null;
+    }
+    const data = await res.json();
+    return { content: data.content || '', mtime_ns: data.mtime_ns || '' };
+  } catch (err) {
+    showToast(t('toast.request_failed'), 'error');
+    return null;
+  }
+}
+
+function _ctxResolveConflict(userBuffer, freshContent) {
+  // Opens the 3-button modal and resolves to 'reload' | 'force' | 'diff'
+  // — or null if dismissed via Escape / backdrop click.
+  return new Promise(resolve => {
+    const modal = qs('ctx-conflict-modal');
+    qs('ctx-conflict-yours').textContent = userBuffer;
+    qs('ctx-conflict-theirs').textContent = freshContent;
+    const reloadBtn = qs('ctx-conflict-reload-btn');
+    const diffBtn = qs('ctx-conflict-diff-btn');
+    const forceBtn = qs('ctx-conflict-force-btn');
+    show(modal);
+    forceBtn.focus();
+
+    function cleanup(choice) {
+      hide(modal);
+      modal.removeEventListener('click', onBackdrop);
+      document.removeEventListener('keydown', onKey, true);
+      reloadBtn.onclick = null;
+      diffBtn.onclick = null;
+      forceBtn.onclick = null;
+      resolve(choice);
+    }
+    function onBackdrop(e) { if (e.target === modal) cleanup(null); }
+    function onKey(e) {
+      if (e.key === 'Escape') { e.stopPropagation(); cleanup(null); }
+    }
+    modal.addEventListener('click', onBackdrop);
+    document.addEventListener('keydown', onKey, true);
+    reloadBtn.onclick = () => cleanup('reload');
+    diffBtn.onclick = () => cleanup('diff');
+    forceBtn.onclick = () => cleanup('force');
+  });
+}
+
+function _ctxRenderConflictBanner(detailEl, userBuffer, freshContent) {
+  // Inline diff inside the edit pane, above the textarea. Diff orientation
+  // is on-disk → user-buffer so '+' lines are the user's edits and '-'
+  // lines are what the user is about to overwrite — matches the "your
+  // edits over what's there" mental model.
+  const banner = detailEl.querySelector('.ctx-conflict-banner');
+  if (!banner) return;
+  const heading = `${escapeHtml(t('settings.ctx.conflict_your_edits'))} ↔ ${escapeHtml(t('settings.ctx.conflict_on_disk'))}`;
+  const ops = diffLines(freshContent, userBuffer);
+  banner.innerHTML = `<div class="text-muted" style="margin-bottom:6px;font-size:0.78rem">${heading}</div>`
+    + `<div class="diff-view" style="max-height:200px;overflow:auto;margin-bottom:8px">${renderDiff(ops)}</div>`;
+  banner.hidden = false;
+}
+
+async function _ctxHandleConflict(type, name, userBuffer, detailEl, headers) {
+  // Stash early so the buffer survives an Escape-out / tab close.
+  _ctxStashDraft(type, name, userBuffer);
+  const fresh = await _ctxFetchFresh(type, name);
+  if (fresh == null) return;
+  const choice = await _ctxResolveConflict(userBuffer, fresh.content);
+  if (choice === 'reload') {
+    _ctxClearDraft(type, name);
+    loadCtxDetail(type, name);
+    return;
+  }
+  if (choice === 'diff') {
+    // Refresh mtime_ns to the freshly-read value so the user's next Save
+    // is comparing against a version we *know* is current. The buffer
+    // remains in the textarea; clear-on-success / clear-on-cancel happen
+    // in the regular save / cancel handlers.
+    detailEl.dataset.mtimeNs = fresh.mtime_ns;
+    _ctxRenderConflictBanner(detailEl, userBuffer, fresh.content);
+    return;
+  }
+  if (choice === 'force') {
+    try {
+      const r2 = await fetch(`/api/context/${type}/${encodeURIComponent(name)}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ content: userBuffer, mtime_ns: fresh.mtime_ns, force: true }),
+      });
+      if (!r2.ok) {
+        const err = await r2.json().catch(() => ({}));
+        showToast(err.detail || t('toast.request_failed'), 'error');
+        return;
+      }
+      const result = await r2.json();
+      if (result.name) {
+        showToast(t('settings.ctx.conflict_force_done'), 'warning');
+        detailEl.dataset.mtimeNs = result.mtime_ns || '';
+        _ctxClearDraft(type, name);
+        loadCtxDetail(type, name);
+      }
+    } catch (err) {
+      showToast(t('toast.save_failed', { error: err.message }), 'error');
+    }
+    return;
+  }
+  // ``null`` (Escape / backdrop) — leave detail as-is, draft stays
+  // stashed so a later refresh / re-mount can rehydrate.
+}
+
 // -- Detail -------------------------------------------------------------------
 
 async function loadCtxDetail(type, name, opts = {}) {
@@ -591,7 +734,12 @@ async function loadCtxDetail(type, name, opts = {}) {
 
     html += '<div class="ctx-detail-pane" id="ctx-pane-diff"><div class="text-muted">Click Diff tab to load...</div></div>';
 
+    // ``ctx-conflict-banner`` stays hidden in the normal edit flow. When a
+    // 409 reaches the dialog and the user picks "Open diff editor", we
+    // render the user-buffer-vs-on-disk diff into this banner above the
+    // textarea so they can hand-merge with both sides visible (issue #763).
     html += `<div id="ctx-pane-edit" hidden>
+      <div class="ctx-conflict-banner" hidden></div>
       <textarea class="ctx-edit-area" id="ctx-edit-content">${escapeHtml(data.content || '')}</textarea>
       <div class="ctx-edit-actions">
         <button class="btn-ghost ctx-edit-cancel">${t('settings.ctx.cancel')}</button>
@@ -603,6 +751,22 @@ async function loadCtxDetail(type, name, opts = {}) {
     detailEl.innerHTML = html;
     // mtime_ns is a string (JS Number can't safely represent ns epochs).
     detailEl.dataset.mtimeNs = data.mtime_ns || '';
+
+    // Draft restore (issue #763): if the user closed a conflict modal
+    // without resolving (Escape / backdrop / tab close-and-reopen) their
+    // unsaved buffer is in sessionStorage. Rehydrate the textarea, open
+    // the edit pane, and toast so they know we kept their work.
+    const stashed = _ctxRestoreDraft(type, name);
+    if (stashed != null) {
+      const ta = detailEl.querySelector('#ctx-edit-content');
+      if (ta) ta.value = stashed;
+      const canonPane = detailEl.querySelector('#ctx-pane-canonical');
+      const editPane = detailEl.querySelector('#ctx-pane-edit');
+      if (canonPane) canonPane.hidden = true;
+      if (editPane) editPane.hidden = false;
+      detailEl.querySelectorAll('.ctx-detail-tab').forEach(tab => { tab.style.display = 'none'; });
+      showToast(t('settings.ctx.conflict_draft_restored'), 'info');
+    }
 
     // Tab switching
     detailEl.querySelectorAll('.ctx-detail-tab').forEach(tab => {
@@ -641,9 +805,16 @@ async function loadCtxDetail(type, name, opts = {}) {
       if (canonPane) canonPane.hidden = false;
       if (editPane) editPane.hidden = true;
       detailEl.querySelectorAll('.ctx-detail-tab').forEach(t => t.style.display = '');
+      // Cancel resolves any pending conflict-diff state by discarding the
+      // user's buffer — same intent as "Reload" in the dialog. Clear both
+      // the inline banner and the sessionStorage stash so a later detail
+      // mount doesn't re-restore a draft the user just walked away from.
+      const banner = detailEl.querySelector('.ctx-conflict-banner');
+      if (banner) { banner.hidden = true; banner.innerHTML = ''; }
+      _ctxClearDraft(type, name);
     });
 
-    // Save
+    // Save (issue #763: 409 opens conflict dialog instead of silent reload).
     detailEl.querySelector('.ctx-edit-save')?.addEventListener('click', async () => {
       const btn = detailEl.querySelector('.ctx-edit-save');
       const content = detailEl.querySelector('#ctx-edit-content').value;
@@ -660,8 +831,7 @@ async function loadCtxDetail(type, name, opts = {}) {
           body: JSON.stringify({ content, mtime_ns }),
         });
         if (r.status === 409) {
-          showToast(t('settings.ctx.mtime_conflict'), 'warning');
-          loadCtxDetail(type, name);
+          await _ctxHandleConflict(type, name, content, detailEl, headers);
           return;
         }
         if (!r.ok) {
@@ -673,6 +843,8 @@ async function loadCtxDetail(type, name, opts = {}) {
         if (result.name) {
           showToast(t('settings.ctx.save_success').replace('{name}', name));
           detailEl.dataset.mtimeNs = result.mtime_ns || '';
+          // Clear any stashed draft now that the buffer is durable on disk.
+          _ctxClearDraft(type, name);
           loadCtxDetail(type, name);
         }
       } catch (err) {
