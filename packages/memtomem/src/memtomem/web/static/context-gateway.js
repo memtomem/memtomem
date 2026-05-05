@@ -233,23 +233,33 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     // entries. Promoted from dev-only via RFC #761 (ADR-0001 §5 criteria
     // + HTTP-layer test fixtures).
     //
-    // The route returns HTTP 200 even when host-write targets need user
-    // confirmation — each per-result entry carries its own ``status``
-    // (``needs_confirmation`` for ``~/.claude/settings.json`` when the
-    // body's ``allow_host_writes`` defaults to false, which is the case
-    // for Sync All — the dedicated Settings panel owns the confirmation
-    // flow). ``resp.ok`` alone would let that pass as a full success and
-    // the ``sync_success`` toast would lie about a merge that never
-    // happened. Inspect the body and surface partial-success with a
-    // one-tap navigation to the Settings panel where the user can drive
-    // the host-write confirmation. (#774)
+    // The route returns HTTP 200 even when individual generators fail —
+    // each per-result entry carries its own ``status`` (one of ``ok`` /
+    // ``skipped`` / ``error`` / ``needs_confirmation`` / ``aborted``,
+    // see ``generate_all_settings``). ``resp.ok`` alone would let any
+    // non-``ok`` result pass as a full success and the ``sync_success``
+    // toast would lie about a merge that never happened. Inspect the
+    // body and surface the most severe per-result status with the
+    // matching toast class. Severity order matches the user-facing
+    // signal from the dedicated Settings panel:
+    //
+    //   error              → error toast with reason   (#799)
+    //   aborted            → mtime_conflict warning    (#799)
+    //   needs_confirmation → info partial + Open Settings action (#774)
+    //   all ok / skipped   → sync_success
     const settingsResp = await fetch('/api/context/settings/sync', { method: 'POST', headers });
     if (!settingsResp.ok) throw new Error('Settings sync failed');
     const settingsData = await settingsResp.json().catch(() => ({}));
-    const needsConfirmation = (settingsData.results || []).some(
-      r => r && r.status === 'needs_confirmation',
-    );
-    if (needsConfirmation) {
+    const settingsResults = settingsData.results || [];
+    const firstWithStatus = (s) => settingsResults.find(r => r && r.status === s);
+    const errored = firstWithStatus('error');
+    const aborted = firstWithStatus('aborted');
+    const needsConfirmation = firstWithStatus('needs_confirmation');
+    if (errored) {
+      showToast(t('toast.sync_failed', { error: errored.reason || '' }), 'error');
+    } else if (aborted) {
+      showToast(t('settings.ctx.mtime_conflict'), 'warning');
+    } else if (needsConfirmation) {
       showToast(
         t('toast.sync_partial_settings_needs_confirmation'),
         'info',

@@ -431,6 +431,56 @@ class TestNoHardcodedStrings:
             "every Sync All would now toast partial-success (#774)"
         )
 
+    def test_issue_799_sync_all_status_coverage(self) -> None:
+        """Sync All must classify *every* non-``ok`` per-result status (#799).
+
+        ``generate_all_settings`` returns one of five statuses per generator:
+        ``ok`` / ``skipped`` / ``error`` / ``needs_confirmation`` / ``aborted``
+        (see ``packages/memtomem/src/memtomem/context/settings.py``). #774
+        added a branch for ``needs_confirmation`` only, leaving ``error``
+        and ``aborted`` to fall through to the unconditional success
+        toast — the same class of "resp.ok hides per-result failure" bug
+        the parent issue closed for the host-write case. #799 widens the
+        Sync All handler to surface ``error`` (error toast) and
+        ``aborted`` (mtime_conflict warning) in their own classes.
+
+        Symmetric pin per ``feedback_pin_invert_symmetric_assertion.md``:
+        positive markers for each new branch + inverted assertion that
+        the unconditional ``sync_success`` path is no longer reachable
+        for ``error`` / ``aborted`` results. The pre-#799 shape only
+        named ``'needs_confirmation'`` literal in the handler — pinning
+        both ``'error'`` and ``'aborted'`` literals catches a regression
+        that drops one branch back into the success fallthrough.
+        """
+        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        # Both new statuses are inspected.
+        assert "'error'" in text and "firstWithStatus('error')" in text, (
+            "context-gateway.js Sync All must classify ``status === 'error'`` "
+            "as an error toast (#799)"
+        )
+        assert "firstWithStatus('aborted')" in text, (
+            "context-gateway.js Sync All must classify ``status === 'aborted'`` "
+            "as an mtime_conflict warning (#799)"
+        )
+        # Reuses existing toast keys rather than introducing duplicates —
+        # the per-target Sync flow already surfaces these classes the
+        # same way.
+        assert "t('toast.sync_failed'" in text, (
+            "context-gateway.js Sync All ``error`` branch must reuse ``toast.sync_failed`` (#799)"
+        )
+        assert "t('settings.ctx.mtime_conflict')" in text, (
+            "context-gateway.js Sync All ``aborted`` branch must reuse "
+            "``settings.ctx.mtime_conflict`` (#799)"
+        )
+        # Inverted pin: the success fallthrough must remain reachable —
+        # only for the all-``ok``/``skipped`` case. ``test_issue_774_*``
+        # already pins the literal; this assertion guards a regression
+        # that *removes* the else branch in the new severity ladder.
+        assert "showToast(t('settings.ctx.sync_success'))" in text, (
+            "context-gateway.js Sync All lost its success fallthrough — "
+            "the new severity ladder collapsed to a single branch (#799)"
+        )
+
     def test_issue_698_new_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
         """Locale keys introduced for #698 must exist in both files. The
         existing ``test_placeholder_parity`` will catch ``{count}`` /

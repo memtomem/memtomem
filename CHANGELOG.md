@@ -67,6 +67,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Sync All classifies every non-`ok` Settings status, not just
+  `needs_confirmation` (closes #799).** `generate_all_settings` returns
+  one of five per-result statuses — `ok` / `skipped` / `error` /
+  `needs_confirmation` / `aborted`. #774 (PR #798) added a branch for
+  `needs_confirmation` only, so an `error` (canonical or target file
+  malformed JSON) or `aborted` (concurrent-write mtime conflict) result
+  still toasted `sync_success` even though the merge never landed —
+  the same class of "resp.ok hides per-result failure" bug, just with
+  different status values. Sync All now surfaces `error` as an
+  error-level toast carrying the route's `reason` and `aborted` as a
+  warning-level `mtime_conflict` toast — both reusing the same i18n
+  keys the per-target Sync flow already uses, so no new strings to
+  translate. Severity ladder: `error` > `aborted` >
+  `needs_confirmation` > all-`ok`/`skipped` (success). The Settings
+  panel's `Sync Now` host-write confirmation flow stays out of scope
+  per #774.
+
 - **Sync All no longer lies when Settings host writes need confirmation
   (closes #774).** The Context Gateway "Sync All" button posts to four
   endpoints sequentially; the Settings hop's `POST /api/context/settings/sync`
