@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -9,9 +10,22 @@ from fastapi import APIRouter, Depends
 
 from memtomem.web.deps import get_project_root
 
+try:
+    import tomllib
+except ImportError:  # pragma: no cover — py<3.11 fallback, repo targets py312
+    tomllib = None  # type: ignore[assignment]
+
+try:
+    import yaml  # type: ignore[import-untyped]
+except ImportError:  # pragma: no cover — PyYAML may be absent on minimal installs
+    yaml = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["context-gateway"])
+
+_HOME = str(Path.home())
+_ERROR_MESSAGE_LIMIT = 200
 
 
 def _count_statuses(triples: list[tuple[str, str, str]]) -> dict:
@@ -23,6 +37,54 @@ def _count_statuses(triples: list[tuple[str, str, str]]) -> dict:
         key = status.replace(" ", "_")
         counts[key] = counts.get(key, 0) + 1
     return {"total": len(names), **counts}
+
+
+def _classify_exception(exc: BaseException) -> str:
+    """Map an exception to one of {parse, permission, missing, internal}.
+
+    Order matters: ``PermissionError`` and ``FileNotFoundError`` are both
+    ``OSError`` subclasses, so they must be checked before bare ``OSError``.
+    Generic ``OSError`` is ``internal`` rather than ``permission``/``missing``
+    because ``errno`` may be ``EIO``/``EMFILE``/``ELOOP`` etc.
+    """
+    if isinstance(exc, PermissionError):
+        return "permission"
+    if isinstance(exc, (FileNotFoundError, NotADirectoryError, IsADirectoryError)):
+        return "missing"
+    if isinstance(exc, ModuleNotFoundError):
+        return "missing"
+    if isinstance(exc, UnicodeDecodeError):
+        return "parse"
+    if isinstance(exc, json.JSONDecodeError):
+        return "parse"
+    if tomllib is not None and isinstance(exc, tomllib.TOMLDecodeError):
+        return "parse"
+    if yaml is not None and isinstance(exc, yaml.YAMLError):
+        return "parse"
+    return "internal"
+
+
+def _redact_message(message: str) -> str:
+    """Collapse ``$HOME`` to ``~`` and truncate to ``_ERROR_MESSAGE_LIMIT``."""
+    redacted = message.replace(_HOME, "~") if _HOME else message
+    if len(redacted) > _ERROR_MESSAGE_LIMIT:
+        redacted = redacted[:_ERROR_MESSAGE_LIMIT]
+    return redacted
+
+
+def _error_payload(exc: BaseException, *, shape: str = "total") -> dict:
+    """Build the per-surface error envelope.
+
+    ``shape="total"`` matches skills/commands/agents (count-based summary).
+    ``shape="status"`` matches settings (status-based summary).
+    ``error: True`` and ``total: 0`` are preserved for backwards compatibility
+    so existing front-end and external callers keep working.
+    """
+    kind = _classify_exception(exc)
+    message = _redact_message(str(exc))
+    if shape == "status":
+        return {"status": "error", "error_kind": kind, "error_message": message}
+    return {"total": 0, "error": True, "error_kind": kind, "error_message": message}
 
 
 @router.get("/context/overview")
@@ -39,21 +101,21 @@ async def context_overview(
 
     try:
         result["skills"] = _count_statuses(diff_skills(project_root))
-    except Exception:
+    except Exception as exc:
         logger.exception("diff_skills failed")
-        result["skills"] = {"total": 0, "error": True}
+        result["skills"] = _error_payload(exc, shape="total")
 
     try:
         result["commands"] = _count_statuses(diff_commands(project_root))
-    except Exception:
+    except Exception as exc:
         logger.exception("diff_commands failed")
-        result["commands"] = {"total": 0, "error": True}
+        result["commands"] = _error_payload(exc, shape="total")
 
     try:
         result["agents"] = _count_statuses(diff_agents(project_root))
-    except Exception:
+    except Exception as exc:
         logger.exception("diff_agents failed")
-        result["agents"] = {"total": 0, "error": True}
+        result["agents"] = _error_payload(exc, shape="total")
 
     try:
         settings_diff = diff_settings(project_root)
@@ -61,11 +123,13 @@ async def context_overview(
         if all(s in ("in sync", "skipped") for s in statuses):
             result["settings"] = {"status": "in_sync"}
         elif any(s == "error" for s in statuses):
+            # In-band error: per-file failure already classified by diff_settings.
+            # No error_kind here — adding one would conflate distinct per-file causes.
             result["settings"] = {"status": "error"}
         else:
             result["settings"] = {"status": "out_of_sync"}
-    except Exception:
+    except Exception as exc:
         logger.exception("diff_settings failed")
-        result["settings"] = {"status": "error"}
+        result["settings"] = _error_payload(exc, shape="status")
 
     return result

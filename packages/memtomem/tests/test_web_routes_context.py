@@ -86,6 +86,155 @@ class TestOverview:
 
 
 # ---------------------------------------------------------------------------
+# Overview — error taxonomy (issue #762)
+# ---------------------------------------------------------------------------
+
+
+def _raises(exc: BaseException):
+    """Return a callable that raises ``exc`` when invoked."""
+
+    def _fn(*_args, **_kwargs):
+        raise exc
+
+    return _fn
+
+
+class TestContextOverviewErrorTaxonomy:
+    """Pin the {parse, permission, missing, internal} classification.
+
+    Patches the source modules (``memtomem.context.skills.diff_skills`` etc.)
+    rather than the route-local re-imports — the route does function-level
+    ``from ... import ...`` so the lookup hits the patched module attribute.
+    """
+
+    @pytest.mark.anyio
+    async def test_skills_permission_error_classified_as_permission(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(
+            "memtomem.context.skills.diff_skills",
+            _raises(PermissionError("denied")),
+        )
+        r = await client.get("/api/context/overview")
+        assert r.status_code == 200
+        skills = r.json()["skills"]
+        assert skills["error"] is True
+        assert skills["total"] == 0
+        assert skills["error_kind"] == "permission"
+        assert "denied" in skills["error_message"]
+
+    @pytest.mark.anyio
+    async def test_commands_file_not_found_classified_as_missing(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(
+            "memtomem.context.commands.diff_commands",
+            _raises(FileNotFoundError("no such dir")),
+        )
+        r = await client.get("/api/context/overview")
+        assert r.json()["commands"]["error_kind"] == "missing"
+
+    @pytest.mark.anyio
+    async def test_agents_unicode_decode_classified_as_parse(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(
+            "memtomem.context.agents.diff_agents",
+            _raises(UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")),
+        )
+        r = await client.get("/api/context/overview")
+        assert r.json()["agents"]["error_kind"] == "parse"
+
+    @pytest.mark.anyio
+    async def test_skills_runtime_error_classified_as_internal(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(
+            "memtomem.context.skills.diff_skills",
+            _raises(RuntimeError("boom")),
+        )
+        r = await client.get("/api/context/overview")
+        assert r.json()["skills"]["error_kind"] == "internal"
+
+    @pytest.mark.anyio
+    async def test_skills_generic_oserror_classified_as_internal(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Bare OSError with errno=EIO — not permission/missing — should fall
+        # through to ``internal`` rather than be guessed as permission/missing.
+        monkeypatch.setattr(
+            "memtomem.context.skills.diff_skills",
+            _raises(OSError(5, "Input/output error")),
+        )
+        r = await client.get("/api/context/overview")
+        assert r.json()["skills"]["error_kind"] == "internal"
+
+    @pytest.mark.anyio
+    async def test_settings_bare_exception_uses_status_shape(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(
+            "memtomem.context.settings.diff_settings",
+            _raises(RuntimeError("settings exploded")),
+        )
+        r = await client.get("/api/context/overview")
+        settings = r.json()["settings"]
+        assert settings == {
+            "status": "error",
+            "error_kind": "internal",
+            "error_message": "settings exploded",
+        }
+
+    @pytest.mark.anyio
+    async def test_settings_inband_error_has_no_error_kind(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        # In-band per-file error: diff_settings succeeds but returns a result
+        # with status="error". Aggregated as {"status": "error"} with no
+        # error_kind — adding one would conflate per-file causes.
+        from memtomem.context.settings import SettingsSyncResult
+
+        monkeypatch.setattr(
+            "memtomem.context.settings.diff_settings",
+            lambda *_a, **_k: {"claude": SettingsSyncResult(status="error")},
+        )
+        r = await client.get("/api/context/overview")
+        assert r.json()["settings"] == {"status": "error"}
+
+    @pytest.mark.anyio
+    async def test_error_message_truncated_and_homedir_collapsed(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        long_msg = str(Path.home()) + "/oops-" + "z" * 500
+        monkeypatch.setattr(
+            "memtomem.context.skills.diff_skills",
+            _raises(RuntimeError(long_msg)),
+        )
+        r = await client.get("/api/context/overview")
+        msg = r.json()["skills"]["error_message"]
+        assert len(msg) <= 200
+        assert msg.startswith("~/oops-")
+        assert str(Path.home()) not in msg
+
+    @pytest.mark.anyio
+    async def test_back_compat_error_true_preserved(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The new fields are additive — existing consumers reading `error`
+        # boolean and `total` int must keep seeing them on the failure path.
+        monkeypatch.setattr(
+            "memtomem.context.skills.diff_skills",
+            _raises(PermissionError("nope")),
+        )
+        r = await client.get("/api/context/overview")
+        skills = r.json()["skills"]
+        assert skills["error"] is True
+        assert skills["total"] == 0
+        assert "error_kind" in skills
+        assert "error_message" in skills
+
+
+# ---------------------------------------------------------------------------
 # Skills — List
 # ---------------------------------------------------------------------------
 
