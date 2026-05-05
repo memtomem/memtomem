@@ -5722,7 +5722,11 @@ qs('group-toggle').addEventListener('click', () => {
         // followed by a contradicting "indexed N files" message.
         const partial = upload.blockedFileCount > 0 && !upload.bypassed;
         if (!partial) {
-          const chunks = (data.results || []).reduce((s, r) => s + (r.indexed_chunks || 0), 0);
+          // ``/api/upload`` returns ``{files, total_indexed}`` — never a
+          // ``results`` field. The original ``data.results`` read fell
+          // back to ``[]`` so this toast has been showing "indexed N
+          // files (0 chunks)" since v0.1.0.
+          const chunks = (data.files || []).reduce((s, r) => s + (r.indexed_chunks || 0), 0);
           showToast(t('toast.indexed_files_chunks', { files: files.length, chunks }), 'success');
         }
       }
