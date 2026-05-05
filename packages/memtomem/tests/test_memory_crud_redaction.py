@@ -242,6 +242,46 @@ class TestMemBatchAddRedactionGuard:
         assert "<redacted: secret-shape>" in joined
 
     @pytest.mark.asyncio
+    async def test_audit_hits_count_matches_scan_result(self, bm25_only_components, caplog):
+        """``hits=`` in the bypass audit line must equal the actual
+        ``len(privacy.scan(value))``, not the placeholder ``hits=1``
+        the inline logger used to emit. Cross-surface audit fidelity
+        with the single-content path (Codex review of PR #784,
+        Minor #1).
+        """
+        import logging
+
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        # Two-pattern entry: ``api_key:`` (pattern 0) + ``sk-…``
+        # (pattern 2). ``privacy.scan`` returns one hit per pattern, so
+        # the audit line should report ``hits=2``.
+        multi_hit_value = "api_key: dummy and token sk-" + "a" * 30
+        target = mem_dir / "audit_count.md"
+
+        expected_hits = len(privacy.scan(multi_hit_value))
+        assert expected_hits >= 2, "fixture must trigger multiple privacy patterns"
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            await mem_batch_add(  # type: ignore[arg-type]
+                entries=[{"key": "Multi", "value": multi_hit_value}],
+                file=str(target),
+                force_unsafe=True,
+                ctx=ctx,
+            )
+
+        bypass_line = next(
+            (r.getMessage() for r in caplog.records if "redaction bypass" in r.getMessage()),
+            "",
+        )
+        assert bypass_line, "expected a bypass audit line"
+        assert f"hits={expected_hits}" in bypass_line, (
+            f"expected hits={expected_hits} in audit line: {bypass_line!r}"
+        )
+
+    @pytest.mark.asyncio
     async def test_clean_batch_records_pass_per_entry(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
         app = AppContext.from_components(comp)

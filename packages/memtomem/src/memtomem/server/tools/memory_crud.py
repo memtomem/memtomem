@@ -445,29 +445,36 @@ async def mem_batch_add(
     # ``memtomem.privacy`` for the cross-repo sync rule.
     from memtomem import privacy
 
-    hit_indices: list[int] = []
+    # ``hit_counts[idx]`` records the actual ``len(privacy.scan(value))``
+    # for each entry that matched, so the bypass audit later carries the
+    # same hit count shape as the single-content guard
+    # (``enforce_write_guard`` reports ``len(hits)``). The earlier
+    # ``hit_indices.append(idx)`` form lost the count and forced
+    # ``hits=1`` on every batch audit line, breaking cross-surface
+    # audit fidelity (Codex review of PR #784, Minor #1).
+    hit_counts: dict[int, int] = {}
     for idx, entry in enumerate(entries):
         value = entry.get("value") or entry.get("content", "")
         if not value:
             continue
-        if privacy.scan(value):
-            hit_indices.append(idx)
+        item_hits = privacy.scan(value)
+        if item_hits:
+            hit_counts[idx] = len(item_hits)
 
-    if hit_indices and not force_unsafe:
-        for _ in hit_indices:
+    if hit_counts and not force_unsafe:
+        for _ in hit_counts:
             privacy.record("blocked", "mem_batch_add")
         return (
-            f"Error: items at indices {hit_indices} match privacy patterns; "
+            f"Error: items at indices {sorted(hit_counts)} match privacy patterns; "
             "whole batch rejected. Resubmit with hit items removed, or pass "
             "force_unsafe=True to bypass (audit-logged)."
         )
 
-    hit_set = set(hit_indices)
     for idx, entry in enumerate(entries):
         value = entry.get("value") or entry.get("content", "")
         if not value:
             continue
-        if idx in hit_set:
+        if idx in hit_counts:
             privacy.record("bypassed", "mem_batch_add")
             # Funnel through the shared audit emitter so the
             # ``namespace`` / ``file`` audit fields go through the same
@@ -477,7 +484,7 @@ async def mem_batch_add(
             privacy.emit_bypass_audit(
                 surface="mem_batch_add",
                 content_chars=len(value),
-                hits=1,
+                hits=hit_counts[idx],
                 audit_context={"namespace": namespace, "file": file, "item_idx": idx},
             )
         else:
