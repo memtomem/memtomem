@@ -1,16 +1,21 @@
-"""Tag listing and automatic tag extraction endpoints."""
+"""Tag listing, auto-tag extraction, and tag-management endpoints."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from memtomem.services import tag_management as tag_svc
 from memtomem.tools.auto_tag import auto_tag_storage
-from memtomem.web.deps import get_storage
+from memtomem.web.deps import get_search_pipeline, get_storage
 from memtomem.web.schemas.tags import (
     AutoTagRequest,
     AutoTagResponse,
     AutoTagSample,
     TagCount,
+    TagMergeRequest,
+    TagOpResponse,
+    TagOpSampleOut,
+    TagRenameRequest,
     TagsListResponse,
 )
 
@@ -71,3 +76,87 @@ async def run_auto_tag(
             for s in stats.samples
         ],
     )
+
+
+def _to_response(result: tag_svc.TagOpResult) -> TagOpResponse:
+    return TagOpResponse(
+        tag=result.tag,
+        affected_chunks=result.affected_chunks,
+        dry_run=result.dry_run,
+        samples=[
+            TagOpSampleOut(
+                chunk_id=str(s.chunk_id),
+                source_file=s.source_file,
+                content_preview=s.content_preview,
+                current_tags=list(s.current_tags),
+            )
+            for s in result.samples
+        ],
+    )
+
+
+@router.put("/{name}", response_model=TagOpResponse)
+async def rename_tag(
+    name: str,
+    body: TagRenameRequest,
+    dry_run: bool = Query(False),
+    storage=Depends(get_storage),
+    search_pipeline=Depends(get_search_pipeline),
+) -> TagOpResponse:
+    """Rename ``name`` to ``body.new_name`` across every chunk that carries it.
+
+    With ``dry_run=true`` the response carries the count + up to 10 sample
+    chunk previews so the UI can show a confirmation modal before the
+    apply call.
+    """
+    try:
+        result = await tag_svc.rename_tag(
+            storage,
+            name,
+            body.new_name,
+            dry_run=dry_run,
+            search_pipeline=search_pipeline,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _to_response(result)
+
+
+@router.delete("/{name}", response_model=TagOpResponse)
+async def delete_tag(
+    name: str,
+    dry_run: bool = Query(False),
+    storage=Depends(get_storage),
+    search_pipeline=Depends(get_search_pipeline),
+) -> TagOpResponse:
+    """Drop ``name`` from every chunk that carries it. Chunks ending up
+    tag-less stay indexed."""
+    try:
+        result = await tag_svc.delete_tag(
+            storage, name, dry_run=dry_run, search_pipeline=search_pipeline
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _to_response(result)
+
+
+@router.post("/merge", response_model=TagOpResponse)
+async def merge_tags(
+    body: TagMergeRequest,
+    dry_run: bool = Query(False),
+    storage=Depends(get_storage),
+    search_pipeline=Depends(get_search_pipeline),
+) -> TagOpResponse:
+    """Replace every tag in ``body.sources`` with ``body.target`` across all
+    chunks. Resulting per-chunk tag list is deduplicated."""
+    try:
+        result = await tag_svc.merge_tags(
+            storage,
+            body.sources,
+            body.target,
+            dry_run=dry_run,
+            search_pipeline=search_pipeline,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _to_response(result)

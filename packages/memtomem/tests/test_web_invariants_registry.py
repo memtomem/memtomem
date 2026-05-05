@@ -96,6 +96,9 @@ _CSRF_PROTECTED: frozenset[str] = frozenset(
         "system.save_config",
         "system.trigger_index",
         "system.upload_files",
+        "tags.delete_tag",
+        "tags.merge_tags",
+        "tags.rename_tag",
         "tags.run_auto_tag",
         "watchdog.watchdog_run_now",
     }
@@ -161,6 +164,9 @@ _REDACTION_EXEMPT: dict[str, str] = {
     "chunks.update_chunk_tags": "tags are short labels; redaction not applicable to tag strings",
     "tags.run_auto_tag": "auto-tag operates on already-stored chunks; "
     "redaction already applied at original write time",
+    "tags.rename_tag": "tags are short labels; rewrites existing chunk metadata only",
+    "tags.delete_tag": "tags are short labels; rewrites existing chunk metadata only",
+    "tags.merge_tags": "tags are short labels; rewrites existing chunk metadata only",
     # Maintenance / control plane: no user-supplied content.
     "decay.expire_old_chunks": "control plane; operates on existing chunks",
     "dedup.merge_duplicates": "operates on existing chunks; redaction "

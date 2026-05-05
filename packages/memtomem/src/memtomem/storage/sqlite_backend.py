@@ -101,6 +101,12 @@ class SqliteBackend(
         self._meta: MetaManager | None = None
         self._ns: NamespaceOps | None = None
         self._in_transaction: bool = False
+        # In-process serialization for tag-management read-modify-write
+        # paths (rename / delete / merge) and ``auto_tag_storage`` so they
+        # can't interleave on the same chunks.tags column. Cross-process
+        # safety still falls back to SQLite's WAL file lock — this is a
+        # single-process invariant only.
+        self._tag_write_lock: asyncio.Lock = asyncio.Lock()
         # Invariant: _has_vec_table is True iff sqlite_master contains 'chunks_vec',
         # which holds iff self._dimension > 0. Maintained by initialize(),
         # reset_embedding_meta(), and reset_all() — all three must update this
@@ -909,6 +915,40 @@ class SqliteBackend(
         row = db.execute(
             "SELECT COUNT(*) FROM chunks WHERE source_file=?",
             (norm_path(source_file),),
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    async def list_chunks_by_tag(self, tag: str, limit: int = 10) -> list[Chunk]:
+        # Thin wrapper over ``recall_chunks(tag_filter=...)`` — the post-fusion
+        # tag-filter path (#750) already implements the json_each EXISTS match
+        # and ORDER BY created_at DESC LIMIT shape this helper needs. Keeping
+        # the SQL in one place means the dry-run sample path inherits any
+        # future correctness fixes for free.
+        return await self.recall_chunks(tag_filter=tag, limit=limit)
+
+    async def count_chunks_by_tag(self, tag: str) -> int:
+        db = self._get_read_db()
+        row = db.execute(
+            "SELECT COUNT(*) FROM chunks WHERE EXISTS "
+            "(SELECT 1 FROM json_each(chunks.tags) WHERE value = ?)",
+            (tag,),
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    async def count_chunks_by_any_tag(self, tags: Sequence[str]) -> int:
+        # Single-query union count for the merge dry-run path. Counting per
+        # tag and Python-side deduping would either cap at the per-tag scan
+        # limit (under-reports) or fetch every row (slow); the EXISTS+IN
+        # form lets SQLite de-dup once per chunk regardless of how many
+        # source tags overlap on the same row.
+        if not tags:
+            return 0
+        placeholders = ",".join("?" for _ in tags)
+        db = self._get_read_db()
+        row = db.execute(
+            "SELECT COUNT(*) FROM chunks WHERE EXISTS "
+            f"(SELECT 1 FROM json_each(chunks.tags) WHERE value IN ({placeholders}))",
+            tuple(tags),
         ).fetchone()
         return int(row[0]) if row else 0
 

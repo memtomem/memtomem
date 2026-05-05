@@ -7,8 +7,15 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from memtomem.services import tag_management as tag_svc
 from memtomem.tools.memory_writer import remove_lines, replace_chunk_body
-from memtomem.web.deps import get_embedder, get_index_engine, get_storage, require_indexed_source
+from memtomem.web.deps import (
+    get_embedder,
+    get_index_engine,
+    get_search_pipeline,
+    get_storage,
+    require_indexed_source,
+)
 from memtomem.web.schemas.core import (
     ChunkOut,
     DeleteResponse,
@@ -130,42 +137,22 @@ async def update_chunk_tags(
     chunk_id: UUID,
     body: TagsUpdateRequest,
     storage=Depends(get_storage),
+    search_pipeline=Depends(get_search_pipeline),
 ) -> TagsUpdateResponse:
-    """Replace the tags on a chunk with the given list."""
-    from datetime import datetime, timezone
+    """Replace the tags on a chunk with the given list.
 
-    chunk = await storage.get_chunk(chunk_id)
-    if chunk is None:
+    Routed through ``services.tag_management`` so the same
+    ``_tag_write_lock`` and cache-invalidation policy that govern global
+    rename/delete/merge also cover per-chunk edits — the previous direct
+    ``upsert_chunks`` call could race against an in-flight bulk rewrite
+    and leave search-result tag filters cached against stale tags.
+    """
+    updated = await tag_svc.replace_chunk_tags(
+        storage, chunk_id, body.tags, search_pipeline=search_pipeline
+    )
+    if updated is None:
         raise HTTPException(status_code=404, detail="Chunk not found")
-
-    deduped = list(dict.fromkeys(body.tags))
-
-    # Copy-with-override: spread every existing metadata field then
-    # replace only ``tags``. The previous shape (explicit field list)
-    # silently dropped any field not enumerated here — including
-    # ``overlap_before/after``, ``parent_context``, ``file_context``,
-    # and the newly added temporal-validity columns
-    # (``valid_from_unix`` / ``valid_to_unix``). The mm CLI's
-    # ``add`` command already uses this pattern; consolidate.
-    new_meta = chunk.metadata.__class__(
-        **{
-            **{f: getattr(chunk.metadata, f) for f in chunk.metadata.__dataclass_fields__},
-            "tags": tuple(deduped),
-        }
-    )
-    from memtomem.models import Chunk as _Chunk
-
-    updated = _Chunk(
-        content=chunk.content,
-        metadata=new_meta,
-        id=chunk.id,
-        content_hash=chunk.content_hash,
-        embedding=chunk.embedding,
-        created_at=chunk.created_at,
-        updated_at=datetime.now(timezone.utc),
-    )
-    await storage.upsert_chunks([updated])
-    return TagsUpdateResponse(id=str(chunk_id), tags=deduped)
+    return TagsUpdateResponse(id=str(chunk_id), tags=list(updated.metadata.tags))
 
 
 @router.get("/{chunk_id}/similar", response_model=SimilarChunksResponse)

@@ -317,7 +317,7 @@ async def auto_tag_storage(
         are also returned in ``samples`` for UI preview (cheap to capture
         because the keyword/LLM extraction has already run by then).
     """
-    from memtomem.models import Chunk, ChunkMetadata
+    from memtomem.models import Chunk
 
     sources = await storage.get_all_source_files()
     if source_filter:
@@ -355,26 +355,48 @@ async def auto_tag_storage(
                 continue
 
             if not dry_run:
-                new_meta = ChunkMetadata(
-                    source_file=chunk.metadata.source_file,
-                    heading_hierarchy=chunk.metadata.heading_hierarchy,
-                    chunk_type=chunk.metadata.chunk_type,
-                    start_line=chunk.metadata.start_line,
-                    end_line=chunk.metadata.end_line,
-                    language=chunk.metadata.language,
-                    tags=tuple(new_tags),
-                    namespace=chunk.metadata.namespace,
-                )
-                updated = Chunk(
-                    content=chunk.content,
-                    metadata=new_meta,
-                    id=chunk.id,
-                    content_hash=chunk.content_hash,
-                    embedding=chunk.embedding,
-                    created_at=chunk.created_at,
-                    updated_at=datetime.now(timezone.utc),
-                )
-                await storage.upsert_chunks([updated])
+                # Lock-narrow: keep the slow LLM/keyword extraction outside
+                # the lock and only serialize the read-modify-write window
+                # against ``services.tag_management`` (#688). The re-read
+                # inside the lock guards against a concurrent rename /
+                # delete / merge slipping in between our outer
+                # ``list_chunks_by_source`` and the upsert — without it,
+                # ``auto_tag`` would silently overwrite a tag mutation that
+                # landed during the LLM call.
+                async with storage._tag_write_lock:
+                    latest = await storage.get_chunk(chunk.id)
+                    if latest is None:
+                        # Deleted while we were extracting; skip cleanly.
+                        skipped += 1
+                        total -= 1  # rebalance: the chunk no longer exists
+                        continue
+                    # Copy-with-override: spread every existing metadata
+                    # field then replace only ``tags``. The previous
+                    # explicit-list shape silently dropped any field not
+                    # enumerated here — including ``overlap_before/after``,
+                    # ``parent_context``, ``file_context``, and the
+                    # temporal-validity columns (``valid_from_unix`` /
+                    # ``valid_to_unix``). Mirrors
+                    # ``web/routes/chunks.py:update_chunk_tags``.
+                    new_meta = latest.metadata.__class__(
+                        **{
+                            **{
+                                f: getattr(latest.metadata, f)
+                                for f in latest.metadata.__dataclass_fields__
+                            },
+                            "tags": tuple(new_tags),
+                        }
+                    )
+                    updated = Chunk(
+                        content=latest.content,
+                        metadata=new_meta,
+                        id=latest.id,
+                        content_hash=latest.content_hash,
+                        embedding=latest.embedding,
+                        created_at=latest.created_at,
+                        updated_at=datetime.now(timezone.utc),
+                    )
+                    await storage.upsert_chunks([updated])
 
             tagged += 1
             if sample_limit > 0 and len(samples) < sample_limit:

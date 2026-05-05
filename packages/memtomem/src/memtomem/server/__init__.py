@@ -97,7 +97,12 @@ from memtomem.server.tools.dedup_decay import (
 from memtomem.server.tools.export_import import mem_export, mem_import  # noqa: E402, F401
 from memtomem.server.tools.auto_tag import mem_auto_tag  # noqa: E402, F401
 from memtomem.server.tools.browse import mem_list, mem_read  # noqa: E402, F401
-from memtomem.server.tools.tag_management import mem_tag_list, mem_tag_rename, mem_tag_delete  # noqa: E402, F401
+from memtomem.server.tools.tag_management import (
+    mem_tag_list,
+    mem_tag_rename,
+    mem_tag_delete,
+    mem_tag_merge,
+)  # noqa: E402, F401
 from memtomem.server.tools.url_index import mem_fetch  # noqa: E402, F401
 from memtomem.server.tools.cross_ref import mem_link, mem_unlink, mem_related  # noqa: E402, F401
 from memtomem.server.tools.session import mem_session_start, mem_session_end, mem_session_list  # noqa: E402, F401

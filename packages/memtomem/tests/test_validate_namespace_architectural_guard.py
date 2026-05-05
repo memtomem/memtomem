@@ -114,6 +114,12 @@ DEFERRED_NS_SURFACES: frozenset[tuple[str, str, str]] = frozenset(
         ("memory_crud.py", "mem_batch_add", "namespace"),
         ("procedure.py", "mem_procedure_save", "namespace"),
         ("url_index.py", "mem_fetch", "namespace"),
+        # ``mem_tag_merge.target`` is a *tag name*, not a namespace — caught
+        # by the parameter-name heuristic but semantically distinct from the
+        # ``mem_agent_share.target`` shape above. Tags travel through
+        # ``services.tag_management`` and SQLite ``chunks.tags`` JSON; no
+        # namespace gate applies.
+        ("tag_management.py", "mem_tag_merge", "target"),
     }
 )
 

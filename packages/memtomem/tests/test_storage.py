@@ -137,6 +137,163 @@ class TestTags:
         assert "remove_me" not in counts
         assert "keep_me" in counts
 
+    @pytest.mark.asyncio
+    async def test_list_chunks_by_tag(self, storage):
+        c1 = _make_chunk(content="a", tags=("python",))
+        c2 = _make_chunk(content="b", tags=("python", "web"))
+        c3 = _make_chunk(content="c", tags=("rust",))
+        await storage.upsert_chunks([c1, c2, c3])
+        rows = await storage.list_chunks_by_tag("python", limit=10)
+        ids = {r.id for r in rows}
+        assert ids == {c1.id, c2.id}
+        assert all("python" in r.metadata.tags for r in rows)
+
+    @pytest.mark.asyncio
+    async def test_list_chunks_by_tag_respects_limit(self, storage):
+        chunks = [_make_chunk(content=f"x{i}", tags=("shared",)) for i in range(5)]
+        await storage.upsert_chunks(chunks)
+        rows = await storage.list_chunks_by_tag("shared", limit=2)
+        assert len(rows) == 2
+
+    @pytest.mark.asyncio
+    async def test_count_chunks_by_tag(self, storage):
+        c1 = _make_chunk(content="a", tags=("python",))
+        c2 = _make_chunk(content="b", tags=("python", "web"))
+        c3 = _make_chunk(content="c", tags=("rust",))
+        await storage.upsert_chunks([c1, c2, c3])
+        assert await storage.count_chunks_by_tag("python") == 2
+        assert await storage.count_chunks_by_tag("rust") == 1
+        assert await storage.count_chunks_by_tag("absent") == 0
+
+    @pytest.mark.asyncio
+    async def test_merge_tags(self, storage):
+        c1 = _make_chunk(content="a", tags=("py", "code"))
+        c2 = _make_chunk(content="b", tags=("python3",))
+        c3 = _make_chunk(content="c", tags=("py", "python3"))  # collapses
+        c4 = _make_chunk(content="d", tags=("rust",))  # untouched
+        await storage.upsert_chunks([c1, c2, c3, c4])
+        affected = await storage.merge_tags(["py", "python3"], "python")
+        assert affected == 3
+        # Reload and verify
+        r1 = await storage.get_chunk(c1.id)
+        r2 = await storage.get_chunk(c2.id)
+        r3 = await storage.get_chunk(c3.id)
+        r4 = await storage.get_chunk(c4.id)
+        assert r1 is not None and set(r1.metadata.tags) == {"code", "python"}
+        assert r2 is not None and set(r2.metadata.tags) == {"python"}
+        # collapse: both source tags + dedup → single "python"
+        assert r3 is not None and set(r3.metadata.tags) == {"python"}
+        assert r4 is not None and set(r4.metadata.tags) == {"rust"}
+
+    @pytest.mark.asyncio
+    async def test_merge_tags_target_in_sources_is_noop_for_target(self, storage):
+        c1 = _make_chunk(content="a", tags=("py", "python"))
+        await storage.upsert_chunks([c1])
+        # target appearing in sources is treated as "leave target alone"
+        affected = await storage.merge_tags(["py", "python"], "python")
+        assert affected == 1
+        r1 = await storage.get_chunk(c1.id)
+        assert r1 is not None and set(r1.metadata.tags) == {"python"}
+
+    @pytest.mark.asyncio
+    async def test_merge_tags_empty_sources_no_writes(self, storage):
+        c1 = _make_chunk(content="a", tags=("py",))
+        await storage.upsert_chunks([c1])
+        assert await storage.merge_tags([], "python") == 0
+        assert await storage.merge_tags(["python"], "python") == 0
+        r1 = await storage.get_chunk(c1.id)
+        assert r1 is not None and set(r1.metadata.tags) == {"py"}
+
+    @staticmethod
+    def _force_old_updated_at(storage, chunk_id, iso="2026-01-01T00:00:00+00:00"):
+        """Pin a chunk's updated_at to a known-old value via direct SQL.
+
+        Avoids the asyncio.sleep-1-second hack the isoformat(timespec="seconds")
+        precision would otherwise force on the test.
+        """
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET updated_at = ? WHERE id = ?", (iso, str(chunk_id)))
+        db.commit()
+
+    @pytest.mark.asyncio
+    async def test_rename_tag_bumps_updated_at_symmetric(self, storage):
+        """Symmetric pin: positive (renamed chunk's ``updated_at`` moves
+        forward) + negative (untouched chunk's ``updated_at`` stays put).
+
+        ``decay.py`` reads ``updated_at`` for age, so the bump is what
+        propagates the rename to decay scoring downstream. A negative-only
+        assertion would false-pass against a no-op implementation; both
+        halves are required (feedback_pin_invert_symmetric_assertion).
+        """
+        renamed = _make_chunk(content="a", tags=("old_tag",))
+        untouched = _make_chunk(content="b", tags=("other",))
+        await storage.upsert_chunks([renamed, untouched])
+        self._force_old_updated_at(storage, renamed.id)
+        self._force_old_updated_at(storage, untouched.id)
+
+        before_renamed = await storage.get_chunk(renamed.id)
+        before_untouched = await storage.get_chunk(untouched.id)
+        assert before_renamed is not None and before_untouched is not None
+
+        affected = await storage.rename_tag("old_tag", "new_tag")
+        assert affected == 1
+
+        after_renamed = await storage.get_chunk(renamed.id)
+        after_untouched = await storage.get_chunk(untouched.id)
+        assert after_renamed is not None and after_untouched is not None
+
+        # Positive: renamed chunk's updated_at moved forward
+        assert after_renamed.updated_at > before_renamed.updated_at
+        # Negative: untouched chunk stayed anchored
+        assert after_untouched.updated_at == before_untouched.updated_at
+
+    @pytest.mark.asyncio
+    async def test_delete_tag_bumps_updated_at_symmetric(self, storage):
+        deleted = _make_chunk(content="a", tags=("remove_me", "keep"))
+        untouched = _make_chunk(content="b", tags=("other",))
+        await storage.upsert_chunks([deleted, untouched])
+        self._force_old_updated_at(storage, deleted.id)
+        self._force_old_updated_at(storage, untouched.id)
+
+        before_deleted = await storage.get_chunk(deleted.id)
+        before_untouched = await storage.get_chunk(untouched.id)
+        assert before_deleted is not None and before_untouched is not None
+
+        await storage.delete_tag("remove_me")
+
+        after_deleted = await storage.get_chunk(deleted.id)
+        after_untouched = await storage.get_chunk(untouched.id)
+        assert after_deleted is not None and after_untouched is not None
+
+        assert after_deleted.updated_at > before_deleted.updated_at
+        assert after_untouched.updated_at == before_untouched.updated_at
+
+    @pytest.mark.asyncio
+    async def test_merge_tags_bumps_updated_at_symmetric(self, storage):
+        merged = _make_chunk(content="a", tags=("py",))
+        collapsed = _make_chunk(content="b", tags=("py", "python"))
+        untouched = _make_chunk(content="c", tags=("rust",))
+        await storage.upsert_chunks([merged, collapsed, untouched])
+        for c in (merged, collapsed, untouched):
+            self._force_old_updated_at(storage, c.id)
+
+        before_merged = await storage.get_chunk(merged.id)
+        before_collapsed = await storage.get_chunk(collapsed.id)
+        before_untouched = await storage.get_chunk(untouched.id)
+        assert before_merged and before_collapsed and before_untouched
+
+        affected = await storage.merge_tags(["py"], "python")
+        assert affected == 2
+
+        after_merged = await storage.get_chunk(merged.id)
+        after_collapsed = await storage.get_chunk(collapsed.id)
+        after_untouched = await storage.get_chunk(untouched.id)
+        assert after_merged and after_collapsed and after_untouched
+
+        assert after_merged.updated_at > before_merged.updated_at
+        assert after_collapsed.updated_at > before_collapsed.updated_at
+        assert after_untouched.updated_at == before_untouched.updated_at
+
 
 class TestAccess:
     @pytest.mark.asyncio

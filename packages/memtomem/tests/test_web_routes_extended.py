@@ -137,6 +137,16 @@ def app():
 
     # tags
     storage.get_tag_counts = AsyncMock(return_value=[("python", 10), ("memory", 5), ("docs", 2)])
+    storage.count_chunks_by_tag = AsyncMock(return_value=2)
+    storage.list_chunks_by_tag = AsyncMock(return_value=[_make_test_chunk()])
+    storage.rename_tag = AsyncMock(return_value=2)
+    storage.delete_tag = AsyncMock(return_value=2)
+    storage.merge_tags = AsyncMock(return_value=2)
+    # Service acquires storage._tag_write_lock — give the mock a real Lock
+    # so the ``async with`` context works.
+    import asyncio as _asyncio
+
+    storage._tag_write_lock = _asyncio.Lock()
 
     # timeline / recall
     storage.recall_chunks = AsyncMock(return_value=[_make_test_chunk()])
@@ -262,6 +272,104 @@ class TestTags:
         data = resp.json()
         assert data["total"] == 0
         assert data["tags"] == []
+
+
+# ---------------------------------------------------------------------------
+# PUT /api/tags/{name}, DELETE /api/tags/{name}, POST /api/tags/merge
+# ---------------------------------------------------------------------------
+
+
+class TestTagManagementRoutes:
+    async def test_rename_apply_returns_count_and_invalidates(self, app, client: AsyncClient):
+        resp = await client.put(
+            "/api/tags/old_tag",
+            json={"new_name": "new_tag"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["tag"] == "new_tag"
+        assert data["affected_chunks"] == 2
+        assert data["dry_run"] is False
+        assert data["samples"] == []
+        app.state.storage.rename_tag.assert_awaited_once_with("old_tag", "new_tag")
+        app.state.search_pipeline.invalidate_cache.assert_called_once()
+
+    async def test_rename_dry_run_skips_apply_and_returns_samples(self, app, client: AsyncClient):
+        resp = await client.put(
+            "/api/tags/old_tag",
+            params={"dry_run": "true"},
+            json={"new_name": "new_tag"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["dry_run"] is True
+        assert data["affected_chunks"] == 2  # from count_chunks_by_tag mock
+        assert len(data["samples"]) == 1
+        # apply must not have happened
+        app.state.storage.rename_tag.assert_not_called()
+        app.state.search_pipeline.invalidate_cache.assert_not_called()
+
+    async def test_rename_empty_new_name_returns_400(self, app, client: AsyncClient):
+        resp = await client.put(
+            "/api/tags/old_tag",
+            json={"new_name": ""},
+        )
+        assert resp.status_code == 400
+
+    async def test_delete_apply_invalidates_cache(self, app, client: AsyncClient):
+        resp = await client.delete("/api/tags/doomed")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["tag"] == "doomed"
+        assert data["affected_chunks"] == 2
+        assert data["dry_run"] is False
+        app.state.storage.delete_tag.assert_awaited_once_with("doomed")
+        app.state.search_pipeline.invalidate_cache.assert_called_once()
+
+    async def test_delete_dry_run_skips_apply(self, app, client: AsyncClient):
+        resp = await client.delete("/api/tags/doomed", params={"dry_run": "true"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["dry_run"] is True
+        app.state.storage.delete_tag.assert_not_called()
+        app.state.search_pipeline.invalidate_cache.assert_not_called()
+
+    async def test_merge_apply_invalidates_cache(self, app, client: AsyncClient):
+        resp = await client.post(
+            "/api/tags/merge",
+            json={"sources": ["py", "python3"], "target": "python"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["tag"] == "python"
+        assert data["affected_chunks"] == 2
+        assert data["dry_run"] is False
+        # storage.merge_tags called with the deduped source set
+        app.state.storage.merge_tags.assert_awaited_once()
+        called_sources = app.state.storage.merge_tags.await_args.args[0]
+        assert set(called_sources) == {"py", "python3"}
+        assert app.state.storage.merge_tags.await_args.args[1] == "python"
+        app.state.search_pipeline.invalidate_cache.assert_called_once()
+
+    async def test_merge_empty_target_returns_400(self, app, client: AsyncClient):
+        resp = await client.post(
+            "/api/tags/merge",
+            json={"sources": ["py"], "target": ""},
+        )
+        assert resp.status_code == 400
+
+    async def test_merge_only_target_in_sources_returns_zero_no_invalidate(
+        self, app, client: AsyncClient
+    ):
+        resp = await client.post(
+            "/api/tags/merge",
+            json={"sources": ["python"], "target": "python"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["affected_chunks"] == 0
+        app.state.storage.merge_tags.assert_not_called()
+        app.state.search_pipeline.invalidate_cache.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
