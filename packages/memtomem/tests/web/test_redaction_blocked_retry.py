@@ -250,6 +250,133 @@ def test_api_upload_per_file_redaction_triggers_batch_retry_with_query_param(
     )
 
 
+def test_api_upload_mixed_batch_retries_only_blocked_file(
+    page, mm_web_url: str, tmp_path: Path
+) -> None:
+    """Mixed batch (1 clean + 1 blocked) → retry FormData carries **only**
+    the blocked filename, never the clean one (issue #803).
+
+    Before the scope-reduction fix, ``uploadFilesWithRedactionRetry``
+    re-sent the original FormData on retry; the server's ``_{mtime_ns}``
+    collision suffix at system.py:1121 then silently double-indexed the
+    clean file under two filenames. This spec pins the narrowed retry:
+    the blocked entry is sent with ``?force_unsafe=true`` while the
+    clean entry stays out of the request body, so disk and index reflect
+    one copy of each file regardless of mixed-batch confirms.
+    """
+    _install_default_stubs(page)
+
+    calls: list[tuple[str, str]] = []
+
+    def _upload_handler(route):
+        # Capture URL + raw multipart body so the test can inspect both
+        # the bypass query-param and the filenames present in each call.
+        calls.append((route.request.url, route.request.post_data or ""))
+        if len(calls) == 1:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "files": [
+                            {
+                                "filename": "clean.md",
+                                "indexed_chunks": 2,
+                                "path": "/home/u/.memtomem/uploads/clean.md",
+                            },
+                            {
+                                "filename": "secret.md",
+                                "indexed_chunks": 0,
+                                "error": "redaction_blocked (hits=3)",
+                            },
+                        ],
+                        "total_indexed": 2,
+                    }
+                ),
+            )
+        else:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "files": [
+                            {
+                                "filename": "secret.md",
+                                "indexed_chunks": 1,
+                                "path": "/home/u/.memtomem/uploads/secret.md",
+                            }
+                        ],
+                        "total_indexed": 1,
+                    }
+                ),
+            )
+
+    page.route(re.compile(r"/api/upload(?:\?.*)?$"), _upload_handler)
+
+    clean = tmp_path / "clean.md"
+    clean.write_text("# Clean notes\n\nNo secrets here.\n")
+    secret = tmp_path / "secret.md"
+    secret.write_text("# Secret notes\n\nsk-ant-test-fake-1234567890abcdef\n")
+
+    page.goto(mm_web_url)
+    page.locator("#tabbtn-index").click()
+    page.locator("#index-mode-upload").click()
+    page.locator("#upload-input").set_input_files([str(clean), str(secret)])
+    page.locator("#upload-btn").click()
+
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    message = page.locator("#confirm-message").text_content() or ""
+    # Hit count is summed over blocked rows only — clean.md contributed 0.
+    assert "3" in message, f"hit count missing from dialog: {message!r}"
+
+    with page.expect_request(
+        re.compile(r"/api/upload\?force_unsafe=true$"), timeout=5_000
+    ) as retry_info:
+        page.locator("#confirm-ok-btn").click()
+    retry_request = retry_info.value
+
+    # Core invariant: retry body must contain the blocked filename and
+    # *not* the clean one. The first call carried both, so this asserts a
+    # genuine narrowing rather than coincidence. Multipart bodies encode
+    # ``filename="<basename>"`` per part (RFC 7578); a simple substring
+    # check is sufficient and avoids parsing the boundary.
+    retry_body = retry_request.post_data or ""
+    assert 'filename="secret.md"' in retry_body, (
+        f"retry must include the blocked file: {retry_body[:500]!r}"
+    )
+    assert 'filename="clean.md"' not in retry_body, (
+        f"retry must NOT re-send the already-persisted clean file (issue #803): "
+        f"{retry_body[:500]!r}"
+    )
+    # First call carried both — sanity-check that the assertion above is
+    # not vacuously true because clean.md never made it into any request.
+    assert 'filename="clean.md"' in calls[0][1], (
+        "first call should have included clean.md; route stub may be misconfigured"
+    )
+
+    page.wait_for_function(
+        "() => document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+
+    # Final UI must show one row per input file (clean from first pass,
+    # secret from retry merged at its original index). Two rows with no
+    # duplication of clean.md is the user-visible promise of the fix.
+    page.wait_for_selector("#upload-result .upload-result-row", timeout=2_000)
+    rows = page.locator("#upload-result .upload-result-row").all_text_contents()
+    assert len(rows) == 2, f"expected 2 result rows, got {len(rows)}: {rows!r}"
+    assert sum("clean.md" in r for r in rows) == 1, (
+        f"clean.md must appear exactly once after merge: {rows!r}"
+    )
+    assert sum("secret.md" in r for r in rows) == 1, (
+        f"secret.md must appear exactly once after merge: {rows!r}"
+    )
+
+
 def test_api_add_403_cancel_does_not_retry_or_emit_bypass_toast(page, mm_web_url: str) -> None:
     """``POST /api/add`` 403 → confirm dialog → click **Cancel** → no
     retry POST, no ``toast.redaction_bypassed``.

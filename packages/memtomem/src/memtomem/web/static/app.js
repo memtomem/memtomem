@@ -322,25 +322,31 @@ async function apiWithRedactionRetry(method, path, body, opts = {}) {
 // returns HTTP 200 with per-file ``error="redaction_blocked (hits=N)"``
 // strings (system.py:1161) instead of a structured 403, so the dialog is
 // driven off the per-file error scan rather than a typed exception. On
-// confirm, re-issues the same FormData with ``?force_unsafe=true``;
-// the retry is non-conflicting (not strictly idempotent) — already-OK
-// files get re-written under a ``_{mtime_ns}`` suffix by the server
-// (system.py:1121), so the same content is indexed twice under two
-// filenames. Acceptable trade-off given the rarity of mixed batches.
+// confirm, re-issues a *narrowed* FormData containing only the blocked
+// entries with ``?force_unsafe=true``; clean files from the first pass
+// are already persisted server-side and are not re-sent (issue #803 —
+// the previous full-batch retry let the server's ``_{mtime_ns}``
+// collision suffix at system.py:1121 silently duplicate every clean
+// file in any mixed batch, since that suffix was meant for genuine
+// name collisions, not retry-batch deduplication).
+//
+// The retry result rows are merged back into the original ``data.files``
+// at their original positions, so the caller renders one row per input
+// file regardless of which pass produced it.
 //
 // Returns ``{data, cancelled, bypassed, blockedFileCount}``: ``data`` is
-// the response to render, ``cancelled`` is true when the user declined
-// the bypass (caller should still render ``data`` to surface the
-// per-file errors), ``bypassed`` is true on a successful retry, and
+// the (merged) response to render, ``cancelled`` is true when the user
+// declined the bypass (caller should still render ``data`` to surface
+// the per-file errors), ``bypassed`` is true on a successful retry, and
 // ``blockedFileCount`` is the number of files that triggered the guard
 // (used by callers to localize the cancel-toast).
 const _UPLOAD_REDACTION_BLOCKED_RE = /^redaction_blocked \(hits=(\d+)\)$/;
 async function uploadFilesWithRedactionRetry(formData) {
-  async function _post(forceUnsafe) {
+  async function _post(form, forceUnsafe) {
     const csrf = await ensureCsrfToken();
     const headers = csrf ? { 'X-Memtomem-CSRF': csrf } : {};
     const url = forceUnsafe ? '/api/upload?force_unsafe=true' : '/api/upload';
-    const res = await fetch(url, { method: 'POST', body: formData, headers });
+    const res = await fetch(url, { method: 'POST', body: form, headers });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: res.statusText }));
       const detail = err.detail;
@@ -354,18 +360,21 @@ async function uploadFilesWithRedactionRetry(formData) {
     return res.json();
   }
 
-  const data = await _post(false);
-  const blockedHits = (data.files || [])
-    .map(r => {
-      const m = r.error && r.error.match(_UPLOAD_REDACTION_BLOCKED_RE);
-      return m ? parseInt(m[1], 10) : 0;
-    })
-    .filter(n => n > 0);
-  if (!blockedHits.length) {
+  const data = await _post(formData, false);
+  // Walk per-file rows once, recording (rowIndex, hits) pairs for blocked
+  // entries. Index-based matching handles duplicate basenames in the same
+  // batch — the server tags rows positionally (one result per ``files``
+  // entry, in order), and we mirror that here when narrowing the retry.
+  const blockedRows = [];
+  (data.files || []).forEach((r, i) => {
+    const m = r.error && r.error.match(_UPLOAD_REDACTION_BLOCKED_RE);
+    if (m) blockedRows.push({ index: i, hits: parseInt(m[1], 10) });
+  });
+  if (!blockedRows.length) {
     return { data, cancelled: false, bypassed: false, blockedFileCount: 0 };
   }
 
-  const totalHits = blockedHits.reduce((a, b) => a + b, 0);
+  const totalHits = blockedRows.reduce((a, r) => a + r.hits, 0);
   const surfaceKey = 'surface.web_api_upload';
   const localized = t(surfaceKey);
   const surfaceLabel = localized === surfaceKey ? 'web_api_upload' : localized;
@@ -378,12 +387,36 @@ async function uploadFilesWithRedactionRetry(formData) {
     confirmText: t('confirm.redaction_blocked_proceed'),
   });
   if (!ok) {
-    return { data, cancelled: true, bypassed: false, blockedFileCount: blockedHits.length };
+    return { data, cancelled: true, bypassed: false, blockedFileCount: blockedRows.length };
   }
 
-  const retryData = await _post(true);
+  // Build a narrowed FormData with only the blocked entries, preserving
+  // original order. ``getAll('files')`` returns the entries in insertion
+  // order, so blockedRows[k].index aligns with allFiles[blockedRows[k].index].
+  const allFiles = formData.getAll('files');
+  const retryForm = new FormData();
+  for (const row of blockedRows) retryForm.append('files', allFiles[row.index]);
+  const retryData = await _post(retryForm, true);
+
+  // Merge retry rows back into their original positions. The server
+  // returns retry results in the same order as the narrowed FormData,
+  // so retryData.files[k] corresponds to blockedRows[k].
+  const mergedFiles = (data.files || []).slice();
+  (retryData.files || []).forEach((row, k) => {
+    if (k < blockedRows.length) mergedFiles[blockedRows[k].index] = row;
+  });
+  const mergedData = {
+    ...data,
+    files: mergedFiles,
+    total_indexed: mergedFiles.reduce((s, r) => s + (r.indexed_chunks || 0), 0),
+  };
   showToast(t('toast.redaction_bypassed', { hits: totalHits }), 'info');
-  return { data: retryData, cancelled: false, bypassed: true, blockedFileCount: blockedHits.length };
+  return {
+    data: mergedData,
+    cancelled: false,
+    bypassed: true,
+    blockedFileCount: blockedRows.length,
+  };
 }
 
 function qs(id) { return document.getElementById(id); }
