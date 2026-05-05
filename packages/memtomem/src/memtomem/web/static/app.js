@@ -1999,6 +1999,7 @@ function _buildResultItem(r) {
   item.className = 'result-item';
   item.dataset.id = r.chunk.id;
   item.setAttribute('tabindex', '0');
+  item.setAttribute('role', 'button');
 
   const checkLabel = document.createElement('label');
   checkLabel.className = 'result-check-wrap';
@@ -2017,6 +2018,14 @@ function _buildResultItem(r) {
   const fname = basename(r.chunk.source_file || '');
   const dir = shortDir((r.chunk.source_file || '').split('/').slice(0, -1).join('/') || '/');
   const age = relativeTime(r.chunk.created_at);
+  const lineRange = (r.chunk.start_line && r.chunk.end_line)
+    ? `lines ${r.chunk.start_line}-${r.chunk.end_line}`
+    : null;
+  const nsLabel = r.chunk.namespace && r.chunk.namespace !== 'default'
+    ? `namespace ${r.chunk.namespace}`
+    : null;
+  const ariaParts = [fname, lineRange, nsLabel, age].filter(Boolean);
+  item.setAttribute('aria-label', ariaParts.join(', '));
   const nsBadge = r.chunk.namespace && r.chunk.namespace !== 'default'
     ? ` <span class="badge badge-ns">${escapeHtml(r.chunk.namespace)}</span>` : '';
   const validityBadge = _validityBadgeHtml(r.chunk.valid_from_unix, r.chunk.valid_to_unix);
@@ -3649,6 +3658,14 @@ async function browseSource(path, limit = 100) {
         const card = document.createElement('div');
         card.className = 'chunk-card';
         card.dataset.chunkId = c.id;
+        const cardTypeLabel = c.chunk_type.replace('_', ' ');
+        const cardTrail = c.heading_hierarchy.length
+          ? `, ${c.heading_hierarchy.join(' › ')}`
+          : '';
+        card.setAttribute(
+          'aria-label',
+          `${cardTypeLabel}, lines ${c.start_line}-${c.end_line}${cardTrail}`,
+        );
         card.innerHTML = `
           <div class="chunk-card-meta">
             <span class="badge badge-gray">${c.chunk_type.replace('_',' ')}</span>
@@ -3725,13 +3742,25 @@ async function browseSource(path, limit = 100) {
           if (contentDiv.scrollHeight > 120) {
             card.classList.add('chunk-card-collapsible');
             card.setAttribute('aria-expanded', 'false');
+            card.setAttribute('role', 'button');
+            card.setAttribute('tabindex', '0');
+            const toggleCard = () => {
+              contentDiv.classList.toggle('expanded');
+              card.setAttribute('aria-expanded', contentDiv.classList.contains('expanded'));
+            };
             let dragStartX = 0, dragStartY = 0;
             card.addEventListener('mousedown', e => { dragStartX = e.clientX; dragStartY = e.clientY; });
             card.addEventListener('click', e => {
               if (Math.abs(e.clientX - dragStartX) > 4 || Math.abs(e.clientY - dragStartY) > 4) return;
               if (e.target.closest('.chunk-card-edit-area')) return;
-              contentDiv.classList.toggle('expanded');
-              card.setAttribute('aria-expanded', contentDiv.classList.contains('expanded'));
+              toggleCard();
+            });
+            card.addEventListener('keydown', e => {
+              if (e.target.closest('.chunk-card-actions, .chunk-card-edit-area')) return;
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                toggleCard();
+              }
             });
           }
         });
