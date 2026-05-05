@@ -168,6 +168,16 @@ class TestHostHeader:
         # Host header must not include userinfo.
         assert _host_header("https://u:p@example.com:81/") == "example.com:81"
 
+    def test_ipv6_literal_keeps_brackets(self):
+        # RFC 7230 §5.4: IPv6 literals in Host must remain bracketed, otherwise
+        # `Host: 2001:db8::1:8080` is ambiguous between an IP+port and a longer
+        # IPv6. urlparse strips the brackets — the helper has to put them back.
+        assert _host_header("http://[2001:db8::1]/") == "[2001:db8::1]"
+        assert _host_header("http://[2001:db8::1]:8080/") == "[2001:db8::1]:8080"
+
+    def test_ipv6_literal_with_userinfo_keeps_brackets(self):
+        assert _host_header("http://u:p@[2001:db8::1]:81/") == "[2001:db8::1]:81"
+
 
 # ----------------------------------------------------------------------------
 # _build_pinned_request — Host header + sni_hostname extension

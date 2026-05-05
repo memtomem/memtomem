@@ -149,9 +149,17 @@ def _rewrite_to_pinned_ip(url: str, pinned_ip: str) -> str:
 
 
 def _host_header(url: str) -> str:
-    """Return the Host header value (host[:port], no userinfo) from url."""
+    """Return the Host header value (host[:port], no userinfo) from url.
+
+    RFC 7230 §5.4: IPv6 address literals in `Host` must remain bracketed —
+    `urlparse(...).hostname` strips the brackets, so re-add them here for any
+    host that contains a colon (the unambiguous IPv6 marker; DNS hostnames
+    cannot contain `:` per RFC 952/1123).
+    """
     parsed = urlparse(url)
     host = parsed.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
     if parsed.port is None:
         return host
     return f"{host}:{parsed.port}"
