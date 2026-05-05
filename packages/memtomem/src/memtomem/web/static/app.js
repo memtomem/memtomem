@@ -3765,6 +3765,7 @@ qs('add-btn').addEventListener('click', async () => {
   // ``enforce_write_guard`` does not — so the client is more
   // permissive (covers more positions). The server boundary remains
   // the source of truth; this client check is a UX-time hint.
+  let forceUnsafe = false;
   const patterns = STATE.privacyPatterns;
   if (patterns && patterns.some(re => re.test(content))) {
     const ok = await showConfirm({
@@ -3773,6 +3774,11 @@ qs('add-btn').addEventListener('click', async () => {
       confirmText: t('compose.privacy_warning_proceed'),
     });
     if (!ok) return;
+    // The server-side ``enforce_write_guard`` defaults to blocking, so
+    // a confirmed warning must travel as ``force_unsafe: true`` or the
+    // submission gets a 403 from the same patterns the client just
+    // surfaced. Without this the confirm dialog would be a no-op.
+    forceUnsafe = true;
   }
 
   const title = qs('add-title').value.trim() || null;
@@ -3786,7 +3792,9 @@ qs('add-btn').addEventListener('click', async () => {
   hide(qs('add-msg'));
 
   try {
-    const data = await api('POST', '/api/add', { content, title, tags, file, namespace });
+    const body = { content, title, tags, file, namespace };
+    if (forceUnsafe) body.force_unsafe = true;
+    const data = await api('POST', '/api/add', body);
     const n = data.indexed_chunks;
     showToast(t('toast.saved_to_file', { path: tildifyPath(data.file), count: n }), 'success');
     qs('add-content').value = '';
