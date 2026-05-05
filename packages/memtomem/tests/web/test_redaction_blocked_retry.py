@@ -774,3 +774,101 @@ def test_api_add_403_cancel_does_not_retry_or_emit_bypass_toast(page, mm_web_url
     # one asserts none does. Together they pin the symmetric pair.
     bypass_toasts = page.locator("#toast-container .toast", has_text="Bypassed")
     assert bypass_toasts.count() == 0, "cancel must not emit toast.redaction_bypassed"
+
+
+def test_api_upload_mixed_batch_cancel_refreshes_stale_state(
+    page, mm_web_url: str, tmp_path: Path
+) -> None:
+    """Mixed batch (1 clean + 1 blocked) → user cancels the bypass dialog
+    → ``loadStats`` / ``loadSourceFilter`` still fire so the rest of the
+    UI doesn't lag behind the per-file result list.
+
+    The first POST already persisted/indexed ``clean.md`` before the
+    confirm dialog opened. The pre-fix early-return on ``cancelled``
+    skipped the staleness refresh, leaving the result list showing a
+    fresh row while sources / stats panels stayed pinned to their
+    pre-upload state. This spec counts ``GET /api/stats`` calls before
+    and after the cancel click; the post-cancel delta must be ≥ 1.
+    """
+    _install_default_stubs(page)
+
+    stats_calls: list[str] = []
+    page.route(
+        "**/api/stats",
+        lambda r: (
+            stats_calls.append(r.request.url),
+            r.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({}),
+            ),
+        )[1],
+    )
+
+    def _upload_handler(route):
+        # Single fulfillment — the user cancels, so no retry POST fires.
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "files": [
+                        {
+                            "filename": "clean.md",
+                            "indexed_chunks": 2,
+                            "path": "/home/u/.memtomem/uploads/clean.md",
+                        },
+                        {
+                            "filename": "secret.md",
+                            "indexed_chunks": 0,
+                            "error": "redaction_blocked (hits=3)",
+                        },
+                    ],
+                    "total_indexed": 2,
+                }
+            ),
+        )
+
+    page.route(re.compile(r"/api/upload(?:\?.*)?$"), _upload_handler)
+
+    clean = tmp_path / "clean.md"
+    clean.write_text("# Clean notes\n\nNo secrets here.\n")
+    secret = tmp_path / "secret.md"
+    secret.write_text("# Secret notes\n\nsk-ant-test-fake-1234567890abcdef\n")
+
+    page.goto(mm_web_url)
+    page.locator("#tabbtn-index").click()
+    page.locator("#index-mode-upload").click()
+    page.locator("#upload-input").set_input_files([str(clean), str(secret)])
+
+    # Wait for boot ``/api/stats`` calls to settle so the post-cancel
+    # delta isn't fighting against late-arriving boot traffic.
+    page.wait_for_timeout(200)
+    pre_cancel = len(stats_calls)
+
+    page.locator("#upload-btn").click()
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    page.locator("#confirm-cancel-btn").click()
+    page.wait_for_function(
+        "() => document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+
+    # Cancel toast must render so the operator knows the blocked file did
+    # not land. (Drag-upload had no toast at all pre-fix.)
+    page.wait_for_selector(
+        "#toast-container .toast",
+        timeout=2_000,
+    )
+
+    # Staleness refresh must fire on cancel — the unified branch below
+    # the if/else in the upload-tab handler hits ``loadStats``. Give the
+    # SPA a beat for the GET to dispatch.
+    page.wait_for_timeout(300)
+    post_cancel = len(stats_calls)
+    assert post_cancel > pre_cancel, (
+        f"cancel must trigger loadStats refresh; saw {pre_cancel} pre, {post_cancel} post"
+    )

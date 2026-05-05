@@ -4156,25 +4156,32 @@ qs('add-btn').addEventListener('click', async () => {
         }
         result.appendChild(row);
       });
+      // Mixed-batch refresh: the first ``_post(false)`` already persisted /
+      // indexed every clean file in the batch (only the redaction-blocked
+      // rows came back with an ``error`` field). Whether the user proceeds,
+      // cancels, or the retry partially succeeds, the stats / source filter
+      // / usage panels are stale and must refresh — the early-return cancel
+      // path used to skip them, leaving the per-file result list showing
+      // newly saved files while the rest of the UI lagged behind. Drop
+      // through to the unified refresh below in every branch.
       if (upload.cancelled) {
         showToast(t('toast.upload_redaction_cancelled', { count: upload.blockedFileCount }), 'error');
-        return;
-      }
-      // Partial bypass: helper already emitted ``toast.redaction_bypass_partial``
-      // with the succeeded/total counts. Skip the generic "Upload complete"
-      // success toast (it would falsely audit a successful write on top of the
-      // partial warning) and keep the file selection so the operator can adjust
-      // and retry. First-pass clean files DID land on disk, so stats / source
-      // filter / usage refresh still happens below.
-      const partial = upload.blockedFileCount > 0 && !upload.bypassed;
-      if (!partial) {
-        const firstPath = data.files.find(r => !r.error && r.path)?.path;
-        const successMsg = firstPath
-          ? t('toast.upload_complete_with_path', { count: data.total_indexed, path: tildifyPath(firstPath) })
-          : t('toast.upload_complete', { count: data.total_indexed });
-        showToast(successMsg, 'success');
-        selectedFiles = [];
-        renderFileList();
+      } else {
+        // Partial bypass: helper already emitted ``toast.redaction_bypass_partial``
+        // with the succeeded/total counts. Skip the generic "Upload complete"
+        // success toast (it would falsely audit a successful write on top of
+        // the partial warning) and keep the file selection so the operator
+        // can adjust and retry.
+        const partial = upload.blockedFileCount > 0 && !upload.bypassed;
+        if (!partial) {
+          const firstPath = data.files.find(r => !r.error && r.path)?.path;
+          const successMsg = firstPath
+            ? t('toast.upload_complete_with_path', { count: data.total_indexed, path: tildifyPath(firstPath) })
+            : t('toast.upload_complete', { count: data.total_indexed });
+          showToast(successMsg, 'success');
+          selectedFiles = [];
+          renderFileList();
+        }
       }
       _markDataStale();
       loadSourceFilter();
@@ -5681,17 +5688,25 @@ qs('group-toggle').addEventListener('click', () => {
     showToast(t('toast.indexing_files', { count: files.length }), 'info');
     try {
       const upload = await uploadFilesWithRedactionRetry(fd);
-      if (upload.cancelled) return;
       const data = upload.data;
-      // See upload-mode caller for the rationale: on partial bypass the
-      // helper already surfaced the per-file failure via
-      // ``toast.redaction_bypass_partial``; suppress the generic success
-      // toast here so the audit-relevant warning isn't followed by a
-      // contradicting "indexed N files" message.
-      const partial = upload.blockedFileCount > 0 && !upload.bypassed;
-      if (!partial) {
-        const chunks = (data.results || []).reduce((s, r) => s + (r.indexed_chunks || 0), 0);
-        showToast(t('toast.indexed_files_chunks', { files: files.length, chunks }), 'success');
+      // Mixed-batch refresh: same rationale as upload-mode caller — the
+      // first POST already indexed clean files even when the user later
+      // cancels the bypass dialog. Unlike the upload tab there is no
+      // per-file result list here, so without a cancel toast the operator
+      // has zero signal that some files DID land. Surface the cancel toast
+      // and drop through to the staleness refresh in every branch.
+      if (upload.cancelled) {
+        showToast(t('toast.upload_redaction_cancelled', { count: upload.blockedFileCount }), 'error');
+      } else {
+        // On partial bypass the helper already surfaced the per-file
+        // failure via ``toast.redaction_bypass_partial``; suppress the
+        // generic success toast here so the audit-relevant warning isn't
+        // followed by a contradicting "indexed N files" message.
+        const partial = upload.blockedFileCount > 0 && !upload.bypassed;
+        if (!partial) {
+          const chunks = (data.results || []).reduce((s, r) => s + (r.indexed_chunks || 0), 0);
+          showToast(t('toast.indexed_files_chunks', { files: files.length, chunks }), 'success');
+        }
       }
       _markDataStale();
       loadSourceFilter();
