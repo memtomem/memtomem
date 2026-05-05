@@ -365,6 +365,44 @@ def _sanitize_audit_value(value: object) -> object:
     return value
 
 
+def emit_bypass_audit(
+    *,
+    surface: str,
+    content_chars: int,
+    hits: int,
+    audit_context: dict[str, object] | None = None,
+) -> None:
+    """Emit a structured ``redaction bypass`` warning with sanitized context.
+
+    Public seam for callers that pre-scan their own content and cannot
+    route through :func:`enforce_write_guard` — currently
+    ``mem_batch_add``'s transactional path, which decides per-item
+    bypass after a whole-batch hit-collection pass and therefore
+    can't take :class:`WriteGuardResult` 's single-content shape.
+    Funnelling that callsite through this helper instead of an ad-hoc
+    ``logger.warning`` keeps the "matched bytes never reach logs"
+    invariant in one place: every audit value passes through
+    :func:`_sanitize_audit_value` first.
+
+    The corresponding counter (:func:`record`) is intentionally **not**
+    bumped here — callers that have their own per-item bookkeeping
+    (again, ``mem_batch_add``) own the counter contract and would
+    double-count if this helper also recorded.
+    """
+    if audit_context:
+        sanitized = {k: _sanitize_audit_value(v) for k, v in audit_context.items()}
+        ctx_pairs = ", " + ", ".join(f"{k}={v!r}" for k, v in sanitized.items())
+    else:
+        ctx_pairs = ""
+    logger.warning(
+        "redaction bypass via force_unsafe=True (surface=%s%s, content_chars=%d, hits=%d)",
+        surface,
+        ctx_pairs,
+        content_chars,
+        hits,
+    )
+
+
 def enforce_write_guard(
     content: str,
     *,
@@ -410,17 +448,11 @@ def enforce_write_guard(
         return WriteGuardResult("pass", [])
     if force_unsafe:
         record("bypassed", surface)
-        if audit_context:
-            sanitized = {k: _sanitize_audit_value(v) for k, v in audit_context.items()}
-            ctx_pairs = ", " + ", ".join(f"{k}={v!r}" for k, v in sanitized.items())
-        else:
-            ctx_pairs = ""
-        logger.warning(
-            "redaction bypass via force_unsafe=True (surface=%s%s, content_chars=%d, hits=%d)",
-            surface,
-            ctx_pairs,
-            len(content),
-            len(hits),
+        emit_bypass_audit(
+            surface=surface,
+            content_chars=len(content),
+            hits=len(hits),
+            audit_context=audit_context,
         )
         return WriteGuardResult("bypassed", hits)
     record("blocked", surface)

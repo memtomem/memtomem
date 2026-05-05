@@ -469,13 +469,16 @@ async def mem_batch_add(
             continue
         if idx in hit_set:
             privacy.record("bypassed", "mem_batch_add")
-            logger.warning(
-                "redaction bypass via force_unsafe=True "
-                "(tool=mem_batch_add, namespace=%r, file=%r, item_idx=%d, content_chars=%d)",
-                namespace,
-                file,
-                idx,
-                len(value),
+            # Funnel through the shared audit emitter so the
+            # ``namespace`` / ``file`` audit fields go through the same
+            # ``_sanitize_audit_value`` scrub the single-content guard
+            # uses. A secret-shaped batch ``file=`` argument used to
+            # leak verbatim here (Codex review of PR #784).
+            privacy.emit_bypass_audit(
+                surface="mem_batch_add",
+                content_chars=len(value),
+                hits=1,
+                audit_context={"namespace": namespace, "file": file, "item_idx": idx},
             )
         else:
             privacy.record("pass", "mem_batch_add")

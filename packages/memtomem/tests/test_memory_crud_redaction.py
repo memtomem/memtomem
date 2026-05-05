@@ -204,6 +204,44 @@ class TestMemBatchAddRedactionGuard:
         assert target.exists()
 
     @pytest.mark.asyncio
+    async def test_secret_shaped_file_argument_is_redacted_in_audit_log(
+        self, bm25_only_components, caplog
+    ):
+        """A secret-matching ``file=`` argument used to leak verbatim
+        through ``mem_batch_add``'s inline audit logger (Codex review
+        of PR #784). Pin the post-fix behavior: the same
+        ``_sanitize_audit_value`` scrub the single-content guard uses
+        must run here too, so the secret-shaped filename is replaced
+        with the redaction marker before reaching the warning line.
+        """
+        import logging
+
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        secret_in_path = mem_dir / f"notes-{_SECRET_SAMPLE.split(': ')[1]}.md"
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            await mem_batch_add(  # type: ignore[arg-type]
+                entries=[
+                    {"key": "Secret", "value": _SECRET_SAMPLE},
+                ],
+                file=str(secret_in_path),
+                force_unsafe=True,
+                ctx=ctx,
+            )
+
+        bypass_lines = [
+            r.getMessage() for r in caplog.records if "redaction bypass" in r.getMessage()
+        ]
+        assert bypass_lines, "expected at least one bypass audit line"
+        joined = "\n".join(bypass_lines)
+        # The matched-bytes prefix must not surface in the audit log line
+        # when the path itself happens to embed the same secret shape.
+        assert "sk-" not in joined, f"audit log leaked secret-shaped file path: {joined!r}"
+        assert "<redacted: secret-shape>" in joined
+
+    @pytest.mark.asyncio
     async def test_clean_batch_records_pass_per_entry(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
         app = AppContext.from_components(comp)
