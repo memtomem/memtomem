@@ -24,6 +24,7 @@ cache (``search/pipeline.py``) cannot serve stale tag-filter responses.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Sequence
 from uuid import UUID
 
@@ -112,6 +113,12 @@ async def rename_tag(
     old, new = old.strip(), new.strip()
     if not old or not new:
         raise ValueError("rename_tag requires non-empty old and new tag names")
+    # Same-name rename is a no-op the storage helper would still execute as
+    # a rewrite, bumping ``updated_at`` and triggering cache invalidation as
+    # if data had changed. Reject here so Web (which previously relied on
+    # MCP's wrapper-only check) and CLI (PR3) all see the same gate.
+    if old == new:
+        raise ValueError("rename_tag old and new tag names are identical")
 
     async with storage._tag_write_lock:
         if dry_run:
@@ -208,3 +215,56 @@ async def merge_tags(
         if affected:
             _invalidate(search_pipeline)
         return TagOpResult(tag=target, affected_chunks=affected, dry_run=False)
+
+
+async def replace_chunk_tags(
+    storage: StorageBackend,
+    chunk_id: UUID,
+    tags: Sequence[str],
+    *,
+    search_pipeline: SearchPipeline | None = None,
+) -> Chunk | None:
+    """Replace the tag list on a single chunk.
+
+    Returns the updated ``Chunk`` on success or ``None`` if the chunk does
+    not exist. Routed through the same ``_tag_write_lock`` as the global
+    rename/delete/merge ops so a per-chunk edit cannot interleave with a
+    bulk rewrite mid-flight, and shares cache invalidation so a follow-up
+    ``GET /search`` cannot serve a stale tag-filter result.
+
+    ``tags`` is order-preserving deduplicated. If the resulting tag tuple
+    matches the chunk's current tags, the call is a no-op: no upsert, no
+    cache invalidation, no ``updated_at`` bump.
+    """
+    from memtomem.models import Chunk as _Chunk
+
+    deduped = tuple(dict.fromkeys(tags))
+
+    async with storage._tag_write_lock:
+        chunk = await storage.get_chunk(chunk_id)
+        if chunk is None:
+            return None
+
+        if tuple(chunk.metadata.tags) == deduped:
+            # Idempotent — preserve ``updated_at`` so decay scoring and the
+            # search TTL cache aren't disturbed by a no-op write.
+            return chunk
+
+        new_meta = chunk.metadata.__class__(
+            **{
+                **{f: getattr(chunk.metadata, f) for f in chunk.metadata.__dataclass_fields__},
+                "tags": deduped,
+            }
+        )
+        updated = _Chunk(
+            content=chunk.content,
+            metadata=new_meta,
+            id=chunk.id,
+            content_hash=chunk.content_hash,
+            embedding=chunk.embedding,
+            created_at=chunk.created_at,
+            updated_at=datetime.now(timezone.utc),
+        )
+        await storage.upsert_chunks([updated])
+        _invalidate(search_pipeline)
+        return updated

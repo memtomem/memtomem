@@ -7,6 +7,7 @@ full component initialization (embedding provider, SQLite, etc.).
 
 from __future__ import annotations
 
+import asyncio
 import unicodedata
 import uuid
 from dataclasses import dataclass
@@ -150,6 +151,11 @@ def app():
     storage.upsert_chunks = AsyncMock()
     storage.stored_embedding_info = None
     storage.embedding_mismatch = None
+    # Real ``asyncio.Lock`` so service-layer ``async with storage._tag_write_lock:``
+    # works against the AsyncMock storage. AsyncMock auto-attrs return
+    # plain MagicMock children, which don't implement the async-context
+    # protocol the tag-management service relies on.
+    storage._tag_write_lock = asyncio.Lock()
 
     # -- embedder mock --
     embedder = AsyncMock()
@@ -1074,6 +1080,81 @@ class TestChunkValidityFields:
         assert new_meta.parent_context == "Section A"
         assert new_meta.overlap_before == 42
         assert tuple(new_meta.tags) == ("new-tag", "another")
+
+    async def test_tag_update_invalidates_search_cache(self, app, client: AsyncClient):
+        """Routing PATCH /chunks/{id}/tags through services.tag_management
+        means a successful tag rewrite must flush the search-result TTL
+        cache — otherwise tag-filter queries can return stale hits until
+        the cache expires. The previous direct ``upsert_chunks`` shape
+        had no hook into ``SearchPipeline``."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        chunk = Chunk(
+            content="alpha",
+            metadata=ChunkMetadata(
+                source_file=Path("/tmp/test.md"),
+                tags=("old",),
+                namespace="default",
+            ),
+            id=CHUNK_ID,
+            content_hash="abc",
+            embedding=[0.1] * 768,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        app.state.storage.get_chunk.return_value = chunk
+        app.state.search_pipeline.invalidate_cache.reset_mock()
+
+        resp = await client.patch(
+            f"/api/chunks/{CHUNK_ID}/tags",
+            json={"tags": ["new"]},
+        )
+        assert resp.status_code == 200
+        assert app.state.search_pipeline.invalidate_cache.call_count == 1
+
+    async def test_tag_update_no_op_skips_upsert_and_invalidate(self, app, client: AsyncClient):
+        """Idempotent guard: PATCH-ing the same tag list a chunk already
+        carries must not call ``upsert_chunks`` (no ``updated_at`` bump,
+        no decay-timer reset) and must not flush the cache."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        chunk = Chunk(
+            content="alpha",
+            metadata=ChunkMetadata(
+                source_file=Path("/tmp/test.md"),
+                tags=("a", "b"),
+                namespace="default",
+            ),
+            id=CHUNK_ID,
+            content_hash="abc",
+            embedding=[0.1] * 768,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        app.state.storage.get_chunk.return_value = chunk
+        app.state.storage.upsert_chunks.reset_mock()
+        app.state.search_pipeline.invalidate_cache.reset_mock()
+
+        resp = await client.patch(
+            f"/api/chunks/{CHUNK_ID}/tags",
+            json={"tags": ["a", "b"]},
+        )
+        assert resp.status_code == 200
+        assert app.state.storage.upsert_chunks.await_count == 0
+        assert app.state.search_pipeline.invalidate_cache.call_count == 0
+
+    async def test_tag_update_404_when_chunk_missing(self, app, client: AsyncClient):
+        app.state.storage.get_chunk.return_value = None
+        app.state.storage.upsert_chunks.reset_mock()
+        app.state.search_pipeline.invalidate_cache.reset_mock()
+
+        resp = await client.patch(
+            f"/api/chunks/{CHUNK_ID}/tags",
+            json={"tags": ["new"]},
+        )
+        assert resp.status_code == 404
+        assert app.state.storage.upsert_chunks.await_count == 0
+        assert app.state.search_pipeline.invalidate_cache.call_count == 0
 
 
 # ---------------------------------------------------------------------------

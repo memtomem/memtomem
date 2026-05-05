@@ -152,6 +152,28 @@ async def test_mcp_rename_rejects_empty(mcp_app):
 
 
 @pytest.mark.asyncio
+async def test_mcp_rename_rejects_same_name_after_strip(mcp_app, components):
+    """Service-layer reject (post-strip) covers MCP too: the wrapper used
+    to pre-check ``old_tag == new_tag`` raw, which let ``"foo"`` vs
+    ``" foo "`` slip through. With the gate in ``services.tag_management``
+    the MCP path now reports the same error from a single source.
+    """
+    app, counter = mcp_app
+    c1 = make_chunk(content="a", tags=("kept",))
+    await components.storage.upsert_chunks([c1])
+    ctx = StubCtx(app)
+
+    out = await mem_tag_rename("kept", "kept", ctx=ctx)
+    assert "Error" in out
+    out = await mem_tag_rename("  kept  ", "kept", ctx=ctx)
+    assert "Error" in out
+    # No write happened.
+    counts = dict(await components.storage.get_tag_counts())
+    assert counts.get("kept") == 1
+    assert counter["calls"] == 0
+
+
+@pytest.mark.asyncio
 async def test_mcp_merge_rejects_empty_target(mcp_app):
     app, _ = mcp_app
     ctx = StubCtx(app)

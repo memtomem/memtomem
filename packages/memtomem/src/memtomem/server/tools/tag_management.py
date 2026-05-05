@@ -72,8 +72,9 @@ async def mem_tag_rename(
     """
     if not old_tag.strip() or not new_tag.strip():
         return "Error: both old_tag and new_tag must be non-empty."
-    if old_tag == new_tag:
-        return "Error: old_tag and new_tag are the same."
+    # Same-name reject lives in services.tag_management.rename_tag so Web,
+    # MCP, and the upcoming CLI all see the same gate (after strip — the
+    # raw == compare here was wrong for "foo" vs " foo ").
 
     app = await _get_app_initialized(ctx)
     result = await tag_svc.rename_tag(

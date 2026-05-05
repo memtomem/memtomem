@@ -88,6 +88,30 @@ async def test_rename_rejects_empty_names(storage):
 
 
 @pytest.mark.asyncio
+async def test_rename_rejects_same_name_after_strip(storage):
+    """A no-op rename would still execute the storage rewrite, bumping
+    ``updated_at`` and triggering cache invalidation as if data had
+    changed. The MCP wrapper used to gate this with a raw ``==`` compare,
+    which was both wrong (``"foo"`` vs ``" foo "`` slipped through) and
+    bypassed by the Web route. Service-layer reject is the single gate.
+    """
+    c1 = _make_chunk(content="alpha", tags=("kept",))
+    await storage.upsert_chunks([c1])
+    spy = _SearchPipelineSpy()
+
+    with pytest.raises(ValueError):
+        await svc.rename_tag(storage, "kept", "kept", search_pipeline=spy)
+    # Whitespace-only difference also caught: post-strip the names match.
+    with pytest.raises(ValueError):
+        await svc.rename_tag(storage, "  kept  ", "kept", search_pipeline=spy)
+
+    # No write happened, no cache flush.
+    counts = dict(await storage.get_tag_counts())
+    assert counts.get("kept") == 1
+    assert spy.invalidate_count == 0
+
+
+@pytest.mark.asyncio
 async def test_rename_rejects_whitespace_only_names(storage):
     """Whitespace-only names slipped past the ``not old`` truthiness check
     before the service started ``.strip()``-ing inputs — the Web route
@@ -350,3 +374,161 @@ async def test_service_acquires_tag_write_lock(storage):
     await holder
     result = await svc_task
     assert result.affected_chunks == 1
+
+
+# ---------------------------------------------------------------------------
+# replace_chunk_tags — per-chunk edit through the same lock + invalidation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_replace_chunk_tags_mutates_and_invalidates(storage):
+    c1 = _make_chunk(content="alpha", tags=("old",))
+    await storage.upsert_chunks([c1])
+    spy = _SearchPipelineSpy()
+
+    updated = await svc.replace_chunk_tags(
+        storage, c1.id, ["new", "extra", "extra"], search_pipeline=spy
+    )
+
+    assert updated is not None
+    assert updated.metadata.tags == ("new", "extra")  # dedup, order-preserving
+    assert spy.invalidate_count == 1
+    refreshed = await storage.get_chunk(c1.id)
+    assert tuple(refreshed.metadata.tags) == ("new", "extra")
+
+
+@pytest.mark.asyncio
+async def test_replace_chunk_tags_returns_none_when_chunk_missing(storage):
+    """Caller (web route, future CLI) should distinguish 404 from a write
+    failure. Service returns ``None`` so the route can map to 404."""
+    from uuid import uuid4
+
+    spy = _SearchPipelineSpy()
+    result = await svc.replace_chunk_tags(storage, uuid4(), ["x"], search_pipeline=spy)
+    assert result is None
+    assert spy.invalidate_count == 0
+
+
+@pytest.mark.asyncio
+async def test_replace_chunk_tags_no_op_when_unchanged(storage):
+    """Idempotent: same tag tuple → no upsert, no cache flush, ``updated_at``
+    untouched. Without this guard a watcher loop or polling UI could keep
+    re-PATCH-ing the same list and quietly reset decay timers each time.
+    """
+    c1 = _make_chunk(content="alpha", tags=("a", "b"))
+    await storage.upsert_chunks([c1])
+    before = await storage.get_chunk(c1.id)
+    spy = _SearchPipelineSpy()
+
+    result = await svc.replace_chunk_tags(storage, c1.id, ["a", "b"], search_pipeline=spy)
+
+    assert result is not None
+    assert tuple(result.metadata.tags) == ("a", "b")
+    assert spy.invalidate_count == 0
+    after = await storage.get_chunk(c1.id)
+    assert after.updated_at == before.updated_at
+
+
+@pytest.mark.asyncio
+async def test_replace_chunk_tags_acquires_tag_write_lock(storage):
+    """Holding ``_tag_write_lock`` from outside must block the service
+    call — the whole point of routing per-chunk edits through this
+    service is that they share the same lock as the bulk rename/delete/
+    merge ops. A future refactor that drops the ``async with`` would
+    surface here.
+    """
+    import asyncio
+
+    c1 = _make_chunk(content="a", tags=("old",))
+    await storage.upsert_chunks([c1])
+
+    held = asyncio.Event()
+    can_release = asyncio.Event()
+
+    async def hold_lock():
+        async with storage._tag_write_lock:
+            held.set()
+            await can_release.wait()
+
+    holder = asyncio.create_task(hold_lock())
+    await held.wait()
+
+    svc_task = asyncio.create_task(svc.replace_chunk_tags(storage, c1.id, ["new"]))
+    try:
+        await asyncio.wait_for(asyncio.shield(svc_task), timeout=0.05)
+    except asyncio.TimeoutError:
+        pass  # expected
+    else:
+        raise AssertionError("replace_chunk_tags did not acquire the lock")
+
+    can_release.set()
+    await holder
+    updated = await svc_task
+    assert updated is not None
+    assert tuple(updated.metadata.tags) == ("new",)
+
+
+# ---------------------------------------------------------------------------
+# Invariant pin: tag mutations must not touch content / embedding /
+# content_hash / created_at. The storage SQL only writes ``tags`` and
+# ``updated_at`` today, but the contract is part of why ``replace_chunk_tags``
+# can promise embeddings stay valid (no re-embed). Snapshot before/after.
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_invariants(chunk):
+    return {
+        "content": chunk.content,
+        "content_hash": chunk.content_hash,
+        "embedding": tuple(chunk.embedding) if chunk.embedding is not None else None,
+        "created_at": chunk.created_at,
+    }
+
+
+@pytest.mark.asyncio
+async def test_rename_preserves_content_embedding_hash_created_at(storage):
+    c1 = _make_chunk(content="alpha", tags=("old",), embedding=[0.42] * 1024)
+    await storage.upsert_chunks([c1])
+    before = _snapshot_invariants(await storage.get_chunk(c1.id))
+
+    await svc.rename_tag(storage, "old", "new")
+
+    after = _snapshot_invariants(await storage.get_chunk(c1.id))
+    assert after == before
+
+
+@pytest.mark.asyncio
+async def test_delete_preserves_content_embedding_hash_created_at(storage):
+    c1 = _make_chunk(content="alpha", tags=("doomed", "keep"), embedding=[0.7] * 1024)
+    await storage.upsert_chunks([c1])
+    before = _snapshot_invariants(await storage.get_chunk(c1.id))
+
+    await svc.delete_tag(storage, "doomed")
+
+    after = _snapshot_invariants(await storage.get_chunk(c1.id))
+    assert after == before
+
+
+@pytest.mark.asyncio
+async def test_merge_preserves_content_embedding_hash_created_at(storage):
+    c1 = _make_chunk(content="alpha", tags=("py",), embedding=[0.3] * 1024)
+    await storage.upsert_chunks([c1])
+    before = _snapshot_invariants(await storage.get_chunk(c1.id))
+
+    await svc.merge_tags(storage, ["py"], "python")
+
+    after = _snapshot_invariants(await storage.get_chunk(c1.id))
+    assert after == before
+
+
+@pytest.mark.asyncio
+async def test_replace_chunk_tags_preserves_content_embedding_hash_created_at(storage):
+    c1 = _make_chunk(content="alpha", tags=("a",), embedding=[0.9] * 1024)
+    await storage.upsert_chunks([c1])
+    before = _snapshot_invariants(await storage.get_chunk(c1.id))
+
+    await svc.replace_chunk_tags(storage, c1.id, ["a", "b"])
+
+    after = _snapshot_invariants(await storage.get_chunk(c1.id))
+    assert after == before
