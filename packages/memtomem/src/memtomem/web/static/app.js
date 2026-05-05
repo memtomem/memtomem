@@ -3727,9 +3727,9 @@ qs('folder-hint-sources-link')?.addEventListener('click', e => {
 // objects, cached on STATE.privacyPatterns. Soft-fail on network /
 // translator error: leave the cache null and the submit handler skips
 // the scan rather than break Add on a transient blip. The server's
-// /api/add route does not invoke privacy.scan either, so a strict
-// client gate would not be real security — this is defense-in-depth
-// for accidental paste, not the trust boundary.
+// /api/add route enforces ``privacy.enforce_write_guard`` (the trust
+// boundary); this client-side check is defense-in-depth that warns
+// before submit so a paste-then-cancel doesn't have to round-trip.
 async function loadPrivacyPatterns() {
   try {
     const data = await api('GET', '/api/privacy/patterns');
@@ -3760,11 +3760,11 @@ qs('add-btn').addEventListener('click', async () => {
   //
   // Scan-window asymmetry: ``re.test()`` here scans the entire
   // textarea, while server-side ``privacy.scan()`` caps at the first
-  // 10K chars (``_SCAN_WINDOW`` in privacy.py). Today moot —
-  // ``/api/add`` does not invoke ``privacy.scan`` — but if the
-  // ADR-tracked server gate ever lands, the two would disagree on
-  // very long content. The client is more permissive (covers more);
-  // the server boundary is the source of truth.
+  // 10K chars (``_SCAN_WINDOW`` in privacy.py). For very long content
+  // with a secret past that cap, the client warns and the server's
+  // ``enforce_write_guard`` does not — so the client is more
+  // permissive (covers more positions). The server boundary remains
+  // the source of truth; this client check is a UX-time hint.
   const patterns = STATE.privacyPatterns;
   if (patterns && patterns.some(re => re.test(content))) {
     const ok = await showConfirm({
