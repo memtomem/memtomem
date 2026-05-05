@@ -625,11 +625,11 @@
             <span class="nav-sub" data-i18n="settings.nav.ctx_skills_sub">Reusable workflows</span>
           </span>
         </button>
-        <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-commands" data-group="integrations" role="tab" aria-selected="false">
+        <button class="settings-nav-btn" data-ui-tier="dev" data-section="ctx-commands" data-group="integrations" role="tab" aria-selected="false">
           <span class="nav-icon" aria-hidden="true">⌘</span>
           <span class="nav-labels">
-            <span class="nav-label" data-i18n="settings.nav.ctx_commands">Slash Commands</span>
-            <span class="nav-sub" data-i18n="settings.nav.ctx_commands_sub">/ commands</span>
+            <span class="nav-label" data-i18n="settings.nav.ctx_commands">Custom Commands</span>
+            <span class="nav-sub" data-i18n="settings.nav.ctx_commands_sub">Legacy .claude/commands/</span>
           </span>
         </button>
         <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-agents" data-group="integrations" role="tab" aria-selected="false">
@@ -758,7 +758,7 @@
         <div class="settings-section" id="settings-hooks-sync">
           <p class="settings-section-desc" data-i18n="settings.hooks.desc">Sync Claude Code hooks from .memtomem/settings.json to the active runtime.</p>
           <div class="hooks-sync-header" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
-            <h2 data-i18n="settings.hooks.title">Settings Hooks</h2>
+            <h2 data-i18n="settings.hooks.title">Hooks</h2>
             <button id="hooks-sync-btn" class="btn-primary" data-i18n="settings.hooks.sync_now">Sync Now</button>
           </div>
           <div id="hooks-sync-status"></div>
@@ -805,7 +805,7 @@
         <div class="settings-section" id="settings-ctx-commands">
           <p class="settings-section-desc" data-i18n="settings.ctx.commands_desc">Manage command definitions and fan them out to runtimes.</p>
           <div class="ctx-header">
-            <h2 data-i18n="settings.ctx.commands_title">Commands</h2>
+            <h2 data-i18n="settings.ctx.commands_title">Custom Commands</h2>
             <div>
               <button class="btn-ghost ctx-add-project-btn" data-type="commands" data-i18n="settings.ctx.add_project">Add Project</button>
               <button class="btn-ghost ctx-create-btn" data-type="commands" data-i18n="settings.ctx.create">Create</button>
@@ -822,7 +822,7 @@
         <div class="settings-section" id="settings-ctx-agents">
           <p class="settings-section-desc" data-i18n="settings.ctx.agents_desc">Manage agent definitions and fan them out to runtimes.</p>
           <div class="ctx-header">
-            <h2 data-i18n="settings.ctx.agents_title">Agents</h2>
+            <h2 data-i18n="settings.ctx.agents_title">Subagents</h2>
             <div>
               <button class="btn-ghost ctx-add-project-btn" data-type="agents" data-i18n="settings.ctx.add_project">Add Project</button>
               <button class="btn-ghost ctx-create-btn" data-type="agents" data-i18n="settings.ctx.create">Create</button>

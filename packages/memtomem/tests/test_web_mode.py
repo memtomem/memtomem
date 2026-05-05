@@ -385,9 +385,12 @@ def test_app_js_pins_ui_mode_default_and_toast_copy() -> None:
     assert "if (STATE.uiMode === 'dev')" in js, (
         "Home dashboard lost its dev-only sessions+scratch fetch gate"
     )
-    # The Context Gateway tab is fully prod — Skills / Slash Commands /
-    # Subagents shipped first, and Hooks (Phase D)
-    # graduated via RFC #761 (ADR-0001 §5 readiness criteria). The two
+    # The Context Gateway tab is fully prod — Skills / Subagents shipped
+    # first, and Hooks (Phase D) graduated via RFC #761 (ADR-0001 §5
+    # readiness criteria). Custom Commands sits on the same Context Gateway
+    # surface but is dev-tier pending an external deprecation signal from
+    # Anthropic on .claude/commands/ (the docs already mark it merged into
+    # Skills as the recommended path). The two
     # historical ``STATE.uiMode === 'dev'`` gates around the settings
     # overview-card push and the Sync All settings hop were removed
     # together with the router move from _DEV_ONLY_ROUTERS to
@@ -426,7 +429,15 @@ def test_html_main_tabs_all_stay_prod() -> None:
 def test_html_classification_matches_router_lists() -> None:
     """HTML ``data-ui-tier`` values must agree with the Python router lists
     — drift between the two would hide/show a tab whose route disagrees,
-    breaking `mm web --dev` discovery or producing phantom prod 404s."""
+    breaking `mm web --dev` discovery or producing phantom prod 404s.
+
+    One direction is deliberately allowed: a section can be dev-tier in the
+    HTML while its router stays in ``_PROD_ROUTERS`` (UI hides what the
+    backend still serves). That's the deprecation-transition shape — see
+    ``ctx-commands`` below. The dangerous direction (UI shows a section
+    whose router is dev-only, producing 404s in prod) is what this test
+    actually defends against.
+    """
     html = _read_static("index.html")
     dev_sections = set(re.findall(r'data-ui-tier="dev"\s+data-section="([^"]+)"', html))
     # Expected dev sections derived from _DEV_ONLY_ROUTERS + naming (SPA
@@ -441,6 +452,15 @@ def test_html_classification_matches_router_lists() -> None:
         # ``hooks-sync`` graduated to prod via RFC #761 (ADR-0001 §5
         # readiness criteria); the section's data-ui-tier was flipped
         # together with the router move.
+        # ``ctx-commands``: sidebar leaf is dev-tier (hidden in
+        # ``mm web`` prod) following Anthropic's IA shift — the official
+        # Claude Code docs mark ``.claude/commands/`` as "merged into
+        # skills" with Skills as the recommended path, but the files
+        # "keep working", so ``context_commands`` is intentionally kept
+        # in ``_PROD_ROUTERS`` to keep the API responsive for existing
+        # users until an explicit deprecation signal lands. UI-only
+        # demote, no router move.
+        "ctx-commands",
         "harness-sessions",
         "harness-scratch",
         "harness-procedures",
