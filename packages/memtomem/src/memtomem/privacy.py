@@ -275,10 +275,11 @@ def scan(text: str, patterns: tuple[str, ...] | None = None) -> list[RedactionHi
     the LTM scan is a write-rejection gate. The two contracts diverge,
     and the trust boundary lives here.
 
-    All current ``DEFAULT_PATTERNS`` are short, prefix-anchored regexes
-    (provider tokens, PEM headers, etc.); ``re.finditer`` over a 1 MB
-    input completes well under the 50 ms ceiling pinned by
-    ``test_privacy_long_content``.
+    All current ``DEFAULT_PATTERNS`` are simple short regexes (provider
+    tokens, PEM headers, etc.); ``re.finditer`` runs in linear time and
+    a 1 MB input stays comfortably under the perf ceiling pinned by
+    ``test_privacy_long_content``. A future quadratic regression in the
+    pattern set or scan implementation fails that test loudly.
     """
     effective = patterns if patterns is not None else DEFAULT_PATTERNS
     if not effective:

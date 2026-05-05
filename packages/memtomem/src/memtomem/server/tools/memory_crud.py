@@ -199,10 +199,11 @@ async def mem_add(
     are recorded with a ``bypassed`` outcome label so guard effectiveness
     and bypass usage stay observable. See ``mem_add_redaction_stats``.
 
-    The redaction scan covers the first 10,000 characters of ``content``;
-    matches beyond that window are not seen by the guard. This is parity
-    with the STM compression-side scanner — split very long content into
-    multiple calls if every region must be inspected.
+    The redaction scan covers the entire ``content`` regardless of length —
+    a secret pasted past any byte offset still triggers the guard. The
+    asymmetry with STM's compression-side scanner is intentional: STM's
+    window is a routing signal, while the LTM scan is the write-rejection
+    gate at the trust boundary.
 
     Args:
         content: The memory content to store
@@ -425,9 +426,9 @@ async def mem_batch_add(
     bypass for the whole batch (each hit item is recorded with a
     ``bypassed`` outcome label per audit).
 
-    The scan covers only the first 10,000 characters of each entry's
-    value; matches beyond that per-entry window are not seen by the
-    guard.
+    Each entry's full value is scanned regardless of length — the scan
+    no longer truncates at a fixed window, so a secret embedded past any
+    byte offset still trips the guard.
 
     Args:
         entries: List of {"key": "title", "value": "content", "tags": [...]}
