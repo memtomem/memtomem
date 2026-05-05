@@ -101,6 +101,12 @@ class SqliteBackend(
         self._meta: MetaManager | None = None
         self._ns: NamespaceOps | None = None
         self._in_transaction: bool = False
+        # In-process serialization for tag-management read-modify-write
+        # paths (rename / delete / merge) and ``auto_tag_storage`` so they
+        # can't interleave on the same chunks.tags column. Cross-process
+        # safety still falls back to SQLite's WAL file lock — this is a
+        # single-process invariant only.
+        self._tag_write_lock: asyncio.Lock = asyncio.Lock()
         # Invariant: _has_vec_table is True iff sqlite_master contains 'chunks_vec',
         # which holds iff self._dimension > 0. Maintained by initialize(),
         # reset_embedding_meta(), and reset_all() — all three must update this
@@ -909,6 +915,25 @@ class SqliteBackend(
         row = db.execute(
             "SELECT COUNT(*) FROM chunks WHERE source_file=?",
             (norm_path(source_file),),
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    async def list_chunks_by_tag(self, tag: str, limit: int = 10) -> list[Chunk]:
+        db = self._get_read_db()
+        rows = db.execute(
+            "SELECT * FROM chunks WHERE EXISTS "
+            "(SELECT 1 FROM json_each(chunks.tags) WHERE value = ?) "
+            "ORDER BY created_at DESC LIMIT ?",
+            (tag, limit),
+        ).fetchall()
+        return [self._row_to_chunk(row) for row in rows]
+
+    async def count_chunks_by_tag(self, tag: str) -> int:
+        db = self._get_read_db()
+        row = db.execute(
+            "SELECT COUNT(*) FROM chunks WHERE EXISTS "
+            "(SELECT 1 FROM json_each(chunks.tags) WHERE value = ?)",
+            (tag,),
         ).fetchone()
         return int(row[0]) if row else 0
 

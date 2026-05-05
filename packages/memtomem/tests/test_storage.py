@@ -137,6 +137,73 @@ class TestTags:
         assert "remove_me" not in counts
         assert "keep_me" in counts
 
+    @pytest.mark.asyncio
+    async def test_list_chunks_by_tag(self, storage):
+        c1 = _make_chunk(content="a", tags=("python",))
+        c2 = _make_chunk(content="b", tags=("python", "web"))
+        c3 = _make_chunk(content="c", tags=("rust",))
+        await storage.upsert_chunks([c1, c2, c3])
+        rows = await storage.list_chunks_by_tag("python", limit=10)
+        ids = {r.id for r in rows}
+        assert ids == {c1.id, c2.id}
+        assert all("python" in r.metadata.tags for r in rows)
+
+    @pytest.mark.asyncio
+    async def test_list_chunks_by_tag_respects_limit(self, storage):
+        chunks = [_make_chunk(content=f"x{i}", tags=("shared",)) for i in range(5)]
+        await storage.upsert_chunks(chunks)
+        rows = await storage.list_chunks_by_tag("shared", limit=2)
+        assert len(rows) == 2
+
+    @pytest.mark.asyncio
+    async def test_count_chunks_by_tag(self, storage):
+        c1 = _make_chunk(content="a", tags=("python",))
+        c2 = _make_chunk(content="b", tags=("python", "web"))
+        c3 = _make_chunk(content="c", tags=("rust",))
+        await storage.upsert_chunks([c1, c2, c3])
+        assert await storage.count_chunks_by_tag("python") == 2
+        assert await storage.count_chunks_by_tag("rust") == 1
+        assert await storage.count_chunks_by_tag("absent") == 0
+
+    @pytest.mark.asyncio
+    async def test_merge_tags(self, storage):
+        c1 = _make_chunk(content="a", tags=("py", "code"))
+        c2 = _make_chunk(content="b", tags=("python3",))
+        c3 = _make_chunk(content="c", tags=("py", "python3"))  # collapses
+        c4 = _make_chunk(content="d", tags=("rust",))  # untouched
+        await storage.upsert_chunks([c1, c2, c3, c4])
+        affected = await storage.merge_tags(["py", "python3"], "python")
+        assert affected == 3
+        # Reload and verify
+        r1 = await storage.get_chunk(c1.id)
+        r2 = await storage.get_chunk(c2.id)
+        r3 = await storage.get_chunk(c3.id)
+        r4 = await storage.get_chunk(c4.id)
+        assert r1 is not None and set(r1.metadata.tags) == {"code", "python"}
+        assert r2 is not None and set(r2.metadata.tags) == {"python"}
+        # collapse: both source tags + dedup → single "python"
+        assert r3 is not None and set(r3.metadata.tags) == {"python"}
+        assert r4 is not None and set(r4.metadata.tags) == {"rust"}
+
+    @pytest.mark.asyncio
+    async def test_merge_tags_target_in_sources_is_noop_for_target(self, storage):
+        c1 = _make_chunk(content="a", tags=("py", "python"))
+        await storage.upsert_chunks([c1])
+        # target appearing in sources is treated as "leave target alone"
+        affected = await storage.merge_tags(["py", "python"], "python")
+        assert affected == 1
+        r1 = await storage.get_chunk(c1.id)
+        assert r1 is not None and set(r1.metadata.tags) == {"python"}
+
+    @pytest.mark.asyncio
+    async def test_merge_tags_empty_sources_no_writes(self, storage):
+        c1 = _make_chunk(content="a", tags=("py",))
+        await storage.upsert_chunks([c1])
+        assert await storage.merge_tags([], "python") == 0
+        assert await storage.merge_tags(["python"], "python") == 0
+        r1 = await storage.get_chunk(c1.id)
+        assert r1 is not None and set(r1.metadata.tags) == {"py"}
+
 
 class TestAccess:
     @pytest.mark.asyncio
