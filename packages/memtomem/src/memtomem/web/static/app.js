@@ -323,13 +323,17 @@ async function apiWithRedactionRetry(method, path, body, opts = {}) {
 // strings (system.py:1161) instead of a structured 403, so the dialog is
 // driven off the per-file error scan rather than a typed exception. On
 // confirm, re-issues the same FormData with ``?force_unsafe=true``;
-// re-uploading already-OK files is idempotent thanks to the
-// ``_{mtime_ns}`` collision suffix added by the server (system.py:1121).
+// the retry is non-conflicting (not strictly idempotent) — already-OK
+// files get re-written under a ``_{mtime_ns}`` suffix by the server
+// (system.py:1121), so the same content is indexed twice under two
+// filenames. Acceptable trade-off given the rarity of mixed batches.
 //
-// Returns ``{data, cancelled, bypassed}``: ``data`` is the response to
-// render, ``cancelled`` is true when the user declined the bypass (caller
-// should still render ``data`` to surface the per-file errors), and
-// ``bypassed`` is true on a successful retry.
+// Returns ``{data, cancelled, bypassed, blockedFileCount}``: ``data`` is
+// the response to render, ``cancelled`` is true when the user declined
+// the bypass (caller should still render ``data`` to surface the
+// per-file errors), ``bypassed`` is true on a successful retry, and
+// ``blockedFileCount`` is the number of files that triggered the guard
+// (used by callers to localize the cancel-toast).
 const _UPLOAD_REDACTION_BLOCKED_RE = /^redaction_blocked \(hits=(\d+)\)$/;
 async function uploadFilesWithRedactionRetry(formData) {
   async function _post(forceUnsafe) {
@@ -357,7 +361,9 @@ async function uploadFilesWithRedactionRetry(formData) {
       return m ? parseInt(m[1], 10) : 0;
     })
     .filter(n => n > 0);
-  if (!blockedHits.length) return { data, cancelled: false, bypassed: false };
+  if (!blockedHits.length) {
+    return { data, cancelled: false, bypassed: false, blockedFileCount: 0 };
+  }
 
   const totalHits = blockedHits.reduce((a, b) => a + b, 0);
   const surfaceKey = 'surface.web_api_upload';
@@ -371,11 +377,13 @@ async function uploadFilesWithRedactionRetry(formData) {
     }),
     confirmText: t('confirm.redaction_blocked_proceed'),
   });
-  if (!ok) return { data, cancelled: true, bypassed: false };
+  if (!ok) {
+    return { data, cancelled: true, bypassed: false, blockedFileCount: blockedHits.length };
+  }
 
   const retryData = await _post(true);
   showToast(t('toast.redaction_bypassed', { hits: totalHits }), 'info');
-  return { data: retryData, cancelled: false, bypassed: true };
+  return { data: retryData, cancelled: false, bypassed: true, blockedFileCount: blockedHits.length };
 }
 
 function qs(id) { return document.getElementById(id); }
@@ -4072,7 +4080,7 @@ qs('add-btn').addEventListener('click', async () => {
         result.appendChild(row);
       });
       if (upload.cancelled) {
-        showToast(t('toast.upload_failed', { error: t('confirm.redaction_blocked_title') }), 'error');
+        showToast(t('toast.upload_redaction_cancelled', { count: upload.blockedFileCount }), 'error');
         return;
       }
       const firstPath = data.files.find(r => !r.error && r.path)?.path;

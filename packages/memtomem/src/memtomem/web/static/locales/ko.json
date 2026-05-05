@@ -234,6 +234,7 @@
   "confirm.redaction_blocked_message": "서버가 {surface}에서 {hits}개의 비밀 의심 패턴을 감지했어요. 우회하고 작성할까요? 감사 로그에 기록됩니다.",
   "confirm.redaction_blocked_proceed": "우회하고 작성",
   "toast.redaction_bypassed": "비밀정보 가드 우회 ({hits}건) — 저장됨.",
+  "toast.upload_redaction_cancelled": "업로드 취소됨 — 비밀정보 가드가 {count}개 파일을 차단한 상태로 두었습니다.",
   "surface.web_api_add": "메모리 추가",
   "surface.web_api_chunk_edit": "청크 편집",
   "surface.web_api_scratch_promote": "스크래치 승격",

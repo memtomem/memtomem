@@ -143,6 +143,13 @@ def test_api_add_403_triggers_confirm_and_retries_with_force_unsafe(page, mm_web
     )
     assert calls[0].get("force_unsafe") is not True, "first call should not carry force_unsafe"
 
+    # The dialog must dismiss on confirm — guards against a regression where
+    # ``showConfirm`` resolves but the modal stays visible (would block the
+    # next interaction without surfacing as a request-level failure).
+    page.wait_for_function(
+        "() => document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
     # Success toast for the audited bypass should render.
     page.wait_for_selector(
         "#toast-container .toast",
@@ -235,3 +242,9 @@ def test_api_upload_per_file_redaction_triggers_batch_retry_with_query_param(
         f"retry upload must carry ?force_unsafe=true: {retry_request.url!r}"
     )
     assert "force_unsafe=true" not in calls[0]
+
+    # Dialog must dismiss on confirm (mirrors the JSON-route spec above).
+    page.wait_for_function(
+        "() => document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
