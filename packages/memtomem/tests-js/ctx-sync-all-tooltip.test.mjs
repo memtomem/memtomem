@@ -88,7 +88,13 @@ describe('Sync All — disabled-state tooltip', () => {
 
     expect(btn.dataset.runtimeOnly).toBeUndefined();
     expect(btn.getAttribute('aria-disabled')).toBeNull();
-    expect(btn.title).toBe('');
+    // PR #813 added a default ``data-i18n-title`` (sync_all_tooltip), so
+    // releasing the gate must restore that locale-aware default rather
+    // than wipe the attribute. Pin to the resolved string so a future
+    // ``removeAttribute('title')`` regression fails loudly. Also confirm
+    // the stale tooltip set above was actually replaced.
+    expect(btn.title).toBe(window.I18N.t('settings.ctx.sync_all_tooltip'));
+    expect(btn.title).not.toBe('stale tooltip');
   });
 
   it('refreshes title on langchange while the gate is still active', async () => {

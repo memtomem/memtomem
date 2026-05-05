@@ -609,41 +609,41 @@
 
         <button class="settings-nav-group" type="button" data-group="integrations" aria-expanded="true">
           <span class="nav-group-caret" aria-hidden="true">▾</span>
-          <span data-i18n="settings.nav.integrations">Integrations</span>
+          <span data-i18n="settings.nav.integrations">Agent Integrations</span>
         </button>
         <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-overview" data-group="integrations" role="tab" aria-selected="false">
           <span class="nav-icon" aria-hidden="true">🔄</span>
           <span class="nav-labels">
-            <span class="nav-label" data-i18n="settings.nav.ctx_overview">Artifact Sync</span>
-            <span class="nav-sub" data-i18n="settings.nav.ctx_overview_sub">Skills/Cmd/Agents status</span>
+            <span class="nav-label" data-i18n="settings.nav.ctx_overview">Context Gateway</span>
+            <span class="nav-sub" data-i18n="settings.nav.ctx_overview_sub">Sync overview</span>
           </span>
         </button>
         <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-skills" data-group="integrations" role="tab" aria-selected="false">
           <span class="nav-icon" aria-hidden="true">🧩</span>
           <span class="nav-labels">
             <span class="nav-label" data-i18n="settings.nav.ctx_skills">Skills</span>
-            <span class="nav-sub" data-i18n="settings.nav.ctx_skills_sub">Skill definitions</span>
+            <span class="nav-sub" data-i18n="settings.nav.ctx_skills_sub">Reusable workflows</span>
           </span>
         </button>
-        <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-commands" data-group="integrations" role="tab" aria-selected="false">
+        <button class="settings-nav-btn" data-ui-tier="dev" data-section="ctx-commands" data-group="integrations" role="tab" aria-selected="false">
           <span class="nav-icon" aria-hidden="true">⌘</span>
           <span class="nav-labels">
-            <span class="nav-label" data-i18n="settings.nav.ctx_commands">Commands</span>
-            <span class="nav-sub" data-i18n="settings.nav.ctx_commands_sub">Command definitions</span>
+            <span class="nav-label" data-i18n="settings.nav.ctx_commands">Custom Commands</span>
+            <span class="nav-sub" data-i18n="settings.nav.ctx_commands_sub">Legacy .claude/commands/</span>
           </span>
         </button>
         <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-agents" data-group="integrations" role="tab" aria-selected="false">
           <span class="nav-icon" aria-hidden="true">🤖</span>
           <span class="nav-labels">
-            <span class="nav-label" data-i18n="settings.nav.ctx_agents">Agents</span>
-            <span class="nav-sub" data-i18n="settings.nav.ctx_agents_sub">Agent definitions</span>
+            <span class="nav-label" data-i18n="settings.nav.ctx_agents">Subagents</span>
+            <span class="nav-sub" data-i18n="settings.nav.ctx_agents_sub">Specialized agents</span>
           </span>
         </button>
         <button class="settings-nav-btn" data-ui-tier="prod" data-section="hooks-sync" data-group="integrations" role="tab" aria-selected="false">
           <span class="nav-icon" aria-hidden="true">📎</span>
           <span class="nav-labels">
-            <span class="nav-label" data-i18n="settings.nav.hooks_sync">Hook Files</span>
-            <span class="nav-sub" data-i18n="settings.nav.hooks_sync_sub">Settings hooks</span>
+            <span class="nav-label" data-i18n="settings.nav.hooks_sync">Hooks</span>
+            <span class="nav-sub" data-i18n="settings.nav.hooks_sync_sub">Lifecycle hooks</span>
           </span>
         </button>
 
@@ -758,7 +758,7 @@
         <div class="settings-section" id="settings-hooks-sync">
           <p class="settings-section-desc" data-i18n="settings.hooks.desc">Sync Claude Code hooks from .memtomem/settings.json to the active runtime.</p>
           <div class="hooks-sync-header" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
-            <h2 data-i18n="settings.hooks.title">Settings Hooks</h2>
+            <h2 data-i18n="settings.hooks.title">Hooks</h2>
             <button id="hooks-sync-btn" class="btn-primary" data-i18n="settings.hooks.sync_now">Sync Now</button>
           </div>
           <div id="hooks-sync-status"></div>
@@ -767,12 +767,18 @@
 
         <!-- Context Gateway: Overview -->
         <div class="settings-section" id="settings-ctx-overview">
-          <p class="settings-section-desc" data-i18n="settings.ctx.overview_desc">Status of memtomem skills, commands, and agents across connected runtimes.</p>
+          <p class="settings-section-desc" data-i18n="settings.ctx.overview_desc">Sync memtomem Skills, Subagents, and Hooks to Claude Code, Codex, and other agent runtimes.</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.overview_title">Context Gateway</h2>
             <div>
-              <button id="ctx-detect-btn" class="btn-ghost" data-i18n="settings.ctx.detect">Detect</button>
-              <button id="ctx-sync-all-btn" class="btn-primary" data-i18n="settings.ctx.sync_all">Sync All</button>
+              <button id="ctx-detect-btn" class="btn-ghost"
+                      data-i18n="settings.ctx.detect"
+                      data-i18n-title="settings.ctx.detect_tooltip"
+                      data-i18n-aria-label="settings.ctx.detect_aria">Detect</button>
+              <button id="ctx-sync-all-btn" class="btn-primary"
+                      data-i18n="settings.ctx.sync_all"
+                      data-i18n-title="settings.ctx.sync_all_tooltip"
+                      data-i18n-aria-label="settings.ctx.sync_all_aria">Sync All</button>
             </div>
           </div>
           <div id="ctx-overview-content"></div>
@@ -799,7 +805,7 @@
         <div class="settings-section" id="settings-ctx-commands">
           <p class="settings-section-desc" data-i18n="settings.ctx.commands_desc">Manage command definitions and fan them out to runtimes.</p>
           <div class="ctx-header">
-            <h2 data-i18n="settings.ctx.commands_title">Commands</h2>
+            <h2 data-i18n="settings.ctx.commands_title">Custom Commands</h2>
             <div>
               <button class="btn-ghost ctx-add-project-btn" data-type="commands" data-i18n="settings.ctx.add_project">Add Project</button>
               <button class="btn-ghost ctx-create-btn" data-type="commands" data-i18n="settings.ctx.create">Create</button>
@@ -816,7 +822,7 @@
         <div class="settings-section" id="settings-ctx-agents">
           <p class="settings-section-desc" data-i18n="settings.ctx.agents_desc">Manage agent definitions and fan them out to runtimes.</p>
           <div class="ctx-header">
-            <h2 data-i18n="settings.ctx.agents_title">Agents</h2>
+            <h2 data-i18n="settings.ctx.agents_title">Subagents</h2>
             <div>
               <button class="btn-ghost ctx-add-project-btn" data-type="agents" data-i18n="settings.ctx.add_project">Add Project</button>
               <button class="btn-ghost ctx-create-btn" data-type="agents" data-i18n="settings.ctx.create">Create</button>
@@ -1343,7 +1349,7 @@
   <script src="/settings-harness.js?v=2"></script>
   <script src="/settings-hooks-watchdog.js?v=3"></script>
   <script src="/timeline.js?v=3"></script>
-  <script src="/context-gateway.js?v=16"></script>
+  <script src="/context-gateway.js?v=21"></script>
   <script src="/path-picker.js?v=2"></script>
 </body>
 </html>

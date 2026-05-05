@@ -385,22 +385,50 @@ def test_app_js_pins_ui_mode_default_and_toast_copy() -> None:
     assert "if (STATE.uiMode === 'dev')" in js, (
         "Home dashboard lost its dev-only sessions+scratch fetch gate"
     )
-    # The Context Gateway (Artifact Sync) tab is fully prod — Skills /
-    # Commands / Agents shipped first, and Settings Hooks (Phase D)
-    # graduated via RFC #761 (ADR-0001 §5 readiness criteria). The two
-    # historical ``STATE.uiMode === 'dev'`` gates around the settings
-    # overview-card push and the Sync All settings hop were removed
-    # together with the router move from _DEV_ONLY_ROUTERS to
-    # _PROD_ROUTERS. Symmetric pin per
-    # ``feedback_pin_invert_symmetric_assertion.md``: this assertion is
-    # inverted to ``== 0`` so a future re-gating attempt (e.g., a
-    # half-revert that adds a gate back without moving the router)
-    # fails loudly.
+    # The Context Gateway tab is fully prod — Skills / Subagents shipped
+    # first, and Hooks (Phase D) graduated via RFC #761 (ADR-0001 §5
+    # readiness criteria). Custom Commands sits on the same Context Gateway
+    # surface but is dev-tier pending an external deprecation signal from
+    # Anthropic on .claude/commands/ (the docs already mark it merged into
+    # Skills as the recommended path). PR #813 mirrors the sidebar tier
+    # gate in three client-side surfaces — overview tile render, Sync All
+    # POST loop, and the runtime-only totals reducer — so prod users
+    # don't see Custom Commands in the overview, can't click through to a
+    # dev-only-section toast, and aren't gated on an artifact set they
+    # can't see. Pin both directions per
+    # ``feedback_pin_invert_symmetric_assertion.md``: positive marker
+    # (the three Custom Commands gate sites must exist) + negative
+    # marker (no *other* dev gate may sneak in alongside them, since
+    # the historical RFC #761 dev gates were intentionally removed).
     cg_js = _read_static("context-gateway.js")
-    assert cg_js.count("STATE.uiMode === 'dev'") == 0, (
-        "context-gateway.js gained a dev-mode gate after the RFC #761 "
-        "promotion — either the gate flip is being half-reverted, or a "
-        "new dev-only feature was added without updating this pin."
+    eq_count = cg_js.count("STATE.uiMode === 'dev'")
+    ne_count = cg_js.count("STATE.uiMode !== 'dev'")
+    assert (eq_count, ne_count) == (2, 1), (
+        f"context-gateway.js dev-mode gate distribution drifted from "
+        f"(2 ===, 1 !==), got ({eq_count} ===, {ne_count} !==). "
+        "Expected three Custom Commands gate sites: one negation "
+        "(overview tile devOnly skip via ``!==``) and two ternaries "
+        "(syncKinds reducer split + Sync All POST loop split via "
+        "``===``)."
+    )
+    # Tie each gate to a specific marker so a future refactor that
+    # collapses the gates into one helper (or accidentally drops one of
+    # the three sites) trips a precise failure rather than a stale-
+    # count drift.
+    assert "if (typ.devOnly && STATE.uiMode !== 'dev') continue;" in cg_js, (
+        "context-gateway.js lost the overview-tile devOnly skip; prod "
+        "users would see Custom Commands and bounce off the dev-only-"
+        "section toast in switchSettingsSection."
+    )
+    assert "syncKinds = STATE.uiMode === 'dev'" in cg_js, (
+        "context-gateway.js lost the runtime-only totals tier split; "
+        "prod users would see Sync All disabled because of an artifact "
+        "category (commands) they can't see."
+    )
+    assert "STATE.uiMode === 'dev'\n      ? ['skills', 'commands', 'agents']" in cg_js, (
+        "context-gateway.js lost the Sync All POST loop tier split; "
+        "Sync All would still POST /api/context/commands/sync in prod "
+        "even though the surface is dev-only."
     )
     # And the locale entries themselves are pinned so a rename doesn't go
     # unnoticed by the i18n completeness check.
@@ -426,7 +454,15 @@ def test_html_main_tabs_all_stay_prod() -> None:
 def test_html_classification_matches_router_lists() -> None:
     """HTML ``data-ui-tier`` values must agree with the Python router lists
     — drift between the two would hide/show a tab whose route disagrees,
-    breaking `mm web --dev` discovery or producing phantom prod 404s."""
+    breaking `mm web --dev` discovery or producing phantom prod 404s.
+
+    One direction is deliberately allowed: a section can be dev-tier in the
+    HTML while its router stays in ``_PROD_ROUTERS`` (UI hides what the
+    backend still serves). That's the deprecation-transition shape — see
+    ``ctx-commands`` below. The dangerous direction (UI shows a section
+    whose router is dev-only, producing 404s in prod) is what this test
+    actually defends against.
+    """
     html = _read_static("index.html")
     dev_sections = set(re.findall(r'data-ui-tier="dev"\s+data-section="([^"]+)"', html))
     # Expected dev sections derived from _DEV_ONLY_ROUTERS + naming (SPA
@@ -441,6 +477,15 @@ def test_html_classification_matches_router_lists() -> None:
         # ``hooks-sync`` graduated to prod via RFC #761 (ADR-0001 §5
         # readiness criteria); the section's data-ui-tier was flipped
         # together with the router move.
+        # ``ctx-commands``: sidebar leaf is dev-tier (hidden in
+        # ``mm web`` prod) following Anthropic's IA shift — the official
+        # Claude Code docs mark ``.claude/commands/`` as "merged into
+        # skills" with Skills as the recommended path, but the files
+        # "keep working", so ``context_commands`` is intentionally kept
+        # in ``_PROD_ROUTERS`` to keep the API responsive for existing
+        # users until an explicit deprecation signal lands. UI-only
+        # demote, no router move.
+        "ctx-commands",
         "harness-sessions",
         "harness-scratch",
         "harness-procedures",

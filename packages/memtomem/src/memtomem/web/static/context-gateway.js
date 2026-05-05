@@ -94,15 +94,20 @@ async function loadCtxOverview() {
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Failed to load overview');
     const data = await res.json();
 
+    // Custom Commands sidebar leaf is dev-tier (Anthropic merged
+    // .claude/commands/ into Skills); the overview tile mirrors that —
+    // surfacing it in prod would let users click through and trigger
+    // the dev-only-section toast in switchSettingsSection.
     const types = [
       { key: 'skills',   label: t('settings.ctx.skills_title'),   section: 'ctx-skills' },
-      { key: 'commands', label: t('settings.ctx.commands_title'), section: 'ctx-commands' },
+      { key: 'commands', label: t('settings.ctx.commands_title'), section: 'ctx-commands', devOnly: true },
       { key: 'agents',   label: t('settings.ctx.agents_title'),   section: 'ctx-agents' },
       { key: 'settings', label: t('settings.hooks.title'),        section: 'hooks-sync' },
     ];
 
     let html = '<div class="ctx-overview-grid">';
     for (const typ of types) {
+      if (typ.devOnly && STATE.uiMode !== 'dev') continue;
       const d = data[typ.key] || {};
       const total = d.total || 0;
       const inSync = d.in_sync || 0;
@@ -165,7 +170,14 @@ async function loadCtxOverview() {
     // stays as a fallback for users who don't hover (mobile, keyboard).
     const syncAllBtn = document.getElementById('ctx-sync-all-btn');
     if (syncAllBtn) {
-      const totals = ['skills', 'commands', 'agents'].reduce((acc, k) => {
+      // Mirror the overview-tile gate: in prod the Custom Commands
+      // surface is hidden, so its missing_canonical count must not
+      // gate the Sync All button (otherwise prod users would see Sync
+      // All disabled because of an artifact set they can't even see).
+      const syncKinds = STATE.uiMode === 'dev'
+        ? ['skills', 'commands', 'agents']
+        : ['skills', 'agents'];
+      const totals = syncKinds.reduce((acc, k) => {
         const d = data[k] || {};
         acc.total += d.total || 0;
         acc.runtimeOnly += d.missing_canonical || 0;
@@ -177,8 +189,17 @@ async function loadCtxOverview() {
         syncAllBtn.setAttribute('aria-disabled', 'true');
       } else {
         delete syncAllBtn.dataset.runtimeOnly;
-        syncAllBtn.removeAttribute('title');
         syncAllBtn.removeAttribute('aria-disabled');
+        // The button has a default ``data-i18n-title`` (sync_all_tooltip);
+        // wiping the attribute outright would clobber the locale-driven
+        // hover tooltip that ``I18N.applyDOM`` set on page load.
+        // Restore it from the dataset key instead.
+        const titleKey = syncAllBtn.dataset.i18nTitle;
+        if (titleKey) {
+          syncAllBtn.title = t(titleKey);
+        } else {
+          syncAllBtn.removeAttribute('title');
+        }
       }
     }
 
@@ -223,7 +244,13 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     const headers = csrf
       ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
       : { 'Content-Type': 'application/json' };
-    const types = ['skills', 'commands', 'agents'];
+    // Skip the dev-tier Custom Commands surface in prod — calling its
+    // backend route still 200s, but Sync All advertises itself as
+    // synchronizing what the user can see, and the prod sidebar /
+    // overview no longer expose ``ctx-commands``.
+    const types = STATE.uiMode === 'dev'
+      ? ['skills', 'commands', 'agents']
+      : ['skills', 'agents'];
     for (const typ of types) {
       const resp = await fetch(`/api/context/${typ}/sync`, { method: 'POST', headers });
       if (!resp.ok) throw new Error(`Sync ${typ} failed`);
