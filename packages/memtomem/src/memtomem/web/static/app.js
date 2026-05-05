@@ -431,7 +431,14 @@ async function uploadFilesWithRedactionRetry(formData) {
   // ``toast.redaction_bypass_partial`` with the actual succeeded/total counts
   // so the operator sees that some blocked files did not land. ``bypassed``
   // tracks the same boolean so callers can branch off it.
-  const succeededCount = retryFiles.filter(r => !r.error).length;
+  //
+  // ``succeededCount`` is clamped to ``blockedRows.length`` rows so that an
+  // over-long retry response (server returns more rows than we re-sent —
+  // shape regression in the other direction) cannot produce nonsense counts
+  // like "3 of 2 written" in the partial toast.
+  const succeededCount = retryFiles
+    .slice(0, blockedRows.length)
+    .filter(r => !r.error).length;
   const fullySucceeded =
     retryFiles.length === blockedRows.length && succeededCount === blockedRows.length;
   if (fullySucceeded) {
@@ -4153,13 +4160,22 @@ qs('add-btn').addEventListener('click', async () => {
         showToast(t('toast.upload_redaction_cancelled', { count: upload.blockedFileCount }), 'error');
         return;
       }
-      const firstPath = data.files.find(r => !r.error && r.path)?.path;
-      const successMsg = firstPath
-        ? t('toast.upload_complete_with_path', { count: data.total_indexed, path: tildifyPath(firstPath) })
-        : t('toast.upload_complete', { count: data.total_indexed });
-      showToast(successMsg, 'success');
-      selectedFiles = [];
-      renderFileList();
+      // Partial bypass: helper already emitted ``toast.redaction_bypass_partial``
+      // with the succeeded/total counts. Skip the generic "Upload complete"
+      // success toast (it would falsely audit a successful write on top of the
+      // partial warning) and keep the file selection so the operator can adjust
+      // and retry. First-pass clean files DID land on disk, so stats / source
+      // filter / usage refresh still happens below.
+      const partial = upload.blockedFileCount > 0 && !upload.bypassed;
+      if (!partial) {
+        const firstPath = data.files.find(r => !r.error && r.path)?.path;
+        const successMsg = firstPath
+          ? t('toast.upload_complete_with_path', { count: data.total_indexed, path: tildifyPath(firstPath) })
+          : t('toast.upload_complete', { count: data.total_indexed });
+        showToast(successMsg, 'success');
+        selectedFiles = [];
+        renderFileList();
+      }
       _markDataStale();
       loadSourceFilter();
       loadStats();
@@ -5667,8 +5683,16 @@ qs('group-toggle').addEventListener('click', () => {
       const upload = await uploadFilesWithRedactionRetry(fd);
       if (upload.cancelled) return;
       const data = upload.data;
-      const chunks = (data.results || []).reduce((s, r) => s + (r.indexed_chunks || 0), 0);
-      showToast(t('toast.indexed_files_chunks', { files: files.length, chunks }), 'success');
+      // See upload-mode caller for the rationale: on partial bypass the
+      // helper already surfaced the per-file failure via
+      // ``toast.redaction_bypass_partial``; suppress the generic success
+      // toast here so the audit-relevant warning isn't followed by a
+      // contradicting "indexed N files" message.
+      const partial = upload.blockedFileCount > 0 && !upload.bypassed;
+      if (!partial) {
+        const chunks = (data.results || []).reduce((s, r) => s + (r.indexed_chunks || 0), 0);
+        showToast(t('toast.indexed_files_chunks', { files: files.length, chunks }), 'success');
+      }
       _markDataStale();
       loadSourceFilter();
       loadStats();

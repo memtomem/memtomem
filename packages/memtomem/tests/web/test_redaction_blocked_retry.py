@@ -475,6 +475,19 @@ def test_api_upload_retry_with_persistent_error_row_does_not_claim_bypassed(
     assert "0" in partial_text and "1" in partial_text, (
         f"partial toast must include succeeded/total counts: {partial_text!r}"
     )
+    # The audit-relevant promise: caller must not stack a generic "Upload
+    # complete" success toast on top of the partial warning. ``showToast``
+    # tags success-class messages with ``.toast-success`` (app.js:908), so
+    # the upload-mode caller's success branch is detectable as a class
+    # presence — independent of locale text. Without the caller-side
+    # ``partial`` guard added in PR #805 follow-up, this assertion fails
+    # because the success path runs unconditionally after retry.
+    success_toasts = page.locator("#toast-container .toast.toast-success")
+    assert success_toasts.count() == 0, (
+        f"partial bypass must not emit a generic upload-complete success toast; "
+        f"saw {success_toasts.count()}: "
+        f"{[t.text_content() for t in success_toasts.all()]}"
+    )
 
 
 def test_api_upload_retry_with_truncated_row_count_does_not_claim_bypassed(
@@ -570,6 +583,133 @@ def test_api_upload_retry_with_truncated_row_count_does_not_claim_bypassed(
     # 1 of 2 succeeded — the single returned row was clean.
     assert "1" in partial_text and "2" in partial_text, (
         f"partial toast must include 1 of 2: {partial_text!r}"
+    )
+    # Same caller-side guard as the persistent-error spec: a partial
+    # bypass must not be followed by the upload-mode caller's generic
+    # success toast (would imply "all good" on top of the partial warning).
+    success_toasts = page.locator("#toast-container .toast.toast-success")
+    assert success_toasts.count() == 0, (
+        f"truncated retry must not emit a generic upload-complete success toast; "
+        f"saw {success_toasts.count()}"
+    )
+
+
+def test_api_upload_retry_with_extra_row_count_clamps_succeeded_count(
+    page, mm_web_url: str, tmp_path: Path
+) -> None:
+    """Retry returns *more* rows than the narrowed FormData carried (server
+    shape regression in the over-long direction) → ``succeededCount`` must
+    be clamped to ``blockedRows.length`` so the partial toast cannot show
+    impossible counts like "3 of 2 written", and the success bypass toast
+    must still be suppressed because the row count mismatch breaks the
+    positional alignment the merge depends on.
+
+    This is the symmetric companion to the truncated-retry spec: same
+    failure mode (length mismatch invalidates positional merge) from the
+    other direction. The narrowed FormData carries one blocked file; the
+    server returns three rows. Without the clamp at app.js:434 the
+    partial toast would read "3 of 1 written" — nonsensical and worse,
+    suggests over-success rather than the underlying contract violation.
+    """
+    _install_default_stubs(page)
+
+    def _upload_handler(route):
+        if "force_unsafe=true" in route.request.url:
+            # Over-long retry — three rows back even though we sent one.
+            # All three are clean (no error) so a naive
+            # ``retryFiles.filter(r => !r.error).length`` would yield 3,
+            # then format as "3 of 1" in the partial toast.
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "files": [
+                            {
+                                "filename": "secret.md",
+                                "indexed_chunks": 1,
+                                "path": "/home/u/.memtomem/uploads/secret.md",
+                            },
+                            {
+                                "filename": "ghost1.md",
+                                "indexed_chunks": 1,
+                                "path": "/home/u/.memtomem/uploads/ghost1.md",
+                            },
+                            {
+                                "filename": "ghost2.md",
+                                "indexed_chunks": 1,
+                                "path": "/home/u/.memtomem/uploads/ghost2.md",
+                            },
+                        ],
+                        "total_indexed": 3,
+                    }
+                ),
+            )
+        else:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "files": [
+                            {
+                                "filename": "secret.md",
+                                "indexed_chunks": 0,
+                                "error": "redaction_blocked (hits=2)",
+                            }
+                        ],
+                        "total_indexed": 0,
+                    }
+                ),
+            )
+
+    page.route(re.compile(r"/api/upload(?:\?.*)?$"), _upload_handler)
+
+    fixture = tmp_path / "secret.md"
+    fixture.write_text("# Secret notes\n\nsk-ant-test-fake-1234567890abcdef\n")
+
+    page.goto(mm_web_url)
+    page.locator("#tabbtn-index").click()
+    page.locator("#index-mode-upload").click()
+    page.locator("#upload-input").set_input_files(str(fixture))
+    page.locator("#upload-btn").click()
+
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    with page.expect_request(re.compile(r"/api/upload\?force_unsafe=true$"), timeout=5_000):
+        page.locator("#confirm-ok-btn").click()
+    page.wait_for_function(
+        "() => document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+
+    page.wait_for_selector("#toast-container .toast", timeout=2_000)
+    bypass_toasts = page.locator("#toast-container .toast", has_text="Bypassed redaction guard")
+    assert bypass_toasts.count() == 0, (
+        "over-long retry response must not emit the success bypass toast — "
+        "row count mismatch breaks positional merge"
+    )
+    partial_toasts = page.locator("#toast-container .toast", has_text="Bypass partial")
+    assert partial_toasts.count() == 1, (
+        f"over-long retry must emit toast.redaction_bypass_partial, saw {partial_toasts.count()}"
+    )
+    partial_text = partial_toasts.first.text_content() or ""
+    # Clamp pin: the displayed succeeded count must be ≤ total (1 here),
+    # so the toast reads "1 of 1" rather than "3 of 1". Match the exact
+    # "X of Y" fragment to avoid false positives from other digits in the
+    # surrounding template.
+    assert "1 of 1" in partial_text, (
+        f"partial toast must clamp succeeded to total (1 of 1), got: {partial_text!r}"
+    )
+    assert "3 of 1" not in partial_text, (
+        f"partial toast must not leak the unclamped server-side count: {partial_text!r}"
+    )
+    success_toasts = page.locator("#toast-container .toast.toast-success")
+    assert success_toasts.count() == 0, (
+        f"over-long retry must not emit a generic upload-complete success toast; "
+        f"saw {success_toasts.count()}"
     )
 
 
