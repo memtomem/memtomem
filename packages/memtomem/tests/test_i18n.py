@@ -373,6 +373,64 @@ class TestNoHardcodedStrings:
                 f"_SETTINGS_STATUS_I18N missing entry for emitted status {status!r} (#775)"
             )
 
+    def test_issue_774_sync_all_inspects_settings_body(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """Sync All must inspect the Settings sync response body (#774).
+
+        The route at ``/api/context/settings/sync`` returns HTTP 200 with
+        ``{"results": [{"status": "needs_confirmation", ...}]}`` when the
+        body's ``allow_host_writes`` defaults to false — the case for Sync
+        All, which posts no body. ``resp.ok`` alone is therefore not
+        enough to confirm the merge actually happened: before #774 the
+        ``sync_success`` toast lied to the user even though
+        ``~/.claude/settings.json`` was untouched. The fix branches on
+        ``status === 'needs_confirmation'`` and surfaces partial-success
+        with a one-tap navigation to the Settings panel.
+
+        Symmetric pin per ``feedback_pin_invert_symmetric_assertion.md``:
+        the partial-success branch (positive marker) is paired with the
+        unconditional ``settings.ctx.sync_success`` for the negative case
+        (still present so a regression that always toasts partial-success
+        also fails). i18n keys for both locales are pinned to catch a
+        rename.
+        """
+        # i18n keys exist in both locales.
+        required = {
+            "toast.sync_partial_settings_needs_confirmation",
+            "toast.open_settings_action",
+        }
+        missing_en = required - set(en)
+        missing_ko = required - set(ko)
+        assert not missing_en, f"#774 keys missing from en.json: {sorted(missing_en)}"
+        assert not missing_ko, f"#774 keys missing from ko.json: {sorted(missing_ko)}"
+
+        # JS branches on the per-result status, not on resp.ok alone.
+        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        assert "settingsResp.json()" in text, (
+            "context-gateway.js Sync All must read the Settings sync "
+            "response body — resp.ok alone hides ``needs_confirmation``"
+        )
+        assert "'needs_confirmation'" in text, (
+            "context-gateway.js Sync All must branch on per-result "
+            "``status === 'needs_confirmation'`` (#774)"
+        )
+        # Action button wires through to the Settings panel, not a dead
+        # toast — the user has to be able to drive the host-write
+        # confirmation from somewhere reachable.
+        assert "switchSettingsSection('hooks-sync')" in text, (
+            "context-gateway.js Sync All partial-success toast must "
+            "expose a navigation action to the Settings panel (#774)"
+        )
+        # Inverted pin: the unconditional success branch must still
+        # exist. A regression that universally toasts partial-success
+        # would drop ``settings.ctx.sync_success`` from the Sync All
+        # handler — fail loudly.
+        assert "t('settings.ctx.sync_success')" in text, (
+            "context-gateway.js Sync All lost its full-success branch — "
+            "every Sync All would now toast partial-success (#774)"
+        )
+
     def test_issue_698_new_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
         """Locale keys introduced for #698 must exist in both files. The
         existing ``test_placeholder_parity`` will catch ``{count}`` /

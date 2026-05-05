@@ -232,9 +232,37 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     // entries to ~/.claude/settings.json without clobbering user-authored
     // entries. Promoted from dev-only via RFC #761 (ADR-0001 §5 criteria
     // + HTTP-layer test fixtures).
+    //
+    // The route returns HTTP 200 even when host-write targets need user
+    // confirmation — each per-result entry carries its own ``status``
+    // (``needs_confirmation`` for ``~/.claude/settings.json`` when the
+    // body's ``allow_host_writes`` defaults to false, which is the case
+    // for Sync All — the dedicated Settings panel owns the confirmation
+    // flow). ``resp.ok`` alone would let that pass as a full success and
+    // the ``sync_success`` toast would lie about a merge that never
+    // happened. Inspect the body and surface partial-success with a
+    // one-tap navigation to the Settings panel where the user can drive
+    // the host-write confirmation. (#774)
     const settingsResp = await fetch('/api/context/settings/sync', { method: 'POST', headers });
     if (!settingsResp.ok) throw new Error('Settings sync failed');
-    showToast(t('settings.ctx.sync_success'));
+    const settingsData = await settingsResp.json().catch(() => ({}));
+    const needsConfirmation = (settingsData.results || []).some(
+      r => r && r.status === 'needs_confirmation',
+    );
+    if (needsConfirmation) {
+      showToast(
+        t('toast.sync_partial_settings_needs_confirmation'),
+        'info',
+        {
+          action: {
+            label: t('toast.open_settings_action'),
+            onClick: () => switchSettingsSection('hooks-sync'),
+          },
+        },
+      );
+    } else {
+      showToast(t('settings.ctx.sync_success'));
+    }
     loadCtxOverview();
   } catch (err) {
     showToast(t('toast.sync_failed', { error: err.message }), 'error');
