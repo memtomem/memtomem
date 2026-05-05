@@ -756,10 +756,13 @@
 
         <!-- Hooks Sync section -->
         <div class="settings-section" id="settings-hooks-sync">
-          <p class="settings-section-desc" data-i18n="settings.hooks.desc">Sync Claude Code hooks from .memtomem/settings.json to the active runtime.</p>
+          <p class="settings-section-desc" data-i18n="settings.hooks.desc">Lifecycle hooks defined in .memtomem/settings.json, applied to the active runtime.</p>
           <div class="hooks-sync-header" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
             <h2 data-i18n="settings.hooks.title">Hooks</h2>
-            <button id="hooks-sync-btn" class="btn-primary" data-i18n="settings.hooks.sync_now">Sync Now</button>
+            <button id="hooks-sync-btn" class="btn-primary"
+                    data-i18n="settings.hooks.sync_now"
+                    data-i18n-title="settings.hooks.sync_now_tooltip"
+                    data-i18n-aria-label="settings.hooks.sync_now_aria">Sync Now</button>
           </div>
           <div id="hooks-sync-status"></div>
           <div id="hooks-sync-content"></div>
@@ -786,14 +789,26 @@
 
         <!-- Context Gateway: Skills -->
         <div class="settings-section" id="settings-ctx-skills">
-          <p class="settings-section-desc" data-i18n="settings.ctx.skills_desc">Manage skill definitions and fan them out to runtimes.</p>
+          <p class="settings-section-desc" data-i18n="settings.ctx.skills_desc">Reusable workflows shared across Claude Code, Codex, and other detected runtimes.</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.skills_title">Skills</h2>
             <div>
-              <button class="btn-ghost ctx-add-project-btn" data-type="skills" data-i18n="settings.ctx.add_project">Add Project</button>
-              <button class="btn-ghost ctx-create-btn" data-type="skills" data-i18n="settings.ctx.create">Create</button>
-              <button class="btn-ghost ctx-import-btn" data-type="skills" data-i18n="settings.ctx.import">Import</button>
-              <button class="btn-primary ctx-sync-btn" data-type="skills" data-i18n="settings.ctx.sync">Sync</button>
+              <button class="btn-ghost ctx-add-project-btn" data-type="skills"
+                      data-i18n="settings.ctx.add_project"
+                      data-i18n-title="settings.ctx.skills_add_project_tooltip"
+                      data-i18n-aria-label="settings.ctx.skills_add_project_aria">Add Project</button>
+              <button class="btn-ghost ctx-create-btn" data-type="skills"
+                      data-i18n="settings.ctx.create"
+                      data-i18n-title="settings.ctx.skills_create_tooltip"
+                      data-i18n-aria-label="settings.ctx.skills_create_aria">Create</button>
+              <button class="btn-ghost ctx-import-btn" data-type="skills"
+                      data-i18n="settings.ctx.import"
+                      data-i18n-title="settings.ctx.skills_import_tooltip"
+                      data-i18n-aria-label="settings.ctx.skills_import_aria">Import</button>
+              <button class="btn-primary ctx-sync-btn" data-type="skills"
+                      data-i18n="settings.ctx.sync"
+                      data-i18n-title="settings.ctx.skills_sync_tooltip"
+                      data-i18n-aria-label="settings.ctx.skills_sync_aria">Sync</button>
             </div>
           </div>
           <div id="ctx-skills-status"></div>
@@ -803,14 +818,26 @@
 
         <!-- Context Gateway: Commands -->
         <div class="settings-section" id="settings-ctx-commands">
-          <p class="settings-section-desc" data-i18n="settings.ctx.commands_desc">Manage command definitions and fan them out to runtimes.</p>
+          <p class="settings-section-desc" data-i18n="settings.ctx.commands_desc">Project-scoped slash commands kept in .claude/commands/, synced to detected runtimes.</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.commands_title">Custom Commands</h2>
             <div>
-              <button class="btn-ghost ctx-add-project-btn" data-type="commands" data-i18n="settings.ctx.add_project">Add Project</button>
-              <button class="btn-ghost ctx-create-btn" data-type="commands" data-i18n="settings.ctx.create">Create</button>
-              <button class="btn-ghost ctx-import-btn" data-type="commands" data-i18n="settings.ctx.import">Import</button>
-              <button class="btn-primary ctx-sync-btn" data-type="commands" data-i18n="settings.ctx.sync">Sync</button>
+              <button class="btn-ghost ctx-add-project-btn" data-type="commands"
+                      data-i18n="settings.ctx.add_project"
+                      data-i18n-title="settings.ctx.commands_add_project_tooltip"
+                      data-i18n-aria-label="settings.ctx.commands_add_project_aria">Add Project</button>
+              <button class="btn-ghost ctx-create-btn" data-type="commands"
+                      data-i18n="settings.ctx.create"
+                      data-i18n-title="settings.ctx.commands_create_tooltip"
+                      data-i18n-aria-label="settings.ctx.commands_create_aria">Create</button>
+              <button class="btn-ghost ctx-import-btn" data-type="commands"
+                      data-i18n="settings.ctx.import"
+                      data-i18n-title="settings.ctx.commands_import_tooltip"
+                      data-i18n-aria-label="settings.ctx.commands_import_aria">Import</button>
+              <button class="btn-primary ctx-sync-btn" data-type="commands"
+                      data-i18n="settings.ctx.sync"
+                      data-i18n-title="settings.ctx.commands_sync_tooltip"
+                      data-i18n-aria-label="settings.ctx.commands_sync_aria">Sync</button>
             </div>
           </div>
           <div id="ctx-commands-status"></div>
@@ -820,14 +847,26 @@
 
         <!-- Context Gateway: Agents -->
         <div class="settings-section" id="settings-ctx-agents">
-          <p class="settings-section-desc" data-i18n="settings.ctx.agents_desc">Manage agent definitions and fan them out to runtimes.</p>
+          <p class="settings-section-desc" data-i18n="settings.ctx.agents_desc">Specialized subagents shared across Claude Code, Codex, and other detected runtimes.</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.agents_title">Subagents</h2>
             <div>
-              <button class="btn-ghost ctx-add-project-btn" data-type="agents" data-i18n="settings.ctx.add_project">Add Project</button>
-              <button class="btn-ghost ctx-create-btn" data-type="agents" data-i18n="settings.ctx.create">Create</button>
-              <button class="btn-ghost ctx-import-btn" data-type="agents" data-i18n="settings.ctx.import">Import</button>
-              <button class="btn-primary ctx-sync-btn" data-type="agents" data-i18n="settings.ctx.sync">Sync</button>
+              <button class="btn-ghost ctx-add-project-btn" data-type="agents"
+                      data-i18n="settings.ctx.add_project"
+                      data-i18n-title="settings.ctx.agents_add_project_tooltip"
+                      data-i18n-aria-label="settings.ctx.agents_add_project_aria">Add Project</button>
+              <button class="btn-ghost ctx-create-btn" data-type="agents"
+                      data-i18n="settings.ctx.create"
+                      data-i18n-title="settings.ctx.agents_create_tooltip"
+                      data-i18n-aria-label="settings.ctx.agents_create_aria">Create</button>
+              <button class="btn-ghost ctx-import-btn" data-type="agents"
+                      data-i18n="settings.ctx.import"
+                      data-i18n-title="settings.ctx.agents_import_tooltip"
+                      data-i18n-aria-label="settings.ctx.agents_import_aria">Import</button>
+              <button class="btn-primary ctx-sync-btn" data-type="agents"
+                      data-i18n="settings.ctx.sync"
+                      data-i18n-title="settings.ctx.agents_sync_tooltip"
+                      data-i18n-aria-label="settings.ctx.agents_sync_aria">Sync</button>
             </div>
           </div>
           <div id="ctx-agents-status"></div>

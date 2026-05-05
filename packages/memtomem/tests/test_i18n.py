@@ -502,3 +502,49 @@ class TestNoHardcodedStrings:
         missing_ko = required - set(ko)
         assert not missing_en, f"#698 keys missing from en.json: {sorted(missing_en)}"
         assert not missing_ko, f"#698 keys missing from ko.json: {sorted(missing_ko)}"
+
+    def test_pr_2_leaf_relabel_pin(self, en: dict[str, str], ko: dict[str, str]) -> None:
+        """Pin the post-PR-2 leaf-page copy + tooltip/aria keys.
+
+        Sibling of #813 (sidebar relabel): each leaf page (Skills, Custom
+        Commands, Subagents, Hooks) now uses task-oriented descriptions
+        and per-button directional tooltip + aria-label keys. Symmetric
+        assertion (positive marker + negative ``not in``) catches both
+        rollbacks to the generic ``Manage X definitions`` copy and
+        rename/drop of any of the 26 new tooltip/aria keys."""
+        # Positive markers — canonical phrasing must be present (en + ko)
+        assert "Reusable workflows" in en["settings.ctx.skills_desc"]
+        assert "slash commands" in en["settings.ctx.commands_desc"]
+        assert "Specialized subagents" in en["settings.ctx.agents_desc"]
+        assert "Lifecycle hooks" in en["settings.hooks.desc"]
+        assert "재사용 워크플로우" in ko["settings.ctx.skills_desc"]
+        assert "슬래시 명령어" in ko["settings.ctx.commands_desc"]
+        assert "전문 서브에이전트" in ko["settings.ctx.agents_desc"]
+        assert "라이프사이클 훅" in ko["settings.hooks.desc"]
+        # Negative markers — generic pre-PR-2 copy must be gone
+        for key in (
+            "settings.ctx.skills_desc",
+            "settings.ctx.commands_desc",
+            "settings.ctx.agents_desc",
+        ):
+            assert "Manage" not in en[key], f"{key} still uses pre-PR-2 'Manage X' phrasing"
+            assert "fan them out" not in en[key], (
+                f"{key} still uses pre-PR-2 'fan them out' phrasing"
+            )
+            assert "정의를 관리하고" not in ko[key], (
+                f"{key} still uses pre-PR-2 KO '정의를 관리하고' phrasing"
+            )
+        assert "Sync Claude Code hooks" not in en["settings.hooks.desc"]
+        # Tooltip + aria-label key existence (13 buttons × 2 attrs = 26 keys)
+        required_keys = {
+            "settings.hooks.sync_now_tooltip",
+            "settings.hooks.sync_now_aria",
+        }
+        for leaf in ("skills", "commands", "agents"):
+            for action in ("add_project", "create", "import", "sync"):
+                required_keys.add(f"settings.ctx.{leaf}_{action}_tooltip")
+                required_keys.add(f"settings.ctx.{leaf}_{action}_aria")
+        missing_en = required_keys - set(en)
+        missing_ko = required_keys - set(ko)
+        assert not missing_en, f"PR-2 tooltip/aria keys missing from en.json: {sorted(missing_en)}"
+        assert not missing_ko, f"PR-2 tooltip/aria keys missing from ko.json: {sorted(missing_ko)}"
