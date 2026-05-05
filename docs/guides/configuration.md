@@ -745,15 +745,15 @@ Tab classification changes over time — run `mm web --dev` to see the full surf
 
 ## Context Gateway
 
-Settings for the multi-project context UI (skills / commands / agents)
-that ships with `mm web`. The discovery surface enumerates every scope
+Settings for the multi-project context UI (Skills, Custom Commands, and
+Subagents) that ships with `mm web`. The discovery surface enumerates every scope
 the gateway knows about — the server's current working directory, any
 project roots registered via the Web UI, and (opt-in) decoded paths
 from `~/.claude/projects/`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMTOMEM_CONTEXT_GATEWAY__KNOWN_PROJECTS_PATH` | `~/.memtomem/known_projects.json` | Where the Web UI persists "Add Project" registrations. The Sources / Skills / Commands / Agents tabs render one collapsible group per registered scope. |
+| `MEMTOMEM_CONTEXT_GATEWAY__KNOWN_PROJECTS_PATH` | `~/.memtomem/known_projects.json` | Where the Web UI persists "Add Project" registrations. The Sources, Skills, Custom Commands, and Subagents tabs render one collapsible group per registered scope. |
 | `MEMTOMEM_CONTEXT_GATEWAY__EXPERIMENTAL_CLAUDE_PROJECTS_SCAN` | `false` | When `true`, the gateway also reverse-decodes `~/.claude/projects/<encoded>` directory names into project roots and surfaces them as discovered scopes. Off by default — the encoding is fragile around dash-containing paths, so this stays gated behind explicit consent. |
 | `MEMTOMEM_CONTEXT_GATEWAY__USER_TIER_ENABLED` | `false` | Forward-compat flag for the user-scope artifact surface. While `false`, user-tier entries are hidden from discovery responses entirely. |
 
