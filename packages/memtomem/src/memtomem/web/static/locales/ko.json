@@ -616,6 +616,8 @@
   "toast.reindex_complete": "재인덱스 완료 \u2014 {count}개 청크 인덱싱",
   "toast.indexing_in_progress": "이미 인덱싱이 진행 중입니다",
   "toast.hooks_warnings": "동기화 완료 (경고 {count}건)",
+  "toast.sync_partial_settings_needs_confirmation": "Sync All 완료 (Settings 제외) — Settings 패널에서 호스트 쓰기를 확인하세요.",
+  "toast.open_settings_action": "Settings 열기",
   "toast.request_failed": "요청 실패",
   "toast.unexpected_response": "예상치 못한 응답",
   "toast.sync_failed": "동기화 실패: {error}",

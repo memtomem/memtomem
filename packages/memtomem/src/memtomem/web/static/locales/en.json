@@ -616,6 +616,8 @@
   "toast.reindex_complete": "Re-index complete \u2014 {count} chunks indexed",
   "toast.indexing_in_progress": "Indexing already in progress",
   "toast.hooks_warnings": "Synced with {count} warning(s)",
+  "toast.sync_partial_settings_needs_confirmation": "Sync All complete except Settings — confirm host writes in the Settings panel.",
+  "toast.open_settings_action": "Open Settings",
   "toast.request_failed": "Request failed",
   "toast.unexpected_response": "Unexpected response",
   "toast.sync_failed": "Sync failed: {error}",

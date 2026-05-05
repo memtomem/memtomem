@@ -65,6 +65,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   existing 21 tests in `tests/test_context_settings.py`. Rollback:
   `git revert` the gate-flip commit restores dev-only gating.
 
+### Fixed
+
+- **Sync All no longer lies when Settings host writes need confirmation
+  (closes #774).** The Context Gateway "Sync All" button posts to four
+  endpoints sequentially; the Settings hop's `POST /api/context/settings/sync`
+  body-less request defaults `allow_host_writes` to false, and the route
+  returns HTTP 200 with `{"results": [{"status": "needs_confirmation",
+  ...}]}` for host-write targets like `~/.claude/settings.json` — the
+  merge is skipped. Previously the JS only checked `resp.ok`, so the
+  post-merge `sync_success` toast lied about a merge that never
+  happened. After RFC #761 (#771) flipped Settings to prod, this
+  silent-skip behavior reached every prod user instead of just the
+  `mm web --dev` audience. The frontend now inspects per-result
+  `status` and surfaces an info-level toast (`Sync All complete except
+  Settings — confirm host writes in the Settings panel.`) with an
+  `Open Settings` action that navigates to the Settings panel where
+  the user can drive the host-write confirmation. The Skills /
+  Commands / Agents fanout keeps its all-or-nothing failure shape.
+
 ## [0.1.35] — 2026-05-02
 
 ### Added
