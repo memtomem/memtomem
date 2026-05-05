@@ -12,6 +12,10 @@ __all__ = [
     "AutoTagSample",
     "TagsUpdateRequest",
     "TagsUpdateResponse",
+    "TagRenameRequest",
+    "TagMergeRequest",
+    "TagOpSampleOut",
+    "TagOpResponse",
 ]
 
 
@@ -57,3 +61,26 @@ class TagsUpdateRequest(BaseModel):
 class TagsUpdateResponse(BaseModel):
     id: str
     tags: list[str]
+
+
+class TagRenameRequest(BaseModel):
+    new_name: str
+
+
+class TagMergeRequest(BaseModel):
+    sources: list[str]
+    target: str
+
+
+class TagOpSampleOut(BaseModel):
+    chunk_id: str
+    source_file: str
+    content_preview: str
+    current_tags: list[str]
+
+
+class TagOpResponse(BaseModel):
+    tag: str
+    affected_chunks: int
+    dry_run: bool
+    samples: list[TagOpSampleOut] = []
