@@ -390,20 +390,45 @@ def test_app_js_pins_ui_mode_default_and_toast_copy() -> None:
     # readiness criteria). Custom Commands sits on the same Context Gateway
     # surface but is dev-tier pending an external deprecation signal from
     # Anthropic on .claude/commands/ (the docs already mark it merged into
-    # Skills as the recommended path). The two
-    # historical ``STATE.uiMode === 'dev'`` gates around the settings
-    # overview-card push and the Sync All settings hop were removed
-    # together with the router move from _DEV_ONLY_ROUTERS to
-    # _PROD_ROUTERS. Symmetric pin per
-    # ``feedback_pin_invert_symmetric_assertion.md``: this assertion is
-    # inverted to ``== 0`` so a future re-gating attempt (e.g., a
-    # half-revert that adds a gate back without moving the router)
-    # fails loudly.
+    # Skills as the recommended path). PR #813 mirrors the sidebar tier
+    # gate in three client-side surfaces — overview tile render, Sync All
+    # POST loop, and the runtime-only totals reducer — so prod users
+    # don't see Custom Commands in the overview, can't click through to a
+    # dev-only-section toast, and aren't gated on an artifact set they
+    # can't see. Pin both directions per
+    # ``feedback_pin_invert_symmetric_assertion.md``: positive marker
+    # (the three Custom Commands gate sites must exist) + negative
+    # marker (no *other* dev gate may sneak in alongside them, since
+    # the historical RFC #761 dev gates were intentionally removed).
     cg_js = _read_static("context-gateway.js")
-    assert cg_js.count("STATE.uiMode === 'dev'") == 0, (
-        "context-gateway.js gained a dev-mode gate after the RFC #761 "
-        "promotion — either the gate flip is being half-reverted, or a "
-        "new dev-only feature was added without updating this pin."
+    eq_count = cg_js.count("STATE.uiMode === 'dev'")
+    ne_count = cg_js.count("STATE.uiMode !== 'dev'")
+    assert (eq_count, ne_count) == (2, 1), (
+        f"context-gateway.js dev-mode gate distribution drifted from "
+        f"(2 ===, 1 !==), got ({eq_count} ===, {ne_count} !==). "
+        "Expected three Custom Commands gate sites: one negation "
+        "(overview tile devOnly skip via ``!==``) and two ternaries "
+        "(syncKinds reducer split + Sync All POST loop split via "
+        "``===``)."
+    )
+    # Tie each gate to a specific marker so a future refactor that
+    # collapses the gates into one helper (or accidentally drops one of
+    # the three sites) trips a precise failure rather than a stale-
+    # count drift.
+    assert "if (typ.devOnly && STATE.uiMode !== 'dev') continue;" in cg_js, (
+        "context-gateway.js lost the overview-tile devOnly skip; prod "
+        "users would see Custom Commands and bounce off the dev-only-"
+        "section toast in switchSettingsSection."
+    )
+    assert "syncKinds = STATE.uiMode === 'dev'" in cg_js, (
+        "context-gateway.js lost the runtime-only totals tier split; "
+        "prod users would see Sync All disabled because of an artifact "
+        "category (commands) they can't see."
+    )
+    assert "STATE.uiMode === 'dev'\n      ? ['skills', 'commands', 'agents']" in cg_js, (
+        "context-gateway.js lost the Sync All POST loop tier split; "
+        "Sync All would still POST /api/context/commands/sync in prod "
+        "even though the surface is dev-only."
     )
     # And the locale entries themselves are pinned so a rename doesn't go
     # unnoticed by the i18n completeness check.
