@@ -234,6 +234,20 @@ async function ensureCsrfToken() {
   return _csrfTokenPromise;
 }
 
+// Trust-boundary redaction guard (PR #784). Server mutating routes return
+// HTTP 403 with ``{detail: {detail: "redaction_blocked", hits, surface}}``
+// (FastAPI nests our structured payload under an outer ``detail``); the
+// SPA parses it via ``api()`` below and surfaces a confirm-and-retry UX
+// through ``apiWithRedactionRetry()``. Issue #785.
+class RedactionBlockedError extends Error {
+  constructor({ hits, surface }) {
+    super('redaction_blocked');
+    this.name = 'RedactionBlockedError';
+    this.hits = hits;
+    this.surface = surface;
+  }
+}
+
 async function api(method, path, body, opts = {}) {
   if (typeof opts !== 'object' || Array.isArray(opts)) opts = {};
   const fetchOpts = { method, headers: { 'Content-Type': 'application/json' } };
@@ -247,9 +261,129 @@ async function api(method, path, body, opts = {}) {
   const res = await fetch(API + path, fetchOpts);
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || res.statusText);
+    if (
+      res.status === 403 &&
+      err && typeof err.detail === 'object' && err.detail !== null &&
+      err.detail.detail === 'redaction_blocked'
+    ) {
+      throw new RedactionBlockedError({
+        hits: err.detail.hits,
+        surface: err.detail.surface,
+      });
+    }
+    // Harden against ``[object Object]`` when ``detail`` is itself a dict
+    // (e.g. structured 4xx that isn't redaction_blocked).
+    const msg = typeof err.detail === 'string'
+      ? err.detail
+      : (err.detail && typeof err.detail === 'object' && typeof err.detail.detail === 'string'
+        ? err.detail.detail
+        : res.statusText);
+    throw new Error(msg);
   }
   return res.json();
+}
+
+// Wraps ``api()`` for write surfaces guarded by the trust-boundary redaction
+// filter. On a 403, prompts the user via ``showConfirm`` with the matched
+// pattern count and the localized surface label, then re-issues the same
+// request with ``body.force_unsafe = true``.
+//
+// Returns the JSON response on success (initial or retry), ``null`` if the
+// user declined the bypass. Non-redaction errors (and a second-pass error
+// after the user confirmed) propagate so existing call-site catches keep
+// working unchanged. Emits ``toast.redaction_bypassed`` on retry success
+// so the audit-log bypass is visible to the operator without forcing each
+// call site to add its own affirmation.
+async function apiWithRedactionRetry(method, path, body, opts = {}) {
+  try {
+    return await api(method, path, body, opts);
+  } catch (err) {
+    if (!(err instanceof RedactionBlockedError)) throw err;
+    const surfaceKey = 'surface.' + err.surface;
+    const localized = t(surfaceKey);
+    const surfaceLabel = localized === surfaceKey ? err.surface : localized;
+    const ok = await showConfirm({
+      title: t('confirm.redaction_blocked_title'),
+      message: t('confirm.redaction_blocked_message', {
+        hits: err.hits,
+        surface: surfaceLabel,
+      }),
+      confirmText: t('confirm.redaction_blocked_proceed'),
+    });
+    if (!ok) return null;
+    const retryBody = Object.assign({}, body || {}, { force_unsafe: true });
+    const data = await api(method, path, retryBody, opts);
+    showToast(t('toast.redaction_bypassed', { hits: err.hits }), 'info');
+    return data;
+  }
+}
+
+// Multipart upload variant of ``apiWithRedactionRetry``. ``/api/upload``
+// returns HTTP 200 with per-file ``error="redaction_blocked (hits=N)"``
+// strings (system.py:1161) instead of a structured 403, so the dialog is
+// driven off the per-file error scan rather than a typed exception. On
+// confirm, re-issues the same FormData with ``?force_unsafe=true``;
+// the retry is non-conflicting (not strictly idempotent) — already-OK
+// files get re-written under a ``_{mtime_ns}`` suffix by the server
+// (system.py:1121), so the same content is indexed twice under two
+// filenames. Acceptable trade-off given the rarity of mixed batches.
+//
+// Returns ``{data, cancelled, bypassed, blockedFileCount}``: ``data`` is
+// the response to render, ``cancelled`` is true when the user declined
+// the bypass (caller should still render ``data`` to surface the
+// per-file errors), ``bypassed`` is true on a successful retry, and
+// ``blockedFileCount`` is the number of files that triggered the guard
+// (used by callers to localize the cancel-toast).
+const _UPLOAD_REDACTION_BLOCKED_RE = /^redaction_blocked \(hits=(\d+)\)$/;
+async function uploadFilesWithRedactionRetry(formData) {
+  async function _post(forceUnsafe) {
+    const csrf = await ensureCsrfToken();
+    const headers = csrf ? { 'X-Memtomem-CSRF': csrf } : {};
+    const url = forceUnsafe ? '/api/upload?force_unsafe=true' : '/api/upload';
+    const res = await fetch(url, { method: 'POST', body: formData, headers });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      const detail = err.detail;
+      const errMsg = typeof detail === 'string'
+        ? detail
+        : (detail && typeof detail === 'object' && typeof detail.detail === 'string'
+          ? detail.detail
+          : res.statusText);
+      throw new Error(errMsg);
+    }
+    return res.json();
+  }
+
+  const data = await _post(false);
+  const blockedHits = (data.files || [])
+    .map(r => {
+      const m = r.error && r.error.match(_UPLOAD_REDACTION_BLOCKED_RE);
+      return m ? parseInt(m[1], 10) : 0;
+    })
+    .filter(n => n > 0);
+  if (!blockedHits.length) {
+    return { data, cancelled: false, bypassed: false, blockedFileCount: 0 };
+  }
+
+  const totalHits = blockedHits.reduce((a, b) => a + b, 0);
+  const surfaceKey = 'surface.web_api_upload';
+  const localized = t(surfaceKey);
+  const surfaceLabel = localized === surfaceKey ? 'web_api_upload' : localized;
+  const ok = await showConfirm({
+    title: t('confirm.redaction_blocked_title'),
+    message: t('confirm.redaction_blocked_message', {
+      hits: totalHits,
+      surface: surfaceLabel,
+    }),
+    confirmText: t('confirm.redaction_blocked_proceed'),
+  });
+  if (!ok) {
+    return { data, cancelled: true, bypassed: false, blockedFileCount: blockedHits.length };
+  }
+
+  const retryData = await _post(true);
+  showToast(t('toast.redaction_bypassed', { hits: totalHits }), 'info');
+  return { data: retryData, cancelled: false, bypassed: true, blockedFileCount: blockedHits.length };
 }
 
 function qs(id) { return document.getElementById(id); }
@@ -2181,8 +2315,16 @@ qs('d-save-btn').addEventListener('click', async () => {
   const btn = qs('d-save-btn');
   btnLoading(btn, true);
   try {
+    const resp = await apiWithRedactionRetry(
+      'PATCH',
+      `/api/chunks/${STATE.selectedChunkId}`,
+      { new_content: newContent },
+    );
+    if (resp === null) return;
+    // History push must follow a confirmed write — pushing before the
+    // request would pollute the undo stack with a no-op entry when the
+    // user cancels the redaction-blocked confirm dialog.
     _pushHistory(STATE.selectedChunkId, STATE.selectedOriginal);
-    await api('PATCH', `/api/chunks/${STATE.selectedChunkId}`, { new_content: newContent });
     showToast(t('toast.chunk_saved'), 'success');
     STATE.selectedOriginal = newContent;
     _syncResultContent(STATE.selectedChunkId, newContent);
@@ -3652,7 +3794,16 @@ function _startChunkEdit(card, chunk, sourcePath) {
     saveBtn.disabled = true;
     saveBtn.textContent = 'Saving…';
     try {
-      await api('PATCH', `/api/chunks/${chunk.id}`, { new_content: newContent });
+      const resp = await apiWithRedactionRetry(
+        'PATCH',
+        `/api/chunks/${chunk.id}`,
+        { new_content: newContent },
+      );
+      if (resp === null) {
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Save';
+        return;
+      }
       showToast(t('toast.chunk_updated'), 'success');
       _syncResultContent(chunk.id, newContent);
       _markDataStale();
@@ -3825,7 +3976,12 @@ qs('add-btn').addEventListener('click', async () => {
   try {
     const body = { content, title, tags, file, namespace };
     if (forceUnsafe) body.force_unsafe = true;
-    const data = await api('POST', '/api/add', body);
+    // ``apiWithRedactionRetry`` covers the case where the client pre-check
+    // missed (cache failed to load) or where the server-side pattern set
+    // is broader than the client's cached snapshot — the server's 403
+    // becomes a confirm-and-retry instead of an opaque error toast.
+    const data = await apiWithRedactionRetry('POST', '/api/add', body);
+    if (data === null) return;
     const n = data.indexed_chunks;
     showToast(t('toast.saved_to_file', { path: tildifyPath(data.file), count: n }), 'success');
     qs('add-content').value = '';
@@ -3911,14 +4067,8 @@ qs('add-btn').addEventListener('click', async () => {
     selectedFiles.forEach(f => form.append('files', f));
 
     try {
-      const csrf = await ensureCsrfToken();
-      const headers = csrf ? { 'X-Memtomem-CSRF': csrf } : {};
-      const res = await fetch('/api/upload', { method: 'POST', body: form, headers });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: res.statusText }));
-        throw new Error(err.detail || res.statusText);
-      }
-      const data = await res.json();
+      const upload = await uploadFilesWithRedactionRetry(form);
+      const data = upload.data;
       // Render per-file results
       show(result);
       result.innerHTML = '';
@@ -3932,11 +4082,15 @@ qs('add-btn').addEventListener('click', async () => {
         }
         result.appendChild(row);
       });
+      if (upload.cancelled) {
+        showToast(t('toast.upload_redaction_cancelled', { count: upload.blockedFileCount }), 'error');
+        return;
+      }
       const firstPath = data.files.find(r => !r.error && r.path)?.path;
-      const msg = firstPath
+      const successMsg = firstPath
         ? t('toast.upload_complete_with_path', { count: data.total_indexed, path: tildifyPath(firstPath) })
         : t('toast.upload_complete', { count: data.total_indexed });
-      showToast(msg, 'success');
+      showToast(successMsg, 'success');
       selectedFiles = [];
       renderFileList();
       _markDataStale();
@@ -5443,14 +5597,9 @@ qs('group-toggle').addEventListener('click', () => {
     files.forEach(f => fd.append('files', f));
     showToast(t('toast.indexing_files', { count: files.length }), 'info');
     try {
-      const csrf = await ensureCsrfToken();
-      const headers = csrf ? { 'X-Memtomem-CSRF': csrf } : {};
-      const res = await fetch('/api/upload', { method: 'POST', body: fd, headers });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: res.statusText }));
-        throw new Error(err.detail);
-      }
-      const data = await res.json();
+      const upload = await uploadFilesWithRedactionRetry(fd);
+      if (upload.cancelled) return;
+      const data = upload.data;
       const chunks = (data.results || []).reduce((s, r) => s + (r.indexed_chunks || 0), 0);
       showToast(t('toast.indexed_files_chunks', { files: files.length, chunks }), 'success');
       _markDataStale();

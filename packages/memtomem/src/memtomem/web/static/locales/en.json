@@ -230,6 +230,16 @@
   "compose.privacy_warning_message": "What looks like an API key was found. This content will be stored as-is in the local database and exposed to search — proceed anyway?",
   "compose.privacy_warning_proceed": "Proceed",
 
+  "confirm.redaction_blocked_title": "Redaction guard blocked write",
+  "confirm.redaction_blocked_message": "The server detected {hits} secret-like pattern(s) on {surface}. Bypass and write anyway? This will be audited.",
+  "confirm.redaction_blocked_proceed": "Bypass and write",
+  "toast.redaction_bypassed": "Bypassed redaction guard ({hits} hits) — entry written.",
+  "toast.upload_redaction_cancelled": "Upload cancelled — redaction guard left {count} file(s) blocked.",
+  "surface.web_api_add": "Add memory",
+  "surface.web_api_chunk_edit": "Chunk edit",
+  "surface.web_api_scratch_promote": "Scratch promote",
+  "surface.web_api_upload": "File upload",
+
   "settings.nav.general": "General",
   "settings.nav.integrations": "Integrations",
   "settings.nav.runtime": "Runtime",

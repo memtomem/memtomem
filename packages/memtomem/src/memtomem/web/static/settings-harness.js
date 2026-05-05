@@ -225,7 +225,12 @@ async function deleteScratchEntry(key) {
 
 async function promoteScratchEntry(key) {
   try {
-    await api('POST', `/api/scratch/${encodeURIComponent(key)}/promote`, {});
+    const resp = await apiWithRedactionRetry(
+      'POST',
+      `/api/scratch/${encodeURIComponent(key)}/promote`,
+      {},
+    );
+    if (resp === null) return;
     toast('Promoted to long-term memory', 'success');
     loadHarnessScratch();
   } catch (e) {
