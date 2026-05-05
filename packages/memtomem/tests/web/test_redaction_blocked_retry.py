@@ -377,6 +377,202 @@ def test_api_upload_mixed_batch_retries_only_blocked_file(
     )
 
 
+def test_api_upload_retry_with_persistent_error_row_does_not_claim_bypassed(
+    page, mm_web_url: str, tmp_path: Path
+) -> None:
+    """Retry returns the same row count but the row still carries
+    ``error`` → no ``toast.redaction_bypassed`` (the audit toast lies if
+    the bypass didn't actually write), instead the partial-failure toast
+    surfaces the succeeded/total counts.
+
+    This is the per-file-error half of the bypass validation: the server
+    honored ``?force_unsafe=true`` at the route level (HTTP 200), but the
+    write itself reports a different failure (a non-redaction validation
+    error, or a class of redaction the bypass query-param didn't cover —
+    the SPA can't introspect why, just whether the row landed). Without
+    the validation, the operator sees "entry written" while the per-file
+    list shows the file unwritten.
+    """
+    _install_default_stubs(page)
+
+    def _upload_handler(route):
+        if "force_unsafe=true" in route.request.url:
+            # Retry — server claims success at the HTTP layer but the
+            # per-file row still has an error. Same row count as the
+            # original blocked set (1) so the length check passes; the
+            # error-presence check is what catches this.
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "files": [
+                            {
+                                "filename": "secret.md",
+                                "indexed_chunks": 0,
+                                "error": "write_failed: disk full",
+                            }
+                        ],
+                        "total_indexed": 0,
+                    }
+                ),
+            )
+        else:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "files": [
+                            {
+                                "filename": "secret.md",
+                                "indexed_chunks": 0,
+                                "error": "redaction_blocked (hits=3)",
+                            }
+                        ],
+                        "total_indexed": 0,
+                    }
+                ),
+            )
+
+    page.route(re.compile(r"/api/upload(?:\?.*)?$"), _upload_handler)
+
+    fixture = tmp_path / "secret.md"
+    fixture.write_text("# Secret notes\n\nsk-ant-test-fake-1234567890abcdef\n")
+
+    page.goto(mm_web_url)
+    page.locator("#tabbtn-index").click()
+    page.locator("#index-mode-upload").click()
+    page.locator("#upload-input").set_input_files(str(fixture))
+    page.locator("#upload-btn").click()
+
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    with page.expect_request(re.compile(r"/api/upload\?force_unsafe=true$"), timeout=5_000):
+        page.locator("#confirm-ok-btn").click()
+    page.wait_for_function(
+        "() => document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+
+    # Wait for *some* toast to appear so the assertions below race-free.
+    page.wait_for_selector("#toast-container .toast", timeout=2_000)
+    # The success-bypass toast must not fire — that's the misleading
+    # claim this test exists to catch.
+    bypass_toasts = page.locator("#toast-container .toast", has_text="Bypassed redaction guard")
+    assert bypass_toasts.count() == 0, (
+        "retry with persistent per-file error must not emit the success bypass toast"
+    )
+    # The partial toast surfaces 0/1 succeeded so the operator knows the
+    # write didn't land despite the confirm.
+    partial_toasts = page.locator("#toast-container .toast", has_text="Bypass partial")
+    assert partial_toasts.count() == 1, (
+        f"partial-retry must emit toast.redaction_bypass_partial, saw {partial_toasts.count()}"
+    )
+    partial_text = partial_toasts.first.text_content() or ""
+    assert "0" in partial_text and "1" in partial_text, (
+        f"partial toast must include succeeded/total counts: {partial_text!r}"
+    )
+
+
+def test_api_upload_retry_with_truncated_row_count_does_not_claim_bypassed(
+    page, mm_web_url: str, tmp_path: Path
+) -> None:
+    """Retry returns fewer rows than the narrowed FormData carried (e.g.,
+    upstream truncation or a server-shape regression) → no
+    ``toast.redaction_bypassed``, partial toast instead.
+
+    Two blocked files go up on retry; server returns only one row. The
+    merged ``data.files`` keeps the unmatched second row at its original
+    ``redaction_blocked`` state, so the per-file UI is honest, but the
+    aggregate toast must not claim the bypass succeeded.
+    """
+    _install_default_stubs(page)
+
+    def _upload_handler(route):
+        if "force_unsafe=true" in route.request.url:
+            # Truncated retry — only one row back even though we sent two.
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "files": [
+                            {
+                                "filename": "a.md",
+                                "indexed_chunks": 1,
+                                "path": "/home/u/.memtomem/uploads/a.md",
+                            }
+                        ],
+                        "total_indexed": 1,
+                    }
+                ),
+            )
+        else:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "files": [
+                            {
+                                "filename": "a.md",
+                                "indexed_chunks": 0,
+                                "error": "redaction_blocked (hits=2)",
+                            },
+                            {
+                                "filename": "b.md",
+                                "indexed_chunks": 0,
+                                "error": "redaction_blocked (hits=1)",
+                            },
+                        ],
+                        "total_indexed": 0,
+                    }
+                ),
+            )
+
+    page.route(re.compile(r"/api/upload(?:\?.*)?$"), _upload_handler)
+
+    a = tmp_path / "a.md"
+    a.write_text("# a\n\nsk-ant-test-fake-1234567890abcdef\n")
+    b = tmp_path / "b.md"
+    b.write_text("# b\n\nsk-ant-test-fake-2222222222222222\n")
+
+    page.goto(mm_web_url)
+    page.locator("#tabbtn-index").click()
+    page.locator("#index-mode-upload").click()
+    page.locator("#upload-input").set_input_files([str(a), str(b)])
+    page.locator("#upload-btn").click()
+
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    with page.expect_request(re.compile(r"/api/upload\?force_unsafe=true$"), timeout=5_000):
+        page.locator("#confirm-ok-btn").click()
+    page.wait_for_function(
+        "() => document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+
+    page.wait_for_selector("#toast-container .toast", timeout=2_000)
+    bypass_toasts = page.locator("#toast-container .toast", has_text="Bypassed redaction guard")
+    assert bypass_toasts.count() == 0, (
+        "truncated retry response must not emit the success bypass toast"
+    )
+    partial_toasts = page.locator("#toast-container .toast", has_text="Bypass partial")
+    assert partial_toasts.count() == 1, (
+        f"truncated retry must emit toast.redaction_bypass_partial, saw {partial_toasts.count()}"
+    )
+    partial_text = partial_toasts.first.text_content() or ""
+    # 1 of 2 succeeded — the single returned row was clean.
+    assert "1" in partial_text and "2" in partial_text, (
+        f"partial toast must include 1 of 2: {partial_text!r}"
+    )
+
+
 def test_api_add_403_cancel_does_not_retry_or_emit_bypass_toast(page, mm_web_url: str) -> None:
     """``POST /api/add`` 403 → confirm dialog → click **Cancel** → no
     retry POST, no ``toast.redaction_bypassed``.

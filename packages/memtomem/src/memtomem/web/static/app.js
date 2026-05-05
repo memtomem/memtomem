@@ -337,9 +337,13 @@ async function apiWithRedactionRetry(method, path, body, opts = {}) {
 // Returns ``{data, cancelled, bypassed, blockedFileCount}``: ``data`` is
 // the (merged) response to render, ``cancelled`` is true when the user
 // declined the bypass (caller should still render ``data`` to surface
-// the per-file errors), ``bypassed`` is true on a successful retry, and
-// ``blockedFileCount`` is the number of files that triggered the guard
-// (used by callers to localize the cancel-toast).
+// the per-file errors), ``bypassed`` is true only when **every** blocked
+// row came back from the retry without an ``error`` field (a partial or
+// malformed retry response keeps ``bypassed`` false and substitutes
+// ``toast.redaction_bypass_partial`` for the success toast — see the
+// validation block below), and ``blockedFileCount`` is the number of
+// files that triggered the guard (used by callers to localize the
+// cancel-toast).
 const _UPLOAD_REDACTION_BLOCKED_RE = /^redaction_blocked \(hits=(\d+)\)$/;
 async function uploadFilesWithRedactionRetry(formData) {
   async function _post(form, forceUnsafe) {
@@ -402,7 +406,8 @@ async function uploadFilesWithRedactionRetry(formData) {
   // returns retry results in the same order as the narrowed FormData,
   // so retryData.files[k] corresponds to blockedRows[k].
   const mergedFiles = (data.files || []).slice();
-  (retryData.files || []).forEach((row, k) => {
+  const retryFiles = retryData.files || [];
+  retryFiles.forEach((row, k) => {
     if (k < blockedRows.length) mergedFiles[blockedRows[k].index] = row;
   });
   const mergedData = {
@@ -410,11 +415,40 @@ async function uploadFilesWithRedactionRetry(formData) {
     files: mergedFiles,
     total_indexed: mergedFiles.reduce((s, r) => s + (r.indexed_chunks || 0), 0),
   };
-  showToast(t('toast.redaction_bypassed', { hits: totalHits }), 'info');
+
+  // Validate that the bypass actually wrote every blocked file. ``/api/upload``
+  // reports per-file failures inside an HTTP-200 response, so a clean status
+  // alone is not proof that the retry landed — emitting
+  // ``toast.redaction_bypassed`` ("entry written") on a malformed or partially
+  // failed retry would falsely audit a non-write. Two ways the retry can lie:
+  //   - ``retryFiles.length !== blockedRows.length`` (server returned fewer
+  //     rows than we re-sent — shape regression or upstream truncation).
+  //   - any retry row still carries ``error`` (force_unsafe was honored at the
+  //     route level but the per-file write hit a different failure, e.g. a
+  //     non-redaction validation error or a second redaction class the bypass
+  //     didn't cover).
+  // On either, suppress the bypass-success toast and emit
+  // ``toast.redaction_bypass_partial`` with the actual succeeded/total counts
+  // so the operator sees that some blocked files did not land. ``bypassed``
+  // tracks the same boolean so callers can branch off it.
+  const succeededCount = retryFiles.filter(r => !r.error).length;
+  const fullySucceeded =
+    retryFiles.length === blockedRows.length && succeededCount === blockedRows.length;
+  if (fullySucceeded) {
+    showToast(t('toast.redaction_bypassed', { hits: totalHits }), 'info');
+  } else {
+    showToast(
+      t('toast.redaction_bypass_partial', {
+        succeeded: succeededCount,
+        total: blockedRows.length,
+      }),
+      'error',
+    );
+  }
   return {
     data: mergedData,
     cancelled: false,
-    bypassed: true,
+    bypassed: fullySucceeded,
     blockedFileCount: blockedRows.length,
   };
 }

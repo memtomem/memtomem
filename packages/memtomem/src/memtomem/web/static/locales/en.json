@@ -234,6 +234,7 @@
   "confirm.redaction_blocked_message": "The server detected {hits} secret-like pattern(s) on {surface}. Bypass and write anyway? This will be audited.",
   "confirm.redaction_blocked_proceed": "Bypass and write",
   "toast.redaction_bypassed": "Bypassed redaction guard ({hits} hits) — entry written.",
+  "toast.redaction_bypass_partial": "Bypass partial — {succeeded} of {total} blocked file(s) written. Check per-file results below.",
   "toast.upload_redaction_cancelled": "Upload cancelled — redaction guard left {count} file(s) blocked.",
   "surface.web_api_add": "Add memory",
   "surface.web_api_chunk_edit": "Chunk edit",
