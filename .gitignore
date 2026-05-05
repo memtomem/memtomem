@@ -49,6 +49,7 @@ node_modules/
 # Internal development artifacts
 docs/testing/
 docs/marketing/
+docs/reports/
 .claude-memory/
 BUG_REPORT.md
 *.png
