@@ -872,3 +872,212 @@ def test_api_upload_mixed_batch_cancel_refreshes_stale_state(
     assert post_cancel > pre_cancel, (
         f"cancel must trigger loadStats refresh; saw {pre_cancel} pre, {post_cancel} post"
     )
+
+
+def test_api_upload_mixed_batch_cancel_prunes_landed_clean_file_from_selection(
+    page, mm_web_url: str, tmp_path: Path
+) -> None:
+    """Mixed batch (1 clean + 1 blocked) → user cancels the bypass dialog
+    → ``#upload-file-list`` must drop ``clean.md`` (already on disk) and
+    keep only ``secret.md`` (still unwritten), so a follow-up Upload
+    click does not re-send the clean file and reintroduce the
+    ``_{mtime_ns}`` dup-write that issue #803 set out to fix.
+
+    Without the selection prune in the cancel branch, ``selectedFiles``
+    keeps every original input regardless of which ones landed in the
+    first pass. A user who cancels the bypass dialog and immediately
+    clicks Upload again then resends ``clean.md`` — the server's
+    collision suffix kicks in and writes ``clean_{mtime_ns}.md``,
+    silently double-indexing the same content. This spec mutation-fails
+    if the prune is removed: the post-cancel ``#upload-file-list``
+    contains both basenames, not just the blocked one.
+    """
+    _install_default_stubs(page)
+
+    def _upload_handler(route):
+        # Single fulfillment — user cancels, no retry POST.
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "files": [
+                        {
+                            "filename": "clean.md",
+                            "indexed_chunks": 2,
+                            "path": "/home/u/.memtomem/uploads/clean.md",
+                        },
+                        {
+                            "filename": "secret.md",
+                            "indexed_chunks": 0,
+                            "error": "redaction_blocked (hits=3)",
+                        },
+                    ],
+                    "total_indexed": 2,
+                }
+            ),
+        )
+
+    page.route(re.compile(r"/api/upload(?:\?.*)?$"), _upload_handler)
+
+    clean = tmp_path / "clean.md"
+    clean.write_text("# Clean notes\n\nNo secrets here.\n")
+    secret = tmp_path / "secret.md"
+    secret.write_text("# Secret notes\n\nsk-ant-test-fake-1234567890abcdef\n")
+
+    page.goto(mm_web_url)
+    page.locator("#tabbtn-index").click()
+    page.locator("#index-mode-upload").click()
+    page.locator("#upload-input").set_input_files([str(clean), str(secret)])
+
+    # Pre-cancel sanity: list shows both basenames.
+    page.wait_for_selector("#upload-file-list", timeout=2_000)
+    pre_text = page.locator("#upload-file-list").text_content() or ""
+    assert "clean.md" in pre_text and "secret.md" in pre_text, (
+        f"pre-upload list must show both: {pre_text!r}"
+    )
+
+    page.locator("#upload-btn").click()
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    page.locator("#confirm-cancel-btn").click()
+    page.wait_for_function(
+        "() => document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+
+    # The list must now show secret.md only — clean.md was indexed in
+    # the first pass and re-sending it would dup via _{mtime_ns}.
+    post_text = page.locator("#upload-file-list").text_content() or ""
+    assert "secret.md" in post_text, (
+        f"blocked file must remain selected for retry: {post_text!r}"
+    )
+    assert "clean.md" not in post_text, (
+        f"already-indexed clean file must be pruned (issue #803 dup-write "
+        f"prevention extended to user-driven re-upload): {post_text!r}"
+    )
+
+
+def test_api_upload_mixed_batch_partial_bypass_prunes_landed_clean_file(
+    page, mm_web_url: str, tmp_path: Path
+) -> None:
+    """Mixed batch with partial-success retry → ``#upload-file-list`` must
+    drop the clean first-pass file AND any retry rows that landed,
+    keeping only rows whose merged ``data.files`` entry still carries
+    ``error``.
+
+    Three input files: ``clean.md`` (first-pass clean), ``ok.md`` and
+    ``bad.md`` (both blocked first pass; retry writes ``ok.md`` but
+    ``bad.md`` hits a different per-file failure under force_unsafe).
+    After confirm:
+        - merged data.files[0] = clean.md (no error)  → prune
+        - merged data.files[1] = ok.md   (no error)   → prune
+        - merged data.files[2] = bad.md  (error)      → keep
+
+    Pin asserts the list shows only ``bad.md`` post-confirm. Mirrors
+    the cancel-prune spec for the partial branch — both go through the
+    same ``selectedFiles.filter`` logic but via different code paths,
+    so each needs its own pin.
+    """
+    _install_default_stubs(page)
+
+    def _upload_handler(route):
+        if "force_unsafe=true" in route.request.url:
+            # Retry of [ok.md, bad.md]: ok lands clean, bad hits a
+            # different per-file failure (force_unsafe was honored at
+            # the route level but the write hit a separate validation).
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "files": [
+                            {
+                                "filename": "ok.md",
+                                "indexed_chunks": 1,
+                                "path": "/home/u/.memtomem/uploads/ok.md",
+                            },
+                            {
+                                "filename": "bad.md",
+                                "indexed_chunks": 0,
+                                "error": "write_failed: disk full",
+                            },
+                        ],
+                        "total_indexed": 1,
+                    }
+                ),
+            )
+        else:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "files": [
+                            {
+                                "filename": "clean.md",
+                                "indexed_chunks": 2,
+                                "path": "/home/u/.memtomem/uploads/clean.md",
+                            },
+                            {
+                                "filename": "ok.md",
+                                "indexed_chunks": 0,
+                                "error": "redaction_blocked (hits=2)",
+                            },
+                            {
+                                "filename": "bad.md",
+                                "indexed_chunks": 0,
+                                "error": "redaction_blocked (hits=1)",
+                            },
+                        ],
+                        "total_indexed": 2,
+                    }
+                ),
+            )
+
+    page.route(re.compile(r"/api/upload(?:\?.*)?$"), _upload_handler)
+
+    clean = tmp_path / "clean.md"
+    clean.write_text("# Clean\n\nNo secrets.\n")
+    ok = tmp_path / "ok.md"
+    ok.write_text("# OK\n\nsk-ant-test-fake-1234567890abcdef\n")
+    bad = tmp_path / "bad.md"
+    bad.write_text("# Bad\n\nsk-ant-test-fake-2222222222222222\n")
+
+    page.goto(mm_web_url)
+    page.locator("#tabbtn-index").click()
+    page.locator("#index-mode-upload").click()
+    page.locator("#upload-input").set_input_files([str(clean), str(ok), str(bad)])
+    page.locator("#upload-btn").click()
+
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    with page.expect_request(re.compile(r"/api/upload\?force_unsafe=true$"), timeout=5_000):
+        page.locator("#confirm-ok-btn").click()
+    page.wait_for_function(
+        "() => document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+
+    # Wait for partial toast so we know the helper finished merging
+    # before sampling the file list (the prune happens in the same tick
+    # but reading too eagerly can race the renderFileList call).
+    page.wait_for_selector(
+        "#toast-container .toast",
+        timeout=2_000,
+    )
+
+    post_text = page.locator("#upload-file-list").text_content() or ""
+    assert "bad.md" in post_text, (
+        f"persistently-failed file must remain selected for retry: {post_text!r}"
+    )
+    assert "clean.md" not in post_text, (
+        f"first-pass clean file must be pruned to avoid #803 dup-write: {post_text!r}"
+    )
+    assert "ok.md" not in post_text, (
+        f"retry-landed file must also be pruned (no error in mergedData): {post_text!r}"
+    )

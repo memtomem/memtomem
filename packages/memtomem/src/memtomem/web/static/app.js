@@ -4166,12 +4166,20 @@ qs('add-btn').addEventListener('click', async () => {
       // through to the unified refresh below in every branch.
       if (upload.cancelled) {
         showToast(t('toast.upload_redaction_cancelled', { count: upload.blockedFileCount }), 'error');
+        // Prune already-landed clean files from the selection so a
+        // user-driven re-upload doesn't trip the server's
+        // ``_{mtime_ns}`` collision suffix on rows that already exist on
+        // disk (issue #803 — the same dup-write the narrowed retry
+        // FormData fixed). The first-pass response aligns positionally
+        // with ``selectedFiles`` (one row per input file, in order), so
+        // an index-based filter is duplicate-basename-safe.
+        selectedFiles = selectedFiles.filter((_, i) => data.files[i]?.error);
+        renderFileList();
       } else {
         // Partial bypass: helper already emitted ``toast.redaction_bypass_partial``
         // with the succeeded/total counts. Skip the generic "Upload complete"
         // success toast (it would falsely audit a successful write on top of
-        // the partial warning) and keep the file selection so the operator
-        // can adjust and retry.
+        // the partial warning).
         const partial = upload.blockedFileCount > 0 && !upload.bypassed;
         if (!partial) {
           const firstPath = data.files.find(r => !r.error && r.path)?.path;
@@ -4180,6 +4188,16 @@ qs('add-btn').addEventListener('click', async () => {
             : t('toast.upload_complete', { count: data.total_indexed });
           showToast(successMsg, 'success');
           selectedFiles = [];
+          renderFileList();
+        } else {
+          // Same prune as the cancel branch: clean files from the first
+          // pass and any retry rows that landed are now on disk; only
+          // rows that still carry ``error`` in mergedData should remain
+          // selected so a follow-up Upload click sends just the unwritten
+          // ones. Without this prune, partial bypass is functionally
+          // identical to the original #803 dup bug for users who retry
+          // after a partial outcome.
+          selectedFiles = selectedFiles.filter((_, i) => data.files[i]?.error);
           renderFileList();
         }
       }
