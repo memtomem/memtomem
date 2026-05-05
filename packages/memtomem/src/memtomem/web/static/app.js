@@ -3658,6 +3658,14 @@ async function browseSource(path, limit = 100) {
         const card = document.createElement('div');
         card.className = 'chunk-card';
         card.dataset.chunkId = c.id;
+        const cardTypeLabel = c.chunk_type.replace('_', ' ');
+        const cardTrail = c.heading_hierarchy.length
+          ? `, ${c.heading_hierarchy.join(' › ')}`
+          : '';
+        card.setAttribute(
+          'aria-label',
+          `${cardTypeLabel}, lines ${c.start_line}-${c.end_line}${cardTrail}`,
+        );
         card.innerHTML = `
           <div class="chunk-card-meta">
             <span class="badge badge-gray">${c.chunk_type.replace('_',' ')}</span>
@@ -3734,13 +3742,25 @@ async function browseSource(path, limit = 100) {
           if (contentDiv.scrollHeight > 120) {
             card.classList.add('chunk-card-collapsible');
             card.setAttribute('aria-expanded', 'false');
+            card.setAttribute('role', 'button');
+            card.setAttribute('tabindex', '0');
+            const toggleCard = () => {
+              contentDiv.classList.toggle('expanded');
+              card.setAttribute('aria-expanded', contentDiv.classList.contains('expanded'));
+            };
             let dragStartX = 0, dragStartY = 0;
             card.addEventListener('mousedown', e => { dragStartX = e.clientX; dragStartY = e.clientY; });
             card.addEventListener('click', e => {
               if (Math.abs(e.clientX - dragStartX) > 4 || Math.abs(e.clientY - dragStartY) > 4) return;
               if (e.target.closest('.chunk-card-edit-area')) return;
-              contentDiv.classList.toggle('expanded');
-              card.setAttribute('aria-expanded', contentDiv.classList.contains('expanded'));
+              toggleCard();
+            });
+            card.addEventListener('keydown', e => {
+              if (e.target.closest('.chunk-card-actions, .chunk-card-edit-area')) return;
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                toggleCard();
+              }
             });
           }
         });

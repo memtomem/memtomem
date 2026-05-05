@@ -30,8 +30,8 @@ def timeline_js() -> str:
 
 
 def _extract_function(source: str, name: str) -> str:
-    """Extract a top-level ``function name(...) { ... }`` body via brace matching."""
-    m = re.search(rf"\bfunction\s+{re.escape(name)}\s*\(", source)
+    """Extract a top-level ``[async ]function name(...) { ... }`` body via brace matching."""
+    m = re.search(rf"\b(?:async\s+)?function\s+{re.escape(name)}\s*\(", source)
     assert m, f"function {name} not found"
     i = source.index("{", m.end())
     depth = 0
@@ -44,6 +44,11 @@ def _extract_function(source: str, name: str) -> str:
             if depth == 0:
                 return source[i : j + 1]
     raise AssertionError(f"unterminated function body for {name}")
+
+
+def _count_setattr(body: str, attr: str) -> int:
+    """Count ``setAttribute('<attr>', ...)`` regardless of formatter line wrap."""
+    return len(re.findall(rf"setAttribute\(\s*['\"]{re.escape(attr)}['\"]", body))
 
 
 class TestSearchResultItemA11y:
@@ -118,4 +123,57 @@ class TestTimelineRowA11y:
         assert body.count("addEventListener('keydown'") >= 2, (
             "files-view must wire keydown on both the outer expand row and the "
             "inner navigate row — Enter/Space activation parity with click"
+        )
+
+
+class TestChunkCardA11y:
+    """Pin a11y attributes on source-detail ``.chunk-card`` rows (issue #700).
+
+    All cards must have an accessible name; collapsible (toggle-able) cards
+    must additionally have ``role=button`` + keyboard activation.
+    """
+
+    def test_chunk_card_has_aria_label(self, app_js: str) -> None:
+        body = _extract_function(app_js, "browseSource")
+        # The aria-label is set on the card before the rAF accordion pass —
+        # i.e. unconditionally for every card, not just collapsible ones.
+        assert "card.setAttribute" in body, "card.setAttribute missing"
+        assert _count_setattr(body, "aria-label") >= 1, (
+            "every chunk-card must set aria-label so screen readers announce a "
+            "meaningful name (chunk type + line range + heading trail)"
+        )
+
+    def test_collapsible_chunk_card_role_button(self, app_js: str) -> None:
+        body = _extract_function(app_js, "browseSource")
+        # Slice to the accordion activation block — role=button must be set
+        # ALONGSIDE the chunk-card-collapsible class, not on every card.
+        m = re.search(r"chunk-card-collapsible.*?\}\s*\}\s*\)\s*;", body, re.DOTALL)
+        assert m, "chunk-card-collapsible block not found"
+        block = m.group(0)
+        assert "setAttribute('role', 'button')" in block, (
+            "collapsible chunk-cards must expose role=button — they are the "
+            "expand/collapse trigger, mirroring home-source-item / result-item"
+        )
+        assert "setAttribute('tabindex'" in block, (
+            "collapsible chunk-cards must be keyboard-focusable"
+        )
+
+    def test_collapsible_chunk_card_keydown_handler(self, app_js: str) -> None:
+        body = _extract_function(app_js, "browseSource")
+        m = re.search(r"chunk-card-collapsible.*?\}\s*\}\s*\)\s*;", body, re.DOTALL)
+        assert m, "chunk-card-collapsible block not found"
+        block = m.group(0)
+        assert "addEventListener('keydown'" in block, (
+            "role=button without Enter/Space activation is a lie — pair the "
+            "click handler with a keydown handler"
+        )
+        # Must guard against firing while the user is editing or pressing
+        # Enter on an action button — those cases should not toggle the card.
+        assert "chunk-card-edit-area" in block, (
+            "keydown handler must skip when focus is in .chunk-card-edit-area "
+            "(textarea Enter must not collapse the card)"
+        )
+        assert "chunk-card-actions" in block, (
+            "keydown handler must skip when focus is in .chunk-card-actions "
+            "(button Enter must not also toggle the parent card)"
         )
