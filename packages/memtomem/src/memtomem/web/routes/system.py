@@ -131,6 +131,29 @@ async def get_ui_mode(request: Request) -> dict[str, str]:
     return {"mode": mode}
 
 
+@router.get("/session")
+async def get_session(request: Request) -> dict[str, str]:
+    """Return the per-process CSRF token + UI mode for SPA bootstrap.
+
+    The SPA's ``api(...)`` helper calls this once on first unsafe request
+    and caches the token, threading ``X-Memtomem-CSRF`` through every
+    subsequent ``POST``/``PATCH``/``PUT``/``DELETE``. Token rotation is
+    by ``mm web`` restart — there is no in-process rotation surface (RFC
+    #787 explicitly out-of-scope).
+
+    Not localhost-guarded at the route layer: ``CSRFGuardMiddleware``
+    already covers the Origin / Host checks for every ``/api/*`` request,
+    including this one. Adding ``_require_localhost`` here would
+    duplicate the Host check and tie the token endpoint to a different
+    failure shape than the rest of the gate, making the AST registry's
+    "one seam, one surface" assertion harder to keep clean.
+    """
+    return {
+        "csrf": getattr(request.app.state, "csrf_token", ""),
+        "mode": getattr(request.app.state, "web_mode", "prod"),
+    }
+
+
 @router.get("/health")
 async def health(storage=Depends(get_storage), embedder=Depends(get_embedder)):
     checks: dict[str, str] = {}

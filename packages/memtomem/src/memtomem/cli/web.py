@@ -35,6 +35,9 @@ def _web_install_hint() -> str:
     return 'uv tool install --reinstall "memtomem[web]"'
 
 
+_LOOPBACK_BINDS = {"127.0.0.1", "::1", "localhost"}
+
+
 @click.command("web")
 @click.option("--host", default="127.0.0.1", help="Host to bind to")
 @click.option("--port", default=8080, type=int, help="Port to bind to")
@@ -55,6 +58,33 @@ def _web_install_hint() -> str:
     is_flag=True,
     help="Shortcut for --mode dev. Mutually exclusive with --mode.",
 )
+@click.option(
+    "--allow-remote-ui",
+    is_flag=True,
+    help="Acknowledge that --host is exposing the Web UI off-loopback. RFC #787 "
+    "stage 1 (this release) only logs the observation; stage 2 will refuse to "
+    "start without this flag when --host is non-loopback. Pair with "
+    "--trusted-origin / --trusted-host so the eventual enforcement layer has "
+    "an explicit allow-list to read.",
+)
+@click.option(
+    "--trusted-origin",
+    "trusted_origins",
+    multiple=True,
+    metavar="HOST",
+    help="Add a hostname to the CSRF Origin/Referer allow-list. Loopback "
+    "(127.0.0.1, ::1, localhost) is always trusted; anything else has to be "
+    "named explicitly. Repeat the flag for multiple hosts.",
+)
+@click.option(
+    "--trusted-host",
+    "trusted_hosts",
+    multiple=True,
+    metavar="HOST",
+    help="Add a hostname to the CSRF Host-header allow-list. Defends DNS "
+    "rebinding when running with --allow-remote-ui. Loopback is always "
+    "trusted. Repeat for multiple hosts.",
+)
 def web(
     host: str,
     port: int,
@@ -62,6 +92,9 @@ def web(
     timeout: int,
     mode: str | None,
     dev_flag: bool,
+    allow_remote_ui: bool,
+    trusted_origins: tuple[str, ...],
+    trusted_hosts: tuple[str, ...],
 ) -> None:
     """Launch the memtomem Web UI (FastAPI + SPA)."""
     missing = _missing_web_deps()
@@ -103,6 +136,20 @@ def web(
 
     click.echo(f"Starting memtomem Web UI at http://{host}:{port} (mode={resolved_mode})")
 
+    bind_is_loopback = host in _LOOPBACK_BINDS
+    if not bind_is_loopback and not allow_remote_ui:
+        # PR1 (log-only) doesn't refuse to start — that's PR2's flip per
+        # RFC #787 stage 2. But emit a loud warning so an operator who
+        # ran `--host 0.0.0.0` for a screen-share knows the upcoming
+        # release will gate it on `--allow-remote-ui`.
+        click.secho(
+            f"Warning: --host {host} exposes the Web UI off-loopback. RFC #787 "
+            "stage 2 will require --allow-remote-ui (with --trusted-origin / "
+            "--trusted-host) for non-loopback binds. See "
+            "https://github.com/memtomem/memtomem/issues/787 .",
+            fg="yellow",
+        )
+
     async def after_started(server: uvicorn.Server, timeout: float) -> None:
         if not open_browser:
             return
@@ -129,8 +176,18 @@ def web(
         webbrowser.open(f"http://{host}:{port}")
 
     async def start_server() -> None:
+        app_instance = create_app(lifespan=_lifespan, mode=resolved_mode)
+        # Push the operator-supplied allow-lists into the app state so
+        # ``CSRFGuardMiddleware`` (RFC #787) can read them. Done here
+        # rather than via env vars so the CLI surface stays the
+        # source-of-truth and the app factory keeps being usable
+        # standalone (tests, asgi mounts) with the safe defaults.
+        if trusted_origins:
+            app_instance.state.csrf_trusted_origins = frozenset(trusted_origins)
+        if trusted_hosts:
+            app_instance.state.csrf_trusted_hosts = frozenset(trusted_hosts)
         web_config = uvicorn.Config(
-            create_app(lifespan=_lifespan, mode=resolved_mode),
+            app_instance,
             host=host,
             port=port,
         )

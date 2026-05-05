@@ -157,7 +157,11 @@ document.getElementById('hooks-sync-btn')?.addEventListener('click', async () =>
   if (!ok) return;
   btnLoading(btn, true);
   try {
-    const res = await fetch('/api/settings-sync', {method: 'POST', headers: {'Content-Type': 'application/json'}});
+    const csrf = await ensureCsrfToken();
+    const headers = csrf
+      ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
+      : { 'Content-Type': 'application/json' };
+    const res = await fetch('/api/settings-sync', {method: 'POST', headers});
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || `Request failed: ${res.status}`);

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -17,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from memtomem import __version__
+from memtomem.web.middleware.csrf import CSRFGuardMiddleware
 from memtomem.web.routes import (
     chunks,
     context_agents,
@@ -147,6 +149,19 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
     )
     app.state.web_mode = mode
 
+    # Per-process CSRF token (RFC #787 stage 1, log-only). Generated
+    # fresh on every ``create_app`` so token rotation is just a restart;
+    # never persisted. ``GET /api/session`` exposes this to the SPA, and
+    # ``CSRFGuardMiddleware`` checks ``X-Memtomem-CSRF`` against it on
+    # unsafe ``/api/*`` requests. Operator allow-lists default to empty
+    # — populated by the ``mm web`` CLI when ``--trusted-host`` /
+    # ``--trusted-origin`` are passed alongside ``--allow-remote-ui``.
+    app.state.csrf_token = secrets.token_urlsafe(32)
+    app.state.csrf_trusted_hosts = frozenset()
+    app.state.csrf_trusted_origins = frozenset()
+    # Stage-1 default: observe-only. PR2 will flip via env toggle.
+    app.state.csrf_enforce = False
+
     # Hand-rolled instead of ``fastapi.openapi.docs.get_swagger_ui_html``
     # for two reasons that combine on the same page:
     # * The default helper bakes a Swagger UI bootstrap into an inline
@@ -207,6 +222,16 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "Accept"],
     )
+
+    # CSRF / Origin / Host guard (RFC #787 stage 1, log-only).
+    #
+    # Order with SecurityHeaders matters: ``add_middleware`` stacks last-added
+    # outermost on the request path. We want CSRFGuard *inside*
+    # SecurityHeaders so a 403 from the gate (PR2 enforcement flip) still
+    # picks up nosniff / frame-options / CSP on its way back to the client.
+    # PR1 never returns 403, but the wiring is the same as PR2 — fewer moving
+    # parts at the flip.
+    app.add_middleware(CSRFGuardMiddleware)
 
     class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next) -> Response:

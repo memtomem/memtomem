@@ -204,9 +204,43 @@ function _visibleSettingsSections() {
 // Utilities
 // ---------------------------------------------------------------------------
 
+// CSRF token bootstrap (RFC #787 stage 1). Server generates a per-process
+// token at create_app() and exposes it via GET /api/session. The api()
+// helper (and the FormData uploaders that bypass it — see ``ensureCsrfToken``
+// callsites) thread the token through every unsafe-method request via
+// ``X-Memtomem-CSRF``. Stage 1 server-side is observe-only, so a missing
+// header just produces a log line; stage 2 will enforce. We do the work now
+// so the flip is a server-side toggle, not a coordinated client release.
+let _csrfToken = null;
+let _csrfTokenPromise = null;
+const _UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+async function ensureCsrfToken() {
+  if (_csrfToken) return _csrfToken;
+  if (_csrfTokenPromise) return _csrfTokenPromise;
+  _csrfTokenPromise = (async () => {
+    try {
+      const res = await fetch(API + '/api/session', { method: 'GET' });
+      if (!res.ok) return '';
+      const data = await res.json();
+      _csrfToken = data?.csrf || '';
+    } catch (_) {
+      _csrfToken = '';
+    } finally {
+      _csrfTokenPromise = null;
+    }
+    return _csrfToken;
+  })();
+  return _csrfTokenPromise;
+}
+
 async function api(method, path, body, opts = {}) {
   if (typeof opts !== 'object' || Array.isArray(opts)) opts = {};
   const fetchOpts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (_UNSAFE_METHODS.has(method.toUpperCase())) {
+    const tok = await ensureCsrfToken();
+    if (tok) fetchOpts.headers['X-Memtomem-CSRF'] = tok;
+  }
   if (body !== undefined) fetchOpts.body = JSON.stringify(body);
   if (opts.signal) fetchOpts.signal = opts.signal;
   else fetchOpts.signal = AbortSignal.timeout(opts.timeout ?? 30_000);
@@ -3880,7 +3914,9 @@ qs('add-btn').addEventListener('click', async () => {
     selectedFiles.forEach(f => form.append('files', f));
 
     try {
-      const res = await fetch('/api/upload', { method: 'POST', body: form });
+      const csrf = await ensureCsrfToken();
+      const headers = csrf ? { 'X-Memtomem-CSRF': csrf } : {};
+      const res = await fetch('/api/upload', { method: 'POST', body: form, headers });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }));
         throw new Error(err.detail || res.statusText);
@@ -5410,7 +5446,9 @@ qs('group-toggle').addEventListener('click', () => {
     files.forEach(f => fd.append('files', f));
     showToast(t('toast.indexing_files', { count: files.length }), 'info');
     try {
-      const res = await fetch('/api/upload', { method: 'POST', body: fd });
+      const csrf = await ensureCsrfToken();
+      const headers = csrf ? { 'X-Memtomem-CSRF': csrf } : {};
+      const res = await fetch('/api/upload', { method: 'POST', body: fd, headers });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }));
         throw new Error(err.detail);

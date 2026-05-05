@@ -219,16 +219,20 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
   if (!ok) return;
   btnLoading(btn, true);
   try {
+    const csrf = await ensureCsrfToken();
+    const headers = csrf
+      ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
+      : { 'Content-Type': 'application/json' };
     const types = ['skills', 'commands', 'agents'];
     for (const typ of types) {
-      const resp = await fetch(`/api/context/${typ}/sync`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+      const resp = await fetch(`/api/context/${typ}/sync`, { method: 'POST', headers });
       if (!resp.ok) throw new Error(`Sync ${typ} failed`);
     }
     // Settings hooks sync (additive merge) — appends memtomem-owned hook
     // entries to ~/.claude/settings.json without clobbering user-authored
     // entries. Promoted from dev-only via RFC #761 (ADR-0001 §5 criteria
     // + HTTP-layer test fixtures).
-    const settingsResp = await fetch('/api/context/settings/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+    const settingsResp = await fetch('/api/context/settings/sync', { method: 'POST', headers });
     if (!settingsResp.ok) throw new Error('Settings sync failed');
     showToast(t('settings.ctx.sync_success'));
     loadCtxOverview();
@@ -474,8 +478,10 @@ async function loadCtxList(type) {
           });
           if (!ok) return;
           try {
+            const csrf = await ensureCsrfToken();
             const r = await fetch(`/api/context/known-projects/${encodeURIComponent(scope.scope_id)}`, {
               method: 'DELETE',
+              headers: csrf ? { 'X-Memtomem-CSRF': csrf } : {},
             });
             if (!r.ok) {
               const err = await r.json().catch(() => ({}));
@@ -606,9 +612,13 @@ async function loadCtxDetail(type, name, opts = {}) {
       const mtime_ns = detailEl.dataset.mtimeNs || '';
       btnLoading(btn, true);
       try {
+        const csrf = await ensureCsrfToken();
+        const headers = csrf
+          ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
+          : { 'Content-Type': 'application/json' };
         const r = await fetch(`/api/context/${type}/${encodeURIComponent(name)}`, {
           method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({ content, mtime_ns }),
         });
         if (r.status === 409) {
@@ -658,9 +668,10 @@ async function loadCtxDetail(type, name, opts = {}) {
       if (!result || !result.ok) return;
       const cascade = !!(result.extras && result.extras.cascade);
       try {
+        const csrf = await ensureCsrfToken();
         const r = await fetch(
           `/api/context/${type}/${encodeURIComponent(name)}?cascade=${cascade}`,
-          { method: 'DELETE' },
+          { method: 'DELETE', headers: csrf ? { 'X-Memtomem-CSRF': csrf } : {} },
         );
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
@@ -886,7 +897,11 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
     if (!ok) return;
     btnLoading(btn, true);
     try {
-      const r = await fetch(`/api/context/${type}/sync`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+      const csrf = await ensureCsrfToken();
+      const headers = csrf
+        ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
+        : { 'Content-Type': 'application/json' };
+      const r = await fetch(`/api/context/${type}/sync`, { method: 'POST', headers });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
         showToast(err.detail || t('toast.request_failed'), 'error');
