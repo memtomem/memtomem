@@ -329,20 +329,19 @@ class TestRuntimeProfileImportPin:
 
 
 class TestServerAliveRefuses:
-    @pytest.mark.skipif(
-        sys.platform == "win32",
-        reason=(
-            "POSIX-specific user-facing text: Windows substitutes the "
-            "'Server still running (pid N) … lsof' message with a "
-            "Sysinternals/handle.exe hint that omits the recorded pid. "
-            "Widening the assertion is a separate follow-up to #819; the "
-            "lock-acquisition mechanics work cross-platform."
-        ),
-    )
     def test_refuses_when_server_alive_at_legacy_path(self, home):
         """Pre-#412 servers still write ``~/.memtomem/.server.pid``. The
         mixed-version upgrade path (old server running, new uninstall)
-        must still refuse — the flock probe checks both locations."""
+        must still refuse — the flock probe checks both locations.
+
+        Cross-platform via portalocker (#817/#819). On Windows
+        ``LockFileEx`` blocks ``read`` from other handles too, so
+        ``probe_pid_file`` cannot read the pid number out of the locked
+        file and the message takes the unknown-pid branch with a
+        Sysinternals/Resource Monitor hint instead of the POSIX
+        ``lsof`` + recorded-pid path. Both branches must surface
+        "Server still running" + ``exit_code == 2`` + state preserved.
+        """
         state = _seed_state(home)
         pid_file = state / ".server.pid"
         # The PID inside the file is just for the user-facing message now;
@@ -354,19 +353,28 @@ class TestServerAliveRefuses:
 
         assert result.exit_code == 2
         assert "Server still running" in result.output
-        assert str(os.getpid()) in result.output
+        if sys.platform == "win32":
+            # Windows: pid is None (read blocked by LockFileEx), so the
+            # message points at handle.exe / Resource Monitor, not lsof.
+            assert "handle.exe" in result.output or "Resource Monitor" in result.output, (
+                f"Windows refusal must point at a holder-finder; got: {result.output!r}"
+            )
+        else:
+            assert str(os.getpid()) in result.output
         # nothing deleted
         assert (state / "memtomem.db").exists()
         assert (state / "config.json").exists()
 
-    @pytest.mark.skipif(
-        sys.platform == "win32",
-        reason="POSIX-specific user-facing text (#819 follow-up); see test_refuses_when_server_alive_at_legacy_path",
-    )
     def test_refuses_when_server_alive_at_runtime_path(self, home):
         """Post-#412 servers hold the flock at
         ``$XDG_RUNTIME_DIR/memtomem/server.pid``. The probe must see it
-        even though the pid file lives outside ``~/.memtomem/``."""
+        even though the pid file lives outside ``~/.memtomem/``.
+
+        Same Windows caveat as ``test_refuses_when_server_alive_at_legacy_path``:
+        the recorded pid is unreachable behind ``LockFileEx``, so the
+        message routes through the unknown-pid branch with a
+        Sysinternals hint.
+        """
         from memtomem._runtime_paths import ensure_runtime_dir
 
         _seed_state(home)
@@ -378,16 +386,20 @@ class TestServerAliveRefuses:
 
         assert result.exit_code == 2
         assert "Server still running" in result.output
-        assert str(os.getpid()) in result.output
+        if sys.platform == "win32":
+            assert "handle.exe" in result.output or "Resource Monitor" in result.output, (
+                f"Windows refusal must point at a holder-finder; got: {result.output!r}"
+            )
+        else:
+            assert str(os.getpid()) in result.output
         assert (home / ".memtomem" / "memtomem.db").exists()
 
     @pytest.mark.skipif(
         sys.platform == "win32",
         reason=(
             "POSIX-only contract: --force unlinks the locked pid file via "
-            "unlink-while-open. Windows refuses (WinError 32, #730 contract) "
-            "and exits non-zero by design — the Windows-equivalent test for "
-            "that refusal lives elsewhere in this file."
+            "unlink-while-open. The Windows mirror of this contract lives in "
+            "test_force_refuses_on_windows_when_pid_locked (#730 + #819)."
         ),
     )
     def test_force_overrides_liveness(self, home):
@@ -400,6 +412,46 @@ class TestServerAliveRefuses:
 
         assert result.exit_code == 0, result.output
         assert not state.exists()
+
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason=(
+            "Windows-only contract (#730 + #819): --force cannot wipe a "
+            "locked pid file because NTFS refuses unlink-while-open "
+            "(WinError 32). The refusal must be clean — exit 2 + actionable "
+            "hint + state preserved — never a half-wiped state dir."
+        ),
+    )
+    def test_force_refuses_on_windows_when_pid_locked(self, home):
+        """Windows mirror of ``test_force_overrides_liveness``.
+
+        POSIX ``--force`` succeeds via ``unlink-while-open``; Windows
+        cannot, so the same invocation must refuse cleanly rather than
+        partially wipe state. This pins the #730 destructive-CLI
+        contract on the pid-lock side, complementing
+        ``test_force_refuses_on_windows_when_writer_alive`` which pins
+        the same contract on the DB-lock side.
+        """
+        state = _seed_state(home)
+        pid_file = state / ".server.pid"
+        pid_file.write_text(str(os.getpid()), encoding="utf-8")
+
+        with _hold_pid_lock(pid_file):
+            result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
+
+        assert result.exit_code == 2, result.output
+        # State preserved — refusal fires before any deletion runs.
+        assert state.exists()
+        assert (state / "memtomem.db").exists()
+        assert (state / "config.json").exists()
+        assert pid_file.exists()
+        # Actionable Windows-native hint must surface; the refusal text
+        # came from #730 and uses Sysinternals/Task Manager wording.
+        assert (
+            "handle.exe" in result.output
+            or "WinError 32" in result.output
+            or "cannot wipe" in result.output
+        ), f"Windows --force refusal must point at a holder-finder; got: {result.output!r}"
 
     @pytest.mark.skipif(
         sys.platform == "win32",
