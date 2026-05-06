@@ -325,6 +325,36 @@ def test_html_settings_nav_btns_all_carry_ui_tier_attr() -> None:
         assert "data-ui-tier=" in tag, f"settings-nav-btn missing data-ui-tier: {tag[:120]}"
 
 
+def test_ctx_overview_has_landing_modifier_for_group_dashboard() -> None:
+    """ctx-overview is the Agent Integrations group's dashboard card and must
+    carry the ``settings-nav-btn--landing`` modifier so CSS gives it visual
+    hierarchy distinct from the leaf rows."""
+    html = _read_static("index.html")
+    overview_btn = re.search(r'<button[^>]*data-section="ctx-overview"[^>]*>', html)
+    assert overview_btn is not None, "ctx-overview button not found in markup"
+    assert "settings-nav-btn--landing" in overview_btn.group(0), (
+        "ctx-overview must carry settings-nav-btn--landing modifier "
+        "(group dashboard, not a leaf); "
+        f"got: {overview_btn.group(0)[:200]}"
+    )
+
+
+def test_other_integration_leaves_lack_landing_modifier() -> None:
+    """Symmetric negative pin: only ctx-overview is the landing card. The
+    other Agent Integrations leaves (Skills / Custom Commands / Subagents /
+    Hooks) must not carry the ``--landing`` modifier, otherwise the visual
+    hierarchy collapses again."""
+    html = _read_static("index.html")
+    for section in ("ctx-skills", "ctx-commands", "ctx-agents", "hooks-sync"):
+        tag = re.search(rf'<button[^>]*data-section="{section}"[^>]*>', html)
+        assert tag is not None, f"{section} button not found in markup"
+        assert "settings-nav-btn--landing" not in tag.group(0), (
+            f"{section} must NOT carry --landing modifier "
+            "(reserved for ctx-overview only); "
+            f"got: {tag.group(0)[:200]}"
+        )
+
+
 def test_html_dev_mode_banner_is_present_and_starts_hidden() -> None:
     html = _read_static("index.html")
     assert 'id="dev-mode-banner"' in html, "dev-mode banner removed from markup"

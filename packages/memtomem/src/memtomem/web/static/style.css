@@ -192,6 +192,15 @@ header h1 { font-size: 1.2rem; font-weight: 700; color: var(--accent); letter-sp
 .settings-nav-btn--danger:hover { background: rgba(var(--danger-rgb), 0.08); color: var(--danger); }
 .settings-nav-btn--danger.active { color: var(--danger); background: rgba(var(--danger-rgb), 0.12); border-left-color: var(--danger); }
 .settings-nav-btn--danger.active .nav-sub { color: var(--danger); opacity: 0.75; }
+.settings-nav-btn--landing {
+  width: auto;
+  background: rgba(var(--accent-rgb), 0.04);
+  border-radius: 6px;
+  margin: 6px 8px;
+  padding: 10px 14px;
+}
+.settings-nav-btn--landing .nav-label { font-weight: 600; }
+.settings-nav-btn--landing.active { background: rgba(var(--accent-rgb), 0.14); }
 .settings-content { flex: 1; padding: 16px 24px; overflow-y: auto; }
 .settings-section { display: none; }
 .settings-section.active { display: block; }
@@ -208,6 +217,7 @@ header h1 { font-size: 1.2rem; font-weight: 700; color: var(--accent); letter-sp
 @media (max-width: 900px) {
   .settings-nav { width: 180px; }
   .settings-nav-btn { padding: 7px 10px; }
+  .settings-nav-btn--landing { padding: 9px 10px; margin: 4px 6px; }
   .settings-content { padding: 12px 16px; }
   .settings-nav-btn .nav-sub { display: none; }
 }
