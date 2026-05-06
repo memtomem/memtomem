@@ -335,13 +335,27 @@ def main() -> None:
     legacy_pid_file = legacy_server_pid_path()
     _legacy_lock_fp = _try_hold_legacy_flock(legacy_pid_file)
     if _legacy_lock_fp is not None:
-        # LIFO: unlink must run before close so the file we delete is still
-        # the one we own the flock on. Without unlink the legacy path
-        # outlives the process and the next server's ``_try_hold_legacy_flock``
-        # can race against the stale file, reporting a phantom "pre-0.1.25
-        # install" holder (issue #437).
-        atexit.register(lambda: _legacy_lock_fp.close())
-        atexit.register(lambda: legacy_pid_file.unlink(missing_ok=True))
+        # POSIX needs unlink-before-close so we delete exactly the inode we
+        # own the flock on (issue #437); otherwise the next server's
+        # ``_try_hold_legacy_flock`` races against a stale file and reports
+        # a phantom "pre-0.1.25 install" holder. Composite cleanup keeps the
+        # ordering correct on POSIX and stays Windows-safe in case a future
+        # change removes the ``_try_hold_legacy_flock`` Windows short-circuit
+        # (#818 review).
+        def _legacy_cleanup() -> None:
+            if os.name == "nt":
+                try:
+                    _legacy_lock_fp.close()
+                finally:
+                    try:
+                        legacy_pid_file.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            else:
+                legacy_pid_file.unlink(missing_ok=True)
+                _legacy_lock_fp.close()
+
+        atexit.register(_legacy_cleanup)
 
     # Runtime files (pid / flock) live on ``$XDG_RUNTIME_DIR/memtomem``
     # when the platform provides one, otherwise a per-user temp subdir.
@@ -394,8 +408,37 @@ def main() -> None:
         _lock_fp.truncate()
         _lock_fp.write(str(os.getpid()))
         _lock_fp.flush()
-        atexit.register(lambda: _lock_fp.close())  # LIFO: runs second
-        atexit.register(lambda: pid_file.unlink(missing_ok=True))  # LIFO: runs first
+
+        # Composite cleanup — single atexit registration, platform-aware order
+        # (#818 review). Splitting close+unlink across two ``atexit.register``
+        # calls relies on LIFO so unlink runs before close, which works on
+        # POSIX (you can unlink an open file and the inode persists until
+        # close) but breaks on Windows: NTFS refuses to delete an open or
+        # locked handle, so a clean shutdown via ``atexit`` would raise
+        # ``PermissionError`` (WinError 32) and leave a stale ``server.pid``
+        # behind — the next start then misreads it as a live holder.
+        def _cleanup() -> None:
+            if os.name == "nt":
+                # Close → unlock → unlink. The close releases both the
+                # file handle and the portalocker lock; the unlink only
+                # then succeeds because no handle is open against the path.
+                try:
+                    _lock_fp.close()
+                finally:
+                    try:
+                        pid_file.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            else:
+                # POSIX: unlink while still holding the flock so we delete
+                # exactly the inode we own; without that, a window opens
+                # where another process could ``open`` the same path and
+                # we'd close-then-unlink the wrong inode. Closing the fd
+                # afterwards releases the flock.
+                pid_file.unlink(missing_ok=True)
+                _lock_fp.close()
+
+        atexit.register(_cleanup)
         sigterm_targets = [pid_file]
         if _legacy_lock_fp is not None:
             sigterm_targets.append(legacy_pid_file)

@@ -627,10 +627,11 @@ def test_server_main_acquires_portalocker_pid_lock(
         lambda fn, *a, **kw: captured_atexit.append((fn, a, kw)) or fn,
     )
 
+    pid_file = server_pid_path()
+    cleanup_ran = False
     try:
         server_mod.main()
 
-        pid_file = server_pid_path()
         assert pid_file.exists(), "main() must create the pid file"
         assert pid_file.read_text().strip() == str(os.getpid()), (
             "pid file must contain this process's pid"
@@ -640,11 +641,28 @@ def test_server_main_acquires_portalocker_pid_lock(
         assert probe_pid_file(pid_file).alive is True, (
             "probe_pid_file must see the lock as held while main() owns it"
         )
-    finally:
-        # LIFO mirrors atexit's real ordering: unlink runs before close
-        # so the file we delete is still the one we own the lock on.
+
+        # Run the captured atexit callbacks in LIFO order (mirrors atexit
+        # itself). After they've all run the pid file MUST be gone — that
+        # is the regression net for #818 review: the original two-callback
+        # ``register(close); register(unlink)`` pattern relied on POSIX's
+        # unlink-while-open semantics, which Windows refuses (PermissionError,
+        # WinError 32). The composite cleanup fixes this; if a future change
+        # reverts to two registrations, this assert fails on Windows because
+        # ``pid_file.unlink`` raises while the lock fd is still open.
         for fn, args, kwargs in reversed(captured_atexit):
-            try:
-                fn(*args, **kwargs)
-            except Exception:
-                pass
+            fn(*args, **kwargs)
+        cleanup_ran = True
+        assert not pid_file.exists(), (
+            "atexit cleanup must unlink the pid file on every platform; "
+            "Windows requires close-before-unlink (#818 review)"
+        )
+    finally:
+        # Belt-and-suspenders: if the asserts above bailed before the
+        # cleanup loop, run it now so the test environment is clean.
+        if not cleanup_ran:
+            for fn, args, kwargs in reversed(captured_atexit):
+                try:
+                    fn(*args, **kwargs)
+                except Exception:
+                    pass
