@@ -5,7 +5,69 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.36] — 2026-05-06
+
 ### Added
+
+- **Windows MCP server target (#818, closes #817).** `memtomem-server`
+  now starts and serves over stdio on Windows. The two `fcntl.flock`
+  callsites in `server/__init__.py` (legacy-flock probe + XDG-runtime
+  pid lock) are swapped onto `portalocker`, mirroring the #652 swap
+  that landed for the CLI side. The legacy-flock probe early-returns
+  on Windows because pre-0.1.25 servers were Linux-only by
+  construction (the `mm` CLI itself didn't load on Windows until
+  #652 / 0.1.34). `_install_sigterm_handler` now POSIX-gates the
+  `signal.signal(SIGTERM, ...)` registration; on Windows the teardown
+  path is FastMCP's stdin-EOF + `atexit`, since the C runtime does
+  not deliver SIGTERM. The atexit cleanup closes the lock fd
+  *before* unlinking the pid file on Windows (NTFS refuses to delete
+  an open or locked handle, WinError 32) while POSIX still keeps the
+  unlink-before-close ordering for the #437 inode-identity invariant.
+  Pid files on Windows now land at
+  `%LOCALAPPDATA%\Temp\memtomem-0\server.pid`; `~/.memtomem/.server.pid`
+  is intentionally never created on Windows.
+
+- **`mm index` streams discovery + chunking progress through a
+  `click.progressbar` (#748, closes #656).** Indexing now emits
+  per-source events (`discovered`, `parsed`, `chunked`) that drive a
+  bar with `Discovered N / Indexed M` so a long index of thousands of
+  files no longer feels stuck. The bar length is sized from the
+  engine's discovery event, not a heuristic, so the percentage is
+  accurate.
+
+- **Tags rename / delete / merge service exposed on Web + MCP (#795,
+  PR1 of #688).** A new `tag_management` service unifies the three
+  operations behind `mem_tag_rename` / `mem_tag_delete` /
+  `mem_tag_list` MCP tools and the Web `PATCH /api/chunks/{id}/tags`
+  delegation. Before this, rename and delete were ad-hoc SQL behind
+  the search panel only. The Web chunk-edit flow now goes through
+  the same service so there's one tag-graph mutation surface to
+  reason about.
+
+- **JS unit-test layer for static modules (vitest + jsdom, closes
+  #641).** `web/static/`'s pure modules — markdown rendering, tag
+  pill construction, sort comparators, i18n key resolution — are
+  now exercised under vitest with jsdom, run from a new `js-unit`
+  CI job. Closes a real coverage gap: previously these helpers were
+  only touched by Playwright e2e specs, which couldn't catch a
+  regression in a pure helper without going through the full SPA
+  load.
+
+- **CSRF / Origin / Host guard middleware for `mm web` (#787 stage 1,
+  observe-only mode).** Logs same-site policy violations on every
+  state-changing request without rejecting yet; pins the metric so a
+  later stage can flip to `enforce` with confidence the false-positive
+  rate is tolerable. The middleware lives in
+  `web/middleware/csrf_guard.py` and is wired before the routers.
+
+- **Privacy redaction at the LTM trust boundary covers every user-driven
+  write surface (#784, #789, #802).** Previously the redaction guard
+  only ran on `mem_add` and the indexing pipeline; the SPA's "Add
+  Memory" form, `/api/import`, the Sources upload toast, and the
+  redaction-blocked 403 confirm-and-retry path now all flow through
+  the same trust-boundary scan. The Add-Memory dialog wires
+  `force_unsafe` so users with a confirmed PII-class hit can opt in
+  per-write rather than disabling redaction globally.
 
 - **Browser test harness for tag-filter mutation sites (closes #751).** A
   new `packages/memtomem/tests/web/` directory runs a tiny uvicorn-in-thread
@@ -97,6 +159,84 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm uninstall` deletion is now transactional via stage-then-rmtree
+  (closes #757).** Previously a partway failure (permission flip mid-walk,
+  external lock acquired during deletion) left the state directory in a
+  half-wiped condition with no clean recovery — the user had to manually
+  audit what survived. The new path stages the entire deletion to a
+  sibling `~/.memtomem.uninstall-staging/` via `os.replace`, then a
+  single `rmtree` finalizes; mid-stage failures roll back via reverse
+  `os.replace` and the user-visible state is unchanged. Cross-FS staging
+  upfront-refuses with a clear message (`os.replace` would EXDEV) and a
+  late-firing EXDEV during the rename loop also rolls back. POSIX/Windows
+  parity tests use `as_posix()` keys so the snapshot survives both path
+  separators.
+
+- **`mm uninstall --force` refuses cleanly on Windows when a writer is
+  alive (closes #730).** The POSIX `--force` semantics rely on
+  `unlink-while-open` to wipe a path the calling user no longer wants
+  even if a process holds the inode; NTFS refuses (WinError 32). Rather
+  than half-wipe and fail mid-walk, Windows now refuses upfront with an
+  actionable hint pointing at Sysinternals `handle.exe` / Resource
+  Monitor / `Get-Process`. POSIX/Windows behavior is now pinned by a
+  paired test.
+
+- **Windows runtime dir resolution is NTFS-aware (closes #637).**
+  `_runtime_paths` was using POSIX mode-bit gates against NTFS-synthesised
+  permissions, which meant `ensure_runtime_dir` refused its own previously
+  created directory on every second invocation. The owner-uid +
+  mode-`0o700` gates now skip on `os.name == "nt"` and rely on
+  `%LOCALAPPDATA%\Temp\` already being per-user; symlink rejection and
+  the fresh-creation-with-mode path remain cross-platform.
+
+- **Windows pytest cleanup of components fixture (closes #206).**
+  ORT-backed embedder `close()` now forces `gc.collect()` before
+  releasing the file handle, so `tmp_path` can rmtree the model dir on
+  Windows without lingering handle errors. Tmp-path fixtures gained
+  `mkdir(exist_ok=True)` to absorb the same-test reuse pattern.
+
+- **Concurrent-merge abort test forces distinguishable mtimes (closes
+  #645).** Windows clock resolution can produce identical `st_mtime_ns`
+  for two writes in the same millisecond, breaking the test's contention
+  assumption. The setup now bumps mtime explicitly between the two
+  writes via `os.utime(..., ns=...)`.
+
+- **Context Gateway editor 409 echoes the current `mtime_ns` on Settings
+  resolve abort (#782).** Previously the abort response carried the
+  client-submitted (stale) `mtime_ns`, so the next save still 409'd
+  even when the client wanted to retry. The route now reads the file
+  again post-abort and returns the fresh value so the SPA's resolve
+  flow can re-arm without an extra GET.
+
+- **Web i18n race-free dispatch + listener registration (closes #698).**
+  `applyDOM` was clobbering already-rendered live data on `langchange`
+  because the dispatch happened mid-render. Listeners now register at
+  module top-level (not inside conditional setup) and dispatch via
+  `setLang` so the order is deterministic. Tests pin both the dispatch
+  contract and the listener-registration site.
+
+- **Web a11y: `role="button"` + `aria-label` on row-as-clickable
+  surfaces (#700, batched as #808 / #809 / #810).** Search results,
+  Timeline rows, and source-detail chunk cards now announce as buttons
+  with descriptive labels for screen readers; previously they were bare
+  `<div>`s with click handlers, which read as plain text.
+
+- **`/api/sources` resolves `memory_dir` paths instead of returning raw
+  config strings (closes #675).** The Sources panel's grouping now
+  matches the on-disk path the indexer used, so a `~`-prefixed
+  `memory_dirs` entry no longer renders as a separate group from its
+  resolved twin.
+
+- **`mm init` filesystem ops wrap into the wizard's `fail_step` (closes
+  #664).** `_step_memory_dir` and `_step_settings` now propagate IO
+  errors through the wizard's structured error path instead of dumping
+  a Python traceback at the user.
+
+- **Web tab activation re-applies `hidden=true` on deactivation (closes
+  #699).** Previously a freshly-activated tab could leave the
+  just-deactivated sibling visible briefly, producing a flash. Settings
+  Runtime group header is now hidden in prod tier (#701).
+
 - **Sync All classifies every non-`ok` Settings status, not just
   `needs_confirmation` (closes #799).** `generate_all_settings` returns
   one of five per-result statuses — `ok` / `skipped` / `error` /
@@ -113,6 +253,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `needs_confirmation` > all-`ok`/`skipped` (success). The Settings
   panel's `Sync Now` host-write confirmation flow stays out of scope
   per #774.
+
+### Security
+
+- **Privacy scan covers full content at the LTM trust boundary, not just
+  the first 10K chars (#792).** Previously the redaction guard sampled
+  only a prefix to keep the scan cheap on large pages, but a determined
+  attacker could push secrets past the cutoff and have them ingested.
+  The scan now runs against the full content; the perf cost on typical
+  prose is negligible and the trust-boundary contract is restored.
+
+- **DNS resolution pinned in `mem_fetch` to defeat rebinding (#794).**
+  The URL fetcher now resolves once and pins the IP for the connection,
+  preventing a DNS-rebinding attacker from steering a `https://example.com`
+  fetch toward `127.0.0.1` between resolution and connect. Combined
+  with the existing private-network refusal, this closes the rebinding
+  variant of SSRF for the indexer.
 
 - **Sync All no longer lies when Settings host writes need confirmation
   (closes #774).** The Context Gateway "Sync All" button posts to four
