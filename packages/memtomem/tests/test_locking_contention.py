@@ -124,12 +124,22 @@ class TestAtomicLockContention:
         assert p1.exitcode == 0
         assert p2.exitcode == 0
 
+        # Phase-ordering pin (jitter-immune): p2 made its request while p1
+        # still held the lock, and only acquired once p1 had released. The
+        # earlier ``(p2_acquired - p2_requested) >= hold_seconds * 0.5``
+        # check measured wall-clock wait and flaked on macOS CI when
+        # ``Process.start()`` jitter pushed p2_requested past p1's hold
+        # midpoint — the lock was working, the duration just didn't make
+        # the cutoff (#821).
+        assert p2_requested < p1_released, (
+            f"p2 requested {p2_requested} after p1 released {p1_released} — "
+            "spawn jitter exceeded hold window; the lock can't be proven "
+            "to have blocked p2 in this run"
+        )
         # 50ms scheduler slack: p2 must not have entered before p1 left.
         assert p2_acquired >= p1_released - 0.05, (
             f"p2 acquired {p2_acquired} before p1 released {p1_released}"
         )
-        # And p2 was actually blocked for most of the hold window.
-        assert (p2_acquired - p2_requested) >= hold_seconds * 0.5
 
     def test_uncontended_acquire_is_immediate(self, tmp_path: Path):
         """Negative pin: with no holder, _file_lock acquires without
