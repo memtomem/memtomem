@@ -203,6 +203,15 @@ def _install_sigterm_handler(*pid_files: Path) -> None:
     Only register after the flock succeeds, so we never unlink a pid
     file another primary owns. ``atexit`` still handles the normal
     stdin-EOF shutdown path.
+
+    Windows note (#817): Python's ``signal.SIGTERM`` is a no-op on
+    Windows — the OS has no equivalent of POSIX SIGTERM that the C
+    runtime delivers to the Python signal layer. We skip registration
+    entirely on ``os.name == "nt"`` so the call is honest about what it
+    does, instead of silently installing a handler that will never
+    fire. The ``atexit`` path remains the only teardown route on
+    Windows; FastMCP's stdio loop exits via stdin-EOF when the MCP
+    host disconnects, which triggers ``atexit`` cleanly.
     """
     import os as _os
     import signal
@@ -215,7 +224,8 @@ def _install_sigterm_handler(*pid_files: Path) -> None:
                 pass
         _os._exit(0)
 
-    signal.signal(signal.SIGTERM, _handle)
+    if _os.name != "nt":
+        signal.signal(signal.SIGTERM, _handle)
 
 
 def _try_hold_legacy_flock(legacy_pid: Path) -> object | None:
@@ -266,9 +276,23 @@ def _try_hold_legacy_flock(legacy_pid: Path) -> object | None:
     Returns ``None`` on the skip paths (fresh install, open error,
     shared-lock acquire failure). The returned fd must stay referenced
     for the lock to persist.
+
+    Windows short-circuit (#817): pre-0.1.25 ``memtomem-server`` was
+    Linux-only by construction — the ``mm`` CLI itself didn't load on
+    Windows until #652 / 0.1.34, so a pre-0.1.25 Windows server is
+    impossible. The whole legacy-flock probe exists only to interlock
+    with that hypothetical holder, so on Windows we return ``None``
+    immediately. This also sidesteps a real correctness concern:
+    portalocker's Windows backend selection (``MsvcrtLocker`` vs
+    ``Win32Locker``) does not uniformly implement ``LOCK_SH`` semantics,
+    and we don't want to bet the cross-version mutex on backend
+    internals.
     """
-    import fcntl
+    import portalocker
     import logging
+
+    if os.name == "nt":
+        return None
 
     log = logging.getLogger(__name__)
 
@@ -282,8 +306,8 @@ def _try_hold_legacy_flock(legacy_pid: Path) -> object | None:
         return None
 
     try:
-        fcntl.flock(legacy_fp, fcntl.LOCK_SH | fcntl.LOCK_NB)
-    except (BlockingIOError, OSError):
+        portalocker.lock(legacy_fp, portalocker.LOCK_SH | portalocker.LOCK_NB)
+    except (portalocker.LockException, BlockingIOError, OSError):
         log.warning(
             "Legacy flock at %s is held exclusively (likely a pre-0.1.25 "
             "install). Continuing — if that holder is a pre-0.1.25 "
@@ -299,7 +323,8 @@ def _try_hold_legacy_flock(legacy_pid: Path) -> object | None:
 def main() -> None:
     """Run the MCP server."""
     import atexit
-    import fcntl
+
+    import portalocker
 
     from memtomem._runtime_paths import ensure_runtime_dir, legacy_server_pid_path
 
@@ -338,14 +363,25 @@ def main() -> None:
     # debugging). ``a+`` keeps the existing content readable until the lock
     # decision is made; we ``truncate`` + write the pid only after acquiring
     # the lock.
+    #
+    # ``a+`` (read+write) is also load-bearing for Windows (#817): portalocker's
+    # ``MsvcrtLocker`` backend calls ``msvcrt.locking``, which the C runtime
+    # rejects on read-only handles with ``EACCES``. ``cli/_liveness.py`` uses
+    # ``"rb+"`` for the same reason. Don't simplify this to ``"w"``.
     _lock_fp = open(pid_file, "a+")  # noqa: SIM115
     try:
-        fcntl.flock(_lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+        portalocker.lock(_lock_fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
+    except (portalocker.LockException, BlockingIOError, OSError):
         # Another server already holds the lock — proceed anyway (the editor
         # expects the process to stay alive), but log a warning. Don't register
         # atexit unlink or the SIGTERM handler: either would yank the primary
         # server's pid file out from under it.
+        #
+        # Exception tuple matches ``cli/_liveness.py:probe_pid_file`` (#817):
+        # POSIX raises ``BlockingIOError``; portalocker's Windows backend
+        # wraps Win32 errors as ``LockException``. Keep all three explicit so
+        # a future reader doesn't narrow this and accidentally swallow the
+        # wrong exception.
         _lock_fp.close()
         import logging
 

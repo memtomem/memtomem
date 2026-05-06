@@ -26,24 +26,22 @@ from .helpers import set_home
 
 @contextlib.contextmanager
 def _hold_pid_lock(pid_file: Path) -> Iterator[None]:
-    """Hold an exclusive flock on ``pid_file`` for the duration of the block.
+    """Hold an exclusive lock on ``pid_file`` for the duration of the block.
 
     Mirrors what ``server/__init__.py:main`` does at runtime so the
-    flock-based liveness probe (#387) sees a live writer.
-
-    POSIX-only — ``fcntl`` is imported lazily so the module collects on
-    Windows. Tests that depend on this helper are gated with
-    ``skipif(sys.platform == "win32", ...)``.
+    portalocker-based liveness probe (#387, #817) sees a live writer.
+    Cross-platform via ``portalocker``; on Windows ``"rb+"`` open is
+    required by the ``MsvcrtLocker`` backend (see ``cli/_liveness.py:54``).
     """
-    import fcntl
+    import portalocker
 
     fp = open(pid_file, "rb+")
     try:
-        fcntl.flock(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
         try:
             yield
         finally:
-            fcntl.flock(fp, fcntl.LOCK_UN)
+            portalocker.unlock(fp)
     finally:
         fp.close()
 
@@ -330,10 +328,6 @@ class TestRuntimeProfileImportPin:
 # -------------------------------------------------------------------- 12
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="flock-based liveness probe is POSIX-only (#448 follow-up)",
-)
 class TestServerAliveRefuses:
     def test_refuses_when_server_alive_at_legacy_path(self, home):
         """Pre-#412 servers still write ``~/.memtomem/.server.pid``. The

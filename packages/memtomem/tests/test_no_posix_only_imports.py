@@ -20,13 +20,13 @@ library's POSIX-only modules at module scope:
 Two patterns are allowed because the scan walks ``tree.body`` only
 and does not recurse:
 
-- **Lazy imports inside functions / methods**: the documented pattern
-  in ``server/__init__.py:main``, where ``import fcntl`` lives inside
-  the function body and only evaluates on POSIX call paths. The
-  server is POSIX-only by design (no SIGTERM, different pid semantics
-  on Windows), but the module is import-walked from Windows tooling
-  via ``cli/__init__.py:_register``, so module-level imports must
-  stay safe.
+- **Lazy imports inside functions / methods**: imports living inside
+  a function body that only evaluate on POSIX call paths. The escape
+  hatch stays as general infrastructure, but as of #817 the server
+  itself is fully ``portalocker``-based and contains zero ``import
+  fcntl`` (lazy or otherwise) — so no current ``src/memtomem/`` callsite
+  exercises this exemption. It remains supported for future code that
+  legitimately needs a POSIX-only branch.
 - **Gated ``if sys.platform`` branches**: ``import msvcrt`` /
   ``import fcntl`` inside a top-level ``if/else`` is also fine — the
   wrong-platform branch never executes. The 43ae140 half-fix that
@@ -88,8 +88,8 @@ def _module_level_violations(tree: ast.Module) -> list[tuple[int, str]]:
         #   this shape; portalocker, PR #652, replaced it with a single
         #   unconditional import.)
         # - Lazy imports inside function / method bodies are not flagged
-        #   — that is the documented pattern in
-        #   ``server/__init__.py:main``.
+        #   — historically the pattern used by ``server/__init__.py:main``,
+        #   though as of #817 that file is fully portalocker-based.
         #
         # The regression we're catching is the unguarded module-level
         # ``import fcntl`` from PR #623 — directly in ``tree.body``,
@@ -119,8 +119,7 @@ def test_no_module_level_posix_only_imports(py_file: pathlib.Path) -> None:
     assert violations == [], (
         f"{py_file.relative_to(_SRC_ROOT)} has module-level POSIX-only "
         f"import(s): {violations}. Move the import inside a function, "
-        f"method, or guarded ``sys.platform`` branch — see "
-        f"``server/__init__.py`` for the lazy-import pattern."
+        f"method, or guarded ``sys.platform`` branch."
     )
 
 

@@ -28,6 +28,10 @@ import pytest
 from memtomem.server import _install_sigterm_handler
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows path skips signal.signal registration (#817); see test_install_sigterm_handler_is_noop_on_windows",
+)
 def test_install_sigterm_handler_registers_for_sigterm(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -39,6 +43,10 @@ def test_install_sigterm_handler_registers_for_sigterm(
     assert signal.SIGTERM in captured, "_install_sigterm_handler must bind SIGTERM"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="depends on signal.signal capture; Windows path does not register SIGTERM (#817)",
+)
 def test_sigterm_handler_unlinks_pid_file_and_hard_exits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -65,6 +73,10 @@ def test_sigterm_handler_unlinks_pid_file_and_hard_exits(
     assert exit_calls == [0], "handler must call os._exit(0), not sys.exit or return"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="depends on signal.signal capture; Windows path does not register SIGTERM (#817)",
+)
 def test_sigterm_handler_unlinks_all_pid_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -86,6 +98,30 @@ def test_sigterm_handler_unlinks_all_pid_files(
 
     assert not xdg_pid.exists(), "XDG pid file must be unlinked"
     assert not legacy_pid.exists(), "legacy pid file must be unlinked (#437)"
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="Windows-only: pins the no-op contract added in #817",
+)
+def test_install_sigterm_handler_is_noop_on_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On Windows, ``_install_sigterm_handler`` must NOT call ``signal.signal``.
+
+    Python's SIGTERM is a no-op on Windows (the C runtime does not
+    deliver it), so registering a handler would silently mislead
+    readers into thinking shutdown was wired. The Windows path relies
+    on FastMCP's stdin-EOF teardown + ``atexit`` instead. Pin the
+    contract here so a future "let's just always register it" tweak
+    surfaces as a test failure.
+    """
+    captured: dict[int, object] = {}
+    monkeypatch.setattr(signal, "signal", lambda sig, h: captured.setdefault(sig, h))
+
+    _install_sigterm_handler(tmp_path / ".server.pid")
+
+    assert captured == {}, "Windows path must not call signal.signal"
 
 
 # ── integration ──────────────────────────────────────────────────────
@@ -134,7 +170,8 @@ def _cleanup_proc(proc: subprocess.Popen) -> None:
 
 
 @pytest.mark.skipif(
-    sys.platform == "win32", reason="SIGTERM semantics differ on Windows; server is POSIX-only"
+    sys.platform == "win32",
+    reason="no SIGTERM equivalent on Windows; teardown path is atexit-only (#817)",
 )
 def test_sigterm_unlinks_pid_file_end_to_end(tmp_path: Path) -> None:
     """Spawn ``memtomem-server`` as a subprocess, send SIGTERM, verify cleanup.
@@ -185,34 +222,55 @@ def test_sigterm_unlinks_pid_file_end_to_end(tmp_path: Path) -> None:
         _cleanup_proc(proc)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="server is POSIX-only")
 def test_server_uses_tempdir_fallback_when_xdg_unset(tmp_path: Path) -> None:
     """With ``$XDG_RUNTIME_DIR`` unset the server must land on the
     ``{tempfile.gettempdir()}/memtomem-{uid}/`` fallback, not silently
     refuse to start or write somewhere unexpected.
 
     Covers the code path that the default sigterm test skips (XDG set).
-    Uses an isolated ``TMPDIR`` under ``tmp_path`` so we don't litter
-    the real ``/var/folders/.../T/`` during the run.
+    Uses an isolated tempdir under ``tmp_path`` so we don't litter the
+    real ``/var/folders/.../T/`` (POSIX) or ``%LOCALAPPDATA%\\Temp``
+    (Windows) during the run.
+
+    Cross-platform notes (#817):
+
+    - ``Path.home()`` reads ``HOME`` on POSIX and ``USERPROFILE`` on
+      Windows; setting both keeps the subprocess hermetic on either OS
+      (mirrors ``tests/helpers.py::set_home``, which we cannot reuse here
+      because it operates on ``monkeypatch`` not on a subprocess env dict).
+    - ``tempfile.gettempdir()`` reads ``TMPDIR`` on POSIX but on Windows
+      it picks the first of ``TMP`` / ``TEMP`` / ``USERPROFILE`` it
+      finds. Set all three to land in our isolated dir regardless of
+      backend.
+    - The ``uid`` suffix collapses to ``0`` on Windows (``os.geteuid``
+      doesn't exist) — mirror ``_runtime_paths.runtime_dir()`` line 99.
+    - The ``0o700`` mode-bit assert is POSIX-only: NTFS synthesizes
+      mode bits and ``_runtime_paths.ensure_runtime_dir`` deliberately
+      skips the chmod gate on Windows.
     """
     home = tmp_path / "home"
     home.mkdir()
     tmp_tmp = tmp_path / "tmp"
     tmp_tmp.mkdir()
-    expected_dir = tmp_tmp / f"memtomem-{os.geteuid()}"
+    uid = os.geteuid() if hasattr(os, "geteuid") else 0
+    expected_dir = tmp_tmp / f"memtomem-{uid}"
     expected_pid = expected_dir / "server.pid"
 
     env = os.environ.copy()
     env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
     env["TMPDIR"] = str(tmp_tmp)
+    env["TMP"] = str(tmp_tmp)
+    env["TEMP"] = str(tmp_tmp)
     env.pop("XDG_RUNTIME_DIR", None)
 
     proc = _spawn_server(env)
     try:
         _wait_for_pid_file(proc, expected_pid)
-        assert stat_mode(expected_dir) == 0o700, (
-            "tempdir fallback must create the subdir at owner-only mode"
-        )
+        if os.name != "nt":
+            assert stat_mode(expected_dir) == 0o700, (
+                "tempdir fallback must create the subdir at owner-only mode"
+            )
         assert not (home / ".memtomem").exists()
     finally:
         _cleanup_proc(proc)
@@ -220,7 +278,11 @@ def test_server_uses_tempdir_fallback_when_xdg_unset(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(
-    sys.platform == "win32", reason="SIGTERM semantics differ on Windows; server is POSIX-only"
+    sys.platform == "win32",
+    reason=(
+        "no SIGTERM equivalent on Windows; teardown path is atexit-only "
+        "and the legacy flock probe short-circuits on Windows (#817)"
+    ),
 )
 def test_sigterm_unlinks_legacy_pid_file_end_to_end(tmp_path: Path) -> None:
     """Issue #437: when ``~/.memtomem/`` exists but no live server holds
@@ -266,7 +328,13 @@ def test_sigterm_unlinks_legacy_pid_file_end_to_end(tmp_path: Path) -> None:
         _cleanup_proc(proc)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="server is POSIX-only")
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "legacy flock is POSIX-only by design (#817): #444 contention only "
+        "matters for Linux pre-0.1.25 holdovers, which cannot exist on Windows"
+    ),
+)
 def test_server_warns_but_proceeds_when_legacy_lock_held_exclusively(
     tmp_path: Path,
 ) -> None:
@@ -325,7 +393,13 @@ def test_server_warns_but_proceeds_when_legacy_lock_held_exclusively(
         holder.close()
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="server is POSIX-only")
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "LOCK_SH coexistence is only required against pre-0.1.25 legacy servers, "
+        "which are POSIX-only by construction (#817)"
+    ),
+)
 def test_two_post_412_servers_coexist_with_shared_lock(tmp_path: Path) -> None:
     """#444 primary repro: two 0.1.26 servers must be able to run at
     the same time (different projects / Claude Code sessions).
@@ -418,44 +492,51 @@ def test_legacy_lock_sh_allows_multiple_holders(tmp_path: Path) -> None:
         fp2.close()
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="server is POSIX-only")
 def test_contended_server_start_preserves_pid_file_content(tmp_path: Path) -> None:
     """Regression: a contended server start must NOT truncate the live
     server's pid file when the flock probe bails.
 
     Pre-fix, ``main()`` opened the pid file with ``open(..., "w")`` which
-    truncates *before* ``fcntl.flock`` is checked. So a second server
-    starting while the first held the lock zeroed out the file content
-    even though the first server kept running. The user-visible symptom:
-    ``mm uninstall`` reports ``Server still running (pid None)`` and
-    ``lsof`` loses the recorded process identity, defeating the whole
-    point of writing the pid in the first place.
+    truncates *before* the lock is checked. So a second server starting
+    while the first held the lock zeroed out the file content even though
+    the first server kept running. The user-visible symptom: ``mm
+    uninstall`` reports ``Server still running (pid None)`` and ``lsof``
+    loses the recorded process identity, defeating the whole point of
+    writing the pid in the first place.
 
     Repro: pre-create the pid file with known content and hold
     ``LOCK_EX`` on it, spawn the server, and assert the recorded pid
     survived. The fix uses ``open(..., "a+")`` + post-lock truncate so
     contended starts leave the live file alone.
+
+    Cross-platform via portalocker (#817): the simulator holds an
+    exclusive lock the same way ``main()`` does. ``"rb+"`` open keeps
+    the ``MsvcrtLocker`` Windows backend happy (read-only handles
+    fail with ``EACCES``).
     """
     home = tmp_path / "home"
     home.mkdir()
     xdg = tmp_path / "xdg_runtime"
     xdg.mkdir()
-    os.chmod(xdg, 0o700)
+    if os.name != "nt":
+        os.chmod(xdg, 0o700)
     sub = xdg / "memtomem"
     sub.mkdir()
-    os.chmod(sub, 0o700)
+    if os.name != "nt":
+        os.chmod(sub, 0o700)
     pid_file = sub / "server.pid"
     pid_file.write_text("12345")
 
     env = os.environ.copy()
     env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
 
-    import fcntl as _fcntl
+    import portalocker
 
-    holder = open(pid_file, "a+b")  # noqa: SIM115 — held for test scope
+    holder = open(pid_file, "rb+")  # noqa: SIM115 — held for test scope
     try:
-        _fcntl.flock(holder, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        portalocker.lock(holder, portalocker.LOCK_EX | portalocker.LOCK_NB)
         proc = _spawn_server(env)
         try:
             # The open + flock + warning log runs synchronously at
@@ -477,8 +558,8 @@ def test_contended_server_start_preserves_pid_file_content(tmp_path: Path) -> No
             _cleanup_proc(proc)
     finally:
         try:
-            _fcntl.flock(holder, _fcntl.LOCK_UN)
-        except OSError:
+            portalocker.unlock(holder)
+        except (portalocker.LockException, OSError):
             pass
         holder.close()
 
@@ -487,3 +568,83 @@ def stat_mode(path: Path) -> int:
     import stat as _stat
 
     return _stat.S_IMODE(path.stat().st_mode)
+
+
+# ── in-process regression pin (cross-platform, #817) ─────────────────
+
+
+def test_server_main_acquires_portalocker_pid_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Run ``memtomem.server.main()`` in-process and pin that it acquires
+    a real exclusive lock on the pid file via ``portalocker``.
+
+    Cross-platform regression net for #817 — works identically on Linux,
+    macOS, and Windows. Without this pin, a future "swap portalocker
+    back to fcntl" tweak would slip past the AST guard (which only
+    catches *module-level* ``import fcntl``) and re-break Windows.
+
+    Aggressive isolation, in this order:
+
+    1. Stub ``_install_sigterm_handler`` to a no-op so ``main()`` does
+       not replace the test process's global ``signal.signal(SIGTERM, ...)``
+       handler. Going through the function-level seam (rather than
+       monkeypatching ``signal.signal``) is cleaner — that's the entire
+       intent boundary.
+    2. Stub ``mcp.run`` to a no-op so the asyncio loop never starts.
+    3. Pin ``Path.home()`` and ``XDG_RUNTIME_DIR`` to tmp paths so
+       ``server_pid_path()`` and ``legacy_server_pid_path()`` land
+       inside ``tmp_path``. Otherwise the test would write a real
+       pid file into the developer's runtime dir.
+    4. Capture ``atexit.register`` calls. Without this the lock fd and
+       pid file outlive the test even though ``mcp.run`` is no-op'd —
+       ``main()`` registers cleanups via ``atexit`` expecting them to
+       fire at process exit, but pytest never exits between tests.
+    """
+    import atexit
+    import pathlib
+
+    from memtomem import server as server_mod
+    from memtomem._runtime_paths import server_pid_path
+    from memtomem.cli._liveness import probe_pid_file
+
+    tmp_home = tmp_path / "home"
+    tmp_home.mkdir()
+    xdg = tmp_path / "xdg_runtime"
+    xdg.mkdir()
+    if os.name != "nt":
+        os.chmod(xdg, 0o700)
+
+    captured_atexit: list[tuple] = []
+
+    monkeypatch.setattr(server_mod, "_install_sigterm_handler", lambda *a, **kw: None)
+    monkeypatch.setattr(server_mod.mcp, "run", lambda: None)
+    monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: tmp_home))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
+    monkeypatch.setattr(
+        atexit,
+        "register",
+        lambda fn, *a, **kw: captured_atexit.append((fn, a, kw)) or fn,
+    )
+
+    try:
+        server_mod.main()
+
+        pid_file = server_pid_path()
+        assert pid_file.exists(), "main() must create the pid file"
+        assert pid_file.read_text().strip() == str(os.getpid()), (
+            "pid file must contain this process's pid"
+        )
+        # The probe opens its own handle and tries LOCK_EX | LOCK_NB —
+        # if main() is holding the lock, the probe must report alive.
+        assert probe_pid_file(pid_file).alive is True, (
+            "probe_pid_file must see the lock as held while main() owns it"
+        )
+    finally:
+        # LIFO mirrors atexit's real ordering: unlink runs before close
+        # so the file we delete is still the one we own the lock on.
+        for fn, args, kwargs in reversed(captured_atexit):
+            try:
+                fn(*args, **kwargs)
+            except Exception:
+                pass
