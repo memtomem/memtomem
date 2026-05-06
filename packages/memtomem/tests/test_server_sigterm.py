@@ -548,11 +548,20 @@ def test_contended_server_start_preserves_pid_file_content(tmp_path: Path) -> No
                 "server must stay alive when another holder owns the flock; "
                 f"exited rc={proc.returncode}"
             )
-            assert pid_file.read_text() == "12345", (
+            # Read THROUGH the lock-owning handle, not via a separate
+            # ``Path.read_text()`` (#819): on Windows ``LockFileEx``
+            # blocks reads from other handles, so opening a fresh handle
+            # would raise ``PermissionError`` (ERROR_LOCK_VIOLATION) even
+            # though the file content is intact. POSIX ``flock`` is
+            # advisory and lets ``read_text`` through, so this works on
+            # both — the holder-handle read is the cross-platform form.
+            holder.seek(0)
+            content = holder.read().decode("utf-8")
+            assert content == "12345", (
                 "contended server start truncated the live pid file — this "
                 "is the open(..., 'w') race the fix replaces with "
-                "open(..., 'a+') + post-lock truncate. Got: "
-                f"{pid_file.read_text()!r}"
+                "open(..., 'a+') + post-lock truncate. "
+                f"Got: {content!r}"
             )
         finally:
             _cleanup_proc(proc)
@@ -633,11 +642,22 @@ def test_server_main_acquires_portalocker_pid_lock(
         server_mod.main()
 
         assert pid_file.exists(), "main() must create the pid file"
-        assert pid_file.read_text().strip() == str(os.getpid()), (
-            "pid file must contain this process's pid"
-        )
+        # POSIX-only: read pid-file content via a fresh handle. Windows
+        # ``LockFileEx`` blocks reads from other handles, so this would
+        # raise ``PermissionError`` (#819). The lock-owning handle lives
+        # in ``main()``'s closure (``_lock_fp``) and isn't reachable from
+        # here. The cross-platform ``probe_pid_file`` assertion below is
+        # the load-bearing check; the content read is just additional
+        # POSIX-side coverage.
+        if os.name != "nt":
+            assert pid_file.read_text().strip() == str(os.getpid()), (
+                "pid file must contain this process's pid"
+            )
         # The probe opens its own handle and tries LOCK_EX | LOCK_NB —
         # if main() is holding the lock, the probe must report alive.
+        # ``probe_pid_file`` is designed to handle the Windows
+        # lock-blocks-reads case (catches ``OSError`` at open and treats
+        # as alive), so it works on every platform.
         assert probe_pid_file(pid_file).alive is True, (
             "probe_pid_file must see the lock as held while main() owns it"
         )

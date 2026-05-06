@@ -329,6 +329,16 @@ class TestRuntimeProfileImportPin:
 
 
 class TestServerAliveRefuses:
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason=(
+            "POSIX-specific user-facing text: Windows substitutes the "
+            "'Server still running (pid N) … lsof' message with a "
+            "Sysinternals/handle.exe hint that omits the recorded pid. "
+            "Widening the assertion is a separate follow-up to #819; the "
+            "lock-acquisition mechanics work cross-platform."
+        ),
+    )
     def test_refuses_when_server_alive_at_legacy_path(self, home):
         """Pre-#412 servers still write ``~/.memtomem/.server.pid``. The
         mixed-version upgrade path (old server running, new uninstall)
@@ -349,6 +359,10 @@ class TestServerAliveRefuses:
         assert (state / "memtomem.db").exists()
         assert (state / "config.json").exists()
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX-specific user-facing text (#819 follow-up); see test_refuses_when_server_alive_at_legacy_path",
+    )
     def test_refuses_when_server_alive_at_runtime_path(self, home):
         """Post-#412 servers hold the flock at
         ``$XDG_RUNTIME_DIR/memtomem/server.pid``. The probe must see it
@@ -367,6 +381,15 @@ class TestServerAliveRefuses:
         assert str(os.getpid()) in result.output
         assert (home / ".memtomem" / "memtomem.db").exists()
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason=(
+            "POSIX-only contract: --force unlinks the locked pid file via "
+            "unlink-while-open. Windows refuses (WinError 32, #730 contract) "
+            "and exits non-zero by design — the Windows-equivalent test for "
+            "that refusal lives elsewhere in this file."
+        ),
+    )
     def test_force_overrides_liveness(self, home):
         state = _seed_state(home)
         pid_file = state / ".server.pid"
@@ -378,6 +401,10 @@ class TestServerAliveRefuses:
         assert result.exit_code == 0, result.output
         assert not state.exists()
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX-specific 'lsof' wording (#819 follow-up); Windows uses handle.exe / Resource Monitor",
+    )
     def test_refuses_with_unknown_pid_branch_when_pid_file_empty(self, home):
         """Empty pid file + flock held = the truncate-race fingerprint.
 
