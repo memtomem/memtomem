@@ -241,14 +241,18 @@ async function loadCtxOverview() {
 // The overview cards themselves are inline-templated via ``t()`` in
 // ``loadCtxOverview``'s innerHTML, so ``I18N.applyDOM`` cannot re-translate
 // the rendered text on toggle (it only walks ``data-i18n*`` attributes).
-// Re-render when the section is mounted; ``loadCtxOverview``'s own
-// sequence guard handles the multi-toggle race.
+// Re-render only when the overview section is the active settings pane;
+// ``#settings-ctx-overview`` always exists in the DOM, so checking
+// ``qs('ctx-overview-content')`` truthiness alone would fire the fetch
+// on every toggle from any page (#824 review). ``loadCtxOverview``'s
+// own sequence guard handles the multi-toggle race.
 window.addEventListener('langchange', () => {
   const btn = document.getElementById('ctx-sync-all-btn');
   if (btn && btn.dataset.runtimeOnly === 'true') {
     btn.title = t('settings.ctx.sync_all_disabled_tooltip');
   }
-  if (qs('ctx-overview-content')) {
+  const overviewSection = document.getElementById('settings-ctx-overview');
+  if (overviewSection && overviewSection.classList.contains('active')) {
     loadCtxOverview();
   }
 });

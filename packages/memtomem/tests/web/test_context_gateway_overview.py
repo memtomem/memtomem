@@ -256,10 +256,13 @@ def test_multi_toggle_race_keeps_newest_locale_on_cards(page, mm_web_url: str) -
     # window we want.
     page.evaluate("async () => { await I18N.setLang('ko'); }")
     # Belt-and-braces: don't proceed to EN until the KO request is
-    # actually parked in the route handler.
+    # actually parked in the route handler. Use ``page.wait_for_timeout``
+    # to poll — a pure-Python ``time.sleep`` would hold the sync_playwright
+    # main thread and starve Playwright's own callback dispatch (the
+    # very route handler whose ``calls`` we're polling).
     deadline = time.monotonic() + 2.0
     while call_seq["calls"] < 2 and time.monotonic() < deadline:
-        time.sleep(0.02)
+        page.wait_for_timeout(20)
     assert call_seq["calls"] >= 2, "KO toggle's overview fetch did not dispatch"
 
     # Second toggle KO→EN. Wait for the EN response to render. The EN
@@ -294,3 +297,49 @@ def test_multi_toggle_race_keeps_newest_locale_on_cards(page, mm_web_url: str) -
     # Negative: the KO literal must not be present anywhere on the
     # tile, even partially — a half-clobber is still a regression.
     assert "스킬" not in final, f"old locale must not bleed through after race: {final!r}"
+
+
+def test_langchange_off_overview_does_not_refetch_overview(page, mm_web_url: str) -> None:
+    """PR #824 review P2 pin: language toggles from a non-overview page
+    must not fire ``/api/context/overview``. The dashboard's
+    ``#settings-ctx-overview`` element is always present in the DOM, so
+    the listener must gate on ``classList.contains('active')`` rather
+    than on element existence; without the gate, every toggle from
+    Search/Index/etc. issues an unnecessary backend round-trip."""
+    _install_default_stubs(page)
+
+    overview_calls: list[str] = []
+
+    def _overview_handler(route):
+        overview_calls.append(route.request.url)
+        route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_HEALTHY_OVERVIEW)
+        )
+
+    page.route("**/api/context/overview", _overview_handler)
+    page.goto(mm_web_url)
+    # Land on the Search tab — the SPA's default landing page already
+    # exercises the non-overview path, but click explicitly so a future
+    # default change doesn't silently make this spec passive.
+    page.locator("#tabbtn-search").click()
+    page.wait_for_selector("#tabbtn-search.active", timeout=2_000)
+    # No overview fetch should have happened yet — boot didn't visit
+    # the dashboard. Confirm the baseline before toggling so the post-
+    # toggle assertion has a clean reference.
+    assert overview_calls == [], (
+        f"overview must not be fetched during boot on Search tab; got {overview_calls!r}"
+    )
+
+    # Toggle KO and back to EN. Each setLang dispatches ``langchange``;
+    # a missing active-section gate would fire two ``/api/context/overview``
+    # requests here. Await each promise so the assertion samples after
+    # both listeners have run.
+    page.evaluate("async () => { await I18N.setLang('ko'); }")
+    page.evaluate("async () => { await I18N.setLang('en'); }")
+    # Give the page a beat for any racing fetch to dispatch.
+    page.wait_for_timeout(300)
+
+    assert overview_calls == [], (
+        f"language toggle from a non-overview page must not fetch the overview; "
+        f"saw {overview_calls!r} (PR #824 review P2)"
+    )

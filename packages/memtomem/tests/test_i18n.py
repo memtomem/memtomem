@@ -657,10 +657,16 @@ class TestNoHardcodedStrings:
 
     def test_q_pr1_langchange_listener_reloads_overview(self) -> None:
         """Bug-1 single-toggle pin: the ``langchange`` listener in
-        context-gateway.js must call ``loadCtxOverview`` when the section
-        is mounted. Without this call the inline-templated card text
-        (typ.label, badgeText) would stay in the previous locale because
-        ``I18N.applyDOM`` only walks ``data-i18n*`` attributes."""
+        context-gateway.js must call ``loadCtxOverview`` when the
+        overview section is the active settings pane — and only then.
+
+        ``#settings-ctx-overview`` always exists in the DOM regardless of
+        which page the user is on; gating on mere element existence
+        (``qs('ctx-overview-content')`` truthiness) would fire a fetch on
+        every language toggle from any page, not just the dashboard.
+        The active-class gate matches ``switchSettingsSection``'s own
+        ``section.classList.add('active')`` contract (app.js:1191).
+        """
         text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
         m = re.search(
             r"window\.addEventListener\('langchange',\s*\(\)\s*=>\s*\{(.+?)\}\);",
@@ -671,6 +677,19 @@ class TestNoHardcodedStrings:
         body = m.group(1)
         assert "loadCtxOverview()" in body, (
             "langchange listener must call loadCtxOverview() for the inline-templated cards"
+        )
+        # Active-section gate: the listener body must look up
+        # ``settings-ctx-overview`` and check ``classList.contains('active')``
+        # before reloading. Without this, every language toggle from any
+        # page would hit /api/context/overview (PR #824 review P2).
+        assert "settings-ctx-overview" in body, (
+            "langchange listener must reference settings-ctx-overview "
+            "to gate the reload to the active pane"
+        )
+        assert "classList.contains('active')" in body or 'classList.contains("active")' in body, (
+            "langchange listener must check the active class before "
+            "calling loadCtxOverview() — otherwise toggles from other "
+            "pages still hit /api/context/overview"
         )
 
     def test_q_pr1_status_parse_error_mapped(self) -> None:
