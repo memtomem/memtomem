@@ -751,3 +751,80 @@ class TestNoHardcodedStrings:
         assert m.group(1) == "settings.ctx.status_parse_error", (
             f"'parse error' must map to settings.ctx.status_parse_error; got: {m.group(1)!r}"
         )
+
+    def test_q_pr2_nav_label_translated_in_ko(self, en: dict[str, str], ko: dict[str, str]) -> None:
+        """Q-PR2 Drift-1: the Context Gateway sidebar nav label
+        (``settings.nav.ctx_overview``) used to be the English literal
+        ``"Context Gateway"`` in ko.json, while the body H2
+        (``settings.ctx.overview_title``) was already
+        ``"컨텍스트 게이트웨이"``. The KO sidebar→body inconsistency was
+        the bug; pin the symmetric pair so a future revert fails on both
+        the positive value and the sidebar/H2 parity that the user sees.
+
+        Negative cross-locale assertion catches the silent ``ko = en``
+        regression that ``test_ko_has_all_en_keys`` (key parity) cannot
+        detect — that test only checks the *key* exists in ko, not that
+        the *value* is translated."""
+        assert ko["settings.nav.ctx_overview"] == "컨텍스트 게이트웨이", (
+            f"ko sidebar label must be translated; got: {ko['settings.nav.ctx_overview']!r}"
+        )
+        assert ko["settings.nav.ctx_overview"] != en["settings.nav.ctx_overview"], (
+            "ko settings.nav.ctx_overview must not silently equal the en "
+            "value (Drift-1 regression — KO sidebar showing English literal)"
+        )
+        assert ko["settings.nav.ctx_overview"] == ko["settings.ctx.overview_title"], (
+            "KO sidebar label and body H2 must match — that parity is what "
+            "the user actually sees when clicking the nav entry"
+        )
+
+    def test_q_pr2_overview_desc_is_tier_agnostic(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """Q-PR2 Drift-3: the Context Gateway dashboard description must
+        not enumerate individual tile names. The desc is rendered
+        unconditionally via ``data-i18n="settings.ctx.overview_desc"``
+        but the dashboard renders 3 tiles in prod tier and 4 tiles in
+        dev tier (Custom Commands is ``devOnly``), so any enumeration
+        in the desc is wrong in at least one tier.
+
+        Word-bounded, case-sensitive, each token checked separately so a
+        creative future regression (``"Subagents and Skills"``,
+        ``"Skills/Hooks"``, etc.) is caught with the same strictness as
+        the original ``"Skills, Subagents, and Hooks"`` phrasing.
+
+        KO uses substring (not word-bounded) because Korean has no word
+        boundary character; ``"훅"`` matches inside ``"훅을"`` etc. — that's
+        the desired strictness, since the desc is intentionally
+        tier-agnostic and shouldn't mention the term at all in any
+        inflection.
+
+        Positive anchors keep ``"Claude Code"`` + ``"Codex"`` in both
+        locales — those are the runtime-name examples that survive
+        generalization and removing them would also be a copy-polish
+        regression."""
+        forbidden_en = {"Skills", "Subagents", "Hooks"}
+        desc_en = en["settings.ctx.overview_desc"]
+        present_en = {t for t in forbidden_en if re.search(rf"\b{t}\b", desc_en)}
+        assert not present_en, (
+            f"en overview_desc reintroduced tile-name enumeration: "
+            f"{sorted(present_en)} (must stay tier-agnostic so the dev-tier "
+            f"4th 'Custom Commands' tile doesn't make the desc lie)"
+        )
+
+        forbidden_ko = {"스킬", "서브에이전트", "훅"}
+        desc_ko = ko["settings.ctx.overview_desc"]
+        present_ko = {t for t in forbidden_ko if t in desc_ko}
+        assert not present_ko, (
+            f"ko overview_desc reintroduced tile-name enumeration: "
+            f"{sorted(present_ko)} (must stay tier-agnostic)"
+        )
+
+        for locale_name, desc in (("en", desc_en), ("ko", desc_ko)):
+            assert "Claude Code" in desc, (
+                f"{locale_name} overview_desc must still anchor 'Claude Code' "
+                f"as a concrete runtime example"
+            )
+            assert "Codex" in desc, (
+                f"{locale_name} overview_desc must still anchor 'Codex' "
+                f"as a concrete runtime example"
+            )
