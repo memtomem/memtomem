@@ -329,12 +329,18 @@ def test_langchange_after_tab_switch_does_not_refetch_overview(page, mm_web_url:
 
     page.route("**/api/context/overview", _overview_handler)
     page.goto(mm_web_url)
-    # Mount the Context Gateway dashboard — this fires the initial
-    # /api/context/overview load (call #1) and adds .active to
-    # #settings-ctx-overview.
+    # Mount the Context Gateway dashboard — adds .active to
+    # #settings-ctx-overview and fires at least one
+    # /api/context/overview load. The exact mount-time call count
+    # varies between local + CI (boot-path differences around
+    # ``activateTab('settings')`` → ``switchSettingsSection`` cascade);
+    # this spec's invariant is "no *additional* refetch after the
+    # main-tab switch", so capture the post-mount baseline rather than
+    # pinning a specific number.
     _open_context_gateway(page)
-    assert len(overview_calls) == 1, (
-        f"expected one initial overview fetch on dashboard mount, got {overview_calls!r}"
+    initial_calls = len(overview_calls)
+    assert initial_calls >= 1, (
+        f"dashboard mount should fire at least one overview fetch; got {overview_calls!r}"
     )
 
     # Switch to a different main tab. ``activateTab`` flips
@@ -366,9 +372,10 @@ def test_langchange_after_tab_switch_does_not_refetch_overview(page, mm_web_url:
     page.evaluate("async () => { await I18N.setLang('ko'); }")
     page.evaluate("async () => { await I18N.setLang('en'); }")
     page.wait_for_timeout(300)
-    assert len(overview_calls) == 1, (
+    assert len(overview_calls) == initial_calls, (
         f"language toggle from a non-Settings main tab must not refetch the "
-        f"overview; saw {overview_calls!r} (PR #824 second-pass review)"
+        f"overview; baseline={initial_calls}, after-toggles={len(overview_calls)}, "
+        f"calls={overview_calls!r} (PR #824 second-pass review)"
     )
 
 
