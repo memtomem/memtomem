@@ -678,18 +678,36 @@ class TestNoHardcodedStrings:
         assert "loadCtxOverview()" in body, (
             "langchange listener must call loadCtxOverview() for the inline-templated cards"
         )
-        # Active-section gate: the listener body must look up
-        # ``settings-ctx-overview`` and check ``classList.contains('active')``
-        # before reloading. Without this, every language toggle from any
-        # page would hit /api/context/overview (PR #824 review P2).
+        # Two-gate active check: both the main Settings tab
+        # (``#tab-settings``) AND the Context Gateway settings sub-section
+        # (``#settings-ctx-overview``) must carry ``.active`` before
+        # reloading.
+        #   * Section gate alone is insufficient: ``activateTab`` toggles
+        #     panel-level ``.active`` + ``hidden`` but does not reach into
+        #     sub-section classes, so leaving Settings for Search keeps
+        #     the section's ``.active`` set and a toggle from Search
+        #     would still hit /api/context/overview (PR #824 review P2).
+        #   * Tab gate alone is insufficient: a user could be in Settings
+        #     but viewing Hooks, where reloading the unmounted overview
+        #     dashboard is wasted work.
+        assert "tab-settings" in body, (
+            "langchange listener must reference #tab-settings — "
+            "without the main-tab gate, off-Settings toggles still fetch"
+        )
         assert "settings-ctx-overview" in body, (
-            "langchange listener must reference settings-ctx-overview "
+            "langchange listener must reference #settings-ctx-overview "
             "to gate the reload to the active pane"
         )
-        assert "classList.contains('active')" in body or 'classList.contains("active")' in body, (
-            "langchange listener must check the active class before "
-            "calling loadCtxOverview() — otherwise toggles from other "
-            "pages still hit /api/context/overview"
+        # Counts: at least two ``classList.contains('active')`` calls (one
+        # per gate). Quoting style matches the source — both single-quote
+        # and double-quote forms accepted in case ruff reformats one day.
+        active_calls = body.count("classList.contains('active')") + body.count(
+            'classList.contains("active")'
+        )
+        assert active_calls >= 2, (
+            f"langchange listener must check classList.contains('active') "
+            f"on both #tab-settings and #settings-ctx-overview; found "
+            f"{active_calls} call(s)"
         )
 
     def test_q_pr1_status_parse_error_mapped(self) -> None:

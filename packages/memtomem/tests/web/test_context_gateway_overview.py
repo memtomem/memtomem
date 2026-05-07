@@ -58,18 +58,23 @@ def _install_default_stubs(page) -> None:
 def _open_context_gateway(page) -> None:
     """Navigate to ``settings-ctx-overview`` so ``loadCtxOverview`` runs.
 
-    The dashboard is reached via the ⚙️ Settings header. ``switchSettingsSection``
-    drives the routing; calling it from page.evaluate is more deterministic than
-    chasing the right click sequence (the sidebar layout changed twice in #813
-    and #816 and a click-based path keeps re-breaking).
+    The dashboard is reached via the ⚙️ Settings main tab → Context
+    Gateway sidebar item. The langchange listener now gates on both
+    main-tab activity (``#tab-settings.active``) and sub-section
+    activity (``#settings-ctx-overview.active``), so this helper has to
+    activate both. ``activateTab`` + ``switchSettingsSection`` are
+    invoked from ``page.evaluate`` rather than chasing click coordinates
+    — the sidebar layout changed twice in #813 / #816 and a click-based
+    path keeps re-breaking.
 
-    Wait via ``wait_for_function`` rather than ``wait_for_selector``: the
-    overview tiles render inside a section that may not yet be the active
-    visible pane (other settings sections also exist in the DOM with
-    ``ctx-overview-stat`` children-of-a-different-tile shape), so the
-    visibility check is fragile. The DOM-attach + populated-text check is
-    what the assertions actually depend on.
+    Wait via ``wait_for_function`` rather than ``wait_for_selector``:
+    the overview tiles render inside a section that may not yet be the
+    active visible pane (other settings sections also exist in the DOM
+    with ``ctx-overview-stat`` children-of-a-different-tile shape), so
+    the visibility check is fragile. The DOM-attach + populated-text
+    check is what the assertions actually depend on.
     """
+    page.evaluate("() => activateTab('settings')")
     page.evaluate("() => switchSettingsSection('ctx-overview')")
     page.wait_for_function(
         "() => {"
@@ -297,6 +302,74 @@ def test_multi_toggle_race_keeps_newest_locale_on_cards(page, mm_web_url: str) -
     # Negative: the KO literal must not be present anywhere on the
     # tile, even partially — a half-clobber is still a regression.
     assert "스킬" not in final, f"old locale must not bleed through after race: {final!r}"
+
+
+def test_langchange_after_tab_switch_does_not_refetch_overview(page, mm_web_url: str) -> None:
+    """PR #824 second-pass review pin: ``activateTab`` hides the Settings
+    panel but does not remove ``.active`` from
+    ``#settings-ctx-overview``, so a section-only gate would still let
+    off-Settings language toggles re-issue ``/api/context/overview``.
+    The fix gates on both the Settings main tab AND the Context Gateway
+    sub-section being active; this spec mounts the dashboard, switches
+    to the Search main tab, then toggles language and asserts no
+    overview refetch.
+
+    Mutation check: dropping the ``#tab-settings`` gate (section gate
+    alone) makes this spec fail with one extra ``/api/context/overview``
+    call per ``setLang`` invocation."""
+    _install_default_stubs(page)
+
+    overview_calls: list[str] = []
+
+    def _overview_handler(route):
+        overview_calls.append(route.request.url)
+        route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_HEALTHY_OVERVIEW)
+        )
+
+    page.route("**/api/context/overview", _overview_handler)
+    page.goto(mm_web_url)
+    # Mount the Context Gateway dashboard — this fires the initial
+    # /api/context/overview load (call #1) and adds .active to
+    # #settings-ctx-overview.
+    _open_context_gateway(page)
+    assert len(overview_calls) == 1, (
+        f"expected one initial overview fetch on dashboard mount, got {overview_calls!r}"
+    )
+
+    # Switch to a different main tab. ``activateTab`` flips
+    # ``#tab-settings.active`` off + ``hidden`` on, but the section
+    # ``.active`` class on ``#settings-ctx-overview`` stays.
+    page.locator("#tabbtn-search").click()
+    page.wait_for_selector("#tabbtn-search.active", timeout=2_000)
+    section_state = page.evaluate(
+        """() => {
+          const tab = document.getElementById('tab-settings');
+          const sec = document.getElementById('settings-ctx-overview');
+          return {
+            settingsTabActive: !!(tab && tab.classList.contains('active')),
+            sectionActive: !!(sec && sec.classList.contains('active')),
+          };
+        }"""
+    )
+    # Sanity-pin the precondition the bug depends on: the section keeps
+    # its .active class even after the main tab switch. If this ever
+    # changes (someone teaches activateTab to clean up sub-section
+    # classes) the bug evaporates and this spec becomes redundant —
+    # the explicit precondition makes that situation surface.
+    assert section_state == {"settingsTabActive": False, "sectionActive": True}, (
+        f"precondition broken — expected #tab-settings inactive but section "
+        f"still .active; got {section_state!r}"
+    )
+
+    # Now toggle language. With both gates in place, no overview refetch.
+    page.evaluate("async () => { await I18N.setLang('ko'); }")
+    page.evaluate("async () => { await I18N.setLang('en'); }")
+    page.wait_for_timeout(300)
+    assert len(overview_calls) == 1, (
+        f"language toggle from a non-Settings main tab must not refetch the "
+        f"overview; saw {overview_calls!r} (PR #824 second-pass review)"
+    )
 
 
 def test_langchange_off_overview_does_not_refetch_overview(page, mm_web_url: str) -> None:

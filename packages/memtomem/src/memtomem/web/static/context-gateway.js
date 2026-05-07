@@ -241,18 +241,29 @@ async function loadCtxOverview() {
 // The overview cards themselves are inline-templated via ``t()`` in
 // ``loadCtxOverview``'s innerHTML, so ``I18N.applyDOM`` cannot re-translate
 // the rendered text on toggle (it only walks ``data-i18n*`` attributes).
-// Re-render only when the overview section is the active settings pane;
-// ``#settings-ctx-overview`` always exists in the DOM, so checking
-// ``qs('ctx-overview-content')`` truthiness alone would fire the fetch
-// on every toggle from any page (#824 review). ``loadCtxOverview``'s
-// own sequence guard handles the multi-toggle race.
+// Re-render only when both gates are active:
+//   * the Settings *main tab* (``#tab-settings``) is the visible panel —
+//     ``activateTab`` toggles ``.active`` + ``hidden`` here when the
+//     user switches between main tabs.
+//   * the Context Gateway *settings section* (``#settings-ctx-overview``)
+//     is the active sub-pane — ``switchSettingsSection`` toggles
+//     ``.active`` here when the user clicks a settings nav item.
+// Without both checks, switching from Settings → Search keeps the
+// section's ``.active`` class set (``activateTab`` hides the panel but
+// doesn't reach into sub-section classes), and a language toggle from
+// Search would still issue ``/api/context/overview`` for an off-screen
+// dashboard (#824 review P2). ``loadCtxOverview``'s own sequence guard
+// handles the multi-toggle race.
 window.addEventListener('langchange', () => {
   const btn = document.getElementById('ctx-sync-all-btn');
   if (btn && btn.dataset.runtimeOnly === 'true') {
     btn.title = t('settings.ctx.sync_all_disabled_tooltip');
   }
+  const settingsTab = document.getElementById('tab-settings');
   const overviewSection = document.getElementById('settings-ctx-overview');
-  if (overviewSection && overviewSection.classList.contains('active')) {
+  const settingsVisible = settingsTab && settingsTab.classList.contains('active');
+  const overviewActive = overviewSection && overviewSection.classList.contains('active');
+  if (settingsVisible && overviewActive) {
     loadCtxOverview();
   }
 });
