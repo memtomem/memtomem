@@ -22,6 +22,7 @@ const _ctxStatusLabel = {
   'out of sync':       'settings.ctx.status_out_of_sync',
   'missing target':    'settings.ctx.status_missing_target',
   'missing canonical': 'settings.ctx.status_missing_canonical',
+  'parse error':       'settings.ctx.status_parse_error',
 };
 
 // Settings overview badge i18n map. Keys are the wire status values that
@@ -86,7 +87,14 @@ function renderImportResult(data) {
 
 // -- Overview -----------------------------------------------------------------
 
+// Sequence guard for fast lang toggles. ``loadCtxOverview`` is also called from
+// the ``langchange`` listener so the inline-templated card text picks up the
+// new locale; without a guard a slow first fetch can land *after* a second
+// toggle and clobber the newer locale's cards with stale text.
+let _ctxOverviewSeq = 0;
+
 async function loadCtxOverview() {
+  const seq = ++_ctxOverviewSeq;
   const el = qs('ctx-overview-content');
   panelLoading(el);
   try {
@@ -127,19 +135,29 @@ async function loadCtxOverview() {
       const issueCount = missingTarget + missingCanonical + outOfSync + parseError;
       const hasIssue = d.error || issueCount > 0
         || d.status === 'out_of_sync' || d.status === 'error';
-      const badgeCls = d.error ? 'badge-danger' : (hasIssue ? 'badge-warning' : 'badge-success');
+      // ``isEmpty`` only applies to the count tiles (skills/agents/commands).
+      // The Settings tile takes a separate ``status``-driven branch below and
+      // would never reach the count fallthrough that ``isEmpty`` is guarding
+      // against; gate the tile-key here so we don't intercept Settings.
+      const isEmpty = typ.key !== 'settings' && total === 0 && !d.error && !hasIssue;
+      const badgeCls = d.error
+        ? 'badge-danger'
+        : (isEmpty ? 'badge-gray' : (hasIssue ? 'badge-warning' : 'badge-success'));
 
       // Pick the most actionable status to surface in the badge. Order
-      // matters: ``parse_error`` is a hard failure (file is malformed),
-      // then unsynced-runtime states, then unimported-canonical, then
-      // out-of-sync content. Falling through to the historical
-      // ``{inSync}/{total} synced`` keeps the all-clear case unchanged.
+      // matters: ``error`` and the empty-tile case both pre-empt the count
+      // ladder; then ``parse_error`` (hard failure — file is malformed),
+      // unsynced-runtime states, unimported-canonical, and out-of-sync
+      // content. Falling through to ``{inSync}/{total} synced`` keeps the
+      // all-clear case unchanged.
       let badgeText;
       if (d.error) {
-        badgeText = 'Error';
+        badgeText = t('settings.hooks.badge_error');
       } else if (typ.key === 'settings') {
         const key = _SETTINGS_STATUS_I18N[d.status];
         badgeText = key ? t(key) : (d.status || '').replace('_', ' ');
+      } else if (isEmpty) {
+        badgeText = t('settings.ctx.badge_empty');
       } else if (parseError > 0) {
         badgeText = `${parseError} ${t('settings.ctx.badge_parse_error')}`;
       } else if (missingTarget > 0) {
@@ -159,6 +177,7 @@ async function loadCtxOverview() {
       </div>`;
     }
     html += '</div>';
+    if (seq !== _ctxOverviewSeq) return;
     el.innerHTML = html;
 
     // Gate the Sync All button: when every artifact type's items are
@@ -208,6 +227,7 @@ async function loadCtxOverview() {
       card.addEventListener('click', () => switchSettingsSection(card.dataset.section));
     });
   } catch (err) {
+    if (seq !== _ctxOverviewSeq) return;
     el.innerHTML = emptyState('', 'Failed to load overview', err.message);
   }
 }
@@ -217,10 +237,19 @@ async function loadCtxOverview() {
 // hover tooltip stays in sync with the active locale. Only rewrites the
 // attribute when the gate is still active — clearing it during normal
 // state would erase any caller's title.
+//
+// The overview cards themselves are inline-templated via ``t()`` in
+// ``loadCtxOverview``'s innerHTML, so ``I18N.applyDOM`` cannot re-translate
+// the rendered text on toggle (it only walks ``data-i18n*`` attributes).
+// Re-render when the section is mounted; ``loadCtxOverview``'s own
+// sequence guard handles the multi-toggle race.
 window.addEventListener('langchange', () => {
   const btn = document.getElementById('ctx-sync-all-btn');
   if (btn && btn.dataset.runtimeOnly === 'true') {
     btn.title = t('settings.ctx.sync_all_disabled_tooltip');
+  }
+  if (qs('ctx-overview-content')) {
+    loadCtxOverview();
   }
 });
 
@@ -306,13 +335,16 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
   } finally { btnLoading(btn, false); }
 });
 
-// Detect button
-document.getElementById('ctx-detect-btn')?.addEventListener('click', async () => {
-  const btn = document.getElementById('ctx-detect-btn');
+// Refresh button — re-fetches /api/context/overview to pick up freshly
+// generated runtime artifacts. The label/handler/toast were previously
+// named "detect" but the action has always been a refresh; the rename
+// aligns the button id, i18n keys, and toast copy.
+document.getElementById('ctx-refresh-btn')?.addEventListener('click', async () => {
+  const btn = document.getElementById('ctx-refresh-btn');
   btnLoading(btn, true);
   try {
     await loadCtxOverview();
-    showToast(t('toast.detection_complete'));
+    showToast(t('toast.refresh_complete'));
   } finally { btnLoading(btn, false); }
 });
 
