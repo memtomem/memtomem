@@ -152,7 +152,10 @@ async function loadCtxOverview() {
       // all-clear case unchanged.
       let badgeText;
       if (d.error) {
-        badgeText = t('settings.hooks.badge_error');
+        // Own-namespace key — reaching across into ``settings.hooks.*``
+        // would couple the dashboard to whatever the hooks panel
+        // decides to label its errors as next.
+        badgeText = t('settings.ctx.badge_error');
       } else if (typ.key === 'settings') {
         const key = _SETTINGS_STATUS_I18N[d.status];
         badgeText = key ? t(key) : (d.status || '').replace('_', ' ');

@@ -327,6 +327,7 @@
   "settings.ctx.badge_out_of_sync": "불일치",
   "settings.ctx.badge_parse_error": "파싱 오류",
   "settings.ctx.badge_empty": "비어 있음",
+  "settings.ctx.badge_error": "오류",
   "settings.ctx.dropped_fields": "제거됨",
   "settings.ctx.no_artifacts": "{type} 없음",
   "settings.ctx.no_artifacts_hint": "새로 만들거나 기존 런타임에서 가져올 수 있습니다.",

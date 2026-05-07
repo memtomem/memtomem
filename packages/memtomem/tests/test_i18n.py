@@ -550,13 +550,23 @@ class TestNoHardcodedStrings:
         assert not missing_ko, f"PR-2 tooltip/aria keys missing from ko.json: {sorted(missing_ko)}"
 
     def test_q_pr1_required_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
-        """Q-PR1 introduced two new keys for the Context Gateway dashboard
-        (``badge_empty`` for the zero-state tile, ``status_parse_error`` for
-        the runtime badge label) and renamed the four ``detect``-named keys
-        to ``refresh`` so the i18n surface matches the (already-Refresh)
-        button copy. Pin both."""
+        """Q-PR1 introduced new keys for the Context Gateway dashboard:
+
+        * ``badge_empty`` — zero-state tile label (Bug-2).
+        * ``status_parse_error`` — runtime badge label (Drift-4).
+        * ``badge_error`` — own-namespace error label (Bug-3). Initially
+          piggy-backed on ``settings.hooks.badge_error``; PR #824
+          review pass-3 surfaced the cross-namespace coupling
+          (``settings.ctx.*`` reading the hooks panel's translation
+          values would silently drift if hooks ever relabels) and split
+          it into a dedicated ctx key.
+
+        And renamed the four ``detect``-named keys to ``refresh`` so the
+        i18n surface matches the (already-Refresh) button copy (Drift-2).
+        Pin them all."""
         required = {
             "settings.ctx.badge_empty",
+            "settings.ctx.badge_error",
             "settings.ctx.status_parse_error",
             "settings.ctx.refresh",
             "settings.ctx.refresh_tooltip",
@@ -615,18 +625,28 @@ class TestNoHardcodedStrings:
         """Bug-3 fix: the ``d.error`` branch in ``loadCtxOverview``'s badge
         ladder used to assign a raw ``'Error'`` literal, leaking English
         copy into Korean UIs. The branch must now route through
-        ``t('settings.hooks.badge_error')`` (the same key the Settings
-        tile already uses, so we don't introduce a fresh badge/error key
-        for a single-callsite path)."""
+        ``t('settings.ctx.badge_error')`` — own-namespace, after PR #824
+        review pass-3 split it from ``settings.hooks.badge_error`` so
+        the dashboard's translation surface doesn't reach across into
+        the hooks panel's keys (where a future hooks relabel would
+        silently drift the ctx text)."""
         text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
         m = re.search(
-            r"if \(d\.error\) \{\s*\n\s*badgeText = ([^;]+);",
+            r"if \(d\.error\) \{\s*\n(?:\s*//[^\n]*\n)*\s*badgeText = ([^;]+);",
             text,
         )
         assert m, "Could not locate the d.error branch in context-gateway.js loadCtxOverview"
         rhs = m.group(1).strip()
-        assert "t(" in rhs and "badge_error" in rhs, (
-            f"d.error branch must route through t('settings.hooks.badge_error'); got: {rhs!r}"
+        assert "settings.ctx.badge_error" in rhs, (
+            f"d.error branch must route through t('settings.ctx.badge_error'); got: {rhs!r}"
+        )
+        # Symmetric negative: the legacy hooks reach-across must not
+        # creep back in. Distinct keys with similar values invite a
+        # silent regression where a refactor "simplifies" two
+        # almost-identical strings into one cross-namespace call.
+        assert "settings.hooks.badge_error" not in rhs, (
+            f"d.error branch must not cross into settings.hooks.* — "
+            f"the dashboard owns its own badge_error key; got: {rhs!r}"
         )
 
     def test_q_pr1_overview_has_sequence_guard(self) -> None:
