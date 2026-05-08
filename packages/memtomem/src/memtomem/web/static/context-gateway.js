@@ -362,67 +362,55 @@ window.addEventListener('langchange', () => {
     const editPane = detailEl ? detailEl.querySelector('#ctx-pane-edit') : null;
     const editTextarea = detailEl ? detailEl.querySelector('#ctx-edit-content') : null;
     const wasEditing = editPane != null && !editPane.hidden;
-    // ``myStashGen`` defaults to a sentinel that no future capture can
-    // match (gen counter only increments) so the post-mount ``.then()``
-    // never identifies an unrelated stash as "ours" when this listener
-    // didn't actually capture one.
-    let myStashGen = -1;
     if (wasEditing && editTextarea && openName && !openRuntimeOnly) {
-      myStashGen = ++_ctxPendingEditGen;
       _ctxPendingEdit = {
         type,
         name: openName,
         content: editTextarea.value,
         mtimeNs: detailEl ? (detailEl.dataset.mtimeNs || '') : '',
-        gen: myStashGen,
       };
     }
 
     loadCtxList(type);
 
     if (openName) {
+      // ``preservePendingEdit: true`` opts these mounts out of the
+      // navigation-drop guard inside ``loadCtxDetail`` /
+      // ``_ctxLoadRuntimeOnlyDetail`` — the langchange listener IS the
+      // intended stash consumer, the drop only fires on user-initiated
+      // navigations to a different (or same-name post-edit-discard)
+      // mount. Without the flag here, the listener's own list-rebuild +
+      // detail re-mount would clear the stash that the post-mount
+      // ``.then()`` is about to apply (rapid-toggle regression).
       if (openRuntimeOnly) {
-        _ctxLoadRuntimeOnlyDetail(type, openName, detailEl);
+        _ctxLoadRuntimeOnlyDetail(type, openName, detailEl, {
+          preservePendingEdit: true,
+        });
       } else {
-        const detailPromise = loadCtxDetail(type, openName, { autoOpenDiff: wasDiffActive });
+        const detailPromise = loadCtxDetail(type, openName, {
+          autoOpenDiff: wasDiffActive,
+          preservePendingEdit: true,
+        });
         // ``loadCtxDetail`` synchronously bumps ``_ctxDetailSeq[type]``
         // before returning the promise, so reading it here captures
         // *this* invocation's seq. A subsequent invocation (e.g. from
         // a rapid second toggle) will bump the counter further; this
-        // .then() then bails by inequality.
+        // .then() then bails by inequality. The bail intentionally
+        // does NOT clear the stash — a later .then() (rapid-toggle
+        // L2) is the consumer; navigation orphans are caught up-front
+        // by the navigation-drop guard, not here.
         const myDetailSeq = _ctxDetailSeq[type];
         if (detailPromise && typeof detailPromise.then === 'function') {
           detailPromise.then(() => {
+            if (myDetailSeq !== _ctxDetailSeq[type]) return;
             const pending = _ctxPendingEdit;
-            // ``stashIsOurs`` gates every clear and apply: a clear path
-            // must never delete a stash that belongs to a *later*
-            // langchange (see the (a) race in the doc-comment near
-            // ``_ctxPendingEditGen``), and an apply path must never
-            // resurrect an unrelated capture.
-            const stashIsOurs = pending != null && pending.gen === myStashGen;
-            if (myDetailSeq !== _ctxDetailSeq[type]) {
-              // Superseded. If a later langchange fired, ``pending``
-              // already reflects its capture (different gen) so we
-              // leave the stash alone and let that ``.then()`` apply.
-              // If only a navigation superseded us, the stash is an
-              // orphan that no future ``.then()`` will pick up; drop
-              // it now so it can't resurrect on a remount of the same
-              // card (race (b) in the doc-comment).
-              if (stashIsOurs) _ctxPendingEdit = null;
-              return;
-            }
-            if (!stashIsOurs) return;
+            if (!pending || pending.type !== type || pending.name !== openName) return;
             // Re-resolve panes — the previous detailEl children were
             // wiped by loadCtxDetail's innerHTML rewrite.
             const newTa = detailEl.querySelector('#ctx-edit-content');
             const newCanonPane = detailEl.querySelector('#ctx-pane-canonical');
             const newEditPane = detailEl.querySelector('#ctx-pane-edit');
-            if (!newTa || !newEditPane) {
-              // Ours but un-appliable (DOM didn't render the edit
-              // pane). Drop the stash rather than let it leak forward.
-              _ctxPendingEdit = null;
-              return;
-            }
+            if (!newTa || !newEditPane) return;
             newTa.value = pending.content;
             if (newCanonPane) newCanonPane.hidden = true;
             newEditPane.hidden = false;
@@ -571,18 +559,22 @@ let _ctxDetailSeq = { skills: 0, commands: 0, agents: 0 };
 // from) but ``_ctxPendingEdit`` still carries T1's stash, and T2's
 // own (now-latest) detail mount applies it.
 //
-// ``_ctxPendingEditGen`` is a monotonically incrementing token tagged
-// onto each capture. The post-mount ``.then()`` reads its closure-local
-// ``myStashGen`` and only clears / applies the stash when its own gen
-// still matches — preventing two distinct races:
-//   (a) ``T1`` clearing ``T2``'s overwritten stash when T1's superseded
-//       ``.then()`` resolves later.
-//   (b) An orphaned stash from a langchange-then-navigate sequence
-//       resurrecting on a future remount of the same card. The orphan
-//       case is detected by seq mismatch + ``stashIsOurs`` and the
-//       stash is dropped instead of leaking.
+// Lifetime is bounded by two clear sites — there is intentionally no
+// stash-clear inside the langchange ``.then()`` supersede branch, so a
+// rapid same-card retoggle hands the stash forward to the latest
+// mount's consumer:
+//
+//   1. **Apply-success** — the latest detail mount's ``.then()`` paints
+//      the buffer back into the new textarea, then clears.
+//   2. **Navigation-drop** — ``loadCtxDetail`` /
+//      ``_ctxLoadRuntimeOnlyDetail`` clear the stash at the top of any
+//      mount that was NOT initiated by the langchange listener. This
+//      catches the langchange-then-navigate orphan (P2 review): the
+//      user toggles language while editing card A, navigates to card
+//      B before T1's reload settles, and the stash would otherwise
+//      survive forever. The langchange listener opts back in to
+//      preservation via ``opts.preservePendingEdit: true``.
 let _ctxPendingEdit = null;
-let _ctxPendingEditGen = 0;
 
 // ``runtimeOnly`` disambiguates the two detail loaders: ``loadCtxDetail``
 // fetches the canonical file, ``_ctxLoadRuntimeOnlyDetail`` (line ~1134)
@@ -1019,6 +1011,16 @@ async function loadCtxDetail(type, name, opts = {}) {
   // themselves. Other call paths (post-save / post-delete reload at
   // line ~575/588) leave it false to preserve their canonical-pane
   // default.
+  //
+  // ``opts.preservePendingEdit`` (default false): only set by the
+  // langchange listener, which IS the intended consumer of
+  // ``_ctxPendingEdit``. Every other caller (card-click navigation,
+  // save/delete post-mount reload, etc.) is a user-initiated change
+  // of context — drop any pending stash here so a future remount of
+  // the original card cannot resurrect a stale draft.
+  if (!opts.preservePendingEdit) {
+    _ctxPendingEdit = null;
+  }
   const seq = ++_ctxDetailSeq[type];
   const autoOpenDiff = opts.autoOpenDiff === true;
   const detailEl = qs(`ctx-${type}-detail`);
@@ -1341,12 +1343,21 @@ async function _ctxLoadDiff(type, name, detailEl) {
 // returns ``runtime_content`` for each runtime, so we reuse it as the
 // preview source and surface an "Import all" CTA so the user can pull every
 // runtime-only artifact in one click.
-async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl) {
+async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
   // Shares ``_ctxDetailSeq[type]`` with ``loadCtxDetail`` — both paint
   // into the same detailEl, so a runtime-only fetch racing against a
   // canonical fetch (or another runtime-only fetch) must obey the same
   // seq invariant. Review P2 specifically called out the runtime-only
   // path as having the same stale-response window.
+  //
+  // ``opts.preservePendingEdit`` mirrors the canonical sibling — see
+  // ``loadCtxDetail`` for the rationale. A runtime-only mount is no
+  // less of a navigation than a canonical one; orphan-drop must apply
+  // to both paths or a langchange-then-navigate-to-runtime-only
+  // sequence still leaks the stash.
+  if (!opts.preservePendingEdit) {
+    _ctxPendingEdit = null;
+  }
   const seq = ++_ctxDetailSeq[type];
   detailEl.hidden = false;
   _ctxCurrentDetail = { type, name, runtimeOnly: true };

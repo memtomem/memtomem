@@ -1087,80 +1087,115 @@ class TestNoHardcodedStrings:
             "(otherwise an older .then() races a newer one for the DOM)"
         )
 
-    def test_pending_edit_stash_clears_in_all_bail_paths(self) -> None:
-        """Pin the orphan-drop invariant on ``_ctxPendingEdit``.
+    def test_pending_edit_navigation_drop_guards_against_orphan_resurrect(
+        self,
+    ) -> None:
+        """P2 review: a langchange-then-navigate sequence must not orphan
+        the ``_ctxPendingEdit`` stash. The fix is a navigation-drop guard
+        at the top of ``loadCtxDetail`` and ``_ctxLoadRuntimeOnlyDetail``
+        — every mount initiated by a path other than the langchange
+        listener clears the stash before the new mount paints. The
+        langchange listener, which IS the intended consumer, opts back
+        in via ``opts.preservePendingEdit: true``.
 
-        The langchange listener captures an unsaved edit buffer into the
-        module-level stash. The post-mount ``.then()`` has three exit
-        modes — supersede (seq mismatch), un-appliable (DOM panes not
-        rendered), and apply (success). Without a generation token,
-        clearing the stash on supersede races against a *later*
-        capture's apply (T1's superseded ``.then()`` would delete T2's
-        stash). Without clearing on supersede or un-appliable, an
-        orphaned stash from a langchange-then-navigate sequence can
-        resurrect on a future remount of the same card.
+        Pinning here rather than via Playwright because the
+        resurrection scenario takes 4–5 user-initiated DOM events to
+        reproduce reliably and a static-source guard catches the
+        regression at the line that introduces it.
 
-        This test pins five invariants that together resolve both
-        races:
+        Five invariants together close both the resurrection race and
+        the rapid-toggle preservation race:
 
-        1. ``_ctxPendingEditGen`` exists at module scope as a counter.
-        2. The langchange capture writes a ``gen: myStashGen`` field.
-        3. The ``.then()`` derives ``stashIsOurs`` from the gen.
-        4. The ``.then()`` clears the stash in the seq-mismatch path
-           when ``stashIsOurs`` is true (orphan drop).
-        5. The stash is cleared on every exit where it is "ours" — the
-           file contains exactly three ``_ctxPendingEdit = null``
-           assignments inside the listener (supersede orphan,
-           un-appliable, apply success).
+        1+2. Both detail-mount entry points (canonical + runtime-only)
+             accept ``opts = {}`` and start with the navigation-drop
+             guard ``if (!opts.preservePendingEdit) _ctxPendingEdit = null;``.
+        3+4. The langchange listener calls each entry point with
+             ``preservePendingEdit: true`` so the listener's own
+             re-mount cycle does not clear the stash that its
+             ``.then()`` is about to consume.
+        5.   The listener's post-mount ``.then()`` does NOT clear the
+             stash on the seq-mismatch (supersede) bail. A rapid
+             same-card retoggle (L1 superseded by L2) hands the stash
+             to L2's ``.then()``; clearing on supersede would race
+             against L2's apply.
         """
         text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
 
-        assert re.search(r"^let _ctxPendingEditGen\s*=\s*0;", text, re.MULTILINE), (
-            "missing module-level _ctxPendingEditGen counter — required to "
-            "tag each capture so the post-mount .then() can identify its own "
-            "stash and avoid clearing a later capture's"
+        # 1+2. Both entry points carry the guard.
+        canonical_match = re.search(
+            r"async\s+function\s+loadCtxDetail\s*\([^)]*opts\s*=\s*\{\}\s*\)\s*\{"
+            r"(?:[^{}]|\{[^{}]*\})*?"
+            r"if\s*\(\s*!\s*opts\.preservePendingEdit\s*\)\s*\{\s*"
+            r"_ctxPendingEdit\s*=\s*null;\s*\}",
+            text,
+        )
+        assert canonical_match, (
+            "loadCtxDetail must drop _ctxPendingEdit at entry unless "
+            "opts.preservePendingEdit is true — without the guard a "
+            "langchange-then-navigate sequence orphans the stash and a "
+            "future remount of the original card resurrects stale draft "
+            "content (review P2)"
+        )
+        runtime_only_match = re.search(
+            r"async\s+function\s+_ctxLoadRuntimeOnlyDetail\s*\([^)]*opts\s*=\s*\{\}\s*\)\s*\{"
+            r"(?:[^{}]|\{[^{}]*\})*?"
+            r"if\s*\(\s*!\s*opts\.preservePendingEdit\s*\)\s*\{\s*"
+            r"_ctxPendingEdit\s*=\s*null;\s*\}",
+            text,
+        )
+        assert runtime_only_match, (
+            "_ctxLoadRuntimeOnlyDetail must mirror loadCtxDetail's "
+            "navigation-drop guard. A user navigating from an edited "
+            "canonical card to a runtime-only card otherwise leaves the "
+            "stash live for a future remount of the original card."
         )
 
+        # 3+4. Langchange listener opts both mounts in to preservation.
         start = text.find("window.addEventListener('langchange'")
         end = text.find("// Sync All button", start)
         assert end > start, "couldn't locate end-of-listener sentinel"
         body = text[start:end]
 
-        # Capture writes the gen onto the stash so the .then() can match.
-        assert re.search(r"gen\s*:\s*myStashGen", body), (
-            "capture must tag stash with ``gen: myStashGen`` — without the "
-            "tag the .then() cannot distinguish its own stash from a later "
-            "langchange's overwrite"
-        )
-
-        # The .then() derives stashIsOurs and uses it to gate every clear.
-        assert re.search(r"const\s+stashIsOurs\s*=", body), (
-            ".then() must compute ``stashIsOurs`` (gen-based) — every clear "
-            "and apply path is gated on it so a later capture's stash never "
-            "gets deleted by an older .then()"
-        )
-
-        # Supersede path clears the stash when it's ours (orphan-drop case).
-        assert re.search(
-            r"myDetailSeq\s*!==\s*_ctxDetailSeq\[type\]\s*\)\s*\{\s*"
+        canonical_call_match = re.search(
+            r"loadCtxDetail\s*\(\s*type\s*,\s*openName\s*,\s*\{"
             r"(?:[^{}]|\{[^{}]*\})*?"
-            r"if\s*\(\s*stashIsOurs\s*\)\s*_ctxPendingEdit\s*=\s*null;",
+            r"preservePendingEdit\s*:\s*true",
             body,
-        ), (
-            "seq-mismatch bail must clear the stash when stashIsOurs is "
-            "true — otherwise a langchange-then-navigate sequence orphans "
-            "the stash and a future remount of the same card resurrects "
-            "stale draft content"
+        )
+        assert canonical_call_match, (
+            "langchange listener's canonical-detail call must pass "
+            "preservePendingEdit: true. Without it the listener's own "
+            "loadCtxDetail invocation clears the stash before its "
+            ".then() can apply it (rapid-toggle regression)."
+        )
+        runtime_only_call_match = re.search(
+            r"_ctxLoadRuntimeOnlyDetail\s*\(\s*type\s*,\s*openName\s*,"
+            r"\s*detailEl\s*,\s*\{"
+            r"(?:[^{}]|\{[^{}]*\})*?"
+            r"preservePendingEdit\s*:\s*true",
+            body,
+        )
+        assert runtime_only_call_match, (
+            "langchange listener's runtime-only call must also pass "
+            "preservePendingEdit: true — symmetric with the canonical "
+            "path so a runtime-only-card retoggle preserves its buffer."
         )
 
-        # Exactly three clears: orphan-drop, un-appliable, and apply-success.
-        # If a fourth path leaks the stash without clearing, this count fails.
-        clear_count = len(re.findall(r"_ctxPendingEdit\s*=\s*null", body))
-        assert clear_count == 3, (
-            f"expected exactly 3 ``_ctxPendingEdit = null`` clears in the "
-            f"langchange listener (orphan-drop, un-appliable, apply-success); "
-            f"got {clear_count}. A new bail path that doesn't clear a "
-            f"stash that's ours leaks the stash and risks resurrection."
+        # 5. Supersede bail does NOT clear the stash.
+        # The seq-mismatch branch must be a bare ``return;`` — any
+        # stash-clear there would race against a rapid-toggle L2's
+        # apply path. The navigation-drop guard at the loadCtxDetail
+        # entry is the single source of orphan cleanup.
+        supersede_match = re.search(
+            r"if\s*\(\s*myDetailSeq\s*!==\s*_ctxDetailSeq\[type\]\s*\)\s*return;",
+            body,
+        )
+        assert supersede_match, (
+            "supersede branch in the langchange listener .then() must "
+            "be a bare ``return;`` — clearing _ctxPendingEdit there "
+            "would race against a rapid-toggle L2's apply path. The "
+            "navigation-drop guard at loadCtxDetail entry is the "
+            "single source of orphan cleanup."
         )
 
     def test_q_pr4_ctxCurrentDetail_carries_runtime_only_flag(self) -> None:
