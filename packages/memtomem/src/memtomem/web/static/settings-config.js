@@ -564,8 +564,9 @@ const _CONFIG_GUIDES = {
       { label: 'Structured Chunk Mode', text: 'For JSON/YAML/TOML files. "original": extracts raw text lines per key (preserves formatting, line numbers). "recursive": serializes via json.dumps, recursively splits deep nested structures by sub-keys.' },
     ],
     envs: [
-      'MEMTOMEM_INDEXING__SUPPORTED_EXTENSIONS=\'[".md",".py",".js",".ts"]\'',
+      'MEMTOMEM_INDEXING__SUPPORTED_EXTENSIONS=\'[".md",".json",".yaml",".yml",".toml",".py",".js",".ts",".tsx",".jsx"]\'',
       'MEMTOMEM_INDEXING__MAX_CHUNK_TOKENS=512',
+      'MEMTOMEM_INDEXING__TARGET_CHUNK_TOKENS=384',
       'MEMTOMEM_INDEXING__MIN_CHUNK_TOKENS=128',
       'MEMTOMEM_INDEXING__CHUNK_OVERLAP_TOKENS=0',
       'MEMTOMEM_INDEXING__STRUCTURED_CHUNK_MODE=original',
@@ -574,7 +575,7 @@ const _CONFIG_GUIDES = {
       title: 'Indexing Settings',
       restart: false,
       steps: [
-        'Extensions / Exclude Patterns: edit inline; each change persists immediately and may prompt a re-index',
+        'Extensions / Exclude Patterns: edit inline; each change persists immediately. Changing Extensions also surfaces a re-index hint toast.',
         'Chunk token settings: edit here + Save (immediate, no restart)',
         'After changing chunk settings, re-index to apply to existing data',
       ],
