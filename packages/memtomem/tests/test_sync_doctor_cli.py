@@ -41,6 +41,17 @@ def _set_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
     monkeypatch.setenv("USERPROFILE", str(home))
 
 
+def _claude_slug_for(cwd: Path) -> str:
+    """Encode ``cwd`` into a Claude-style hyphenated slug, cross-platform.
+
+    POSIX cwd ``/Users/foo/bar`` → ``-Users-foo-bar``.
+    Windows cwd ``C:\\Users\\foo\\bar`` → ``CUsers-foo-bar`` (drive colon
+    dropped) — matches the Windows-no-colon candidate the doctor's
+    ``check_claude_slug`` fast path looks up.
+    """
+    return str(cwd.resolve()).replace("\\", "-").replace(":", "").replace("/", "-")
+
+
 # ---- cloud_mount_prefix helper ---------------------------------------------
 
 
@@ -216,8 +227,7 @@ class TestCheckClaudeSlug:
         cwd.mkdir(parents=True)
         projects = home / ".claude" / "projects"
         projects.mkdir(parents=True)
-        slug = str(cwd.resolve()).replace("/", "-")
-        (projects / slug).mkdir()
+        (projects / _claude_slug_for(cwd)).mkdir()
         r = check_claude_slug(cwd, home=home)
         assert r.status == "pass"
 
@@ -328,8 +338,7 @@ class TestSyncDoctorCli:
         # Create a Claude project entry for the repo root (not the subdir).
         projects = tmp_path / ".claude" / "projects"
         projects.mkdir(parents=True)
-        slug = str(tmp_path.resolve()).replace("/", "-")
-        (projects / slug).mkdir()
+        (projects / _claude_slug_for(tmp_path)).mkdir()
 
         monkeypatch.chdir(nested)
         runner = CliRunner()
