@@ -54,7 +54,14 @@ class MemtomemStore:
     Components are lazily initialized on first use.
 
     Args:
-        config_overrides: Optional dict of config overrides (e.g. {"storage": {"sqlite_path": "..."}})
+        config_overrides: Optional dict of config overrides
+            (e.g. ``{"storage": {"sqlite_path": "..."}}``). Sections and
+            keys that do not exist on :class:`Mem2MemConfig` raise
+            ``ValueError`` from :meth:`_ensure_init` so a typo cannot
+            silently land writes/index calls in the default
+            ``~/.memtomem`` location. The constructor itself does not
+            validate (the config object is built lazily) — the first
+            ``await``-ed call surfaces the error.
     """
 
     def __init__(self, config_overrides: dict[str, Any] | None = None):
@@ -72,13 +79,33 @@ class MemtomemStore:
 
             config = Mem2MemConfig()
 
-            # Apply overrides
+            # Apply overrides. Unknown sections / keys raise immediately:
+            # ``config_overrides`` is a programmatic constructor argument, so
+            # a typo like ``{"storge": ...}`` or ``{"storage":
+            # {"sqlite_pat": ...}}`` would otherwise fall back to the default
+            # DB / memory_dirs and silently land writes in the wrong place.
+            # Logging-only would be hidden by callers who don't surface
+            # ``WARNING`` from ``memtomem.integrations.langgraph``.
             for section, updates in self._config_overrides.items():
                 section_obj = getattr(config, section, None)
-                if section_obj and isinstance(updates, dict):
-                    for key, value in updates.items():
-                        if hasattr(section_obj, key):
-                            setattr(section_obj, key, value)
+                if section_obj is None:
+                    raise ValueError(
+                        f"MemtomemStore.config_overrides: unknown section {section!r}. "
+                        "Section must match a Mem2MemConfig section "
+                        "(e.g. 'storage', 'indexing', 'embedding')."
+                    )
+                if not isinstance(updates, dict):
+                    raise ValueError(
+                        f"MemtomemStore.config_overrides: section {section!r} value "
+                        f"is {type(updates).__name__}, expected dict."
+                    )
+                for key, value in updates.items():
+                    if not hasattr(section_obj, key):
+                        raise ValueError(
+                            f"MemtomemStore.config_overrides: unknown key {key!r} "
+                            f"in section {section!r}."
+                        )
+                    setattr(section_obj, key, value)
 
             self._components = await create_components(config)
         return self._components

@@ -39,6 +39,77 @@ class TestMemtomemStoreInit:
         assert store._current_agent_id is None
 
 
+class TestConfigOverridesStrict:
+    """Unknown sections / keys in ``config_overrides`` raise ``ValueError``.
+
+    The constructor takes a Python dict, so a typo silently falling back to
+    the default DB / memory_dirs would mean writes land in the wrong place.
+    We surface the error at first ``_ensure_init`` instead of warn-and-skip.
+    """
+
+    @staticmethod
+    def _patch_factory(monkeypatch):
+        import memtomem.config as _cfg
+        import memtomem.server.component_factory as _factory
+
+        async def _fake_create(_):
+            return MagicMock()
+
+        async def _fake_close(_):
+            return None
+
+        monkeypatch.setattr(_factory, "create_components", _fake_create)
+        monkeypatch.setattr(_factory, "close_components", _fake_close)
+        # Block real ~/.memtomem/config.json from polluting the override chain.
+        monkeypatch.setattr(_cfg, "load_config_overrides", lambda c: None)
+
+    @pytest.mark.asyncio
+    async def test_unknown_section_raises(self, monkeypatch):
+        """Typo in ``config_overrides`` section name raises ValueError."""
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        self._patch_factory(monkeypatch)
+
+        store = MemtomemStore(config_overrides={"storge": {"sqlite_path": "/tmp/x.db"}})
+        with pytest.raises(ValueError, match="unknown section 'storge'"):
+            await store._ensure_init()
+
+    @pytest.mark.asyncio
+    async def test_unknown_key_raises(self, monkeypatch):
+        """Typo in a known section's field name raises ValueError."""
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        self._patch_factory(monkeypatch)
+
+        store = MemtomemStore(config_overrides={"storage": {"sqlite_pat": "/tmp/x.db"}})
+        with pytest.raises(ValueError, match="unknown key 'sqlite_pat'"):
+            await store._ensure_init()
+
+    @pytest.mark.asyncio
+    async def test_non_dict_section_value_raises(self, monkeypatch):
+        """A scalar where a section dict is expected also raises (catches
+        e.g. ``{"storage": "/tmp/x.db"}`` from a caller skimming the docs).
+        """
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        self._patch_factory(monkeypatch)
+
+        store = MemtomemStore(config_overrides={"storage": "/tmp/x.db"})
+        with pytest.raises(ValueError, match="section 'storage' value is str"):
+            await store._ensure_init()
+
+    @pytest.mark.asyncio
+    async def test_known_override_succeeds(self, monkeypatch):
+        """Negative pin: a valid override does NOT raise (no false-positive)."""
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        self._patch_factory(monkeypatch)
+
+        store = MemtomemStore(config_overrides={"storage": {"sqlite_path": "/tmp/x.db"}})
+        # Should complete without raising.
+        await store._ensure_init()
+
+
 class TestResolveSearchNamespace:
     """``_resolve_search_namespace`` encodes the 6-case ``include_shared``
     table documented in ``MemtomemStore.search``. Drift here would let the

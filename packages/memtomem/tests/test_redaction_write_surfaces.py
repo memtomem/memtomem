@@ -254,3 +254,124 @@ class TestLangGraphAddRedactionGuard:
 
         assert after["bypassed"] == before["bypassed"] + 1
         assert "redaction bypass" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_blocked_under_agent_session_keeps_error_dict_shape(self):
+        """Multi-agent × redaction: a redaction block under an active
+        agent session still returns the same error-dict contract and ticks
+        the same ``blocked`` counter — the agent identity must not change
+        how the trust boundary surfaces failures.
+        """
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        mem = MemtomemStore.__new__(MemtomemStore)
+        mem._current_session_id = "fake-session"
+        mem._current_agent_id = "planner"
+        mem._ensure_init = AsyncMock(return_value=MagicMock())  # type: ignore[attr-defined]
+
+        before = privacy.snapshot()["by_tool"].get(
+            "langgraph_add", {"blocked": 0, "pass": 0, "bypassed": 0}
+        )
+        result = await mem.add(content=_SECRET_SAMPLE)
+        after = privacy.snapshot()["by_tool"]["langgraph_add"]
+
+        assert isinstance(result, dict)
+        assert result.get("error") == "redaction_blocked"
+        assert "hits" in result
+        assert after["blocked"] == before["blocked"] + 1
+        # Agent state survives the block — the call is rejected, not the session.
+        assert mem._current_agent_id == "planner"
+
+    @pytest.mark.asyncio
+    async def test_force_unsafe_under_agent_session_pins_call_order(self, tmp_path, monkeypatch):
+        """Multi-agent × redaction bypass: under an active agent session,
+        ``force_unsafe=True`` must run **redaction guard → namespace
+        resolve → write → index** in that exact order, with
+        ``namespace="agent-runtime:<id>"`` reaching the index layer.
+
+        A naked "final ``index_file`` got the agent namespace" assertion
+        would still pass if a refactor moved the namespace resolve
+        *before* the redaction guard — losing the trust-boundary
+        invariant that no namespace work happens on rejected content.
+        We sequence-pin via spies on each stage.
+        """
+        from memtomem import privacy as _privacy
+        from memtomem.integrations.langgraph import MemtomemStore
+        from memtomem.tools import memory_writer as _memory_writer
+
+        mem = MemtomemStore.__new__(MemtomemStore)
+        mem._current_session_id = "fake-session"
+        mem._current_agent_id = "planner"
+
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+
+        index_engine = AsyncMock()
+        mem._ensure_init = AsyncMock(  # type: ignore[attr-defined]
+            return_value=MagicMock(
+                config=MagicMock(indexing=MagicMock(memory_dirs=[memory_dir])),
+                index_engine=index_engine,
+            )
+        )
+
+        events: list[tuple[str, dict]] = []
+
+        real_guard = _privacy.enforce_write_guard
+
+        def _spy_guard(content, *, surface, force_unsafe, audit_context):
+            events.append(("guard", {"force_unsafe": force_unsafe, "surface": surface}))
+            return real_guard(
+                content,
+                surface=surface,
+                force_unsafe=force_unsafe,
+                audit_context=audit_context,
+            )
+
+        monkeypatch.setattr(_privacy, "enforce_write_guard", _spy_guard)
+
+        real_resolve = mem._resolve_add_namespace
+
+        def _spy_resolve(namespace):
+            events.append(("resolve_namespace", {"input": namespace}))
+            return real_resolve(namespace)
+
+        # Method spy via direct attribute set — ``add`` calls
+        # ``self._resolve_add_namespace(namespace)`` which resolves
+        # through the instance dict before falling back to the class.
+        mem._resolve_add_namespace = _spy_resolve  # type: ignore[method-assign]
+
+        real_append = _memory_writer.append_entry
+
+        def _spy_append(target, content, *, title=None, tags=None):
+            events.append(("append", {"target": str(target)}))
+            return real_append(target, content, title=title, tags=tags)
+
+        monkeypatch.setattr(_memory_writer, "append_entry", _spy_append)
+
+        async def _spy_index(*args, **kwargs):
+            events.append(("index", {"namespace": kwargs.get("namespace")}))
+            return MagicMock(indexed_chunks=1)
+
+        index_engine.index_file = _spy_index
+
+        target_file = str(tmp_path / "agent_target.md")
+        result = await mem.add(
+            content=_SECRET_SAMPLE,
+            file=target_file,
+            force_unsafe=True,
+        )
+
+        # Order pin: redaction guard fires first, then namespace resolve,
+        # then write, then index. Any reorder trips the equality check.
+        assert [name for name, _ in events] == [
+            "guard",
+            "resolve_namespace",
+            "append",
+            "index",
+        ], events
+
+        # Index call carried the agent-runtime namespace.
+        assert events[3][1]["namespace"] == "agent-runtime:planner"
+        # Caller saw the success shape (not the redaction-block dict).
+        assert result.get("error") is None
+        assert "indexed_chunks" in result
