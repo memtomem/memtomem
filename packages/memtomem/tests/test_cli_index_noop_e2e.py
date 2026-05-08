@@ -123,11 +123,20 @@ class TestFreshNoopIndexSubprocess:
         env["XDG_CONFIG_HOME"] = str(home / ".config")
 
         def _run(*args: str) -> subprocess.CompletedProcess:
+            # ``encoding="utf-8"`` is required: ``text=True`` alone falls
+            # back to ``locale.getpreferredencoding(False)``, which is
+            # ``cp949`` on Korean Windows. The CLI emits UTF-8 (em-dashes,
+            # box-drawing) so the reader thread crashes mid-decode and
+            # ``r.stdout`` / ``r.stderr`` come back as ``None``, surfacing
+            # later as ``"argument of type 'NoneType' is not iterable"``
+            # on the assertion below (#759).
             return subprocess.run(
                 [mm_bin, *args],
                 env=env,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=60,
             )
 
