@@ -2143,8 +2143,9 @@ def _write_config_and_summary(
         else:
             existing[section] = fields
 
-    from memtomem.config import _atomic_write_json
+    from memtomem.config import _atomic_write_json, _relativize_config_paths_in_place
 
+    _relativize_config_paths_in_place(existing)
     _atomic_write_json(config_path, existing)
     click.echo(f"  Config: {config_path}")
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -1552,6 +1553,7 @@ def _persist_auto_discover_migration(config_path: Path, full_memory_dirs: list[P
     indexing["memory_dirs"] = [str(d) for d in full_memory_dirs]
     indexing["auto_discover"] = False
 
+    _relativize_config_paths_in_place(existing)
     try:
         _atomic_write_json(config_path, existing)
     except OSError as exc:
@@ -1577,19 +1579,90 @@ _EXTRA_MUTATION_FIELDS: dict[str, set[str]] = {
 }
 
 
+def _portable_path_str(p: Path | str | os.PathLike[str]) -> str:
+    """Serialize a path as ``~/...`` if under ``$HOME``, else absolute.
+
+    Keeps ``config.json`` portable across machines with different
+    ``$HOME`` values: a config written on one machine and copied (or
+    git-synced) to another resolves correctly because loaders already
+    call ``Path.expanduser()`` per-field. Outside-``$HOME`` paths
+    (``/var/log/...``, ``/opt/...``) stay absolute since their meaning
+    is genuinely machine-specific.
+
+    Idempotent: already-tilde input is returned verbatim. Relative
+    inputs are also passed through unchanged. ``$HOME`` lookup
+    failures (rare; bare-bones containers without ``HOME``) fall
+    through to the absolute form.
+    """
+    p_str = os.fspath(p)
+    if p_str.startswith("~"):
+        return p_str
+    p_path = Path(p_str)
+    if not p_path.is_absolute():
+        return p_str
+    try:
+        home = Path.home()
+    except (RuntimeError, KeyError):
+        return p_str
+    try:
+        rel = p_path.relative_to(home)
+    except ValueError:
+        return p_str
+    rel_str = rel.as_posix()
+    if rel_str in ("", "."):
+        return "~"
+    return f"~/{rel_str}"
+
+
+# Schema-aware: which config fields hold path values that benefit from
+# home-relative serialization. Update both tuples when adding new path-
+# typed fields. Loaders apply ``Path.expanduser()`` per-field, so the
+# round-trip ``write tilde -> read absolute`` is symmetric.
+_CONFIG_PATH_SCALAR_FIELDS: tuple[tuple[str, str], ...] = (("storage", "sqlite_path"),)
+_CONFIG_PATH_LIST_FIELDS: tuple[tuple[str, str], ...] = (("indexing", "memory_dirs"),)
+
+
+def _relativize_config_paths_in_place(data: dict) -> None:
+    """Rewrite known path-typed config fields as ``~/...`` if under HOME.
+
+    Mutates *data* in place. Idempotent — safe to call on already-tilde
+    values or on dicts where the target sections are missing. Accepts
+    both ``str`` and ``Path`` values for path fields, so it covers the
+    init-wizard write path (string-typed ``state["db_path"]``) and the
+    ``save_config_overrides`` flow (Pydantic ``Path`` instances pulled
+    via ``getattr``) with one transform.
+    """
+    for section, field in _CONFIG_PATH_SCALAR_FIELDS:
+        sec = data.get(section)
+        if not isinstance(sec, dict):
+            continue
+        val = sec.get(field)
+        if isinstance(val, (str, Path)):
+            sec[field] = _portable_path_str(val)
+    for section, field in _CONFIG_PATH_LIST_FIELDS:
+        sec = data.get(section)
+        if not isinstance(sec, dict):
+            continue
+        val = sec.get(field)
+        if isinstance(val, list):
+            sec[field] = [_portable_path_str(p) if isinstance(p, (str, Path)) else p for p in val]
+
+
 def _json_default(obj: object) -> object:
     """``json.dumps`` fallback for values not natively JSON-serializable.
 
     ``BaseSettings`` entries in fields like ``namespace.rules`` must be
     written as dicts (via ``model_dump(mode="json")``) so the load path
-    can re-validate them on startup. ``Path`` gets ``str()``; unknown
-    types fall back to ``str()`` to preserve the original default=str
-    behaviour.
+    can re-validate them on startup. ``Path`` goes through
+    ``_portable_path_str`` so home-rooted paths land as ``~/...``
+    even if a future field bypasses ``_relativize_config_paths_in_place``;
+    unknown types fall back to ``str()`` to preserve the original
+    default=str behaviour.
     """
     if isinstance(obj, BaseSettings):
         return obj.model_dump(mode="json")
     if isinstance(obj, Path):
-        return str(obj)
+        return _portable_path_str(obj)
     return str(obj)
 
 
@@ -1727,4 +1800,5 @@ def save_config_overrides(
         else:
             existing.pop(section_name, None)
 
+    _relativize_config_paths_in_place(existing)
     _atomic_write_json(path, existing)

@@ -541,7 +541,7 @@ def test_migration_persists_to_config_json(
 
     persisted = json.loads(override_path.read_text(encoding="utf-8"))
     assert persisted["indexing"]["auto_discover"] is False
-    assert str(fake) in persisted["indexing"]["memory_dirs"]
+    assert _cfg._portable_path_str(str(fake)) in persisted["indexing"]["memory_dirs"]
 
 
 def test_migration_idempotent(

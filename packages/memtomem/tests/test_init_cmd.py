@@ -2968,8 +2968,14 @@ class TestProviderDirsStep:
         """``_write_config_and_summary`` concatenates ``state["memory_dir"]``
         with ``state["provider_dirs"]`` (deduped) when persisting
         ``indexing.memory_dirs``. Also pins ``auto_discover: false`` so a
-        fresh wizard run on a legacy install doesn't keep migrating."""
+        fresh wizard run on a legacy install doesn't keep migrating.
+
+        Both ``state["memory_dir"]`` and ``state["provider_dirs"]`` sit
+        under ``tmp_path`` (the test ``$HOME``), so the writer's home-
+        relative serialization rewrites them as ``~/...`` on disk.
+        """
         from memtomem.cli.init_cmd import _write_config_and_summary
+        from memtomem.config import _portable_path_str
 
         set_home(monkeypatch, tmp_path)
         provider_dir = tmp_path / "claude-mem"
@@ -2981,9 +2987,11 @@ class TestProviderDirsStep:
 
         data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
         dirs = data["indexing"]["memory_dirs"]
-        assert state["memory_dir"] in dirs
-        assert str(provider_dir) in dirs
-        assert dirs.count(state["memory_dir"]) == 1  # no duplicates
+        memory_dir_portable = _portable_path_str(state["memory_dir"])
+        provider_dir_portable = _portable_path_str(str(provider_dir))
+        assert memory_dir_portable in dirs
+        assert provider_dir_portable in dirs
+        assert dirs.count(memory_dir_portable) == 1  # no duplicates
         assert data["indexing"]["auto_discover"] is False
 
 
@@ -3307,8 +3315,10 @@ class TestIncludeProviderFlag:
         )
         assert result.exit_code == 0, result.output
 
+        from memtomem.config import _portable_path_str
+
         data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
-        assert str(codex) in data["indexing"]["memory_dirs"]
+        assert _portable_path_str(str(codex)) in data["indexing"]["memory_dirs"]
 
     def test_flag_silently_skips_unavailable_categories(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3338,9 +3348,11 @@ class TestIncludeProviderFlag:
             ],
         )
         assert result.exit_code == 0, result.output
+        from memtomem.config import _portable_path_str
+
         data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
         # Only the user's primary memory_dir survives; no fake codex path.
-        assert data["indexing"]["memory_dirs"] == [str(tmp_path / "memories")]
+        assert data["indexing"]["memory_dirs"] == [_portable_path_str(str(tmp_path / "memories"))]
 
     def test_no_flag_writes_no_provider_dirs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -5,6 +5,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed
+
+- **`config.json` writers serialize home-rooted paths as `~/...`.**
+  `indexing.memory_dirs` and `storage.sqlite_path` (and any future
+  path-typed config field) are written in tilde form when they sit
+  under `$HOME`, restoring portability for the documented "moving
+  `config.json` between machines" workflow at
+  `docs/guides/configuration.md:96`. Outside-`$HOME` paths stay
+  absolute. Loaders are unchanged — `Path.expanduser()` already runs
+  at use sites, so the round-trip is symmetric. Legacy absolute-path
+  configs continue to load on the same machine; the next save through
+  any writer (`mm config set`, the Web UI, `mm init`) rewrites them
+  into tilde form. New helper `_portable_path_str` plus
+  `_relativize_config_paths_in_place` centralize the transform; all
+  four writer call sites (`save_config_overrides`,
+  `_persist_auto_discover_migration`, `mm config unset`, `mm init`'s
+  `_write_config_and_summary`) now invoke it before
+  `_atomic_write_json`.
+
 ## [0.1.36] — 2026-05-06
 
 ### Added

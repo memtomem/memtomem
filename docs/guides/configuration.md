@@ -95,13 +95,20 @@ the next save, provided the stale value now matches the comparand.
 
 ### Moving `config.json` between machines
 
+Path-typed fields (`storage.sqlite_path`, `indexing.memory_dirs`)
+under `$HOME` serialize as `~/...` on write, so a config copied to a
+machine with a different `$HOME` resolves correctly via
+`Path.expanduser()` on read. Paths *outside* `$HOME` (`/var/...`,
+`/opt/...`) stay absolute because their meaning is genuinely
+machine-specific.
+
 `indexing.memory_dirs` participates in delta-only save, so on the
 machine where it was set the file typically omits it. When copying an
 existing `config.json` to a new machine, any `indexing.memory_dirs`
-entry carries over as-is — provider memory paths from the source
-machine (e.g. `~/.claude/projects/<project-A>/memory/`) won't exist
-on the destination and won't be replaced by detection on the target.
-Reset it explicitly when migrating:
+entry that points at provider-specific paths (e.g.
+`~/.claude/projects/<project-A>/memory/`) carries over as-is — the
+project-A path won't exist on the destination and won't be replaced
+by detection on the target. Reset it explicitly when migrating:
 
 ```bash
 # Option 1: targeted removal of the carried-over entry
@@ -113,6 +120,12 @@ mm init --fresh
 # Option 3: remove the indexing section by hand
 #          (edit ~/.memtomem/config.json)
 ```
+
+> **Backward compatibility.** Configs written before home-relative
+> serialization landed (≤ 0.1.36) carry absolute paths. Loading them
+> on the same machine still works. The next save through any writer
+> (`mm config set`, the Web UI, `mm init`) rewrites home-rooted paths
+> into `~/...` form automatically.
 
 ### Removing individual overrides (`mm config unset`)
 
