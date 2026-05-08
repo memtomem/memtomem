@@ -1087,6 +1087,82 @@ class TestNoHardcodedStrings:
             "(otherwise an older .then() races a newer one for the DOM)"
         )
 
+    def test_pending_edit_stash_clears_in_all_bail_paths(self) -> None:
+        """Pin the orphan-drop invariant on ``_ctxPendingEdit``.
+
+        The langchange listener captures an unsaved edit buffer into the
+        module-level stash. The post-mount ``.then()`` has three exit
+        modes — supersede (seq mismatch), un-appliable (DOM panes not
+        rendered), and apply (success). Without a generation token,
+        clearing the stash on supersede races against a *later*
+        capture's apply (T1's superseded ``.then()`` would delete T2's
+        stash). Without clearing on supersede or un-appliable, an
+        orphaned stash from a langchange-then-navigate sequence can
+        resurrect on a future remount of the same card.
+
+        This test pins five invariants that together resolve both
+        races:
+
+        1. ``_ctxPendingEditGen`` exists at module scope as a counter.
+        2. The langchange capture writes a ``gen: myStashGen`` field.
+        3. The ``.then()`` derives ``stashIsOurs`` from the gen.
+        4. The ``.then()`` clears the stash in the seq-mismatch path
+           when ``stashIsOurs`` is true (orphan drop).
+        5. The stash is cleared on every exit where it is "ours" — the
+           file contains exactly three ``_ctxPendingEdit = null``
+           assignments inside the listener (supersede orphan,
+           un-appliable, apply success).
+        """
+        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+
+        assert re.search(r"^let _ctxPendingEditGen\s*=\s*0;", text, re.MULTILINE), (
+            "missing module-level _ctxPendingEditGen counter — required to "
+            "tag each capture so the post-mount .then() can identify its own "
+            "stash and avoid clearing a later capture's"
+        )
+
+        start = text.find("window.addEventListener('langchange'")
+        end = text.find("// Sync All button", start)
+        assert end > start, "couldn't locate end-of-listener sentinel"
+        body = text[start:end]
+
+        # Capture writes the gen onto the stash so the .then() can match.
+        assert re.search(r"gen\s*:\s*myStashGen", body), (
+            "capture must tag stash with ``gen: myStashGen`` — without the "
+            "tag the .then() cannot distinguish its own stash from a later "
+            "langchange's overwrite"
+        )
+
+        # The .then() derives stashIsOurs and uses it to gate every clear.
+        assert re.search(r"const\s+stashIsOurs\s*=", body), (
+            ".then() must compute ``stashIsOurs`` (gen-based) — every clear "
+            "and apply path is gated on it so a later capture's stash never "
+            "gets deleted by an older .then()"
+        )
+
+        # Supersede path clears the stash when it's ours (orphan-drop case).
+        assert re.search(
+            r"myDetailSeq\s*!==\s*_ctxDetailSeq\[type\]\s*\)\s*\{\s*"
+            r"(?:[^{}]|\{[^{}]*\})*?"
+            r"if\s*\(\s*stashIsOurs\s*\)\s*_ctxPendingEdit\s*=\s*null;",
+            body,
+        ), (
+            "seq-mismatch bail must clear the stash when stashIsOurs is "
+            "true — otherwise a langchange-then-navigate sequence orphans "
+            "the stash and a future remount of the same card resurrects "
+            "stale draft content"
+        )
+
+        # Exactly three clears: orphan-drop, un-appliable, and apply-success.
+        # If a fourth path leaks the stash without clearing, this count fails.
+        clear_count = len(re.findall(r"_ctxPendingEdit\s*=\s*null", body))
+        assert clear_count == 3, (
+            f"expected exactly 3 ``_ctxPendingEdit = null`` clears in the "
+            f"langchange listener (orphan-drop, un-appliable, apply-success); "
+            f"got {clear_count}. A new bail path that doesn't clear a "
+            f"stash that's ours leaks the stash and risks resurrection."
+        )
+
     def test_q_pr4_ctxCurrentDetail_carries_runtime_only_flag(self) -> None:
         """Q-PR4 (#826) review finding P2: ``_ctxCurrentDetail`` must carry
         a ``runtimeOnly`` flag so the langchange listener can route the

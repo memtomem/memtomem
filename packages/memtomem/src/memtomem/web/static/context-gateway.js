@@ -362,12 +362,19 @@ window.addEventListener('langchange', () => {
     const editPane = detailEl ? detailEl.querySelector('#ctx-pane-edit') : null;
     const editTextarea = detailEl ? detailEl.querySelector('#ctx-edit-content') : null;
     const wasEditing = editPane != null && !editPane.hidden;
+    // ``myStashGen`` defaults to a sentinel that no future capture can
+    // match (gen counter only increments) so the post-mount ``.then()``
+    // never identifies an unrelated stash as "ours" when this listener
+    // didn't actually capture one.
+    let myStashGen = -1;
     if (wasEditing && editTextarea && openName && !openRuntimeOnly) {
+      myStashGen = ++_ctxPendingEditGen;
       _ctxPendingEdit = {
         type,
         name: openName,
         content: editTextarea.value,
         mtimeNs: detailEl ? (detailEl.dataset.mtimeNs || '') : '',
+        gen: myStashGen,
       };
     }
 
@@ -386,15 +393,36 @@ window.addEventListener('langchange', () => {
         const myDetailSeq = _ctxDetailSeq[type];
         if (detailPromise && typeof detailPromise.then === 'function') {
           detailPromise.then(() => {
-            if (myDetailSeq !== _ctxDetailSeq[type]) return;
             const pending = _ctxPendingEdit;
-            if (!pending || pending.type !== type || pending.name !== openName) return;
+            // ``stashIsOurs`` gates every clear and apply: a clear path
+            // must never delete a stash that belongs to a *later*
+            // langchange (see the (a) race in the doc-comment near
+            // ``_ctxPendingEditGen``), and an apply path must never
+            // resurrect an unrelated capture.
+            const stashIsOurs = pending != null && pending.gen === myStashGen;
+            if (myDetailSeq !== _ctxDetailSeq[type]) {
+              // Superseded. If a later langchange fired, ``pending``
+              // already reflects its capture (different gen) so we
+              // leave the stash alone and let that ``.then()`` apply.
+              // If only a navigation superseded us, the stash is an
+              // orphan that no future ``.then()`` will pick up; drop
+              // it now so it can't resurrect on a remount of the same
+              // card (race (b) in the doc-comment).
+              if (stashIsOurs) _ctxPendingEdit = null;
+              return;
+            }
+            if (!stashIsOurs) return;
             // Re-resolve panes — the previous detailEl children were
             // wiped by loadCtxDetail's innerHTML rewrite.
             const newTa = detailEl.querySelector('#ctx-edit-content');
             const newCanonPane = detailEl.querySelector('#ctx-pane-canonical');
             const newEditPane = detailEl.querySelector('#ctx-pane-edit');
-            if (!newTa || !newEditPane) return;
+            if (!newTa || !newEditPane) {
+              // Ours but un-appliable (DOM didn't render the edit
+              // pane). Drop the stash rather than let it leak forward.
+              _ctxPendingEdit = null;
+              return;
+            }
             newTa.value = pending.content;
             if (newCanonPane) newCanonPane.hidden = true;
             newEditPane.hidden = false;
@@ -542,7 +570,19 @@ let _ctxDetailSeq = { skills: 0, commands: 0, agents: 0 };
 // detail fetch completes, T2 sees a wiped DOM (no editPane to capture
 // from) but ``_ctxPendingEdit`` still carries T1's stash, and T2's
 // own (now-latest) detail mount applies it.
+//
+// ``_ctxPendingEditGen`` is a monotonically incrementing token tagged
+// onto each capture. The post-mount ``.then()`` reads its closure-local
+// ``myStashGen`` and only clears / applies the stash when its own gen
+// still matches — preventing two distinct races:
+//   (a) ``T1`` clearing ``T2``'s overwritten stash when T1's superseded
+//       ``.then()`` resolves later.
+//   (b) An orphaned stash from a langchange-then-navigate sequence
+//       resurrecting on a future remount of the same card. The orphan
+//       case is detected by seq mismatch + ``stashIsOurs`` and the
+//       stash is dropped instead of leaking.
 let _ctxPendingEdit = null;
+let _ctxPendingEditGen = 0;
 
 // ``runtimeOnly`` disambiguates the two detail loaders: ``loadCtxDetail``
 // fetches the canonical file, ``_ctxLoadRuntimeOnlyDetail`` (line ~1134)
