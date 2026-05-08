@@ -1,19 +1,18 @@
-"""Browser tests for the Context Gateway overview dashboard (Q-PR1).
+"""Browser tests for the Context Gateway overview dashboard (Q-PR1, #825).
 
 Pin three pieces of audit-driven behavior that file-scan regression guards
 in ``test_i18n.py`` cannot exercise:
 
-* **Bug-1, multi-toggle race**: rapid lang toggles must surface only the
-  newest locale on the cards. Without the ``_ctxOverviewSeq`` guard in
-  ``loadCtxOverview`` (context-gateway.js), a slow first fetch can land
-  *after* a second toggle and clobber the newer locale's cards with stale
-  text. The timing is forced by delaying the KO response in the route
-  handler so the EN response wins the render race; the late KO arrival
-  must then be dropped by the seq guard.
 * **Bug-1, single-toggle re-render**: lang toggle must re-render the cards
   when the section is mounted. ``I18N.applyDOM`` does not handle inline
-  ``t()`` text in innerHTML, so ``loadCtxOverview`` itself runs on
-  ``langchange``.
+  ``t()`` text in innerHTML, so the ``langchange`` listener calls
+  ``_renderCtxOverview`` directly.
+* **#825, no spinner flash on lang toggle**: a healthy mounted dashboard
+  caches its last ``/api/context/overview`` payload in
+  ``_ctxOverviewCache``; subsequent lang toggles re-render from the
+  cache — no refetch, no ``panelLoading`` spinner flash. Drops the
+  round-trip the langchange listener used to issue (also addresses #824
+  review P2 about langchange firing one fetch per toggle).
 * **Bug-2, zero-state empty badge**: a ``total === 0`` tile must render
   the ``Empty`` badge (``settings.ctx.badge_empty``) with ``badge-gray``,
   not the green ``0/0 synced`` fallthrough.
@@ -25,7 +24,6 @@ is off (see ``conftest.py`` docstring) so no real backend writes happen.
 from __future__ import annotations
 
 import json
-import time
 
 import pytest
 
@@ -171,17 +169,26 @@ def test_zero_total_renders_empty_badge_not_green_synced(page, mm_web_url: str) 
 def test_langchange_rerenders_card_label_text(page, mm_web_url: str) -> None:
     """Bug-1 single-toggle pin: ``langchange`` must re-render
     ``ctx-overview-content`` so inline-templated ``t()`` text picks up the
-    new locale. ``I18N.applyDOM`` only walks ``data-i18n*`` attributes; the
-    cards are inline-templated, so without the explicit ``loadCtxOverview``
-    call in the langchange listener, the EN→KO toggle leaves cards in EN.
-    """
+    new locale. ``I18N.applyDOM`` only walks ``data-i18n*`` attributes;
+    the cards are inline-templated, so without the explicit
+    ``_renderCtxOverview`` call in the langchange listener the EN→KO
+    toggle leaves cards in EN.
+
+    Cross-pinned with #825: the cache-driven re-render path means no
+    refetch on toggle — the assertion captures the call count before
+    and after to catch a regression that re-introduced the
+    fetch-on-langchange behavior."""
     _install_default_stubs(page)
-    page.route(
-        "**/api/context/overview",
-        lambda r: r.fulfill(
+
+    overview_calls: list[str] = []
+
+    def _overview_handler(route):
+        overview_calls.append(route.request.url)
+        route.fulfill(
             status=200, content_type="application/json", body=json.dumps(_HEALTHY_OVERVIEW)
-        ),
-    )
+        )
+
+    page.route("**/api/context/overview", _overview_handler)
     page.goto(mm_web_url)
     _open_context_gateway(page)
 
@@ -191,18 +198,16 @@ def test_langchange_rerenders_card_label_text(page, mm_web_url: str) -> None:
     label = skills_tile.locator(".ctx-overview-label")
     pre = (label.text_content() or "").strip()
     assert pre == "Skills", f"default locale (EN) tile label should be 'Skills', got {pre!r}"
+    initial_calls = len(overview_calls)
+    assert initial_calls >= 1, (
+        f"dashboard mount should fire at least one overview fetch; got {overview_calls!r}"
+    )
 
     # Toggle EN→KO. ``I18N.setLang`` awaits the locale fetch, applyDOM, and
     # then dispatches ``langchange`` (i18n.js L65-76); the ``langchange``
-    # listener in context-gateway.js calls ``loadCtxOverview`` which
-    # re-fires ``/api/context/overview``. Wait for the request to land
-    # so the assertion below doesn't race the re-render.
-    with page.expect_request("**/api/context/overview", timeout=2_000):
-        page.evaluate("() => I18N.setLang('ko')")
-    # ``loadCtxOverview`` calls ``panelLoading(el)`` before the new fetch
-    # resolves; that wipes the inner tiles and replaces them with a
-    # spinner. Use a null-safe wait so the polling doesn't trip on the
-    # transient empty state between the wipe and the re-render.
+    # listener in context-gateway.js re-renders synchronously from
+    # ``_ctxOverviewCache`` — no fetch, no spinner.
+    page.evaluate("async () => { await I18N.setLang('ko'); }")
     page.wait_for_function(
         "() => {"
         "  const el = document.querySelector("
@@ -226,45 +231,39 @@ def test_langchange_rerenders_card_label_text(page, mm_web_url: str) -> None:
     # behavior would also pass the positive assertion above on a partial
     # rerender that updated some attributes but not the inline text).
     assert "Skills" not in post, f"EN literal must not linger after KO toggle: {post!r}"
+    # #825: cache-driven re-render means no extra fetch on toggle.
+    assert len(overview_calls) == initial_calls, (
+        f"lang toggle must re-render from _ctxOverviewCache, no refetch; "
+        f"baseline={initial_calls}, after={len(overview_calls)}, "
+        f"calls={overview_calls!r} (#825)"
+    )
 
 
-def test_multi_toggle_race_keeps_newest_locale_on_cards(page, mm_web_url: str) -> None:
-    """Bug-1 multi-toggle race pin: when a slow first fetch lands *after*
-    a second lang toggle, the newer locale's cards must remain — the
-    older response's stale render must be dropped by the
-    ``_ctxOverviewSeq`` guard in ``loadCtxOverview``.
+def test_langchange_uses_cache_no_spinner_flash(page, mm_web_url: str) -> None:
+    """#825 pin: lang toggle on a healthy mounted dashboard must re-render
+    from ``_ctxOverviewCache`` directly — no refetch and, crucially, no
+    ``panelLoading`` spinner flash between the wipe and the response
+    render. The cards should feel like an in-place text swap, not a
+    panel reload.
 
-    Drive the race deterministically: the first ``/api/context/overview``
-    response is held until after a second ``setLang`` has fired its own
-    request and rendered. Then we release the first response. Without
-    the seq guard the first (KO) response would clobber the second (EN)
-    render and the assertion would catch it.
+    Two regressions this catches:
 
-    Mutation check: temporarily removing the
-    ``if (seq !== _ctxOverviewSeq) return`` line in ``loadCtxOverview``
-    fails this spec because the held KO response wins on arrival order.
-    """
+    * Approach-1 partial fix (``loadCtxOverview({ silent: true })``) that
+      keeps the fetch but skips ``panelLoading`` — the ``overview_calls``
+      assertion catches the unnecessary round-trip.
+    * Reverting to the pre-#825 ``loadCtxOverview()`` call from the
+      langchange listener — both the spinner-flash assertion and the
+      ``overview_calls`` assertion catch this.
+
+    Three sequential toggles (EN→KO→EN→KO) stress the cache-hit path
+    repeatedly so a one-shot cache-fill that then falls back to fetch
+    would still surface as ``overview_calls > initial_calls``."""
     _install_default_stubs(page)
 
-    # Three calls hit ``/api/context/overview`` during this spec:
-    #   1) initial EN load by ``_open_context_gateway``     (immediate)
-    #   2) KO toggle dispatched (delayed in stub so it races EN)
-    #   3) EN toggle dispatched after, returns immediately
-    # The KO response is delayed inside the route handler — Playwright
-    # runs each handler on a worker thread, so a sync ``time.sleep`` here
-    # parks call 2's response without stalling the page event loop or
-    # blocking call 3 from being served on a separate worker thread.
-    # Awaiting each ``setLang`` promise from Python guarantees call 2 is
-    # the KO request and call 3 is the EN one (without the await, the
-    # second toggle's ``langchange`` could be dispatched before the
-    # first's, swapping which request is delayed).
-    call_seq = {"calls": 0}
-    KO_DELAY = 0.6  # seconds; long enough that EN fully renders before KO arrives
+    overview_calls: list[str] = []
 
     def _overview_handler(route):
-        call_seq["calls"] += 1
-        if call_seq["calls"] == 2:
-            time.sleep(KO_DELAY)
+        overview_calls.append(route.request.url)
         route.fulfill(
             status=200, content_type="application/json", body=json.dumps(_HEALTHY_OVERVIEW)
         )
@@ -272,28 +271,42 @@ def test_multi_toggle_race_keeps_newest_locale_on_cards(page, mm_web_url: str) -
     page.route("**/api/context/overview", _overview_handler)
     page.goto(mm_web_url)
     _open_context_gateway(page)
+    initial_calls = len(overview_calls)
+    assert initial_calls >= 1, (
+        f"dashboard mount should fire at least one overview fetch; got {overview_calls!r}"
+    )
 
-    # First toggle EN→KO. Awaiting the setLang promise guarantees the KO
-    # ``langchange`` (and its ``loadCtxOverview`` fetch) has been dispatched
-    # before the EN toggle starts. ``loadCtxOverview`` itself is
-    # fire-and-forget from inside the listener, so the await returns
-    # while the KO fetch is still in flight — which is exactly the race
-    # window we want.
+    # Spinner-flash detection. ``panelLoading`` injects
+    # ``<div class="loading-panel">…</div>`` into ``#ctx-overview-content``;
+    # the cache-driven re-render rewrites innerHTML directly with the
+    # rendered grid (no intermediate spinner state). A MutationObserver
+    # that latches on any ``.loading-panel`` appearance during the
+    # toggle window catches both the ``panelLoading`` flash *and* a
+    # partial fix that kept the spinner but dropped the fetch.
+    page.evaluate(
+        """() => {
+            window._spinnerSeen = false;
+            const el = document.getElementById('ctx-overview-content');
+            const obs = new MutationObserver(() => {
+                if (el.querySelector('.loading-panel')) {
+                    window._spinnerSeen = true;
+                }
+            });
+            obs.observe(el, { childList: true, subtree: true });
+            window._spinnerObserver = obs;
+        }"""
+    )
+
     page.evaluate("async () => { await I18N.setLang('ko'); }")
-    # Belt-and-braces: don't proceed to EN until the KO request is
-    # actually parked in the route handler. Use ``page.wait_for_timeout``
-    # to poll — a pure-Python ``time.sleep`` would hold the sync_playwright
-    # main thread and starve Playwright's own callback dispatch (the
-    # very route handler whose ``calls`` we're polling).
-    deadline = time.monotonic() + 2.0
-    while call_seq["calls"] < 2 and time.monotonic() < deadline:
-        page.wait_for_timeout(20)
-    assert call_seq["calls"] >= 2, "KO toggle's overview fetch did not dispatch"
-
-    # Second toggle KO→EN. Wait for the EN response to render. The EN
-    # request is call 3 and fulfills immediately (no delay branch), so
-    # the cards land on Skills well within timeout while the KO response
-    # is still parked in its delay sleep.
+    page.wait_for_function(
+        "() => {"
+        "  const el = document.querySelector("
+        '    \'#ctx-overview-content .ctx-overview-stat[data-section="ctx-skills"] '
+        ".ctx-overview-label');"
+        "  return el && el.textContent.trim() === '스킬';"
+        "}",
+        timeout=2_000,
+    )
     page.evaluate("async () => { await I18N.setLang('en'); }")
     page.wait_for_function(
         "() => {"
@@ -302,26 +315,30 @@ def test_multi_toggle_race_keeps_newest_locale_on_cards(page, mm_web_url: str) -
         ".ctx-overview-label');"
         "  return el && el.textContent.trim() === 'Skills';"
         "}",
-        timeout=3_000,
+        timeout=2_000,
+    )
+    page.evaluate("async () => { await I18N.setLang('ko'); }")
+    page.wait_for_function(
+        "() => {"
+        "  const el = document.querySelector("
+        '    \'#ctx-overview-content .ctx-overview-stat[data-section="ctx-skills"] '
+        ".ctx-overview-label');"
+        "  return el && el.textContent.trim() === '스킬';"
+        "}",
+        timeout=2_000,
     )
 
-    # Wait long enough for the delayed KO response to land (or be dropped
-    # by the seq guard). KO_DELAY is the upper bound on its arrival; pad
-    # a bit so the assertion is sampled after the late response has
-    # had its chance to clobber the EN render.
-    page.wait_for_timeout(int(KO_DELAY * 1000) + 300)
-
-    label = page.locator(
-        "#ctx-overview-content .ctx-overview-stat[data-section='ctx-skills'] .ctx-overview-label"
+    assert len(overview_calls) == initial_calls, (
+        f"three lang toggles must re-render from _ctxOverviewCache without "
+        f"refetching; baseline={initial_calls}, after={len(overview_calls)}, "
+        f"calls={overview_calls!r} (#825)"
     )
-    final = (label.text_content() or "").strip()
-    assert final == "Skills", (
-        f"newest locale (EN) must remain after late KO arrival; got {final!r}. "
-        "Without _ctxOverviewSeq the KO render would overwrite EN."
+    spinner_seen = page.evaluate("() => window._spinnerSeen")
+    assert spinner_seen is False, (
+        "lang toggle on a cached dashboard must not flash panelLoading; the "
+        "cache-driven _renderCtxOverview path rewrites innerHTML directly "
+        "without an intermediate spinner state (#825)"
     )
-    # Negative: the KO literal must not be present anywhere on the
-    # tile, even partially — a half-clobber is still a regression.
-    assert "스킬" not in final, f"old locale must not bleed through after race: {final!r}"
 
 
 def test_langchange_after_tab_switch_does_not_refetch_overview(page, mm_web_url: str) -> None:

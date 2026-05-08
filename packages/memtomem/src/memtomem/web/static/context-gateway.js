@@ -87,34 +87,41 @@ function renderImportResult(data) {
 
 // -- Overview -----------------------------------------------------------------
 
-// Sequence guard for fast lang toggles. ``loadCtxOverview`` is also called from
-// the ``langchange`` listener so the inline-templated card text picks up the
-// new locale; without a guard a slow first fetch can land *after* a second
-// toggle and clobber the newer locale's cards with stale text.
+// Sequence guard for in-flight fetch races. ``loadCtxOverview`` is called
+// from the cold mount, the Refresh button, and the end of Sync All; rapid
+// triggers can leave a stale response landing *after* a newer one and
+// clobber the fresher render. Toggling language does NOT re-fetch — see
+// ``_ctxOverviewCache`` and the ``langchange`` listener below.
 let _ctxOverviewSeq = 0;
 
-async function loadCtxOverview() {
-  const seq = ++_ctxOverviewSeq;
+// Cache the last successful ``/api/context/overview`` payload so a
+// ``langchange`` toggle can re-render the inline ``t()`` card text from
+// the existing data — no fetch, no ``panelLoading`` spinner flash. The
+// dashboard data itself is locale-independent (counts, statuses); only
+// the labels and badge copy translate, so a cached re-render is
+// equivalent to a re-fetch + re-render for translation-only events and
+// drops the round-trip the langchange listener used to issue (#824
+// review P2 / #825). Cleared on fetch errors so the next call falls
+// back to a fresh fetch path.
+let _ctxOverviewCache = null;
+
+function _renderCtxOverview(data) {
   const el = qs('ctx-overview-content');
-  panelLoading(el);
-  try {
-    const res = await fetch('/api/context/overview');
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Failed to load overview');
-    const data = await res.json();
+  if (!el) return;
 
-    // Custom Commands sidebar leaf is dev-tier (Anthropic merged
-    // .claude/commands/ into Skills); the overview tile mirrors that —
-    // surfacing it in prod would let users click through and trigger
-    // the dev-only-section toast in switchSettingsSection.
-    const types = [
-      { key: 'skills',   label: t('settings.ctx.skills_title'),   section: 'ctx-skills' },
-      { key: 'commands', label: t('settings.ctx.commands_title'), section: 'ctx-commands', devOnly: true },
-      { key: 'agents',   label: t('settings.ctx.agents_title'),   section: 'ctx-agents' },
-      { key: 'settings', label: t('settings.hooks.title'),        section: 'hooks-sync' },
-    ];
+  // Custom Commands sidebar leaf is dev-tier (Anthropic merged
+  // .claude/commands/ into Skills); the overview tile mirrors that —
+  // surfacing it in prod would let users click through and trigger
+  // the dev-only-section toast in switchSettingsSection.
+  const types = [
+    { key: 'skills',   label: t('settings.ctx.skills_title'),   section: 'ctx-skills' },
+    { key: 'commands', label: t('settings.ctx.commands_title'), section: 'ctx-commands', devOnly: true },
+    { key: 'agents',   label: t('settings.ctx.agents_title'),   section: 'ctx-agents' },
+    { key: 'settings', label: t('settings.hooks.title'),        section: 'hooks-sync' },
+  ];
 
-    let html = '<div class="ctx-overview-grid">';
-    for (const typ of types) {
+  let html = '<div class="ctx-overview-grid">';
+  for (const typ of types) {
       if (typ.devOnly && STATE.uiMode !== 'dev') continue;
       const d = data[typ.key] || {};
       const total = d.total || 0;
@@ -189,57 +196,70 @@ async function loadCtxOverview() {
       </div>`;
     }
     html += '</div>';
-    if (seq !== _ctxOverviewSeq) return;
     el.innerHTML = html;
 
-    // Gate the Sync All button: when every artifact type's items are
-    // entirely runtime-only (no canonicals to fan out), Sync All resolves
-    // to a series of `no_canonical_root` skips. Surface that pre-click
-    // via a data attribute (CSS dims the button) plus a native ``title``
-    // hover tooltip + ``aria-disabled`` so the user understands the
-    // dimmed state without having to click first; the post-click toast
-    // stays as a fallback for users who don't hover (mobile, keyboard).
-    const syncAllBtn = document.getElementById('ctx-sync-all-btn');
-    if (syncAllBtn) {
-      // Mirror the overview-tile gate: in prod the Custom Commands
-      // surface is hidden, so its missing_canonical count must not
-      // gate the Sync All button (otherwise prod users would see Sync
-      // All disabled because of an artifact set they can't even see).
-      const syncKinds = STATE.uiMode === 'dev'
-        ? ['skills', 'commands', 'agents']
-        : ['skills', 'agents'];
-      const totals = syncKinds.reduce((acc, k) => {
-        const d = data[k] || {};
-        acc.total += d.total || 0;
-        acc.runtimeOnly += d.missing_canonical || 0;
-        return acc;
-      }, { total: 0, runtimeOnly: 0 });
-      if (totals.total > 0 && totals.runtimeOnly === totals.total) {
-        syncAllBtn.dataset.runtimeOnly = 'true';
-        syncAllBtn.title = t('settings.ctx.sync_all_disabled_tooltip');
-        syncAllBtn.setAttribute('aria-disabled', 'true');
+  // Gate the Sync All button: when every artifact type's items are
+  // entirely runtime-only (no canonicals to fan out), Sync All resolves
+  // to a series of `no_canonical_root` skips. Surface that pre-click
+  // via a data attribute (CSS dims the button) plus a native ``title``
+  // hover tooltip + ``aria-disabled`` so the user understands the
+  // dimmed state without having to click first; the post-click toast
+  // stays as a fallback for users who don't hover (mobile, keyboard).
+  const syncAllBtn = document.getElementById('ctx-sync-all-btn');
+  if (syncAllBtn) {
+    // Mirror the overview-tile gate: in prod the Custom Commands
+    // surface is hidden, so its missing_canonical count must not
+    // gate the Sync All button (otherwise prod users would see Sync
+    // All disabled because of an artifact set they can't even see).
+    const syncKinds = STATE.uiMode === 'dev'
+      ? ['skills', 'commands', 'agents']
+      : ['skills', 'agents'];
+    const totals = syncKinds.reduce((acc, k) => {
+      const d = data[k] || {};
+      acc.total += d.total || 0;
+      acc.runtimeOnly += d.missing_canonical || 0;
+      return acc;
+    }, { total: 0, runtimeOnly: 0 });
+    if (totals.total > 0 && totals.runtimeOnly === totals.total) {
+      syncAllBtn.dataset.runtimeOnly = 'true';
+      syncAllBtn.title = t('settings.ctx.sync_all_disabled_tooltip');
+      syncAllBtn.setAttribute('aria-disabled', 'true');
+    } else {
+      delete syncAllBtn.dataset.runtimeOnly;
+      syncAllBtn.removeAttribute('aria-disabled');
+      // The button has a default ``data-i18n-title`` (sync_all_tooltip);
+      // wiping the attribute outright would clobber the locale-driven
+      // hover tooltip that ``I18N.applyDOM`` set on page load.
+      // Restore it from the dataset key instead.
+      const titleKey = syncAllBtn.dataset.i18nTitle;
+      if (titleKey) {
+        syncAllBtn.title = t(titleKey);
       } else {
-        delete syncAllBtn.dataset.runtimeOnly;
-        syncAllBtn.removeAttribute('aria-disabled');
-        // The button has a default ``data-i18n-title`` (sync_all_tooltip);
-        // wiping the attribute outright would clobber the locale-driven
-        // hover tooltip that ``I18N.applyDOM`` set on page load.
-        // Restore it from the dataset key instead.
-        const titleKey = syncAllBtn.dataset.i18nTitle;
-        if (titleKey) {
-          syncAllBtn.title = t(titleKey);
-        } else {
-          syncAllBtn.removeAttribute('title');
-        }
+        syncAllBtn.removeAttribute('title');
       }
     }
+  }
 
-    // Click to navigate
-    el.querySelectorAll('.ctx-overview-stat').forEach(card => {
-      card.addEventListener('click', () => switchSettingsSection(card.dataset.section));
-    });
+  // Click to navigate
+  el.querySelectorAll('.ctx-overview-stat').forEach(card => {
+    card.addEventListener('click', () => switchSettingsSection(card.dataset.section));
+  });
+}
+
+async function loadCtxOverview() {
+  const seq = ++_ctxOverviewSeq;
+  const el = qs('ctx-overview-content');
+  panelLoading(el);
+  try {
+    const res = await fetch('/api/context/overview');
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Failed to load overview');
+    const data = await res.json();
+    if (seq !== _ctxOverviewSeq) return;
+    _ctxOverviewCache = data;
+    _renderCtxOverview(data);
   } catch (err) {
     if (seq !== _ctxOverviewSeq) return;
+    _ctxOverviewCache = null;
     el.innerHTML = emptyState('', 'Failed to load overview', err.message);
   }
 }
@@ -251,7 +271,7 @@ async function loadCtxOverview() {
 // state would erase any caller's title.
 //
 // The overview cards themselves are inline-templated via ``t()`` in
-// ``loadCtxOverview``'s innerHTML, so ``I18N.applyDOM`` cannot re-translate
+// ``_renderCtxOverview``'s innerHTML, so ``I18N.applyDOM`` cannot re-translate
 // the rendered text on toggle (it only walks ``data-i18n*`` attributes).
 // Re-render only when both gates are active:
 //   * the Settings *main tab* (``#tab-settings``) is the visible panel —
@@ -263,9 +283,15 @@ async function loadCtxOverview() {
 // Without both checks, switching from Settings → Search keeps the
 // section's ``.active`` class set (``activateTab`` hides the panel but
 // doesn't reach into sub-section classes), and a language toggle from
-// Search would still issue ``/api/context/overview`` for an off-screen
-// dashboard (#824 review P2). ``loadCtxOverview``'s own sequence guard
-// handles the multi-toggle race.
+// Search would re-render an off-screen dashboard (#824 review P2).
+//
+// Re-render path: when ``_ctxOverviewCache`` holds a prior payload, render
+// directly from it — translation is locale-only, so no fetch and no
+// ``panelLoading`` spinner flash (#825). The cold-mount fallback to
+// ``loadCtxOverview`` only fires when the dashboard has never successfully
+// loaded (initial mount race, or prior fetch error cleared the cache);
+// in that case ``loadCtxOverview``'s sequence guard handles the
+// fetch-in-flight scenario.
 window.addEventListener('langchange', () => {
   const btn = document.getElementById('ctx-sync-all-btn');
   if (btn && btn.dataset.runtimeOnly === 'true') {
@@ -276,7 +302,11 @@ window.addEventListener('langchange', () => {
   const settingsVisible = settingsTab && settingsTab.classList.contains('active');
   const overviewActive = overviewSection && overviewSection.classList.contains('active');
   if (settingsVisible && overviewActive) {
-    loadCtxOverview();
+    if (_ctxOverviewCache) {
+      _renderCtxOverview(_ctxOverviewCache);
+    } else {
+      loadCtxOverview();
+    }
   }
 });
 

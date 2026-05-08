@@ -650,15 +650,16 @@ class TestNoHardcodedStrings:
         )
 
     def test_q_pr1_overview_has_sequence_guard(self) -> None:
-        """Bug-1 multi-toggle race guard: ``loadCtxOverview`` must read +
+        """In-flight fetch race guard: ``loadCtxOverview`` must read +
         check a module-level sequence counter so a slow fetch from an
-        earlier toggle cannot clobber the cards rendered by a later
-        toggle. The browser test in ``test_context_gateway_overview.py``
-        pins the multi-toggle *outcome* but cannot deterministically
-        reproduce the race window (Playwright sync route handlers serialize
-        on the dispatcher thread, so a delay on one fetch also delays the
-        next). The guard itself — counter + capture + bail-on-stale — is
-        what this static check enforces."""
+        earlier call cannot clobber the cards rendered by a later one.
+        Lang toggles re-render from ``_ctxOverviewCache`` (#825) and do
+        not fetch, but the cold-mount, Refresh button, and end-of-Sync-All
+        paths can still race each other under rapid clicks; the guard
+        protects all of those. The browser-side cache pin in
+        ``test_context_gateway_overview.py`` covers the langchange path
+        directly; this static check enforces the guard's structural
+        invariants — counter + capture + bail-on-stale."""
         text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
         assert "_ctxOverviewSeq" in text, (
             "missing _ctxOverviewSeq module counter — Bug-1 race guard"
@@ -677,12 +678,16 @@ class TestNoHardcodedStrings:
 
     def test_q_pr1_langchange_listener_reloads_overview(self) -> None:
         """Bug-1 single-toggle pin: the ``langchange`` listener in
-        context-gateway.js must call ``loadCtxOverview`` when the
-        overview section is the active settings pane — and only then.
+        context-gateway.js must re-render the inline-templated cards
+        when the overview section is the active settings pane — and only
+        then. After #825 the listener prefers ``_renderCtxOverview`` from
+        ``_ctxOverviewCache`` (no fetch, no spinner flash) and falls back
+        to ``loadCtxOverview`` only when the cache is empty (cold mount
+        race / prior fetch error).
 
         ``#settings-ctx-overview`` always exists in the DOM regardless of
         which page the user is on; gating on mere element existence
-        (``qs('ctx-overview-content')`` truthiness) would fire a fetch on
+        (``qs('ctx-overview-content')`` truthiness) would re-render on
         every language toggle from any page, not just the dashboard.
         The active-class gate matches ``switchSettingsSection``'s own
         ``section.classList.add('active')`` contract (app.js:1191).
@@ -695,8 +700,17 @@ class TestNoHardcodedStrings:
         )
         assert m, "langchange listener missing from context-gateway.js"
         body = m.group(1)
+        # Cache-driven re-render path is the primary action; the
+        # ``loadCtxOverview()`` cold-mount fallback covers the case when
+        # the cache is empty (initial mount race or prior fetch error).
+        # Both must be referenced inside the listener.
+        assert "_renderCtxOverview(_ctxOverviewCache)" in body, (
+            "langchange listener must re-render from _ctxOverviewCache directly "
+            "(#825 — no fetch, no panelLoading flash on toggle)"
+        )
         assert "loadCtxOverview()" in body, (
-            "langchange listener must call loadCtxOverview() for the inline-templated cards"
+            "langchange listener must keep the loadCtxOverview() cold-mount "
+            "fallback for when _ctxOverviewCache is null"
         )
         # Two-gate active check: both the main Settings tab
         # (``#tab-settings``) AND the Context Gateway settings sub-section
