@@ -28,35 +28,51 @@ import click
 
 # ---- Cloud-mount path-prefix helper ----------------------------------------
 #
-# Pure path-prefix match against the user's expanded ``$HOME``. No fs probing,
-# no platform branching — the prefix list is fixed (RFC §Phase 2). Intended to
-# be applied to each entry in ``memory_dirs[]`` after ``Path.expanduser()``.
-
-CLOUD_MOUNT_PREFIXES: tuple[str, ...] = (
-    "~/Library/CloudStorage/",
-    "~/Library/Mobile Documents/com~apple~CloudDocs/",
-    "~/Dropbox/",
-    "~/OneDrive",  # matches OneDrive, OneDrive-Personal, "OneDrive - Foo", etc.
-)
+# Pure path comparison against a fixed list of cloud-sync mounts under
+# ``$HOME`` (RFC §Phase 2). No fs probing. ``Path.relative_to`` keeps the
+# match separator-safe on Windows (``\\``) as well as POSIX (``/``).
+#
+# Matched prefixes (display form):
+#   ~/Library/CloudStorage/                          (macOS sync clients)
+#   ~/Library/Mobile Documents/com~apple~CloudDocs/  (iCloud Drive on macOS)
+#   ~/Dropbox/                                       (Dropbox legacy fallback)
+#   ~/OneDrive*/                                     (OneDrive, any suffix variant)
 
 
 def cloud_mount_prefix(path: Path, *, home: Path | None = None) -> str | None:
     """Return matched cloud-mount prefix (display form), or ``None`` if none.
 
     ``path`` should already be expanded (``Path.expanduser()``). ``home`` is
-    overridable for tests; defaults to ``Path.home()``.
+    overridable for tests; defaults to ``Path.home()``. Comparison goes through
+    ``Path.relative_to`` so the result is separator-safe on Windows (``\\`` vs
+    ``/``).
     """
-    home_s = str(home or Path.home())
-    s = str(path)
-    for prefix in CLOUD_MOUNT_PREFIXES:
-        expanded = prefix.replace("~", home_s, 1)
-        if prefix == "~/OneDrive":
-            if s.startswith(expanded):
-                rest = s[len(expanded) :]
-                if not rest or rest[0] in "-_ /":
-                    return "~/OneDrive*/"
-        elif s.startswith(expanded):
-            return prefix
+    home_p = home or Path.home()
+    fixed = (
+        ("~/Library/CloudStorage/", home_p / "Library" / "CloudStorage"),
+        (
+            "~/Library/Mobile Documents/com~apple~CloudDocs/",
+            home_p / "Library" / "Mobile Documents" / "com~apple~CloudDocs",
+        ),
+        ("~/Dropbox/", home_p / "Dropbox"),
+    )
+    for label, root in fixed:
+        try:
+            path.relative_to(root)
+        except ValueError:
+            continue
+        return label
+    # OneDrive variants: matches ``OneDrive``, ``OneDrive-Personal``,
+    # ``OneDrive - Acme``; rejects substring false positives like ``OneDriveX``.
+    try:
+        rel = path.relative_to(home_p)
+    except ValueError:
+        return None
+    if not rel.parts:
+        return None
+    head = rel.parts[0]
+    if head == "OneDrive" or (head.startswith("OneDrive") and len(head) > 8 and head[8] in "-_ "):
+        return "~/OneDrive*/"
     return None
 
 

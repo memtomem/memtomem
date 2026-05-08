@@ -30,6 +30,17 @@ def _git_add(repo: Path, *paths: str) -> None:
     subprocess.run(["git", "add", *paths], cwd=repo, check=True)
 
 
+def _set_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
+    """Point ``Path.home()`` at ``home`` on both POSIX and Windows.
+
+    ``os.path.expanduser`` consults ``USERPROFILE`` on Windows; setting only
+    ``HOME`` leaves Windows CI looking at the real user profile (reviewer
+    note from PR #838).
+    """
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+
 # ---- cloud_mount_prefix helper ---------------------------------------------
 
 
@@ -144,7 +155,7 @@ class TestCheckConfigDPresent:
 
 class TestCheckMemoryDirsUnderHome:
     def test_under_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("HOME", str(tmp_path))
+        _set_home(monkeypatch, tmp_path)
         d = tmp_path / "memories"
         d.mkdir()
         r = check_memory_dirs_under_home([d])
@@ -153,7 +164,7 @@ class TestCheckMemoryDirsUnderHome:
     def test_outside_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         outside_home = tmp_path / "home"
         outside_home.mkdir()
-        monkeypatch.setenv("HOME", str(outside_home))
+        _set_home(monkeypatch, outside_home)
         # An entry under tmp_path but not under tmp_path/home.
         outside = tmp_path / "elsewhere"
         outside.mkdir()
@@ -166,12 +177,12 @@ class TestCheckMemoryDirsUnderHome:
 
 class TestCheckCloudMount:
     def test_no_cloud(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("HOME", str(tmp_path))
+        _set_home(monkeypatch, tmp_path)
         r = check_cloud_mount([tmp_path / "memories"])
         assert r.status == "pass"
 
     def test_dropbox_warns(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("HOME", str(tmp_path))
+        _set_home(monkeypatch, tmp_path)
         r = check_cloud_mount([tmp_path / "Dropbox" / "memories"])
         assert r.status == "warn"
         assert "Dropbox" in r.message
@@ -223,7 +234,7 @@ class TestSyncDoctorCli:
     def test_exits_nonzero_when_db_staged(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv("HOME", str(tmp_path))
+        _set_home(monkeypatch, tmp_path)
         monkeypatch.chdir(tmp_path)
         _git_init(tmp_path)
         (tmp_path / "snapshot.db").write_bytes(b"")
@@ -235,7 +246,7 @@ class TestSyncDoctorCli:
         assert "*.db" in result.output
 
     def test_pass_path_clean_repo(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("HOME", str(tmp_path))
+        _set_home(monkeypatch, tmp_path)
         monkeypatch.chdir(tmp_path)
         _git_init(tmp_path)
 
