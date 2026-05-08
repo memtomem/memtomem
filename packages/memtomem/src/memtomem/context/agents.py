@@ -6,7 +6,7 @@ superset) and a Markdown body that acts as the system prompt. From that single
 canonical source we fan out to:
 
 * ``.claude/agents/<name>.md`` — Claude Code (project-scope)
-* ``.gemini/agents/<name>.md`` — Gemini CLI (project-scope; experimental in 2026-03)
+* ``.gemini/agents/<name>.md`` — Gemini CLI (project-scope)
 * ``.codex/agents/<name>.toml`` — OpenAI Codex CLI (project-scope)
 
 Codex CLI accepts both ``~/.codex/agents/`` (user-scope) and ``.codex/agents/``
