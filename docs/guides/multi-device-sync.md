@@ -255,17 +255,20 @@ the synced repo or to *contain* it:
 Obsidian stores vault metadata in a top-level `.obsidian/` directory —
 workspace layout, plugin state, hotkeys, etc. — much of which is JSON.
 memtomem indexes `.json` by default, so without an explicit rule this
-metadata ends up in your search results. Add the following fragment to
-`~/.memtomem/config.d/` so the rule is portable across machines:
+metadata ends up in your search results. Save the following fragment as
+`~/.memtomem/config.d/30-obsidian.json` so the rule is portable across
+machines:
 
 ```json
-// ~/.memtomem/config.d/30-obsidian.json
 {
   "indexing": {
     "exclude_patterns": ["**/.obsidian/**"]
   }
 }
 ```
+
+The fragment loader uses strict `json.loads`, so the file contents must be
+valid JSON — no `//` comments, no path-label header inside the file.
 
 See [`exclude_patterns`](configuration.md#exclude-patterns) for the broader
 semantics (root-relative matching, non-retroactive behavior, layering on
