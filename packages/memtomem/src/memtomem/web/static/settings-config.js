@@ -555,14 +555,16 @@ const _CONFIG_GUIDES = {
     title: 'Indexing',
     desc: 'Controls how files are discovered, chunked, and stored as searchable units.',
     items: [
-      { label: 'Memory Dirs', text: 'Directories that can be indexed. Add or remove entries inline; grouped by origin (user-chosen, Claude projects, Claude plans, Codex). Each change persists immediately.' },
-      { label: 'Extensions', text: 'File types recognized for chunking: .md, .py, .js, .ts, .tsx, .jsx, .json, .yaml, .yml, .toml.' },
+      { label: 'Extensions', text: 'File types recognized for chunking: .md, .py, .js, .ts, .tsx, .jsx, .json, .yaml, .yml, .toml. Edit inline; changes persist immediately.' },
+      { label: 'Exclude Patterns', text: 'Glob patterns skipped during indexing. Built-in secret/noise groups are read-only; user patterns are editable inline.' },
       { label: 'Max Chunk Tokens', text: 'Upper bound for chunk size. Long sections are split to stay under this limit.' },
+      { label: 'Target Chunk Tokens', text: 'Soft target the chunker aims for between Min and Max. Most chunks land near this size; Max is the hard cap.' },
       { label: 'Min Chunk Tokens', text: 'Short chunks below this threshold are merged with their neighbor. 0 = no merging.' },
       { label: 'Chunk Overlap', text: 'Token overlap between adjacent chunks. Adds shared context at boundaries for better retrieval. 0 = no overlap.' },
       { label: 'Structured Chunk Mode', text: 'For JSON/YAML/TOML files. "original": extracts raw text lines per key (preserves formatting, line numbers). "recursive": serializes via json.dumps, recursively splits deep nested structures by sub-keys.' },
     ],
     envs: [
+      'MEMTOMEM_INDEXING__SUPPORTED_EXTENSIONS=\'[".md",".py",".js",".ts"]\'',
       'MEMTOMEM_INDEXING__MAX_CHUNK_TOKENS=512',
       'MEMTOMEM_INDEXING__MIN_CHUNK_TOKENS=128',
       'MEMTOMEM_INDEXING__CHUNK_OVERLAP_TOKENS=0',
@@ -572,12 +574,11 @@ const _CONFIG_GUIDES = {
       title: 'Indexing Settings',
       restart: false,
       steps: [
-        'Memory Dirs: use the inline [+ Add] / [✕] / [↻] controls; each change hits the server immediately',
+        'Extensions / Exclude Patterns: edit inline; each change persists immediately and may prompt a re-index',
         'Chunk token settings: edit here + Save (immediate, no restart)',
         'After changing chunk settings, re-index to apply to existing data',
-        'Or set env: MEMTOMEM_INDEXING__MEMORY_DIRS=\'["/path1","/path2"]\'',
       ],
-      warn: 'Extensions are read-only in UI. Chunk setting changes require re-index to take effect on existing data.',
+      warn: 'Extensions / Exclude Patterns / chunk size changes only affect data indexed after the change. Re-index to apply to existing chunks.',
     },
   },
   decay: {
