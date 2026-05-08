@@ -93,10 +93,19 @@ Pull/import stays leaf-only.
 When a tile shows partial sync, the dashboard renders an inline pointer
 derived from the existing per-status counts emitted by `_count_statuses`
 (`packages/memtomem/src/memtomem/web/routes/context_gateway.py:33`) over
-the 4-value enum produced by `diff_skills` / `diff_commands` /
-`diff_agents`: `in sync`, `out of sync`, `missing target`,
-`missing canonical`. **No new wire fields are required for direction** —
-the signal is already carried by which counts are non-zero:
+the per-surface status enum from `diff_skills` / `diff_commands` /
+`diff_agents`. The three surfaces share the same direction-bearing core
+— `in sync`, `out of sync`, `missing target`, `missing canonical` —
+which is what the inline pointer reads. The surfaces that parse
+canonical files (`diff_commands` and `diff_agents`) additionally emit
+`parse error` (`packages/memtomem/src/memtomem/context/commands.py:598`,
+`packages/memtomem/src/memtomem/context/agents.py:741`), which
+`_count_statuses` lifts into a `parse_error` count key but which is
+direction-neutral and not surfaced as a remediation pointer.
+`diff_skills` is the only true four-status surface
+(`packages/memtomem/src/memtomem/context/skills.py:321-324`).
+**No new wire fields are required for direction** — the signal is
+already carried by which counts are non-zero:
 
 - `missing_target > 0` (canonical has it, runtime does not) → push is
   unambiguous → "Run Sync All to push N missing entries."
@@ -202,17 +211,19 @@ the client's perspective:
 already understand. Older clients ignore unknown fields. The four
 existing tile envelopes are unchanged.
 
-**Direction signal source for §2.** The four-status enum produced by
+**Direction signal source for §2.** The four-status core shared by
 `diff_skills` / `diff_commands` / `diff_agents` (`in sync`,
 `out of sync`, `missing target`, `missing canonical`) already flows
 through `_count_statuses` (`packages/memtomem/src/memtomem/web/routes/
 context_gateway.py:33`) into the per-tile envelope as named count
 fields (`in_sync`, `out_of_sync`, `missing_target`, `missing_canonical`
-— the helper lifts every observed status into a count key). §2's
-inline pointer logic reads those existing counts; **no new tile
-fields, no mtime comparison, no diff-output extension is required**.
-The settings tile is the only envelope that omits `missing_canonical`
-by design (§2 last paragraph).
+— the helper lifts every observed status into a count key). The
+surface-specific `parse error` from `diff_commands` and `diff_agents`
+lands as a `parse_error` count alongside the core four. §2's inline
+pointer logic reads those existing counts; **no new tile fields, no
+mtime comparison, no diff-output extension is required**. The settings
+tile is the only envelope that omits `missing_canonical` by design
+(§2 last paragraph).
 
 ## Consequences
 
@@ -252,8 +263,8 @@ This ADR is **Proposed**, not Accepted. The five proposed directions are
 deliberately conservative — they preserve ADR-0001's invariants and the
 current dashboard's "glance" property. Reviewers are encouraged to push
 back on any of the five if a different direction better serves real
-workflows. The discussion period is **≥ 1 week** (mirrors ADR-0008's
-PR-A cadence) before promotion to Accepted.
+workflows. The discussion period is **≥ 1 week** before promotion to
+Accepted.
 
 ## References
 
