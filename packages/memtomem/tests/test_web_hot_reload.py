@@ -209,10 +209,14 @@ async def test_memory_dirs_add_reloads_before_write(
     )
     assert resp.status_code == 200, resp.text
 
+    from memtomem.config import _portable_path_str
+
     on_disk = json.loads((home / ".memtomem" / "config.json").read_text())
     # External mmr edit survived the memory-dirs write.
     assert on_disk.get("mmr", {}).get("enabled") is True
-    assert str(second.resolve()) in on_disk.get("indexing", {}).get("memory_dirs", [])
+    assert _portable_path_str(str(second.resolve())) in on_disk.get("indexing", {}).get(
+        "memory_dirs", []
+    )
 
 
 async def test_memory_dirs_remove_reloads_before_write(

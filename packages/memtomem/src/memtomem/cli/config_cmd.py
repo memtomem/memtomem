@@ -140,7 +140,11 @@ def config_unset(keys: tuple[str, ...]) -> None:
     itself is deleted. For a wholesale reset of wizard-untouched keys, use
     ``mm init --fresh``.
     """
-    from memtomem.config import _atomic_write_json, _override_path
+    from memtomem.config import (
+        _atomic_write_json,
+        _override_path,
+        _relativize_config_paths_in_place,
+    )
 
     canonical = _canonical_unset_keys()
     path = _override_path()
@@ -201,6 +205,7 @@ def config_unset(keys: tuple[str, ...]) -> None:
             lines.append(f"Unset: {key} (already at default)")
 
     if existing:
+        _relativize_config_paths_in_place(existing)
         _atomic_write_json(path, existing)
     elif path.exists():
         path.unlink()
