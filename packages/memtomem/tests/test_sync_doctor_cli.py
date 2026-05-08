@@ -172,6 +172,30 @@ class TestCheckConfigDPresent:
         r = check_config_d_present(tmp_path / "absent")
         assert r.status == "warn"
 
+    def test_symlinked_fragment_is_counted(self, tmp_path: Path) -> None:
+        # The multi-device sync guide recommends bridging synced fragments
+        # into ``~/.memtomem/config.d/`` via symlink so edits flow back to
+        # the synced repo automatically. ``Path.glob("*.json")`` follows
+        # symlinks today; pinning so a refactor to a non-following
+        # iteration (e.g. Python 3.13's ``glob(..., follow_symlinks=False)``
+        # or a ``set(d.iterdir())`` walk that stat-filters them out) trips
+        # the test.
+        synced_dir = tmp_path / "synced-repo" / "config.d"
+        synced_dir.mkdir(parents=True)
+        target = synced_dir / "10-namespace-rules.json"
+        target.write_text("{}")
+
+        canonical_dir = tmp_path / ".memtomem" / "config.d"
+        canonical_dir.mkdir(parents=True)
+        try:
+            (canonical_dir / "10-namespace-rules.json").symlink_to(target)
+        except (OSError, NotImplementedError) as exc:
+            pytest.skip(f"symlink creation unavailable in this environment: {exc}")
+
+        r = check_config_d_present(canonical_dir)
+        assert r.status == "pass"
+        assert "1 files" in r.message
+
 
 # ---- check_memory_dirs_under_home ------------------------------------------
 
@@ -207,6 +231,23 @@ class TestCheckCloudMount:
     def test_dropbox_warns(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_home(monkeypatch, tmp_path)
         r = check_cloud_mount([tmp_path / "Dropbox" / "memories"])
+        assert r.status == "warn"
+        assert "Dropbox" in r.message
+
+    def test_outside_synced_worktree_still_warns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Pin the broader-scope decision from PR #838 review: the cloud-mount
+        # check is a watcher-reliability check, not a worktree-hygiene check,
+        # so it scans every entry in ``memory_dirs[]`` — including entries
+        # outside the synced repo's worktree. Narrowing to "only entries
+        # inside the synced worktree" was the alternative that didn't land;
+        # this test makes a future flip a deliberate fixture edit.
+        _set_home(monkeypatch, tmp_path)
+        synced_repo = tmp_path / "synced-repo"
+        inside_worktree = synced_repo / "memories"  # not on a cloud mount
+        outside_worktree = tmp_path / "Dropbox" / "agent-memory"
+        r = check_cloud_mount([inside_worktree, outside_worktree])
         assert r.status == "warn"
         assert "Dropbox" in r.message
 
