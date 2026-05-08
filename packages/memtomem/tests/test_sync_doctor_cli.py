@@ -99,6 +99,18 @@ class TestCheckNoDbStaged:
         r = check_no_db_staged(tmp_path)
         assert r.status == "warn"
 
+    def test_subdir_invocation_sees_root_files(self, tmp_path: Path) -> None:
+        # When invoked from a nested subdir, the check must still see
+        # tracked *.db at the repo root (reviewer note from PR #838).
+        _git_init(tmp_path)
+        (tmp_path / "snapshot.db").write_bytes(b"")
+        _git_add(tmp_path, "snapshot.db")
+        nested = tmp_path / "deep" / "nested"
+        nested.mkdir(parents=True)
+        r = check_no_db_staged(nested)
+        assert r.status == "fail"
+        assert "snapshot.db" in (r.detail or "")
+
 
 # ---- check_config_json_absent ----------------------------------------------
 
@@ -257,3 +269,70 @@ class TestSyncDoctorCli:
         assert result.exit_code == 0
         assert "no *.db files staged" in result.output
         assert "config.json absent from worktree" in result.output
+
+    def test_does_not_rewrite_legacy_config_json(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Reviewer note from PR #838: legacy installs (auto_discover=True
+        # + existing config.json) trigger _migrate_auto_discover_once via
+        # load_config_overrides, which rewrites config.json on disk. The
+        # doctor must be read-only (RFC §Non-goals).
+        import json
+
+        _set_home(monkeypatch, tmp_path)
+        memtomem_dir = tmp_path / ".memtomem"
+        memtomem_dir.mkdir()
+        config_json = memtomem_dir / "config.json"
+        config_json.write_text(
+            json.dumps({"indexing": {"auto_discover": True, "memory_dirs": ["~/notes"]}})
+        )
+        before = config_json.read_bytes()
+
+        monkeypatch.chdir(tmp_path)
+        _git_init(tmp_path)
+        runner = CliRunner()
+        runner.invoke(cli, ["sync-doctor"])
+
+        assert config_json.read_bytes() == before, "sync-doctor must not rewrite config.json"
+
+    def test_subdir_invocation_finds_root_db(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # End-to-end variant of the subdir-invocation fix: running
+        # ``mm sync-doctor`` from a nested subdir must still flag a *.db
+        # tracked at the repo root.
+        _set_home(monkeypatch, tmp_path)
+        _git_init(tmp_path)
+        (tmp_path / "leaked.db").write_bytes(b"")
+        _git_add(tmp_path, "leaked.db")
+        nested = tmp_path / "memories" / "shared"
+        nested.mkdir(parents=True)
+        monkeypatch.chdir(nested)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["sync-doctor"])
+        assert result.exit_code == 1
+        assert "leaked.db" in result.output
+
+    def test_subdir_invocation_anchors_slug_at_repo_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The slug check should use the repo top-level, not the subdir cwd —
+        # otherwise a subdir invocation would see ``slug differs`` even when
+        # Claude Code has the repo root indexed correctly.
+        _set_home(monkeypatch, tmp_path)
+        _git_init(tmp_path)
+        nested = tmp_path / "memories" / "shared"
+        nested.mkdir(parents=True)
+
+        # Create a Claude project entry for the repo root (not the subdir).
+        projects = tmp_path / ".claude" / "projects"
+        projects.mkdir(parents=True)
+        slug = str(tmp_path.resolve()).replace("/", "-")
+        (projects / slug).mkdir()
+
+        monkeypatch.chdir(nested)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["sync-doctor"])
+        assert "slug matches synced layout" in result.output
+        assert "slug differs" not in result.output

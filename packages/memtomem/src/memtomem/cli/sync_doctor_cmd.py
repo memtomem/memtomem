@@ -99,15 +99,46 @@ def _emit(result: CheckResult) -> None:
 # ---- Individual checks -----------------------------------------------------
 
 
-def _git_ls_files(cwd: Path) -> list[str] | None:
-    """Return ``git ls-files`` output split per line, or ``None`` if not a repo."""
+def _repo_top_level(start: Path) -> Path | None:
+    """Return the git top-level above ``start``, or ``None`` if not in a repo."""
     git = shutil.which("git")
     if git is None:
         return None
     try:
         proc = subprocess.run(
+            [git, "rev-parse", "--show-toplevel"],
+            cwd=str(start),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    top = proc.stdout.strip()
+    return Path(top) if top else None
+
+
+def _git_ls_files(start: Path) -> list[str] | None:
+    """List every tracked path in the enclosing repo, or ``None`` if not a repo.
+
+    Resolves the repository top-level first so the listing covers the whole
+    private repo regardless of the subdirectory the doctor was invoked from.
+    Plain ``git ls-files`` from a nested dir only yields paths *under* that
+    dir, which would let the doctor miss a tracked root-level
+    ``config.json`` or ``*.db``.
+    """
+    git = shutil.which("git")
+    if git is None:
+        return None
+    repo_root = _repo_top_level(start)
+    if repo_root is None:
+        return None
+    try:
+        proc = subprocess.run(
             [git, "ls-files"],
-            cwd=str(cwd),
+            cwd=str(repo_root),
             capture_output=True,
             text=True,
             check=False,
@@ -192,27 +223,100 @@ def check_cloud_mount(memory_dirs: list[Path]) -> CheckResult:
 
 
 def check_claude_slug(cwd: Path, *, home: Path | None = None) -> CheckResult:
-    """Verify ``~/.claude/projects/<slug>`` for the current cwd exists.
+    """Verify ``~/.claude/projects/<slug>`` matches the current cwd.
 
     Skipped silently when ``~/.claude/projects/`` is absent (user doesn't run
-    Claude Code). When present, the cwd must round-trip to a real entry under
-    that directory; otherwise the synced auto-memory layout is broken for this
-    machine.
+    Claude Code). Two-tier match:
+
+    1. **Fast path** — encode ``cwd`` (POSIX ``/`` → ``-``, Windows ``\\`` /
+       drive ``:`` → ``-``) and look up the resulting directory directly. The
+       previous one-shot ``str(cwd).replace("/", "-")`` only handled POSIX
+       and produced an invalid slug on Windows (drive prefix + backslashes
+       remained), causing false failures for valid Windows layouts.
+    2. **Slow path** — iterate real entries and decode-then-``samefile`` each
+       against ``cwd``. Catches cases where the encoded form isn't
+       predictable (e.g., the entry on disk uses an encoding variant we
+       didn't enumerate) but skips entries whose name has literal dashes
+       and so doesn't round-trip to a real directory.
     """
     projects = (home or Path.home()) / ".claude" / "projects"
     if not projects.is_dir():
         return CheckResult("info", "~/.claude/projects/ absent — auto-memory check skipped")
-    encoded = str(cwd.resolve()).replace("/", "-")
-    if (projects / encoded).is_dir():
-        return CheckResult("pass", "~/.claude/projects/ slug matches synced layout")
+    try:
+        cwd_resolved = cwd.resolve()
+    except OSError:
+        return CheckResult("info", "cwd resolution failed — Claude slug check skipped")
+    cwd_str = str(cwd_resolved)
+    encoded_candidates = {
+        cwd_str.replace("/", "-"),  # POSIX absolute
+        cwd_str.replace("\\", "-").replace(":", ""),  # Windows: drop drive colon
+        cwd_str.replace("\\", "-").replace(":", "-"),  # Windows: encode drive colon as "-"
+    }
+    for cand in encoded_candidates:
+        # Skip candidates that still contain a path separator — the encoding
+        # didn't fully strip them (wrong platform), and ``projects / cand``
+        # would silently resolve to ``cand`` itself when it's absolute.
+        if "/" in cand or "\\" in cand:
+            continue
+        if (projects / cand).is_dir():
+            return CheckResult("pass", "~/.claude/projects/ slug matches synced layout")
+    # Slow path: decode existing entries and samefile-compare.
+    for child in projects.iterdir():
+        if not child.is_dir():
+            continue
+        # Decode follows ``_decode_claude_project_dirname`` in
+        # ``memtomem.context.projects``: every ``-`` becomes ``/``.
+        decoded = Path(child.name.replace("-", "/"))
+        try:
+            if decoded.is_dir() and decoded.samefile(cwd):
+                return CheckResult("pass", "~/.claude/projects/ slug matches synced layout")
+        except OSError:
+            continue
     return CheckResult(
         "fail",
         "~/.claude/projects/ slug differs from synced layout — see doc",
-        detail=f"expected entry: {projects}/{encoded}",
+        detail=f"no entry under {projects} matches cwd",
     )
 
 
 # ---- Click entry point -----------------------------------------------------
+
+
+def _apply_memory_dirs_override_no_write(cfg: object) -> None:
+    """Read ``~/.memtomem/config.json``'s ``indexing.memory_dirs`` into ``cfg``.
+
+    Read-only mirror of the relevant slice of ``load_config_overrides`` — the
+    full loader also calls ``_migrate_auto_discover_once`` which rewrites
+    ``config.json`` on legacy ``auto_discover=True`` installs. The doctor
+    must not mutate config (RFC §Non-goals: read-only).
+
+    Env precedence (``MEMTOMEM_INDEXING__MEMORY_DIRS``) is preserved by
+    deferring to whatever ``Mem2MemConfig()`` already loaded.
+    """
+    import json
+    import os
+
+    from memtomem.config import _override_path
+
+    path = _override_path()
+    if not path.exists():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    indexing = data.get("indexing") if isinstance(data, dict) else None
+    if not isinstance(indexing, dict):
+        return
+    md = indexing.get("memory_dirs")
+    if not isinstance(md, list):
+        return
+    if "MEMTOMEM_INDEXING__MEMORY_DIRS" in os.environ:
+        return  # env wins, mirroring load_config_overrides
+    try:
+        cfg.indexing.memory_dirs = [Path(p) for p in md if isinstance(p, str)]  # type: ignore[attr-defined]
+    except (TypeError, ValueError):
+        return
 
 
 @click.command("sync-doctor")
@@ -223,13 +327,17 @@ def sync_doctor() -> None:
     + ``config.d/``). Reports six checks; exits non-zero on any failure. Warns
     don't fail the exit code (a future ``--strict`` may flip that).
     """
-    from memtomem.config import Mem2MemConfig, _config_d_path, load_config_d, load_config_overrides
+    from memtomem.config import Mem2MemConfig, _config_d_path, load_config_d
 
     cfg = Mem2MemConfig()
     load_config_d(cfg, quiet=True)
-    load_config_overrides(cfg)
+    _apply_memory_dirs_override_no_write(cfg)
 
     cwd = Path.cwd()
+    # Slug check anchors at the repo top-level so subdir invocations still
+    # match the project Claude Code recorded for the repo (which is the dir
+    # ``claude`` was launched from — typically the repo root, not a subdir).
+    repo_root = _repo_top_level(cwd) or cwd
     memory_dirs = list(cfg.indexing.memory_dirs)
     config_d = _config_d_path()
 
@@ -237,7 +345,7 @@ def sync_doctor() -> None:
         check_no_db_staged(cwd),
         check_config_json_absent(cwd),
         check_config_d_present(config_d),
-        check_claude_slug(cwd),
+        check_claude_slug(repo_root),
         check_memory_dirs_under_home(memory_dirs),
         check_cloud_mount(memory_dirs),
     ]
