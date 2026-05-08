@@ -81,6 +81,35 @@ class TestLocaleFiles:
 _STATIC_JS_DIR = _LOCALES_DIR.parent
 
 
+def _langchange_listener_body(text: str) -> str:
+    """Sentinel-slice the langchange listener body in ``context-gateway.js``.
+
+    Earlier specs used a lazy regex ``\\{(.+?)\\}\\);`` to grab the body —
+    that pattern stops at the first ``});`` it sees, which fails the
+    moment a call inside the listener body uses an inline object
+    argument like::
+
+        loadCtxDetail(type, name, { autoOpenDiff: true });
+
+    The inline ``});`` is the call's closing parenthesis, not the
+    listener's, but the lazy regex doesn't know that. Switch to a
+    stable pair of sentinels: the listener's
+    ``window.addEventListener('langchange', ...)`` registration on the
+    upper end and the file's ``// Sync All button`` comment that
+    immediately follows on the lower end. Both have been stable for
+    months and are scoped to this single listener.
+
+    See ``feedback_listener_body_lazy_regex_trips_inline_objects.md``
+    (PR #840 review) — same pattern surfaced there and was fixed with
+    the same sentinel slice.
+    """
+    start = text.find("window.addEventListener('langchange'")
+    assert start >= 0, "langchange listener registration missing"
+    end = text.find("// Sync All button", start)
+    assert end > start, "couldn't locate end-of-listener sentinel"
+    return text[start:end]
+
+
 class TestNoHardcodedStrings:
     """Guard against regressions in i18n coverage for user-facing dialogs.
 
@@ -693,13 +722,7 @@ class TestNoHardcodedStrings:
         ``section.classList.add('active')`` contract (app.js:1191).
         """
         text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
-        m = re.search(
-            r"window\.addEventListener\('langchange',\s*\(\)\s*=>\s*\{(.+?)\}\);",
-            text,
-            re.DOTALL,
-        )
-        assert m, "langchange listener missing from context-gateway.js"
-        body = m.group(1)
+        body = _langchange_listener_body(text)
         # Cache-driven re-render path is the primary action; the
         # ``loadCtxOverview()`` cold-mount fallback covers the case when
         # the cache is empty (initial mount race or prior fetch error).
@@ -778,13 +801,7 @@ class TestNoHardcodedStrings:
         the overview cards.
         """
         text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
-        m = re.search(
-            r"window\.addEventListener\('langchange',\s*\(\)\s*=>\s*\{(.+?)\}\);",
-            text,
-            re.DOTALL,
-        )
-        assert m, "langchange listener missing from context-gateway.js"
-        body = m.group(1)
+        body = _langchange_listener_body(text)
         # All three per-type sections must be referenced — using the
         # template literal ``settings-ctx-${type}`` is the canonical form,
         # but we accept literal strings too in case a refactor inlines them.
@@ -812,13 +829,7 @@ class TestNoHardcodedStrings:
         the ``runtimeOnly`` flag on ``_ctxCurrentDetail``.
         """
         text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
-        m = re.search(
-            r"window\.addEventListener\('langchange',\s*\(\)\s*=>\s*\{(.+?)\}\);",
-            text,
-            re.DOTALL,
-        )
-        assert m, "langchange listener missing from context-gateway.js"
-        body = m.group(1)
+        body = _langchange_listener_body(text)
         assert "loadCtxDetail(" in body, (
             "langchange listener must call loadCtxDetail() to re-mount the canonical detail pane"
         )
@@ -846,13 +857,7 @@ class TestNoHardcodedStrings:
         P1.
         """
         text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
-        m = re.search(
-            r"window\.addEventListener\('langchange',\s*\(\)\s*=>\s*\{(.+?)\}\);",
-            text,
-            re.DOTALL,
-        )
-        assert m, "langchange listener missing from context-gateway.js"
-        body = m.group(1)
+        body = _langchange_listener_body(text)
         # Active-tab capture: must query for the .ctx-detail-tab[data-pane="diff"]
         # element and check whether it carries ``.active``.
         assert 'data-pane="diff"' in body or "data-pane='diff'" in body, (
@@ -879,13 +884,7 @@ class TestNoHardcodedStrings:
         itself.
         """
         text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
-        m = re.search(
-            r"window\.addEventListener\('langchange',\s*\(\)\s*=>\s*\{(.+?)\}\);",
-            text,
-            re.DOTALL,
-        )
-        assert m, "langchange listener missing from context-gateway.js"
-        body = m.group(1)
+        body = _langchange_listener_body(text)
         # The clear happens implicitly via ``loadCtxList`` (which clears
         # ``statusEl.innerHTML`` near its top). Pin both the call and the
         # absence of any caching of the import-result payload.
@@ -939,13 +938,7 @@ class TestNoHardcodedStrings:
         bug if a future refactor weakened the section-active invariant.
         """
         text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
-        m = re.search(
-            r"window\.addEventListener\('langchange',\s*\(\)\s*=>\s*\{(.+?)\}\);",
-            text,
-            re.DOTALL,
-        )
-        assert m, "langchange listener missing from context-gateway.js"
-        body = m.group(1)
+        body = _langchange_listener_body(text)
         # Find the overview branch (settings-ctx-overview gate) and
         # confirm it ends with ``return;`` before the per-type loop.
         # Using a permissive regex to avoid coupling to brace placement.
@@ -975,15 +968,9 @@ class TestNoHardcodedStrings:
         # Slice from the listener's `addEventListener('langchange',` line
         # to the next "// -- " section comment header (or, defensively,
         # the next `// Sync All button` block which follows the listener).
-        # A simple lazy-regex body extraction trips on inline object
-        # literals like ``{ autoOpenDiff: wasDiffActive }`` inside
-        # ``loadCtxDetail(...)`` — those ``});`` balance against the
-        # listener's outer ``});``.
-        start = text.find("window.addEventListener('langchange'")
-        assert start >= 0, "langchange listener missing from context-gateway.js"
-        end = text.find("// Sync All button", start)
-        assert end > start, "couldn't locate end-of-listener sentinel"
-        body = text[start:end]
+        # See ``_langchange_listener_body`` for why this is a sentinel
+        # slice rather than a lazy regex.
+        body = _langchange_listener_body(text)
         # Must reference the edit-pane element + textarea so the dirty
         # buffer is captured before loadCtxList wipes it.
         assert "ctx-pane-edit" in body, (
@@ -1062,11 +1049,7 @@ class TestNoHardcodedStrings:
             "missing module-level _ctxPendingEdit declaration"
         )
         # Listener reads + writes the stash + clears after consumption.
-        start = text.find("window.addEventListener('langchange'")
-        assert start >= 0, "langchange listener missing"
-        end = text.find("// Sync All button", start)
-        assert end > start, "couldn't locate end-of-listener sentinel"
-        body = text[start:end]
+        body = _langchange_listener_body(text)
         assert "_ctxPendingEdit = {" in body, (
             "listener must populate _ctxPendingEdit with the captured buffer"
         )
@@ -1151,10 +1134,7 @@ class TestNoHardcodedStrings:
         )
 
         # 3+4. Langchange listener opts both mounts in to preservation.
-        start = text.find("window.addEventListener('langchange'")
-        end = text.find("// Sync All button", start)
-        assert end > start, "couldn't locate end-of-listener sentinel"
-        body = text[start:end]
+        body = _langchange_listener_body(text)
 
         canonical_call_match = re.search(
             r"loadCtxDetail\s*\(\s*type\s*,\s*openName\s*,\s*\{"
