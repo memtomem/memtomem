@@ -32,6 +32,7 @@ follow-up; for now the multi-agent helpers live on
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 from uuid import UUID, uuid4
@@ -46,6 +47,8 @@ from memtomem.constants import (
 if TYPE_CHECKING:
     from memtomem.server.component_factory import Components
 
+logger = logging.getLogger(__name__)
+
 
 class MemtomemStore:
     """LangGraph-compatible memory store wrapping memtomem components.
@@ -54,7 +57,12 @@ class MemtomemStore:
     Components are lazily initialized on first use.
 
     Args:
-        config_overrides: Optional dict of config overrides (e.g. {"storage": {"sqlite_path": "..."}})
+        config_overrides: Optional dict of config overrides
+            (e.g. ``{"storage": {"sqlite_path": "..."}}``). Sections and
+            keys that do not exist on :class:`Mem2MemConfig` are skipped
+            with a ``logger.warning`` rather than silently no-op'd, so a
+            typo in either the section name (``storge``) or a field name
+            (``sqlite_pat``) is detectable without raising.
     """
 
     def __init__(self, config_overrides: dict[str, Any] | None = None):
@@ -72,13 +80,38 @@ class MemtomemStore:
 
             config = Mem2MemConfig()
 
-            # Apply overrides
+            # Apply overrides. Unknown sections / keys are skipped with a
+            # warning so a typo (e.g. ``{"storge": ...}`` or
+            # ``{"storage": {"sqlite_pat": ...}}``) is loud rather than
+            # silently no-op'd. We log instead of raising because the dict is
+            # implementation-defined — a future memtomem release may rename a
+            # section, and a callers' lock-in shouldn't break on import.
             for section, updates in self._config_overrides.items():
                 section_obj = getattr(config, section, None)
-                if section_obj and isinstance(updates, dict):
-                    for key, value in updates.items():
-                        if hasattr(section_obj, key):
-                            setattr(section_obj, key, value)
+                if section_obj is None:
+                    logger.warning(
+                        "MemtomemStore.config_overrides: unknown section %r — skipping",
+                        section,
+                    )
+                    continue
+                if not isinstance(updates, dict):
+                    logger.warning(
+                        "MemtomemStore.config_overrides: section %r value is %s, "
+                        "expected dict — skipping",
+                        section,
+                        type(updates).__name__,
+                    )
+                    continue
+                for key, value in updates.items():
+                    if not hasattr(section_obj, key):
+                        logger.warning(
+                            "MemtomemStore.config_overrides: unknown key %r in section "
+                            "%r — skipping",
+                            key,
+                            section,
+                        )
+                        continue
+                    setattr(section_obj, key, value)
 
             self._components = await create_components(config)
         return self._components

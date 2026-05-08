@@ -39,6 +39,74 @@ class TestMemtomemStoreInit:
         assert store._current_agent_id is None
 
 
+class TestConfigOverridesWarn:
+    """Unknown sections / keys in ``config_overrides`` should be loud."""
+
+    @staticmethod
+    def _patch_factory(monkeypatch):
+        import memtomem.config as _cfg
+        import memtomem.server.component_factory as _factory
+
+        async def _fake_create(_):
+            return MagicMock()
+
+        async def _fake_close(_):
+            return None
+
+        monkeypatch.setattr(_factory, "create_components", _fake_create)
+        monkeypatch.setattr(_factory, "close_components", _fake_close)
+        # Block real ~/.memtomem/config.json from polluting the override chain.
+        monkeypatch.setattr(_cfg, "load_config_overrides", lambda c: None)
+
+    @pytest.mark.asyncio
+    async def test_unknown_section_emits_warning(self, caplog, monkeypatch):
+        """Typo in ``config_overrides`` section name surfaces as a warning."""
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        self._patch_factory(monkeypatch)
+
+        store = MemtomemStore(config_overrides={"storge": {"sqlite_path": "/tmp/x.db"}})
+        with caplog.at_level("WARNING", logger="memtomem.integrations.langgraph"):
+            await store._ensure_init()
+
+        assert any("unknown section 'storge'" in r.getMessage() for r in caplog.records), (
+            caplog.text
+        )
+
+    @pytest.mark.asyncio
+    async def test_unknown_key_emits_warning(self, caplog, monkeypatch):
+        """Typo in a known section's field name surfaces as a warning."""
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        self._patch_factory(monkeypatch)
+
+        store = MemtomemStore(config_overrides={"storage": {"sqlite_pat": "/tmp/x.db"}})
+        with caplog.at_level("WARNING", logger="memtomem.integrations.langgraph"):
+            await store._ensure_init()
+
+        assert any("unknown key 'sqlite_pat'" in r.getMessage() for r in caplog.records), (
+            caplog.text
+        )
+
+    @pytest.mark.asyncio
+    async def test_known_override_does_not_warn(self, caplog, monkeypatch):
+        """Negative pin: a valid override stays silent (no false-positive warns)."""
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        self._patch_factory(monkeypatch)
+
+        store = MemtomemStore(config_overrides={"storage": {"sqlite_path": "/tmp/x.db"}})
+        with caplog.at_level("WARNING", logger="memtomem.integrations.langgraph"):
+            await store._ensure_init()
+
+        warns = [
+            r
+            for r in caplog.records
+            if r.levelname == "WARNING" and r.name == "memtomem.integrations.langgraph"
+        ]
+        assert warns == [], "valid overrides should not warn"
+
+
 class TestResolveSearchNamespace:
     """``_resolve_search_namespace`` encodes the 6-case ``include_shared``
     table documented in ``MemtomemStore.search``. Drift here would let the

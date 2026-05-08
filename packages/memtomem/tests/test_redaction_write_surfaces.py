@@ -254,3 +254,77 @@ class TestLangGraphAddRedactionGuard:
 
         assert after["bypassed"] == before["bypassed"] + 1
         assert "redaction bypass" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_blocked_under_agent_session_keeps_error_dict_shape(self):
+        """Multi-agent × redaction: a redaction block under an active
+        agent session still returns the same error-dict contract and ticks
+        the same ``blocked`` counter — the agent identity must not change
+        how the trust boundary surfaces failures.
+        """
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        mem = MemtomemStore.__new__(MemtomemStore)
+        mem._current_session_id = "fake-session"
+        mem._current_agent_id = "planner"
+        mem._ensure_init = AsyncMock(return_value=MagicMock())  # type: ignore[attr-defined]
+
+        before = privacy.snapshot()["by_tool"].get(
+            "langgraph_add", {"blocked": 0, "pass": 0, "bypassed": 0}
+        )
+        result = await mem.add(content=_SECRET_SAMPLE)
+        after = privacy.snapshot()["by_tool"]["langgraph_add"]
+
+        assert isinstance(result, dict)
+        assert result.get("error") == "redaction_blocked"
+        assert "hits" in result
+        assert after["blocked"] == before["blocked"] + 1
+        # Agent state survives the block — the call is rejected, not the session.
+        assert mem._current_agent_id == "planner"
+
+    @pytest.mark.asyncio
+    async def test_force_unsafe_under_agent_session_uses_agent_namespace(self, caplog, tmp_path):
+        """Multi-agent × redaction bypass: when ``force_unsafe=True`` is
+        chosen under an active agent session, the resulting
+        ``index_engine.index_file`` call must carry
+        ``namespace="agent-runtime:<id>"`` even though the caller passed
+        no ``namespace=`` kwarg. This pins the boundary between the
+        bypass decision and the namespace resolver — agent scope must
+        survive the bypass path, otherwise a bypassed secret silently
+        lands in the default bucket and can't be attributed back to the
+        agent in audit.
+        """
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        mem = MemtomemStore.__new__(MemtomemStore)
+        mem._current_session_id = "fake-session"
+        mem._current_agent_id = "planner"
+
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+
+        index_engine = AsyncMock()
+        index_engine.index_file.return_value = MagicMock(indexed_chunks=1)
+        mem._ensure_init = AsyncMock(  # type: ignore[attr-defined]
+            return_value=MagicMock(
+                config=MagicMock(indexing=MagicMock(memory_dirs=[memory_dir])),
+                index_engine=index_engine,
+            )
+        )
+
+        target_file = str(tmp_path / "agent_target.md")
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            result = await mem.add(
+                content=_SECRET_SAMPLE,
+                file=target_file,
+                force_unsafe=True,
+            )
+
+        # The write reached index_file under the agent-runtime namespace.
+        index_engine.index_file.assert_called_once()
+        _, kwargs = index_engine.index_file.call_args
+        assert kwargs.get("namespace") == "agent-runtime:planner"
+
+        # And the caller still gets a success-shaped dict (not the error shape).
+        assert result.get("error") is None
+        assert "indexed_chunks" in result
