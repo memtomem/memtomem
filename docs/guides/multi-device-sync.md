@@ -222,6 +222,105 @@ Both work. (a) is simpler if path discipline is feasible; (b) is
 username/path-agnostic at the cost of one symlink per project per
 machine.
 
+## Obsidian as editor on top of git transport
+
+Obsidian fits cleanly on top of this layout because the source of truth is
+already plain markdown — Obsidian opens any folder as a *vault* and edits the
+files in place. There is **no separate sync layer** to configure on the
+Obsidian side: the private git repo described above is still the transport,
+and Obsidian is purely the editor. This guide does not cover Obsidian Sync
+(the paid SaaS), iCloud, Dropbox, or other transports as alternatives —
+their reliability characteristics (especially fs-watcher behavior) differ
+from git's and would invalidate the layout / anti-patterns above.
+
+### Vault layout
+
+Two arrangements work, depending on whether you want the vault root to *be*
+the synced repo or to *contain* it:
+
+- **(a) Vault root = synced repo root.** Open `~/.memtomem-private/` itself
+  as the vault. The namespace tree (`shared/`, `personal/`, `work/`,
+  `local/`) becomes the vault's top-level folders, and the existing
+  `path_glob` rules from [The layout](#the-layout--namespace-aligned-directory-tree)
+  apply unchanged.
+- **(b) Vault contains a `memories/` sub-folder.** If your vault root is
+  somewhere else (e.g. `~/Obsidian/`) and the synced memtomem files live at
+  `~/Obsidian/memories/{shared,personal,work}/`, adjust the `path_glob`
+  fragments accordingly — e.g. `~/Obsidian/memories/shared/**` →
+  `shared:{parent}`. The semantics are identical; only the absolute path
+  differs.
+
+### Required: exclude `.obsidian/` from indexing
+
+Obsidian stores vault metadata in a top-level `.obsidian/` directory —
+workspace layout, plugin state, hotkeys, etc. — much of which is JSON.
+memtomem indexes `.json` by default, so without an explicit rule this
+metadata ends up in your search results. Add the following fragment to
+`~/.memtomem/config.d/` so the rule is portable across machines:
+
+```json
+// ~/.memtomem/config.d/30-obsidian.json
+{
+  "indexing": {
+    "exclude_patterns": ["**/.obsidian/**"]
+  }
+}
+```
+
+See [`exclude_patterns`](configuration.md#exclude-patterns) for the broader
+semantics (root-relative matching, non-retroactive behavior, layering on
+top of built-in denylists).
+
+### `.gitignore` — vault-local state
+
+In addition to the entries in [What syncs, what does not](#what-syncs-what-does-not),
+Obsidian-specific paths that are commonly *not* useful to sync:
+
+```
+.obsidian/workspace*.json
+.obsidian/cache/
+```
+
+`workspace.json` and `workspace-mobile.json` track per-device pane layouts
+and tend to thrash on every Obsidian launch; the cache dir is reproducible
+state. The remaining `.obsidian/` files (`community-plugins.json`,
+`themes/`, `hotkeys.json`, `app.json`) are often useful to sync if you
+want consistent vault behavior across devices, but this is an Obsidian-side
+preference rather than a memtomem one — defer to Obsidian's own guidance.
+
+### Plugin-generated markdown
+
+Two formats produced by common plugins to be aware of:
+
+- **`.canvas`** (Obsidian Canvas, JSON-backed). Not in memtomem's default
+  indexed extensions, so it's ignored automatically. No action needed.
+- **`.excalidraw.md`** (Excalidraw plugin's plugin-generated markdown
+  files). These match the `.md` filter and *will* be indexed unless
+  excluded. If you treat them as drawings rather than searchable notes,
+  add `**/*.excalidraw.md` to `exclude_patterns`.
+
+### Workflow
+
+Day-to-day flow once the layout is in place:
+
+1. Edit notes in Obsidian. The file watcher picks up `.md` changes and
+   re-embeds incrementally. Obsidian writes via temp-file + rename, which
+   the watcher already handles correctly — no extra configuration.
+2. Commit and push from the synced repo on whatever cadence suits you.
+3. On another device, `git pull` and follow [Post-pull workflow](#post-pull-workflow)
+   to pick the right re-index strategy for your runtime mode (Web,
+   long-running MCP, or per-call).
+
+### Different from one-shot import
+
+If you have an existing Obsidian vault you want to ingest *without*
+reorganising it into the synced layout — a one-time copy into
+`~/.memtomem/memories/_imported/obsidian/` — use the existing
+[Importing from Obsidian](reference.md#importing-from-obsidian) action
+(`mem_do(action="import_obsidian", …)`) instead. That's a different use
+case: one-shot ingest of a non-synced vault, rather than continuous live
+sync of the vault as your `memory_dirs[]`.
+
 ## `mm sync-doctor` — read-only validator
 
 Run from inside your private repo's working tree. The command performs six

@@ -626,6 +626,9 @@ How Obsidian files are processed:
 - **Heading-based chunking**: Each `##` heading becomes a separate chunk, just like native memtomem files.
 - **Output**: Imported files are copied to `~/.memtomem/memories/_imported/obsidian/`.
 
+> For *continuous* sync of an Obsidian vault as your live `memory_dirs` (rather
+> than one-shot ingest), see [Multi-device sync § Obsidian as editor](multi-device-sync.md#obsidian-as-editor-on-top-of-git-transport).
+
 ### Importing from Notion
 
 ```

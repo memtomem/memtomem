@@ -337,8 +337,10 @@ extend them but cannot override them.
     "exclude_patterns": [
       "**/subagents/**",         // Claude Code subagent metadata
       "**/antigravity-browser-profile/**",
-      "**/.gemini/**/*.json"     // defensive — only relevant if you manually
+      "**/.gemini/**/*.json",    // defensive — only relevant if you manually
                                  // add ~/.gemini/ to memory_dirs
+      "**/.obsidian/**"          // Obsidian vault metadata (workspace.json,
+                                 // plugin state) when a vault is a memory_dir
     ]
   }
 }

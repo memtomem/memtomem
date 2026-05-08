@@ -35,6 +35,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `_write_config_and_summary`) now invoke it before
   `_atomic_write_json`.
 
+### Documentation
+
+- **Obsidian as editor on top of git transport.** New section in the
+  multi-device sync guide (`docs/guides/multi-device-sync.md`) describing
+  vault layout (vault root = synced repo vs. vault contains a `memories/`
+  sub-folder), the required `**/.obsidian/**` exclude_patterns step (vault
+  metadata includes JSON which memtomem indexes by default), `.gitignore`
+  guidance for vault-local state, and plugin-generated formats (`.canvas`,
+  `.excalidraw.md`). Cross-references to the existing one-shot
+  `mem_do(action="import_obsidian", …)` flow in `reference.md` clarify
+  that they cover different use cases (live sync vs. one-shot ingest).
+  Also adds an `**/.obsidian/**` example to the
+  `configuration.md#exclude-patterns` block.
+
 ## [0.1.36] — 2026-05-06
 
 ### Added
