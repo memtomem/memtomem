@@ -572,6 +572,103 @@ def test_q_pr4_langchange_preserves_mtime_for_dirty_buffer(page, mm_web_url: str
     )
 
 
+def test_q_pr4_rapid_toggle_preserves_edit_buffer(page, mm_web_url: str) -> None:
+    """Review finding (P2): two back-to-back langchange events while
+    a dirty Edit buffer is open must not drop the buffer. The first
+    listener invocation captures into ``_ctxPendingEdit`` and kicks off
+    detail fetch #1; before that fetch settles, the second invocation
+    fires. By then ``loadCtxList`` has already wiped the detail DOM,
+    so a closure-local capture would yield ``null`` and the second
+    mount would have no buffer to apply — silently dropping the user's
+    work. The module-level ``_ctxPendingEdit`` + ``_ctxDetailSeq``
+    guard pattern means the latest mount's ``.then()`` consumes the
+    stash; older `.then()`s skip via seq mismatch.
+
+    Mutation-validated: removing the module-level stash and
+    ``myDetailSeq !== _ctxDetailSeq[type]`` bail makes this spec fail
+    with the textarea reverting to the server's freshly-fetched
+    canonical content.
+    """
+    _install_default_stubs(page)
+    _stub_projects(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
+    _stub_skills(page, _CWD_SKILLS_ITEMS)
+    page.route(
+        "**/api/context/skills/demo-skill",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "name": "demo-skill",
+                    "canonical_path": "/srv/cwd/.memtomem/skills/demo-skill.md",
+                    "content": "SERVER-CANONICAL\n",
+                    "mtime_ns": "1700000000000000000",
+                    "files": [],
+                }
+            ),
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_skills_list(page)
+    page.wait_for_function(
+        "() => document.querySelectorAll("
+        '  \'#ctx-skills-list details[data-scope-id="cwd-scope"] '
+        ".ctx-card').length > 0",
+        timeout=5_000,
+    )
+    page.locator("#ctx-skills-list details[data-scope-id='cwd-scope'] .ctx-card").first.click()
+    page.wait_for_selector("#ctx-skills-detail .ctx-detail-edit-btn", timeout=3_000)
+    page.locator("#ctx-skills-detail .ctx-detail-edit-btn").click()
+    page.wait_for_function(
+        "() => {"
+        "  const ep = document.querySelector('#ctx-skills-detail #ctx-pane-edit');"
+        "  return ep && !ep.hidden;"
+        "}",
+        timeout=2_000,
+    )
+    page.evaluate(
+        """() => {
+            const ta = document.querySelector('#ctx-skills-detail #ctx-edit-content');
+            ta.value = 'RAPID-BUFFER-SENTINEL';
+        }"""
+    )
+
+    # Fire TWO langchange events in the same JS task so both listener
+    # invocations enter before either's detail fetch can resolve. The
+    # second invocation will see a wiped DOM (loadCtxList from the
+    # first invocation already cleared detailEl synchronously). With a
+    # closure-local capture, the second invocation would have no
+    # buffer to apply and the buffer would be lost when the second
+    # detail fetch's response paints. With the module-level stash +
+    # seq-guard pattern, the buffer survives.
+    page.evaluate(
+        """() => {
+            window.dispatchEvent(new Event('langchange'));
+            window.dispatchEvent(new Event('langchange'));
+        }"""
+    )
+
+    # Wait for the latest mount to complete and (re-)apply the buffer.
+    page.wait_for_function(
+        "() => {"
+        "  const ta = document.querySelector('#ctx-skills-detail #ctx-edit-content');"
+        "  const ep = document.querySelector('#ctx-skills-detail #ctx-pane-edit');"
+        "  return ta && ep && !ep.hidden && ta.value === 'RAPID-BUFFER-SENTINEL';"
+        "}",
+        timeout=4_000,
+    )
+    final_value = page.evaluate(
+        "() => document.querySelector('#ctx-skills-detail #ctx-edit-content').value"
+    )
+    assert final_value == "RAPID-BUFFER-SENTINEL", (
+        f"buffer must survive rapid back-to-back langchange events; got {final_value!r}"
+    )
+    assert "SERVER-CANONICAL" not in final_value, (
+        f"server canonical content must not silently overwrite the user's "
+        f"in-progress edits across rapid toggles (review P2 race): {final_value!r}"
+    )
+
+
 def test_q_pr4_langchange_rerenders_dropped_chips_in_diff_pane(page, mm_web_url: str) -> None:
     """``renderDroppedChips`` lives inside the Diff pane of the canonical
     detail. Without active-tab capture, a ``loadCtxDetail`` re-mount

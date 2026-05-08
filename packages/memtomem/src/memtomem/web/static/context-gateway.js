@@ -338,28 +338,38 @@ window.addEventListener('langchange', () => {
     const wasDiffActive = openName && detailEl
       ? detailEl.querySelector('.ctx-detail-tab[data-pane="diff"].active') != null
       : false;
-    // Edit-mode buffer preservation: if the user has the canonical
-    // detail open in Edit mode (#ctx-pane-edit visible) with unsaved
-    // changes in the textarea, ``loadCtxDetail`` would refetch and
-    // overwrite the rendered HTML — silently discarding their work.
-    // Capture the buffer + edit-mode flag here, then re-apply after
-    // the re-mount completes (loadCtxDetail returns a Promise). The
-    // existing 409-conflict ``_ctxStashDraft`` path uses sessionStorage
-    // and emits a "draft restored" toast; we keep the langchange path
-    // in-memory + toastless to avoid mis-attributing the recovery.
+    // Edit-mode buffer preservation. Two complementary mechanisms:
+    //   1. Capture the dirty textarea + pre-toggle mtime into the
+    //      module-level ``_ctxPendingEdit`` stash *before* loadCtxList
+    //      wipes the detail. Module-level (not closure-local) so a
+    //      rapid second toggle that finds an already-wiped DOM doesn't
+    //      lose the buffer — the stash carries it forward until the
+    //      latest detail mount applies it.
+    //   2. The post-loadCtxDetail ``.then()`` checks ``_ctxDetailSeq``
+    //      so only the newest detail mount actually paints the
+    //      stash into the DOM. An older `.then()` whose mount was
+    //      superseded skips, leaving the stash for the newer mount.
+    // Why module-level + seq-guarded instead of closure-local:
+    //   T1 captures buffer; T2 fires before T1's fetch settles; T2
+    //   sees a wiped DOM (no editPane) so closure-local capture would
+    //   yield null → buffer silently dropped on T2's mount. Sharing
+    //   via _ctxPendingEdit + bailing older .then()s gives the latest
+    //   toggle's mount sole authority to apply the captured buffer.
+    // mtime preservation: on capture, ``detailEl.dataset.mtimeNs`` is
+    // the pre-toggle value (loadCtxDetail hasn't refetched yet). The
+    // .then() restores it so the next Save still triggers the
+    // backend's 409 conflict gate (#763) on an external on-disk edit.
     const editPane = detailEl ? detailEl.querySelector('#ctx-pane-edit') : null;
     const editTextarea = detailEl ? detailEl.querySelector('#ctx-edit-content') : null;
     const wasEditing = editPane != null && !editPane.hidden;
-    const dirtyBuffer = wasEditing && editTextarea ? editTextarea.value : null;
-    // Preserve the *pre-toggle* mtime alongside the dirty buffer.
-    // ``loadCtxDetail`` overwrites ``detailEl.dataset.mtimeNs`` with the
-    // freshly-read value (line ~988); without restoring the original, a
-    // Save after the toggle would send the new mtime with the stale
-    // draft and the backend's 409 conflict gate (issue #763) would not
-    // fire — silently letting the user clobber an external edit. Only
-    // captured when wasEditing so we don't pin a stale mtime onto a
-    // canonical-pane re-mount.
-    const preToggleMtime = wasEditing && detailEl ? (detailEl.dataset.mtimeNs || '') : null;
+    if (wasEditing && editTextarea && openName && !openRuntimeOnly) {
+      _ctxPendingEdit = {
+        type,
+        name: openName,
+        content: editTextarea.value,
+        mtimeNs: detailEl ? (detailEl.dataset.mtimeNs || '') : '',
+      };
+    }
 
     loadCtxList(type);
 
@@ -368,28 +378,35 @@ window.addEventListener('langchange', () => {
         _ctxLoadRuntimeOnlyDetail(type, openName, detailEl);
       } else {
         const detailPromise = loadCtxDetail(type, openName, { autoOpenDiff: wasDiffActive });
-        if (dirtyBuffer != null && detailPromise && typeof detailPromise.then === 'function') {
+        // ``loadCtxDetail`` synchronously bumps ``_ctxDetailSeq[type]``
+        // before returning the promise, so reading it here captures
+        // *this* invocation's seq. A subsequent invocation (e.g. from
+        // a rapid second toggle) will bump the counter further; this
+        // .then() then bails by inequality.
+        const myDetailSeq = _ctxDetailSeq[type];
+        if (detailPromise && typeof detailPromise.then === 'function') {
           detailPromise.then(() => {
+            if (myDetailSeq !== _ctxDetailSeq[type]) return;
+            const pending = _ctxPendingEdit;
+            if (!pending || pending.type !== type || pending.name !== openName) return;
             // Re-resolve panes — the previous detailEl children were
             // wiped by loadCtxDetail's innerHTML rewrite.
             const newTa = detailEl.querySelector('#ctx-edit-content');
             const newCanonPane = detailEl.querySelector('#ctx-pane-canonical');
             const newEditPane = detailEl.querySelector('#ctx-pane-edit');
-            if (newTa) newTa.value = dirtyBuffer;
+            if (!newTa || !newEditPane) return;
+            newTa.value = pending.content;
             if (newCanonPane) newCanonPane.hidden = true;
-            if (newEditPane) newEditPane.hidden = false;
+            newEditPane.hidden = false;
             // Match the in-edit affordance: tabs are hidden while editing
             // (see the Edit click handler in loadCtxDetail).
             detailEl.querySelectorAll('.ctx-detail-tab').forEach(tab => {
               tab.style.display = 'none';
             });
-            // Restore the pre-toggle mtime so the next Save still
-            // surfaces a 409 if the file changed on disk during the
-            // toggle window. Falls through to the existing
-            // ``_ctxHandleConflict`` flow with the user's draft intact.
-            if (preToggleMtime != null) {
-              detailEl.dataset.mtimeNs = preToggleMtime;
-            }
+            // Restore pre-toggle mtime so the next Save still surfaces
+            // a 409 if the file changed on disk during the toggle window.
+            detailEl.dataset.mtimeNs = pending.mtimeNs;
+            _ctxPendingEdit = null;
           });
         }
       }
@@ -506,6 +523,26 @@ document.getElementById('ctx-refresh-btn')?.addEventListener('click', async () =
 // runtime-only banner) so its async writes are gated by the parent
 // ``loadCtxList`` invocation that originated them.
 let _ctxListSeq = { skills: 0, commands: 0, agents: 0 };
+
+// Sibling guard for ``loadCtxDetail`` and ``_ctxLoadRuntimeOnlyDetail``
+// races. Both write to the same ``detailEl``, so they share one
+// per-type counter. Rapid langchange / card-click bursts can put
+// multiple detail fetches in flight; the guard ensures only the newest
+// response paints into the live DOM, both for the locale-stale window
+// and the Edit-mode buffer-restore race (where an older fetch would
+// otherwise overwrite a textarea that the listener just rehydrated).
+let _ctxDetailSeq = { skills: 0, commands: 0, agents: 0 };
+
+// Module-level pending Edit-mode buffer that needs to be restored
+// after the next detail mount. Set when a langchange fires while the
+// user has unsaved changes in the textarea; consumed (and cleared)
+// when the latest detail mount's ``.then()`` runs against a freshly
+// mounted DOM. Surviving across multiple back-to-back toggles is the
+// whole point: if T1 captures the buffer and T2 fires before T1's
+// detail fetch completes, T2 sees a wiped DOM (no editPane to capture
+// from) but ``_ctxPendingEdit`` still carries T1's stash, and T2's
+// own (now-latest) detail mount applies it.
+let _ctxPendingEdit = null;
 
 // ``runtimeOnly`` disambiguates the two detail loaders: ``loadCtxDetail``
 // fetches the canonical file, ``_ctxLoadRuntimeOnlyDetail`` (line ~1134)
@@ -942,6 +979,7 @@ async function loadCtxDetail(type, name, opts = {}) {
   // themselves. Other call paths (post-save / post-delete reload at
   // line ~575/588) leave it false to preserve their canonical-pane
   // default.
+  const seq = ++_ctxDetailSeq[type];
   const autoOpenDiff = opts.autoOpenDiff === true;
   const detailEl = qs(`ctx-${type}-detail`);
   detailEl.hidden = false;
@@ -951,11 +989,19 @@ async function loadCtxDetail(type, name, opts = {}) {
   try {
     const res = await fetch(`/api/context/${type}/${encodeURIComponent(name)}`);
     if (res.status === 404) {
+      if (seq !== _ctxDetailSeq[type]) return;
       detailEl.innerHTML = emptyState('', `"${name}" not found`, t('settings.ctx.no_artifacts_hint'));
       return;
     }
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Failed to load ${name}`);
     const data = await res.json();
+    // Bail if a newer ``loadCtxDetail`` (or ``_ctxLoadRuntimeOnlyDetail``)
+    // has superseded us — both share ``_ctxDetailSeq[type]`` because
+    // they paint into the same detailEl. Without this, a slow first
+    // toggle's response would overwrite a freshly-mounted second
+    // toggle's render and silently drop any edit buffer the second
+    // toggle's `.then()` had just rehydrated (review P2).
+    if (seq !== _ctxDetailSeq[type]) return;
 
     let html = '<div class="ctx-detail">';
     html += `<div class="ctx-detail-header">
@@ -1151,6 +1197,7 @@ async function loadCtxDetail(type, name, opts = {}) {
     });
 
   } catch (err) {
+    if (seq !== _ctxDetailSeq[type]) return;
     detailEl.innerHTML = emptyState('', 'Failed to load detail', err.message);
   }
 }
@@ -1255,6 +1302,12 @@ async function _ctxLoadDiff(type, name, detailEl) {
 // preview source and surface an "Import all" CTA so the user can pull every
 // runtime-only artifact in one click.
 async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl) {
+  // Shares ``_ctxDetailSeq[type]`` with ``loadCtxDetail`` — both paint
+  // into the same detailEl, so a runtime-only fetch racing against a
+  // canonical fetch (or another runtime-only fetch) must obey the same
+  // seq invariant. Review P2 specifically called out the runtime-only
+  // path as having the same stale-response window.
+  const seq = ++_ctxDetailSeq[type];
   detailEl.hidden = false;
   _ctxCurrentDetail = { type, name, runtimeOnly: true };
   panelLoading(detailEl);
@@ -1265,6 +1318,7 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl) {
       throw new Error((await res.json().catch(() => ({}))).detail || `Failed to load ${name}`);
     }
     const data = await res.json();
+    if (seq !== _ctxDetailSeq[type]) return;
 
     let html = '<div class="ctx-detail">';
     html += `<div class="ctx-detail-header">
@@ -1331,6 +1385,7 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl) {
       }
     });
   } catch (err) {
+    if (seq !== _ctxDetailSeq[type]) return;
     detailEl.innerHTML = emptyState('', 'Failed to load detail', err.message);
   }
 }

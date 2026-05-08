@@ -1016,6 +1016,77 @@ class TestNoHardcodedStrings:
             "(otherwise a concurrent on-disk edit gets silently overwritten)"
         )
 
+    def test_q_pr4_detail_loaders_have_sequence_guard(self) -> None:
+        """Review finding (P2): ``loadCtxDetail`` and
+        ``_ctxLoadRuntimeOnlyDetail`` must guard their innerHTML writes
+        with ``_ctxDetailSeq[type]``. Both paint the same ``detailEl``,
+        so a stale fetch from a previous langchange / card-click can
+        overwrite a fresher render — silently dropping a buffer the
+        listener just rehydrated. Pin: per-type counter declared with
+        all three keys; bumped at the entry of each loader; checked at
+        the success and catch innerHTML write sites in both functions.
+        """
+        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        assert re.search(
+            r"_ctxDetailSeq\s*=\s*\{[^}]*skills[^}]*commands[^}]*agents[^}]*\}",
+            text,
+        ), "missing _ctxDetailSeq counter with all three keys"
+        assert re.search(r"const seq\s*=\s*\+\+_ctxDetailSeq\[type\]", text), (
+            "loadCtxDetail / _ctxLoadRuntimeOnlyDetail must capture-and-bump "
+            "_ctxDetailSeq[type] at entry"
+        )
+        # Both loaders write innerHTML in success + catch paths. Expect
+        # at least 3 guards in loadCtxDetail (404 fast-path + success +
+        # catch) and 2 in _ctxLoadRuntimeOnlyDetail (success + catch).
+        # Cumulative ≥5 guards across the file.
+        guards = re.findall(r"if \(seq !==\s*_ctxDetailSeq\[type\]\)\s*return;", text)
+        assert len(guards) >= 5, (
+            f"expected ≥5 _ctxDetailSeq guards across loadCtxDetail and "
+            f"_ctxLoadRuntimeOnlyDetail (success + catch sites in both, "
+            f"plus the 404 fast-path); found {len(guards)}"
+        )
+
+    def test_q_pr4_listener_uses_pending_edit_module_stash(self) -> None:
+        """Review finding (P2): edit-buffer preservation across rapid
+        toggles requires a *module-level* stash, not a closure-local
+        capture. With a closure capture, T2 (which finds an
+        already-wiped DOM after T1's loadCtxList) yields ``null`` and
+        T2's mount has no buffer to apply — silently dropped. The
+        module-level ``_ctxPendingEdit`` carries forward; only the
+        latest detail mount's ``.then()`` (gated by
+        ``_ctxDetailSeq``) consumes it.
+        """
+        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        # Module-level declaration.
+        assert re.search(r"^let _ctxPendingEdit\s*=\s*null;", text, re.MULTILINE), (
+            "missing module-level _ctxPendingEdit declaration"
+        )
+        # Listener reads + writes the stash + clears after consumption.
+        start = text.find("window.addEventListener('langchange'")
+        assert start >= 0, "langchange listener missing"
+        end = text.find("// Sync All button", start)
+        assert end > start, "couldn't locate end-of-listener sentinel"
+        body = text[start:end]
+        assert "_ctxPendingEdit = {" in body, (
+            "listener must populate _ctxPendingEdit with the captured buffer"
+        )
+        assert "_ctxPendingEdit = null" in body, (
+            "listener must clear _ctxPendingEdit after the latest mount "
+            "applies it (otherwise a subsequent unrelated mount would "
+            "stamp stale content into the new textarea)"
+        )
+        # The .then() bails when its captured detail seq has been
+        # superseded — this is what gives the *latest* mount sole
+        # authority to consume the stash.
+        assert re.search(
+            r"myDetailSeq\s*!==\s*_ctxDetailSeq\[type\]",
+            body,
+        ), (
+            "listener .then() must compare its captured myDetailSeq to "
+            "_ctxDetailSeq[type] so older mounts skip the buffer apply "
+            "(otherwise an older .then() races a newer one for the DOM)"
+        )
+
     def test_q_pr4_ctxCurrentDetail_carries_runtime_only_flag(self) -> None:
         """Q-PR4 (#826) review finding P2: ``_ctxCurrentDetail`` must carry
         a ``runtimeOnly`` flag so the langchange listener can route the
