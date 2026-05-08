@@ -322,13 +322,133 @@ def _try_hold_legacy_flock(legacy_pid: Path) -> object | None:
     return legacy_fp
 
 
-def main() -> None:
+def _is_direct_stdio_terminal() -> bool:
+    """Return True when stdio mode was launched directly in a terminal."""
+    import sys
+
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _print_direct_stdio_help() -> None:
+    """Explain why bare stdio server launches exit immediately."""
+    print(
+        "\n".join(
+            [
+                "memtomem-server is an MCP stdio server.",
+                "",
+                "This command is normally launched by an MCP client over stdin/stdout.",
+                "Do not run it directly in a terminal.",
+                "",
+                "Configure your MCP client with:",
+                "  command: uvx",
+                '  args: ["--from", "memtomem", "memtomem-server"]',
+                "",
+                "Example:",
+                "  claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server",
+                "",
+                "For a manually started network server, use:",
+                "  memtomem-server --transport sse --host 127.0.0.1 --port 8000",
+                "  memtomem-server --transport http --host 127.0.0.1 --port 8000",
+                "",
+                "No MCP client is connected; exiting.",
+            ]
+        )
+    )
+
+
+def _parse_server_args(argv: list[str] | None = None):
+    """Parse ``memtomem-server`` transport options."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="memtomem-server",
+        description="Run the memtomem MCP server.",
+    )
+    parser.add_argument(
+        "--transport",
+        choices=("stdio", "sse", "streamable-http", "http"),
+        default="stdio",
+        help="MCP transport to use. 'http' is an alias for 'streamable-http'.",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host for sse/http transports.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port for sse/http transports.",
+    )
+    parser.add_argument(
+        "--mount-path",
+        default=None,
+        help="Optional mount path for SSE transport.",
+    )
+    parser.add_argument(
+        "--sse-path",
+        default="/sse",
+        help="SSE endpoint path for --transport sse.",
+    )
+    parser.add_argument(
+        "--http-path",
+        default="/mcp",
+        help="Streamable HTTP endpoint path for --transport http.",
+    )
+    return parser.parse_args(argv)
+
+
+def _normalize_transport(transport: str) -> str:
+    if transport == "http":
+        return "streamable-http"
+    return transport
+
+
+def _configure_network_transport(args) -> None:
+    mcp.settings.host = args.host
+    mcp.settings.port = args.port
+    mcp.settings.sse_path = args.sse_path
+    mcp.settings.streamable_http_path = args.http_path
+
+
+def _print_network_server_info(transport: str, args) -> None:
+    if transport == "sse":
+        path = args.sse_path
+        if args.mount_path:
+            mount = args.mount_path.rstrip("/")
+            path = f"{mount}{path}"
+    else:
+        path = args.http_path
+    print(
+        "\n".join(
+            [
+                "memtomem-server",
+                f"Transport: {transport}",
+                f"Listening: http://{args.host}:{args.port}{path}",
+                "",
+                "Press Ctrl+C to stop.",
+            ]
+        )
+    )
+
+
+def main(argv: list[str] | None = None) -> None:
     """Run the MCP server."""
     import atexit
 
     import portalocker
 
     from memtomem._runtime_paths import ensure_runtime_dir, legacy_server_pid_path
+
+    args = _parse_server_args(argv)
+    transport = _normalize_transport(args.transport)
+    if transport == "stdio" and _is_direct_stdio_terminal():
+        _print_direct_stdio_help()
+        raise SystemExit(2)
+    if transport != "stdio":
+        _configure_network_transport(args)
+        _print_network_server_info(transport, args)
 
     # B1: bidirectional mutual exclusion during the transition window.
     # Hold the legacy flock for the process lifetime so an old (pre-#412)
@@ -446,4 +566,9 @@ def main() -> None:
             sigterm_targets.append(legacy_pid_file)
         _install_sigterm_handler(*sigterm_targets)
 
-    mcp.run()
+    if transport == "stdio":
+        mcp.run()
+    elif transport == "sse":
+        mcp.run(transport="sse", mount_path=args.mount_path)
+    else:
+        mcp.run(transport="streamable-http")

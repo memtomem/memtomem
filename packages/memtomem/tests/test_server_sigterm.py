@@ -613,16 +613,20 @@ def test_server_main_acquires_portalocker_pid_lock(
     import atexit
     import pathlib
 
+    import memtomem._runtime_paths as runtime_paths
+
     from memtomem import server as server_mod
-    from memtomem._runtime_paths import server_pid_path
     from memtomem.cli._liveness import probe_pid_file
 
     tmp_home = tmp_path / "home"
     tmp_home.mkdir()
     xdg = tmp_path / "xdg_runtime"
     xdg.mkdir()
+    runtime = xdg / "memtomem"
+    runtime.mkdir()
     if os.name != "nt":
         os.chmod(xdg, 0o700)
+        os.chmod(runtime, 0o700)
 
     captured_atexit: list[tuple] = []
 
@@ -630,16 +634,21 @@ def test_server_main_acquires_portalocker_pid_lock(
     monkeypatch.setattr(server_mod.mcp, "run", lambda: None)
     monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: tmp_home))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
+    monkeypatch.setenv("TMPDIR", str(xdg))
+    monkeypatch.setenv("TMP", str(xdg))
+    monkeypatch.setenv("TEMP", str(xdg))
+    monkeypatch.setattr(runtime_paths, "ensure_runtime_dir", lambda: runtime)
+    monkeypatch.setattr(runtime_paths, "server_pid_path", lambda: runtime / "server.pid")
     monkeypatch.setattr(
         atexit,
         "register",
         lambda fn, *a, **kw: captured_atexit.append((fn, a, kw)) or fn,
     )
 
-    pid_file = server_pid_path()
+    pid_file = runtime_paths.server_pid_path()
     cleanup_ran = False
     try:
-        server_mod.main()
+        server_mod.main([])
 
         assert pid_file.exists(), "main() must create the pid file"
         # Cross-platform: pid file must be non-empty. ``LockFileEx`` blocks
