@@ -766,6 +766,359 @@ class TestNoHardcodedStrings:
             f"'parse error' must map to settings.ctx.status_parse_error; got: {m.group(1)!r}"
         )
 
+    def test_q_pr4_langchange_listener_branches_per_type(self) -> None:
+        """Q-PR4 (#826): the langchange listener must extend its overview-only
+        gating from PR #824 to also cover the three per-type list sections
+        (``settings-ctx-skills`` / ``settings-ctx-commands`` /
+        ``settings-ctx-agents``). Without per-section refresh, inline-``t()``
+        regions in the list view (``_ctxScopeBadges``,
+        ``_ctxRefreshSectionState``, ``renderRuntimeBadges``,
+        ``renderImportResult``) stale on toggle until the next user action
+        rebuilds the list — the same class of staleness PR #824 fixed for
+        the overview cards.
+        """
+        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        m = re.search(
+            r"window\.addEventListener\('langchange',\s*\(\)\s*=>\s*\{(.+?)\}\);",
+            text,
+            re.DOTALL,
+        )
+        assert m, "langchange listener missing from context-gateway.js"
+        body = m.group(1)
+        # All three per-type sections must be referenced — using the
+        # template literal ``settings-ctx-${type}`` is the canonical form,
+        # but we accept literal strings too in case a refactor inlines them.
+        for type_name in ("skills", "commands", "agents"):
+            literal = f"settings-ctx-{type_name}"
+            template_via_loop = "for (const type of ['skills'" in body and (
+                "settings-ctx-${type}" in body
+            )
+            assert literal in body or template_via_loop, (
+                f"langchange listener must reference {literal} (or iterate "
+                f"['skills','commands','agents'] and template into "
+                f"settings-ctx-${{type}})"
+            )
+        assert "loadCtxList(" in body, (
+            "langchange listener must call loadCtxList() to rebuild the "
+            "active per-type section's inline-t() regions"
+        )
+
+    def test_q_pr4_langchange_listener_routes_runtime_only_detail(self) -> None:
+        """Q-PR4 (#826): if a detail pane is open at toggle time, the
+        listener must route the re-mount through the *correct* loader.
+        ``loadCtxDetail`` GETs the canonical file and 404s for runtime-only
+        items; ``_ctxLoadRuntimeOnlyDetail`` uses the diff endpoint as
+        preview source. Both must be reachable from the listener, gated by
+        the ``runtimeOnly`` flag on ``_ctxCurrentDetail``.
+        """
+        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        m = re.search(
+            r"window\.addEventListener\('langchange',\s*\(\)\s*=>\s*\{(.+?)\}\);",
+            text,
+            re.DOTALL,
+        )
+        assert m, "langchange listener missing from context-gateway.js"
+        body = m.group(1)
+        assert "loadCtxDetail(" in body, (
+            "langchange listener must call loadCtxDetail() to re-mount the canonical detail pane"
+        )
+        assert "_ctxLoadRuntimeOnlyDetail(" in body, (
+            "langchange listener must call _ctxLoadRuntimeOnlyDetail() to "
+            "re-mount runtime-only detail panes (otherwise they 404 into "
+            "emptyState — review finding P2)"
+        )
+        assert "_ctxCurrentDetail" in body, (
+            "langchange listener must read _ctxCurrentDetail to find the "
+            "currently-open detail name + runtimeOnly flag"
+        )
+        assert "runtimeOnly" in body, (
+            "langchange listener must branch on the runtimeOnly flag to "
+            "choose between loadCtxDetail and _ctxLoadRuntimeOnlyDetail"
+        )
+
+    def test_q_pr4_langchange_listener_preserves_diff_tab(self) -> None:
+        """Q-PR4 (#826): if the Diff tab is the active pane when language
+        toggles, ``loadCtxDetail`` must be re-invoked with
+        ``autoOpenDiff: true`` so ``_ctxLoadDiff`` runs and re-renders
+        ``renderDroppedChips``. Without active-tab capture, the re-mount
+        lands on the Canonical pane and the Diff content (including chips)
+        stays stale until the user clicks Diff manually — review finding
+        P1.
+        """
+        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        m = re.search(
+            r"window\.addEventListener\('langchange',\s*\(\)\s*=>\s*\{(.+?)\}\);",
+            text,
+            re.DOTALL,
+        )
+        assert m, "langchange listener missing from context-gateway.js"
+        body = m.group(1)
+        # Active-tab capture: must query for the .ctx-detail-tab[data-pane="diff"]
+        # element and check whether it carries ``.active``.
+        assert 'data-pane="diff"' in body or "data-pane='diff'" in body, (
+            "langchange listener must locate the Diff tab via "
+            '.ctx-detail-tab[data-pane="diff"] to capture active state'
+        )
+        assert ".active" in body, (
+            "langchange listener must check the Diff tab's .active class "
+            "before deciding autoOpenDiff"
+        )
+        assert "autoOpenDiff" in body, (
+            "langchange listener must thread autoOpenDiff into loadCtxDetail() "
+            "so the Diff pane loads (and renders dropped-chips) on re-mount"
+        )
+
+    def test_q_pr4_langchange_listener_clears_import_status(self) -> None:
+        """Q-PR4 (#826): the post-Import status box (``ctx-${type}-status``)
+        is rendered via inline ``t()`` in
+        ``renderImportResult`` and would stale on toggle until the next
+        Import or list reload. The listener clears it explicitly rather
+        than caching the receipt — caching would resurrect a stale message
+        in misleading form after navigation. Matches the
+        ``statusEl.innerHTML = ''`` behavior at the top of ``loadCtxList``
+        itself.
+        """
+        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        m = re.search(
+            r"window\.addEventListener\('langchange',\s*\(\)\s*=>\s*\{(.+?)\}\);",
+            text,
+            re.DOTALL,
+        )
+        assert m, "langchange listener missing from context-gateway.js"
+        body = m.group(1)
+        # The clear happens implicitly via ``loadCtxList`` (which clears
+        # ``statusEl.innerHTML`` near its top). Pin both the call and the
+        # absence of any caching of the import-result payload.
+        assert "loadCtxList(" in body, (
+            "langchange listener must invoke loadCtxList() — its existing "
+            "statusEl.innerHTML='' at the top of the function clears the "
+            "Import status receipt"
+        )
+        # Symmetric negative: no rerender-from-cache for import results.
+        assert "renderImportResult" not in body, (
+            "langchange listener must NOT cache + re-render Import receipts; "
+            "the status box is ephemeral by design"
+        )
+
+    def test_q_pr4_loadCtxList_has_sequence_guard_all_sites(self) -> None:
+        """Q-PR4 (#826) review finding P2: the ``_ctxListSeq`` race-guard
+        must protect *every* stale-write site, not just the success path.
+        A late-failing fetch from a previous toggle would otherwise paint
+        ``emptyState`` over the latest list, and a late
+        ``_loadScopeGroupItems`` response would clobber the rebuilt
+        ``ctx-scope-items`` container or re-insert a stale runtime-only
+        banner.
+
+        Sites that need guards:
+        * ``loadCtxList`` success path (post-await, before listEl.innerHTML)
+        * ``loadCtxList`` catch path (before emptyState write)
+        * ``_loadScopeGroupItems`` success path (post-await, before
+          container.innerHTML + _ctxRefreshSectionState)
+        * ``_loadScopeGroupItems`` catch path (before emptyState write)
+        """
+        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        assert "_ctxListSeq" in text, "missing _ctxListSeq module counter — Q-PR4 list race guard"
+        assert re.search(r"const seq\s*=\s*\+\+_ctxListSeq\[type\]", text), (
+            "loadCtxList must capture-and-bump _ctxListSeq[type] at entry"
+        )
+        # The bail check appears as ``if (seq !== _ctxListSeq[type]) return;``
+        # at every stale-write site. We expect ≥ 4 occurrences total
+        # (loadCtxList success + catch, _loadScopeGroupItems success + catch).
+        guards = re.findall(r"if \(seq !==\s*_ctxListSeq\[type\]\)\s*return;", text)
+        assert len(guards) >= 4, (
+            f"expected ≥4 _ctxListSeq guards (loadCtxList success+catch + "
+            f"_loadScopeGroupItems success+catch); found {len(guards)}"
+        )
+
+    def test_q_pr4_listener_returns_after_overview_branch(self) -> None:
+        """Q-PR4 (#826): the listener's overview branch must early-return
+        so the per-type-list loop below does not double-fire. The Context
+        Gateway sub-sections are mutually exclusive (one ``.active`` at a
+        time per ``switchSettingsSection``), so falling through after the
+        overview branch is wasted work — and would still be a correctness
+        bug if a future refactor weakened the section-active invariant.
+        """
+        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        m = re.search(
+            r"window\.addEventListener\('langchange',\s*\(\)\s*=>\s*\{(.+?)\}\);",
+            text,
+            re.DOTALL,
+        )
+        assert m, "langchange listener missing from context-gateway.js"
+        body = m.group(1)
+        # Find the overview branch (settings-ctx-overview gate) and
+        # confirm it ends with ``return;`` before the per-type loop.
+        # Using a permissive regex to avoid coupling to brace placement.
+        overview_idx = body.find("settings-ctx-overview")
+        assert overview_idx >= 0, "overview branch missing"
+        per_type_idx = body.find("for (const type of [")
+        assert per_type_idx > overview_idx, "per-type loop must come after the overview branch"
+        between = body[overview_idx:per_type_idx]
+        assert "return" in between, (
+            "overview branch must early-return before falling through to the per-type-list loop"
+        )
+
+    def test_q_pr4_langchange_listener_preserves_edit_buffer(self) -> None:
+        """Review finding (P1, data-loss): when the user has the canonical
+        detail open in Edit mode with an unsaved textarea buffer, the
+        listener's ``loadCtxDetail`` re-issue would overwrite the textarea
+        with fresh server content — silently discarding their work.
+
+        The listener must (a) read ``#ctx-pane-edit`` visibility and
+        ``#ctx-edit-content`` value before ``loadCtxList`` resets the
+        DOM, (b) thread that buffer through to a post-``loadCtxDetail``
+        re-apply step. This is distinct from the 409 ``_ctxStashDraft``
+        path which only triggers on the conflict dialog, not on a normal
+        language toggle.
+        """
+        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        # Slice from the listener's `addEventListener('langchange',` line
+        # to the next "// -- " section comment header (or, defensively,
+        # the next `// Sync All button` block which follows the listener).
+        # A simple lazy-regex body extraction trips on inline object
+        # literals like ``{ autoOpenDiff: wasDiffActive }`` inside
+        # ``loadCtxDetail(...)`` — those ``});`` balance against the
+        # listener's outer ``});``.
+        start = text.find("window.addEventListener('langchange'")
+        assert start >= 0, "langchange listener missing from context-gateway.js"
+        end = text.find("// Sync All button", start)
+        assert end > start, "couldn't locate end-of-listener sentinel"
+        body = text[start:end]
+        # Must reference the edit-pane element + textarea so the dirty
+        # buffer is captured before loadCtxList wipes it.
+        assert "ctx-pane-edit" in body, (
+            "langchange listener must read #ctx-pane-edit visibility to "
+            "detect Edit mode and capture the dirty textarea buffer"
+        )
+        assert "ctx-edit-content" in body, (
+            "langchange listener must read #ctx-edit-content (the textarea) "
+            "to capture the user's unsaved buffer before re-mount"
+        )
+        # The capture+reapply pattern keys off ``loadCtxDetail`` returning
+        # a Promise. The listener must thread a then(...) (or await) so
+        # the buffer re-apply runs after the new detail HTML lands.
+        assert ".then(" in body or "await loadCtxDetail" in body, (
+            "langchange listener must wait for loadCtxDetail's Promise "
+            "before re-applying the captured edit buffer (otherwise the "
+            "re-apply targets the in-flight or wiped DOM)"
+        )
+        # Pre-toggle mtime must be captured *and* restored. ``loadCtxDetail``
+        # overwrites ``detailEl.dataset.mtimeNs`` with the freshly-read
+        # value, so without an explicit restore a post-toggle Save would
+        # send the new mtime with the stale draft and the backend's 409
+        # conflict gate (#763) would not fire — letting the user clobber
+        # an external edit. The capture must reference ``dataset.mtimeNs``
+        # *before* loadCtxList wipes it, and the restore must reference
+        # it inside the post-loadCtxDetail then().
+        assert "dataset.mtimeNs" in body, (
+            "langchange listener must capture/restore detailEl.dataset.mtimeNs "
+            "to preserve mtime conflict protection across the toggle "
+            "(otherwise a concurrent on-disk edit gets silently overwritten)"
+        )
+
+    def test_q_pr4_detail_loaders_have_sequence_guard(self) -> None:
+        """Review finding (P2): ``loadCtxDetail`` and
+        ``_ctxLoadRuntimeOnlyDetail`` must guard their innerHTML writes
+        with ``_ctxDetailSeq[type]``. Both paint the same ``detailEl``,
+        so a stale fetch from a previous langchange / card-click can
+        overwrite a fresher render — silently dropping a buffer the
+        listener just rehydrated. Pin: per-type counter declared with
+        all three keys; bumped at the entry of each loader; checked at
+        the success and catch innerHTML write sites in both functions.
+        """
+        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        assert re.search(
+            r"_ctxDetailSeq\s*=\s*\{[^}]*skills[^}]*commands[^}]*agents[^}]*\}",
+            text,
+        ), "missing _ctxDetailSeq counter with all three keys"
+        assert re.search(r"const seq\s*=\s*\+\+_ctxDetailSeq\[type\]", text), (
+            "loadCtxDetail / _ctxLoadRuntimeOnlyDetail must capture-and-bump "
+            "_ctxDetailSeq[type] at entry"
+        )
+        # Both loaders write innerHTML in success + catch paths. Expect
+        # at least 3 guards in loadCtxDetail (404 fast-path + success +
+        # catch) and 2 in _ctxLoadRuntimeOnlyDetail (success + catch).
+        # Cumulative ≥5 guards across the file.
+        guards = re.findall(r"if \(seq !==\s*_ctxDetailSeq\[type\]\)\s*return;", text)
+        assert len(guards) >= 5, (
+            f"expected ≥5 _ctxDetailSeq guards across loadCtxDetail and "
+            f"_ctxLoadRuntimeOnlyDetail (success + catch sites in both, "
+            f"plus the 404 fast-path); found {len(guards)}"
+        )
+
+    def test_q_pr4_listener_uses_pending_edit_module_stash(self) -> None:
+        """Review finding (P2): edit-buffer preservation across rapid
+        toggles requires a *module-level* stash, not a closure-local
+        capture. With a closure capture, T2 (which finds an
+        already-wiped DOM after T1's loadCtxList) yields ``null`` and
+        T2's mount has no buffer to apply — silently dropped. The
+        module-level ``_ctxPendingEdit`` carries forward; only the
+        latest detail mount's ``.then()`` (gated by
+        ``_ctxDetailSeq``) consumes it.
+        """
+        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        # Module-level declaration.
+        assert re.search(r"^let _ctxPendingEdit\s*=\s*null;", text, re.MULTILINE), (
+            "missing module-level _ctxPendingEdit declaration"
+        )
+        # Listener reads + writes the stash + clears after consumption.
+        start = text.find("window.addEventListener('langchange'")
+        assert start >= 0, "langchange listener missing"
+        end = text.find("// Sync All button", start)
+        assert end > start, "couldn't locate end-of-listener sentinel"
+        body = text[start:end]
+        assert "_ctxPendingEdit = {" in body, (
+            "listener must populate _ctxPendingEdit with the captured buffer"
+        )
+        assert "_ctxPendingEdit = null" in body, (
+            "listener must clear _ctxPendingEdit after the latest mount "
+            "applies it (otherwise a subsequent unrelated mount would "
+            "stamp stale content into the new textarea)"
+        )
+        # The .then() bails when its captured detail seq has been
+        # superseded — this is what gives the *latest* mount sole
+        # authority to consume the stash.
+        assert re.search(
+            r"myDetailSeq\s*!==\s*_ctxDetailSeq\[type\]",
+            body,
+        ), (
+            "listener .then() must compare its captured myDetailSeq to "
+            "_ctxDetailSeq[type] so older mounts skip the buffer apply "
+            "(otherwise an older .then() races a newer one for the DOM)"
+        )
+
+    def test_q_pr4_ctxCurrentDetail_carries_runtime_only_flag(self) -> None:
+        """Q-PR4 (#826) review finding P2: ``_ctxCurrentDetail`` must carry
+        a ``runtimeOnly`` flag so the langchange listener can route the
+        re-mount through the correct loader. The flag is set at the two
+        call-sites that mount a detail pane (``loadCtxDetail`` →
+        ``runtimeOnly: false``; ``_ctxLoadRuntimeOnlyDetail`` →
+        ``runtimeOnly: true``) and reset at the top of ``loadCtxList``.
+        Without the flag the listener cannot disambiguate canonical vs
+        runtime-only items after the list is rebuilt — the card's
+        ``data-canonical-path`` attribute is gone with the wiped DOM.
+        """
+        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        # Declaration includes the field with a default.
+        assert re.search(
+            r"_ctxCurrentDetail\s*=\s*\{[^}]*runtimeOnly\s*:\s*false[^}]*\}",
+            text,
+        ), "_ctxCurrentDetail declaration must include runtimeOnly: false"
+        # Canonical loader sets runtimeOnly: false.
+        canonical_assigns = re.findall(
+            r"_ctxCurrentDetail\s*=\s*\{\s*type\s*,\s*name\s*,\s*runtimeOnly\s*:\s*false\s*\}",
+            text,
+        )
+        assert canonical_assigns, "loadCtxDetail must set _ctxCurrentDetail.runtimeOnly = false"
+        # Runtime-only loader sets runtimeOnly: true.
+        runtime_assigns = re.findall(
+            r"_ctxCurrentDetail\s*=\s*\{\s*type\s*,\s*name\s*,\s*runtimeOnly\s*:\s*true\s*\}",
+            text,
+        )
+        assert runtime_assigns, (
+            "_ctxLoadRuntimeOnlyDetail must set _ctxCurrentDetail.runtimeOnly = true"
+        )
+
     def test_q_pr2_nav_label_translated_in_ko(self, en: dict[str, str], ko: dict[str, str]) -> None:
         """Q-PR2 Drift-1: the Context Gateway sidebar nav label
         (``settings.nav.ctx_overview``) used to be the English literal
