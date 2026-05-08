@@ -6,6 +6,7 @@ basic config operations with mocked components.
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -452,7 +453,14 @@ class TestSaveConfigOverrides:
     # ── Load-path defensive tests (unrelated to delta semantic) ────────
 
     def test_memory_dirs_survives_save_load(self, isolated):
-        """User-added memory_dirs (distinct from factory) must survive save→load."""
+        """User-added memory_dirs (distinct from factory) must survive save→load.
+
+        Compare via ``Path.expanduser().resolve()`` rather than raw string
+        equality. Phase 1 (#836) persists home-rooted paths in ``~/...``
+        portable form, so the loaded list won't match the raw input string
+        verbatim when ``tmp_path`` happens to land under ``$HOME`` (true on
+        Windows CI under ``C:\\Users\\runneradmin\\AppData\\Local\\Temp``).
+        """
         tmp_path = isolated["tmp_path"]
 
         cfg = Mem2MemConfig()
@@ -462,9 +470,9 @@ class TestSaveConfigOverrides:
         fresh = Mem2MemConfig()
         load_config_overrides(fresh)
 
-        loaded_dirs = [str(p) for p in fresh.indexing.memory_dirs]
-        assert str(tmp_path / "a") in loaded_dirs
-        assert str(tmp_path / "b") in loaded_dirs
+        loaded_resolved = {Path(p).expanduser().resolve() for p in fresh.indexing.memory_dirs}
+        assert (tmp_path / "a").resolve() in loaded_resolved
+        assert (tmp_path / "b").resolve() in loaded_resolved
 
     def test_invalid_value_falls_back_to_default(self, isolated):
         """Invalid values in config.json should be skipped with warning, not crash."""
