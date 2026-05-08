@@ -891,7 +891,7 @@ function panelLoading(container) {
 }
 
 // ── A5: Empty State ──
-// Wrapper is emitted by the function so callers don't need an `.empty-state` ancestor.
+// Owns its `.empty-state` wrapper — callers must NOT add their own.
 function emptyState(icon, message, hint) {
   const i = icon ? `<span class="empty-state-icon">${icon}</span>` : '';
   const h = hint ? `<span class="empty-state-hint">${escapeHtml(hint)}</span>` : '';
