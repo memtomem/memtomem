@@ -373,6 +373,98 @@ def test_q_pr4_langchange_clears_import_status_box(page, mm_web_url: str) -> Non
     )
 
 
+def test_q_pr4_langchange_preserves_unsaved_edit_buffer(page, mm_web_url: str) -> None:
+    """Review finding (P1, data-loss): when the user has the canonical
+    detail open in Edit mode with unsaved textarea changes, a language
+    toggle would refetch and silently discard their work. The listener
+    must capture the dirty buffer + edit-mode flag *before*
+    ``loadCtxList`` resets the panes, then re-apply after
+    ``loadCtxDetail``'s re-mount completes.
+
+    This is distinct from the 409-conflict ``_ctxStashDraft`` path —
+    that one stashes only when the user enters the conflict dialog, so
+    a normal Edit-mode toggle has no protection there.
+
+    Pin: enter Edit mode, type a sentinel into the textarea, toggle
+    language, assert the textarea retains the user's content (not the
+    server's freshly-fetched canonical_content) and the edit pane
+    remains visible.
+    """
+    _install_default_stubs(page)
+    _stub_projects(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
+    _stub_skills(page, _CWD_SKILLS_ITEMS)
+    page.route(
+        "**/api/context/skills/demo-skill",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "name": "demo-skill",
+                    "canonical_path": "/srv/cwd/.memtomem/skills/demo-skill.md",
+                    "content": "SERVER-CANONICAL-CONTENT\n",
+                    "mtime_ns": "1700000000000000000",
+                    "files": [],
+                }
+            ),
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_skills_list(page)
+    page.wait_for_function(
+        "() => document.querySelectorAll("
+        '  \'#ctx-skills-list details[data-scope-id="cwd-scope"] '
+        ".ctx-card').length > 0",
+        timeout=5_000,
+    )
+    page.locator("#ctx-skills-list details[data-scope-id='cwd-scope'] .ctx-card").first.click()
+    page.wait_for_selector("#ctx-skills-detail .ctx-detail-edit-btn", timeout=3_000)
+    # Enter Edit mode — flips #ctx-pane-edit visible and hides the tabs
+    # (per loadCtxDetail's edit handler).
+    page.locator("#ctx-skills-detail .ctx-detail-edit-btn").click()
+    page.wait_for_function(
+        "() => {"
+        "  const ep = document.querySelector('#ctx-skills-detail #ctx-pane-edit');"
+        "  return ep && !ep.hidden;"
+        "}",
+        timeout=2_000,
+    )
+    # Type a sentinel — distinct from the server canonical_content so a
+    # silent refetch-and-overwrite would be deterministically observable.
+    page.evaluate(
+        """() => {
+            const ta = document.querySelector('#ctx-skills-detail #ctx-edit-content');
+            ta.value = 'USER-IN-PROGRESS-DRAFT-SENTINEL';
+        }"""
+    )
+
+    page.evaluate("async () => { await I18N.setLang('ko'); }")
+    # The listener should: stash the buffer, call loadCtxList (wipes
+    # detail), call loadCtxDetail (refetches canonical), then re-apply
+    # the buffer + reopen the edit pane on the freshly-mounted DOM.
+    page.wait_for_function(
+        "() => {"
+        "  const ta = document.querySelector('#ctx-skills-detail #ctx-edit-content');"
+        "  const ep = document.querySelector('#ctx-skills-detail #ctx-pane-edit');"
+        "  return ta && ep && !ep.hidden && ta.value === 'USER-IN-PROGRESS-DRAFT-SENTINEL';"
+        "}",
+        timeout=4_000,
+    )
+    post_value = page.evaluate(
+        "() => document.querySelector('#ctx-skills-detail #ctx-edit-content').value"
+    )
+    assert post_value == "USER-IN-PROGRESS-DRAFT-SENTINEL", (
+        f"unsaved edit buffer must survive langchange — got: {post_value!r}"
+    )
+    # Symmetric negative: the server canonical content must NOT have
+    # silently replaced the user's work.
+    assert "SERVER-CANONICAL-CONTENT" not in post_value, (
+        f"server canonical content must not silently overwrite the user's "
+        f"in-progress edits on language toggle (data-loss regression): "
+        f"{post_value!r}"
+    )
+
+
 def test_q_pr4_langchange_rerenders_dropped_chips_in_diff_pane(page, mm_web_url: str) -> None:
     """``renderDroppedChips`` lives inside the Diff pane of the canonical
     detail. Without active-tab capture, a ``loadCtxDetail`` re-mount

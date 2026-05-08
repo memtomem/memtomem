@@ -338,6 +338,19 @@ window.addEventListener('langchange', () => {
     const wasDiffActive = openName && detailEl
       ? detailEl.querySelector('.ctx-detail-tab[data-pane="diff"].active') != null
       : false;
+    // Edit-mode buffer preservation: if the user has the canonical
+    // detail open in Edit mode (#ctx-pane-edit visible) with unsaved
+    // changes in the textarea, ``loadCtxDetail`` would refetch and
+    // overwrite the rendered HTML — silently discarding their work.
+    // Capture the buffer + edit-mode flag here, then re-apply after
+    // the re-mount completes (loadCtxDetail returns a Promise). The
+    // existing 409-conflict ``_ctxStashDraft`` path uses sessionStorage
+    // and emits a "draft restored" toast; we keep the langchange path
+    // in-memory + toastless to avoid mis-attributing the recovery.
+    const editPane = detailEl ? detailEl.querySelector('#ctx-pane-edit') : null;
+    const editTextarea = detailEl ? detailEl.querySelector('#ctx-edit-content') : null;
+    const wasEditing = editPane != null && !editPane.hidden;
+    const dirtyBuffer = wasEditing && editTextarea ? editTextarea.value : null;
 
     loadCtxList(type);
 
@@ -345,7 +358,24 @@ window.addEventListener('langchange', () => {
       if (openRuntimeOnly) {
         _ctxLoadRuntimeOnlyDetail(type, openName, detailEl);
       } else {
-        loadCtxDetail(type, openName, { autoOpenDiff: wasDiffActive });
+        const detailPromise = loadCtxDetail(type, openName, { autoOpenDiff: wasDiffActive });
+        if (dirtyBuffer != null && detailPromise && typeof detailPromise.then === 'function') {
+          detailPromise.then(() => {
+            // Re-resolve panes — the previous detailEl children were
+            // wiped by loadCtxDetail's innerHTML rewrite.
+            const newTa = detailEl.querySelector('#ctx-edit-content');
+            const newCanonPane = detailEl.querySelector('#ctx-pane-canonical');
+            const newEditPane = detailEl.querySelector('#ctx-pane-edit');
+            if (newTa) newTa.value = dirtyBuffer;
+            if (newCanonPane) newCanonPane.hidden = true;
+            if (newEditPane) newEditPane.hidden = false;
+            // Match the in-edit affordance: tabs are hidden while editing
+            // (see the Edit click handler in loadCtxDetail).
+            detailEl.querySelectorAll('.ctx-detail-tab').forEach(tab => {
+              tab.style.display = 'none';
+            });
+          });
+        }
       }
     }
     return;

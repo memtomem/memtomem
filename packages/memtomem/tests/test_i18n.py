@@ -958,6 +958,51 @@ class TestNoHardcodedStrings:
             "overview branch must early-return before falling through to the per-type-list loop"
         )
 
+    def test_q_pr4_langchange_listener_preserves_edit_buffer(self) -> None:
+        """Review finding (P1, data-loss): when the user has the canonical
+        detail open in Edit mode with an unsaved textarea buffer, the
+        listener's ``loadCtxDetail`` re-issue would overwrite the textarea
+        with fresh server content — silently discarding their work.
+
+        The listener must (a) read ``#ctx-pane-edit`` visibility and
+        ``#ctx-edit-content`` value before ``loadCtxList`` resets the
+        DOM, (b) thread that buffer through to a post-``loadCtxDetail``
+        re-apply step. This is distinct from the 409 ``_ctxStashDraft``
+        path which only triggers on the conflict dialog, not on a normal
+        language toggle.
+        """
+        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        # Slice from the listener's `addEventListener('langchange',` line
+        # to the next "// -- " section comment header (or, defensively,
+        # the next `// Sync All button` block which follows the listener).
+        # A simple lazy-regex body extraction trips on inline object
+        # literals like ``{ autoOpenDiff: wasDiffActive }`` inside
+        # ``loadCtxDetail(...)`` — those ``});`` balance against the
+        # listener's outer ``});``.
+        start = text.find("window.addEventListener('langchange'")
+        assert start >= 0, "langchange listener missing from context-gateway.js"
+        end = text.find("// Sync All button", start)
+        assert end > start, "couldn't locate end-of-listener sentinel"
+        body = text[start:end]
+        # Must reference the edit-pane element + textarea so the dirty
+        # buffer is captured before loadCtxList wipes it.
+        assert "ctx-pane-edit" in body, (
+            "langchange listener must read #ctx-pane-edit visibility to "
+            "detect Edit mode and capture the dirty textarea buffer"
+        )
+        assert "ctx-edit-content" in body, (
+            "langchange listener must read #ctx-edit-content (the textarea) "
+            "to capture the user's unsaved buffer before re-mount"
+        )
+        # The capture+reapply pattern keys off ``loadCtxDetail`` returning
+        # a Promise. The listener must thread a then(...) (or await) so
+        # the buffer re-apply runs after the new detail HTML lands.
+        assert ".then(" in body or "await loadCtxDetail" in body, (
+            "langchange listener must wait for loadCtxDetail's Promise "
+            "before re-applying the captured edit buffer (otherwise the "
+            "re-apply targets the in-flight or wiped DOM)"
+        )
+
     def test_q_pr4_ctxCurrentDetail_carries_runtime_only_flag(self) -> None:
         """Q-PR4 (#826) review finding P2: ``_ctxCurrentDetail`` must carry
         a ``runtimeOnly`` flag so the langchange listener can route the
