@@ -351,6 +351,15 @@ window.addEventListener('langchange', () => {
     const editTextarea = detailEl ? detailEl.querySelector('#ctx-edit-content') : null;
     const wasEditing = editPane != null && !editPane.hidden;
     const dirtyBuffer = wasEditing && editTextarea ? editTextarea.value : null;
+    // Preserve the *pre-toggle* mtime alongside the dirty buffer.
+    // ``loadCtxDetail`` overwrites ``detailEl.dataset.mtimeNs`` with the
+    // freshly-read value (line ~988); without restoring the original, a
+    // Save after the toggle would send the new mtime with the stale
+    // draft and the backend's 409 conflict gate (issue #763) would not
+    // fire — silently letting the user clobber an external edit. Only
+    // captured when wasEditing so we don't pin a stale mtime onto a
+    // canonical-pane re-mount.
+    const preToggleMtime = wasEditing && detailEl ? (detailEl.dataset.mtimeNs || '') : null;
 
     loadCtxList(type);
 
@@ -374,6 +383,13 @@ window.addEventListener('langchange', () => {
             detailEl.querySelectorAll('.ctx-detail-tab').forEach(tab => {
               tab.style.display = 'none';
             });
+            // Restore the pre-toggle mtime so the next Save still
+            // surfaces a 409 if the file changed on disk during the
+            // toggle window. Falls through to the existing
+            // ``_ctxHandleConflict`` flow with the user's draft intact.
+            if (preToggleMtime != null) {
+              detailEl.dataset.mtimeNs = preToggleMtime;
+            }
           });
         }
       }

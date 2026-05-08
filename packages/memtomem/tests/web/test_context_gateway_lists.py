@@ -465,6 +465,113 @@ def test_q_pr4_langchange_preserves_unsaved_edit_buffer(page, mm_web_url: str) -
     )
 
 
+def test_q_pr4_langchange_preserves_mtime_for_dirty_buffer(page, mm_web_url: str) -> None:
+    """Review finding (P1, mtime conflict bypass): when a file changes
+    on disk while the user has unsaved Edit-mode changes and they
+    toggle language, ``loadCtxDetail`` overwrites
+    ``detailEl.dataset.mtimeNs`` with the fresh on-disk mtime. If the
+    listener didn't restore the *pre-toggle* mtime, the next Save
+    would PUT the stale draft with the new mtime and bypass the
+    backend's 409 conflict gate (issue #763), silently clobbering the
+    external edit.
+
+    Pin: open Edit mode at mtime=A, then route the canonical GET to
+    return mtime=B (simulating an external edit during the toggle
+    window), toggle language, assert ``detailEl.dataset.mtimeNs``
+    still equals A so the next Save's PUT body carries the original
+    pre-edit mtime.
+    """
+    _install_default_stubs(page)
+    _stub_projects(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
+    _stub_skills(page, _CWD_SKILLS_ITEMS)
+    # Two distinct mtime values — A is the mtime the user started
+    # editing against; B simulates an external edit landing during
+    # the toggle window. The listener must keep A on the textarea
+    # buffer so a Save re-surfaces the 409.
+    initial_resp = {
+        "name": "demo-skill",
+        "canonical_path": "/srv/cwd/.memtomem/skills/demo-skill.md",
+        "content": "ORIGINAL\n",
+        "mtime_ns": "1700000000000000000",  # A
+        "files": [],
+    }
+    refreshed_resp = {
+        "name": "demo-skill",
+        "canonical_path": "/srv/cwd/.memtomem/skills/demo-skill.md",
+        "content": "EXTERNALLY-EDITED\n",
+        "mtime_ns": "1800000000000000000",  # B
+        "files": [],
+    }
+    call_count = {"n": 0}
+
+    def _detail_handler(route):
+        idx = call_count["n"]
+        call_count["n"] += 1
+        body = json.dumps(initial_resp if idx == 0 else refreshed_resp)
+        route.fulfill(status=200, content_type="application/json", body=body)
+
+    page.route("**/api/context/skills/demo-skill", _detail_handler)
+    page.goto(mm_web_url)
+    _open_skills_list(page)
+    page.wait_for_function(
+        "() => document.querySelectorAll("
+        '  \'#ctx-skills-list details[data-scope-id="cwd-scope"] '
+        ".ctx-card').length > 0",
+        timeout=5_000,
+    )
+    page.locator("#ctx-skills-list details[data-scope-id='cwd-scope'] .ctx-card").first.click()
+    page.wait_for_function(
+        "() => document.querySelector('#ctx-skills-detail').dataset.mtimeNs "
+        "=== '1700000000000000000'",
+        timeout=3_000,
+    )
+    page.locator("#ctx-skills-detail .ctx-detail-edit-btn").click()
+    page.wait_for_function(
+        "() => {"
+        "  const ep = document.querySelector('#ctx-skills-detail #ctx-pane-edit');"
+        "  return ep && !ep.hidden;"
+        "}",
+        timeout=2_000,
+    )
+    page.evaluate(
+        """() => {
+            const ta = document.querySelector('#ctx-skills-detail #ctx-edit-content');
+            ta.value = 'USER-IN-PROGRESS-DRAFT';
+        }"""
+    )
+
+    # Toggle language. The detail GET handler returns mtime B on this
+    # second call, simulating an external on-disk edit landing during
+    # the toggle window.
+    page.evaluate("async () => { await I18N.setLang('ko'); }")
+    page.wait_for_function(
+        "() => {"
+        "  const ta = document.querySelector('#ctx-skills-detail #ctx-edit-content');"
+        "  return ta && ta.value === 'USER-IN-PROGRESS-DRAFT';"
+        "}",
+        timeout=4_000,
+    )
+    # The critical assertion: dataset.mtimeNs must be A (pre-toggle),
+    # not B (the freshly-read value). Without the listener's restore
+    # step, loadCtxDetail's `detailEl.dataset.mtimeNs = data.mtime_ns`
+    # write at line ~988 would have stamped B onto the element while
+    # the textarea still carried A's draft — exactly the 409-bypass
+    # the review flagged.
+    final_mtime = page.evaluate(
+        "() => document.querySelector('#ctx-skills-detail').dataset.mtimeNs"
+    )
+    assert final_mtime == "1700000000000000000", (
+        f"pre-toggle mtime must be restored when the textarea carries an "
+        f"unsaved buffer; got {final_mtime!r}. The freshly-read mtime "
+        f"(1800...) on the dirty buffer would let Save bypass the 409 "
+        f"conflict gate and silently overwrite the external edit."
+    )
+    assert final_mtime != "1800000000000000000", (
+        f"refreshed mtime ({final_mtime!r}) must not stamp onto a dirty "
+        f"buffer — that's the 409 bypass the review flagged"
+    )
+
+
 def test_q_pr4_langchange_rerenders_dropped_chips_in_diff_pane(page, mm_web_url: str) -> None:
     """``renderDroppedChips`` lives inside the Diff pane of the canonical
     detail. Without active-tab capture, a ``loadCtxDetail`` re-mount

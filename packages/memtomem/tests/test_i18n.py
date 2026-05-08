@@ -1002,6 +1002,19 @@ class TestNoHardcodedStrings:
             "before re-applying the captured edit buffer (otherwise the "
             "re-apply targets the in-flight or wiped DOM)"
         )
+        # Pre-toggle mtime must be captured *and* restored. ``loadCtxDetail``
+        # overwrites ``detailEl.dataset.mtimeNs`` with the freshly-read
+        # value, so without an explicit restore a post-toggle Save would
+        # send the new mtime with the stale draft and the backend's 409
+        # conflict gate (#763) would not fire — letting the user clobber
+        # an external edit. The capture must reference ``dataset.mtimeNs``
+        # *before* loadCtxList wipes it, and the restore must reference
+        # it inside the post-loadCtxDetail then().
+        assert "dataset.mtimeNs" in body, (
+            "langchange listener must capture/restore detailEl.dataset.mtimeNs "
+            "to preserve mtime conflict protection across the toggle "
+            "(otherwise a concurrent on-disk edit gets silently overwritten)"
+        )
 
     def test_q_pr4_ctxCurrentDetail_carries_runtime_only_flag(self) -> None:
         """Q-PR4 (#826) review finding P2: ``_ctxCurrentDetail`` must carry
