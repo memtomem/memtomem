@@ -85,14 +85,19 @@ def _compare_hooks(
     if not isinstance(target_hooks, dict):
         target_hooks = {}
 
-    # Index target rules by (event, matcher)
-    target_index: dict[tuple[str, str], dict] = {}
+    # Index target rules by (event, matcher) preserving multiplicity. Claude
+    # Code allows the same matcher (or no matcher) to appear more than once
+    # under one event, so collapsing to a single dict-of-rule lets a
+    # byte-identical canonical contribution mismatch the *second* user rule
+    # and surface as a false-positive conflict (mirrors the same fix on the
+    # merge side in PR #844).
+    target_index: dict[tuple[str, str], list[dict]] = {}
     for event, rules in target_hooks.items():
         if not isinstance(rules, list):
             continue
         for rule in rules:
             if isinstance(rule, dict):
-                target_index[(event, rule.get("matcher", ""))] = rule
+                target_index.setdefault((event, rule.get("matcher", "")), []).append(rule)
 
     for event, rules in canonical_hooks.items():
         if not isinstance(rules, list):
@@ -102,18 +107,23 @@ def _compare_hooks(
                 continue
             matcher = rule.get("matcher", "")
             key = (event, matcher)
+            same_matcher = target_index.get(key, [])
 
-            if key in target_index:
-                if target_index[key] == rule:
+            if same_matcher:
+                if any(existing == rule for existing in same_matcher):
                     result["hooks"]["synced"].append(
                         {"event": event, "matcher": matcher, "rule": rule}
                     )
                 else:
+                    # Surface the first same-matcher rule as the conflict
+                    # representative — keeps the API payload shape stable
+                    # for the resolve flow while not silently shadowing the
+                    # rest of the user's same-matcher rules.
                     result["hooks"]["conflicts"].append(
                         {
                             "event": event,
                             "matcher": matcher,
-                            "existing": target_index[key],
+                            "existing": same_matcher[0],
                             "proposed": rule,
                         }
                     )

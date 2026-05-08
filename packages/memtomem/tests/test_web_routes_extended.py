@@ -702,6 +702,49 @@ class TestSettingsSync:
             elif target.is_file():
                 target.unlink()
 
+    async def test_dedup_when_target_has_multiple_same_matcher_rules(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """Pin: target rules with the same (event, matcher) should not collapse during indexing.
+
+        The user can keep two PostToolUse rules under the same matcher (or
+        omit the matcher on both — record-format hooks allow that). Earlier
+        the route indexed ``target_index`` as ``dict[(event, matcher), dict]``,
+        so the second rule silently shadowed the first. A byte-identical
+        canonical contribution then mismatched the second and reported a
+        false-positive conflict. Mirrors the merge-side fix in PR #844 for
+        the corresponding silent-collapse bug on the conflict reporter
+        path.
+        """
+        existing_a = self._rule("Write", "echo first")
+        existing_b = self._rule("Write", "echo second")
+        # Canonical is byte-identical to the user's first rule.
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        canonical.write_text(json.dumps({"hooks": {"PostToolUse": [existing_a]}}), encoding="utf-8")
+
+        target = Path.home() / ".claude" / "settings.json"
+        backup = target.read_text(encoding="utf-8") if target.is_file() else None
+        try:
+            target.write_text(
+                json.dumps({"hooks": {"PostToolUse": [existing_a, existing_b]}}),
+                encoding="utf-8",
+            )
+            app.state.project_root = tmp_path
+
+            resp = await client.get("/api/settings-sync")
+            data = resp.json()
+
+            assert data["status"] == "in_sync"  # was "conflicts" before the fix
+            assert data["hooks"]["conflicts"] == []
+            assert len(data["hooks"]["synced"]) == 1
+            assert data["hooks"]["synced"][0]["matcher"] == "Write"
+        finally:
+            if backup is not None:
+                target.write_text(backup, encoding="utf-8")
+            elif target.is_file():
+                target.unlink()
+
     async def test_resolve_replaces_rule(self, app, client: AsyncClient, tmp_path):
         """POST /resolve replaces the target's rule with canonical version."""
         canonical_rule = self._rule("Write", "echo new")
