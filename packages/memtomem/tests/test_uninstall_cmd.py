@@ -62,7 +62,20 @@ def home(tmp_path, monkeypatch):
     Also isolates ``$XDG_RUNTIME_DIR`` so the new runtime pid file
     location (#412) lives under ``tmp_path`` rather than the developer's
     real ``/run/user/{uid}/memtomem/`` or a shared ``/tmp`` subdir.
+
+    On Windows, ``_runtime_paths.runtime_dir()`` skips the
+    ``XDG_RUNTIME_DIR`` branch entirely (``XDG_RUNTIME_DIR`` is a Linux/
+    systemd convention; the POSIX-mode-bit gate guarding it is
+    meaningless on NTFS) and falls through to
+    ``tempfile.gettempdir() / memtomem-0``. ``gettempdir()`` resolves to
+    the user-shared ``%LOCALAPPDATA%\\Temp\\``, so leftover artifacts
+    from prior pytest runs or concurrent tools blocked the prune
+    assertion in ``TestRuntimePidCleanedWithOther`` (#759 failure 3).
+    Pin ``tempfile.tempdir`` to a per-test path so the runtime dir is
+    always test-scoped, regardless of platform.
     """
+    import tempfile
+
     from memtomem.cli import _bootstrap
     from memtomem.cli import uninstall_cmd
 
@@ -71,6 +84,9 @@ def home(tmp_path, monkeypatch):
     xdg = tmp_path / "xdg_runtime"
     xdg.mkdir()
     os.chmod(xdg, 0o700)  # _runtime_paths validator requires owner-only
+    fake_tempdir = tmp_path / "tempdir"
+    fake_tempdir.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(fake_tempdir))
     set_home(monkeypatch, h)
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
     monkeypatch.setattr(_bootstrap, "_CONFIG_PATH", h / ".memtomem" / "config.json")
