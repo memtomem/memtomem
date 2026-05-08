@@ -45,9 +45,14 @@ async function loadHooksSync() {
       + `<span class="text-muted" style="margin-left:0.5rem;font-size:0.85rem">${escapeHtml(data.target_path || '')}</span>`;
 
     if (data.status === 'no_source' || data.status === 'error') {
-      contentEl.innerHTML = emptyState('', badge.text, data.status === 'no_source'
-        ? 'Create .memtomem/settings.json or run mm init to set up hooks.'
-        : 'Fix the JSON file and reload.');
+      // Status badge above already names the condition — keep the body to
+      // a single actionable line so the same string isn't echoed twice.
+      contentEl.innerHTML = emptyState(
+        '',
+        data.status === 'no_source'
+          ? t('settings.hooks.no_source_hint')
+          : t('settings.hooks.error_hint'),
+      );
       return;
     }
 
@@ -100,7 +105,7 @@ async function loadHooksSync() {
     }
 
     if (!html) {
-      html = emptyState('', t('settings.hooks.in_sync'), 'No hooks defined in .memtomem/settings.json.');
+      html = emptyState('', t('settings.hooks.in_sync'), t('settings.hooks.no_hooks_defined'));
     }
 
     contentEl.innerHTML = html;
@@ -142,7 +147,7 @@ async function loadHooksSync() {
     });
 
   } catch (err) {
-    contentEl.innerHTML = emptyState('', 'Failed to load sync status', err.message);
+    contentEl.innerHTML = emptyState('', t('settings.hooks.load_failed'), err.message);
   }
 }
 
