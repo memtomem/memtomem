@@ -520,9 +520,16 @@ def test_migration_preserves_existing_user_memory_dirs(
     assert cfg.indexing.auto_discover is False
 
     persisted = json.loads(override_path.read_text(encoding="utf-8"))
-    persisted_dirs = set(persisted["indexing"]["memory_dirs"])
-    assert str(user_dir) in persisted_dirs
-    assert str(fake_provider) in persisted_dirs
+    # Phase 1 (#836) persists home-rooted paths in ``~/...`` portable form,
+    # so compare the persisted list via ``Path.expanduser().resolve()``
+    # rather than raw string equality. ``tmp_path`` lands under ``$HOME``
+    # on Windows CI but typically not on POSIX, so a raw-string assertion
+    # is platform-fragile.
+    persisted_resolved = {
+        Path(p).expanduser().resolve() for p in persisted["indexing"]["memory_dirs"]
+    }
+    assert user_dir.resolve() in persisted_resolved
+    assert fake_provider.resolve() in persisted_resolved
     assert persisted["indexing"]["auto_discover"] is False
 
 
@@ -556,13 +563,18 @@ def test_migration_idempotent(
 
     cfg1 = Mem2MemConfig()
     load_config_overrides(cfg1)
-    first_dirs = sorted(str(p) for p in cfg1.indexing.memory_dirs)
+    # First load goes through migration: memory_dirs is the in-memory list
+    # of raw ``Path`` values. Second load reads back the persisted tilde-form
+    # written by Phase 1 (#836). Resolve both before comparison so the round
+    # trip is checked by filesystem identity rather than raw string form
+    # (which differs on Windows where ``tmp_path`` sits under ``$HOME``).
+    first_resolved = sorted(Path(p).expanduser().resolve() for p in cfg1.indexing.memory_dirs)
 
     cfg2 = Mem2MemConfig()
     load_config_overrides(cfg2)
-    second_dirs = sorted(str(p) for p in cfg2.indexing.memory_dirs)
+    second_resolved = sorted(Path(p).expanduser().resolve() for p in cfg2.indexing.memory_dirs)
 
-    assert first_dirs == second_dirs
+    assert first_resolved == second_resolved
 
 
 def test_migration_env_var_false_skips(
