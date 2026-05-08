@@ -49,6 +49,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Also adds an `**/.obsidian/**` example to the
   `configuration.md#exclude-patterns` block.
 
+- **`configuration.md#exclude-patterns` example is now copy-paste-safe
+  (#854).** The block previously used a ` ```jsonc ` fence with a
+  path-label comment on the first line and `//` comments inside the
+  array, but the fragment loader at
+  `packages/memtomem/src/memtomem/config.py:1157` calls strict
+  `json.loads`, so a verbatim copy into `~/.memtomem/config.d/*.json`
+  was dropped after only a single startup-log WARN — practically silent
+  to most users. The example is rewritten to mirror the canonical PR
+  #853 shape: prose lead-in, pure-JSON fence, per-pattern `Why` table
+  underneath, and an explicit strict-loader note. A new
+  `TestNoJsoncFenceInPublicGuides` regression in
+  `packages/memtomem/tests/test_docs_guards.py` fails CI if any
+  `docs/guides/**/*.md` reintroduces a ` ```jsonc ` fence.
+
 ## [0.1.36] — 2026-05-06
 
 ### Added

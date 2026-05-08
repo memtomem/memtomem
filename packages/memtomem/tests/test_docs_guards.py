@@ -17,6 +17,11 @@ These guards protect invariants that code cannot enforce directly:
   the plugin's shipped ``hooks.json`` for every event the snippet
   covers. Drift between the two sites silently ships an outdated
   user-facing recipe.
+- Public guides must not use `````jsonc`` fences for
+  ``config.d`` examples — the fragment loader at
+  ``packages/memtomem/src/memtomem/config.py:1157`` calls strict
+  ``json.loads`` and a ``//`` comment drops the fragment with only a
+  startup-log WARNING (see #854).
 """
 
 from __future__ import annotations
@@ -221,4 +226,37 @@ class TestPluginHooksDocsParity:
             "hooks.json. The two sites must declare byte-identical commands "
             "for every (event, matcher) the docs render. Diffs:\n"
             + "\n".join(f"  {em}:\n    plugin: {p}\n    docs:   {d}" for em, p, d in diffs)
+        )
+
+
+class TestNoJsoncFenceInPublicGuides:
+    """Public guides must not use ```` ```jsonc ```` fences.
+
+    The fragment loader at
+    ``packages/memtomem/src/memtomem/config.py:1157`` calls
+    ``json.loads`` strictly; ``//`` comments and trailing commas raise
+    ``JSONDecodeError`` which the surrounding ``except`` swallows with
+    only a startup-log WARNING (lines 1158-1160). A user who copy-pastes
+    a ``jsonc`` block from a guide ends up with a fragment that never
+    loads and an "exclude_patterns aren't applied" symptom that's hard
+    to trace back to that warn line. The canonical post-fix shape is
+    the pure-JSON fence + prose lead-in + per-row table established by
+    PR #853 in ``multi-device-sync.md`` and applied to
+    ``configuration.md`` in #854.
+    """
+
+    def test_no_jsonc_fence_in_any_public_guide(self) -> None:
+        offenders = sorted(
+            str(md.relative_to(_REPO_ROOT))
+            for md in _GUIDES.rglob("*.md")
+            if "```jsonc" in md.read_text(encoding="utf-8")
+        )
+        assert not offenders, (
+            "Public guides use ```jsonc fences which the strict "
+            "json.loads fragment loader cannot parse "
+            "(packages/memtomem/src/memtomem/config.py:1157). Use "
+            "```json + pure JSON inside the fence and move any //-style "
+            "annotations to surrounding prose or a per-row table — see "
+            "PR #853 / multi-device-sync.md:262-268 for the canonical "
+            f"shape, and #854 for the trap. Offenders: {offenders}"
         )
