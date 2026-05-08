@@ -303,7 +303,7 @@ mm status
 uses, so the output is identical. Useful as a sanity check between
 `mm init` and the first editor-side call.
 
-### Available MCP Tools (79)
+### Available MCP Tools (80)
 
 | Category | Tools |
 |----------|-------|
@@ -339,7 +339,7 @@ uses, so the output is identical. Useful as a sanity check between
 
 \* Requires `MEMTOMEM_TOOL_MODE=full`. In `core` or `standard` mode, use `mm config` (CLI) or the Web UI Settings tab instead.
 
-> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 tools, default), `standard` (core + common packs + `mem_do`), or `full` (all 79 tools individually) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
+> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 tools, default), `standard` (core + common packs + `mem_do`), or `full` (all 80 tools individually) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
 
 ### STM Proxy Tools (optional, separate package)
 
