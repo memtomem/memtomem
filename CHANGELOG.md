@@ -5,6 +5,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **Multi-device sync guide (`docs/guides/multi-device-sync.md`).**
+  Documents the namespace-aligned layout, `.gitignore` recipe, post-pull
+  workflow, and anti-patterns for syncing markdown memories across
+  personal devices via a private git repo. Anchors `mm sync-doctor`
+  (shipped in 0.1.36 via #838) and the home-rooted `config.json`
+  serialization (#836). Inbound links from `README.md`,
+  `docs/guides/getting-started.md`, and
+  `docs/guides/configuration.md` (Moving `config.json` between machines).
+
 ### Changed
 
 - **`config.json` writers serialize home-rooted paths as `~/...`.**

@@ -127,6 +127,12 @@ mm init --fresh
 > (`mm config set`, the Web UI, `mm init`) rewrites home-rooted paths
 > into `~/...` form automatically.
 
+> **Syncing memories across personal devices?** See
+> [Multi-device sync](multi-device-sync.md) for the recommended
+> namespace-aligned layout, a `.gitignore` recipe that keeps `*.db`
+> out of the synced tree, and `mm sync-doctor` for catching the
+> common footguns.
+
 ### Removing individual overrides (`mm config unset`)
 
 `mm config unset <key>` drops a single pinned entry from
