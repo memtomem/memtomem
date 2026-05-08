@@ -38,6 +38,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -139,6 +140,33 @@ def _save(path: Path, entries: dict[str, QueueEntry]) -> None:
         raise
 
 
+# Per-lockfile ``threading.Lock`` for intra-process serialization. The
+# file lock (``portalocker.lock``) is the cross-process barrier, but on
+# Windows ``LockFileEx`` does not reliably block a *second handle* from
+# the *same* process holding the file open through ``open(..., "a+b")`` —
+# two threads in one Python process each opening the sidecar lockfile
+# can both pass ``portalocker.lock(LOCK_EX)`` and race the read-modify-
+# write of the queue, losing entries (#759 failure 2). Holding a
+# threading.Lock keyed to the lockfile path before acquiring the file
+# lock collapses same-process contention to a single waiter, so
+# portalocker only ever sees one handle per process competing.
+_intra_process_locks: dict[Path, threading.Lock] = {}
+_intra_process_locks_guard = threading.Lock()
+
+
+def _intra_process_lock_for(path: Path) -> threading.Lock:
+    """Return the threading.Lock associated with ``path``, creating it
+    on first use. The dict accumulates one entry per distinct lockfile
+    path observed in the process — bounded in practice by the number of
+    queue files (one in normal usage)."""
+    with _intra_process_locks_guard:
+        lock = _intra_process_locks.get(path)
+        if lock is None:
+            lock = threading.Lock()
+            _intra_process_locks[path] = lock
+        return lock
+
+
 class _Lock:
     """``portalocker.lock(LOCK_EX)`` on a sidecar lockfile next to the queue.
 
@@ -151,30 +179,51 @@ class _Lock:
 
     The sidecar (``.<queue_name>.lock``) is never replaced; every
     process locks the same inode for the duration of its critical
-    section, so serialization is correct.
+    section, so serialization is correct across processes.
 
-    Cross-platform via ``portalocker``; concurrent callers serialize
-    on Windows the same as POSIX (replaces the prior Windows-no-op
-    fallback that relied on hooks firing serially per Claude Code
-    session — see #625).
+    Two-layer locking (#759):
+
+    - **Intra-process** ``threading.Lock`` keyed by the lockfile path
+      (``_intra_process_lock_for``). Acquired first; serializes threads
+      inside a single Python process before any file-handle work.
+      Required because Windows ``LockFileEx`` does not reliably block a
+      second handle from the same process — without this layer, a
+      multi-threaded plugin host (e.g. Claude Code's bursty ``Write``
+      hook fanout) loses queue entries on Windows.
+    - **Cross-process** ``portalocker.lock(LOCK_EX)`` on the sidecar
+      lockfile. Acquired second; serializes parallel ``mm index
+      --debounce-window`` invocations that don't share Python state.
+
+    Both layers release in reverse order in ``__exit__``.
     """
 
     def __init__(self, path: Path) -> None:
         self._lock_path = path.parent / f".{path.name}.lock"
+        self._intra_lock = _intra_process_lock_for(self._lock_path)
         self._fp: IO[bytes] | None = None
 
     def __enter__(self) -> "_Lock":
-        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
-        self._fp = open(self._lock_path, "a+b")
-        portalocker.lock(self._fp, portalocker.LOCK_EX)
+        self._intra_lock.acquire()
+        try:
+            self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+            self._fp = open(self._lock_path, "a+b")
+            portalocker.lock(self._fp, portalocker.LOCK_EX)
+        except BaseException:
+            # File-lock acquisition failed — must release the intra
+            # lock so other threads aren't permanently blocked.
+            self._intra_lock.release()
+            raise
         return self
 
     def __exit__(self, *exc) -> None:
-        if self._fp is None:
-            return
-        portalocker.unlock(self._fp)
-        self._fp.close()
-        self._fp = None
+        try:
+            if self._fp is None:
+                return
+            portalocker.unlock(self._fp)
+            self._fp.close()
+            self._fp = None
+        finally:
+            self._intra_lock.release()
 
 
 def enqueue(

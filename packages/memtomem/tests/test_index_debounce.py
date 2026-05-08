@@ -276,6 +276,40 @@ class TestPersistenceAndConcurrency:
         entries = _read_raw(queue_file)["entries"]
         assert len(entries) == 20
 
+    def test_intra_process_lock_serializes_threads_when_file_lock_is_noop(
+        self, queue_file: Path, monkeypatch
+    ) -> None:
+        """Pin the in-process ``threading.Lock`` independently of the
+        cross-process file lock.
+
+        On Windows, ``LockFileEx`` is unreliable between two handles in
+        the *same* process — if the file lock is the only barrier,
+        same-process threads race the read-modify-write and lose
+        entries (#759 failure 2). By stubbing ``portalocker.lock`` /
+        ``unlock`` to no-ops, this test simulates that regression on
+        every platform: the test passes only because the intra-process
+        ``threading.Lock`` is the actual serializer. Removing the
+        threading.Lock layer from ``_Lock`` flips this to a flaky
+        ``len(entries) < 20`` failure.
+        """
+        monkeypatch.setattr(debounce.portalocker, "lock", lambda *a, **kw: None)
+        monkeypatch.setattr(debounce.portalocker, "unlock", lambda *a, **kw: None)
+
+        threads: list[threading.Thread] = []
+        for i in range(20):
+            t = threading.Thread(
+                target=debounce.enqueue,
+                args=(f"/tmp/file_{i:02d}.py",),
+                kwargs={"now": 100.0 + i, "queue_file": queue_file},
+            )
+            threads.append(t)
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        entries = _read_raw(queue_file)["entries"]
+        assert len(entries) == 20
+
     def test_partial_drain_writes_remaining_back(self, queue_file: Path) -> None:
         """Two entries, one indexer-errors. The successful one is gone from
         disk; the failing one remains so the next hook call retries."""
