@@ -91,12 +91,35 @@ syncs that succeeded vs ones I edited around"), revisit.
 Pull/import stays leaf-only.
 
 When a tile shows partial sync, the dashboard renders an inline pointer
-distinguishing the two cases:
+derived from the existing per-status counts emitted by `_count_statuses`
+(`packages/memtomem/src/memtomem/web/routes/context_gateway.py:33`) over
+the 4-value enum produced by `diff_skills` / `diff_commands` /
+`diff_agents`: `in sync`, `out of sync`, `missing target`,
+`missing canonical`. **No new wire fields are required for direction** —
+the signal is already carried by which counts are non-zero:
 
-- *Canonical newer than runtime* → "Run Sync All" (existing).
-- *Runtime newer than canonical* (detected by mtime comparison on the
-  diff) → "Edits detected in Claude Code — open the Skills page to
-  import." Hyperlink anchors directly to the leaf section.
+- `missing_target > 0` (canonical has it, runtime does not) → push is
+  unambiguous → "Run Sync All to push N missing entries."
+- `missing_canonical > 0` (runtime has it, canonical does not) → pull
+  is unambiguous → "N runtime entries are not in canonical — open
+  <leaf> to import." Hyperlink anchors directly to the leaf section.
+- `out_of_sync > 0` (both sides exist and differ) → **direction-
+  neutral** → "Open <leaf> to resolve N differences." The `out of
+  sync` status carries no direction signal, and ADR-0001 §1 already
+  rejected mtime-based "newer" detection as filesystem-fragile and
+  CI-flaky — the dashboard does not attempt to guess. Per-entry
+  direction is the user's call, surfaced on the leaf where both sides
+  are renderable side-by-side.
+- Mixed combinations render each applicable line in priority order:
+  `missing_target`, then `out_of_sync`, then `missing_canonical`. Each
+  carries its own count and link target.
+
+The settings tile (Phase D) cannot produce `missing canonical` by
+design — no `extract_settings_to_canonical` path exists because the
+additive merge that owns settings sync cannot distinguish canonical-
+authored from user-authored entries (ADR-0001 §5 unidirectional
+readiness contract). Its inline pointer reduces to the first and third
+rules above.
 
 **Why not add `Import All`:** bidirectional bulk actions create a class
 of UX-traps where the user clicks the wrong direction and silently
@@ -178,6 +201,18 @@ the client's perspective:
 **Why additive:** preserves the Q-PR3 envelope clients (Web UI v0.1.36+)
 already understand. Older clients ignore unknown fields. The four
 existing tile envelopes are unchanged.
+
+**Direction signal source for §2.** The four-status enum produced by
+`diff_skills` / `diff_commands` / `diff_agents` (`in sync`,
+`out of sync`, `missing target`, `missing canonical`) already flows
+through `_count_statuses` (`packages/memtomem/src/memtomem/web/routes/
+context_gateway.py:33`) into the per-tile envelope as named count
+fields (`in_sync`, `out_of_sync`, `missing_target`, `missing_canonical`
+— the helper lifts every observed status into a count key). §2's
+inline pointer logic reads those existing counts; **no new tile
+fields, no mtime comparison, no diff-output extension is required**.
+The settings tile is the only envelope that omits `missing_canonical`
+by design (§2 last paragraph).
 
 ## Consequences
 
