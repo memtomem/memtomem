@@ -330,21 +330,32 @@ root**. Built-in denylists for credentials and noise (`oauth_creds.json`,
 `*.pem`, `**/.ssh/**`, etc.) are always applied on top — user patterns can
 extend them but cannot override them.
 
-```jsonc
-// ~/.memtomem/config.d/noise.json — APPEND semantics, layers on defaults
+Save the following as `~/.memtomem/config.d/noise.json` (APPEND
+semantics — fragments layer on top of the defaults, they don't replace
+them):
+
+```json
 {
   "indexing": {
     "exclude_patterns": [
-      "**/subagents/**",         // Claude Code subagent metadata
+      "**/subagents/**",
       "**/antigravity-browser-profile/**",
-      "**/.gemini/**/*.json",    // defensive — only relevant if you manually
-                                 // add ~/.gemini/ to memory_dirs
-      "**/.obsidian/**"          // Obsidian vault metadata (workspace.json,
-                                 // plugin state) when a vault is a memory_dir
+      "**/.gemini/**/*.json",
+      "**/.obsidian/**"
     ]
   }
 }
 ```
+
+| Pattern | Why |
+|---|---|
+| `**/subagents/**` | Claude Code subagent metadata |
+| `**/antigravity-browser-profile/**` | Antigravity browser profile data |
+| `**/.gemini/**/*.json` | Defensive — only relevant if you manually add `~/.gemini/` to `memory_dirs` |
+| `**/.obsidian/**` | Obsidian vault metadata (`workspace.json`, plugin state) when a vault is itself a `memory_dir` |
+
+The fragment loader uses strict `json.loads`, so the file must be pure
+JSON — no `//` comments, no trailing commas, no `jsonc` extensions.
 
 > **Caveats:**
 > - **Not retroactive.** Adding a pattern only stops *future* indexing. Files
