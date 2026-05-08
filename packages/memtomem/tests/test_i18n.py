@@ -828,3 +828,119 @@ class TestNoHardcodedStrings:
                 f"{locale_name} overview_desc must still anchor 'Codex' "
                 f"as a concrete runtime example"
             )
+
+    def test_q_pr3_overview_desc_inline_fallback_matches_locale(self, en: dict[str, str]) -> None:
+        """Q-PR3 Codex minor 1: the inline ``<p>`` text inside
+        ``data-i18n="settings.ctx.overview_desc"`` is the **fallback**
+        rendered when ``i18n.js`` hasn't yet replaced the node — most
+        commonly during the first paint before ``/locales/{lang}.json``
+        arrives, but also if the fetch fails. Q-PR2 generalized the
+        locale value ("Sync memtomem agent runtime artifacts to Claude
+        Code, Codex, and other detected runtimes.") but left the inline
+        fallback at index.html:773 frozen on the pre-Q-PR2 enumerative
+        copy ("Skills, Subagents, and Hooks…"). This pin keeps the
+        fallback equal to the en locale value so a future locale-only
+        edit can't silently drift the fallback again."""
+        html = (_STATIC_JS_DIR / "index.html").read_text(encoding="utf-8")
+        m = re.search(
+            r'<p[^>]*data-i18n="settings\.ctx\.overview_desc"[^>]*>([^<]+)</p>',
+            html,
+        )
+        assert m, (
+            'Could not locate the data-i18n="settings.ctx.overview_desc" '
+            "<p> in index.html — the markup shape changed and this pin "
+            "needs to be updated."
+        )
+        inline_fallback = m.group(1)
+        expected = en["settings.ctx.overview_desc"]
+        assert inline_fallback == expected, (
+            f"index.html inline fallback for settings.ctx.overview_desc "
+            f"drifted from the en locale value.\n"
+            f"  inline:   {inline_fallback!r}\n"
+            f"  en value: {expected!r}"
+        )
+        # Symmetric negative: catch the pre-Q-PR2 enumerative copy
+        # creeping back even if the en value is also reverted (single
+        # point of failure for the equality check above).
+        assert "Skills, Subagents" not in inline_fallback, (
+            "index.html inline fallback reintroduced the pre-Q-PR2 tile "
+            "enumeration; Drift-3 / Q-PR2 generalized this away — see "
+            "test_q_pr2_overview_desc_is_tier_agnostic."
+        )
+
+    def test_q_pr3_settings_status_replace_is_global(self) -> None:
+        """Q-PR3 Visual-4: the settings tile's badge-text fallthrough for
+        unknown ``d.status`` values uses ``replace(/_/g, ' ')`` (global
+        regex) so a future multi-underscore status — for example
+        ``needs_user_confirm`` — renders as ``"needs user confirm"``.
+
+        The pre-Q-PR3 form ``replace('_', ' ')`` only swapped the FIRST
+        underscore, producing ``"needs user_confirm"``: a silent partial-
+        translation that the existing ``_SETTINGS_STATUS_I18N`` map would
+        need to grow alongside every new status to mask. The global form
+        keeps the defensive fallback robust without coupling each new
+        status string to a synchronous map update.
+
+        Static-source pin: looks for the regex form on the settings
+        branch and explicitly forbids the single-arg literal form.
+        """
+        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        # Positive — the global regex form is present on the settings
+        # status fallthrough.
+        assert re.search(
+            r"\(d\.status\s*\|\|\s*''\)\.replace\(\/_\/g,\s*' '\)",
+            text,
+        ), (
+            "Settings tile badge-text fallthrough must use "
+            "replace(/_/g, ' ') so multi-underscore statuses render fully — "
+            "see Visual-4 in the Q-PR3 plan."
+        )
+        # Symmetric negative — the single-replace literal form must not
+        # appear on a status fallthrough. The pattern is narrow enough
+        # to exclude unrelated single-replace calls.
+        assert not re.search(
+            r"\(d\.status\s*\|\|\s*''\)\.replace\('_',\s*' '\)",
+            text,
+        ), (
+            "Found legacy replace('_', ' ') (single replace) on the "
+            "settings status fallthrough — this drops every underscore "
+            "after the first. Use replace(/_/g, ' ') instead (Visual-4)."
+        )
+
+    def test_q_pr3_settings_tile_count_not_glyph(self) -> None:
+        """Q-PR3 Visual-1 (static pin for the part the Playwright spec
+        also exercises dynamically): the big-number slot of the settings
+        tile must render the generic ``${total}`` like the other three
+        tiles, not the legacy ``typ.key === 'settings' ? glyph : total``
+        ternary (``\\u2714`` for in_sync, ``\\u26A0`` otherwise).
+
+        Catches a frontend-only revert that brings back the visual-weight
+        asymmetry without needing the browser harness. The Playwright
+        spec stubs the API and asserts the rendered text; this pin
+        catches the source change at the layer above."""
+        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        m = re.search(
+            r'<div class="ctx-overview-count">\$\{([^}]+)\}</div>',
+            text,
+        )
+        assert m, (
+            "Could not locate the .ctx-overview-count template "
+            "expression — the markup shape changed and this pin needs "
+            "to be updated."
+        )
+        expr = m.group(1).strip()
+        assert expr == "total", (
+            f"ctx-overview-count must render ${{total}} for every tile "
+            f"(Q-PR3 Visual-1: settings tile aligned with the other three). "
+            f"Got: {expr!r}"
+        )
+        # Symmetric negative — the legacy glyph branch markers must not
+        # appear in the rendering line.
+        assert "✔" not in m.group(0), (
+            "Found legacy '\\u2714' glyph on the count line — Visual-1 "
+            "removed the per-tile glyph branch."
+        )
+        assert "⚠" not in m.group(0).lower(), (
+            "Found legacy '\\u26A0' glyph on the count line — Visual-1 "
+            "removed the per-tile glyph branch."
+        )

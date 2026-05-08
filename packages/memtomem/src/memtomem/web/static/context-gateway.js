@@ -135,11 +135,13 @@ async function loadCtxOverview() {
       const issueCount = missingTarget + missingCanonical + outOfSync + parseError;
       const hasIssue = d.error || issueCount > 0
         || d.status === 'out_of_sync' || d.status === 'error';
-      // ``isEmpty`` only applies to the count tiles (skills/agents/commands).
-      // The Settings tile takes a separate ``status``-driven branch below and
-      // would never reach the count fallthrough that ``isEmpty`` is guarding
-      // against; gate the tile-key here so we don't intercept Settings.
-      const isEmpty = typ.key !== 'settings' && total === 0 && !d.error && !hasIssue;
+      // Empty state ≡ a tile with no actionable artifacts: settings carries
+      // ``total = applicable generators`` (skipped runtimes excluded) so a
+      // zero count there ≡ "no installed runtime has a canonical source",
+      // legitimately empty. Pre-Q-PR3 the gate excluded settings because the
+      // backend then only returned ``{status}``; with the count fields now
+      // present settings participates in the same empty/issue/synced ladder.
+      const isEmpty = total === 0 && !d.error && !hasIssue;
       const badgeCls = d.error
         ? 'badge-danger'
         : (isEmpty ? 'badge-gray' : (hasIssue ? 'badge-warning' : 'badge-success'));
@@ -156,11 +158,18 @@ async function loadCtxOverview() {
         // would couple the dashboard to whatever the hooks panel
         // decides to label its errors as next.
         badgeText = t('settings.ctx.badge_error');
-      } else if (typ.key === 'settings') {
-        const key = _SETTINGS_STATUS_I18N[d.status];
-        badgeText = key ? t(key) : (d.status || '').replace('_', ' ');
       } else if (isEmpty) {
         badgeText = t('settings.ctx.badge_empty');
+      } else if (typ.key === 'settings') {
+        // Settings badge stays status-driven even after Visual-1's count
+        // alignment: "in sync" / "out of sync" reads more accurately than
+        // ``${inSync}/${total} synced``, since the per-runtime semantics
+        // (Claude/Codex each correctly merged) is qualitative, not a copy
+        // count. The fallthrough uses ``/_/g`` (Visual-4) so a future
+        // multi-underscore status like ``needs_user_confirm`` doesn't
+        // render as ``needs user_confirm``.
+        const key = _SETTINGS_STATUS_I18N[d.status];
+        badgeText = key ? t(key) : (d.status || '').replace(/_/g, ' ');
       } else if (parseError > 0) {
         badgeText = `${parseError} ${t('settings.ctx.badge_parse_error')}`;
       } else if (missingTarget > 0) {
@@ -174,7 +183,7 @@ async function loadCtxOverview() {
       }
 
       html += `<div class="ctx-overview-stat" data-section="${typ.section}">
-        <div class="ctx-overview-count">${typ.key === 'settings' ? (d.status === 'in_sync' ? '\u2714' : '\u26A0') : total}</div>
+        <div class="ctx-overview-count">${total}</div>
         <div class="ctx-overview-label">${escapeHtml(typ.label)}</div>
         <div class="ctx-overview-badge"><span class="badge ${badgeCls}">${escapeHtml(badgeText)}</span></div>
       </div>`;

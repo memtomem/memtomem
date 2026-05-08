@@ -140,14 +140,33 @@ async def context_overview(
     try:
         settings_diff = diff_settings(project_root)
         statuses = [r.status for r in settings_diff.values()]
+        # `total` counts only **applicable** generators (runtime installed +
+        # canonical source present). `skipped` items are N/A — including them
+        # would make the dashboard read "1/2 synced" even when the second slot
+        # is "no Codex installed", which misleads the user about actionable work.
+        total_applicable = sum(1 for s in statuses if s != "skipped")
+        in_sync = sum(1 for s in statuses if s == "in sync")
+        out_of_sync = sum(1 for s in statuses if s == "out of sync")
+        error_count = sum(1 for s in statuses if s == "error")
         if all(s in ("in sync", "skipped") for s in statuses):
-            result["settings"] = {"status": "in_sync"}
+            status = "in_sync"
         elif any(s == "error" for s in statuses):
             # In-band error: per-file failure already classified by diff_settings.
             # No error_kind here — adding one would conflate distinct per-file causes.
-            result["settings"] = {"status": "error"}
+            status = "error"
         else:
-            result["settings"] = {"status": "out_of_sync"}
+            status = "out_of_sync"
+        # `error` is a count here (parallel to `out_of_sync` / `in_sync`),
+        # NOT the bool flag `_error_payload(shape="total")` emits when the
+        # whole call raises. The two shapes are on disjoint code paths and
+        # the frontend already differentiates `d.error === true` vs an int.
+        result["settings"] = {
+            "total": total_applicable,
+            "in_sync": in_sync,
+            "out_of_sync": out_of_sync,
+            "error": error_count,
+            "status": status,
+        }
     except Exception as exc:
         logger.exception("diff_settings failed")
         result["settings"] = _error_payload(exc, shape="status")

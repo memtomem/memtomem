@@ -92,7 +92,17 @@ _ZERO_OVERVIEW = {
     "skills": {"total": 0, "in_sync": 0},
     "commands": {"total": 0, "in_sync": 0},
     "agents": {"total": 0, "in_sync": 0},
-    "settings": {"status": "in_sync"},
+    # Q-PR3 Visual-1: settings carries count fields too (parallel to the
+    # other tiles). The empty-state branch fires when total==0 regardless
+    # of tile key, so settings reaching the same Empty/badge-gray render
+    # as skills/commands/agents is intentional.
+    "settings": {
+        "total": 0,
+        "in_sync": 0,
+        "out_of_sync": 0,
+        "error": 0,
+        "status": "in_sync",
+    },
 }
 
 # A non-empty payload with nothing wrong — used by the lang-toggle specs so
@@ -102,7 +112,13 @@ _HEALTHY_OVERVIEW = {
     "skills": {"total": 3, "in_sync": 3},
     "commands": {"total": 1, "in_sync": 1},
     "agents": {"total": 2, "in_sync": 2},
-    "settings": {"status": "in_sync"},
+    "settings": {
+        "total": 2,
+        "in_sync": 2,
+        "out_of_sync": 0,
+        "error": 0,
+        "status": "in_sync",
+    },
 }
 
 
@@ -113,9 +129,11 @@ def test_zero_total_renders_empty_badge_not_green_synced(page, mm_web_url: str) 
 
     Symmetric pair (``feedback_pin_invert_symmetric_assertion.md``):
     positive on the badge text + class, negative on the legacy literal.
-    Settings tile is skipped — it has its own status-driven branch and is
-    out of scope for the Bug-2 zero-state intercept (verified via
-    ``typ.key !== 'settings'`` guard in production)."""
+    Tile-locator is the skills tile specifically; the Q-PR3 follow-up
+    spec ``test_q_pr3_settings_zero_total_renders_empty`` covers the
+    settings tile, which also participates in the empty branch after
+    Visual-1 (the ``typ.key !== 'settings'`` gate was lifted once the
+    backend started sending real ``total`` for settings)."""
     _install_default_stubs(page)
     page.route(
         "**/api/context/overview",
@@ -422,4 +440,94 @@ def test_langchange_off_overview_does_not_refetch_overview(page, mm_web_url: str
     assert overview_calls == [], (
         f"language toggle from a non-overview page must not fetch the overview; "
         f"saw {overview_calls!r} (PR #824 review P2)"
+    )
+
+
+def test_q_pr3_settings_tile_renders_count_not_glyph(page, mm_web_url: str) -> None:
+    """Q-PR3 Visual-1: the settings tile's big-number slot must render
+    the same ``${total}`` text as the other tiles, never the legacy
+    ✔ / ⚠ glyph. Static-source ``test_q_pr3_settings_tile_count_not_glyph``
+    in ``test_i18n.py`` catches a source revert; this spec catches a
+    rendering regression that compiles/parses but emits the wrong DOM
+    (e.g., a CSS or template change that revives the per-tile branch)."""
+    _install_default_stubs(page)
+    page.route(
+        "**/api/context/overview",
+        lambda r: r.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_HEALTHY_OVERVIEW)
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    # The settings tile in the overview grid lives at data-section="hooks-sync"
+    # because the dashboard reuses the existing hooks panel as the
+    # destination — see the ``types`` array in ``loadCtxOverview``
+    # (context-gateway.js).
+    settings_tile = page.locator(
+        "#ctx-overview-content .ctx-overview-stat[data-section='hooks-sync']"
+    )
+    count = settings_tile.locator(".ctx-overview-count")
+    text = (count.text_content() or "").strip()
+    assert text == "2", (
+        f"settings tile must render the count {{total}} (here: 2 from "
+        f"_HEALTHY_OVERVIEW), not a glyph; got: {text!r}"
+    )
+    # Symmetric negative: the legacy glyphs must not survive the render.
+    assert text not in {"✔", "⚠"}, (
+        f"settings tile rendered legacy glyph instead of count; got: {text!r}"
+    )
+
+
+def test_q_pr3_settings_zero_total_renders_empty(page, mm_web_url: str) -> None:
+    """Q-PR3 Visual-1 isEmpty extension: with the new ``total`` field on
+    the settings response, a settings tile with ``total === 0`` must
+    render the gray ``Empty`` badge (same as skills/commands/agents),
+    not the green ``in sync`` status badge that pre-Q-PR3 fired by
+    default when no runtime had a canonical source.
+
+    Pre-Q-PR3 the dashboard skipped the empty-state branch for settings
+    via ``typ.key !== 'settings'`` and fell through to the
+    ``_SETTINGS_STATUS_I18N`` lookup; the backend then collapsed
+    ``all skipped`` to ``status: "in_sync"``, producing a green badge
+    on a project with no installed runtime (false-OK, mirror of the
+    Bug-2 pattern from Q-PR1). This pin catches a regression in either
+    half: missing ``total`` on the response or a re-introduction of
+    the ``typ.key !== 'settings'`` gate."""
+    _install_default_stubs(page)
+    page.route(
+        "**/api/context/overview",
+        lambda r: r.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_ZERO_OVERVIEW)
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    settings_tile = page.locator(
+        "#ctx-overview-content .ctx-overview-stat[data-section='hooks-sync']"
+    )
+    badge = settings_tile.locator(".ctx-overview-badge .badge")
+    badge_text = (badge.text_content() or "").strip()
+    assert badge_text == "Empty", (
+        f"zero-total settings tile must show 'Empty' badge (badge_empty), got: {badge_text!r}"
+    )
+
+    badge_classes = (badge.get_attribute("class") or "").split()
+    assert "badge-gray" in badge_classes, (
+        f"zero-total settings badge must use badge-gray, got classes: {badge_classes!r}"
+    )
+    # Symmetric negative: green ``badge-success`` would be the false-OK
+    # state — exactly the Bug-2 class regression that Q-PR1 caught for
+    # the count tiles, now also pinned for settings.
+    assert "badge-success" not in badge_classes, (
+        f"zero-total settings must not show badge-success (false-OK "
+        f"regression); got: {badge_classes!r}"
+    )
+    # Settings tile keeps the count form even at zero — verifies the
+    # Visual-1 glyph→count change applied to the empty case too.
+    count = settings_tile.locator(".ctx-overview-count")
+    assert (count.text_content() or "").strip() == "0", (
+        "settings tile big-number slot must show the count even at zero "
+        "(Visual-1 glyph→count alignment)"
     )

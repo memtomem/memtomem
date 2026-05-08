@@ -85,6 +85,97 @@ class TestOverview:
         assert data["skills"]["total"] >= 1
 
 
+class TestSettingsCountShape:
+    """Q-PR3 Visual-1 pins for the new ``settings`` count envelope.
+
+    Pre-Q-PR3 the settings slot only carried ``{"status": ...}``, which
+    forced the dashboard to render a glyph (✔ / ⚠) in the big-number slot
+    while the other three tiles rendered ``${total}``. Visual-1 extends
+    the envelope with ``total`` (count of applicable generators —
+    excluding ``skipped``) plus per-status counts so the frontend can
+    treat settings like the other tiles.
+
+    Pin: the new fields exist with the right semantics, AND the legacy
+    ``status`` field stays for backwards compat with any non-dashboard
+    consumer.
+    """
+
+    @pytest.mark.anyio
+    async def test_settings_envelope_carries_count_fields(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        from memtomem.context.settings import SettingsSyncResult
+
+        # Mixed shape: 1 in-sync + 1 out-of-sync. ``total`` should be 2
+        # (both applicable), with per-status counts split 1/1.
+        monkeypatch.setattr(
+            "memtomem.context.settings.diff_settings",
+            lambda *_a, **_k: {
+                "claude_settings": SettingsSyncResult(status="in sync"),
+                "codex_agents": SettingsSyncResult(status="out of sync"),
+            },
+        )
+        r = await client.get("/api/context/overview")
+        settings = r.json()["settings"]
+        assert settings["total"] == 2, settings
+        assert settings["in_sync"] == 1, settings
+        assert settings["out_of_sync"] == 1, settings
+        assert settings["error"] == 0, settings
+        assert settings["status"] == "out_of_sync", settings
+        # Negative pin: must NOT regress to the legacy status-only shape
+        # (if total goes missing the dashboard's count rendering breaks).
+        assert "total" in settings, "Q-PR3 envelope must carry total"
+
+    @pytest.mark.anyio
+    async def test_settings_skipped_not_counted_in_total(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        from memtomem.context.settings import SettingsSyncResult
+
+        # All ``skipped`` → ``total = 0``. Skipped items represent
+        # generators with no canonical source or no installed runtime;
+        # counting them would inflate the denominator with N/A items.
+        monkeypatch.setattr(
+            "memtomem.context.settings.diff_settings",
+            lambda *_a, **_k: {
+                "claude_settings": SettingsSyncResult(status="skipped"),
+                "codex_agents": SettingsSyncResult(status="skipped"),
+            },
+        )
+        r = await client.get("/api/context/overview")
+        settings = r.json()["settings"]
+        assert settings["total"] == 0, f"all-skipped must not count toward total; got: {settings}"
+        # ``status`` stays "in_sync" via the existing collapse (skipped
+        # is treated as a no-op alongside in_sync). The frontend's
+        # ``isEmpty`` branch handles the resulting tile, not the
+        # status-driven badge — verified separately in the Playwright
+        # spec ``test_q_pr3_settings_zero_total_renders_empty``.
+        assert settings["status"] == "in_sync", settings
+
+    @pytest.mark.anyio
+    async def test_settings_status_collapse_unchanged(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Backwards-compat anchor: the existing ``in_sync`` / ``error`` /
+        ``out_of_sync`` collapse rules are unchanged; only the count
+        fields are additive. A single in-sync entry plus skipped peers
+        still collapses to ``status: "in_sync"``."""
+        from memtomem.context.settings import SettingsSyncResult
+
+        monkeypatch.setattr(
+            "memtomem.context.settings.diff_settings",
+            lambda *_a, **_k: {
+                "claude_settings": SettingsSyncResult(status="in sync"),
+                "codex_agents": SettingsSyncResult(status="skipped"),
+            },
+        )
+        r = await client.get("/api/context/overview")
+        settings = r.json()["settings"]
+        assert settings["status"] == "in_sync"
+        assert settings["total"] == 1  # claude in-sync; codex skipped
+        assert settings["in_sync"] == 1
+
+
 # ---------------------------------------------------------------------------
 # Overview — error taxonomy (issue #762)
 # ---------------------------------------------------------------------------
@@ -190,8 +281,10 @@ class TestContextOverviewErrorTaxonomy:
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ):
         # In-band per-file error: diff_settings succeeds but returns a result
-        # with status="error". Aggregated as {"status": "error"} with no
-        # error_kind — adding one would conflate per-file causes.
+        # with status="error". Aggregated status stays "error" with no
+        # error_kind — adding one would conflate per-file causes. After
+        # Q-PR3 the success-path envelope also carries count fields
+        # (parallel to skills/commands/agents).
         from memtomem.context.settings import SettingsSyncResult
 
         monkeypatch.setattr(
@@ -199,7 +292,14 @@ class TestContextOverviewErrorTaxonomy:
             lambda *_a, **_k: {"claude": SettingsSyncResult(status="error")},
         )
         r = await client.get("/api/context/overview")
-        assert r.json()["settings"] == {"status": "error"}
+        settings = r.json()["settings"]
+        assert settings["status"] == "error"
+        assert "error_kind" not in settings
+        # The bare-exception path uses ``shape="status"`` and emits the
+        # error envelope; the in-band path stays on the count envelope.
+        # Distinguishing factor: a bare exception sets ``error_message``,
+        # the in-band path does not.
+        assert "error_message" not in settings
 
     @pytest.mark.anyio
     async def test_error_message_truncated_and_homedir_collapsed(
