@@ -211,7 +211,7 @@ class TestIsDirty:
         store = WikiStore.at_default()
         store.init()
         readme = wiki_root / "README.md"
-        readme.write_text(readme.read_text() + "\nlocal note\n", encoding="utf-8")
+        readme.write_text(readme.read_text(encoding="utf-8") + "\nlocal note\n", encoding="utf-8")
         assert store.is_dirty() is True
 
     def test_raises_when_wiki_absent(self, wiki_root: Path) -> None:
