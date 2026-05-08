@@ -47,9 +47,22 @@ The dashboard renders three new read-only context elements above the
 
 - **Detected runtimes chip strip** (Info-1, #830) — one chip per
   declared runtime; opacity / `badge-gray` for declared-but-undetected.
-  Sourced from each `*Generator.is_available()` probe, exposed via a new
-  `detected_runtimes: list[{name, available}]` field on
-  `/api/context/overview`.
+  Availability is **per-surface** and reuses the existing detection
+  surface in `packages/memtomem/src/memtomem/context/detector.py`:
+  `detect_skill_dirs()`, `detect_agent_dirs()`, `detect_command_dirs()`
+  are **directory-probe based** (project-scope `SKILL_DIRS` /
+  `AGENT_DIRS` / `COMMAND_DIRS` constants) because the
+  `SkillGenerator` / `AgentGenerator` / `CommandGenerator` protocols
+  expose `target_dir()` / `target_file()` only — no uniform
+  `is_available()` API exists across these registries. `detect_
+  settings_files()` is the sole `is_available()` caller because the
+  `SettingsGenerator` protocol (`packages/memtomem/src/memtomem/
+  context/settings.py:63,119`) is user-scope (`~/.claude/`, etc.) and
+  needs the explicit availability probe. The aggregate per-runtime
+  flag on `/api/context/overview` is **OR across declared surfaces**:
+  a runtime counts as detected when *any* of its surfaces resolves a
+  target on disk. Exposed via a new `detected_runtimes:
+  list[{name, available}]` field.
 - **Project root indicator** (Info-2, #831) — truncated path with
   `title="<full>"` tooltip in the dashboard header. Single
   current-project semantics (see §4 below). Sourced from the existing
