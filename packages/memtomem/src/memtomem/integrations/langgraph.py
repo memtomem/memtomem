@@ -32,7 +32,6 @@ follow-up; for now the multi-agent helpers live on
 from __future__ import annotations
 
 import asyncio
-import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 from uuid import UUID, uuid4
@@ -47,8 +46,6 @@ from memtomem.constants import (
 if TYPE_CHECKING:
     from memtomem.server.component_factory import Components
 
-logger = logging.getLogger(__name__)
-
 
 class MemtomemStore:
     """LangGraph-compatible memory store wrapping memtomem components.
@@ -59,10 +56,12 @@ class MemtomemStore:
     Args:
         config_overrides: Optional dict of config overrides
             (e.g. ``{"storage": {"sqlite_path": "..."}}``). Sections and
-            keys that do not exist on :class:`Mem2MemConfig` are skipped
-            with a ``logger.warning`` rather than silently no-op'd, so a
-            typo in either the section name (``storge``) or a field name
-            (``sqlite_pat``) is detectable without raising.
+            keys that do not exist on :class:`Mem2MemConfig` raise
+            ``ValueError`` from :meth:`_ensure_init` so a typo cannot
+            silently land writes/index calls in the default
+            ``~/.memtomem`` location. The constructor itself does not
+            validate (the config object is built lazily) — the first
+            ``await``-ed call surfaces the error.
     """
 
     def __init__(self, config_overrides: dict[str, Any] | None = None):
@@ -80,37 +79,32 @@ class MemtomemStore:
 
             config = Mem2MemConfig()
 
-            # Apply overrides. Unknown sections / keys are skipped with a
-            # warning so a typo (e.g. ``{"storge": ...}`` or
-            # ``{"storage": {"sqlite_pat": ...}}``) is loud rather than
-            # silently no-op'd. We log instead of raising because the dict is
-            # implementation-defined — a future memtomem release may rename a
-            # section, and a callers' lock-in shouldn't break on import.
+            # Apply overrides. Unknown sections / keys raise immediately:
+            # ``config_overrides`` is a programmatic constructor argument, so
+            # a typo like ``{"storge": ...}`` or ``{"storage":
+            # {"sqlite_pat": ...}}`` would otherwise fall back to the default
+            # DB / memory_dirs and silently land writes in the wrong place.
+            # Logging-only would be hidden by callers who don't surface
+            # ``WARNING`` from ``memtomem.integrations.langgraph``.
             for section, updates in self._config_overrides.items():
                 section_obj = getattr(config, section, None)
                 if section_obj is None:
-                    logger.warning(
-                        "MemtomemStore.config_overrides: unknown section %r — skipping",
-                        section,
+                    raise ValueError(
+                        f"MemtomemStore.config_overrides: unknown section {section!r}. "
+                        "Section must match a Mem2MemConfig section "
+                        "(e.g. 'storage', 'indexing', 'embedding')."
                     )
-                    continue
                 if not isinstance(updates, dict):
-                    logger.warning(
-                        "MemtomemStore.config_overrides: section %r value is %s, "
-                        "expected dict — skipping",
-                        section,
-                        type(updates).__name__,
+                    raise ValueError(
+                        f"MemtomemStore.config_overrides: section {section!r} value "
+                        f"is {type(updates).__name__}, expected dict."
                     )
-                    continue
                 for key, value in updates.items():
                     if not hasattr(section_obj, key):
-                        logger.warning(
-                            "MemtomemStore.config_overrides: unknown key %r in section "
-                            "%r — skipping",
-                            key,
-                            section,
+                        raise ValueError(
+                            f"MemtomemStore.config_overrides: unknown key {key!r} "
+                            f"in section {section!r}."
                         )
-                        continue
                     setattr(section_obj, key, value)
 
             self._components = await create_components(config)
