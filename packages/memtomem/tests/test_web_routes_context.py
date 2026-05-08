@@ -120,11 +120,91 @@ class TestSettingsCountShape:
         assert settings["total"] == 2, settings
         assert settings["in_sync"] == 1, settings
         assert settings["out_of_sync"] == 1, settings
+        assert settings["missing_target"] == 0, settings
         assert settings["error"] == 0, settings
         assert settings["status"] == "out_of_sync", settings
         # Negative pin: must NOT regress to the legacy status-only shape
         # (if total goes missing the dashboard's count rendering breaks).
         assert "total" in settings, "Q-PR3 envelope must carry total"
+
+    @pytest.mark.anyio
+    async def test_settings_missing_target_counted(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The common first-use state: user has ``.memtomem/settings.json``
+        but hasn't yet run ``mm context sync``, so the runtime settings
+        target file (e.g., ``~/.claude/settings.json``) doesn't exist.
+
+        ``diff_settings`` emits ``status="missing target"`` for that case
+        (settings.py:403-404 — ``existing is None`` branch). The envelope
+        must count it as a distinct category so the per-status counts
+        sum to ``total_applicable``; folding it into ``out_of_sync``
+        would conflate "drifted from canonical" with "never imported",
+        which is the same distinction skills/commands/agents already
+        carry via their own ``missing_target`` field. Any future per-
+        status segment rendering would silently lose this slice if the
+        envelope dropped it on the floor."""
+        from memtomem.context.settings import SettingsSyncResult
+
+        monkeypatch.setattr(
+            "memtomem.context.settings.diff_settings",
+            lambda *_a, **_k: {
+                "claude_settings": SettingsSyncResult(status="missing target"),
+            },
+        )
+        r = await client.get("/api/context/overview")
+        settings = r.json()["settings"]
+        assert settings["total"] == 1, settings
+        assert settings["missing_target"] == 1, settings
+        assert settings["in_sync"] == 0, settings
+        assert settings["out_of_sync"] == 0, settings
+        assert settings["error"] == 0, settings
+        # Status collapse: missing target is non-error/non-skipped/non-
+        # in_sync, so the existing ``else`` branch puts it under
+        # ``out_of_sync``. UX-wise the tile reads "1 / out of sync" which
+        # is acceptable for the dashboard summary; per-runtime detail
+        # lives on the leaf page. The count field carries the precise
+        # state for any future renderer that wants to disambiguate.
+        assert settings["status"] == "out_of_sync", settings
+
+    @pytest.mark.anyio
+    async def test_settings_count_conservation(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Invariant: ``in_sync + out_of_sync + missing_target + error ==
+        total`` for every applicable-generator distribution. This is
+        what makes the per-status counts safe to render as segments —
+        if the contract slips (a status emitted by diff_settings is not
+        counted in any field), a future consumer's segments silently
+        drop the missing slice. Use a 4-way mix so every field is
+        non-zero and the equality must hold."""
+        from memtomem.context.settings import SettingsSyncResult
+
+        # Four-way mix — every count field is non-zero.
+        monkeypatch.setattr(
+            "memtomem.context.settings.diff_settings",
+            lambda *_a, **_k: {
+                "a": SettingsSyncResult(status="in sync"),
+                "b": SettingsSyncResult(status="out of sync"),
+                "c": SettingsSyncResult(status="missing target"),
+                "d": SettingsSyncResult(status="error"),
+                "e": SettingsSyncResult(status="skipped"),  # not counted in total
+            },
+        )
+        r = await client.get("/api/context/overview")
+        settings = r.json()["settings"]
+        sub_sum = (
+            settings["in_sync"]
+            + settings["out_of_sync"]
+            + settings["missing_target"]
+            + settings["error"]
+        )
+        assert sub_sum == settings["total"], (
+            f"per-status counts must sum to total (Q-PR3 invariant); "
+            f"got total={settings['total']} sum={sub_sum} settings={settings}"
+        )
+        # Skipped is excluded from total: 5 generators, 1 skipped → 4.
+        assert settings["total"] == 4, settings
 
     @pytest.mark.anyio
     async def test_settings_skipped_not_counted_in_total(

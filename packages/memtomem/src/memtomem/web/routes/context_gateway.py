@@ -145,8 +145,18 @@ async def context_overview(
         # would make the dashboard read "1/2 synced" even when the second slot
         # is "no Codex installed", which misleads the user about actionable work.
         total_applicable = sum(1 for s in statuses if s != "skipped")
+        # diff_settings emits 5 status values (settings.py:386-404):
+        # `in sync`, `out of sync`, `missing target`, `error`, `skipped`.
+        # All four non-skipped categories must be represented as count
+        # fields so `in_sync + out_of_sync + missing_target + error ==
+        # total_applicable` holds — that contract lets future consumers
+        # render per-status segments without the count silently dropping
+        # entries on the floor. `missing target` is the common first-use
+        # state (existing is None — settings.py:403-404), parallel to
+        # how skills/commands/agents already emit `missing_target`.
         in_sync = sum(1 for s in statuses if s == "in sync")
         out_of_sync = sum(1 for s in statuses if s == "out of sync")
+        missing_target = sum(1 for s in statuses if s == "missing target")
         error_count = sum(1 for s in statuses if s == "error")
         if all(s in ("in sync", "skipped") for s in statuses):
             status = "in_sync"
@@ -156,14 +166,18 @@ async def context_overview(
             status = "error"
         else:
             status = "out_of_sync"
-        # `error` is a count here (parallel to `out_of_sync` / `in_sync`),
-        # NOT the bool flag `_error_payload(shape="total")` emits when the
-        # whole call raises. The two shapes are on disjoint code paths and
-        # the frontend already differentiates `d.error === true` vs an int.
+        # `error` is a count here (parallel to `out_of_sync` / `in_sync` /
+        # `missing_target`), NOT the bool flag `_error_payload(shape="total")`
+        # emits when the whole call raises. The two shapes are on disjoint
+        # code paths. The frontend uses truthiness on `d.error` (any
+        # positive int OR the bool `true` reaches the danger render at
+        # context-gateway.js:136-145), so `error: 0` correctly skips the
+        # danger branch and `error: >=1` reaches it — both shapes work.
         result["settings"] = {
             "total": total_applicable,
             "in_sync": in_sync,
             "out_of_sync": out_of_sync,
+            "missing_target": missing_target,
             "error": error_count,
             "status": status,
         }
