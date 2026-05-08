@@ -148,20 +148,27 @@ class ClaudeSettingsGenerator:
                 existing_hooks[event] = list(rules)
                 continue
 
-            # Index existing rules by matcher for conflict detection
+            # Index existing rules by matcher for conflict detection. Keep
+            # the value as a list, not a single dict — Claude Code allows the
+            # same matcher to appear more than once under one event (e.g. a
+            # user keeping two PostToolUse rules without explicit matchers).
+            # Collapsing to a dict-of-rule means whichever same-matcher rule
+            # comes last silently shadows the rest, so byte-identical
+            # contributions can mismatch and emit a noisy warning.
             existing_rules: list = list(existing_hooks[event])
-            existing_by_matcher: dict[str, dict] = {}
+            existing_by_matcher: dict[str, list[dict]] = {}
             for rule in existing_rules:
                 if isinstance(rule, dict):
-                    existing_by_matcher[rule.get("matcher", "")] = rule
+                    existing_by_matcher.setdefault(rule.get("matcher", ""), []).append(rule)
 
             for rule in rules:
                 if not isinstance(rule, dict):
                     continue
                 matcher = rule.get("matcher", "")
-                if matcher in existing_by_matcher:
-                    if existing_by_matcher[matcher] == rule:
-                        continue  # already in sync
+                same_matcher = existing_by_matcher.get(matcher, [])
+                if same_matcher:
+                    if any(existing == rule for existing in same_matcher):
+                        continue  # already in sync (with at least one)
                     label = f"{event}:{matcher}" if matcher else event
                     warnings.append(
                         f"Hook rule '{label}' already exists in the target "

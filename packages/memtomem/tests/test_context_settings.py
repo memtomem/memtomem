@@ -190,6 +190,35 @@ class TestClaudeSettingsMergeConflict:
         assert results["claude_settings"].status == "ok"
         assert results["claude_settings"].warnings == []
 
+    def test_dedup_when_user_has_multiple_same_matcher_rules(self, claude_home, tmp_path):
+        """Pin: existing rules with the same matcher should not collapse during indexing.
+
+        Claude Code allows two rules under the same event to share a matcher
+        (or omit it). Earlier indexing keyed ``existing_by_matcher`` as
+        ``dict[str, dict]``, so the second rule silently shadowed the first.
+        A byte-identical contribution that matched the *first* rule then
+        emitted a spurious warning by comparing against the second.
+        """
+        target = claude_home / ".claude" / "settings.json"
+        existing_a = _rule("", "echo first")
+        existing_b = _rule("", "echo second")
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [existing_a, existing_b]}}) + "\n",
+            encoding="utf-8",
+        )
+
+        # Contribution exactly matches the first user rule.
+        _make_canonical_settings(tmp_path, {"hooks": {"PostToolUse": [existing_a]}})
+
+        results = generate_all_settings(tmp_path)
+        r = results["claude_settings"]
+        assert r.status == "ok"
+        assert r.warnings == []  # was 1 before the fix
+
+        written = _read_target(claude_home)
+        # Both user rules preserved verbatim, no contribution appended.
+        assert written["hooks"]["PostToolUse"] == [existing_a, existing_b]
+
 
 class TestClaudeSettingsMergeWarningContent:
     """Warning messages must contain the rule label, reason, and remediation."""
