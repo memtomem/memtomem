@@ -402,6 +402,7 @@
   "settings.hooks.error_hint": "Fix the JSON file and reload.",
   "settings.hooks.no_hooks_defined": "No hooks defined in .memtomem/settings.json.",
   "settings.hooks.load_failed": "Failed to load sync status",
+  "settings.hooks.target_label": "User-scope target:",
   "settings.hooks.badge_in_sync": "in sync",
   "settings.hooks.badge_out_of_sync": "out of sync",
   "settings.hooks.badge_error": "error",

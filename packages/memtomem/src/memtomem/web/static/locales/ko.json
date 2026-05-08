@@ -402,6 +402,7 @@
   "settings.hooks.error_hint": "JSON 파일을 수정한 뒤 다시 불러오세요.",
   "settings.hooks.no_hooks_defined": ".memtomem/settings.json 에 정의된 훅이 없습니다.",
   "settings.hooks.load_failed": "동기화 상태를 불러오지 못했습니다",
+  "settings.hooks.target_label": "User-scope 대상:",
   "settings.hooks.badge_in_sync": "동기화됨",
   "settings.hooks.badge_out_of_sync": "불일치",
   "settings.hooks.badge_error": "오류",

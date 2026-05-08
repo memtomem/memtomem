@@ -41,8 +41,11 @@ async function loadHooksSync() {
       error: { cls: 'badge-danger', text: data.error || 'Error' },
     };
     const badge = badges[data.status] || badges.error;
-    statusEl.innerHTML = `<span class="badge ${badge.cls}">${escapeHtml(badge.text)}</span>`
-      + `<span class="text-muted" style="margin-left:0.5rem;font-size:0.85rem">${escapeHtml(data.target_path || '')}</span>`;
+    statusEl.innerHTML =
+      `<span class="badge ${badge.cls}">${escapeHtml(badge.text)}</span>`
+      + (data.target_path
+        ? `<div class="hooks-status-target">${escapeHtml(t('settings.hooks.target_label'))} <code>${escapeHtml(data.target_path)}</code></div>`
+        : '');
 
     if (data.status === 'no_source' || data.status === 'error') {
       // Status badge above already names the condition — keep the body to
