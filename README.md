@@ -152,6 +152,7 @@ Hosted at **[memtomem.com](https://memtomem.com)** — also available as Markdow
 | [Embeddings](docs/guides/embeddings.md) | ONNX, Ollama, and OpenAI embedding providers |
 | [LLM Providers](docs/guides/llm-providers.md) | Ollama, OpenAI, Anthropic, and compatible endpoints |
 | [MCP Client Setup](docs/guides/mcp-clients.md) | Editor-specific configuration |
+| [Multi-device sync](docs/guides/multi-device-sync.md) | Sync markdown memories across personal devices via a private git repo |
 | [Uninstalling memtomem](docs/guides/uninstall.md) | Clean removal steps |
 
 ---
