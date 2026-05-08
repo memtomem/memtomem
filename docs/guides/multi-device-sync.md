@@ -180,9 +180,12 @@ applies symmetrically to git pulls: the watcher's reliability for
 
 A `post-merge` git hook (user-installed, not shipped by memtomem) is a
 reasonable optimization for users who keep the server running. Call
-`mm index <affected-dir>` from the hook; pipe stdout to `/dev/null` for
-quiet operation, or pass `--json` if you want one structured line per
-invocation for machine-readable logs.
+`mm index <affected-dir>` from the hook and redirect stdout to your
+hook log (or `/dev/null`). The command exits non-zero on hard failure;
+the trailing `Indexed N file(s): …` summary line is the parse target
+if you want a one-line record per pull. (`mm index --json` is reserved
+for the `--debounce-window` / `--flush` / `--status` paths and does not
+apply to plain indexing.)
 
 ## Conflict policy
 
