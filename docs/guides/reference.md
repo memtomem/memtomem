@@ -1073,6 +1073,9 @@ mm context diff                        # check sync status
 mm context sync                        # sync context.md → agent files
 mm context generate --include=settings # merge hooks → ~/.claude/settings.json
 mm context diff --include=settings     # check hook sync status
+# Note: cursor / codex / copilot fold ## Rules + ## Style into a single block;
+# `generate` warns on stderr when both sections are populated. context.md is
+# the source of truth — edit there, not in generated files.
 
 # Sessions & activity
 mm session start                                              # start a tracked session

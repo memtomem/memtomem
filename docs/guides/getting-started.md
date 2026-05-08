@@ -437,6 +437,8 @@ mm context sync --include=skills,agents,commands
 
 Run `mm context --help` for the full fan-out matrix across editors (Claude Code, Cursor, Gemini CLI, OpenAI Codex, GitHub Copilot) and per-runtime field-drop details.
 
+> Cursor, OpenAI Codex, and GitHub Copilot generators concatenate the `Rules` and `Style` sections from `context.md` into a single block — `mm context generate` warns on stderr when both are populated. `context.md` remains the source of truth; edit there, not in the generated files.
+
 ---
 
 ## Optional: STM Proxy — Proactive Memory Surfacing

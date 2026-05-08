@@ -18,6 +18,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **`mm context generate` warns when Cursor/Codex/Copilot would merge
+  Rules + Style.** These three runtimes fold the canonical `Rules` and
+  `Style` sections into a single block via `_compact_rules`, so the
+  split does not survive a hand-edit of the generated file followed by
+  `mm context init` re-extraction. The CLI now emits a single yellow
+  stderr notice naming only the affected runtimes that intersect with
+  the target set (no warning for `--agent=claude`/`--agent=gemini`, no
+  warning when only one of Rules/Style is populated). Generated file
+  format is unchanged; `context.md` remains the source of truth.
 - **`config.json` writers serialize home-rooted paths as `~/...`.**
   `indexing.memory_dirs` and `storage.sqlite_path` (and any future
   path-typed config field) are written in tilde form when they sit

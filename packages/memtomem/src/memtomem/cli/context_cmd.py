@@ -360,6 +360,32 @@ def _print_settings_diff(root: Path) -> None:
             click.secho(f"  error {name}: {r.reason}", fg="red")
 
 
+_RULES_STYLE_MERGE_RUNTIMES: frozenset[str] = frozenset({"cursor", "codex", "copilot"})
+
+
+def _warn_rules_style_merge(sections: dict[str, str], targets: list[str]) -> None:
+    """Warn when generated targets fold Rules and Style into one block.
+
+    Cursor / Codex / Copilot generators concatenate Rules + Style under a
+    single heading via ``_compact_rules`` in :mod:`memtomem.context.generator`.
+    Claude / Gemini emit them as separate ``##`` blocks. When both sections
+    are present in ``context.md`` and at least one merging runtime is in the
+    target list, surface a single stderr notice naming only the affected
+    runtimes — file format itself is unchanged.
+    """
+    if not (sections.get("Rules", "").strip() and sections.get("Style", "").strip()):
+        return
+    affected = [t for t in targets if t in _RULES_STYLE_MERGE_RUNTIMES]
+    if not affected:
+        return
+    click.secho(
+        f"warning: {'/'.join(affected)} merge Rules and Style into a single block; "
+        "context.md remains the source of truth — edit there, not in generated files.",
+        err=True,
+        fg="yellow",
+    )
+
+
 @click.group("context")
 def context() -> None:
     """Manage unified agent context (CLAUDE.md, .cursorrules, GEMINI.md, etc.)."""
@@ -420,7 +446,7 @@ def init_cmd(include: tuple[str, ...], overwrite: bool) -> None:
     # Detect existing files
     files = detect_agent_files(root)
     if not files:
-        click.echo("No agent files found. Creating empty context template.")
+        click.secho("No agent files found. Creating empty context template.", fg="yellow")
         sections: dict[str, str] = {
             "Project": "- Name: \n- Language: \n- Package manager: ",
             "Commands": "- Build: \n- Test: \n- Lint: ",
@@ -501,6 +527,8 @@ def generate_cmd(
             click.secho(f"{CONTEXT_FILENAME} is empty.", fg="yellow")
         else:
             targets = list(GENERATORS.keys()) if agent == "all" else [agent]
+
+            _warn_rules_style_merge(sections, targets)
 
             for name in targets:
                 if name not in GENERATORS:
