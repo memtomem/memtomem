@@ -617,13 +617,16 @@ function _ctxScopeCount(scope, type) {
   return (scope.counts && scope.counts[type]) || 0;
 }
 
-function _ctxRenderItemsHtml(items, type, projectRoot, { clickable }) {
+function _ctxRenderItemsHtml(items, type, projectRoot, scannedDirs, { clickable }) {
   if (!items.length) {
     const canonical = `.memtomem/${type}`;
+    // Same fallback as the runtime-only banner (line 732) so the hint stays
+    // grammatical when no scan dirs are reported (fresh project / no runtimes).
+    const scanList = (scannedDirs || []).join(', ') || `.${type}/`;
     const hint = t('settings.ctx.empty_hint')
       .replace(/\{type\}/g, type)
       .replace('{canonical}', canonical)
-      .replace('{scan_dirs}', '');
+      .replace('{scan_dirs}', scanList);
     return emptyState(
       '',
       t('settings.ctx.no_artifacts').replace('{type}', type),
@@ -676,9 +679,13 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
     // re-insert the runtime-only banner above the fresh list.
     if (seq !== _ctxListSeq[type]) return;
     const items = data[type] || [];
-    container.innerHTML = _ctxRenderItemsHtml(items, type, scope.root, {
-      clickable: _ctxScopeIsServerCwd(scope),
-    });
+    container.innerHTML = _ctxRenderItemsHtml(
+      items,
+      type,
+      scope.root,
+      data.scanned_dirs || [],
+      { clickable: _ctxScopeIsServerCwd(scope) },
+    );
 
     if (_ctxScopeIsServerCwd(scope)) {
       // Only the cwd is mutable, so its canonical/runtime split drives the
