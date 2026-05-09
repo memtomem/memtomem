@@ -34,16 +34,14 @@ import pytest
 from click.testing import CliRunner
 
 from memtomem.cli import cli
+from memtomem.context.generator import GENERATORS
 
-from .helpers import set_home
+from .helpers import _MEMTOMEM_ENV_VARS, set_home
 
-_GENERATED_PROJECT_FILES = (
-    "CLAUDE.md",
-    ".cursorrules",
-    "GEMINI.md",
-    "AGENTS.md",
-    ".github/copilot-instructions.md",
-)
+# Derived from the runtime registry rather than hand-curated so a new
+# runtime added to ``GENERATORS`` (cline, aider, etc.) is automatically
+# covered without this list silently under-asserting.
+_GENERATED_PROJECT_FILES = tuple(g.output_path for g in GENERATORS.values())
 
 
 def _seed_project(root: Path) -> None:
@@ -87,7 +85,7 @@ class TestContextInitGenerateInline:
         assert r.exit_code == 0, f"init failed: {r.output}"
         assert (project / ".memtomem" / "context.md").is_file()
 
-        # 2. generate → 5 runtimes' worth of project memory
+        # 2. generate → every registered runtime's project memory
         r = runner.invoke(cli, ["context", "generate"])
         assert r.exit_code == 0, f"generate failed: {r.output}"
         for rel in _GENERATED_PROJECT_FILES:
@@ -110,7 +108,7 @@ class TestContextInitGenerateInline:
         assert not (home / ".codex" / "agents").exists()
 
 
-class TestContextSubprocess:
+class TestContextInitGenerateSubprocess:
     """Out-of-process ``mm`` round-trip — process-boundary regressions
     that the in-process variant cannot surface (HOME / USERPROFILE /
     cwd / module-level constants bound at import time)."""
@@ -139,6 +137,15 @@ class TestContextSubprocess:
         _seed_project(project)
 
         env = os.environ.copy()
+        # Strip developer ``MEMTOMEM_*`` overrides — ``HOME`` only
+        # isolates ``~/.memtomem/config.json`` reads, but
+        # pydantic-settings still applies env-var overrides from the
+        # parent shell (e.g. ``MEMTOMEM_INDEXING__MEMORY_DIRS``
+        # pointing at a real path) which would un-hermeticize the
+        # subprocess. Mirrors what ``helpers.isolate_memtomem_env``
+        # does for in-process tests.
+        for var in _MEMTOMEM_ENV_VARS:
+            env.pop(var, None)
         env["HOME"] = str(home)
         env["USERPROFILE"] = str(home)  # Windows ``Path.home()`` priority
         env["XDG_CONFIG_HOME"] = str(home / ".config")
