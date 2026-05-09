@@ -21,11 +21,15 @@ from memtomem.web.app import create_app
 @pytest.fixture
 def ctx_app(tmp_path: Path):
     """App with project_root pointing to a temp directory."""
+    from memtomem.config import Mem2MemConfig
+
     application = create_app(lifespan=None, mode="dev")
     application.state.project_root = tmp_path
     # Minimal stubs for deps the app might check
     application.state.storage = AsyncMock()
-    application.state.config = None
+    # Real config so ``get_hooks_target_scope`` Depends resolves
+    # ``cfg.hooks.target_scope`` (default "user").
+    application.state.config = Mem2MemConfig()
     application.state.search_pipeline = None
     application.state.index_engine = None
     application.state.embedder = None

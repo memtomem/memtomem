@@ -205,13 +205,15 @@ def detect_command_dirs(project_root: Path) -> list[DetectedFile]:
     return sorted(found, key=lambda f: (f.agent, str(f.path)))
 
 
-def detect_settings_files() -> list[DetectedFile]:
-    """Detect user-scope settings files for registered runtimes.
+def detect_settings_files(project_root: Path, scope: str) -> list[DetectedFile]:
+    """Detect the resolved-scope settings file for each registered runtime.
 
-    Unlike the other ``detect_*`` functions this does **not** take a
-    *project_root* because settings files live in the user's home directory.
-    A runtime is reported only when its home directory exists (e.g.
-    ``~/.claude/``), matching :meth:`ClaudeSettingsGenerator.is_available`.
+    Per ADR-0010 §3 the active scope is user-selectable (``user`` /
+    ``project_shared`` / ``project_local``). Callers pass the project
+    root + resolved scope; the function probes that single tier so the
+    UI's "what's where" listing matches what
+    :func:`memtomem.context.settings.generate_all_settings` will actually
+    write.
 
     Delegates to generators from ``context/settings.py`` at call time (lazy
     import) to ensure ``monkeypatch``-based HOME overrides in tests work.
@@ -220,11 +222,9 @@ def detect_settings_files() -> list[DetectedFile]:
 
     found: list[DetectedFile] = []
     for name, gen in SETTINGS_GENERATORS.items():
-        if not gen.is_available():
+        if not gen.is_available(project_root):
             continue
-        # project_root is not used by user-scope generators, but the
-        # protocol requires it — pass cwd as a harmless default.
-        target = gen.target_file(Path.cwd())
+        target = gen.target_file(project_root, scope)
         if target.is_file():
             found.append(
                 DetectedFile(
@@ -246,14 +246,21 @@ def detect_settings_files() -> list[DetectedFile]:
     return sorted(found, key=lambda f: (f.agent, str(f.path)))
 
 
-def detect_all(project_root: Path) -> list[DetectedFile]:
-    """Return project-memory files, skill dirs, sub-agents, commands, and settings."""
+def detect_all(project_root: Path, scope: str = "user") -> list[DetectedFile]:
+    """Return project-memory files, skill dirs, sub-agents, commands, and settings.
+
+    *scope* is the resolved ``hooks.target_scope`` (ADR-0010 §3); see
+    :func:`detect_settings_files` for why it's relevant. Defaults to
+    ``"user"`` so external consumers of this public function don't see
+    a breaking signature change in v1 — the value matches the default
+    of ``hooks.target_scope`` (ADR-0010 §2).
+    """
     return (
         detect_agent_files(project_root)
         + detect_skill_dirs(project_root)
         + detect_agent_dirs(project_root)
         + detect_command_dirs(project_root)
-        + detect_settings_files()
+        + detect_settings_files(project_root, scope)
     )
 
 

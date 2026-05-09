@@ -11,11 +11,12 @@ from pydantic import BaseModel
 
 from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
+    resolve_scope_path,
     _safe_load_json,
     _write_json,
     generate_all_settings,
 )
-from memtomem.web.deps import get_project_root
+from memtomem.web.deps import get_hooks_target_scope, get_project_root
 from memtomem.web.routes._locks import _gateway_lock
 
 logger = logging.getLogger(__name__)
@@ -25,8 +26,14 @@ router = APIRouter(tags=["settings-sync", "context-gateway"])
 _MALFORMED = object()
 
 
-def _claude_target() -> Path:
-    return Path.home() / ".claude" / "settings.json"
+def _claude_target(project_root: Path, scope: str) -> Path:
+    """Resolve the Claude Code settings file under *scope* (ADR-0010 §3).
+
+    Thin wrapper over :func:`memtomem.context.settings.resolve_scope_path`
+    so this module owns no path math of its own — keeps the route helper
+    in lock-step with :class:`ClaudeSettingsGenerator` and the detector.
+    """
+    return resolve_scope_path(project_root, scope)
 
 
 def _rule_label(event: str, matcher: str) -> str:
@@ -146,10 +153,11 @@ def _compare_hooks(
 @router.get("/context/settings")
 async def get_settings_sync(
     project_root: Path = Depends(get_project_root),
+    scope: str = Depends(get_hooks_target_scope),
 ) -> dict:
     """Return structured settings sync status with conflict details."""
     canonical_path = project_root / CANONICAL_SETTINGS_FILE
-    target_path = _claude_target()
+    target_path = _claude_target(project_root, scope)
     return _compare_hooks(canonical_path, target_path)
 
 
@@ -171,6 +179,7 @@ class ApplySettingsSyncRequest(BaseModel):
 async def apply_settings_sync(
     body: ApplySettingsSyncRequest | None = None,
     project_root: Path = Depends(get_project_root),
+    scope: str = Depends(get_hooks_target_scope),
 ) -> dict:
     """Run the full settings merge (generate_all_settings).
 
@@ -183,7 +192,11 @@ async def apply_settings_sync(
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                results = generate_all_settings(project_root, allow_host_writes=allow_host_writes)
+                results = generate_all_settings(
+                    project_root,
+                    scope=scope,
+                    allow_host_writes=allow_host_writes,
+                )
     except TimeoutError:
         raise HTTPException(503, "Settings sync timed out — another sync may be in progress")
     out: list[dict] = []
@@ -211,6 +224,7 @@ class ResolveRequest(BaseModel):
 async def resolve_conflict(
     body: ResolveRequest,
     project_root: Path = Depends(get_project_root),
+    scope: str = Depends(get_hooks_target_scope),
 ) -> dict:
     """Resolve a single hook conflict by replacing the target's rule."""
     if body.action != "use_proposed":
@@ -219,7 +233,7 @@ async def resolve_conflict(
     label = _rule_label(body.event, body.matcher)
 
     canonical_path = project_root / CANONICAL_SETTINGS_FILE
-    target_path = _claude_target()
+    target_path = _claude_target(project_root, scope)
 
     try:
         async with asyncio.timeout(60):

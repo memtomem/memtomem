@@ -54,6 +54,17 @@ def get_project_root(request: Request) -> Path:
     return request.app.state.project_root
 
 
+def get_hooks_target_scope(request: Request) -> str:
+    """Return ``hooks.target_scope`` from the live ``app.state.config``.
+
+    ``hot_reload.py`` swaps ``app.state.config`` atomically on
+    ``config.json`` edits, so handlers depending on this Depends
+    automatically pick up scope changes without a server restart
+    (mirrors :func:`get_config`).
+    """
+    return request.app.state.config.hooks.target_scope
+
+
 def require_configured() -> None:
     """Refuse mutating index routes when ``mm init`` has not run.
 

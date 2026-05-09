@@ -9,7 +9,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends
 
 from memtomem.privacy import scan as _privacy_scan
-from memtomem.web.deps import get_project_root
+from memtomem.web.deps import get_hooks_target_scope, get_project_root
 
 try:
     import tomllib
@@ -110,6 +110,7 @@ def _error_payload(exc: BaseException, *, shape: str = "total") -> dict:
 @router.get("/context/overview")
 async def context_overview(
     project_root: Path = Depends(get_project_root),
+    scope: str = Depends(get_hooks_target_scope),
 ) -> dict:
     """Aggregate sync status across skills, commands, agents, and settings."""
     from memtomem.context.agents import diff_agents
@@ -138,7 +139,7 @@ async def context_overview(
         result["agents"] = _error_payload(exc, shape="total")
 
     try:
-        settings_diff = diff_settings(project_root)
+        settings_diff = diff_settings(project_root, scope=scope)
         statuses = [r.status for r in settings_diff.values()]
         # `total` counts only **applicable** generators (runtime installed +
         # canonical source present). `skipped` items are N/A — including them

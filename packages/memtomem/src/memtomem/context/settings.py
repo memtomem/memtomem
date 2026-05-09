@@ -52,6 +52,24 @@ CANONICAL_SETTINGS_FILE = ".memtomem/settings.json"
 _MALFORMED = object()
 
 
+def resolve_scope_path(project_root: Path, scope: str) -> Path:
+    """Resolve ``hooks.target_scope`` to the runtime settings file path.
+
+    Single source of truth for the ADR-0010 §3 path math; shared by
+    :class:`ClaudeSettingsGenerator`, the Web ``_claude_target`` helper,
+    and the detector. Raises ``ValueError`` on unknown scope so a typo in
+    config.json surfaces loudly instead of silently writing to the
+    fallback path.
+    """
+    if scope == "user":
+        return Path.home() / ".claude" / "settings.json"
+    if scope == "project_shared":
+        return project_root / ".claude" / "settings.json"
+    if scope == "project_local":
+        return project_root / ".claude" / "settings.local.json"
+    raise ValueError(f"Unknown target_scope: {scope!r}")
+
+
 # ── Protocol + Result ───────────────────────────────────────────────
 
 
@@ -60,16 +78,19 @@ class SettingsGenerator(Protocol):
 
     name: str
 
-    def is_available(self) -> bool:
-        """``True`` if the runtime is installed (e.g. ``~/.claude/`` exists).
+    def is_available(self, project_root: Path) -> bool:
+        """``True`` if the runtime is installed for this project.
 
-        Used to skip generators whose runtime isn't installed.  Generators
-        must **not** auto-create the runtime's home directory.
+        Per ADR-0010 §3 the probe is "any of the resolved scopes is a
+        plausible target dir": ``~/.claude/`` for user-tier, or
+        ``<project_root>/.claude/`` for project-tier. Used to skip
+        generators whose runtime isn't installed.  Generators must
+        **not** auto-create the runtime's home directory.
         """
         ...
 
-    def target_file(self, project_root: Path) -> Path:
-        """Return the path to the runtime's settings file."""
+    def target_file(self, project_root: Path, scope: str) -> Path:
+        """Return the path to the runtime's settings file for *scope*."""
         ...
 
     def canonical_source(self, project_root: Path) -> Path:
@@ -116,11 +137,13 @@ class ClaudeSettingsGenerator:
 
     name: str = "claude_settings"
 
-    def is_available(self) -> bool:
-        return (Path.home() / ".claude").is_dir()
+    def is_available(self, project_root: Path) -> bool:
+        # Loosened per ADR-0010 §3: tile shows up if Claude Code has any
+        # settings home for this project — user-tier or project-tier.
+        return (Path.home() / ".claude").is_dir() or (project_root / ".claude").is_dir()
 
-    def target_file(self, project_root: Path) -> Path:
-        return Path.home() / ".claude" / "settings.json"
+    def target_file(self, project_root: Path, scope: str) -> Path:
+        return resolve_scope_path(project_root, scope)
 
     def canonical_source(self, project_root: Path) -> Path:
         return project_root / CANONICAL_SETTINGS_FILE
@@ -207,7 +230,7 @@ def _is_under_project_root(target: Path, project_root: Path) -> bool:
     return resolved_target.is_relative_to(resolved_root)
 
 
-def host_write_targets(project_root: Path) -> list[Path]:
+def host_write_targets(project_root: Path, *, scope: str) -> list[Path]:
     """Target paths a settings sync would write *outside* the project root.
 
     A target counts as a "host write" when its resolved path is not under
@@ -217,17 +240,22 @@ def host_write_targets(project_root: Path) -> list[Path]:
     ``mm context sync --include=settings`` from a worktree must not silently
     edit the real home directory.
 
+    *scope* is the resolved ``hooks.target_scope`` (per ADR-0010 §3); it
+    determines which tier each generator's ``target_file`` resolves to.
+    Project-tier scopes (``project_shared`` / ``project_local``) yield an
+    empty list because writes stay inside the project root.
+
     Generators whose runtime is unavailable (``is_available()`` is False) or
     that have no canonical source are skipped, so the list mirrors what
     :func:`generate_all_settings` would actually try to write.
     """
     pending: list[Path] = []
     for gen in SETTINGS_GENERATORS.values():
-        if not gen.is_available():
+        if not gen.is_available(project_root):
             continue
         if not gen.canonical_source(project_root).exists():
             continue
-        target = gen.target_file(project_root)
+        target = gen.target_file(project_root, scope)
         if not _is_under_project_root(target, project_root):
             pending.append(target)
     return pending
@@ -268,24 +296,34 @@ def _write_json(path: Path, data: dict) -> None:
 def generate_all_settings(
     project_root: Path,
     *,
+    scope: str,
     allow_host_writes: bool = False,
 ) -> dict[str, SettingsSyncResult]:
     """Fan out ``.memtomem/settings.json`` to registered runtimes.
 
+    *scope* is the resolved ``hooks.target_scope`` (per ADR-0010 §3) and
+    is required keyword-only — every caller (CLI, MCP, Web) is expected
+    to resolve it from its own config layer rather than have this
+    function lazy-load ``Mem2MemConfig`` (which would trigger the
+    auto-discover migration as a side effect, see
+    ``feedback_doctor_no_migration_loader``).
+
     ``allow_host_writes`` defaults to ``False`` so any caller — CLI, MCP
     server, or Web route — that does not first prompt the user is
     automatically refused for targets that resolve outside *project_root*
-    (e.g. ``~/.claude/settings.json``). Refused generators come back with
-    ``status="needs_confirmation"`` and ``reason`` containing the host
-    path; callers decide how to surface that. Passing
-    ``allow_host_writes=True`` after acknowledgement (CLI ``--yes``,
-    MCP ``allow_host_writes=True``, Web confirmation modal) restores the
-    previous behavior. Project-scope generators are written unconditionally.
+    (e.g. ``~/.claude/settings.json`` when ``scope="user"``). Refused
+    generators come back with ``status="needs_confirmation"`` and
+    ``reason`` containing the host path; callers decide how to surface
+    that. Passing ``allow_host_writes=True`` after acknowledgement (CLI
+    ``--yes``, MCP ``allow_host_writes=True``, Web confirmation modal)
+    restores the previous behavior. Project-scope writes (``scope`` is
+    ``project_shared`` or ``project_local``) stay inside the project
+    root and never trigger the gate.
     """
     results: dict[str, SettingsSyncResult] = {}
 
     for name, gen in SETTINGS_GENERATORS.items():
-        if not gen.is_available():
+        if not gen.is_available(project_root):
             results[name] = SettingsSyncResult(
                 status="skipped",
                 reason=(f"{name} runtime not installed (target dir missing)"),
@@ -309,7 +347,7 @@ def generate_all_settings(
             continue
         contributions: dict = raw  # type: ignore[assignment]
 
-        target_path = gen.target_file(project_root)
+        target_path = gen.target_file(project_root, scope)
         if not allow_host_writes and not _is_under_project_root(target_path, project_root):
             results[name] = SettingsSyncResult(
                 status="needs_confirmation",
@@ -359,12 +397,19 @@ def generate_all_settings(
 
 def diff_settings(
     project_root: Path,
+    *,
+    scope: str,
 ) -> dict[str, SettingsSyncResult]:
-    """Dry-run: compute what :func:`generate_all_settings` would do."""
+    """Dry-run: compute what :func:`generate_all_settings` would do.
+
+    *scope* is the resolved ``hooks.target_scope`` (ADR-0010 §3); see
+    :func:`generate_all_settings` for the rationale on why callers pass
+    this in rather than having it lazy-loaded here.
+    """
     results: dict[str, SettingsSyncResult] = {}
 
     for name, gen in SETTINGS_GENERATORS.items():
-        if not gen.is_available():
+        if not gen.is_available(project_root):
             results[name] = SettingsSyncResult(
                 status="skipped",
                 reason=f"{name} runtime not installed",
@@ -388,7 +433,7 @@ def diff_settings(
             continue
         contributions: dict = raw  # type: ignore[assignment]
 
-        target_path = gen.target_file(project_root)
+        target_path = gen.target_file(project_root, scope)
         existing_raw, _ = _read_with_mtime(target_path)
         if existing_raw is _MALFORMED:
             results[name] = SettingsSyncResult(
@@ -429,6 +474,7 @@ __all__ = [
     "SETTINGS_GENERATORS",
     "SettingsGenerator",
     "SettingsSyncResult",
+    "resolve_scope_path",
     "diff_settings",
     "generate_all_settings",
     "host_write_targets",

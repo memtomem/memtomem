@@ -102,6 +102,9 @@ class FakeConfig:
         enable_auto_ns = False
         rules: list = []
 
+    class _Hooks:
+        target_scope = "user"
+
     embedding = _Embedding()
     storage = _Storage()
     search = _Search()
@@ -109,6 +112,7 @@ class FakeConfig:
     decay = _Decay()
     mmr = _MMR()
     namespace = _Namespace()
+    hooks = _Hooks()
 
 
 # ---------------------------------------------------------------------------
