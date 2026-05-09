@@ -46,10 +46,14 @@ def gateway_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def app(gateway_home: Path):
+    from memtomem.config import Mem2MemConfig
+
     application = create_app(lifespan=None, mode="dev")
     application.state.project_root = gateway_home
     application.state.storage = AsyncMock()
-    application.state.config = None
+    # Real config so ``get_hooks_target_scope`` Depends resolves
+    # ``cfg.hooks.target_scope`` (default "user").
+    application.state.config = Mem2MemConfig()
     application.state.search_pipeline = None
     application.state.index_engine = None
     application.state.embedder = None

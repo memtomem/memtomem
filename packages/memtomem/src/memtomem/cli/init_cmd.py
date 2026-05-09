@@ -953,7 +953,12 @@ def _step_settings(state: dict) -> None:
             except StepRetry:
                 continue
 
-        results = generate_all_settings(project_root)
+        # ``mm init`` runs *before* ``~/.memtomem/config.json`` is
+        # necessarily persisted, so we hardcode the v1 default scope here
+        # (ADR-0010 §3) instead of loading config — loading would mask
+        # the wizard's own write. Users can flip the scope post-install
+        # via ``mm config set hooks.target_scope …`` and re-run sync.
+        results = generate_all_settings(project_root, scope="user")
         for name, r in results.items():
             if r.status == "ok":
                 click.secho(f"  Merged → {r.target}", fg="green")

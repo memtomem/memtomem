@@ -6979,7 +6979,7 @@ class TestStepSettingsFsGuards:
         # the guard under test.
         monkeypatch.setattr(
             "memtomem.context.settings.generate_all_settings",
-            lambda root: {},
+            lambda root, *, scope, **_: {},
         )
 
         state: dict = {}

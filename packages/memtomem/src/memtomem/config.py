@@ -697,6 +697,22 @@ class SessionSummaryConfig(BaseSettings):
         return v
 
 
+TargetScope = Literal["user", "project_shared", "project_local"]
+
+
+class HooksConfig(BaseSettings):
+    """Settings-hooks fan-out scope (ADR-0010 §3).
+
+    ``target_scope`` selects where memtomem-managed Claude Code hooks land:
+    user-tier (``~/.claude/settings.json``), project-shared
+    (``<project>/.claude/settings.json``), or project-local
+    (``<project>/.claude/settings.local.json``). v1 default is ``user`` for
+    zero behavior change; the default-flip trigger lives in ADR-0010 §5.
+    """
+
+    target_scope: TargetScope = "user"
+
+
 class ContextGatewayConfig(BaseSettings):
     """Settings for the multi-project context UI (skills / commands / agents).
 
@@ -748,6 +764,7 @@ class Mem2MemConfig(BaseSettings):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     session_summary: SessionSummaryConfig = Field(default_factory=SessionSummaryConfig)
     context_gateway: ContextGatewayConfig = Field(default_factory=ContextGatewayConfig)
+    hooks: HooksConfig = Field(default_factory=HooksConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -814,6 +831,7 @@ MUTABLE_FIELDS: dict[str, set[str]] = {
     # instance is cached on startup), so only the pool-sizing knobs are
     # runtime-mutable.
     "rerank": {"enabled", "oversample", "min_pool", "max_pool"},
+    "hooks": {"target_scope"},
 }
 
 FIELD_CONSTRAINTS: dict[str, dict] = {
@@ -849,6 +867,7 @@ FIELD_CONSTRAINTS: dict[str, dict] = {
     "rerank.oversample": {"type": float, "min": 0.1, "max": 10.0},
     "rerank.min_pool": {"type": int, "min": 1, "max": 1000},
     "rerank.max_pool": {"type": int, "min": 1, "max": 1000},
+    "hooks.target_scope": {"type": str, "allowed": set(get_args(TargetScope))},
 }
 
 
@@ -980,12 +999,17 @@ def _override_path() -> Path:
     return _CONFIG_OVERRIDE_PATH.expanduser()
 
 
-def load_config_overrides(config: Mem2MemConfig) -> None:
+def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> None:
     """Apply persisted overrides from ~/.memtomem/config.json (if exists).
 
     Precedence: ``MEMTOMEM_<SECTION>__<FIELD>`` env vars win over
     ``config.json``. If an env var is set for a field, the corresponding
     ``config.json`` entry is skipped so the env-bound value remains in effect.
+
+    Pass ``migrate=False`` to skip the auto-discover legacy migration —
+    required for read-only diagnostic surfaces (e.g. ``mm context detect``,
+    scope resolution from config) that must not touch disk as a side
+    effect (see ``feedback_doctor_no_migration_loader``).
     """
     import json as _json
     import logging
@@ -1046,8 +1070,10 @@ def load_config_overrides(config: Mem2MemConfig) -> None:
 
     # One-shot migration of legacy auto_discover=True installs to explicit
     # provider memory_dirs entries. No-op for fresh installs (no config.json)
-    # and for already-migrated installs (auto_discover=False).
-    _migrate_auto_discover_once(config)
+    # and for already-migrated installs (auto_discover=False). Skipped when
+    # ``migrate=False`` so read-only callers don't trigger a disk write.
+    if migrate:
+        _migrate_auto_discover_once(config)
 
 
 _CONFIG_D_PATH = Path("~/.memtomem/config.d")

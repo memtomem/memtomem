@@ -70,7 +70,15 @@ from memtomem.context.skills import (
     generate_all_skills,
 )
 from memtomem.wiki.store import WikiNotFoundError, WikiStore
-from memtomem.config import ContextGatewayConfig
+from typing import get_args
+
+from memtomem.config import (
+    ContextGatewayConfig,
+    Mem2MemConfig,
+    TargetScope,
+    load_config_d,
+    load_config_overrides,
+)
 
 # Phase 1-3 supports skills/agents/commands; Phase D adds settings.
 _KNOWN_INCLUDES: frozenset[str] = frozenset({"skills", "agents", "commands", "settings"})
@@ -292,8 +300,26 @@ def _print_commands_diff(root: Path) -> None:
 # ── Settings sub-handlers (Phase D) ─────────────────────────────────
 
 
-def _print_settings_detect() -> None:
-    files = detect_settings_files()
+def _resolve_cli_scope(override: str | None) -> str:
+    """Return the resolved ``hooks.target_scope`` for a CLI invocation.
+
+    Per-invocation ``--scope`` flag wins; otherwise build a fresh
+    ``Mem2MemConfig`` and apply the user-level config + env overrides.
+    Always passes ``migrate=False`` because scope resolution is itself
+    a read-only lookup — even from mutating commands (sync/generate)
+    the migration belongs in the path that actually persists state, not
+    in the scope read (see ``feedback_doctor_no_migration_loader``).
+    """
+    if override is not None:
+        return override
+    cfg = Mem2MemConfig()
+    load_config_d(cfg, quiet=True)
+    load_config_overrides(cfg, migrate=False)
+    return cfg.hooks.target_scope
+
+
+def _print_settings_detect(root: Path, scope: str) -> None:
+    files = detect_settings_files(root, scope)
     if not files:
         click.echo("  (no settings files detected)")
         return
@@ -303,7 +329,7 @@ def _print_settings_detect() -> None:
         click.echo(f"    {f.agent:17s}  {f.path}  {status}")
 
 
-def _confirm_settings_host_writes(root: Path, *, yes: bool) -> bool:
+def _confirm_settings_host_writes(root: Path, *, scope: str, yes: bool) -> bool:
     """Prompt before mutating settings files outside the project root.
 
     Returns ``True`` when the caller may pass ``allow_host_writes=True``
@@ -311,8 +337,12 @@ def _confirm_settings_host_writes(root: Path, *, yes: bool) -> bool:
     supplied, or user confirmed at the prompt). Returns ``False`` when
     the user declines, in which case the caller should not invoke
     settings sync at all.
+
+    The host-write check is computed against *scope* so
+    ``--scope=project_local`` skips the prompt: project-tier writes stay
+    inside *root* and never leave the project.
     """
-    pending = host_write_targets(root)
+    pending = host_write_targets(root, scope=scope)
     if not pending:
         return True
     if yes:
@@ -326,8 +356,8 @@ def _confirm_settings_host_writes(root: Path, *, yes: bool) -> bool:
     return click.confirm("Continue?", default=False)
 
 
-def _print_settings_generate(root: Path, *, allow_host_writes: bool) -> None:
-    results = generate_all_settings(root, allow_host_writes=allow_host_writes)
+def _print_settings_generate(root: Path, *, scope: str, allow_host_writes: bool) -> None:
+    results = generate_all_settings(root, scope=scope, allow_host_writes=allow_host_writes)
     for name, r in results.items():
         if r.status == "ok":
             click.secho(f"  Settings: {name} → {r.target}", fg="green")
@@ -343,8 +373,8 @@ def _print_settings_generate(root: Path, *, allow_host_writes: bool) -> None:
             click.secho(f"  {r.status} {name}: {r.reason}", fg="red")
 
 
-def _print_settings_diff(root: Path) -> None:
-    results = diff_settings(root)
+def _print_settings_diff(root: Path, *, scope: str) -> None:
+    results = diff_settings(root, scope=scope)
     if not results:
         click.echo("  (no settings to compare)")
         return
@@ -358,6 +388,20 @@ def _print_settings_diff(root: Path) -> None:
             click.secho(f"  skipped {name}: {r.reason}", fg="yellow")
         elif r.status == "error":
             click.secho(f"  error {name}: {r.reason}", fg="red")
+
+
+_SCOPE_OPTION = click.option(
+    "--scope",
+    "scope_flag",
+    type=click.Choice(list(get_args(TargetScope))),
+    default=None,
+    help=(
+        "Override hooks.target_scope for this invocation only "
+        "(user / project_shared / project_local). "
+        "Host-write confirmation is computed against the resolved scope, "
+        "so --scope=project_local skips the prompt (writes stay in-project)."
+    ),
+)
 
 
 _RULES_STYLE_MERGE_RUNTIMES: frozenset[str] = frozenset({"cursor", "codex", "copilot"})
@@ -423,7 +467,7 @@ def detect_cmd(include: tuple[str, ...]) -> None:
 
     if "settings" in inc:
         click.echo("")
-        _print_settings_detect()
+        _print_settings_detect(root, _resolve_cli_scope(None))
 
 
 @context.command("init")
@@ -512,8 +556,14 @@ def init_cmd(include: tuple[str, ...], overwrite: bool) -> None:
     is_flag=True,
     help="Skip confirmation prompts before writing settings files outside this project.",
 )
+@_SCOPE_OPTION
 def generate_cmd(
-    agent: str, include: tuple[str, ...], strict: bool, on_drop: str, yes: bool
+    agent: str,
+    include: tuple[str, ...],
+    strict: bool,
+    on_drop: str,
+    yes: bool,
+    scope_flag: str | None,
 ) -> None:
     """Generate agent files from .memtomem/context.md."""
     inc = _parse_include(include)
@@ -563,8 +613,9 @@ def generate_cmd(
 
     if "settings" in inc:
         click.echo("")
-        if _confirm_settings_host_writes(root, yes=yes):
-            _print_settings_generate(root, allow_host_writes=True)
+        scope = _resolve_cli_scope(scope_flag)
+        if _confirm_settings_host_writes(root, scope=scope, yes=yes):
+            _print_settings_generate(root, scope=scope, allow_host_writes=True)
         else:
             click.secho("  Skipped settings sync (declined).", fg="yellow")
 
@@ -618,7 +669,7 @@ def diff_cmd(include: tuple[str, ...]) -> None:
 
     if "settings" in inc:
         click.echo("")
-        _print_settings_diff(root)
+        _print_settings_diff(root, scope=_resolve_cli_scope(None))
 
 
 @context.command("sync")
@@ -642,7 +693,14 @@ def diff_cmd(include: tuple[str, ...]) -> None:
     is_flag=True,
     help="Skip confirmation prompts before writing settings files outside this project.",
 )
-def sync_cmd(include: tuple[str, ...], strict: bool, on_drop: str, yes: bool) -> None:
+@_SCOPE_OPTION
+def sync_cmd(
+    include: tuple[str, ...],
+    strict: bool,
+    on_drop: str,
+    yes: bool,
+    scope_flag: str | None,
+) -> None:
     """Sync context.md to all detected agent files."""
     inc = _parse_include(include)
     root = _find_project_root()
@@ -688,8 +746,9 @@ def sync_cmd(include: tuple[str, ...], strict: bool, on_drop: str, yes: bool) ->
 
     if "settings" in inc:
         click.echo("")
-        if _confirm_settings_host_writes(root, yes=yes):
-            _print_settings_generate(root, allow_host_writes=True)
+        scope = _resolve_cli_scope(scope_flag)
+        if _confirm_settings_host_writes(root, scope=scope, yes=yes):
+            _print_settings_generate(root, scope=scope, allow_host_writes=True)
         else:
             click.secho("  Skipped settings sync (declined).", fg="yellow")
 

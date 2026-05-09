@@ -24,6 +24,23 @@ def _find_project_root() -> Path:
     return Path.cwd()
 
 
+def _resolve_mcp_scope() -> str:
+    """Return the resolved ``hooks.target_scope`` for an MCP tool call.
+
+    Builds a fresh ``Mem2MemConfig`` and applies user-level overrides
+    with ``migrate=False`` — scope resolution is read-only, and the
+    same MCP tool dispatcher is shared by read-only entry points
+    (mem_context_detect, mem_context_diff) where a disk-write side
+    effect would be wrong (see ``feedback_doctor_no_migration_loader``).
+    """
+    from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
+
+    cfg = Mem2MemConfig()
+    load_config_d(cfg, quiet=True)
+    load_config_overrides(cfg, migrate=False)
+    return cfg.hooks.target_scope
+
+
 def _parse_include(include: str) -> set[str]:
     """Parse a comma-separated ``include`` argument coming from an MCP caller."""
     values: set[str] = set()
@@ -112,7 +129,7 @@ async def mem_context_detect(
     if "settings" in inc:
         from memtomem.context.detector import detect_settings_files
 
-        settings = detect_settings_files()
+        settings = detect_settings_files(root, _resolve_mcp_scope())
         if lines:
             lines.append("")
         if settings:
@@ -239,7 +256,9 @@ async def mem_context_generate(
     if "settings" in inc:
         from memtomem.context.settings import generate_all_settings
 
-        settings_results = generate_all_settings(root, allow_host_writes=allow_host_writes)
+        settings_results = generate_all_settings(
+            root, scope=_resolve_mcp_scope(), allow_host_writes=allow_host_writes
+        )
         for sname, sr in settings_results.items():
             if sr.status == "ok":
                 results.append(f"\nSettings: {sname} → {sr.target}")
@@ -336,7 +355,7 @@ async def mem_context_diff(
     if "settings" in inc:
         from memtomem.context.settings import diff_settings as _diff_settings
 
-        settings_results = _diff_settings(root)
+        settings_results = _diff_settings(root, scope=_resolve_mcp_scope())
         if settings_results:
             if lines:
                 lines.append("")
@@ -472,7 +491,9 @@ async def mem_context_sync(
     if "settings" in inc:
         from memtomem.context.settings import generate_all_settings
 
-        settings_results = generate_all_settings(root, allow_host_writes=allow_host_writes)
+        settings_results = generate_all_settings(
+            root, scope=_resolve_mcp_scope(), allow_host_writes=allow_host_writes
+        )
         for sname, sr in settings_results.items():
             if sr.status == "ok":
                 if results:
