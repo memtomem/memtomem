@@ -39,6 +39,10 @@ pytestmark = pytest.mark.browser
 SYNC_ALL_TITLE = "Sync All"  # settings.ctx.sync_all
 SYNC_SUCCESS_TOAST = "Sync completed"  # settings.ctx.sync_success
 MTIME_CONFLICT_TOAST = "File was modified externally. Reloading..."  # settings.ctx.mtime_conflict
+SYNC_PARTIAL_NEEDS_CONFIRMATION_TOAST = (
+    "Sync All complete except Settings — confirm host writes in the Settings panel."
+)
+SYNC_FAILED_TEMPLATE = "Sync failed: {error}"  # toast.sync_failed
 
 
 _HEALTHY_OVERVIEW = {
@@ -347,4 +351,168 @@ def test_sync_all_settings_aborted_emits_mtime_conflict_warning(page, mm_web_url
     success_count = page.locator("#toast-container .toast.toast-success").count()
     assert success_count == 0, (
         f"Aborted envelope must not emit the success toast; found {success_count}"
+    )
+
+
+def test_sync_all_settings_error_emits_failure_toast(page, mm_web_url: str) -> None:
+    """S1-d: settings POST returns ``{status: 'error'}`` → error toast
+    with the ``toast.sync_failed`` template and no success toast.
+
+    This pins the highest-severity non-aborted branch in
+    ``context-gateway.js`` so a regression cannot treat a per-result error
+    as a full Sync All success just because the HTTP response itself is OK.
+    """
+    _install_default_stubs(page)
+    _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
+
+    page.route(
+        "**/api/context/skills/sync",
+        lambda r: r.fulfill(status=200, content_type="application/json", body="{}"),
+    )
+    page.route(
+        "**/api/context/agents/sync",
+        lambda r: r.fulfill(status=200, content_type="application/json", body="{}"),
+    )
+
+    error_reason = "Settings merge failed"
+
+    def _settings_error(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "results": [
+                        {
+                            "name": "claude",
+                            "status": "error",
+                            "reason": error_reason,
+                            "warnings": [],
+                            "target": "/fake/.claude/settings.json",
+                        }
+                    ],
+                    "duplicate_tier_warnings": [],
+                }
+            ),
+        )
+
+    page.route("**/api/context/settings/sync", _settings_error)
+
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    page.locator("#ctx-sync-all-btn").click()
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    page.locator("#confirm-ok-btn").click()
+    page.wait_for_function(
+        "() => document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+
+    page.wait_for_selector("#toast-container .toast.toast-error", timeout=4_000)
+    toast_text = (
+        page.locator("#toast-container .toast.toast-error .toast-msg").text_content() or ""
+    ).strip()
+    expected = SYNC_FAILED_TEMPLATE.format(error=error_reason)
+    assert toast_text == expected, f"Settings error toast must be {expected!r}, got {toast_text!r}"
+
+    success_count = page.locator("#toast-container .toast.toast-success").count()
+    assert success_count == 0, (
+        f"Settings error branch must not emit the success toast; found {success_count}"
+    )
+
+
+def test_sync_all_settings_needs_confirmation_opens_hooks_sync(page, mm_web_url: str) -> None:
+    """S1-e: settings POST returns ``needs_confirmation`` → info toast with
+    an Open Settings action that navigates to the Hooks Sync section.
+
+    This pins the partial-success branch added for host-write confirmation:
+    the user should see a non-success severity and get a direct action to
+    the section that can resolve the pending hooks.
+    """
+    _install_default_stubs(page)
+    _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
+
+    page.route(
+        "**/api/context/skills/sync",
+        lambda r: r.fulfill(status=200, content_type="application/json", body="{}"),
+    )
+    page.route(
+        "**/api/context/agents/sync",
+        lambda r: r.fulfill(status=200, content_type="application/json", body="{}"),
+    )
+    page.route(
+        "**/api/settings-sync",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "status": "conflicts",
+                    "target_path": "/fake/.claude/settings.json",
+                    "hooks": {"pending": [], "conflicts": [], "synced": []},
+                }
+            ),
+        ),
+    )
+
+    def _settings_needs_confirmation(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "results": [
+                        {
+                            "name": "claude",
+                            "status": "needs_confirmation",
+                            "reason": "Host writes require confirmation",
+                            "warnings": [],
+                            "target": "/fake/.claude/settings.json",
+                        }
+                    ],
+                    "duplicate_tier_warnings": [],
+                }
+            ),
+        )
+
+    page.route("**/api/context/settings/sync", _settings_needs_confirmation)
+
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    page.locator("#ctx-sync-all-btn").click()
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    page.locator("#confirm-ok-btn").click()
+    page.wait_for_function(
+        "() => document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+
+    page.wait_for_selector("#toast-container .toast.toast-info", timeout=4_000)
+    toast = page.locator("#toast-container .toast.toast-info")
+    toast_text = (toast.locator(".toast-msg").text_content() or "").strip()
+    assert toast_text == SYNC_PARTIAL_NEEDS_CONFIRMATION_TOAST, (
+        f"Needs-confirmation toast must be {SYNC_PARTIAL_NEEDS_CONFIRMATION_TOAST!r}, "
+        f"got {toast_text!r}"
+    )
+
+    success_count = page.locator("#toast-container .toast.toast-success").count()
+    assert success_count == 0, (
+        f"Needs-confirmation branch must not emit the success toast; found {success_count}"
+    )
+
+    toast.locator(".toast-action").click()
+    page.wait_for_function(
+        "() => {"
+        "  const section = document.getElementById('settings-hooks-sync');"
+        "  return section && !section.classList.contains('hidden');"
+        "}",
+        timeout=4_000,
     )

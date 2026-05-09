@@ -344,3 +344,71 @@ def test_resolve_aborted_envelope_keeps_card_and_emits_error_toast(page, mm_web_
     assert len(resolve_calls) >= 1, (
         f"Route stub must have intercepted the resolve POST, got {resolve_calls!r}"
     )
+
+
+def test_resolve_http_error_keeps_card_and_emits_error_toast(page, mm_web_url: str) -> None:
+    """S3-c: POST ``/resolve`` returns HTTP 500 → error toast from
+    ``err.detail`` and no ``loadHooksSync`` reload.
+
+    This pins the ``!r.ok`` branch in ``settings-hooks-watchdog.js``:
+    transport-level failures should be visible to the user while leaving the
+    unresolved conflict card in place.
+    """
+    _install_default_stubs(page)
+    get_state = _stub_settings_sync_get(page, _CONFLICTS_GET)
+
+    detail = "Resolve write failed"
+    resolve_calls: list[dict] = []
+
+    def _resolve_http_error(route):
+        resolve_calls.append(route.request.post_data_json or {})
+        route.fulfill(
+            status=500,
+            content_type="application/json",
+            body=json.dumps({"detail": detail}),
+        )
+
+    page.route("**/api/context/settings/resolve", _resolve_http_error)
+
+    page.goto(mm_web_url)
+    _open_hooks_sync(page)
+    page.wait_for_function(
+        "() => document.querySelectorAll('.hooks-sync-conflict').length === 1",
+        timeout=4_000,
+    )
+    initial_get_count = get_state["get_count"]
+
+    page.locator(".hooks-sync-conflict .hooks-resolve-btn").click()
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    with page.expect_request(
+        lambda req: "/api/context/settings/resolve" in req.url and req.method == "POST",
+        timeout=4_000,
+    ) as resolve_info:
+        page.locator("#confirm-ok-btn").click()
+    assert resolve_info.value.method == "POST", resolve_info.value
+    page.wait_for_function(
+        "() => document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+
+    page.wait_for_selector("#toast-container .toast.toast-error", timeout=4_000)
+    toast_text = (
+        page.locator("#toast-container .toast.toast-error .toast-msg").text_content() or ""
+    ).strip()
+    assert toast_text == detail, (
+        f"HTTP error must surface err.detail {detail!r}, got {toast_text!r}"
+    )
+
+    assert page.locator(".hooks-sync-conflict").count() == 1, (
+        "HTTP error branch must not clear the conflict card — the resolve never landed on disk."
+    )
+    assert get_state["get_count"] == initial_get_count, (
+        f"HTTP error branch must not trigger a GET reload; before = "
+        f"{initial_get_count}, after = {get_state['get_count']}"
+    )
+    assert len(resolve_calls) >= 1, (
+        f"Route stub must have intercepted the resolve POST, got {resolve_calls!r}"
+    )
