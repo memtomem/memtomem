@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal, cast, get_args
@@ -193,6 +194,13 @@ class IndexingConfig(BaseSettings):
     memory_dirs: Annotated[list[Path], APPEND] = Field(
         default_factory=lambda: _default_memory_dirs()
     )
+    # Project-tier index roots (ADR-0011). Each entry MUST resolve under a
+    # ``<X>/.memtomem/memories`` or ``<X>/.memtomem/memories.local`` directory
+    # so the path classifier can derive the scope without a side table. Empty
+    # by default; users opt in via the future ``mm context`` surface (PR-D /
+    # PR-E) or by editing the config directly. Sibling of ``memory_dirs`` so
+    # the wizard / Sources tab / auto-discover migration stay scope-unaware.
+    project_memory_dirs: Annotated[list[Path], APPEND] = Field(default_factory=list)
     supported_extensions: frozenset[str] = frozenset(
         {
             ".md",
@@ -267,6 +275,19 @@ class IndexingConfig(BaseSettings):
                 f"<= max_chunk_tokens ({self.max_chunk_tokens})"
             )
         return self
+
+    def all_index_roots(self) -> list[Path]:
+        """Return every directory the indexer should treat as a root (ADR-0011).
+
+        Single source of truth for "all index roots" — watcher, engine
+        within-roots guard, exclusion match, and the Web sources status
+        endpoint all consume this. Direct ``.memory_dirs`` access is
+        reserved for the user-tier registry (wizard, Sources tab user-
+        view, auto-discover migration); functional consumers that need
+        to act on every indexable file go through this helper instead so
+        a future scope addition does not fork the consumers.
+        """
+        return list(self.memory_dirs) + list(self.project_memory_dirs)
 
 
 class DecayConfig(BaseSettings):
@@ -1393,6 +1414,76 @@ def categorize_memory_dir(path: str | Path) -> ProviderCategory:
         if pat.search(s):
             return cat
     return "user"
+
+
+# Pattern matchers for project-tier scope dirs. ``project_local`` MUST
+# precede ``project_shared`` here because ``.local`` is a strict suffix
+# of ``memories`` after the leading-dir match — match the more specific
+# pattern first. Anchors require the directory to live directly under a
+# ``.memtomem/`` ancestor; nested paths like
+# ``<X>/foo/.memtomem/memories/bar.md`` still classify correctly because
+# we walk up from ``<X>/foo`` to its ``.memtomem`` ancestor.
+_PROJECT_SCOPE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("project_local", re.compile(r"/\.memtomem/memories\.local(?:/|$)")),
+    ("project_shared", re.compile(r"/\.memtomem/memories(?:/|$)")),
+)
+
+
+def classify_scope(
+    path: str | Path,
+    project_memory_dirs: Iterable[Path | str] | None = None,
+) -> tuple[str, Path | None]:
+    """Classify ``path`` into a scope tier and project root (ADR-0011).
+
+    Returns ``(scope, project_root)`` where:
+
+    - ``scope`` is one of ``"user"`` (default) / ``"project_shared"`` /
+      ``"project_local"`` (matches ``TargetScope`` from ADR-0010).
+    - ``project_root`` is the absolute ``<X>`` such that the path lives
+      under ``<X>/.memtomem/...``, or ``None`` for user scope.
+
+    Matching is path-pattern-based; the path is **not** required to exist.
+    Caller passes the configured ``project_memory_dirs`` so we can refuse
+    to classify a project_* path that has not been registered (defense
+    against unregistered project trees being silently picked up by the
+    indexer). When ``project_memory_dirs`` is ``None``, registration is
+    not enforced — used by lower-level callers that already gate on the
+    config field separately.
+    """
+    s = str(path).replace("\\", "/").rstrip("/")
+    for scope_name, pat in _PROJECT_SCOPE_PATTERNS:
+        m = pat.search(s)
+        if m is None:
+            continue
+        # Project root is everything before ``/.memtomem/...``.
+        memtomem_idx = m.start()
+        if memtomem_idx <= 0:
+            continue
+        project_root = Path(str(path)[:memtomem_idx])
+        if project_memory_dirs is not None:
+            registered_roots = {Path(str(d)).expanduser().resolve() for d in project_memory_dirs}
+            try:
+                resolved_path = Path(str(path)).expanduser().resolve()
+            except OSError:
+                resolved_path = Path(str(path))
+            # The path qualifies if any registered project_memory_dir is
+            # an ancestor (the registered dir is the ``memories[/.local]``
+            # subdir, so ``path`` must live at or under it).
+            if not any(
+                resolved_path == r or _is_strictly_under(resolved_path, r) for r in registered_roots
+            ):
+                return ("user", None)
+        return (scope_name, project_root)
+    return ("user", None)
+
+
+def _is_strictly_under(child: Path, parent: Path) -> bool:
+    """Return True iff ``child`` is at or below ``parent`` (resolved both)."""
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
 
 
 def memory_dir_kind(path: str | Path) -> MemoryDirKind:

@@ -38,6 +38,13 @@ class ChunkMetadata:
     # NULL means unbounded on that side; both NULL means always-valid.
     valid_from_unix: int | None = None
     valid_to_unix: int | None = None
+    # Scope axis (ADR-0011). ``user`` is the only scope today; project_shared
+    # / project_local are reserved for the read/write surface PRs.
+    # ``project_root`` is None for user scope, an absolute path for project
+    # scopes — required so a single user-local DB can hold chunks from
+    # multiple worktrees of the same project without path-prefix collisions.
+    scope: str = "user"
+    project_root: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +89,50 @@ class NamespaceFilter:
         if "," in value:
             return NamespaceFilter(namespaces=tuple(v.strip() for v in value.split(",")))
         return NamespaceFilter(namespaces=(value,))
+
+
+@dataclass(frozen=True, slots=True)
+class ScopeFilter:
+    """Filter for scope-axis (ADR-0011) queries.
+
+    Sibling of :class:`NamespaceFilter`. Supports exact match (single or
+    union) and glob patterns over the three scope values
+    (``user`` / ``project_shared`` / ``project_local``). Comma-separated
+    lists are normalised to the union form.
+
+    The "context boundary" — the always-on rule that out-of-project
+    searches see only ``user`` and in-project searches see ``user`` plus
+    the current project's project-tier rows — lives in the SQL helper
+    (:func:`memtomem.storage.sqlite_scope.scope_context_sql`), not in
+    the filter itself. This keeps the filter a pure user-intent value;
+    the helper is the place where caller intent meets project context.
+    """
+
+    scopes: tuple[str, ...] = ()
+    pattern: str | None = None
+
+    @staticmethod
+    def parse(value: str | list[str] | None) -> ScopeFilter | None:
+        """Parse a user-supplied scope argument into a filter.
+
+        ``None`` returns ``None`` (caller falls back to the always-on
+        context-boundary rule). ``"project_*"`` parses as a glob. Comma
+        list and bare exact match work the same as for namespaces. The
+        scope alphabet is small (3 values), so this parser deliberately
+        does NOT validate against ``user`` / ``project_shared`` /
+        ``project_local`` — invalid scope strings produce an empty
+        result set rather than an error, mirroring the namespace parser
+        which also accepts arbitrary strings.
+        """
+        if value is None:
+            return None
+        if isinstance(value, list):
+            return ScopeFilter(scopes=tuple(value))
+        if "*" in value:
+            return ScopeFilter(pattern=value)
+        if "," in value:
+            return ScopeFilter(scopes=tuple(v.strip() for v in value.split(",")))
+        return ScopeFilter(scopes=(value,))
 
 
 @dataclass(slots=True)

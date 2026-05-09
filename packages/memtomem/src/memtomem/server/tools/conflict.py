@@ -28,12 +28,19 @@ async def mem_conflict_check(
     app = await _get_app_initialized(ctx)
 
     from memtomem.search.conflict import detect_conflicts
+    from memtomem.server.tools.search import _resolve_project_context_root
+
+    # ADR-0011 PR-D round 11: thread project context so conflict
+    # candidates respect the same scope boundary as the rest of the
+    # MCP read surface.
+    project_context_root = _resolve_project_context_root(app)
 
     conflicts = await detect_conflicts(
         content,
         app.storage,
         app.embedder,
         threshold=threshold,
+        project_context_root=project_context_root,
     )
 
     if not conflicts:

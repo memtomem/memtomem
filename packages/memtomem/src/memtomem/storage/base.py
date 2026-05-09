@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Protocol, Sequence
 from uuid import UUID
 
-from memtomem.models import Chunk, ChunkLink, NamespaceFilter, SearchResult
+from memtomem.models import Chunk, ChunkLink, NamespaceFilter, ScopeFilter, SearchResult
 
 
 class StorageBackend(Protocol):
@@ -24,19 +24,40 @@ class StorageBackend(Protocol):
     async def get_chunks_batch(self, chunk_ids: Sequence[UUID]) -> dict[UUID, Chunk]: ...
     async def delete_chunks(self, chunk_ids: Sequence[UUID]) -> int: ...
     async def delete_by_source(self, source_file: Path) -> int: ...
+    async def list_scopes_by_source(self, source_file: Path) -> set[str]: ...
+    async def list_scopes_by_namespace(self, namespace: str) -> set[str]: ...
+    async def update_chunks_scope_for_source(
+        self,
+        old_path: Path,
+        new_path: Path,
+        new_scope: str,
+        new_project_root: Path | None,
+    ) -> int: ...
 
     # Search
+    #
+    # ADR-0011 §6 always-on scope-context filter: every backend that
+    # serves search MUST honour ``scope_filter`` + ``project_context_root``,
+    # otherwise the project-aware default merge silently degrades to a
+    # cross-project union on alternate backends. Both kwargs default to
+    # ``None`` so existing callers stay source-compatible; the
+    # ``scope_context_sql`` helper in :mod:`memtomem.storage.sqlite_scope`
+    # reflects how a SQL backend should compose the fragment.
     async def bm25_search(
         self,
         query: str,
         top_k: int = 20,
         namespace_filter: NamespaceFilter | None = None,
+        scope_filter: ScopeFilter | None = None,
+        project_context_root: Path | None = None,
     ) -> list[SearchResult]: ...
     async def dense_search(
         self,
         embedding: list[float],
         top_k: int = 20,
         namespace_filter: NamespaceFilter | None = None,
+        scope_filter: ScopeFilter | None = None,
+        project_context_root: Path | None = None,
     ) -> list[SearchResult]: ...
 
     # Metadata
@@ -59,6 +80,8 @@ class StorageBackend(Protocol):
         limit: int = 20,
         namespace_filter: NamespaceFilter | None = None,
         tag_filter: str | None = None,
+        scope_filter: ScopeFilter | None = None,
+        project_context_root: Path | None = None,
     ) -> list[Chunk]: ...
 
     # Namespace

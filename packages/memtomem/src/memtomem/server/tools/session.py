@@ -329,10 +329,18 @@ async def _maybe_auto_summarize(
         started_at = started_at.replace(tzinfo=timezone.utc)
 
     ns_filter = NamespaceFilter(namespaces=(namespace,))
+    # ADR-0011 PR-D round 9: thread project context onto the always-on
+    # scope filter so an auto-summary for a session run in a
+    # registered project still picks up the session's project_shared /
+    # project_local chunks.
+    from memtomem.server.tools.search import _resolve_project_context_root
+
+    project_context_root = _resolve_project_context_root(app)
     chunks = await app.storage.recall_chunks(
         since=started_at,
         namespace_filter=ns_filter,
         limit=max(cfg.min_chunks * 4, 200),
+        project_context_root=project_context_root,
     )
     if len(chunks) < cfg.min_chunks:
         return None, "below min_chunks", []

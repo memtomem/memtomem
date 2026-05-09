@@ -24,6 +24,7 @@ async def mem_recall(
     namespace: str | None = None,
     limit: int = 20,
     output_format: Literal["compact", "structured"] = "compact",
+    scope: str | None = None,
     ctx: CtxType = None,
 ) -> str:
     """Recall memories created within a date range.
@@ -38,6 +39,10 @@ async def mem_recall(
         limit: Maximum number of chunks to return (default 20)
         output_format: Output format — "compact" (default, human-readable) or "structured"
             (JSON for machine parsing, includes trust-UX hints as a "hints" field).
+        scope: ADR-0011 scope-axis filter — single, comma list (``user,project_local``),
+            or glob (``project_*``). When omitted, the default merge applies: in-project
+            recalls return ``user`` + the current project's project tiers; out-of-project
+            recalls return ``user`` only.
 
     Examples::
 
@@ -53,7 +58,8 @@ async def mem_recall(
             "Supported: compact, structured."
         )
 
-    from memtomem.models import NamespaceFilter
+    from memtomem.models import NamespaceFilter, ScopeFilter
+    from memtomem.server.tools.search import _resolve_project_context_root
 
     app = await _get_app_initialized(ctx)
 
@@ -74,12 +80,16 @@ async def mem_recall(
         effective_ns,
         system_prefixes=tuple(app.config.search.system_namespace_prefixes),
     )
+    scope_filter = ScopeFilter.parse(scope)
+    project_context_root = _resolve_project_context_root(app)
     chunks = await app.storage.recall_chunks(
         since=since_dt,
         until=until_dt,
         source_filter=source_filter,
         limit=limit,
         namespace_filter=ns_filter,
+        scope_filter=scope_filter,
+        project_context_root=project_context_root,
     )
 
     # Build trust-UX hints: archive count when no namespace was pinned, plus a

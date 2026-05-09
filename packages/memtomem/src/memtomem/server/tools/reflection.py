@@ -146,7 +146,16 @@ async def mem_reflect_save(
         app = await _get_app_initialized(ctx)
         from uuid import UUID
 
-        recent = await app.storage.recall_chunks(limit=1)
+        # ADR-0011 PR-D round 9: thread project context onto the
+        # always-on scope filter. Insights default to user-tier today,
+        # but ``mem_reflect`` may land a project-tier reflection in
+        # the future; threading the context now means the
+        # ``recent[0]`` lookup returns the just-written insight chunk
+        # under whichever tier it lives in.
+        from memtomem.server.tools.search import _resolve_project_context_root
+
+        project_context_root = _resolve_project_context_root(app)
+        recent = await app.storage.recall_chunks(limit=1, project_context_root=project_context_root)
         if recent:
             insight_id = recent[0].id
             for cid in related_chunks:

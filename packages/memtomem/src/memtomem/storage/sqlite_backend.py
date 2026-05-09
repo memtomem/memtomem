@@ -16,7 +16,14 @@ import sqlite_vec
 
 from memtomem.config import StorageConfig
 from memtomem.errors import StorageError
-from memtomem.models import Chunk, ChunkMetadata, ChunkType, NamespaceFilter, SearchResult
+from memtomem.models import (
+    Chunk,
+    ChunkMetadata,
+    ChunkType,
+    NamespaceFilter,
+    ScopeFilter,
+    SearchResult,
+)
 from memtomem.storage import fts_tokenizer as _fts
 from memtomem.storage.sqlite_helpers import (
     deserialize_f32,
@@ -28,6 +35,7 @@ from memtomem.storage.sqlite_helpers import (
 )
 from memtomem.storage.sqlite_meta import MetaManager
 from memtomem.storage.sqlite_namespace import NamespaceOps
+from memtomem.storage.sqlite_scope import scope_context_sql, scope_sort_priority_case
 from memtomem.storage.mixins import (
     AnalyticsMixin,
     EntityMixin,
@@ -413,7 +421,8 @@ class SqliteBackend(
                     """UPDATE chunks SET content=?, content_hash=?, source_file=?,
                        heading_hierarchy=?, chunk_type=?, start_line=?, end_line=?,
                        language=?, tags=?, namespace=?, updated_at=?,
-                       valid_from_unix=?, valid_to_unix=?
+                       valid_from_unix=?, valid_to_unix=?,
+                       scope=?, project_root=?
                        WHERE id=?""",
                     [
                         (
@@ -430,6 +439,8 @@ class SqliteBackend(
                             c.updated_at.isoformat(timespec="seconds"),
                             c.metadata.valid_from_unix,
                             c.metadata.valid_to_unix,
+                            c.metadata.scope,
+                            str(c.metadata.project_root) if c.metadata.project_root else None,
                             str(c.id),
                         )
                         for c, _ in to_update
@@ -470,8 +481,9 @@ class SqliteBackend(
                         chunk_type, start_line, end_line, language, tags,
                         namespace, created_at, updated_at,
                         overlap_before, overlap_after,
-                        valid_from_unix, valid_to_unix)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        valid_from_unix, valid_to_unix,
+                        scope, project_root)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     [
                         (
                             str(c.id),
@@ -491,6 +503,8 @@ class SqliteBackend(
                             c.metadata.overlap_after,
                             c.metadata.valid_from_unix,
                             c.metadata.valid_to_unix,
+                            c.metadata.scope,
+                            str(c.metadata.project_root) if c.metadata.project_root else None,
                         )
                         for c in to_insert
                     ],
@@ -645,6 +659,93 @@ class SqliteBackend(
             raise StorageError(f"delete_by_source failed, transaction rolled back: {exc}") from exc
         return len(rows)
 
+    async def list_scopes_by_source(self, source_file: Path) -> set[str]:
+        """Return the distinct persisted scopes for chunks from ``source_file``."""
+        db = self._get_read_db()
+        rows = db.execute(
+            "SELECT DISTINCT COALESCE(scope, 'user') FROM chunks WHERE source_file=?",
+            (norm_path(source_file),),
+        ).fetchall()
+        return {str(row[0] or "user") for row in rows}
+
+    async def list_scopes_by_namespace(self, namespace: str) -> set[str]:
+        """Return the distinct persisted scopes for chunks in ``namespace``.
+
+        ADR-0011 PR-D: ``mem_delete(namespace=...)`` uses this to refuse
+        bulk deletes that would remove ``project_shared`` chunks without
+        ``confirm_project_shared=True``. Project-shared memories can sit
+        in the same default namespace as user memories, so the
+        namespace string alone does not imply the trust tier.
+        """
+        db = self._get_read_db()
+        rows = db.execute(
+            "SELECT DISTINCT COALESCE(scope, 'user') FROM chunks WHERE namespace=?",
+            (namespace,),
+        ).fetchall()
+        return {str(row[0] or "user") for row in rows}
+
+    async def update_chunks_scope_for_source(
+        self,
+        old_path: Path,
+        new_path: Path,
+        new_scope: str,
+        new_project_root: Path | None,
+    ) -> int:
+        """Move indexed chunks to a new source path and scope without changing IDs.
+
+        ADR-0011 PR-D round 10 (B2 partial fix): the SELECT-then-UPDATE
+        pair is wrapped in an explicit ``BEGIN IMMEDIATE`` so a
+        concurrent writer (e.g. the indexer watcher firing
+        ``index_file(new_path)`` between our two statements) cannot
+        sneak in INSERTs for ``new_path`` and end up with duplicate
+        chunks at the destination. ``BEGIN IMMEDIATE`` acquires a
+        ``RESERVED`` lock up front, blocking other writers but not
+        readers — Python's default lazy transaction start would only
+        promote on the first DML, leaving the SELECT phase exposed.
+        """
+        db = self._get_db()
+        old_norm = norm_path(old_path)
+        new_norm = norm_path(new_path)
+        project_root = str(new_project_root) if new_project_root else None
+        # Take an explicit RESERVED lock before the SELECT so the
+        # rowid set we read can't be invalidated by a concurrent
+        # watcher INSERT before we UPDATE. ``BEGIN IMMEDIATE`` is a
+        # no-op if we're already inside an outer ``transaction()``
+        # context (sqlite raises which we swallow); guard via the
+        # backend's own ``_in_transaction`` flag.
+        opened_tx = False
+        if not self._in_transaction:
+            db.execute("BEGIN IMMEDIATE")
+            opened_tx = True
+        try:
+            rows = db.execute(
+                "SELECT rowid FROM chunks WHERE source_file=?",
+                (old_norm,),
+            ).fetchall()
+            if not rows:
+                if opened_tx:
+                    db.commit()
+                return 0
+            rowids = [row[0] for row in rows]
+            db.execute(
+                "UPDATE chunks SET source_file=?, scope=?, project_root=?, "
+                "updated_at=CURRENT_TIMESTAMP WHERE source_file=?",
+                (new_norm, new_scope, project_root, old_norm),
+            )
+            db.execute(
+                f"UPDATE chunks_fts SET source_file=? WHERE rowid IN ({placeholders(len(rowids))})",
+                [new_norm, *rowids],
+            )
+            if opened_tx:
+                db.commit()
+        except Exception as exc:
+            if opened_tx:
+                db.rollback()
+            raise StorageError(
+                f"update_chunks_scope_for_source failed, transaction rolled back: {exc}"
+            ) from exc
+        return len(rowids)
+
     async def rebuild_fts(self) -> int:
         """Rebuild the FTS5 index from chunks table using current tokenizer.
 
@@ -731,6 +832,8 @@ class SqliteBackend(
         query: str,
         top_k: int = 20,
         namespace_filter: NamespaceFilter | None = None,
+        scope_filter: ScopeFilter | None = None,
+        project_context_root: Path | None = None,
     ) -> list[SearchResult]:
         db = self._get_read_db()
         try:
@@ -741,29 +844,47 @@ class SqliteBackend(
                 if frag:
                     ns_clause = f"AND c.{frag}"
 
-            # ``c.*`` carries the full chunks-row layout into ``_row_to_chunk``
-            # so all defensive guards (overlap, importance, validity) activate.
-            # Score sits at the trailing position after the chunk columns —
-            # see ``_chunks_table_column_count`` consumer below.
-            sql = f"""SELECT c.*, sub.rank
-                   FROM (
-                       SELECT rowid, rank
-                       FROM chunks_fts
-                       WHERE chunks_fts MATCH ?
-                       ORDER BY rank
-                       LIMIT ?
-                   ) sub
-                   JOIN chunks c ON c.rowid = sub.rowid {ns_clause}
-                   ORDER BY sub.rank"""
+            # ADR-0011 §6: scope-context filter is ALWAYS appended even
+            # when the caller does not pass an explicit scope_filter,
+            # so cross-project leak is impossible by construction.
+            scope_frag, scope_params = scope_context_sql(
+                scope_filter, project_context_root, column_alias="c."
+            )
+            scope_clause = f"AND ({scope_frag})"
+            tie_break = scope_sort_priority_case("c.")
+
+            # ADR-0011 §6 + PR-D review #2: filter must run *inside* the
+            # FTS candidate selection, not after a post-LIMIT join. With
+            # the previous shape (``LIMIT k`` on chunks_fts MATCH, then
+            # filter), the global top-k could come entirely from another
+            # project's chunks; the current project's matches sat just
+            # below the cutoff and were dropped. Joining chunks first
+            # and applying the namespace/scope predicates inside the
+            # same query lets SQLite/FTS5 lazy-iterate matches and stop
+            # once ``top_k`` filter-passing rows accumulate.
+            #
+            # ``c.*`` carries the full chunks-row layout into
+            # ``_row_to_chunk`` so all defensive guards (overlap,
+            # importance, validity) activate. Score sits at the
+            # trailing position after the chunk columns — see
+            # ``_chunks_table_column_count`` consumer below.
+            sql = f"""SELECT c.*, fts.rank
+                   FROM chunks_fts fts
+                   JOIN chunks c ON c.rowid = fts.rowid
+                   WHERE chunks_fts MATCH ? {ns_clause} {scope_clause}
+                   ORDER BY fts.rank, {tie_break}
+                   LIMIT ?"""
 
             # Try AND first (default FTS5 behaviour)
             fts_query = _fts.tokenize_for_fts(query, for_query=True)
-            rows = db.execute(sql, [fts_query, top_k] + ns_params).fetchall()
+            rows = db.execute(sql, [fts_query] + ns_params + scope_params + [top_k]).fetchall()
 
             # Fall back to OR if AND returns nothing and query has multiple terms
             if not rows and " " in query.strip():
                 fts_query_or = _fts.tokenize_for_fts(query, for_query=True, use_or=True)
-                rows = db.execute(sql, [fts_query_or, top_k] + ns_params).fetchall()
+                rows = db.execute(
+                    sql, [fts_query_or] + ns_params + scope_params + [top_k]
+                ).fetchall()
 
         except sqlite3.OperationalError:
             raise
@@ -783,6 +904,8 @@ class SqliteBackend(
         embedding: list[float],
         top_k: int = 20,
         namespace_filter: NamespaceFilter | None = None,
+        scope_filter: ScopeFilter | None = None,
+        project_context_root: Path | None = None,
     ) -> list[SearchResult]:
         # bm25-only mode (dimension=0) — no chunks_vec table to query. Return
         # early instead of raising OperationalError that the search pipeline
@@ -798,30 +921,81 @@ class SqliteBackend(
             if frag:
                 ns_clause = f"AND c.{frag}"
 
+        # ADR-0011 §6: always-on scope-context fragment.
+        scope_frag, scope_params = scope_context_sql(
+            scope_filter, project_context_root, column_alias="c."
+        )
+        scope_clause = f"AND ({scope_frag})"
+        tie_break = scope_sort_priority_case("c.")
+
         import sqlite3 as _sqlite3
 
-        try:
-            rows = db.execute(
-                f"""SELECT c.*, sub.distance
-                   FROM (
-                       SELECT rowid, distance
-                       FROM chunks_vec
-                       WHERE embedding MATCH ?
-                       ORDER BY distance
-                       LIMIT ?
-                   ) sub
-                   JOIN chunks c ON c.rowid = sub.rowid {ns_clause}
-                   ORDER BY sub.distance""",
-                [serialize_f32(embedding), top_k] + ns_params,
-            ).fetchall()
-        except _sqlite3.OperationalError as exc:
-            if "Dimension mismatch" in str(exc):
-                raise ValueError(
-                    f"Embedding dimension mismatch: query has {len(embedding)}d "
-                    f"but DB expects {self._dimension}d. "
-                    f"Check MEMTOMEM_EMBEDDING__MODEL / MEMTOMEM_EMBEDDING__DIMENSION."
-                ) from exc
-            raise
+        # ADR-0011 §6 + PR-D review (round 2): sqlite-vec's
+        # ``embedding MATCH ?`` uses the inner ``LIMIT`` as the KNN
+        # ``K`` — the namespace / scope filter must run outside that
+        # subquery, so the inner K decides how many candidates the
+        # outer filter is allowed to see. A *fixed* over-fetch (e.g.
+        # ``top_k * 5``) silently drops valid scoped matches when
+        # cross-project / cross-namespace skew exceeds that factor.
+        #
+        # Adaptive over-fetch: try a small K first (fast for the
+        # common case where filter passes nearly everything), and if
+        # the post-filter result is short of ``top_k`` AND the inner
+        # K did not exhaust ``chunks_vec`` (i.e. there could still be
+        # filter-passing matches beyond the cutoff), retry with a
+        # larger K. Cap retries at the table size so the worst case
+        # is "scan every embedding once," which matches the semantics
+        # the caller would expect from "find me the nearest scoped
+        # row."
+        sql = f"""SELECT c.*, sub.distance
+               FROM (
+                   SELECT rowid, distance
+                   FROM chunks_vec
+                   WHERE embedding MATCH ?
+                   ORDER BY distance
+                   LIMIT ?
+               ) sub
+               JOIN chunks c ON c.rowid = sub.rowid {ns_clause} {scope_clause}
+               ORDER BY sub.distance, {tie_break}
+               LIMIT ?"""
+
+        # Total embedding rows — the upper bound for a meaningful
+        # KNN K. Cheap; sqlite stores chunks_vec row counts in its
+        # internal stats and ``COUNT(*)`` is O(table-size) only on
+        # the rare cold-cache path.
+        total_vec_rows = db.execute("SELECT count(*) FROM chunks_vec").fetchone()[0] or 0
+
+        # Schedule: start at the previous fixed factor for the
+        # common case, then jump to "essentially unbounded" before
+        # giving up. Stop early when an attempt either returned
+        # ``top_k`` rows OR already saw every embedding.
+        attempts = [
+            max(top_k * 5, 100),
+            max(top_k * 50, 1000),
+            total_vec_rows,
+        ]
+        rows: list = []
+        for inner_k in attempts:
+            inner_k = max(1, min(inner_k, total_vec_rows or inner_k))
+            try:
+                rows = db.execute(
+                    sql,
+                    [serialize_f32(embedding), inner_k] + ns_params + scope_params + [top_k],
+                ).fetchall()
+            except _sqlite3.OperationalError as exc:
+                if "Dimension mismatch" in str(exc):
+                    raise ValueError(
+                        f"Embedding dimension mismatch: query has {len(embedding)}d "
+                        f"but DB expects {self._dimension}d. "
+                        f"Check MEMTOMEM_EMBEDDING__MODEL / "
+                        f"MEMTOMEM_EMBEDDING__DIMENSION."
+                    ) from exc
+                raise
+            # Done if we hit the requested top_k OR if this attempt
+            # already scanned every embedding (cannot do better by
+            # retrying).
+            if len(rows) >= top_k or inner_k >= (total_vec_rows or 0):
+                break
 
         return [
             SearchResult(
@@ -989,6 +1163,8 @@ class SqliteBackend(
         limit: int = 20,
         namespace_filter: NamespaceFilter | None = None,
         tag_filter: str | None = None,
+        scope_filter: ScopeFilter | None = None,
+        project_context_root: Path | None = None,
     ) -> list[Chunk]:
         db = self._get_read_db()
         conditions: list[str] = []
@@ -1022,11 +1198,17 @@ class SqliteBackend(
                 )
                 params.extend(tags)
 
+        # ADR-0011 §6: always-on scope-context fragment.
+        scope_frag, scope_params = scope_context_sql(scope_filter, project_context_root)
+        conditions.append(scope_frag)
+        params.extend(scope_params)
+
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         params.append(limit)
 
         rows = db.execute(
-            f"SELECT * FROM chunks {where} ORDER BY created_at DESC LIMIT ?",
+            f"SELECT * FROM chunks {where} "
+            f"ORDER BY created_at DESC, {scope_sort_priority_case()} LIMIT ?",
             params,
         ).fetchall()
         return [self._row_to_chunk(row) for row in rows]
@@ -1203,6 +1385,19 @@ class SqliteBackend(
             vfrom = row[19]
             vto = row[20]
 
+        # Scope axis columns (may not exist in older DBs) — columns 21,22
+        # after validity. ADR-0011: ``user`` is the default for legacy rows;
+        # ``project_root`` is NULL for user scope, an absolute path for
+        # project tiers.
+        scope_val: str = "user"
+        project_root_val: Path | None = None
+        if len(row) >= 22:
+            scope_val = row[21] or "user"
+        if len(row) >= 23:
+            raw_pr = row[22]
+            if raw_pr:
+                project_root_val = Path(raw_pr)
+
         metadata = ChunkMetadata(
             source_file=Path(source_file),
             heading_hierarchy=hh,
@@ -1216,6 +1411,8 @@ class SqliteBackend(
             overlap_after=oa,
             valid_from_unix=vfrom,
             valid_to_unix=vto,
+            scope=scope_val,
+            project_root=project_root_val,
         )
 
         # --- timestamps (always timezone-aware) ---

@@ -99,7 +99,17 @@ async def _cmd_search(comp, args: list[str]) -> None:
         return
 
     query = " ".join(args)
-    results, stats = await comp.search_pipeline.search(query, top_k=10)
+    # ADR-0011 PR-D round 9: thread project context so the always-on
+    # scope filter sees the same boundary the rest of the read surface
+    # does. Without this, an interactive shell session inside a
+    # registered project silently loses project_shared / project_local
+    # rows on every search.
+    from memtomem.server.tools.search import _resolve_project_context_root
+
+    project_context_root = _resolve_project_context_root(comp)
+    results, stats = await comp.search_pipeline.search(
+        query, top_k=10, project_context_root=project_context_root
+    )
 
     if not results:
         click.secho("No results found.", fg="yellow")
@@ -133,7 +143,15 @@ async def _cmd_ask(comp, args: list[str]) -> None:
         return
 
     question = " ".join(args)
-    results, _ = await comp.search_pipeline.search(question, top_k=5)
+    # ADR-0011 PR-D round 9: same project-context threading as
+    # ``_cmd_search`` — interactive ``ask`` must see project tier rows
+    # when run inside a registered project.
+    from memtomem.server.tools.search import _resolve_project_context_root
+
+    project_context_root = _resolve_project_context_root(comp)
+    results, _ = await comp.search_pipeline.search(
+        question, top_k=5, project_context_root=project_context_root
+    )
 
     if not results:
         click.secho("No relevant memories found.", fg="yellow")
@@ -215,7 +233,16 @@ async def _cmd_recall(comp, args: list[str]) -> None:
                 pass
 
     since = datetime.now(timezone.utc) - timedelta(days=days)
-    chunks = await comp.storage.recall_chunks(since=since, limit=20)
+    # ADR-0011 PR-D round 9: thread project context onto the always-on
+    # scope filter — interactive ``recall`` in a registered project
+    # cwd should surface project_shared / project_local rows alongside
+    # user-tier ones, matching the contract ``mm mem recall`` honours.
+    from memtomem.server.tools.search import _resolve_project_context_root
+
+    project_context_root = _resolve_project_context_root(comp)
+    chunks = await comp.storage.recall_chunks(
+        since=since, limit=20, project_context_root=project_context_root
+    )
 
     if not chunks:
         click.secho(f"No memories in the last {days} days.", fg="yellow")

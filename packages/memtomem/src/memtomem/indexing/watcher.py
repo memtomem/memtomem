@@ -106,7 +106,11 @@ class FileWatcher:
         self._observer = Observer()
 
         watched: list[Path] = []
-        for watch_dir in self._config.memory_dirs:
+        # ADR-0011: watch every index root (user-tier ``memory_dirs`` and
+        # project-tier ``project_memory_dirs``) so files dropped into a
+        # registered project_shared / project_local dir trigger reindex
+        # the same way user-tier files do.
+        for watch_dir in self._config.all_index_roots():
             expanded = Path(watch_dir).expanduser().resolve()
             if expanded.exists():
                 self._observer.schedule(handler, str(expanded), recursive=True)

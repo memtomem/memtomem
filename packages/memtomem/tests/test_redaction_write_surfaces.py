@@ -52,20 +52,67 @@ def _reset_counters():
 
 
 class TestMemEditRedactionGuard:
+    """ADR-0011 PR-D: the edit-surface guard runs **after** the chunk
+    lookup so the chunk's persisted ``metadata.scope`` can be fed in
+    (inferred-scope contract). A non-existent chunk_id therefore short-
+    circuits before the guard fires; tests provide a stub chunk via
+    monkeypatch so the guard is exercised in the normal flow.
+    """
+
+    @staticmethod
+    def _stub_user_chunk(monkeypatch, comp, tmp_path):
+        """Wire ``comp.storage.get_chunk`` to return a user-scope chunk
+        so the edit-surface guard runs with scope='user' (the default
+        path the existing tests cover).
+
+        Source path is anchored at ``tmp_path`` (per-test isolation +
+        Windows portability — hardcoded ``/tmp/...`` paths trip the
+        ``$HOME``-tilde-rewrite under Windows CI's
+        ``C:\\Users\\runneradmin\\...`` HOME root, see
+        ``feedback_windows_tmp_path_under_userprofile.md``).
+        """
+        from unittest.mock import AsyncMock
+
+        from memtomem.models import Chunk, ChunkMetadata
+
+        chunk = Chunk(
+            content="placeholder",
+            metadata=ChunkMetadata(
+                source_file=tmp_path / "never_touched.md",
+                scope="user",
+                start_line=1,
+                end_line=2,
+            ),
+            embedding=[0.1] * 1024,
+        )
+        monkeypatch.setattr(comp.storage, "get_chunk", AsyncMock(return_value=chunk))
+        # The downstream rollback path tries to read the source file;
+        # we only care about the guard's accounting, so stub the
+        # filesystem mutation + reindex to no-ops.
+
+        async def _noop_index_file(*args, **kwargs):
+            from memtomem.models import IndexingStats
+
+            return IndexingStats(0, 0, 0, 0, 0, 0.0)
+
+        monkeypatch.setattr(comp.index_engine, "index_file", _noop_index_file)
+
     @pytest.mark.asyncio
-    async def test_blocks_secret_and_records_blocked(self, bm25_only_components):
+    async def test_blocks_secret_and_records_blocked(
+        self, bm25_only_components, monkeypatch, tmp_path
+    ):
         """Secret content rejected without ``force_unsafe``; counter
         increments under the ``mem_edit`` ``by_tool`` key (not
         ``mem_add``) so the guard's surface attribution stays observable.
         """
         comp, mem_dir = bm25_only_components
+        self._stub_user_chunk(monkeypatch, comp, tmp_path)
         app = AppContext.from_components(comp)
         ctx = StubCtx(app)
 
         before = privacy.snapshot()["by_tool"].get(
             "mem_edit", {"blocked": 0, "pass": 0, "bypassed": 0}
         )
-        # The guard runs before chunk lookup, so a fake UUID is fine.
         result = await mem_edit(  # type: ignore[arg-type]
             chunk_id=str(uuid4()),
             new_content=_SECRET_SAMPLE,
@@ -79,8 +126,11 @@ class TestMemEditRedactionGuard:
         assert after["blocked"] == before["blocked"] + 1
 
     @pytest.mark.asyncio
-    async def test_force_unsafe_records_bypassed(self, bm25_only_components, caplog):
+    async def test_force_unsafe_records_bypassed(
+        self, bm25_only_components, caplog, monkeypatch, tmp_path
+    ):
         comp, mem_dir = bm25_only_components
+        self._stub_user_chunk(monkeypatch, comp, tmp_path)
         app = AppContext.from_components(comp)
         ctx = StubCtx(app)
 
@@ -88,8 +138,6 @@ class TestMemEditRedactionGuard:
             "mem_edit", {"blocked": 0, "pass": 0, "bypassed": 0}
         )
         with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
-            # Storage lookup will return None; the bypass counter must
-            # have already incremented before that downstream miss.
             await mem_edit(  # type: ignore[arg-type]
                 chunk_id=str(uuid4()),
                 new_content=_SECRET_SAMPLE,
@@ -104,16 +152,15 @@ class TestMemEditRedactionGuard:
         assert "sk-" not in caplog.text
 
     @pytest.mark.asyncio
-    async def test_clean_content_records_pass(self, bm25_only_components):
+    async def test_clean_content_records_pass(self, bm25_only_components, monkeypatch, tmp_path):
         comp, mem_dir = bm25_only_components
+        self._stub_user_chunk(monkeypatch, comp, tmp_path)
         app = AppContext.from_components(comp)
         ctx = StubCtx(app)
 
         before = privacy.snapshot()["by_tool"].get(
             "mem_edit", {"blocked": 0, "pass": 0, "bypassed": 0}
         )
-        # Storage miss returns "chunk not found"; the guard's pass
-        # increment happens before that.
         await mem_edit(  # type: ignore[arg-type]
             chunk_id=str(uuid4()),
             new_content=_CLEAN_SAMPLE,
@@ -152,6 +199,118 @@ class TestCliMmAddRedactionGuard:
         snap = privacy.snapshot()["by_tool"].get("cli_mm_add", {})
         assert snap.get("blocked", 0) == 1
 
+    def test_blocks_force_unsafe_secret_on_project_shared_scope(self):
+        """ADR-0011 §5: ``force_unsafe=True`` on ``project_shared`` is
+        hard-refused at the chokepoint. The CLI surface must mirror the
+        MCP refusal — without this branch ``mm mem add --scope
+        project_shared --force-unsafe`` would still land flagged content
+        in the git-tracked tier.
+        """
+        from memtomem.cli.memory import add as add_cmd
+
+        runner = CliRunner()
+        with patch("memtomem.cli._bootstrap.cli_components") as mock_bootstrap:
+            mock_bootstrap.assert_not_called()
+            result = runner.invoke(
+                add_cmd,
+                [_SECRET_SAMPLE, "--scope", "project_shared", "--force-unsafe", "--yes"],
+            )
+            mock_bootstrap.assert_not_called()
+
+        assert result.exit_code != 0
+        out = result.output + str(result.exception or "")
+        assert "force-unsafe is not permitted" in out
+        assert "git history is forever" in out
+        snap = privacy.snapshot()["by_tool"].get("cli_mm_add", {})
+        assert snap.get("blocked_project_shared", 0) == 1
+
+    def test_blocks_unregistered_project_tier_target(self, monkeypatch, tmp_path):
+        """ADR-0011 PR-D review (round 6) pin: ``mm mem add --scope
+        project_shared`` must refuse when the resolved target tier is
+        not in ``IndexingConfig.project_memory_dirs``. Without this,
+        the write succeeds but the row's scope flips to ``user`` on
+        re-index (registration mismatch) and becomes visible across
+        project boundaries.
+        """
+        from contextlib import asynccontextmanager
+
+        # Components return ``project_memory_dirs=[]`` so any project
+        # tier resolves outside the registry.
+        @asynccontextmanager
+        async def _fake_components():
+            comp = MagicMock()
+            comp.config.indexing.project_memory_dirs = []
+            yield comp
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _fake_components)
+        # ``_resolve_project_context_root`` is lazy-imported inside
+        # ``_add`` from its defining module, so patch it there.
+        monkeypatch.setattr(
+            "memtomem.server.tools.search._resolve_project_context_root",
+            lambda comp: tmp_path / "proj_unreg",
+        )
+
+        from memtomem.cli.memory import add as add_cmd
+
+        runner = CliRunner()
+        result = runner.invoke(
+            add_cmd,
+            [_CLEAN_SAMPLE, "--scope", "project_shared", "--yes"],
+        )
+        assert result.exit_code != 0
+        out = result.output + str(result.exception or "")
+        assert "not registered" in out
+        # Hint must NOT mention the broken `mm config set ...
+        # project_memory_dirs[+]=...` form. ``mm config set`` rejects
+        # that key shape (project_memory_dirs is not in MUTABLE_FIELDS),
+        # so a user following the message would hit a dead-end.
+        assert "mm config set" not in out
+
+    def test_yes_flag_does_not_satisfy_gate_b_for_project_shared(self, monkeypatch, tmp_path):
+        """ADR-0011 PR-D review round 7 pin: ``--yes`` alone is NOT
+        sufficient for ``--scope project_shared`` writes.
+
+        ``--yes`` is a generic "skip prompts" flag users alias for
+        unrelated reasons (e.g. piping to non-interactive tooling).
+        Treating it as Gate B satisfaction would let a script
+        ``mm mem add --scope project_shared --yes`` silently land
+        contents in the git-tracked memory tier without an explicit
+        project-shared opt-in. MCP ``mem_add`` requires an explicit
+        ``confirm_project_shared=True`` regardless — the CLI must
+        keep parity. ``--confirm-project-shared`` remains the only
+        affirmative opt-in.
+        """
+        from contextlib import asynccontextmanager
+
+        proj_root = tmp_path / "proj_share"
+        proj_dir = proj_root / ".memtomem" / "memories"
+        proj_dir.mkdir(parents=True)
+
+        @asynccontextmanager
+        async def _fake_components():
+            comp = MagicMock()
+            comp.config.indexing.memory_dirs = [tmp_path / "user_mem"]
+            comp.config.indexing.project_memory_dirs = [proj_dir]
+            yield comp
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _fake_components)
+        monkeypatch.setattr(
+            "memtomem.server.tools.search._resolve_project_context_root",
+            lambda comp: proj_root,
+        )
+
+        from memtomem.cli.memory import add as add_cmd
+
+        runner = CliRunner()
+        result = runner.invoke(
+            add_cmd,
+            [_CLEAN_SAMPLE, "--scope", "project_shared", "--yes"],
+        )
+        assert result.exit_code != 0, "--yes alone must not satisfy Gate B for project_shared"
+        out = result.output + str(result.exception or "")
+        assert "--confirm-project-shared" in out
+        assert "git-tracked" in out
+
     def test_clean_content_records_pass_in_cli_surface(self, monkeypatch, tmp_path):
         """A clean write still talks to ``cli_components`` — to keep the
         unit fast we stub the bootstrap so no real DB is created. The
@@ -164,9 +323,19 @@ class TestCliMmAddRedactionGuard:
         """
         from contextlib import asynccontextmanager
 
+        # ADR-0011 PR-D review round 7 BLOCKER fix: ``_add`` reads
+        # ``comp.config.indexing.memory_dirs[0]`` to derive the user-tier
+        # base. Set a real Path so the unset-MagicMock chain does not
+        # leak ``MagicMock/...`` directories into the repo cwd when the
+        # test's mkdir + index pipeline runs.
+        user_dir = tmp_path / "user_mem"
+        user_dir.mkdir()
+
         @asynccontextmanager
         async def _fake_components():
             comp = MagicMock()
+            comp.config.indexing.memory_dirs = [user_dir]
+            comp.config.indexing.project_memory_dirs = []
             comp.index_engine = AsyncMock()
             comp.storage = AsyncMock()
             comp.index_engine.index_file = AsyncMock(return_value=MagicMock(indexed_chunks=1))

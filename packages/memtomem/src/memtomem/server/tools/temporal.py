@@ -44,11 +44,20 @@ async def mem_timeline(
 
     app = await _get_app_initialized(ctx)
 
+    # ADR-0011 PR-D round 9: thread project context so the always-on
+    # storage scope filter sees the same boundary the primary mem_search
+    # uses. Without this, mem_temporal_search inside a registered
+    # project would silently drop project_shared / project_local rows.
+    from memtomem.server.tools.search import _resolve_project_context_root
+
+    project_context_root = _resolve_project_context_root(app)
+
     # Search for topic
     results, _stats = await app.search_pipeline.search(
         query=topic,
         top_k=limit,
         namespace=namespace,
+        project_context_root=project_context_root,
     )
 
     if not results:

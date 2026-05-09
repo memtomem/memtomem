@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+from pathlib import Path
 from uuid import UUID
 
 from memtomem.chunking.markdown import _parse_validity_bound
@@ -27,6 +29,73 @@ from memtomem.server.webhooks import webhook_error_cb
 logger = logging.getLogger(__name__)
 
 
+def _resolve_project_context_from_dirs(project_memory_dirs) -> Path | None:
+    """Same as :func:`_resolve_project_context_root` but takes the dirs
+    list directly (no ``app`` / ``comp`` wrapper).
+
+    Used by web routes that have ``Mem2MemConfig`` directly via
+    ``get_config`` and by any caller that already extracted the
+    registered project tier list. The wrapper :func:`_resolve_project_context_root`
+    delegates here so MCP tool callers (``app``) and CLI callers
+    (``comp``) keep their existing one-arg signature.
+    """
+    project_dirs = list(project_memory_dirs)
+    if not project_dirs:
+        return None
+    try:
+        cwd = Path(os.getcwd()).resolve()
+    except OSError:
+        return None
+    best_root: Path | None = None
+    best_depth = -1
+    for d in project_dirs:
+        try:
+            resolved = Path(d).expanduser().resolve()
+        except OSError:
+            continue
+        # ``resolved`` is expected to be ``<root>/.memtomem/memories``
+        # or ``<root>/.memtomem/memories.local``. Project root is
+        # grandparent.
+        if resolved.parent.name != ".memtomem":
+            continue
+        project_root = resolved.parent.parent
+        try:
+            cwd.relative_to(project_root)
+        except ValueError:
+            continue
+        depth = len(project_root.parts)
+        if depth > best_depth:
+            best_depth = depth
+            best_root = project_root
+    return best_root
+
+
+def _resolve_project_context_root(app) -> Path | None:
+    """Find the registered project root that contains the current cwd.
+
+    Returns the project root for the current process, or ``None`` if no
+    registered project tier covers the current cwd. Used by MCP read
+    tools as the always-on context-boundary anchor (ADR-0011 §6) so a
+    memtomem server started from inside a project naturally pins memory
+    queries to that project's project_shared / project_local rows.
+
+    Resolution: for each ``project_memory_dir`` registered in the user
+    config, derive its project root (the grandparent of the
+    ``.memtomem/memories[.local]`` entry); if the current cwd lives
+    under that root, return it. Multiple matching roots → return the
+    deepest match (most specific project context wins for nested
+    project layouts).
+
+    Empty ``project_memory_dirs`` → ``None``. Permission errors during
+    resolve → ``None``.
+
+    Accepts either ``app`` (MCP) or ``comp`` (CLI) — both expose
+    ``.config.indexing.project_memory_dirs`` so the duck-typed access
+    is symmetric.
+    """
+    return _resolve_project_context_from_dirs(app.config.indexing.project_memory_dirs)
+
+
 @mcp.tool()
 @tool_handler
 async def mem_search(
@@ -41,6 +110,7 @@ async def mem_search(
     context_window: int = 0,
     verbose: bool = False,
     output_format: OutputFormat = "compact",
+    scope: str | None = None,
     ctx: CtxType = None,
 ) -> str:
     """Search across indexed memory files using hybrid BM25 + semantic search.
@@ -62,6 +132,11 @@ async def mem_search(
         output_format: Output format — "compact" (default, human-readable), "verbose" (full
             details with UUID/pipeline stats), or "structured" (JSON for machine parsing).
             When set to non-default, overrides the verbose flag.
+        scope: ADR-0011 scope-axis filter — single value, comma list (``user,project_local``)
+            or glob (``project_*``). When omitted, the default merge applies: in-project
+            searches return ``user`` + the current project's project tiers; out-of-project
+            searches return ``user`` only. Pass ``project_shared`` from outside any
+            project context for a cross-project search.
 
     Result count may fall below ``top_k`` when post-rerank filters
     (``source_filter``, ``tag_filter``, validity windows via ``as_of``) exclude
@@ -98,6 +173,7 @@ async def mem_search(
     if bm25_weight is not None or dense_weight is not None:
         rrf_weights = [bm25_weight or 1.0, dense_weight or 1.0]
 
+    project_context_root = _resolve_project_context_root(app)
     results, stats = await app.search_pipeline.search(
         query=query,
         top_k=top_k,
@@ -107,6 +183,8 @@ async def mem_search(
         rrf_weights=rrf_weights,
         context_window=context_window if context_window > 0 else None,
         as_of_unix=as_of_unix,
+        scope=scope,
+        project_context_root=project_context_root,
     )
 
     # Build trust-UX hints shared across formats: archive filter count and a

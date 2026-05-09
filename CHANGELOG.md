@@ -7,6 +7,60 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Memory scope axis schema (ADR-0011 PR-B).** First-time start of an
+  upgraded server runs a one-shot SQLite migration that adds two new
+  columns to ``chunks``: ``scope TEXT NOT NULL DEFAULT 'user'`` (one
+  of ``user`` / ``project_shared`` / ``project_local``) and
+  ``project_root TEXT`` (the registered project root for project-tier
+  rows; ``NULL`` for user-tier). Every existing row backfills to
+  ``scope='user'`` so behaviour for current memtomem deployments is
+  unchanged on upgrade. Two new indexes
+  (``idx_chunks_scope (scope, project_root)``,
+  ``idx_chunks_project_root (project_root) WHERE project_root IS NOT
+  NULL``) cover the always-on default-merge filter shape. Migration is
+  idempotent — DB files already on the new schema are no-ops.
+- **`--scope` filter on `mm mem recall`, `mem_search`, `mem_recall`
+  (ADR-0011 PR-C).** Optional explicit scope filter accepts a single
+  value (``user``), a comma list (``user,project_local``), or a glob
+  (``project_*``). Without ``--scope`` the search falls into the
+  project-aware default merge (see Changed entry below).
+- **`mm mem add --scope` + `--confirm-project-shared` / `--yes` (CLI)
+  (ADR-0011 PR-D).** The CLI ``add`` command now writes to one of three
+  directories based on the resolved scope: ``~/.memtomem/memories``
+  (user, default), ``<project>/.memtomem/memories`` (project_shared,
+  git-tracked), or ``<project>/.memtomem/memories.local``
+  (project_local, gitignored). Project-tier writes need a registered
+  project context (`project_memory_dirs` covers the current cwd);
+  without one the CLI exits with a clear error. ``project_shared``
+  writes prompt for explicit confirm naming the git-tracked target
+  path; ``--yes`` and ``--confirm-project-shared`` skip the prompt for
+  scripted use.
+- **`mem_add(scope=..., confirm_project_shared=...)` and
+  `mem_batch_add(scope=..., confirm_project_shared=...)` (MCP)
+  (ADR-0011 PR-D).** The same scope axis is exposed to MCP callers.
+  Default scope ``user`` keeps existing behaviour; ``project_shared``
+  requires the explicit confirm flag (Gate B). Critically, the write
+  target now resolves per scope on the MCP path too — ``mem_add(
+  scope='project_shared')`` lands in the project's
+  ``.memtomem/memories/`` directory, not the user-tier path. Closes
+  the CLI/MCP divergence flagged during PR-D review. ``mem_batch_add``
+  routes each entry through ``enforce_write_guard`` per-entry (the
+  pre-ADR-0011 inline-scan path is removed); ``force_unsafe=True`` is
+  hard-refused on ``project_shared`` per Gate A; the transactional
+  reject contract is preserved (clean siblings of a flagged batch
+  do not record a ``pass``).
+- **`mm context memory-migrate <source> --from <scope> --to <scope>`
+  (CLI) (ADR-0011 PR-D).** v1: chunk-id-stable, single-DB rename of
+  one markdown memory file between scope tiers. Chunk UUIDs and
+  ``chunk_links`` lineage are preserved via a transactional UPDATE on
+  the chunks table; no re-index is triggered. Default is dry-run;
+  ``--apply`` mutates disk. ``--to project_shared`` re-runs the
+  privacy guard on the file content (Gate A on migrate); secret hits
+  reject the migration with no force bypass — git history is forever.
+  If the DB UPDATE fails after the filesystem move, the move is
+  reverted (best-effort) so the source path remains canonical.
+  Cross-DB migration, glob/multi-file inputs, and partial chunk-link
+  lineage preservation are deferred.
 - **Multi-device sync guide (`docs/guides/multi-device-sync.md`).**
   Documents the namespace-aligned layout, `.gitignore` recipe, post-pull
   workflow, and anti-patterns for syncing markdown memories across
@@ -18,6 +72,46 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **In-project default search merge — behaviour change (ADR-0011 PR-C).**
+  ``mem_search`` / ``mem_recall`` running with an MCP server cwd inside
+  a registered project (``project_memory_dirs`` covers the cwd) now
+  scope by default to ``user`` rows + the current project's
+  project_shared / project_local rows. Previously the same call
+  returned a cross-project union (every project's rows visible). The
+  fragment is composed via the new ``scope_context_sql`` helper and
+  applied unconditionally in the storage layer, so a caller cannot
+  accidentally drop the boundary by omitting an explicit scope.
+  Out-of-project searches still return user-tier only. **Upgrade
+  impact:** users who run memtomem from inside a project_memory_dirs-
+  covered cwd will see fewer results on the same query than they did
+  on 0.1.36 — the dropped rows lived in *other* projects'
+  project-tier directories. Pass ``--scope=project_*`` (CLI) /
+  ``scope='project_*'`` (MCP) to opt back into a cross-project search.
+- **`mem_edit` / `mem_delete` infer scope from the chunk's persisted
+  `metadata.scope` (MCP) (ADR-0011 PR-D).** Editing or deleting a
+  chunk that lives in ``project_shared`` is gated by the same
+  hard-refusal as ``mem_add(scope='project_shared')`` — a client
+  cannot bypass Gate A on edit by omitting an explicit ``scope``
+  kwarg. ``mem_delete`` adds Gate B: deleting a project_shared chunk
+  requires ``confirm_project_shared=True``. Bulk
+  ``mem_delete(source_file=...)`` probes the scope set of affected
+  chunks via a new ``list_scopes_by_source`` storage method (using
+  ``SELECT DISTINCT scope`` rather than the row-limited
+  ``list_chunks_by_source``) and rejects all-or-nothing if any
+  matched chunk is project_shared without explicit confirm.
+- **`mem_consolidate_apply` rejects mixed-scope groups and requires
+  explicit `confirm_project_shared=True` for project_shared
+  consolidation (MCP) (ADR-0011 PR-D).** Source chunks are loaded
+  by ``chunk_ids`` (the truth source — robust to source rename /
+  re-index between ``mem_consolidate`` and the apply call) via
+  ``get_chunks_batch``, not by re-resolving ``group["source"]``.
+  Mixed scope sets skip with a user-visible "Skipped group N: mixed
+  memory scopes (...)" message in the MCP return string (in addition
+  to the existing logger.warning); single-scope groups inheriting
+  ``project_shared`` skip the same way unless ``confirm_project_shared
+  =True`` is passed. The summary is written via ``_mem_add_core``
+  with the inherited scope so it lands in the matching tier
+  directory.
 - **`mm context generate` warns when Cursor/Codex/Copilot would merge
   Rules + Style.** These three runtimes fold the canonical `Rules` and
   `Style` sections into a single block via `_compact_rules`, so the
@@ -43,6 +137,172 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `_persist_auto_discover_migration`, `mm config unset`, `mm init`'s
   `_write_config_and_summary`) now invoke it before
   `_atomic_write_json`.
+
+### Fixed
+
+- **ADR-0011 PR-D review round 12 — `mm context memory-migrate`
+  handles nested project-tier sources.** The pre-fix project_root
+  inference assumed a fixed depth of three
+  (``<root>/.memtomem/memories[.local]/<file>``) and hardcoded
+  ``source.parent.parent.parent``. Files in subdirectories like
+  ``<root>/.memtomem/memories/notes/foo.md`` left
+  ``project_root=None``, AND the fallback to ``_find_project_root()``
+  only ran for ``to_scope != "user"`` — so migrating a nested
+  project_shared file BACK to user scope errored out at
+  ``resolve_memory_scope_dir`` before any FS / DB mutation. Valid
+  nested project-tier memories were unmigratable. Now walks the
+  source's parents looking for the ``.memtomem`` ancestor, supporting
+  arbitrary subdirectory depth.
+- **ADR-0011 PR-D review round 11 — engine cooperates with migrate
+  sidecar lock.** Round 10's ``mm context memory-migrate`` lock was
+  one-sided: only the migrate command itself acquired the sibling
+  ``.<name>.lock`` advisory file. The watcher path (``index_file``)
+  never asked for the lock, so a concurrent ``mm web`` watcher firing
+  ``index_file(target)`` between migrate's ``shutil.move`` and the
+  DB UPDATE could still INSERT duplicate chunks at the destination.
+  ``IndexEngine.index_file`` now wraps its ``_index_file`` call in
+  the same ``_file_lock(_lock_path_for(...))`` so the lock pattern
+  is genuinely transitive. New pin
+  ``test_engine_index_file_acquires_sidecar_lock_for_watcher_cooperation``
+  spies on ``_file_lock`` to confirm the entry path takes the
+  expected lockfile.
+- **ADR-0011 PR-D review round 11 — direct `dense_search` callers
+  thread project context.** Round 9 closed the
+  ``SearchPipeline.search`` and ``recall_chunks`` direct-caller gaps
+  but ``dense_search`` had its own set of direct callers that the
+  always-on storage scope filter still routed to user-tier-only:
+  - ``GET /api/chunks/{chunk_id}/similar`` — pin to the source
+    chunk's own ``metadata.project_root`` so similar-chunk results
+    respect the chunk's tier.
+  - ``search/conflict.py:detect_conflicts`` — accepts
+    ``project_context_root`` kwarg; ``mem_conflict_detect`` MCP
+    tool threads it via ``_resolve_project_context_root(app)``.
+  - ``search/dedup.py:DedupScanner._find_near_duplicates`` —
+    per-chunk ``chunk.metadata.project_root`` so scans honour
+    each chunk's own project tier.
+  - ``search/expansion.py:expand_query_headings`` — accepts
+    ``project_context_root`` kwarg; ``SearchPipeline.search``
+    threads it from the outer search's ``project_context_root``.
+  - ``IndexEngine.is_duplicate`` — accepts the kwarg for
+    forward-compat (no in-tree callers today).
+  Architectural guard test (``test_scope_context_threading.py``)
+  now scans ``dense_search`` and ``bm25_search`` direct callers in
+  addition to ``SearchPipeline.search`` / ``recall_chunks``, so a
+  future regression on any of the four read-surface methods trips
+  CI.
+- **ADR-0011 PR-D review round 10 — `mem_consolidate_apply` rejects
+  project-tier groups with no source `project_root`.** Round 7 added
+  the cross-project leak guard for groups whose sources span >1
+  distinct ``project_root``, but the zero-root case slipped past:
+  every source chunk with ``project_root=None`` (legacy rows
+  pre-PR-B backfill, or any decode that left the column NULL) made
+  ``project_root_override=None`` and ``_mem_add_core`` then resolved
+  the destination via the server cwd, silently leaking summaries
+  into whatever project the server happened to be in. Now rejects
+  with an explicit ``no source chunk carries a persisted project_root``
+  message naming a ``mm reindex`` recovery path.
+- **ADR-0011 PR-D review round 10 — `mm context memory-migrate`
+  watcher race + transaction lock-up.** The migrate command now
+  holds a sidecar advisory lock on both the source and target paths
+  spanning ``shutil.move`` + ``update_chunks_scope_for_source`` (the
+  ``feedback_sidecar_lockfile_for_replaced_files.md`` pattern), and
+  ``update_chunks_scope_for_source`` wraps its SELECT-then-UPDATE
+  pair in an explicit ``BEGIN IMMEDIATE`` transaction. Without
+  these, a concurrent ``mm web`` watcher firing
+  ``index_file(target)`` between the FS move and the DB UPDATE could
+  INSERT duplicate chunk rows at the destination, defeating the
+  chunk-id-stability guarantee the migrate command promises.
+- **ADR-0011 PR-D review round 10 — `mm context memory-migrate
+  --yes` parity.** ``--to project_shared`` now requires an explicit
+  ``--confirm-project-shared``; ``--yes`` alone is no longer
+  sufficient. Mirrors the round-7 fix on ``mm mem add`` for CLI/MCP
+  parity with the MCP ``confirm_project_shared=True`` requirement.
+- **ADR-0011 PR-D review round 10 — engine `_apply_scope` unchanged-
+  chunk drift documented.** Hash-diff means unchanged chunks are not
+  re-UPSERTed on a regular reindex, so a previously project-tier
+  file whose project is later deregistered keeps stale ``scope`` /
+  ``project_root`` rows in storage. Documented the
+  ``mm reindex --force`` recovery path inline at the engine site
+  and via the existing CHANGELOG project-tier migration entry.
+- **ADR-0011 PR-D review round 9 — read surfaces thread project
+  context onto the always-on scope filter.** Round 7 introduced the
+  always-on scope-context fragment in
+  ``storage/sqlite_scope.scope_context_sql`` so missing
+  ``project_context_root`` defaults to ``scope='user'`` only. The
+  primary ``mem_search`` / ``mem_recall`` callers were updated, but
+  every other read surface kept calling ``search_pipeline.search`` /
+  ``storage.recall_chunks`` without the kwarg — silently dropping
+  project_shared / project_local rows for any caller running inside a
+  registered project. Threaded the resolver through:
+  - MCP tools: ``mem_ask``, ``mem_temporal_search``,
+    ``mem_procedure_list``, ``mem_agent_search``,
+    ``_mem_add_core``'s post-write duplicate check, the
+    ``recall_chunks`` calls in ``mem_session_summary`` and
+    ``mem_reflect_save``.
+  - CLI surfaces: interactive shell ``search``, ``ask``, and
+    ``recall`` commands.
+  - Web routes: ``GET /search``, ``GET /timeline``.
+  - LangGraph integration: ``MemtomemStore.search``.
+  Web routes that don't have an ``app``/``comp`` wrapper use a new
+  ``_resolve_project_context_from_dirs(project_memory_dirs)`` helper
+  alongside the existing ``_resolve_project_context_root(app)``
+  variant. New AST-scanning guard in
+  ``tests/test_scope_context_threading.py`` fails CI if a future
+  call site forgets the kwarg.
+- **ADR-0011 PR-D review round 7 — cross-project leak in
+  `mem_consolidate_apply`.** `mem_consolidate` enumerates source files
+  globally so a project-tier group can come from a project that is not
+  the MCP server's current cwd. The apply path now derives the
+  destination project root from the source chunks' persisted
+  `metadata.project_root` (rejecting groups that span multiple
+  projects) and threads it into `_mem_add_core` via a new
+  `project_root_override` kwarg, so the summary lands in the source
+  project's `.memtomem/...` tier instead of being silently routed to
+  the server-cwd project.
+- **ADR-0011 PR-D review round 7 — `mm mem add` user-tier base.**
+  `cli/memory.py` now reads `comp.config.indexing.memory_dirs[0]`
+  to derive the user-tier base, matching MCP `_mem_add_core` and
+  `mm context memory-migrate`. The previous hardcoded
+  `Path("~/.memtomem/memories")` literal split CLI/MCP writes for
+  any user who remapped `memory_dirs` — exactly the divergence PR-D
+  was meant to close.
+- **ADR-0011 PR-D review round 7 — web PATCH/DELETE Gate B.**
+  `PATCH /api/chunks/{id}` now infers scope from the loaded chunk's
+  `metadata.scope` and feeds it into `enforce_write_guard`, so a
+  `force_unsafe` edit on a project_shared chunk hits the same hard
+  refusal MCP `mem_edit` enforces (mirrors memory_crud.py:406-413).
+  `DELETE /api/chunks/{id}` adds a `confirm_project_shared` query
+  parameter and refuses without it for project_shared chunks, mirroring
+  the MCP `mem_delete` round-3 fix.
+- **ADR-0011 PR-D review round 7 — `--yes` no longer satisfies Gate B.**
+  `mm mem add --scope project_shared --yes` (without
+  `--confirm-project-shared`) now exits with a clear error rather than
+  silently writing to the git-tracked tier. `--yes` is a generic
+  "skip prompts" flag users alias for unrelated reasons; treating it
+  as an explicit project-shared opt-in broke CLI/MCP parity (MCP
+  `mem_add` requires `confirm_project_shared=True` regardless).
+- **ADR-0011 PR-D review round 7 — `StorageBackend` Protocol drift.**
+  `bm25_search` / `dense_search` / `recall_chunks` Protocol signatures
+  in `storage/base.py` now declare `scope_filter` and
+  `project_context_root` kwargs (default `None`), aligning with the
+  `sqlite_backend` implementation. Without these, alternate backends
+  silently dropped the always-on scope-context fragment.
+- **ADR-0011 PR-D review round 7 — `idx_chunks_project_root` partial
+  index.** New partial index `(project_root) WHERE project_root IS
+  NOT NULL` covers the dominant in-project filter shape
+  `(scope='user' OR project_root=?)`. The composite
+  `idx_chunks_scope (scope, project_root)` could not serve the OR's
+  second leg because `project_root` is the trailing column; once a
+  user opts into project tiers and accumulates rows, that leg
+  degraded to a full table scan. Partial index keeps storage cheap
+  for the user-tier majority case.
+- **ADR-0011 PR-D review round 7 — Windows CI green.** Two test fixes:
+  the `_ALLOWED_DIRECT_ACCESS_SUFFIXES` allowlist in
+  `test_all_index_roots.py` now matches via `Path.as_posix()` so
+  Windows backslash paths still hit forward-slash entries; the
+  `scope_context_sql` parameter assertions in
+  `test_search_scope_filter.py` use `str(Path(...))` so the test
+  matches native-path stringification on every OS.
 
 ### Documentation
 

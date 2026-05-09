@@ -84,6 +84,7 @@ class FakeConfig:
 
     class _Indexing:
         memory_dirs = [Path("/tmp/memories")]
+        project_memory_dirs: list[Path] = []
         supported_extensions = frozenset({".md", ".json"})
         max_chunk_tokens = 512
         min_chunk_tokens = 128
@@ -91,6 +92,9 @@ class FakeConfig:
         chunk_overlap_tokens = 0
         structured_chunk_mode = "original"
         exclude_patterns: list[str] = []
+
+        def all_index_roots(self):
+            return list(self.memory_dirs) + list(self.project_memory_dirs)
 
     class _Decay:
         enabled = False
@@ -835,6 +839,85 @@ class TestDeleteChunk:
         resp = await client.delete(f"/api/chunks/{fake_id}")
         assert resp.status_code == 404
 
+    async def test_delete_project_shared_chunk_requires_confirm(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        """ADR-0011 PR-D review round 7 pin: web DELETE on a project_shared
+        chunk MUST refuse without ``confirm_project_shared=true`` query
+        parameter. Mirrors the MCP ``mem_delete`` round-3 fix (8407d73).
+        Without this guard a single ``DELETE /api/chunks/{id}`` would
+        rewrite git-tracked memory without any explicit opt-in.
+        """
+        proj = tmp_path / "proj"
+        (proj / ".memtomem" / "memories").mkdir(parents=True)
+        source = proj / ".memtomem" / "memories" / "rule.md"
+        source.write_text("## hi\n\nproject content\n", encoding="utf-8")
+        chunk = _make_test_chunk(source=str(source))
+        chunk = chunk.__class__(
+            content=chunk.content,
+            metadata=chunk.metadata.__class__(
+                source_file=source,
+                heading_hierarchy=chunk.metadata.heading_hierarchy,
+                tags=chunk.metadata.tags,
+                namespace=chunk.metadata.namespace,
+                start_line=1,
+                end_line=3,
+                scope="project_shared",
+                project_root=proj,
+            ),
+            id=chunk.id,
+            content_hash=chunk.content_hash,
+            embedding=chunk.embedding,
+            created_at=chunk.created_at,
+            updated_at=chunk.updated_at,
+        )
+        app.state.storage.get_chunk.return_value = chunk
+
+        resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
+        assert resp.status_code == 403, resp.text
+        body = resp.json()
+        # FastAPI wraps the route's ``detail`` dict under the
+        # top-level ``"detail"`` key.
+        detail = body.get("detail", {})
+        assert detail.get("detail") == "blocked_project_shared"
+        assert detail.get("surface") == "web_api_chunk_delete"
+
+    async def test_delete_project_shared_chunk_with_confirm_proceeds(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        """``confirm_project_shared=true`` lets the delete succeed."""
+        proj = tmp_path / "proj"
+        (proj / ".memtomem" / "memories").mkdir(parents=True)
+        source = proj / ".memtomem" / "memories" / "rule.md"
+        source.write_text("## hi\n\nproject content\n", encoding="utf-8")
+        chunk = _make_test_chunk(source=str(source))
+        chunk = chunk.__class__(
+            content=chunk.content,
+            metadata=chunk.metadata.__class__(
+                source_file=source,
+                heading_hierarchy=chunk.metadata.heading_hierarchy,
+                tags=chunk.metadata.tags,
+                namespace=chunk.metadata.namespace,
+                start_line=1,
+                end_line=3,
+                scope="project_shared",
+                project_root=proj,
+            ),
+            id=chunk.id,
+            content_hash=chunk.content_hash,
+            embedding=chunk.embedding,
+            created_at=chunk.created_at,
+            updated_at=chunk.updated_at,
+        )
+        app.state.storage.get_chunk.return_value = chunk
+
+        resp = await client.delete(
+            f"/api/chunks/{CHUNK_ID}",
+            params={"confirm_project_shared": "true"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["deleted"] == 1
+
 
 # ---------------------------------------------------------------------------
 # PATCH /api/chunks/{id}
@@ -970,6 +1053,60 @@ class TestEditChunkRedaction:
         assert resp.status_code == 200, resp.text
         snap = privacy.snapshot()["by_tool"]["web_api_chunk_edit"]
         assert snap["bypassed"] == 1
+
+    async def test_force_unsafe_on_project_shared_chunk_blocks(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        """ADR-0011 PR-D review round 7 pin: PATCH on a project_shared
+        chunk must infer scope from the loaded metadata so Gate A's
+        ``force_unsafe`` hard-refusal applies. Without
+        ``scope=meta.scope`` on ``enforce_write_guard``, a force_unsafe
+        edit with a secret hit returns ``bypassed`` (status 200) and
+        the secret lands in git-tracked memory. Mirrors the MCP
+        ``mem_edit`` contract at memory_crud.py:406-413.
+        """
+        from memtomem import privacy
+
+        proj = tmp_path / "proj"
+        (proj / ".memtomem" / "memories").mkdir(parents=True)
+        source = proj / ".memtomem" / "memories" / "rule.md"
+        source.write_text("## H\n\nbody\n", encoding="utf-8")
+        chunk = _make_test_chunk(source=str(source))
+        chunk = chunk.__class__(
+            content=chunk.content,
+            metadata=chunk.metadata.__class__(
+                source_file=source,
+                heading_hierarchy=("## H",),
+                tags=chunk.metadata.tags,
+                namespace=chunk.metadata.namespace,
+                start_line=1,
+                end_line=3,
+                scope="project_shared",
+                project_root=proj,
+            ),
+            id=chunk.id,
+            content_hash=chunk.content_hash,
+            embedding=chunk.embedding,
+            created_at=chunk.created_at,
+            updated_at=chunk.updated_at,
+        )
+        app.state.storage.get_chunk.return_value = chunk
+
+        resp = await client.patch(
+            f"/api/chunks/{CHUNK_ID}",
+            json={
+                "new_content": "secret token=sk-" + "a" * 30,
+                "force_unsafe": True,
+            },
+        )
+        assert resp.status_code == 403, resp.text
+        body = resp.json()
+        detail = body.get("detail", {})
+        assert detail.get("detail") == "blocked_project_shared"
+        snap = privacy.snapshot()["by_tool"].get("web_api_chunk_edit", {})
+        assert snap.get("blocked_project_shared", 0) == 1
+        # The bypass counter must NOT have ticked — that was the bug.
+        assert snap.get("bypassed", 0) == 0
 
 
 # ---------------------------------------------------------------------------

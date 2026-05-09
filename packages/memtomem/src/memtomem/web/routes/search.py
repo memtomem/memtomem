@@ -6,7 +6,8 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from memtomem.web.deps import get_search_pipeline
+from memtomem.server.tools.search import _resolve_project_context_from_dirs
+from memtomem.web.deps import get_config, get_search_pipeline
 from memtomem.web.schemas.core import RetrievalStatsOut, to_result_out
 from memtomem.web.schemas.search import SearchResponse
 
@@ -24,6 +25,7 @@ async def search(
     namespace: str | None = Query(None),
     context_window: int = Query(0, ge=0, le=10, description="Expand ±N adjacent chunks"),
     pipeline=Depends(get_search_pipeline),
+    config=Depends(get_config),
 ) -> SearchResponse:
     # #750: ``q`` is optional so a tag/source-only search (no keyword)
     # is a first-class path. The pipeline handles the empty-query branch
@@ -36,6 +38,14 @@ async def search(
             detail="Provide at least one of q, tag_filter, or source_filter.",
         )
 
+    # ADR-0011 PR-D round 9: thread project context onto the always-on
+    # storage scope filter so a Web UI search session running inside a
+    # registered project still surfaces project_shared / project_local
+    # rows. ``_resolve_project_context_from_dirs`` reads only the dirs
+    # list (the ``app``/``comp`` wrapper isn't available here — the
+    # endpoint depends on ``Mem2MemConfig`` directly).
+    project_context_root = _resolve_project_context_from_dirs(config.indexing.project_memory_dirs)
+
     try:
         results, rstats = await pipeline.search(
             query=q,
@@ -44,6 +54,7 @@ async def search(
             tag_filter=tag_filter,
             namespace=namespace,
             context_window=context_window if context_window > 0 else None,
+            project_context_root=project_context_root,
         )
     except Exception as exc:
         logger.error("Search failed: %s", exc, exc_info=True)

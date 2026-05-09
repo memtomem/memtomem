@@ -71,7 +71,17 @@ def create_tables(
             tags TEXT NOT NULL DEFAULT '[]',
             namespace TEXT NOT NULL DEFAULT 'default',
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            access_count INTEGER NOT NULL DEFAULT 0,
+            use_count INTEGER NOT NULL DEFAULT 0,
+            last_accessed_at TEXT,
+            overlap_before INTEGER NOT NULL DEFAULT 0,
+            overlap_after INTEGER NOT NULL DEFAULT 0,
+            importance_score REAL NOT NULL DEFAULT 0.0,
+            valid_from_unix INTEGER,
+            valid_to_unix INTEGER,
+            scope TEXT NOT NULL DEFAULT 'user',
+            project_root TEXT
         )
     """)
 
@@ -119,6 +129,23 @@ def create_tables(
     for col_sql in (
         "ALTER TABLE chunks ADD COLUMN valid_from_unix INTEGER",
         "ALTER TABLE chunks ADD COLUMN valid_to_unix INTEGER",
+    ):
+        try:
+            db.execute(col_sql)
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
+
+    # Idempotent migration: scope hierarchy columns (ADR-0011).
+    # ``scope`` is one of "user" / "project_shared" / "project_local"; all
+    # existing rows default to "user" so search behavior is unchanged for
+    # users who do not opt into project tiers. ``project_root`` is the
+    # absolute path of the canonical project root for project-scoped chunks
+    # (NULL for user scope) — required so one user-local DB can hold chunks
+    # from multiple worktrees without path-prefix collisions.
+    for col_sql in (
+        "ALTER TABLE chunks ADD COLUMN scope TEXT NOT NULL DEFAULT 'user'",
+        "ALTER TABLE chunks ADD COLUMN project_root TEXT",
     ):
         try:
             db.execute(col_sql)
@@ -270,6 +297,27 @@ def create_tables(
     db.execute("""
         CREATE INDEX IF NOT EXISTS idx_chunks_importance
         ON chunks(importance_score)
+    """)
+    # Composite index for (scope, project_root) lookups (ADR-0011 §6 always-on
+    # scope-context filter). Default search pins ``project_root = <current>``
+    # for project context; cheap composite scan beats full table scan once
+    # any user opts into project_memory_dirs.
+    db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_chunks_scope
+        ON chunks(scope, project_root)
+    """)
+    # ADR-0011 PR-D review round 7: partial sibling index on
+    # ``project_root`` alone. The dominant in-project filter shape is
+    # ``(scope='user' OR project_root=?)`` — the OR's second leg cannot
+    # use ``idx_chunks_scope`` because ``project_root`` is the trailing
+    # column behind ``scope``. Without this partial index the second
+    # leg degrades to a full scan once a user accumulates project-tier
+    # chunks. Partial (``WHERE project_root IS NOT NULL``) keeps the
+    # index small for the user-tier majority case.
+    db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_chunks_project_root
+        ON chunks(project_root)
+        WHERE project_root IS NOT NULL
     """)
 
     # --- Personalization tables ---

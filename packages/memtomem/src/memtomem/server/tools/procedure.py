@@ -61,11 +61,19 @@ async def mem_procedure_list(
     """List all saved procedures."""
     app = await _get_app_initialized(ctx)
 
+    # ADR-0011 PR-D round 9: thread project context so procedures
+    # tagged in project_shared / project_local tiers surface when the
+    # server runs inside a registered project.
+    from memtomem.server.tools.search import _resolve_project_context_root
+
+    project_context_root = _resolve_project_context_root(app)
+
     # Find all chunks tagged with "procedure"
     results, _ = await app.search_pipeline.search(
         query="procedure workflow steps",
         top_k=50,
         tag_filter="procedure",
+        project_context_root=project_context_root,
     )
 
     if not results:

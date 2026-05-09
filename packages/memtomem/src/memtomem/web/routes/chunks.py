@@ -70,11 +70,20 @@ async def edit_chunk(
 
     from memtomem import privacy
 
+    # ADR-0011 PR-D review round 7: infer scope from the loaded chunk's
+    # persisted metadata so Gate A's project_shared hard-refusal of
+    # ``force_unsafe=True`` fires on the web edit path too. Without
+    # ``scope=meta.scope``, ``enforce_write_guard`` defaults to user-tier
+    # treatment and a force_unsafe edit on a project_shared chunk
+    # returns ``bypassed`` instead of ``blocked_project_shared`` —
+    # mirrors the MCP ``mem_edit`` contract at memory_crud.py:406-413.
+    inferred_scope = meta.scope or "user"
     guard = privacy.enforce_write_guard(
         body.new_content,
         surface="web_api_chunk_edit",
         force_unsafe=body.force_unsafe,
-        audit_context={"chunk_id": str(chunk_id)},
+        scope=inferred_scope,
+        audit_context={"chunk_id": str(chunk_id), "scope": inferred_scope},
     )
     if guard.decision == "blocked":
         raise HTTPException(
@@ -83,6 +92,20 @@ async def edit_chunk(
                 "detail": "redaction_blocked",
                 "hits": len(guard.hits),
                 "surface": "web_api_chunk_edit",
+            },
+        )
+    if guard.decision == "blocked_project_shared":
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "detail": "blocked_project_shared",
+                "hits": len(guard.hits),
+                "surface": "web_api_chunk_edit",
+                "message": (
+                    "force_unsafe is not permitted on scope='project_shared' "
+                    "chunks (git history is forever). Move the chunk to a "
+                    "different scope first, or hand-edit the canonical file."
+                ),
             },
         )
 
@@ -107,6 +130,13 @@ async def edit_chunk(
 @router.delete("/{chunk_id}", response_model=DeleteResponse)
 async def delete_chunk(
     chunk_id: UUID,
+    confirm_project_shared: bool = Query(
+        False,
+        description=(
+            "ADR-0011 Gate B: required when the target chunk lives in "
+            "scope='project_shared' (git-tracked tier)."
+        ),
+    ),
     storage=Depends(get_storage),
     index_engine=Depends(get_index_engine),
 ) -> DeleteResponse:
@@ -116,6 +146,31 @@ async def delete_chunk(
 
     meta = chunk.metadata
     source = meta.source_file
+
+    # ADR-0011 PR-D review round 7: Gate B on the web delete path —
+    # mirrors the MCP ``mem_delete`` round-3 fix (8407d73). Without
+    # this, deleting a project_shared chunk via DELETE /api/chunks/{id}
+    # would silently rewrite git-tracked memory without an explicit
+    # confirm. The query param shape parallels the MCP
+    # ``confirm_project_shared`` kwarg.
+    inferred_scope = meta.scope or "user"
+    if inferred_scope == "project_shared" and not confirm_project_shared:
+        logger.info(
+            "web delete_chunk rejected project_shared chunk without confirmation",
+            extra={"chunk_id": str(chunk_id), "scope": inferred_scope},
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "detail": "blocked_project_shared",
+                "surface": "web_api_chunk_delete",
+                "message": (
+                    "Deleting scope='project_shared' chunks requires "
+                    "confirm_project_shared=true. The chunk lives in the "
+                    "git-tracked memory tier; pass the query parameter to proceed."
+                ),
+            },
+        )
 
     # Remove lines from original source file, then re-index
     if source.exists() and meta.start_line and meta.end_line:
@@ -168,7 +223,20 @@ async def similar_chunks(
         raise HTTPException(status_code=404, detail="Chunk not found")
 
     embedding = await embedder.embed_query(chunk.content)
-    raw = await storage.dense_search(embedding, top_k=top_k + 1)
+    # ADR-0011 PR-D round 11 (P2): pin similar-chunk dense search to
+    # the SOURCE chunk's own ``project_root`` rather than letting the
+    # always-on storage scope filter default to user-only. Without
+    # this, finding similar chunks for a project_shared / project_local
+    # row excludes every other project-tier chunk in the same project,
+    # because the storage layer treats missing
+    # ``project_context_root`` as out-of-project. The chunk we're
+    # comparing IS the project context for "similar chunks under the
+    # same scope".
+    raw = await storage.dense_search(
+        embedding,
+        top_k=top_k + 1,
+        project_context_root=chunk.metadata.project_root,
+    )
 
     results = [
         SearchResultOut(
