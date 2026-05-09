@@ -31,7 +31,7 @@ the two axes.
 
 ### What ADR-0001 §1 established
 
-ADR-0001 §1 (`docs/adr/0001-context-gateway-sync-policies.md:9-36`) fixed
+ADR-0001 §1 (`docs/adr/0001-context-gateway-sync-policies.md:9-37`) fixed
 two related principles for agents / skills / commands:
 
 - **Reverse sync runtime priority** is deterministic per artifact type
@@ -53,7 +53,7 @@ ADR-0010 (`docs/adr/0010-settings-hooks-target-scope.md`, Accepted
 2026-05-09) introduced `target_scope: user / project_shared /
 project_local` for settings hooks specifically, validated the 3-tier
 model in this codebase (config field at
-`packages/memtomem/src/memtomem/config.py:700`, plumbing across
+`packages/memtomem/src/memtomem/config.py:721`, plumbing across
 `_claude_target` / `target_file`, settings-migrate subcommand in
 PR #876), and **explicitly excluded memory data** from its scope
 (ADR-0010 line 23–31 background table). The deferral was deliberate:
@@ -107,7 +107,7 @@ because project_local never reaches runtime.
 ### 1. Adopt 3-tier scope axis for memory / agents / skills / commands
 
 Mirror ADR-0010's `TargetScope` literal verbatim. Reuse the same type
-(`Literal["user", "project_shared", "project_local"]` at `config.py:700`)
+(`Literal["user", "project_shared", "project_local"]` at `config.py:721`)
 across all artifact types — one vocabulary, one validator, one parser.
 
 The canonical / runtime layout per scope per artifact type:
@@ -115,9 +115,9 @@ The canonical / runtime layout per scope per artifact type:
 | Artifact     | Canonical (user)                              | Canonical (project_shared)                       | Canonical (project_local)                                | Runtime fan-out per scope                                                         |
 |--------------|-----------------------------------------------|--------------------------------------------------|----------------------------------------------------------|-----------------------------------------------------------------------------------|
 | **memory**   | `~/.memtomem/memories/` + auto-discovered dirs | `<proj>/.memtomem/memories/`                     | `<proj>/.memtomem/memories.local/`                       | indexed into single user-local SQLite (no on-disk runtime mirror)                 |
-| **agents**   | `~/.memtomem/agents/<n>.md`                   | `<proj>/.memtomem/agents/<n>.md`                 | `<proj>/.memtomem/agents.local/<n>.md`                   | user → `~/.claude/agents/`; project_shared → `<proj>/.claude/agents/`; project_local → no fan-out |
-| **skills**   | `~/.memtomem/skills/<n>/SKILL.md`             | `<proj>/.memtomem/skills/<n>/SKILL.md`           | `<proj>/.memtomem/skills.local/<n>/SKILL.md`             | user → `~/.claude/skills/<n>/`; project_shared → `<proj>/.claude/skills/<n>/`; project_local → no fan-out |
-| **commands** | `~/.memtomem/commands/<n>.md`                 | `<proj>/.memtomem/commands/<n>.md`               | `<proj>/.memtomem/commands.local/<n>.md`                 | user → `~/.claude/commands/`; project_shared → `<proj>/.claude/commands/`; project_local → no fan-out |
+| **agents**   | `~/.memtomem/agents/<name>.md`                | `<proj>/.memtomem/agents/<name>.md`              | `<proj>/.memtomem/agents.local/<name>.md`                | user → `~/.claude/agents/`; project_shared → `<proj>/.claude/agents/`; project_local → no fan-out |
+| **skills**   | `~/.memtomem/skills/<name>/SKILL.md`          | `<proj>/.memtomem/skills/<name>/SKILL.md`        | `<proj>/.memtomem/skills.local/<name>/SKILL.md`          | user → `~/.claude/skills/<name>/`; project_shared → `<proj>/.claude/skills/<name>/`; project_local → no fan-out |
+| **commands** | `~/.memtomem/commands/<name>.md`              | `<proj>/.memtomem/commands/<name>.md`            | `<proj>/.memtomem/commands.local/<name>.md`              | user → `~/.claude/commands/`; project_shared → `<proj>/.claude/commands/`; project_local → no fan-out |
 | **settings** (ADR-0010, included for completeness) | `~/.claude/settings.json` | `<proj>/.claude/settings.json`                   | `<proj>/.claude/settings.local.json`                     | settings have no canonical/runtime split — they ARE the runtime |
 
 ### 2. v1 defaults preserve current behavior, zero behavior change for existing installs
@@ -175,7 +175,7 @@ FKs). **One DB, per-row scope tag** is the only path that keeps the
 existing dedup, sharing, and embedding contracts intact.
 
 The `chunks` table gains two columns (idempotent ALTER, mirrors the
-namespace migration at `storage/sqlite_schema.py:80`):
+namespace migration at `storage/sqlite_schema.py:90`):
 
 ```sql
 ALTER TABLE chunks ADD COLUMN scope TEXT NOT NULL DEFAULT 'user';
@@ -199,7 +199,7 @@ Two gates fire on every project_shared write. A bug in either still
 leaves one active.
 
 **Gate A (chokepoint).** `privacy.enforce_write_guard`
-(`packages/memtomem/src/memtomem/privacy.py:415`) gains a `scope` kwarg
+(`packages/memtomem/src/memtomem/privacy.py:432`) gains a `scope` kwarg
 and rejects `force_unsafe=True` when `scope == "project_shared"` —
 hard refusal, not a warning. The decision string is
 `blocked_project_shared`; the bypass audit log carries a special
@@ -222,7 +222,8 @@ confirm prompt at the CLI/MCP write surface (`mm mem add`,
 `mm context init`, `mm context promote`). The flag must be passed
 explicitly — no env var or config-field default. The
 `MUTABLE_FIELDS` and `FIELD_CONSTRAINTS` validators at
-`config.py:805+` reject any `memory.default_write_scope` field at
+`MUTABLE_FIELDS` (`config.py:826`) and `FIELD_CONSTRAINTS`
+(`config.py:858`) reject any `memory.default_write_scope` field at
 load time so a future contributor cannot silently introduce a
 project_shared default.
 
@@ -243,19 +244,24 @@ persisted `metadata.scope`, not the caller's parameter — a client that
 omits `scope` while editing a project_shared chunk cannot bypass the
 gate by accident.
 
-`mem_batch_add` currently bypasses `enforce_write_guard` (it uses
-inline `privacy.scan` at `server/tools/memory_crud.py:443-461`) and
-must be refactored to per-entry chokepoint calls during PR-D so the
-batch path cannot become the bypass route.
+Before PR-D, `mem_batch_add` bypassed `enforce_write_guard` and used
+an inline `privacy.scan` instead — the batch path was the obvious
+bypass route. PR-D refactored `mem_batch_add` (`server/tools/memory_crud.py:668`)
+to call `enforce_write_guard` per entry so the chokepoint applies
+uniformly across single-add and batch-add surfaces; this section is
+retained for the rationale, not as a future task.
 
 **Authoring-side privacy is explicitly out of scope.** When a user
 edits a project_shared agent markdown directly with their text editor,
 memtomem cannot gate the save. Pre-commit hooks are the team's choice;
-this RFC ships `mm mem rescan --scope project_shared` and `mm context
-rescan --scope project_shared` as composable building blocks but does
-not auto-install hooks. Auto-installation would imply ingest-time
-scanning is bypassable, which contradicts the trust boundary
-documented in `privacy.py:7-26`.
+this RFC scopes `mm mem rescan --scope project_shared` and
+`mm context rescan --scope project_shared` as the natural composable
+building blocks for that workflow, but treats the subcommands as
+v1-deferred (Open Questions item 4) — they ship only if a concrete
+user reports a need before PR-D / PR-E. Auto-installing pre-commit
+hooks is a non-goal regardless: it would imply ingest-time scanning is
+bypassable, which contradicts the trust boundary documented in
+`privacy.py:7-26`.
 
 The `blocked_project_shared` decision is **LTM-only** and does NOT
 sync to STM. `privacy.py`'s asymmetric-sync rule already specifies
@@ -336,55 +342,44 @@ The asymmetry with ADR-0010 §5 is documented in Consequences below.
 
 ### 9. Phasing
 
-Six PRs, each independently revertable:
+Six PRs, each independently revertable. PR-B / PR-C / PR-D were
+drafted alongside this ADR and shipped together as a single bundle
+in PR #882 (2026-05-09); PR-A landed shortly after to capture the
+RFC on `main`. PR-E and PR-F remain ahead of HEAD.
 
-- **PR-A** (this ADR's markdown). Status: Proposed → Accepted after
-  ≥1 week dwell per ADR-0009 RFC precedent for architectural ADRs.
-- **PR-B**: memory schema (append-only columns), `IndexingConfig.
-  project_memory_dirs` field, `config.all_index_roots()` helper
-  migrated across every consumer (watcher, engine, web), scope
-  classifier, `_resolve_scope` / `_apply_scope`, `dataclasses.replace`
-  refactor of `_apply_namespace`, Gate A on `enforce_write_guard`.
-  No CLI/MCP surface yet; defaults preserve current behavior.
-- **PR-C**: memory read surface — `ScopeFilter`, `scope_context_sql`
-  always-on fragment, project-aware default merge per §6, search
-  pipeline cache key, MCP read tools, CLI `--scope` (with comma-list)
-  on read commands.
-- **PR-D**: memory write surface — Gate B (explicit flag + confirm),
-  `mm mem add` refactor (the current
-  `cli/memory.py:85` hardcoded `~/.memtomem/memories` is incompatible
-  with project-scope writes; ~80 LoC restructure required),
-  `mem_batch_add` refactor through `enforce_write_guard`,
-  `mem_edit` / `mem_delete` inferred-scope, `mem_consolidate_apply`
-  cross-scope rejection, `mm context memory-migrate`, optional
-  `mm mem rescan`.
-- **PR-E**: agents / skills / commands canonical scope axis —
-  `context/scope_resolver.py`, each generator's `target_file` /
-  `is_available` accepting `(scope, project_root)`,
-  `mm context init --scope=...`, `mm context sync --scope=...`
-  filter, `mm context promote` / `demote`, sync-time privacy scan
-  (Gate A for non-memory), optional `mm context rescan`.
-- **PR-F**: Web UI scope badges (memory + context) read-only,
-  `/api/add` rejection with CLI hint plus docs link, public docs
-  updates (user-guide / getting-started / mcp-clients per the
-  default-change fanout convention).
+| PR    | Scope                                                                                       | Ship status                                                |
+|-------|---------------------------------------------------------------------------------------------|------------------------------------------------------------|
+| PR-A  | This ADR markdown.                                                                          | This PR. Status: Proposed at merge → Accepted after dwell. |
+| PR-B  | Memory schema (append-only columns), `IndexingConfig.project_memory_dirs`, scope classifier, `_resolve_scope` / `_apply_scope`, `dataclasses.replace` refactor of `_apply_namespace`, Gate A on `enforce_write_guard`. No CLI/MCP surface; defaults preserved. | Shipped 2026-05-09 in PR #882.                             |
+| PR-C  | Memory read surface — `ScopeFilter`, `scope_context_sql` always-on fragment, project-aware default merge per §6, search pipeline cache key, MCP read tools, CLI `--scope` (comma-list) on read commands. | Shipped 2026-05-09 in PR #882.                             |
+| PR-D  | Memory write surface — Gate B (explicit flag + confirm), `mm mem add` restructure (the pre-PR-D hardcoded `~/.memtomem/memories` user_base in `cli/memory.py` was incompatible with project-scope writes), `mem_batch_add` refactor through `enforce_write_guard`, `mem_edit` / `mem_delete` inferred-scope, `mem_consolidate_apply` cross-scope rejection, `mm context memory-migrate` v1 (chunk-id-stable single-DB rename). `mm mem rescan` deferred (Open Questions item 4). | Shipped 2026-05-09 in PR #882.                             |
+| PR-E  | Agents / skills / commands canonical scope axis — `context/scope_resolver.py`, each generator's `target_file` / `is_available` accepting `(scope, project_root)`, `mm context init --scope=...`, `mm context sync --scope=...` filter, `mm context promote` / `demote`, sync-time privacy scan (Gate A for non-memory). `mm context rescan` deferred per Open Questions item 4. | Pending. Unblocks once this ADR is Accepted.               |
+| PR-F  | Web UI scope badges (memory + context) read-only, `/api/add` rejection with CLI hint plus docs link, public docs updates (user-guide / getting-started / mcp-clients per the default-change fanout convention). | Pending. Follows PR-E.                                     |
 
-**Hard prerequisite for opening PR-A**: ADR-0010 dwell ≥2 weeks
-with no P0/P1 against settings-migrate or `target_scope` plumbing.
-ADR-0010 primitives are load-bearing for ADR-0011; flux there
-cascades into every PR below. The dwell is the same severity
-threshold ADR-0001 §5.1 / ADR-0010 §5 use for default flips, applied
-here to RFC ratification.
+**Sequencing note.** ADR-0010 was Accepted on 2026-05-09 and the
+implementation work for ADR-0011 PR-B / PR-C / PR-D landed the same
+day. The earlier draft of this section recorded a "≥2 weeks ADR-0010
+dwell with no P0/P1 before opening PR-A" prerequisite — applied
+literally that would have blocked opening PR-A indefinitely after the
+implementation already shipped, which is why PR-B / PR-C / PR-D were
+bundled and merged ahead of this ADR landing on `main`. The prerequisite
+is retained in spirit as a **post-merge ratification gate** instead:
+this ADR enters at Status `Proposed`, and the flip to `Accepted`
+requires the same ≥2-week, zero P0/P1 window against ADR-0010's
+settings-migrate plumbing and #882's memory scope plumbing.
+Implementers of PR-E / PR-F should treat the Accepted flip — not the
+PR-A merge — as the unblock signal.
 
 ## Consequences
 
-- Five implementation issues are unblocked once this ADR reaches
-  Accepted: PR-B (memory plumbing), PR-C (memory read surface),
-  PR-D (memory write surface), PR-E (canonical scope axis for
-  agents / skills / commands), PR-F (Web UI + docs). PR-A is this
-  ADR's markdown commit.
+- The implementation roadmap is six PRs (see §9 phasing table).
+  PR-A is this ADR markdown; PR-B (memory plumbing) / PR-C (memory
+  read surface) / PR-D (memory write surface) shipped together in
+  PR #882 (2026-05-09). PR-E (canonical scope axis for agents /
+  skills / commands) and PR-F (Web UI + docs) remain ahead and
+  unblock once this ADR flips to Accepted (see §9 sequencing note).
 - Every canonical artifact in memtomem now uses one scope vocabulary.
-  The `TargetScope` literal at `config.py:700` is the single source
+  The `TargetScope` literal at `config.py:721` is the single source
   of truth across settings, memory, agents, skills, and commands.
 - `<project>/.memtomem/config.json` remains deferred per ADR-0010 §3.
   Per-project scope selection is solved by absolute paths in the
@@ -404,9 +399,10 @@ here to RFC ratification.
   must reopen this discussion explicitly rather than ride on
   ADR-0010's precedent.
 - Privacy `enforce_write_guard` becomes the single chokepoint for
-  every memory write surface. The current `mem_batch_add` bypass at
-  `memory_crud.py:443-461` is treated as a bug (PR-D fix), not as
-  a design choice to preserve.
+  every memory write surface. The pre-PR-D `mem_batch_add` bypass was
+  treated as a bug (closed by PR-D — `mem_batch_add` at
+  `memory_crud.py:668` now calls `enforce_write_guard` per entry),
+  not as a design choice to preserve.
 - For agents / skills / commands, `project_local` exists but does
   not fan out to runtime. Users who expect "everything I author
   ships to .claude/" will be surprised by drafts staying invisible.
@@ -517,7 +513,7 @@ they do not block this ADR's acceptance.
 - ADR-0009 — RFC pattern precedent for Proposed-status ADRs with
   multi-week dwell, mirrored in §9.
 - ADR-0010 — settings hooks 3-tier scope; this ADR's plumbing
-  primitives reuse the `TargetScope` literal at `config.py:700`,
+  primitives reuse the `TargetScope` literal at `config.py:721`,
   the `_resolve_cli_scope` flag pattern at
   `cli/context_cmd.py:313`, and the `_confirm_settings_host_writes`
   prompt shape at `cli/context_cmd.py:342-366`.
@@ -531,36 +527,45 @@ they do not block this ADR's acceptance.
 
 **Source files (anchors for the implementation PRs)**
 
-- `packages/memtomem/src/memtomem/config.py:700` — `TargetScope`
-  literal (reused as-is).
-- `packages/memtomem/src/memtomem/config.py:192-242` —
-  `IndexingConfig`; PR-B adds `project_memory_dirs` and
-  `all_index_roots()`.
-- `packages/memtomem/src/memtomem/config.py:1382` —
-  `categorize_memory_dir`; PR-B adds sibling `classify_scope`.
-- `packages/memtomem/src/memtomem/privacy.py:415` —
-  `enforce_write_guard`; PR-B adds the `scope` kwarg + Gate A
+Line numbers reflect HEAD on `main` after PR #882. Anchors are listed
+by symbol where line drift is plausible; readers should grep the
+symbol if a number ever stops resolving.
+
+- `packages/memtomem/src/memtomem/config.py:721` — `TargetScope`
+  literal (reused as-is across artifacts).
+- `packages/memtomem/src/memtomem/config.py:193` — `IndexingConfig`;
+  PR-B added `project_memory_dirs` (`config.py:203`) and
+  `all_index_roots()` helper (`config.py:290`).
+- `packages/memtomem/src/memtomem/config.py:1403` —
+  `categorize_memory_dir`; PR-B added sibling `classify_scope`.
+- `packages/memtomem/src/memtomem/privacy.py:432` —
+  `enforce_write_guard`; PR-B added the `scope` kwarg + Gate A
   hard refusal.
-- `packages/memtomem/src/memtomem/storage/sqlite_schema.py:80`,
-  `:108`, `:119-120` — column-add migration precedent for PR-B's
-  `scope` / `project_root` columns.
-- `packages/memtomem/src/memtomem/storage/sqlite_backend.py:1151` —
-  `_row_to_chunk`; PR-B updates the optional-column index math for
+- `packages/memtomem/src/memtomem/storage/sqlite_schema.py:90`
+  (namespace migration), `:109` (overlap columns), `:128`
+  (temporal-validity) — column-add migration precedents for PR-B's
+  `scope` / `project_root` columns at `:147-148`.
+- `packages/memtomem/src/memtomem/storage/sqlite_backend.py:1333` —
+  `_row_to_chunk`; PR-B updated the optional-column index math for
   the appended columns.
-- `packages/memtomem/src/memtomem/indexing/engine.py:1007` —
-  `_apply_namespace`; PR-B adds sibling `_apply_scope` and
-  refactors both to `dataclasses.replace`.
-- `packages/memtomem/src/memtomem/server/tools/memory_crud.py:78`,
-  `:274`, `:443-461` — memory write chokepoints; PR-D refactors
-  `mem_batch_add` through `enforce_write_guard` and adds
-  inferred-scope logic to `mem_edit` / `mem_delete`.
-- `packages/memtomem/src/memtomem/cli/memory.py:45-120` — `mm mem
-  add` hardcoded path; PR-D refactor (~80 LoC).
+- `packages/memtomem/src/memtomem/indexing/engine.py:1069` —
+  `_apply_namespace`; PR-B added sibling `_apply_scope` and refactored
+  both to `dataclasses.replace`.
+- `packages/memtomem/src/memtomem/server/tools/memory_crud.py:668` —
+  `mem_batch_add` post-PR-D chokepoint (calls `enforce_write_guard`
+  per entry). `mem_edit` / `mem_delete` inferred-scope is also in this
+  module; grep `_resolve_scope`.
+- `packages/memtomem/src/memtomem/cli/memory.py:179` — `user_base`
+  fallback in the `mm mem add` write-target resolution; PR-D
+  restructured the surrounding flow so `--scope project_shared` /
+  `project_local` now resolve through `memtomem.memory_scope`
+  rather than the user-tier hardcoded path that existed pre-PR-D.
 - `packages/memtomem/src/memtomem/context/agents.py`,
   `context/skills.py`, `context/commands.py`,
-  `context/generator.py` — generator base; PR-E threads
+  `context/generator.py` — generator base; PR-E will thread
   `(scope, project_root)` through `target_file` / `is_available`.
 - `packages/memtomem/src/memtomem/cli/context_cmd.py:313`,
-  `:342-366`, `:1383+` — `_resolve_cli_scope`,
-  `_confirm_settings_host_writes`, `mm context migrate` shape;
-  PR-D / PR-E reuse all three.
+  `:342-366` — `_resolve_cli_scope`, `_confirm_settings_host_writes`;
+  PR-D and PR-E reuse both. `mm context memory-migrate` shape lives
+  at `cli/context_cmd.py:2000` (`memory_migrate_cmd`); PR-E reuses
+  the same Click pattern.
