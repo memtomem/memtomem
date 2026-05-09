@@ -7,6 +7,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`mm mem add --scope` + `--confirm-project-shared` / `--yes` (CLI)
+  (ADR-0011 PR-D).** The CLI ``add`` command now writes to one of three
+  directories based on the resolved scope: ``~/.memtomem/memories``
+  (user, default), ``<project>/.memtomem/memories`` (project_shared,
+  git-tracked), or ``<project>/.memtomem/memories.local``
+  (project_local, gitignored). Project-tier writes need a registered
+  project context (`project_memory_dirs` covers the current cwd);
+  without one the CLI exits with a clear error. ``project_shared``
+  writes prompt for explicit confirm naming the git-tracked target
+  path; ``--yes`` and ``--confirm-project-shared`` skip the prompt for
+  scripted use.
+- **`mem_add(scope=..., confirm_project_shared=...)` and
+  `mem_batch_add(scope=..., confirm_project_shared=...)` (MCP)
+  (ADR-0011 PR-D).** The same scope axis is exposed to MCP callers.
+  Default scope ``user`` keeps existing behaviour; ``project_shared``
+  requires the explicit confirm flag (Gate B). Critically, the write
+  target now resolves per scope on the MCP path too — ``mem_add(
+  scope='project_shared')`` lands in the project's
+  ``.memtomem/memories/`` directory, not the user-tier path. Closes
+  the CLI/MCP divergence flagged during PR-D review. ``mem_batch_add``
+  routes each entry through ``enforce_write_guard`` per-entry (the
+  pre-ADR-0011 inline-scan path is removed); ``force_unsafe=True`` is
+  hard-refused on ``project_shared`` per Gate A; the transactional
+  reject contract is preserved (clean siblings of a flagged batch
+  do not record a ``pass``).
+- **`mm context memory-migrate <source> --from <scope> --to <scope>`
+  (CLI) (ADR-0011 PR-D).** v1: chunk-id-stable, single-DB rename of
+  one markdown memory file between scope tiers. Chunk UUIDs and
+  ``chunk_links`` lineage are preserved via a transactional UPDATE on
+  the chunks table; no re-index is triggered. Default is dry-run;
+  ``--apply`` mutates disk. ``--to project_shared`` re-runs the
+  privacy guard on the file content (Gate A on migrate); secret hits
+  reject the migration with no force bypass — git history is forever.
+  If the DB UPDATE fails after the filesystem move, the move is
+  reverted (best-effort) so the source path remains canonical.
+  Cross-DB migration, glob/multi-file inputs, and partial chunk-link
+  lineage preservation are deferred.
 - **Multi-device sync guide (`docs/guides/multi-device-sync.md`).**
   Documents the namespace-aligned layout, `.gitignore` recipe, post-pull
   workflow, and anti-patterns for syncing markdown memories across
@@ -18,6 +55,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **`mem_edit` / `mem_delete` infer scope from the chunk's persisted
+  `metadata.scope` (MCP) (ADR-0011 PR-D).** Editing or deleting a
+  chunk that lives in ``project_shared`` is gated by the same
+  hard-refusal as ``mem_add(scope='project_shared')`` — a client
+  cannot bypass Gate A on edit by omitting an explicit ``scope``
+  kwarg. ``mem_delete`` adds Gate B: deleting a project_shared chunk
+  requires ``confirm_project_shared=True``. Bulk
+  ``mem_delete(source_file=...)`` probes the scope set of affected
+  chunks via a new ``list_scopes_by_source`` storage method (using
+  ``SELECT DISTINCT scope`` rather than the row-limited
+  ``list_chunks_by_source``) and rejects all-or-nothing if any
+  matched chunk is project_shared without explicit confirm.
+- **`mem_consolidate_apply` rejects mixed-scope groups and requires
+  explicit `confirm_project_shared=True` for project_shared
+  consolidation (MCP) (ADR-0011 PR-D).** Source chunks are loaded
+  by ``chunk_ids`` (the truth source — robust to source rename /
+  re-index between ``mem_consolidate`` and the apply call) via
+  ``get_chunks_batch``, not by re-resolving ``group["source"]``.
+  Mixed scope sets skip with a user-visible "Skipped group N: mixed
+  memory scopes (...)" message in the MCP return string (in addition
+  to the existing logger.warning); single-scope groups inheriting
+  ``project_shared`` skip the same way unless ``confirm_project_shared
+  =True`` is passed. The summary is written via ``_mem_add_core``
+  with the inherited scope so it lands in the matching tier
+  directory.
 - **`mm context generate` warns when Cursor/Codex/Copilot would merge
   Rules + Style.** These three runtimes fold the canonical `Rules` and
   `Style` sections into a single block via `_compact_rules`, so the

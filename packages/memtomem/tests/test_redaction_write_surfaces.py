@@ -117,9 +117,7 @@ class TestMemEditRedactionGuard:
         assert after["blocked"] == before["blocked"] + 1
 
     @pytest.mark.asyncio
-    async def test_force_unsafe_records_bypassed(
-        self, bm25_only_components, caplog, monkeypatch
-    ):
+    async def test_force_unsafe_records_bypassed(self, bm25_only_components, caplog, monkeypatch):
         comp, mem_dir = bm25_only_components
         self._stub_user_chunk(monkeypatch, comp)
         app = AppContext.from_components(comp)

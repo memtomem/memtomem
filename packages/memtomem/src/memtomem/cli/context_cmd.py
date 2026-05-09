@@ -2102,9 +2102,7 @@ async def _memory_migrate_run(
 
         target = (to_dir / source.name).resolve()
         if target.exists():
-            raise click.ClickException(
-                f"Target already exists: {target}. Move or rename it first."
-            )
+            raise click.ClickException(f"Target already exists: {target}. Move or rename it first.")
 
         affected = await comp.storage.count_chunks_by_source(source)
 
@@ -2179,7 +2177,6 @@ async def _memory_migrate_run(
 
         comp.search_pipeline.invalidate_cache()
         click.secho(
-            f"  ✓ moved {source.name} → {to_scope} tier; "
-            f"{updated} chunk row(s) updated.",
+            f"  ✓ moved {source.name} → {to_scope} tier; {updated} chunk row(s) updated.",
             fg="green",
         )

@@ -694,8 +694,7 @@ class SqliteBackend(
                 (new_norm, new_scope, project_root, old_norm),
             )
             db.execute(
-                f"UPDATE chunks_fts SET source_file=? "
-                f"WHERE rowid IN ({placeholders(len(rowids))})",
+                f"UPDATE chunks_fts SET source_file=? WHERE rowid IN ({placeholders(len(rowids))})",
                 [new_norm, *rowids],
             )
             if not self._in_transaction:

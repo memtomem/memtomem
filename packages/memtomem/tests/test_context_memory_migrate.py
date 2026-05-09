@@ -16,7 +16,6 @@ Pins for the chunk-id-stable single-DB rename:
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -78,9 +77,7 @@ def _patch_cli_components(monkeypatch, comp):
 # ---------------------------------------------------------------------------
 
 
-def test_memory_migrate_dry_run_reports_plan_without_mutating(
-    monkeypatch, fake_project_layout
-):
+def test_memory_migrate_dry_run_reports_plan_without_mutating(monkeypatch, fake_project_layout):
     from memtomem.cli.context_cmd import memory_migrate_cmd
 
     layout = fake_project_layout
@@ -232,9 +229,7 @@ def test_memory_migrate_apply_project_shared_target_blocks_on_secret(
 # ---------------------------------------------------------------------------
 
 
-def test_memory_migrate_compensation_rolls_back_on_db_failure(
-    monkeypatch, fake_project_layout
-):
+def test_memory_migrate_compensation_rolls_back_on_db_failure(monkeypatch, fake_project_layout):
     from memtomem.cli.context_cmd import memory_migrate_cmd
 
     layout = fake_project_layout
