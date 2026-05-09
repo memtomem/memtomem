@@ -223,7 +223,20 @@ async def similar_chunks(
         raise HTTPException(status_code=404, detail="Chunk not found")
 
     embedding = await embedder.embed_query(chunk.content)
-    raw = await storage.dense_search(embedding, top_k=top_k + 1)
+    # ADR-0011 PR-D round 11 (P2): pin similar-chunk dense search to
+    # the SOURCE chunk's own ``project_root`` rather than letting the
+    # always-on storage scope filter default to user-only. Without
+    # this, finding similar chunks for a project_shared / project_local
+    # row excludes every other project-tier chunk in the same project,
+    # because the storage layer treats missing
+    # ``project_context_root`` as out-of-project. The chunk we're
+    # comparing IS the project context for "similar chunks under the
+    # same scope".
+    raw = await storage.dense_search(
+        embedding,
+        top_k=top_k + 1,
+        project_context_root=chunk.metadata.project_root,
+    )
 
     results = [
         SearchResultOut(

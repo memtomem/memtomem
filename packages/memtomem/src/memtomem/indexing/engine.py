@@ -534,7 +534,23 @@ class IndexEngine:
         try:
             async with self._index_lock:
                 start = time.monotonic()
-                result = await self._index_file(file_path.resolve(), force, namespace=namespace)
+                # ADR-0011 PR-D round 11 (B2): cross-process advisory
+                # lock so the sibling sidecar lock taken by
+                # ``mm context memory-migrate`` is honored on this
+                # path too. Without this, a watcher firing
+                # ``index_file(target)`` mid-migrate races with
+                # migrate's ``shutil.move`` + DB UPDATE pair —
+                # migrate's lock alone is one-sided. The lock is
+                # ``portalocker.LOCK_EX`` (blocking); the typical
+                # window is sub-millisecond so brief event-loop
+                # blocking is acceptable. Migrate holds the lock for
+                # at most the duration of one DB UPDATE, so watcher
+                # contention is bounded.
+                from memtomem.context._atomic import _file_lock, _lock_path_for
+
+                resolved_path = file_path.resolve()
+                with _file_lock(_lock_path_for(resolved_path)):
+                    result = await self._index_file(resolved_path, force, namespace=namespace)
                 duration = (time.monotonic() - start) * 1000
         finally:
             self._active_runs -= 1
@@ -554,15 +570,26 @@ class IndexEngine:
         *,
         namespace: str | None = None,
         threshold: float = 0.92,
+        project_context_root: Path | None = None,
     ) -> bool:
-        """Check if text is semantically similar to existing indexed content."""
+        """Check if text is semantically similar to existing indexed content.
+
+        ``project_context_root`` is threaded onto the always-on
+        storage scope filter (ADR-0011 PR-D round 11). No in-tree
+        callers today; the kwarg defaults to ``None`` (user-only by
+        the always-on filter) and is positioned for forward-compat
+        with project-aware dedup checks.
+        """
         from memtomem.models import NamespaceFilter
 
         try:
             embedding = await self._embedder.embed_query(text)
             ns_filter = NamespaceFilter.parse(namespace) if namespace else None
             results = await self._storage.dense_search(
-                embedding, top_k=1, namespace_filter=ns_filter
+                embedding,
+                top_k=1,
+                namespace_filter=ns_filter,
+                project_context_root=project_context_root,
             )
             return bool(results and results[0].score >= threshold)
         except Exception:

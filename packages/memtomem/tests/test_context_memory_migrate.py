@@ -16,6 +16,7 @@ Pins for the chunk-id-stable single-DB rename:
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -296,6 +297,67 @@ async def test_memory_migrate_update_uses_begin_immediate_transaction(
         "BEGIN IMMEDIATE must fire BEFORE the SELECT phase, otherwise the "
         "RESERVED lock is acquired only after the rowid set is read and a "
         "concurrent writer can race in. Trace: " + str(sql_trace)
+    )
+
+
+@pytest.mark.asyncio
+async def test_engine_index_file_acquires_sidecar_lock_for_watcher_cooperation(
+    bm25_only_components, monkeypatch, tmp_path
+):
+    """ADR-0011 PR-D review round 11 (B2 carry-over) pin: the indexing
+    engine's public ``index_file`` entry point now acquires the same
+    sidecar advisory lock that ``mm context memory-migrate`` holds.
+    Without this, the migrate's lock is one-sided — the watcher
+    (which routes through ``index_file``) never asks for it, so a
+    concurrent watcher firing ``index_file(target)`` between
+    migrate's ``shutil.move`` and the DB UPDATE still produces
+    duplicate chunks at the destination.
+
+    Spy on ``memtomem.context._atomic._file_lock`` to confirm
+    ``index_file`` enters the lock for the resolved file path. The
+    presence assertion is sufficient — the lock primitive itself
+    is exercised by ``test_memory_migrate_compensation_*`` and the
+    sidecar lockfile pattern's own pin in
+    ``test_atomic_lockfile.py`` (#548 line of work).
+    """
+    comp, mem_dir = bm25_only_components
+
+    src = mem_dir / "rule.md"
+    src.write_text("## Rule\n\nbody.\n", encoding="utf-8")
+
+    # Capture every (lock_path, kind) pair entering ``_file_lock``.
+    from contextlib import contextmanager
+
+    from memtomem.context import _atomic as atomic_mod
+
+    real_file_lock = atomic_mod._file_lock
+    lock_calls: list[Path] = []
+
+    @contextmanager
+    def _spy_file_lock(lock_path):
+        lock_calls.append(lock_path)
+        with real_file_lock(lock_path):
+            yield
+
+    monkeypatch.setattr(atomic_mod, "_file_lock", _spy_file_lock)
+    # The engine imports lazily inside ``index_file`` so the symbol
+    # we want to patch is the module-attribute view there too.
+    monkeypatch.setattr(
+        "memtomem.context._atomic._file_lock",
+        _spy_file_lock,
+    )
+
+    # ``index_file`` is the canonical entry the watcher uses
+    # (``watcher.py:230`` calls ``self._engine.index_file(file_path)``).
+    await comp.index_engine.index_file(src.resolve())
+
+    # The expected lockfile sits next to the source path with
+    # ``.<name>.lock`` (``feedback_sidecar_lockfile_for_replaced_files.md``
+    # via ``_lock_path_for``).
+    expected_lock = src.parent / f".{src.name}.lock"
+    assert any(lp == expected_lock for lp in lock_calls), (
+        f"engine.index_file did not acquire {expected_lock} — the migrate "
+        f"sidecar lock is one-sided. Captured locks: {lock_calls}"
     )
 
 

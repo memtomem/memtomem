@@ -140,6 +140,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **ADR-0011 PR-D review round 11 — engine cooperates with migrate
+  sidecar lock.** Round 10's ``mm context memory-migrate`` lock was
+  one-sided: only the migrate command itself acquired the sibling
+  ``.<name>.lock`` advisory file. The watcher path (``index_file``)
+  never asked for the lock, so a concurrent ``mm web`` watcher firing
+  ``index_file(target)`` between migrate's ``shutil.move`` and the
+  DB UPDATE could still INSERT duplicate chunks at the destination.
+  ``IndexEngine.index_file`` now wraps its ``_index_file`` call in
+  the same ``_file_lock(_lock_path_for(...))`` so the lock pattern
+  is genuinely transitive. New pin
+  ``test_engine_index_file_acquires_sidecar_lock_for_watcher_cooperation``
+  spies on ``_file_lock`` to confirm the entry path takes the
+  expected lockfile.
+- **ADR-0011 PR-D review round 11 — direct `dense_search` callers
+  thread project context.** Round 9 closed the
+  ``SearchPipeline.search`` and ``recall_chunks`` direct-caller gaps
+  but ``dense_search`` had its own set of direct callers that the
+  always-on storage scope filter still routed to user-tier-only:
+  - ``GET /api/chunks/{chunk_id}/similar`` — pin to the source
+    chunk's own ``metadata.project_root`` so similar-chunk results
+    respect the chunk's tier.
+  - ``search/conflict.py:detect_conflicts`` — accepts
+    ``project_context_root`` kwarg; ``mem_conflict_detect`` MCP
+    tool threads it via ``_resolve_project_context_root(app)``.
+  - ``search/dedup.py:DedupScanner._find_near_duplicates`` —
+    per-chunk ``chunk.metadata.project_root`` so scans honour
+    each chunk's own project tier.
+  - ``search/expansion.py:expand_query_headings`` — accepts
+    ``project_context_root`` kwarg; ``SearchPipeline.search``
+    threads it from the outer search's ``project_context_root``.
+  - ``IndexEngine.is_duplicate`` — accepts the kwarg for
+    forward-compat (no in-tree callers today).
+  Architectural guard test (``test_scope_context_threading.py``)
+  now scans ``dense_search`` and ``bm25_search`` direct callers in
+  addition to ``SearchPipeline.search`` / ``recall_chunks``, so a
+  future regression on any of the four read-surface methods trips
+  CI.
 - **ADR-0011 PR-D review round 10 — `mem_consolidate_apply` rejects
   project-tier groups with no source `project_root`.** Round 7 added
   the cross-project leak guard for groups whose sources span >1

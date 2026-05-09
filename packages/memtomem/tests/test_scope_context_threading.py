@@ -59,7 +59,7 @@ _ALLOWED_FILES: set[str] = {
 }
 
 
-_TARGET_METHODS = {"search", "recall_chunks"}
+_TARGET_METHODS = {"search", "recall_chunks", "dense_search", "bm25_search"}
 
 
 class _CallVisitor(ast.NodeVisitor):
@@ -67,7 +67,7 @@ class _CallVisitor(ast.NodeVisitor):
         self.offenders: list[tuple[int, str, str]] = []
 
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802 - ast hook
-        # Match ``something.search(...)`` / ``something.recall_chunks(...)``.
+        # Match ``something.<method>(...)`` for the ADR-0011 read surfaces.
         if isinstance(node.func, ast.Attribute) and node.func.attr in _TARGET_METHODS:
             method = node.func.attr
             # Only check when the receiver looks like a search pipeline
@@ -95,9 +95,10 @@ class _CallVisitor(ast.NodeVisitor):
                 token in recv
                 for token in ("search_pipeline", ".pipeline", "self.pipeline", "self._pipeline")
             ) or recv.endswith("pipeline")
-        if method == "recall_chunks":
+        if method in ("recall_chunks", "dense_search", "bm25_search"):
             # ``app.storage.recall_chunks`` / ``comp.storage.recall_chunks`` /
-            # ``self._storage.recall_chunks`` / ``storage.recall_chunks``.
+            # ``self._storage.recall_chunks`` / ``storage.recall_chunks`` —
+            # same shape across the three storage methods.
             return "storage" in recv
         return False
 

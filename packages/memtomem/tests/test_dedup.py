@@ -37,7 +37,16 @@ class _FakeStorage:
     async def list_chunks_by_source(self, source: Path, limit: int) -> list[Chunk]:
         return self._chunks[:limit]
 
-    async def dense_search(self, embedding: list[float], top_k: int) -> list[SearchResult]:
+    async def dense_search(
+        self,
+        embedding: list[float],
+        top_k: int,
+        **_kwargs,
+    ) -> list[SearchResult]:
+        # ``**_kwargs`` absorbs ``project_context_root`` / ``scope_filter`` /
+        # ``namespace_filter`` (ADR-0011 PR-D round 11) — the fake doesn't
+        # filter by those axes; production real-backend tests cover the
+        # threading. Dedup logic itself is fixture-independent.
         # embedding[0] carries the "query content hash" so we can look up canned scores.
         # We encode the query chunk's content in embedding[0] via id lookup below.
         query_marker = self._query_marker
@@ -85,11 +94,13 @@ def scanner_factory():
             storage._pending_markers = list(texts)  # type: ignore[attr-defined]
             return await original_embed(texts)
 
-        async def wrapped_dense(embedding: list[float], top_k: int) -> list[SearchResult]:
+        async def wrapped_dense(
+            embedding: list[float], top_k: int, **_kwargs
+        ) -> list[SearchResult]:
             pending = getattr(storage, "_pending_markers", [])
             if pending:
                 storage._query_marker = pending.pop(0)
-            return await original_dense(embedding, top_k)
+            return await original_dense(embedding, top_k, **_kwargs)
 
         embedder.embed_texts = wrapped_embed  # type: ignore[method-assign]
         storage.dense_search = wrapped_dense  # type: ignore[method-assign]

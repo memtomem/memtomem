@@ -686,7 +686,17 @@ class SearchPipeline:
             if strategy in ("tags", "both"):
                 query = await expand_query_tags(query, self._storage, max_terms)
             if strategy in ("headings", "both"):
-                query = await expand_query_headings(query, self._storage, self._embedder, max_terms)
+                # ADR-0011 PR-D round 11: thread the outer search's
+                # project context onto the heading-expansion's dense
+                # probe so it samples from the same scope set the
+                # primary retrieval is pinned to.
+                query = await expand_query_headings(
+                    query,
+                    self._storage,
+                    self._embedder,
+                    max_terms,
+                    project_context_root=project_context_root,
+                )
             if strategy == "llm":
                 if query in self._expansion_cache:
                     query = self._expansion_cache[query]
