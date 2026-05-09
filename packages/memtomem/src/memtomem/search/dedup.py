@@ -160,7 +160,20 @@ class DedupScanner:
         embeddings = await self._embedder.embed_texts(texts)
 
         for chunk, embedding in zip(chunks, embeddings):
-            results = await self._storage.dense_search(embedding, top_k=6)
+            # ADR-0011 PR-D round 11: per-chunk project context. Each
+            # chunk only finds duplicates in its OWN project tier —
+            # passing ``chunk.metadata.project_root`` (None for
+            # user-tier rows) honours the always-on storage scope
+            # filter without cross-project leakage. Without this,
+            # the dedup pass would silently drop project-tier
+            # candidates whenever the scanner is invoked outside a
+            # cwd-resolved project context (e.g. from the web admin
+            # endpoint).
+            results = await self._storage.dense_search(
+                embedding,
+                top_k=6,
+                project_context_root=chunk.metadata.project_root,
+            )
             for r in results:
                 if r.chunk.id == chunk.id:
                     continue

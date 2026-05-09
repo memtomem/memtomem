@@ -23,6 +23,14 @@ Sync rule (asymmetric):
 This module is the LTM-side trust boundary. STM's content scanner is a
 routing signal only; if STM is bypassed (direct agent → LTM call), the
 redaction guard here still applies. STM-bypass is not safety-bypass.
+
+ADR-0011 outcomes:
+
+- ``blocked_project_shared`` is LTM-only. STM has no scope axis (every
+  STM-routed write lands in user-tier-equivalent storage), so this
+  outcome does **not** auto-sync upstream. Future maintainers should
+  not extend STM's privacy.py with a mirror outcome — keep STM and LTM
+  on separate decision vocabularies for this dimension.
 """
 
 from __future__ import annotations
@@ -232,12 +240,21 @@ JS_PATTERNS_SHA: str = hashlib.sha256(
 
 
 # Outcome labels recorded for every gated content scan.
-#   blocked  — at least one hit; ``force_unsafe`` not set; write rejected.
-#   pass     — no hits; write proceeded.
-#   bypassed — at least one hit; ``force_unsafe`` was set; write proceeded.
-# The three-label split is the audit surface: "blocked" measures guard
-# value, "bypassed" measures escape-hatch usage.
-_VALID_OUTCOMES: tuple[str, ...] = ("blocked", "pass", "bypassed")
+#   blocked                  — at least one hit; ``force_unsafe`` not set; write rejected.
+#   pass                     — no hits; write proceeded.
+#   bypassed                 — at least one hit; ``force_unsafe=True``; write proceeded.
+#   blocked_project_shared   — ``force_unsafe=True`` attempted on a write
+#                               whose resolved scope is ``project_shared``.
+#                               Hard refusal: the bypass valve does NOT
+#                               apply to git-tracked tiers because git
+#                               history retracts to no clone, ever.
+#                               LTM-only outcome — does NOT auto-sync to
+#                               STM (STM has no scope axis); see module
+#                               docstring "Sync rule (asymmetric)".
+# The four-label split is the audit surface: "blocked" measures guard
+# value on user-tier writes, "bypassed" measures escape-hatch usage,
+# "blocked_project_shared" measures attempted bypass into git history.
+_VALID_OUTCOMES: tuple[str, ...] = ("blocked", "pass", "bypassed", "blocked_project_shared")
 
 
 @dataclass(frozen=True)
@@ -417,7 +434,9 @@ def enforce_write_guard(
     *,
     surface: str,
     force_unsafe: bool = False,
+    scope: str = "user",
     audit_context: dict[str, object] | None = None,
+    record_outcome: bool = True,
 ) -> WriteGuardResult:
     """Trust-boundary content scan + counter increment + audit log.
 
@@ -444,25 +463,53 @@ def enforce_write_guard(
       user-facing error message (HTTP 403 / CLI exception / MCP error
       string) so each surface keeps its native error shape.
 
-    The ``mem_batch_add`` path does not call this helper — its
-    per-entry decision shape (one rejection invalidates the whole
-    batch, but counters still attribute outcomes per item) is fiddly
-    enough that inlining the scan + record pattern there is clearer
-    than wrapping it in a sequence of helper calls. ``record(...)`` is
-    still the shared counter API.
+    Scope-aware refusal (ADR-0011 §5 Gate A):
+
+    - When ``scope == "project_shared"`` and ``force_unsafe=True``,
+      the bypass valve is hard-refused: the call records
+      ``"blocked_project_shared"`` and returns a result whose
+      ``decision == "blocked_project_shared"``. The audit log is
+      still emitted (so SOC pipelines can alert on the attempt) but
+      the write does NOT proceed. Rationale: ``project_shared``
+      content goes into git history; even an instant ``git rm``
+      cannot retract it from any clone or reflog, so the trust
+      boundary moves from the user's machine to every clone of the
+      repo forever. The user-facing path to write a force-unsafe
+      memory is ``scope="project_local"`` (gitignored) or
+      ``scope="user"`` (private to the user).
+
+    Transactional callers (``mem_batch_add``) pass
+    ``record_outcome=False`` so the per-entry decisions can be
+    collected without committing counters; the caller then runs
+    :func:`record` once it has decided whether to commit the whole
+    batch. This preserves the "no pass record on rejected batch"
+    invariant the batch path relies on for clean audit semantics.
     """
     hits = scan(content)
     if not hits:
-        record("pass", surface)
+        if record_outcome:
+            record("pass", surface)
         return WriteGuardResult("pass", [])
+    if force_unsafe and scope == "project_shared":
+        if record_outcome:
+            record("blocked_project_shared", surface)
+            emit_bypass_audit(
+                surface=surface,
+                content_chars=len(content),
+                hits=len(hits),
+                audit_context={**(audit_context or {}), "blocked_scope": "project_shared"},
+            )
+        return WriteGuardResult("blocked_project_shared", hits)
     if force_unsafe:
-        record("bypassed", surface)
-        emit_bypass_audit(
-            surface=surface,
-            content_chars=len(content),
-            hits=len(hits),
-            audit_context=audit_context,
-        )
+        if record_outcome:
+            record("bypassed", surface)
+            emit_bypass_audit(
+                surface=surface,
+                content_chars=len(content),
+                hits=len(hits),
+                audit_context=audit_context,
+            )
         return WriteGuardResult("bypassed", hits)
-    record("blocked", surface)
+    if record_outcome:
+        record("blocked", surface)
     return WriteGuardResult("blocked", hits)

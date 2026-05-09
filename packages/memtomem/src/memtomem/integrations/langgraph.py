@@ -161,6 +161,13 @@ class MemtomemStore:
 
         effective_namespace = self._resolve_search_namespace(namespace, include_shared)
 
+        # ADR-0011 PR-D round 9: thread project context — LangGraph
+        # agents running inside a registered project should still see
+        # the project's tier rows under the always-on scope filter.
+        from memtomem.server.tools.search import _resolve_project_context_root
+
+        project_context_root = _resolve_project_context_root(comp)
+
         results, stats = await comp.search_pipeline.search(
             query=query,
             top_k=top_k,
@@ -168,6 +175,7 @@ class MemtomemStore:
             source_filter=source_filter,
             tag_filter=tag_filter,
             rrf_weights=rrf_weights,
+            project_context_root=project_context_root,
         )
         return [
             {

@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from memtomem.embedding.base import EmbeddingProvider
     from memtomem.models import Chunk
     from memtomem.storage.base import StorageBackend
@@ -41,11 +43,20 @@ async def detect_conflicts(
     embedder: EmbeddingProvider,
     threshold: float = 0.75,
     max_candidates: int = 5,
+    *,
+    project_context_root: Path | None = None,
 ) -> list[ConflictCandidate]:
     """Find existing chunks that semantically match but textually differ.
 
     A conflict is: high embedding similarity + low text overlap.
     This suggests the same topic is discussed but with different content.
+
+    ``project_context_root`` is threaded onto the always-on storage
+    scope filter (ADR-0011 PR-D round 11) so conflict candidates
+    respect the same project boundary as the caller's surrounding
+    operation. Without it, conflict detection would silently sample
+    only user-tier candidates even when the caller is operating
+    inside a registered project.
 
     Args:
         content: New content to check.
@@ -53,13 +64,18 @@ async def detect_conflicts(
         embedder: Embedding provider.
         threshold: Minimum similarity to consider.
         max_candidates: Maximum conflicts to return.
+        project_context_root: Project root to pin candidates to.
 
     Returns:
         List of conflict candidates sorted by conflict_score descending.
     """
     try:
         embedding = await embedder.embed_query(content)
-        results = await storage.dense_search(embedding, top_k=10)
+        results = await storage.dense_search(
+            embedding,
+            top_k=10,
+            project_context_root=project_context_root,
+        )
     except Exception:
         logger.warning("Conflict detection failed", exc_info=True)
         return []

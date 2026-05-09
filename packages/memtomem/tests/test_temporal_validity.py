@@ -697,8 +697,12 @@ def _mock_cli_components_for_search(search_return):
     from unittest.mock import AsyncMock
 
     pipeline_mock = AsyncMock(return_value=search_return)
+    # ADR-0011: scope-resolution helper reads ``config.indexing.project_memory_dirs``;
+    # mock it as empty so no project context is detected.
+    config = SimpleNamespace(indexing=SimpleNamespace(project_memory_dirs=[]))
     comp = SimpleNamespace(
         search_pipeline=SimpleNamespace(search=pipeline_mock),
+        config=config,
     )
 
     @asynccontextmanager
@@ -713,14 +717,19 @@ def _mock_cli_components_for_recall(chunks):
 
     Provides ``comp.storage.recall_chunks`` returning the supplied chunk list
     and a minimal ``comp.config.search.system_namespace_prefixes`` so the
-    NamespaceFilter parse path does not blow up.
+    NamespaceFilter parse path does not blow up. Also exposes
+    ``comp.config.indexing.project_memory_dirs`` (empty) so the ADR-0011
+    scope-resolution helper can run without raising.
     """
     from contextlib import asynccontextmanager
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
     storage = SimpleNamespace(recall_chunks=AsyncMock(return_value=list(chunks)))
-    config = SimpleNamespace(search=SimpleNamespace(system_namespace_prefixes=()))
+    config = SimpleNamespace(
+        search=SimpleNamespace(system_namespace_prefixes=()),
+        indexing=SimpleNamespace(project_memory_dirs=[]),
+    )
     comp = SimpleNamespace(storage=storage, config=config)
 
     @asynccontextmanager

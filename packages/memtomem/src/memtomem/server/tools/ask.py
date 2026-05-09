@@ -50,12 +50,20 @@ async def mem_ask(
     app = await _get_app_initialized(ctx)
     effective_ns = namespace or app.current_namespace
 
+    # ADR-0011 PR-D round 9: same project-context threading mem_search
+    # uses, so mem_ask in a registered project does not silently lose
+    # project-tier rows on the always-on scope filter.
+    from memtomem.server.tools.search import _resolve_project_context_root
+
+    project_context_root = _resolve_project_context_root(app)
+
     results, stats = await app.search_pipeline.search(
         query=question,
         top_k=top_k,
         source_filter=source_filter,
         tag_filter=tag_filter,
         namespace=effective_ns,
+        project_context_root=project_context_root,
     )
 
     if not results:

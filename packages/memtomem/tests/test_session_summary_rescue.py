@@ -25,11 +25,20 @@ from memtomem.search.pipeline import SearchPipeline
 from memtomem.server.formatters import _format_structured_results
 
 
+# Symbolic anchor for chunk source paths. Tests use AsyncMock storage
+# so no real file IO happens against this path; it just identifies
+# chunks for boost-source comparisons. Picked so that ``Path`` does
+# the same thing on POSIX and Windows: forward-slash, no drive letter,
+# no expanduser/resolve needed downstream
+# (``feedback_windows_tmp_path_under_userprofile.md``).
+_CHUNK_SOURCE_BASE = "test-fixtures"
+
+
 def _chunk(content: str = "x", source: str = "a.md", namespace: str = "default") -> Chunk:
     return Chunk(
         content=content,
         metadata=ChunkMetadata(
-            source_file=Path(f"/tmp/{source}"),
+            source_file=Path(f"/{_CHUNK_SOURCE_BASE}/{source}"),
             namespace=namespace,
         ),
         embedding=[0.1] * 8,
@@ -182,7 +191,10 @@ class TestBoostSourcesHelper:
 
         pipeline = _make_pipeline(storage, session_summary_config=cfg)
         sources = await pipeline._session_summary_boost_sources("q")
-        assert {Path(s).as_posix() for s in sources} == {"/tmp/src/a.md", "/tmp/src/b.md"}
+        assert {Path(s).as_posix() for s in sources} == {
+            f"/{_CHUNK_SOURCE_BASE}/src/a.md",
+            f"/{_CHUNK_SOURCE_BASE}/src/b.md",
+        }
         # Walk used the correct link_type
         call_args = storage.get_chunks_shared_from.await_args
         assert call_args.kwargs.get("link_type") == "summarizes"
@@ -198,6 +210,31 @@ class TestBoostSourcesHelper:
         storage.get_chunks_shared_from = AsyncMock(return_value=[])
         pipeline = _make_pipeline(storage, session_summary_config=cfg)
         assert await pipeline._session_summary_boost_sources("q") == set()
+
+    @pytest.mark.asyncio
+    async def test_lookup_threads_scope_context_through(self):
+        """ADR-0011 PR-D review pin: rescue summary lookup must honor
+        the same scope_filter / project_context_root as the primary
+        retrieval. Without it, an in-project search would see only
+        user-tier session summaries.
+        """
+        cfg = SessionSummaryConfig(expansion_lookup_top_k=3, expansion_score_threshold=0.3)
+        storage = _async_storage()
+        storage.bm25_search = AsyncMock(return_value=[])
+        pipeline = _make_pipeline(storage, session_summary_config=cfg)
+
+        proj_root = Path(f"/{_CHUNK_SOURCE_BASE}/proj_pin")
+        await pipeline._session_summary_boost_sources(
+            "q",
+            scope_filter=None,
+            project_context_root=proj_root,
+        )
+        kwargs = storage.bm25_search.await_args.kwargs
+        assert kwargs.get("project_context_root") == proj_root
+        # Explicit None for scope_filter — caller used the always-on
+        # default for the primary retrieval, rescue must mirror it.
+        assert "scope_filter" in kwargs
+        assert kwargs["scope_filter"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +256,13 @@ class TestPipelineEndToEndRescue:
 
         storage = _async_storage()
 
-        async def bm25_dispatch(query: str, top_k: int, namespace_filter=None):
+        async def bm25_dispatch(
+            query: str,
+            top_k: int,
+            namespace_filter=None,
+            scope_filter=None,
+            project_context_root=None,
+        ):
             # Archive lookup pattern
             if namespace_filter is not None and getattr(namespace_filter, "pattern", None) == (
                 "archive:session:*"
@@ -256,6 +299,144 @@ class TestPipelineEndToEndRescue:
         assert organic_result.via_session_summary is False
 
     @pytest.mark.asyncio
+    async def test_rescue_threads_project_context_into_all_storage_calls(self):
+        """ADR-0011 PR-D review pin: every storage call on the rescue
+        path (summary lookup + rescue BM25 leg + rescue dense leg) must
+        receive the same ``project_context_root`` the outer search was
+        pinned to. Without this, the always-on scope filter silently
+        drops project_shared / project_local rescue candidates whenever
+        the outer search runs in a project context.
+        """
+        cfg = SessionSummaryConfig(expansion_lookup_top_k=3, expansion_score_threshold=0.3)
+        summary_chunk = _chunk("summary body", namespace="archive:session:abc")
+        rescued = _chunk("rescued chunk", source="src/old_session.md")
+
+        storage = _async_storage()
+
+        bm25_calls: list[dict] = []
+
+        async def bm25_dispatch(
+            query: str,
+            top_k: int,
+            namespace_filter=None,
+            scope_filter=None,
+            project_context_root=None,
+        ):
+            bm25_calls.append(
+                {
+                    "namespace_pattern": getattr(namespace_filter, "pattern", None),
+                    "project_context_root": project_context_root,
+                    "scope_filter": scope_filter,
+                }
+            )
+            if getattr(namespace_filter, "pattern", None) == "archive:session:*":
+                return [_sr(summary_chunk, score=0.9, rank=1, source="bm25")]
+            return [_sr(rescued, score=0.5, rank=1, source="bm25")]
+
+        storage.bm25_search = AsyncMock(side_effect=bm25_dispatch)
+        storage.get_chunks_shared_from = AsyncMock(
+            return_value=[
+                ChunkLink(
+                    target_id=rescued.id,
+                    link_type="summarizes",
+                    namespace_target="default",
+                    created_at=datetime.now(timezone.utc),
+                    source_id=summary_chunk.id,
+                )
+            ]
+        )
+        storage.get_chunks_batch = AsyncMock(return_value={rescued.id: rescued})
+
+        pipeline = _make_pipeline(storage, session_summary_config=cfg)
+        proj_root = Path(f"/{_CHUNK_SOURCE_BASE}/proj_pinned")
+        await pipeline.search("q", top_k=10, project_context_root=proj_root)
+
+        # Every BM25 call (primary, summary lookup, rescue leg) should
+        # have received the project_context_root the outer search was
+        # pinned to. The summary lookup is identifiable by its
+        # archive namespace pattern.
+        assert any(
+            c["namespace_pattern"] == "archive:session:*" and c["project_context_root"] == proj_root
+            for c in bm25_calls
+        ), "summary lookup did not receive project_context_root"
+        # The rescue retrieval leg ran with the same project_context_root.
+        rescue_legs = [c for c in bm25_calls if c["namespace_pattern"] is None]
+        assert rescue_legs, "rescue leg should have fired"
+        assert all(c["project_context_root"] == proj_root for c in rescue_legs)
+
+    @pytest.mark.asyncio
+    async def test_rescue_dense_leg_threads_project_context(self):
+        """Companion pin to the BM25-leg test: the rescue dense leg
+        also receives ``project_context_root`` so the always-on storage
+        filter sees the same context as the primary dense retrieval.
+        """
+        cfg = SessionSummaryConfig(expansion_lookup_top_k=3, expansion_score_threshold=0.3)
+        summary_chunk = _chunk("summary body", namespace="archive:session:abc")
+        rescued = _chunk("rescued chunk", source="src/old_session.md")
+
+        storage = _async_storage()
+
+        async def bm25_dispatch(
+            query: str,
+            top_k: int,
+            namespace_filter=None,
+            scope_filter=None,
+            project_context_root=None,
+        ):
+            if getattr(namespace_filter, "pattern", None) == "archive:session:*":
+                return [_sr(summary_chunk, score=0.9, rank=1, source="bm25")]
+            return [_sr(rescued, score=0.5, rank=1, source="bm25")]
+
+        dense_calls: list[dict] = []
+
+        async def dense_dispatch(
+            embedding,
+            top_k: int,
+            namespace_filter=None,
+            scope_filter=None,
+            project_context_root=None,
+        ):
+            dense_calls.append(
+                {
+                    "project_context_root": project_context_root,
+                    "scope_filter": scope_filter,
+                }
+            )
+            return [_sr(rescued, score=0.4, rank=1, source="dense")]
+
+        storage.bm25_search = AsyncMock(side_effect=bm25_dispatch)
+        storage.dense_search = AsyncMock(side_effect=dense_dispatch)
+        storage.get_chunks_shared_from = AsyncMock(
+            return_value=[
+                ChunkLink(
+                    target_id=rescued.id,
+                    link_type="summarizes",
+                    namespace_target="default",
+                    created_at=datetime.now(timezone.utc),
+                    source_id=summary_chunk.id,
+                )
+            ]
+        )
+        storage.get_chunks_batch = AsyncMock(return_value={rescued.id: rescued})
+
+        # Need dense enabled on the pipeline to exercise the dense leg.
+        embedder = AsyncMock()
+        embedder.embed_query = AsyncMock(return_value=[0.1] * 8)
+        pipeline = SearchPipeline(
+            storage=storage,
+            embedder=embedder,
+            config=SearchConfig(enable_bm25=True, enable_dense=True),
+            session_summary_config=cfg,
+        )
+        proj_root = Path(f"/{_CHUNK_SOURCE_BASE}/proj_dense_pinned")
+        await pipeline.search("q", top_k=10, project_context_root=proj_root)
+
+        # Both the primary and rescue dense calls must have received
+        # the project_context_root the outer search was pinned to.
+        assert dense_calls, "dense leg should have fired"
+        assert all(c["project_context_root"] == proj_root for c in dense_calls)
+
+    @pytest.mark.asyncio
     async def test_no_rescue_when_no_summary_above_threshold(self):
         """Common case: no past summary above threshold → rescue leg
         skipped (no extra retrieval round-trip)."""
@@ -272,7 +453,13 @@ class TestPipelineEndToEndRescue:
                 return "archive:session:*"
             return "ORGANIC"
 
-        async def bm25_dispatch(query: str, top_k: int, namespace_filter=None):
+        async def bm25_dispatch(
+            query: str,
+            top_k: int,
+            namespace_filter=None,
+            scope_filter=None,
+            project_context_root=None,
+        ):
             label = _label(namespace_filter)
             bm25_calls.append(label)
             if label == "archive:session:*":
@@ -298,7 +485,9 @@ class TestPipelineEndToEndRescue:
         storage = _async_storage()
         archive_lookup_called = False
 
-        async def bm25_dispatch(query, top_k, namespace_filter=None):
+        async def bm25_dispatch(
+            query, top_k, namespace_filter=None, scope_filter=None, project_context_root=None
+        ):
             nonlocal archive_lookup_called
             if getattr(namespace_filter, "pattern", None) == "archive:session:*":
                 archive_lookup_called = True

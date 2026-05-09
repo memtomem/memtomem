@@ -7,6 +7,8 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from memtomem.embedding.base import EmbeddingProvider
     from memtomem.llm.base import LLMProvider
     from memtomem.storage.base import StorageBackend
@@ -48,11 +50,25 @@ async def expand_query_headings(
     storage: StorageBackend,
     embedder: EmbeddingProvider,
     max_terms: int = 3,
+    *,
+    project_context_root: Path | None = None,
 ) -> str:
-    """Expand query by appending related heading terms from dense search."""
+    """Expand query by appending related heading terms from dense search.
+
+    ``project_context_root`` is threaded onto the always-on storage
+    scope filter (ADR-0011 PR-D round 11) so heading-expansion
+    candidates respect the same project boundary as the outer
+    ``SearchPipeline.search`` call. Without it, expansion would
+    silently sample only user-tier headings even when the outer
+    search is pinned to a project context.
+    """
     try:
         embedding = await embedder.embed_query(query)
-        results = await storage.dense_search(embedding, top_k=3)
+        results = await storage.dense_search(
+            embedding,
+            top_k=3,
+            project_context_root=project_context_root,
+        )
     except Exception:
         logger.warning("Heading expansion failed; returning original query", exc_info=True)
         return query

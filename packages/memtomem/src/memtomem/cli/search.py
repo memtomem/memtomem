@@ -11,6 +11,14 @@ import json
 
 import click
 
+# ADR-0011 §6: re-export the project-context resolver from the MCP tool so
+# CLI and MCP surfaces share one resolution rule. Both ``app`` (server) and
+# ``comp`` (CLI) carry the same ``.config.indexing.project_memory_dirs``
+# field, so the helper is interchangeable.
+from memtomem.server.tools.search import (
+    _resolve_project_context_root as _resolve_project_context_root_from_cwd,
+)
+
 
 @click.command()
 @click.argument("query")
@@ -18,6 +26,16 @@ import click
 @click.option("--source-filter", "-s", default=None, help="Source file filter")
 @click.option("--tag-filter", "-t", default=None, help="Tag filter (comma-separated)")
 @click.option("--namespace", "-n", default=None, help="Namespace filter")
+@click.option(
+    "--scope",
+    default=None,
+    help=(
+        "Scope filter (ADR-0011): single value, comma list "
+        "(``user,project_local``), or glob (``project_*``). When omitted, "
+        "in-project searches return user + this project's tiers; out-of-"
+        "project searches return user only."
+    ),
+)
 @click.option(
     "--as-of",
     "as_of",
@@ -36,12 +54,13 @@ def search(
     source_filter: str | None,
     tag_filter: str | None,
     namespace: str | None,
+    scope: str | None,
     as_of: str | None,
     fmt: str,
 ) -> None:
     """Search the knowledge base."""
     try:
-        asyncio.run(_search(query, top_k, source_filter, tag_filter, namespace, as_of, fmt))
+        asyncio.run(_search(query, top_k, source_filter, tag_filter, namespace, scope, as_of, fmt))
     except click.ClickException:
         raise
     except Exception as e:
@@ -54,6 +73,7 @@ async def _search(
     source_filter: str | None,
     tag_filter: str | None,
     namespace: str | None,
+    scope: str | None,
     as_of: str | None,
     fmt: str,
 ) -> None:
@@ -70,6 +90,7 @@ async def _search(
             )
 
     async with cli_components() as comp:
+        project_context_root = _resolve_project_context_root_from_cwd(comp)
         results, stats = await comp.search_pipeline.search(
             query,
             top_k=top_k,
@@ -77,6 +98,8 @@ async def _search(
             tag_filter=tag_filter,
             namespace=namespace,
             as_of_unix=as_of_unix,
+            scope=scope,
+            project_context_root=project_context_root,
         )
 
     if fmt == "context":

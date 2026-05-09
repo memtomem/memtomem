@@ -257,9 +257,28 @@ class TestCounter:
         privacy.record("bypassed", "mem_batch_add")
 
         snap = privacy.snapshot()
-        assert snap["outcomes"] == {"blocked": 2, "pass": 1, "bypassed": 1}
-        assert snap["by_tool"]["mem_add"] == {"blocked": 2, "pass": 1, "bypassed": 0}
-        assert snap["by_tool"]["mem_batch_add"] == {"blocked": 0, "pass": 0, "bypassed": 1}
+        # ``blocked_project_shared`` (ADR-0011) is exposed as 0 here —
+        # the outcome dict is keyed off ``_VALID_OUTCOMES`` and every
+        # known label appears, even unused ones, so dashboards show a
+        # stable schema.
+        assert snap["outcomes"] == {
+            "blocked": 2,
+            "pass": 1,
+            "bypassed": 1,
+            "blocked_project_shared": 0,
+        }
+        assert snap["by_tool"]["mem_add"] == {
+            "blocked": 2,
+            "pass": 1,
+            "bypassed": 0,
+            "blocked_project_shared": 0,
+        }
+        assert snap["by_tool"]["mem_batch_add"] == {
+            "blocked": 0,
+            "pass": 0,
+            "bypassed": 1,
+            "blocked_project_shared": 0,
+        }
 
     def test_record_unknown_outcome_is_dropped(self, caplog):
         with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
@@ -281,7 +300,12 @@ class TestCounter:
         privacy.record("blocked", "mem_add")
         privacy.reset_for_tests()
         snap = privacy.snapshot()
-        assert snap["outcomes"] == {"blocked": 0, "pass": 0, "bypassed": 0}
+        assert snap["outcomes"] == {
+            "blocked": 0,
+            "pass": 0,
+            "bypassed": 0,
+            "blocked_project_shared": 0,
+        }
         assert snap["by_tool"] == {}
 
 

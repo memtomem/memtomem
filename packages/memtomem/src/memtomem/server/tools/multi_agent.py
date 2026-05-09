@@ -157,10 +157,18 @@ async def mem_agent_search(
     else:
         ns_filter = None
 
+    # ADR-0011 PR-D round 9: thread project context onto the always-on
+    # scope filter so an agent search running inside a registered
+    # project still surfaces project_shared / project_local agent rows.
+    from memtomem.server.tools.search import _resolve_project_context_root
+
+    project_context_root = _resolve_project_context_root(app)
+
     results, stats = await app.search_pipeline.search(
         query=query,
         top_k=top_k,
         namespace=ns_filter,
+        project_context_root=project_context_root,
     )
 
     # Mirror mem_search trust-UX hints so structured payloads from the two

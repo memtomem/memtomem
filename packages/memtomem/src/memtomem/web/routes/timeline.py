@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, Query
 
 from memtomem.models import NamespaceFilter
+from memtomem.server.tools.search import _resolve_project_context_from_dirs
 from memtomem.web.deps import get_config, get_storage
 from memtomem.web.schemas.core import chunk_to_out
 from memtomem.web.schemas import TimelineResponse
@@ -29,11 +30,18 @@ async def get_timeline(
         namespace,
         system_prefixes=tuple(config.search.system_namespace_prefixes),
     )
+    # ADR-0011 PR-D round 9: thread project context so Web timeline
+    # surfaces project_shared / project_local rows when the server
+    # runs inside a registered project. Without this, the always-on
+    # scope filter would silently drop project-tier rows from the
+    # timeline view.
+    project_context_root = _resolve_project_context_from_dirs(config.indexing.project_memory_dirs)
     chunks = await storage.recall_chunks(
         since=since,
         source_filter=source,
         limit=limit,
         namespace_filter=ns_filter,
+        project_context_root=project_context_root,
     )
     out = [chunk_to_out(c) for c in chunks]
     return TimelineResponse(chunks=out, total=len(out))
