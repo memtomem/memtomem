@@ -195,6 +195,8 @@ async def _mem_add_core(
         # CLI/MCP divergence flagged in PR-D review.
         from memtomem.memory_scope import (
             MemoryScopeError,
+            is_project_tier_registered,
+            project_tier_registration_error,
             resolve_memory_scope_dir,
         )
         from memtomem.server.tools.search import _resolve_project_context_root
@@ -210,6 +212,15 @@ async def _mem_add_core(
                 )
             except MemoryScopeError as exc:
                 return (f"Error: {exc}", None)
+            # ADR-0011: refuse if the resolved tier directory is not
+            # registered — otherwise the row's scope flips to project
+            # but the read surface / watcher cannot see it. Mirrors
+            # the ``mm context memory-migrate`` registration guard.
+            if not is_project_tier_registered(base, pmdirs):
+                return (
+                    f"Error: {project_tier_registration_error(base, effective_scope)}",
+                    None,
+                )
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         target = base / f"{date_str}.md"
 
@@ -739,6 +750,8 @@ async def mem_batch_add(
         # the user-tier path.
         from memtomem.memory_scope import (
             MemoryScopeError,
+            is_project_tier_registered,
+            project_tier_registration_error,
             resolve_memory_scope_dir,
         )
         from memtomem.server.tools.search import _resolve_project_context_root
@@ -754,6 +767,12 @@ async def mem_batch_add(
                 )
             except MemoryScopeError as exc:
                 return f"Error: {exc}"
+            # ADR-0011 PR-D round 6: refuse if the resolved tier dir is
+            # not registered in IndexingConfig.project_memory_dirs.
+            # Otherwise the row's scope flips to project but the read
+            # surface / watcher cannot see it.
+            if not is_project_tier_registered(base, pmdirs):
+                return f"Error: {project_tier_registration_error(base, effective_scope)}"
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         target = base / f"{date_str}.md"
 

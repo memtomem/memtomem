@@ -168,6 +168,15 @@ async def _add(
         project_root = _resolve_project_context_root(comp)
         user_base = Path("~/.memtomem/memories")
         base = _resolve_memory_scope_dir(scope, project_root, user_base)
+        if scope != "user":
+            from memtomem.memory_scope import (
+                is_project_tier_registered,
+                project_tier_registration_error,
+            )
+
+            pmdirs = comp.config.indexing.project_memory_dirs
+            if not is_project_tier_registered(base, pmdirs):
+                raise click.ClickException(project_tier_registration_error(base, scope))
         if file_name:
             if file_name.startswith("/") or file_name.startswith("\\") or ".." in file_name:
                 raise click.ClickException("File path must be relative and must not contain '..'")

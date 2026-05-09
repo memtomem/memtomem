@@ -311,6 +311,78 @@ async def test_mem_add_project_shared_without_project_context_errors(
 
 
 @pytest.mark.asyncio
+async def test_mem_add_unregistered_project_local_target_refuses(
+    bm25_only_components, monkeypatch, tmp_path
+):
+    """ADR-0011 PR-D review (round 6) pin: refuse a project-tier write
+    whose resolved target directory is not in
+    ``IndexingConfig.project_memory_dirs``.
+
+    The bypass: only the sibling tier (``.memtomem/memories``) is
+    registered, but a caller asks for ``scope='project_local'``. The
+    helper resolves ``base`` to ``.memtomem/memories.local`` — a
+    *different* directory the indexer does not know about. The
+    subsequent ``index_file()`` would classify the new file as
+    ``scope='user'`` (registration mismatch in
+    ``classify_scope``), so the row is visible across project
+    boundaries and the watcher does not track it.
+    """
+    comp, _ = bm25_only_components
+    project_root = tmp_path / "proj_unreg"
+    proj_shared = project_root / ".memtomem" / "memories"
+    proj_local = project_root / ".memtomem" / "memories.local"
+    proj_shared.mkdir(parents=True)
+    proj_local.mkdir(parents=True)
+    # Only the sibling tier is registered.
+    comp.config.indexing.project_memory_dirs = [proj_shared]
+    monkeypatch.setattr(
+        "memtomem.server.tools.search._resolve_project_context_root",
+        lambda app: project_root,
+    )
+
+    app = AppContext.from_components(comp)
+    ctx = StubCtx(app)
+    out = await memory_crud.mem_add(
+        content="rule",
+        scope="project_local",
+        ctx=ctx,
+    )
+    assert "Error" in out
+    assert "not registered" in out
+    # No file landed in the unregistered tier.
+    assert not any(proj_local.glob("*.md"))
+
+
+@pytest.mark.asyncio
+async def test_mem_batch_add_unregistered_project_local_target_refuses(
+    bm25_only_components, monkeypatch, tmp_path
+):
+    """Batch path mirrors the single-add registration guard."""
+    comp, _ = bm25_only_components
+    project_root = tmp_path / "proj_unreg_batch"
+    proj_shared = project_root / ".memtomem" / "memories"
+    proj_local = project_root / ".memtomem" / "memories.local"
+    proj_shared.mkdir(parents=True)
+    proj_local.mkdir(parents=True)
+    comp.config.indexing.project_memory_dirs = [proj_shared]
+    monkeypatch.setattr(
+        "memtomem.server.tools.search._resolve_project_context_root",
+        lambda app: project_root,
+    )
+
+    app = AppContext.from_components(comp)
+    ctx = StubCtx(app)
+    out = await memory_crud.mem_batch_add(
+        entries=[{"key": "k", "value": "v"}],
+        scope="project_local",
+        ctx=ctx,
+    )
+    assert "Error" in out
+    assert "not registered" in out
+    assert not any(proj_local.glob("*.md"))
+
+
+@pytest.mark.asyncio
 async def test_mem_add_file_path_in_project_dir_promotes_scope_and_blocks_force_unsafe(
     bm25_only_components, tmp_path, monkeypatch
 ):

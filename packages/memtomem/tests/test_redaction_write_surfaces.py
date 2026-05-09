@@ -213,6 +213,48 @@ class TestCliMmAddRedactionGuard:
         snap = privacy.snapshot()["by_tool"].get("cli_mm_add", {})
         assert snap.get("blocked_project_shared", 0) == 1
 
+    def test_blocks_unregistered_project_tier_target(self, monkeypatch, tmp_path):
+        """ADR-0011 PR-D review (round 6) pin: ``mm mem add --scope
+        project_shared`` must refuse when the resolved target tier is
+        not in ``IndexingConfig.project_memory_dirs``. Without this,
+        the write succeeds but the row's scope flips to ``user`` on
+        re-index (registration mismatch) and becomes visible across
+        project boundaries.
+        """
+        from contextlib import asynccontextmanager
+
+        # Components return ``project_memory_dirs=[]`` so any project
+        # tier resolves outside the registry.
+        @asynccontextmanager
+        async def _fake_components():
+            comp = MagicMock()
+            comp.config.indexing.project_memory_dirs = []
+            yield comp
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _fake_components)
+        # ``_resolve_project_context_root`` is lazy-imported inside
+        # ``_add`` from its defining module, so patch it there.
+        monkeypatch.setattr(
+            "memtomem.server.tools.search._resolve_project_context_root",
+            lambda comp: tmp_path / "proj_unreg",
+        )
+
+        from memtomem.cli.memory import add as add_cmd
+
+        runner = CliRunner()
+        result = runner.invoke(
+            add_cmd,
+            [_CLEAN_SAMPLE, "--scope", "project_shared", "--yes"],
+        )
+        assert result.exit_code != 0
+        out = result.output + str(result.exception or "")
+        assert "not registered" in out
+        # Hint must NOT mention the broken `mm config set ...
+        # project_memory_dirs[+]=...` form. ``mm config set`` rejects
+        # that key shape (project_memory_dirs is not in MUTABLE_FIELDS),
+        # so a user following the message would hit a dead-end.
+        assert "mm config set" not in out
+
     def test_clean_content_records_pass_in_cli_surface(self, monkeypatch, tmp_path):
         """A clean write still talks to ``cli_components`` — to keep the
         unit fast we stub the bootstrap so no real DB is created. The

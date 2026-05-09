@@ -317,7 +317,18 @@ def test_memory_migrate_unregistered_target_tier_refused(monkeypatch, fake_proje
     out = result.output + str(result.exception or "")
     assert "not registered" in out
     assert "project_memory_dirs" in out
-    # Refusal must happen before any FS / DB mutation.
+    # Hint must NOT mention the broken ``mm config set ...
+    # indexing.project_memory_dirs[+]=...`` form (PR-D review round 6:
+    # that command shape doesn't exist — ``mm config set`` rejects
+    # ``project_memory_dirs`` because it's outside MUTABLE_FIELDS, and
+    # the bracketed assignment isn't supported syntax). The hint must
+    # point at the only path that actually works: editing
+    # ``~/.memtomem/config.json`` directly.
+    assert "mm config set" not in out
+    assert "config.json" in out
+    # Refusal must happen before any FS / DB mutation, including the
+    # cheap ``count_chunks_by_source`` probe.
+    comp.storage.count_chunks_by_source.assert_not_called()
     comp.storage.update_chunks_scope_for_source.assert_not_called()
     assert src.exists()
     assert not (layout["proj_shared"] / "rule.md").exists()

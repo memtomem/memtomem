@@ -2057,7 +2057,12 @@ async def _memory_migrate_run(
 
     from memtomem import privacy
     from memtomem.cli._bootstrap import cli_components
-    from memtomem.memory_scope import MemoryScopeError, resolve_memory_scope_dir
+    from memtomem.memory_scope import (
+        MemoryScopeError,
+        is_project_tier_registered,
+        project_tier_registration_error,
+        resolve_memory_scope_dir,
+    )
 
     async with cli_components() as comp:
         # Project-tier resolution. For ``from`` project tiers the source
@@ -2109,20 +2114,10 @@ async def _memory_migrate_run(
         # whose scope says "project_shared" but which the read surface
         # treats as out-of-scope and the watcher does not reindex —
         # silent data loss from the user's perspective.
-        if to_scope != "user":
-            registered = {
-                Path(d).expanduser().resolve() for d in comp.config.indexing.project_memory_dirs
-            }
-            if to_dir.resolve() not in registered:
-                raise click.ClickException(
-                    f"Target tier {to_dir} is not registered in "
-                    "IndexingConfig.project_memory_dirs. Migrating without "
-                    "registration would hide the moved memory from default "
-                    "search/recall and skip the watcher.\n"
-                    "Register it first (mm config set "
-                    "indexing.project_memory_dirs[+]=<path> or edit "
-                    f"~/.memtomem/config.json), then re-run with --to {to_scope}."
-                )
+        if to_scope != "user" and not is_project_tier_registered(
+            to_dir, comp.config.indexing.project_memory_dirs
+        ):
+            raise click.ClickException(project_tier_registration_error(to_dir, to_scope))
 
         target = (to_dir / source.name).resolve()
         if target.exists():

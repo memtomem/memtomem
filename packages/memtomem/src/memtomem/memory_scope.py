@@ -72,3 +72,40 @@ def resolve_memory_scope_dir(
     if scope == "project_local":
         return (project_root / ".memtomem" / "memories.local").resolve()
     raise MemoryScopeError(f"unsupported memory scope: {scope!r}")
+
+
+def project_tier_registration_error(target_dir: Path, scope: TargetScope) -> str:
+    """Standard error message for an unregistered project-tier write.
+
+    ADR-0011: project-tier writes are only safe when the target tier
+    directory is present in ``IndexingConfig.project_memory_dirs``.
+    Without registration the read/search boundary and the indexing
+    watcher both miss the write — rows persist with
+    ``scope='project_shared'`` / ``project_local'`` but stay invisible
+    to default search/recall. The hint is centralised here so every
+    write surface (MCP ``mem_add`` / ``mem_batch_add``, CLI
+    ``mm mem add``, ``mm context memory-migrate``) emits the same
+    setup instruction.
+    """
+    return (
+        f"Target tier {target_dir} is not registered in "
+        "IndexingConfig.project_memory_dirs. Writing without registration "
+        "would persist a row with the requested scope but the read "
+        "surface and indexing watcher would not see it.\n"
+        f"Edit ~/.memtomem/config.json and add {target_dir} to "
+        f'indexing.project_memory_dirs, then retry with scope="{scope}".'
+    )
+
+
+def is_project_tier_registered(target_dir: Path, project_memory_dirs) -> bool:
+    """``True`` iff ``target_dir`` is in the resolved registered set.
+
+    Both sides expand ``~`` and resolve symlinks so the comparison is
+    canonical. Empty / ``None`` registries return ``False`` for any
+    project-tier path.
+    """
+    if not project_memory_dirs:
+        return False
+    target = target_dir.expanduser().resolve()
+    registered = {Path(d).expanduser().resolve() for d in project_memory_dirs}
+    return target in registered
