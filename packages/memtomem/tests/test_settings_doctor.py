@@ -13,6 +13,7 @@ Covers four surfaces:
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -321,7 +322,12 @@ class TestSettingsDoctorCli:
         assert len(payload["duplicates"]) == 1
         dup = payload["duplicates"][0]
         assert dup["tier"] == "user"
-        assert dup["path"].endswith("/.claude/settings.json")
+        # ``str.endswith("/.claude/settings.json")`` would break on Windows
+        # (backslash separator). Compare via ``Path.parts`` for
+        # cross-platform stability per ``feedback_path_comparison_relative_to``.
+        dup_path = Path(dup["path"])
+        assert dup_path.name == "settings.json"
+        assert dup_path.parent.name == ".claude"
         assert len(dup["entries"]) == 1
         entry = dup["entries"][0]
         assert entry == {
