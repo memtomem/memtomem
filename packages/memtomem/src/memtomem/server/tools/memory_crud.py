@@ -89,28 +89,75 @@ async def _mem_add_core(
     if len(content) > MAX_CONTENT_LENGTH:
         return ("Error: content too large (max 100,000 characters).", None)
 
-    # ADR-0011 Gate B (surface layer). project_shared writes go to git;
-    # require explicit confirm so MCP callers cannot silently commit
-    # PII to a tracked tier through a default-bool oversight.
-    if scope == "project_shared" and not confirm_project_shared:
+    from datetime import datetime, timezone
+
+    from memtomem import privacy
+    from memtomem.config import classify_scope
+    from memtomem.tools.memory_writer import append_entry
+
+    app = await _get_app_initialized(ctx)
+
+    # Block vector-dependent writes when the server is in degraded mode
+    # (see issue #349). Without this gate the subsequent ``index_file``
+    # call hits ``upsert_chunks`` and crashes on a missing ``chunks_vec``.
+    mismatch_msg = _check_embedding_mismatch(app)
+    if mismatch_msg:
+        return (mismatch_msg, None)
+
+    mdirs = app.config.indexing.memory_dirs
+    pmdirs = app.config.indexing.project_memory_dirs
+
+    # ADR-0011: derive the *effective* scope before running the gates.
+    # When the caller passes a ``file=`` path and that path lands in a
+    # registered project tier directory, the indexer will tag the
+    # resulting chunks with that project tier — so Gate A/B must see
+    # the same tier the chunks will end up in. A caller leaving scope
+    # at its default ``user`` while pointing ``file=`` at a project-
+    # shared path would otherwise bypass Gate B (no confirm required)
+    # and Gate A (force_unsafe=True still allowed). Mirrors the
+    # ``mem_edit`` / ``mem_delete`` inferred-scope contract.
+    target: Path | None = None
+    if file:
+        target, err = _validate_path(file, mdirs, pmdirs)
+        if err:
+            return (err, None)
+        assert target is not None
+        inferred_scope, inferred_root = classify_scope(target, pmdirs)
+        effective_scope = inferred_scope
+        effective_project_root: Path | None = inferred_root
+    else:
+        effective_scope = scope
+        effective_project_root = None
+
+    # Gate B (surface layer). project_shared writes go to git; require
+    # explicit confirm so MCP callers cannot silently commit PII to a
+    # tracked tier through a default-bool oversight.
+    if effective_scope == "project_shared" and not confirm_project_shared:
+        hint = (
+            ""
+            if effective_scope == scope
+            else " (scope inferred from file= path; the target directory is "
+            f"a registered project_shared tier under {effective_project_root})"
+        )
         return (
             "Error: scope='project_shared' writes to a git-tracked "
-            "directory. Pass confirm_project_shared=True to proceed.",
+            f"directory. Pass confirm_project_shared=True to proceed.{hint}",
             None,
         )
 
-    # ADR-0011 Gate A (chokepoint). enforce_write_guard hard-refuses
-    # ``force_unsafe=True`` when scope=='project_shared'; this branch
-    # therefore cannot reach the bypass path even if a future caller
-    # accidentally wires force_unsafe through.
-    from memtomem import privacy
-
+    # Gate A (chokepoint). enforce_write_guard hard-refuses
+    # ``force_unsafe=True`` when scope=='project_shared'.
     guard = privacy.enforce_write_guard(
         content,
         surface="mem_add",
         force_unsafe=force_unsafe,
-        scope=scope,
-        audit_context={"namespace": namespace, "file": file, "scope": scope},
+        scope=effective_scope,
+        audit_context={
+            "namespace": namespace,
+            "file": file,
+            "scope": effective_scope,
+            "scope_inferred_from_path": effective_scope != scope,
+        },
     )
     if guard.decision == "blocked":
         return (
@@ -129,19 +176,6 @@ async def _mem_add_core(
             None,
         )
 
-    from datetime import datetime, timezone
-
-    from memtomem.tools.memory_writer import append_entry
-
-    app = await _get_app_initialized(ctx)
-
-    # Block vector-dependent writes when the server is in degraded mode
-    # (see issue #349). Without this gate the subsequent ``index_file``
-    # call hits ``upsert_chunks`` and crashes on a missing ``chunks_vec``.
-    mismatch_msg = _check_embedding_mismatch(app)
-    if mismatch_msg:
-        return (mismatch_msg, None)
-
     # Apply template if specified
     if template:
         from memtomem.templates import list_templates, render_template
@@ -153,14 +187,7 @@ async def _mem_add_core(
         except ValueError as exc:
             return (f"Error: {exc}\n\nAvailable templates:\n{list_templates()}", None)
 
-    mdirs = app.config.indexing.memory_dirs
-    pmdirs = app.config.indexing.project_memory_dirs
-
-    if file:
-        target, err = _validate_path(file, mdirs, pmdirs)
-        if err:
-            return (err, None)
-    else:
+    if target is None:
         # ADR-0011: route the default-dated file to the canonical
         # directory for the requested scope. Without this branch, MCP
         # ``mem_add(scope='project_shared')`` would still write to the
@@ -172,13 +199,15 @@ async def _mem_add_core(
         )
         from memtomem.server.tools.search import _resolve_project_context_root
 
-        if scope == "user":
+        if effective_scope == "user":
             base = mdirs[0] if mdirs else Path(".")
             base = Path(base).expanduser().resolve()
         else:
             project_root = _resolve_project_context_root(app)
             try:
-                base = resolve_memory_scope_dir(scope, project_root, user_base=Path(mdirs[0]))
+                base = resolve_memory_scope_dir(
+                    effective_scope, project_root, user_base=Path(mdirs[0])
+                )
             except MemoryScopeError as exc:
                 return (f"Error: {exc}", None)
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -566,12 +595,51 @@ async def mem_batch_add(
     if len(entries) > 500:
         return f"Error: batch too large (max 500 entries, got {len(entries)})."
 
-    # ADR-0011 Gate B (surface layer). Mirrors mem_add — explicit confirm
+    from datetime import datetime, timezone
+
+    from memtomem import privacy
+    from memtomem.config import classify_scope
+    from memtomem.tools.memory_writer import append_entry
+
+    app = await _get_app_initialized(ctx)
+    mismatch_msg = _check_embedding_mismatch(app)
+    if mismatch_msg:
+        return mismatch_msg
+    mdirs = app.config.indexing.memory_dirs
+    pmdirs = app.config.indexing.project_memory_dirs
+
+    # ADR-0011: derive the *effective* scope before running Gate A/B.
+    # When the caller passes a ``file=`` path that lands in a
+    # registered project tier directory, the indexer will tag the
+    # resulting chunks with that project tier — so the gates must see
+    # the same tier the chunks will end up in. A caller leaving scope
+    # at its default ``user`` while pointing ``file=`` at a project-
+    # shared path would otherwise bypass Gate B (no confirm required)
+    # and Gate A (force_unsafe=True still allowed). Mirrors the
+    # ``_mem_add_core`` inferred-scope contract.
+    target: Path | None = None
+    if file:
+        target, err = _validate_path(file, mdirs, pmdirs)
+        if err:
+            return err
+        assert target is not None
+        inferred_scope, _ = classify_scope(target, pmdirs)
+        effective_scope = inferred_scope
+    else:
+        effective_scope = scope
+
+    # Gate B (surface layer). Mirrors mem_add — explicit confirm
     # required for any project_shared write, batch or single.
-    if scope == "project_shared" and not confirm_project_shared:
+    if effective_scope == "project_shared" and not confirm_project_shared:
+        hint = (
+            ""
+            if effective_scope == scope
+            else " (scope inferred from file= path; the target directory is "
+            "a registered project_shared tier)"
+        )
         return (
             "Error: scope='project_shared' writes to a git-tracked "
-            "directory. Pass confirm_project_shared=True to proceed."
+            f"directory. Pass confirm_project_shared=True to proceed.{hint}"
         )
 
     # Trust-boundary redaction guard. Each entry routes through
@@ -583,8 +651,6 @@ async def mem_batch_add(
     # only record outcomes after deciding whether to commit the
     # whole batch (transactional invariant: no pass record on a
     # rejected batch).
-    from memtomem import privacy
-
     decisions: list[tuple[int, str, int]] = []  # (idx, decision, hit_count)
     for idx, entry in enumerate(entries):
         value = entry.get("value") or entry.get("content", "")
@@ -594,12 +660,13 @@ async def mem_batch_add(
             value,
             surface="mem_batch_add",
             force_unsafe=force_unsafe,
-            scope=scope,
+            scope=effective_scope,
             audit_context={
                 "namespace": namespace,
                 "file": file,
                 "item_idx": idx,
-                "scope": scope,
+                "scope": effective_scope,
+                "scope_inferred_from_path": effective_scope != scope,
             },
             record_outcome=False,
         )
@@ -643,28 +710,13 @@ async def mem_batch_add(
                     "namespace": namespace,
                     "file": file,
                     "item_idx": idx,
-                    "scope": scope,
+                    "scope": effective_scope,
                 },
             )
         else:
             privacy.record("pass", "mem_batch_add")
 
-    from datetime import datetime, timezone
-
-    from memtomem.tools.memory_writer import append_entry
-
-    app = await _get_app_initialized(ctx)
-    mismatch_msg = _check_embedding_mismatch(app)
-    if mismatch_msg:
-        return mismatch_msg
-    mdirs = app.config.indexing.memory_dirs
-    pmdirs = app.config.indexing.project_memory_dirs
-
-    if file:
-        target, err = _validate_path(file, mdirs, pmdirs)
-        if err:
-            return err
-    else:
+    if target is None:
         # ADR-0011: scope-aware default-dated file target. Mirrors
         # ``_mem_add_core`` so MCP ``mem_batch_add(scope='project_shared')``
         # lands in the project's ``.memtomem/memories/`` directory, not
@@ -675,13 +727,15 @@ async def mem_batch_add(
         )
         from memtomem.server.tools.search import _resolve_project_context_root
 
-        if scope == "user":
+        if effective_scope == "user":
             base = mdirs[0] if mdirs else Path(".")
             base = Path(base).expanduser().resolve()
         else:
             project_root = _resolve_project_context_root(app)
             try:
-                base = resolve_memory_scope_dir(scope, project_root, user_base=Path(mdirs[0]))
+                base = resolve_memory_scope_dir(
+                    effective_scope, project_root, user_base=Path(mdirs[0])
+                )
             except MemoryScopeError as exc:
                 return f"Error: {exc}"
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")

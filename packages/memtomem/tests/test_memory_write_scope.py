@@ -311,6 +311,81 @@ async def test_mem_add_project_shared_without_project_context_errors(
 
 
 @pytest.mark.asyncio
+async def test_mem_add_file_path_in_project_dir_promotes_scope_and_blocks_force_unsafe(
+    bm25_only_components, tmp_path, monkeypatch
+):
+    """Caller leaves ``scope='user'`` but points ``file=`` at the project tier.
+
+    PR-D security pin: the gates must see the *target tier*, not the
+    caller's parameter. A user-scope caller with a project_shared
+    file path:
+
+    - Must be rejected without ``confirm_project_shared=True`` (Gate B).
+    - Must hard-refuse ``force_unsafe=True`` on a secret hit (Gate A).
+    """
+    comp, _ = bm25_only_components
+    project_root = tmp_path / "proj_bypass"
+    proj_dir = project_root / ".memtomem" / "memories"
+    proj_dir.mkdir(parents=True)
+    comp.config.indexing.project_memory_dirs = [proj_dir]
+    target_path = proj_dir / "rule.md"
+
+    app = AppContext.from_components(comp)
+    ctx = StubCtx(app)
+
+    # 1) Gate B: no scope, no confirm — explicit project_shared file
+    # path alone must trigger the confirm requirement.
+    out = await memory_crud.mem_add(
+        content="harmless team rule",
+        file=str(target_path),
+        ctx=ctx,
+    )
+    assert "confirm_project_shared=True" in out
+    assert "scope inferred from file= path" in out
+
+    # 2) Gate A: force_unsafe=True with a secret pattern must be
+    # hard-refused even though the caller never named project_shared.
+    out = await memory_crud.mem_add(
+        content=_SECRET,
+        file=str(target_path),
+        confirm_project_shared=True,  # bypass Gate B; Gate A still active
+        force_unsafe=True,
+        ctx=ctx,
+    )
+    assert "force_unsafe=True is not permitted" in out
+    assert "git history is forever" in out
+
+
+@pytest.mark.asyncio
+async def test_mem_batch_add_file_path_in_project_dir_promotes_scope(
+    bm25_only_components, tmp_path
+):
+    """Same bypass surface as ``mem_add``; same fix.
+
+    A batch caller can route hits through the project tier by pointing
+    ``file=`` at a project_shared path while leaving ``scope='user'``;
+    the gates must still fire on the inferred tier.
+    """
+    comp, _ = bm25_only_components
+    project_root = tmp_path / "proj_bypass_batch"
+    proj_dir = project_root / ".memtomem" / "memories"
+    proj_dir.mkdir(parents=True)
+    comp.config.indexing.project_memory_dirs = [proj_dir]
+    target_path = proj_dir / "batch.md"
+
+    app = AppContext.from_components(comp)
+    ctx = StubCtx(app)
+
+    out = await memory_crud.mem_batch_add(
+        entries=[{"key": "k", "value": "harmless team rule"}],
+        file=str(target_path),
+        ctx=ctx,
+    )
+    assert "confirm_project_shared=True" in out
+    assert "scope inferred from file= path" in out
+
+
+@pytest.mark.asyncio
 async def test_mem_batch_add_project_shared_writes_to_project_dir(
     bm25_only_components, monkeypatch, tmp_path
 ):

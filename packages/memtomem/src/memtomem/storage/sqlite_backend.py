@@ -814,29 +814,38 @@ class SqliteBackend(
             scope_clause = f"AND ({scope_frag})"
             tie_break = scope_sort_priority_case("c.")
 
-            # ``c.*`` carries the full chunks-row layout into ``_row_to_chunk``
-            # so all defensive guards (overlap, importance, validity) activate.
-            # Score sits at the trailing position after the chunk columns —
-            # see ``_chunks_table_column_count`` consumer below.
-            sql = f"""SELECT c.*, sub.rank
-                   FROM (
-                       SELECT rowid, rank
-                       FROM chunks_fts
-                       WHERE chunks_fts MATCH ?
-                       ORDER BY rank
-                       LIMIT ?
-                   ) sub
-                   JOIN chunks c ON c.rowid = sub.rowid {ns_clause} {scope_clause}
-                   ORDER BY sub.rank, {tie_break}"""
+            # ADR-0011 §6 + PR-D review #2: filter must run *inside* the
+            # FTS candidate selection, not after a post-LIMIT join. With
+            # the previous shape (``LIMIT k`` on chunks_fts MATCH, then
+            # filter), the global top-k could come entirely from another
+            # project's chunks; the current project's matches sat just
+            # below the cutoff and were dropped. Joining chunks first
+            # and applying the namespace/scope predicates inside the
+            # same query lets SQLite/FTS5 lazy-iterate matches and stop
+            # once ``top_k`` filter-passing rows accumulate.
+            #
+            # ``c.*`` carries the full chunks-row layout into
+            # ``_row_to_chunk`` so all defensive guards (overlap,
+            # importance, validity) activate. Score sits at the
+            # trailing position after the chunk columns — see
+            # ``_chunks_table_column_count`` consumer below.
+            sql = f"""SELECT c.*, fts.rank
+                   FROM chunks_fts fts
+                   JOIN chunks c ON c.rowid = fts.rowid
+                   WHERE chunks_fts MATCH ? {ns_clause} {scope_clause}
+                   ORDER BY fts.rank, {tie_break}
+                   LIMIT ?"""
 
             # Try AND first (default FTS5 behaviour)
             fts_query = _fts.tokenize_for_fts(query, for_query=True)
-            rows = db.execute(sql, [fts_query, top_k] + ns_params + scope_params).fetchall()
+            rows = db.execute(sql, [fts_query] + ns_params + scope_params + [top_k]).fetchall()
 
             # Fall back to OR if AND returns nothing and query has multiple terms
             if not rows and " " in query.strip():
                 fts_query_or = _fts.tokenize_for_fts(query, for_query=True, use_or=True)
-                rows = db.execute(sql, [fts_query_or, top_k] + ns_params + scope_params).fetchall()
+                rows = db.execute(
+                    sql, [fts_query_or] + ns_params + scope_params + [top_k]
+                ).fetchall()
 
         except sqlite3.OperationalError:
             raise
@@ -882,6 +891,17 @@ class SqliteBackend(
 
         import sqlite3 as _sqlite3
 
+        # ADR-0011 §6 + PR-D review #2: sqlite-vec's ``embedding MATCH ?``
+        # uses the inner ``LIMIT`` as the KNN ``K`` — moving the
+        # namespace / scope filter outside the subquery without
+        # over-fetching K would let cross-project chunks crowd out
+        # current-project matches, returning too few or zero results
+        # even when matching rows exist just below the cutoff.
+        # Inside the inner subquery the vec extension still drives K,
+        # so the cleanest fix is to over-fetch by a fixed factor and
+        # cap the post-filter result with an outer LIMIT.
+        overfetch = max(top_k * 5, 100)
+
         try:
             rows = db.execute(
                 f"""SELECT c.*, sub.distance
@@ -893,8 +913,9 @@ class SqliteBackend(
                        LIMIT ?
                    ) sub
                    JOIN chunks c ON c.rowid = sub.rowid {ns_clause} {scope_clause}
-                   ORDER BY sub.distance, {tie_break}""",
-                [serialize_f32(embedding), top_k] + ns_params + scope_params,
+                   ORDER BY sub.distance, {tie_break}
+                   LIMIT ?""",
+                [serialize_f32(embedding), overfetch] + ns_params + scope_params + [top_k],
             ).fetchall()
         except _sqlite3.OperationalError as exc:
             if "Dimension mismatch" in str(exc):

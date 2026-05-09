@@ -380,3 +380,53 @@ async def test_cache_key_distinct_per_project_context(storage, tmp_path):
     assert key_a != key_b
     assert key_a != key_none
     assert key_b != key_none
+
+
+@pytest.mark.asyncio
+async def test_bm25_search_filters_inside_candidate_selection(storage, tmp_path):
+    """PR-D review #2 pin: scope/namespace filter must run inside the
+    FTS candidate selection, not after a post-LIMIT join.
+
+    Stages many high-rank "other-project" hits so the global top-k
+    would have been entirely cross-project chunks under the pre-fix
+    shape (filter applied after LIMIT). With the fix, the inner
+    filter pushes scope into MATCH-time candidate iteration so
+    the current project's chunk still surfaces at top_k=2.
+    """
+    proj_a = tmp_path / "proj_a"
+    proj_b = tmp_path / "proj_b"
+    proj_a.mkdir()
+    proj_b.mkdir()
+
+    # 10 chunks in proj_b that all match the query — under the old
+    # shape these would saturate the inner LIMIT before the scope
+    # filter could see proj_a's chunk.
+    b_chunks = [
+        _make_chunk_at_scope(
+            content="alpha bravo charlie noise " + str(i),
+            source_file=proj_b / ".memtomem" / "memories" / f"b{i}.md",
+            scope="project_shared",
+            project_root=proj_b,
+        )
+        for i in range(10)
+    ]
+    a_chunk = _make_chunk_at_scope(
+        content="alpha bravo charlie team rule",
+        source_file=proj_a / ".memtomem" / "memories" / "a.md",
+        scope="project_shared",
+        project_root=proj_a,
+    )
+    await storage.upsert_chunks(b_chunks + [a_chunk])
+
+    # Pin to proj_a's context — proj_b's chunks must be filtered out
+    # AND proj_a's chunk must still surface even at small top_k.
+    results = await storage.bm25_search(
+        "alpha bravo charlie",
+        top_k=2,
+        project_context_root=proj_a,
+    )
+    contents = {r.chunk.content for r in results}
+    # Cross-project hits stay filtered.
+    assert not any(c.startswith("alpha bravo charlie noise") for c in contents)
+    # proj_a's chunk surfaces despite proj_b dominating the global rank.
+    assert "alpha bravo charlie team rule" in contents
