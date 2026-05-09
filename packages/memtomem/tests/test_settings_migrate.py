@@ -539,8 +539,11 @@ class TestSettingsMigrateCli:
         payload = json.loads(result.output)
         assert payload["status"] == "needs_confirmation"
         assert payload["applied"] is False
-        # Source is user-tier → outside project root → must appear in host_writes.
-        assert any(".claude/settings.json" in p and "/home" in p for p in payload["host_writes"])
+        # Source is user-tier → outside project root → must appear in
+        # host_writes. Compare against the actual source path so the
+        # check is separator-agnostic (Windows uses ``\`` not ``/``).
+        expected_source = str(fake_home / ".claude" / "settings.json")
+        assert expected_source in payload["host_writes"]
         assert "--yes" in payload["hint"]
         # Disk untouched.
         assert not (project_root / ".claude" / "settings.local.json").is_file()
