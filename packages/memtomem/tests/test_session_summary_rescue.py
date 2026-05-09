@@ -353,6 +353,78 @@ class TestPipelineEndToEndRescue:
         assert all(c["project_context_root"] == proj_root for c in rescue_legs)
 
     @pytest.mark.asyncio
+    async def test_rescue_dense_leg_threads_project_context(self):
+        """Companion pin to the BM25-leg test: the rescue dense leg
+        also receives ``project_context_root`` so the always-on storage
+        filter sees the same context as the primary dense retrieval.
+        """
+        cfg = SessionSummaryConfig(expansion_lookup_top_k=3, expansion_score_threshold=0.3)
+        summary_chunk = _chunk("summary body", namespace="archive:session:abc")
+        rescued = _chunk("rescued chunk", source="src/old_session.md")
+
+        storage = _async_storage()
+
+        async def bm25_dispatch(
+            query: str,
+            top_k: int,
+            namespace_filter=None,
+            scope_filter=None,
+            project_context_root=None,
+        ):
+            if getattr(namespace_filter, "pattern", None) == "archive:session:*":
+                return [_sr(summary_chunk, score=0.9, rank=1, source="bm25")]
+            return [_sr(rescued, score=0.5, rank=1, source="bm25")]
+
+        dense_calls: list[dict] = []
+
+        async def dense_dispatch(
+            embedding,
+            top_k: int,
+            namespace_filter=None,
+            scope_filter=None,
+            project_context_root=None,
+        ):
+            dense_calls.append(
+                {
+                    "project_context_root": project_context_root,
+                    "scope_filter": scope_filter,
+                }
+            )
+            return [_sr(rescued, score=0.4, rank=1, source="dense")]
+
+        storage.bm25_search = AsyncMock(side_effect=bm25_dispatch)
+        storage.dense_search = AsyncMock(side_effect=dense_dispatch)
+        storage.get_chunks_shared_from = AsyncMock(
+            return_value=[
+                ChunkLink(
+                    target_id=rescued.id,
+                    link_type="summarizes",
+                    namespace_target="default",
+                    created_at=datetime.now(timezone.utc),
+                    source_id=summary_chunk.id,
+                )
+            ]
+        )
+        storage.get_chunks_batch = AsyncMock(return_value={rescued.id: rescued})
+
+        # Need dense enabled on the pipeline to exercise the dense leg.
+        embedder = AsyncMock()
+        embedder.embed_query = AsyncMock(return_value=[0.1] * 8)
+        pipeline = SearchPipeline(
+            storage=storage,
+            embedder=embedder,
+            config=SearchConfig(enable_bm25=True, enable_dense=True),
+            session_summary_config=cfg,
+        )
+        proj_root = Path("/tmp/proj_dense_pinned")
+        await pipeline.search("q", top_k=10, project_context_root=proj_root)
+
+        # Both the primary and rescue dense calls must have received
+        # the project_context_root the outer search was pinned to.
+        assert dense_calls, "dense leg should have fired"
+        assert all(c["project_context_root"] == proj_root for c in dense_calls)
+
+    @pytest.mark.asyncio
     async def test_no_rescue_when_no_summary_above_threshold(self):
         """Common case: no past summary above threshold → rescue leg
         skipped (no extra retrieval round-trip)."""

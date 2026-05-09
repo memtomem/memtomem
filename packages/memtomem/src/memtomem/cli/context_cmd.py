@@ -2100,6 +2100,30 @@ async def _memory_migrate_run(
                 f"Source {source} is not under --from={from_scope} directory {from_dir}."
             )
 
+        # ADR-0011: the migrated row's scope/project_root only become
+        # visible to search/recall and the indexing watcher when the
+        # target tier directory is registered in
+        # ``IndexingConfig.project_memory_dirs``. Without this guard,
+        # ``mm context memory-migrate --to project_shared`` against a
+        # project that has not yet been registered would produce a row
+        # whose scope says "project_shared" but which the read surface
+        # treats as out-of-scope and the watcher does not reindex —
+        # silent data loss from the user's perspective.
+        if to_scope != "user":
+            registered = {
+                Path(d).expanduser().resolve() for d in comp.config.indexing.project_memory_dirs
+            }
+            if to_dir.resolve() not in registered:
+                raise click.ClickException(
+                    f"Target tier {to_dir} is not registered in "
+                    "IndexingConfig.project_memory_dirs. Migrating without "
+                    "registration would hide the moved memory from default "
+                    "search/recall and skip the watcher.\n"
+                    "Register it first (mm config set "
+                    "indexing.project_memory_dirs[+]=<path> or edit "
+                    f"~/.memtomem/config.json), then re-run with --to {to_scope}."
+                )
+
         target = (to_dir / source.name).resolve()
         if target.exists():
             raise click.ClickException(f"Target already exists: {target}. Move or rename it first.")

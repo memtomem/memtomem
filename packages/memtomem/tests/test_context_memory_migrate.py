@@ -86,7 +86,9 @@ def test_memory_migrate_dry_run_reports_plan_without_mutating(monkeypatch, fake_
 
     comp = AsyncMock()
     comp.config.indexing.memory_dirs = [layout["user_tier"]]
-    comp.config.indexing.project_memory_dirs = []
+    # ADR-0011: target tier must be registered for the migrate to be
+    # discoverable post-move. Tests now mirror the production setup.
+    comp.config.indexing.project_memory_dirs = [layout["proj_shared"]]
     comp.storage = AsyncMock()
     comp.storage.count_chunks_by_source = AsyncMock(return_value=2)
     comp.storage.update_chunks_scope_for_source = AsyncMock()
@@ -136,6 +138,8 @@ async def test_memory_migrate_apply_user_to_project_shared_chunk_ids_preserved(
     proj_shared = project_root / ".memtomem" / "memories"
     proj_shared.mkdir(parents=True)
     (project_root / ".git").mkdir()
+    # Register the target tier so the migrate guard accepts the move.
+    comp.config.indexing.project_memory_dirs = [proj_shared]
 
     src = mem_dir / "rule.md"
     src.write_text("## Rule\n\nharmless body.\n", encoding="utf-8")
@@ -195,7 +199,7 @@ def test_memory_migrate_apply_project_shared_target_blocks_on_secret(
 
     comp = AsyncMock()
     comp.config.indexing.memory_dirs = [layout["user_tier"]]
-    comp.config.indexing.project_memory_dirs = []
+    comp.config.indexing.project_memory_dirs = [layout["proj_shared"]]
     comp.storage = AsyncMock()
     comp.storage.count_chunks_by_source = AsyncMock(return_value=1)
     comp.storage.update_chunks_scope_for_source = AsyncMock()
@@ -241,7 +245,7 @@ def test_memory_migrate_compensation_rolls_back_on_db_failure(monkeypatch, fake_
 
     comp = AsyncMock()
     comp.config.indexing.memory_dirs = [layout["user_tier"]]
-    comp.config.indexing.project_memory_dirs = []
+    comp.config.indexing.project_memory_dirs = [layout["proj_local"]]
     comp.storage = AsyncMock()
     comp.storage.count_chunks_by_source = AsyncMock(return_value=1)
     comp.storage.update_chunks_scope_for_source = _fail_update
@@ -269,3 +273,51 @@ def test_memory_migrate_compensation_rolls_back_on_db_failure(monkeypatch, fake_
     # Source must be back at its original location after compensation.
     assert src.exists(), "FS rollback should restore source path"
     assert not (proj_shared / "rule.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# 5) Pre-flight registration check (PR-D review round 5)
+# ---------------------------------------------------------------------------
+
+
+def test_memory_migrate_unregistered_target_tier_refused(monkeypatch, fake_project_layout):
+    """ADR-0011 PR-D review pin: refuse migrating into a project tier
+    that is not registered in ``IndexingConfig.project_memory_dirs``.
+
+    The new read/search boundary and the indexing watcher derive
+    project context from ``project_memory_dirs``. A migrated row whose
+    target tier is missing from that list flips ``metadata.scope`` to
+    ``project_shared`` / ``project_local`` but stays invisible to
+    default search, recall, and the watcher — silent data loss from
+    the user's perspective.
+    """
+    from memtomem.cli.context_cmd import memory_migrate_cmd
+
+    layout = fake_project_layout
+    src = layout["src"]
+
+    comp = AsyncMock()
+    comp.config.indexing.memory_dirs = [layout["user_tier"]]
+    # Empty registry — the project tier exists on disk but is not
+    # registered with the indexer.
+    comp.config.indexing.project_memory_dirs = []
+    comp.storage = AsyncMock()
+    comp.storage.count_chunks_by_source = AsyncMock(return_value=1)
+    comp.storage.update_chunks_scope_for_source = AsyncMock()
+    comp.search_pipeline = AsyncMock()
+    _patch_cli_components(monkeypatch, comp)
+    monkeypatch.chdir(layout["project_root"])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        memory_migrate_cmd,
+        [str(src), "--from", "user", "--to", "project_shared"],
+    )
+    assert result.exit_code != 0
+    out = result.output + str(result.exception or "")
+    assert "not registered" in out
+    assert "project_memory_dirs" in out
+    # Refusal must happen before any FS / DB mutation.
+    comp.storage.update_chunks_scope_for_source.assert_not_called()
+    assert src.exists()
+    assert not (layout["proj_shared"] / "rule.md").exists()
