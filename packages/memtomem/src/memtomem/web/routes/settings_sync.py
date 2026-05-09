@@ -16,6 +16,10 @@ from memtomem.context.settings import (
     _write_json,
     generate_all_settings,
 )
+from memtomem.context.settings_doctor import (
+    DuplicateTier,
+    detect_duplicate_tiers,
+)
 from memtomem.web.deps import get_hooks_target_scope, get_project_root
 from memtomem.web.routes._locks import _gateway_lock
 
@@ -39,6 +43,30 @@ def _claude_target(project_root: Path, scope: str) -> Path:
 def _rule_label(event: str, matcher: str) -> str:
     """Human-readable label for a hook rule: ``event`` or ``event:matcher``."""
     return f"{event}:{matcher}" if matcher else event
+
+
+def _serialize_duplicate_tiers(duplicates: list[DuplicateTier]) -> list[dict]:
+    """Serialize :class:`DuplicateTier` results for the JSON response.
+
+    Per ADR-0010 §4 the Web hooks panel surfaces this list as a
+    read-only banner; the schema mirrors the CLI ``settings-doctor
+    --json`` payload so both surfaces stay in lock-step.
+    """
+    return [
+        {
+            "tier": dup.tier,
+            "path": str(dup.path),
+            "entries": [
+                {
+                    "event": sig.event,
+                    "matcher": sig.matcher,
+                    "command_preview": sig.command_shape,
+                }
+                for sig in dup.entries
+            ],
+        }
+        for dup in duplicates
+    ]
 
 
 def _compare_hooks(
@@ -158,7 +186,11 @@ async def get_settings_sync(
     """Return structured settings sync status with conflict details."""
     canonical_path = project_root / CANONICAL_SETTINGS_FILE
     target_path = _claude_target(project_root, scope)
-    return _compare_hooks(canonical_path, target_path)
+    payload = _compare_hooks(canonical_path, target_path)
+    payload["duplicate_tier_warnings"] = _serialize_duplicate_tiers(
+        detect_duplicate_tiers(project_root, active_scope=scope)
+    )
+    return payload
 
 
 class ApplySettingsSyncRequest(BaseModel):
@@ -189,6 +221,10 @@ async def apply_settings_sync(
     ``{"allow_host_writes": true}`` once the user has confirmed.
     """
     allow_host_writes = body.allow_host_writes if body else False
+    # Detect duplicate-tier hooks BEFORE the merge so the warning
+    # reflects pre-write state (ADR-0010 §4: the warning fires in the
+    # user's actual workflow, not behind a separate command).
+    duplicates = detect_duplicate_tiers(project_root, active_scope=scope)
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
@@ -210,7 +246,10 @@ async def apply_settings_sync(
                 "target": str(r.target) if r.target else None,
             }
         )
-    return {"results": out}
+    return {
+        "results": out,
+        "duplicate_tier_warnings": _serialize_duplicate_tiers(duplicates),
+    }
 
 
 class ResolveRequest(BaseModel):

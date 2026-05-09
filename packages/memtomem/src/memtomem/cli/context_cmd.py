@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import click
@@ -63,6 +64,10 @@ from memtomem.context.settings import (
     diff_settings,
     generate_all_settings,
     host_write_targets,
+)
+from memtomem.context.settings_doctor import (
+    detect_duplicate_tiers,
+    format_warning,
 )
 from memtomem.context.skills import (
     diff_skills,
@@ -356,7 +361,21 @@ def _confirm_settings_host_writes(root: Path, *, scope: str, yes: bool) -> bool:
     return click.confirm("Continue?", default=False)
 
 
+def _print_duplicate_tier_warnings(root: Path, *, scope: str) -> None:
+    """Emit non-blocking warnings for memtomem hooks duplicated across tiers.
+
+    Per ADR-0010 §4 this is the primary detection surface: it fires in
+    the user's actual sync workflow rather than behind a separate
+    command. Output goes to stderr with yellow color and never blocks
+    the sync — duplicates are informational.
+    """
+    duplicates = detect_duplicate_tiers(root, active_scope=scope)
+    for dup in duplicates:
+        click.secho(f"  warning: {format_warning(dup, active_scope=scope)}", err=True, fg="yellow")
+
+
 def _print_settings_generate(root: Path, *, scope: str, allow_host_writes: bool) -> None:
+    _print_duplicate_tier_warnings(root, scope=scope)
     results = generate_all_settings(root, scope=scope, allow_host_writes=allow_host_writes)
     for name, r in results.items():
         if r.status == "ok":
@@ -374,6 +393,7 @@ def _print_settings_generate(root: Path, *, scope: str, allow_host_writes: bool)
 
 
 def _print_settings_diff(root: Path, *, scope: str) -> None:
+    _print_duplicate_tier_warnings(root, scope=scope)
     results = diff_settings(root, scope=scope)
     if not results:
         click.echo("  (no settings to compare)")
@@ -1615,4 +1635,73 @@ def migrate_cmd(
     click.echo("\nSummary: " + (", ".join(parts) if parts else "0 actions") + ".")
 
     if failures:
+        raise click.exceptions.Exit(1)
+
+
+@context.command("settings-doctor")
+@click.option(
+    "--json",
+    "json_out",
+    is_flag=True,
+    default=False,
+    help="Emit a structured JSON result instead of human-readable output.",
+)
+@_SCOPE_OPTION
+def settings_doctor_cmd(json_out: bool, scope_flag: str | None) -> None:
+    """Detect memtomem-managed hooks duplicated across settings tiers.
+
+    Implements ADR-0010 §4's scoped on-demand check. Same canonical-
+    signature detection used by the sync-time warning, exposed as a
+    standalone subcommand for CI / scripting use.
+
+    Exit codes: ``0`` clean, ``1`` duplicates found.
+    """
+    root = _find_project_root()
+    scope = _resolve_cli_scope(scope_flag)
+    duplicates = detect_duplicate_tiers(root, active_scope=scope)
+
+    if json_out:
+        payload = {
+            "status": "duplicates" if duplicates else "clean",
+            "active_scope": scope,
+            "duplicates": [
+                {
+                    "tier": dup.tier,
+                    "path": str(dup.path),
+                    "entries": [
+                        {
+                            "event": sig.event,
+                            "matcher": sig.matcher,
+                            "command_preview": sig.command_shape,
+                        }
+                        for sig in dup.entries
+                    ],
+                }
+                for dup in duplicates
+            ],
+        }
+        click.echo(json.dumps(payload, indent=2))
+    else:
+        if not duplicates:
+            click.secho(
+                f"✓ No memtomem-managed hooks duplicated outside the active scope ({scope}).",
+                fg="green",
+            )
+        else:
+            click.secho(
+                f"✗ Found memtomem-managed hooks in {len(duplicates)} other "
+                f"tier(s) (active scope: {scope}):",
+                fg="yellow",
+            )
+            for dup in duplicates:
+                click.secho(f"  • {dup.tier} ({dup.path})", fg="yellow")
+                for sig in dup.entries:
+                    label = f"{sig.event}:{sig.matcher}" if sig.matcher else sig.event
+                    click.echo(f"      [{label}] {sig.command_shape}")
+            click.echo(
+                "\nRun the future `mm context settings-migrate` subcommand "
+                "(#872) to move these into the active scope."
+            )
+
+    if duplicates:
         raise click.exceptions.Exit(1)

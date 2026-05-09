@@ -242,6 +242,29 @@ Claude Code starts
 - **Debounce mechanics**: `mm index --debounce-window 5` records the file in `~/.memtomem/index_debounce_queue.json` (flock-protected) and drains entries that have been silent ≥5 seconds. Each Write hook fire restarts the window for that path, so a codegen burst indexes the final state once after the burst ends rather than once per Write. The Stop hook chains `mm index --flush` (synchronous drain — blocks until every queued file is indexed) before `mm session end --auto` to ensure session-end indexing isn't deferred. `mm index --status` prints a snapshot of the queue (depth + oldest entry) for telemetry; it's race-prone and not a correctness primitive — for "is the queue empty?" use `--flush`. RFC-B (PreCompact, deferred — needs Claude Code's PreCompact payload contract) will use a future `mm index --flush --paths <list>` for selective drain at checkpoint time.
 - **STM proxy overlap**: If using [memtomem-stm](https://github.com/memtomem/memtomem-stm) (separate package), hooks are redundant — the proxy already handles surfacing and indexing.
 
+### Detecting duplicate hooks across tiers
+
+Claude Code 2.x merges hook entries from all three settings tiers
+(`~/.claude/settings.json`, `<project>/.claude/settings.json`,
+`<project>/.claude/settings.local.json`) additively, so a memtomem-managed
+hook duplicated across tiers fires once per tier — silent double-execution.
+
+`mm context sync --include=settings` and the Web UI hooks panel scan the
+non-active tiers before write and surface a non-blocking warning when
+duplicates exist. For CI / scripting use, run the on-demand check:
+
+```bash
+mm context settings-doctor               # exits 0 if clean, 1 if duplicates
+mm context settings-doctor --json        # structured output for scripting
+mm context settings-doctor --scope=project_local   # one-shot scope override
+```
+
+The match is by canonical signature (event + matcher + command shape, with
+whitespace normalized) so a hand-edited variant of a memtomem-managed entry
+still classifies. Detection is non-mutating; the `mm context settings-migrate`
+subcommand (see [issue #872](https://github.com/memtomem/memtomem/issues/872))
+will be the action surface that moves duplicate entries into the active scope.
+
 ---
 
 ## Tool Usage Guidelines (Add to CLAUDE.md)
