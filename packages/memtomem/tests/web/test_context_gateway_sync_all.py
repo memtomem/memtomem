@@ -1,0 +1,351 @@
+"""Browser tests for the Sync All flow on the Context Gateway dashboard.
+
+Audit goal (``scripts/context-gateway-review-plan.md`` 갭 3 +
+``~/.claude/plans/context-gateyway-sync-frolicking-rain.md``): pin the
+``ctx-sync-all-btn`` handler's user-facing trust gates and severity routing
+so a regression in (a) confirm modal, (b) settings POST ``aborted`` envelope
+handling, or (c) ``loadCtxOverview`` reload after sync surfaces in CI.
+
+The handler's contract (``static/context-gateway.js:435-514``):
+
+* ``showConfirm`` first; cancel returns without firing a single sync POST.
+* On confirm, fan out ``POST /api/context/{type}/sync`` for each detected
+  runtime (``['skills', 'agents']`` in prod mode), then
+  ``POST /api/context/settings/sync``.
+* The settings POST response body is parsed for severity:
+  ``error`` → ``toast.sync_failed`` ``error`` /
+  ``aborted`` → ``settings.ctx.mtime_conflict`` ``warning`` /
+  ``needs_confirmation`` → info partial + Open Settings action /
+  else (``ok`` / ``skipped``) → ``settings.ctx.sync_success``.
+* After all POSTs, ``loadCtxOverview()`` re-fetches ``/api/context/overview``
+  to refresh the cards.
+
+The harness ``page.route()``-stubs every endpoint; ``lifespan=None`` (see
+``conftest.py``) skips the real backend.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+pytestmark = pytest.mark.browser
+
+
+# Locale-pinned EN strings — module-level constants instead of asserting on
+# i18n keys avoids the ``feedback_data_i18n_nested_children.md`` failure
+# mode (matching the markup rather than what the user sees). Default locale
+# is EN, so no explicit ``I18N.setLang`` call is needed.
+SYNC_ALL_TITLE = "Sync All"  # settings.ctx.sync_all
+SYNC_SUCCESS_TOAST = "Sync completed"  # settings.ctx.sync_success
+MTIME_CONFLICT_TOAST = "File was modified externally. Reloading..."  # settings.ctx.mtime_conflict
+
+
+_HEALTHY_OVERVIEW = {
+    "skills": {"total": 2, "in_sync": 2},
+    "commands": {"total": 0, "in_sync": 0},
+    "agents": {"total": 1, "in_sync": 1},
+    "settings": {
+        "total": 1,
+        "in_sync": 1,
+        "out_of_sync": 0,
+        "missing_target": 0,
+        "error": 0,
+        "status": "in_sync",
+    },
+}
+
+
+def _install_default_stubs(page) -> None:
+    """Mirrors ``test_context_gateway_overview._install_default_stubs``.
+
+    Last-route-wins: the catch-all goes first; specific overrides go last
+    in each spec body.
+    """
+
+    def _ok(route, payload):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(payload),
+        )
+
+    page.route("**/api/**", lambda r: _ok(r, {}))
+    page.route("**/api/system/ui-mode", lambda r: _ok(r, {"mode": "prod"}))
+    page.route("**/api/system/model-readiness", lambda r: _ok(r, {"ready": True}))
+    page.route("**/api/sources", lambda r: _ok(r, {"sources": []}))
+    page.route("**/api/namespaces", lambda r: _ok(r, {"namespaces": []}))
+    page.route("**/api/stats", lambda r: _ok(r, {}))
+    page.route("**/api/privacy/patterns", lambda r: _ok(r, {"patterns": []}))
+
+
+def _open_context_gateway(page) -> None:
+    """Mirrors ``test_context_gateway_overview._open_context_gateway``.
+
+    Activates the Settings main tab + the Context Gateway overview
+    sub-section, then waits for the cards to render. ``activateTab`` /
+    ``switchSettingsSection`` are invoked from ``page.evaluate`` rather
+    than chasing click coordinates because the sidebar layout has churned
+    twice (#813 / #816) and a click-based path keeps re-breaking.
+    """
+    page.evaluate("() => activateTab('settings')")
+    page.evaluate("() => switchSettingsSection('ctx-overview')")
+    page.wait_for_function(
+        "() => {"
+        "  const tiles = document.querySelectorAll("
+        "    '#ctx-overview-content .ctx-overview-stat');"
+        "  if (tiles.length === 0) return false;"
+        "  return Array.from(tiles).every("
+        "    el => (el.textContent || '').trim().length > 0);"
+        "}",
+        timeout=5_000,
+    )
+
+
+def _stub_overview_with_counter(page, payloads: list[dict]) -> dict:
+    """Serve a sequence of overview payloads — 1st GET → ``payloads[0]``,
+    2nd → ``payloads[1]``, etc. Last entry is reused for trailing calls.
+
+    Returns a dict the caller can read post-action: ``{"n": <call_count>}``.
+    A counter closure is the cleanest way to differentiate the cold-mount
+    GET (initial state) from the post-sync GET (after-sync state) without
+    racing on a Python-side timer.
+    """
+    state = {"n": 0}
+
+    def _handler(route):
+        idx = min(state["n"], len(payloads) - 1)
+        state["n"] += 1
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(payloads[idx]),
+        )
+
+    page.route("**/api/context/overview", _handler)
+    return state
+
+
+def test_sync_all_cancel_fires_no_post(page, mm_web_url: str) -> None:
+    """S1-a: clicking Cancel on the Sync All confirm dialog must fire zero
+    POSTs to any of the per-type sync endpoints.
+
+    Negative half of the symmetric cancel/confirm pair
+    (``feedback_pin_invert_symmetric_assertion.md``); the positive halves
+    are ``test_sync_all_happy_path_emits_success_toast`` and
+    ``test_sync_all_settings_aborted_emits_mtime_conflict_warning``.
+    """
+    _install_default_stubs(page)
+    _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
+
+    sync_calls: list[str] = []
+
+    def _record_sync(route):
+        sync_calls.append(route.request.url)
+        route.fulfill(status=200, content_type="application/json", body="{}")
+
+    page.route("**/api/context/skills/sync", _record_sync)
+    page.route("**/api/context/agents/sync", _record_sync)
+    page.route("**/api/context/settings/sync", _record_sync)
+
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    page.locator("#ctx-sync-all-btn").click()
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+
+    title = (page.locator("#confirm-title").text_content() or "").strip()
+    assert title == SYNC_ALL_TITLE, (
+        f"Sync All confirm dialog title must be {SYNC_ALL_TITLE!r}, got {title!r}"
+    )
+
+    page.locator("#confirm-cancel-btn").click()
+    page.wait_for_function(
+        "() => document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+
+    # The cancel branch returns before any fetch is dispatched; the modal
+    # hidden checkpoint is the deterministic settle. Any background POST
+    # would have queued before the click handler returned.
+    assert sync_calls == [], f"Cancel must not fire any sync POST, got {sync_calls!r}"
+
+
+def test_sync_all_happy_path_emits_success_toast(page, mm_web_url: str) -> None:
+    """S1-b: confirm → all POSTs succeed → success toast + overview reload.
+
+    Pins the all-``ok`` branch of the severity ladder
+    (``static/context-gateway.js:507-509``) and the unconditional
+    ``loadCtxOverview()`` call at line 510. Settings POST returns the
+    canonical ``{results: [{status: 'ok'}]}`` shape so the parser cannot
+    fall through to ``error``/``aborted``/``needs_confirmation``.
+    """
+    _install_default_stubs(page)
+    overview_state = _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
+
+    sync_calls: list[str] = []
+
+    def _record_sync(route):
+        sync_calls.append(route.request.url)
+        route.fulfill(status=200, content_type="application/json", body="{}")
+
+    page.route("**/api/context/skills/sync", _record_sync)
+    page.route("**/api/context/agents/sync", _record_sync)
+
+    def _settings_sync(route):
+        sync_calls.append(route.request.url)
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "results": [
+                        {
+                            "name": "claude",
+                            "status": "ok",
+                            "reason": None,
+                            "warnings": [],
+                            "target": "/fake/.claude/settings.json",
+                        }
+                    ],
+                    "duplicate_tier_warnings": [],
+                }
+            ),
+        )
+
+    page.route("**/api/context/settings/sync", _settings_sync)
+
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    initial_overview_calls = overview_state["n"]
+
+    page.locator("#ctx-sync-all-btn").click()
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    page.locator("#confirm-ok-btn").click()
+    page.wait_for_function(
+        "() => document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+
+    # Wait for the success toast — its text is what differentiates ok from
+    # aborted/error. The selector matches the first toast in the container;
+    # ``btnLoading`` in the handler keeps the button disabled until the
+    # toast has been shown, so racing isn't an issue.
+    page.wait_for_selector("#toast-container .toast.toast-success", timeout=4_000)
+    toast_text = (
+        page.locator("#toast-container .toast.toast-success .toast-msg").text_content() or ""
+    ).strip()
+    assert toast_text == SYNC_SUCCESS_TOAST, (
+        f"Happy-path toast must be {SYNC_SUCCESS_TOAST!r}, got {toast_text!r}"
+    )
+
+    # All three POSTs fired in the prod-mode order: skills → agents → settings.
+    # The exact order matters because a regression that reorders or drops one
+    # would surface here. Commands is dev-only and should not appear.
+    sync_paths = [u.split("/api/")[-1] for u in sync_calls]
+    assert sync_paths == [
+        "context/skills/sync",
+        "context/agents/sync",
+        "context/settings/sync",
+    ], f"Sync All must fire skills→agents→settings in prod, got {sync_paths!r}"
+
+    # After all POSTs the handler calls ``loadCtxOverview()`` (line 510) to
+    # refresh the cards. Pin the second GET to catch a regression that drops
+    # the post-sync reload — without it the dashboard would show stale
+    # counts immediately after a sync.
+    assert overview_state["n"] >= initial_overview_calls + 1, (
+        f"Sync All must trigger a post-sync overview reload; calls before "
+        f"= {initial_overview_calls}, after = {overview_state['n']}"
+    )
+
+
+def test_sync_all_settings_aborted_emits_mtime_conflict_warning(page, mm_web_url: str) -> None:
+    """S1-c: settings POST returns ``{status: 'aborted'}`` → warning toast
+    with ``settings.ctx.mtime_conflict`` text. Audit P0 regression lock.
+
+    The mtime guard contract (``web/routes/settings_sync.py:329-334``)
+    returns HTTP 200 with ``{"status": "aborted", "reason": "...",
+    "mtime_ns": "..."}``, **not** HTTP 409. A regression that treats this
+    envelope as success (e.g. only checking ``resp.ok``, or forgetting the
+    ``aborted`` branch in the severity ladder) would silently overwrite a
+    cross-process write — the exact failure mode the audit P0 was meant
+    to lock out.
+
+    Symmetric pin (``feedback_pin_invert_symmetric_assertion.md``):
+    positive on the warning toast text, negative on the success toast not
+    appearing — both must hold or the spec gives a false PASS.
+    """
+    _install_default_stubs(page)
+    _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
+
+    page.route(
+        "**/api/context/skills/sync",
+        lambda r: r.fulfill(status=200, content_type="application/json", body="{}"),
+    )
+    page.route(
+        "**/api/context/agents/sync",
+        lambda r: r.fulfill(status=200, content_type="application/json", body="{}"),
+    )
+
+    def _settings_aborted(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "results": [
+                        {
+                            "name": "claude",
+                            "status": "aborted",
+                            "reason": ("Target file was modified by another process. Retry."),
+                            "warnings": [],
+                            "target": "/fake/.claude/settings.json",
+                        }
+                    ],
+                    "duplicate_tier_warnings": [],
+                }
+            ),
+        )
+
+    page.route("**/api/context/settings/sync", _settings_aborted)
+
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    page.locator("#ctx-sync-all-btn").click()
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    page.locator("#confirm-ok-btn").click()
+    page.wait_for_function(
+        "() => document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+
+    # Positive: warning toast with mtime_conflict text.
+    page.wait_for_selector("#toast-container .toast.toast-warning", timeout=4_000)
+    toast_text = (
+        page.locator("#toast-container .toast.toast-warning .toast-msg").text_content() or ""
+    ).strip()
+    assert toast_text == MTIME_CONFLICT_TOAST, (
+        f"Aborted envelope must surface mtime_conflict warning "
+        f"({MTIME_CONFLICT_TOAST!r}), got {toast_text!r}"
+    )
+
+    # Negative: the success toast must NOT have rendered. A regression that
+    # drops the ``aborted`` branch and falls through to ``ok`` would render
+    # the success toast — checking only the warning toast wouldn't catch
+    # that (both could co-exist in the container).
+    success_count = page.locator("#toast-container .toast.toast-success").count()
+    assert success_count == 0, (
+        f"Aborted envelope must not emit the success toast; found {success_count}"
+    )
