@@ -86,12 +86,19 @@ class MigratePlan:
 
     @property
     def is_noop(self) -> bool:
-        """True when no entries need writing at either side.
+        """True when :func:`apply_migration` will write nothing.
 
-        A plan with all-conflict moves is *not* a no-op — it has
-        warnings to surface; but it does not write either file.
+        Two situations land here:
+
+        * No moves at all — source has no canonical-matched entries.
+        * Every move is a conflict — :attr:`applicable_moves` is empty,
+          so apply writes nothing, but the user **does** have unresolved
+          drift to surface. Callers that need to distinguish "genuinely
+          nothing to do" from "all-conflict drift" should pair this
+          property with a non-empty conflict check (the CLI does this
+          at the ``--apply`` exit-1 gate).
         """
-        return not any(not m.conflict_at_target for m in self.moves)
+        return not self.applicable_moves
 
     @property
     def applicable_moves(self) -> tuple[MigrateMove, ...]:

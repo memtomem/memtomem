@@ -18,10 +18,35 @@ from click.testing import CliRunner
 
 from memtomem.context.settings import CANONICAL_SETTINGS_FILE
 from memtomem.context.settings_migrate import (
+    MigrateMove,
+    MigratePlan,
     apply_migration,
+    format_plan_summary,
     plan_migration,
 )
+from memtomem.context.settings_doctor import HookSignature
 from .helpers import set_home
+
+
+def _make_move(
+    *,
+    matcher: str = "Edit|Write",
+    command: str = "mm session start",
+    already: bool = False,
+    conflict: bool = False,
+) -> MigrateMove:
+    """Build a synthetic MigrateMove for direct unit tests."""
+    sig = HookSignature(event="PostToolUse", matcher=matcher, command_shape=command)
+    return MigrateMove(
+        signature=sig,
+        rule_to_write_at_target={
+            "matcher": matcher,
+            "hooks": [{"type": "command", "command": command, "timeout": 5000}],
+        },
+        already_at_target=already,
+        conflict_at_target=conflict,
+        conflict_reason="synthetic" if conflict else "",
+    )
 
 
 # ── Helpers ────────────────────────────────────────────────────────
@@ -498,6 +523,28 @@ class TestSettingsMigrateCli:
         assert result.exit_code == 1, result.output
         assert "conflict" in result.output.lower()
 
+    def test_json_needs_confirmation_payload(self, project_root, fake_home, monkeypatch):
+        """JSON ``--apply`` without ``--yes`` must refuse host writes
+        explicitly: the prompt would never reach a JSON caller."""
+        _write_canonical(project_root, _bundled_hook())
+        _write_settings(fake_home / ".claude" / "settings.json", _settings_doc(_bundled_hook()))
+        monkeypatch.chdir(project_root)
+        from memtomem.cli.context_cmd import settings_migrate_cmd
+
+        result = CliRunner().invoke(
+            settings_migrate_cmd,
+            ["--from=user", "--to=project_local", "--apply", "--json"],
+        )
+        assert result.exit_code == 1, result.output
+        payload = json.loads(result.output)
+        assert payload["status"] == "needs_confirmation"
+        assert payload["applied"] is False
+        # Source is user-tier → outside project root → must appear in host_writes.
+        assert any(".claude/settings.json" in p and "/home" in p for p in payload["host_writes"])
+        assert "--yes" in payload["hint"]
+        # Disk untouched.
+        assert not (project_root / ".claude" / "settings.local.json").is_file()
+
     def test_project_to_project_no_host_prompt(self, project_root, fake_home, monkeypatch):
         """project_shared → project_local stays in-tree, so no
         host-write prompt fires even without --yes."""
@@ -515,3 +562,68 @@ class TestSettingsMigrateCli:
         )
         assert result.exit_code == 0, result.output
         assert (project_root / ".claude" / "settings.local.json").is_file()
+
+
+# ── Reporting invariants ───────────────────────────────────────────
+
+
+class TestFormatPlanSummary:
+    """Pin the count-conservation invariant on ``format_plan_summary``.
+
+    Per ``feedback_count_conservation_invariant_pin.md``: any per-
+    category count surface must hold ``sum(parts) == total`` so a
+    future status enum addition (e.g. a new ``conflict_kind``) is
+    caught by tests rather than silently dropped from the summary.
+    """
+
+    def _plan(self, *moves: MigrateMove) -> MigratePlan:
+        from pathlib import Path
+
+        return MigratePlan(
+            source_scope="user",
+            target_scope="project_local",
+            source_path=Path("/tmp/from"),
+            target_path=Path("/tmp/to"),
+            moves=tuple(moves),
+        )
+
+    def test_empty_plan(self):
+        summary = format_plan_summary(self._plan())
+        assert "0 entries" in summary
+
+    def test_fresh_only(self):
+        plan = self._plan(_make_move(command="mm session start"))
+        summary = format_plan_summary(plan)
+        assert "1 to add at target" in summary
+
+    def test_already_only(self):
+        plan = self._plan(_make_move(command="mm index", already=True))
+        summary = format_plan_summary(plan)
+        assert "1 already at target" in summary
+
+    def test_conflict_only(self):
+        plan = self._plan(_make_move(command="mm session end", conflict=True))
+        summary = format_plan_summary(plan)
+        assert "1 skipped (conflict)" in summary
+
+    def test_conservation_across_three_categories(self):
+        """fresh + already + conflict counts must sum to len(moves).
+
+        If a future enum value is added without summary plumbing, the
+        sum check fails and surfaces the gap.
+        """
+        plan = self._plan(
+            _make_move(command="cmd-fresh-1"),
+            _make_move(command="cmd-fresh-2"),
+            _make_move(command="cmd-already-1", already=True),
+            _make_move(command="cmd-conflict-1", conflict=True),
+        )
+        summary = format_plan_summary(plan)
+        assert "2 to add at target" in summary
+        assert "1 already at target" in summary
+        assert "1 skipped (conflict)" in summary
+        # Conservation: counts mentioned in the summary must equal len(moves).
+        import re
+
+        nums = [int(n) for n in re.findall(r"\b(\d+)\b", summary)]
+        assert sum(nums) == len(plan.moves)

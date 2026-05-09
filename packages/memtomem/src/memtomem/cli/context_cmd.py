@@ -1733,7 +1733,7 @@ _MIGRATE_SCOPE_TO = click.option(
 )
 
 
-def _print_migrate_plan_human(plan, *, scope: str) -> None:
+def _print_migrate_plan_human(plan) -> None:
     """Render the settings-migrate dry-run / pre-apply preview."""
     if not plan.moves:
         click.echo(
@@ -1846,7 +1846,7 @@ def settings_migrate_cmd(
             ],
         }
     else:
-        _print_migrate_plan_human(plan, scope=from_scope)
+        _print_migrate_plan_human(plan)
         if plan.moves:
             click.echo(f"\nSummary: {summary}")
 
