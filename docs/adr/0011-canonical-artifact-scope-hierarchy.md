@@ -220,12 +220,14 @@ project_shared, the sync write is blocked regardless of `--force-unsafe`.
 **Gate B (surface).** Explicit `--scope project_shared` flag plus
 confirm prompt at the CLI/MCP write surface (`mm mem add`,
 `mm context init`, `mm context promote`). The flag must be passed
-explicitly — no env var or config-field default. The
-`MUTABLE_FIELDS` and `FIELD_CONSTRAINTS` validators at
-`MUTABLE_FIELDS` (`config.py:826`) and `FIELD_CONSTRAINTS`
-(`config.py:858`) reject any `memory.default_write_scope` field at
-load time so a future contributor cannot silently introduce a
-project_shared default.
+explicitly — no env var or config-field default. There is
+deliberately **no** `memory.default_write_scope` config field: the
+explicit `--scope` flag (CLI) and `scope=` kwarg (MCP `mem_add`
+/ `mem_batch_add`) are the only paths by which `project_shared`
+becomes the active scope. A future contributor introducing such a
+default must pass through this ADR rather than landing it as a
+silent config addition; reviewers should refuse a
+`MemoryConfig.default_write_scope` field on sight.
 
 The confirm prompt:
 
