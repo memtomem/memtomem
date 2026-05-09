@@ -32,8 +32,11 @@ Every memtomem fan-out artifact except settings hooks targets
 
 ADR-0001 §1 fixes canonical = project-scope as a deliberate principle
 ("Codex agents fan out to project-scope `<project>/.codex/agents/`
-(symmetric with Claude/Gemini)…" —
-`docs/adr/0001-context-gateway-sync-policies.md:21-23`) but never
+(symmetric with Claude/Gemini); Codex prompts remain user-scope
+(`~/.codex/prompts/`, no project-scope equivalent). Both are **never**
+imported — fan-out is one-way (canonical → Codex) so the canonical
+entry stays the single source of truth." —
+`docs/adr/0001-context-gateway-sync-policies.md:21-25`) but never
 addresses the settings tile, which silently exempts itself by hardcoding
 `Path.home()` in two places:
 
@@ -141,6 +144,13 @@ would require the project-level config layer this ADR explicitly
 defers. The picker is gated on the future project-config ADR. This
 keeps the Web UI consistent with the CLI surface, which has only the
 per-invocation `--scope=…` flag and no persistent per-project setting.
+
+**Per-sync override from the Web UI is intentionally absent in v1.**
+Users who want a one-shot override drop to the CLI: `mm context sync
+--include=settings --scope=project_local`. Adding a per-sync scope
+selector to the Web UI would require either the deferred picker (with
+its persistence implications) or a transient form state, both of which
+expand the v1 surface beyond what this ADR proposes.
 
 ### 4. Migration
 
