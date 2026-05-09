@@ -271,7 +271,12 @@ class SearchPipeline:
             return max(0, min(cfg.window_size, MAX_CONTEXT_WINDOW_CHUNKS))
         return 0
 
-    async def _session_summary_boost_sources(self, query: str) -> set[str]:
+    async def _session_summary_boost_sources(
+        self,
+        query: str,
+        scope_filter: ScopeFilter | None = None,
+        project_context_root: Path | None = None,
+    ) -> set[str]:
         """Stage-1 enrichment lookup against ``archive:session:*``.
 
         Runs a small BM25 lookup against the session-summary namespace
@@ -280,6 +285,14 @@ class SearchPipeline:
         ``"summarizes"`` from the summary chunk back to the source
         chunks it summarized. The set of source files spanned by those
         chunks becomes the boost-sources list.
+
+        ADR-0011 PR-D review: ``scope_filter`` / ``project_context_root``
+        are threaded through so the rescue lookup honors the same
+        always-on scope-context fragment as the primary retrieval.
+        Without these, the new storage default ("no project context →
+        user only") would silently exclude project_shared /
+        project_local summaries from the rescue path even when the
+        outer search is pinned to a project.
 
         Returns an empty set when the feature is disabled, the lookup
         fails, no summary scores above threshold, or no surviving
@@ -293,7 +306,11 @@ class SearchPipeline:
         archive_filter = NamespaceFilter(pattern="archive:session:*")
         try:
             summary_hits = await self._storage.bm25_search(
-                query, top_k=cfg.expansion_lookup_top_k, namespace_filter=archive_filter
+                query,
+                top_k=cfg.expansion_lookup_top_k,
+                namespace_filter=archive_filter,
+                scope_filter=scope_filter,
+                project_context_root=project_context_root,
             )
         except Exception:
             logger.debug("session-summary lookup failed; skipping rescue", exc_info=True)
@@ -341,6 +358,8 @@ class SearchPipeline:
         boost_sources: set[str],
         use_bm25: bool,
         use_dense: bool,
+        scope_filter: ScopeFilter | None = None,
+        project_context_root: Path | None = None,
     ) -> list[SearchResult]:
         """Parallel BM25+dense retrieval restricted to boost_sources.
 
@@ -349,6 +368,12 @@ class SearchPipeline:
         storage primitives — keeps ``bm25_search`` / ``dense_search``
         signatures clean. The leg is merged into RRF as a third input
         list, weighted by ``expansion_rescue_weight``.
+
+        ADR-0011 PR-D review: scope context is threaded through so the
+        rescue legs honor the same always-on scope filter the primary
+        retrieval uses. The default ("no project context → user only")
+        would otherwise drop project_shared / project_local rescue
+        candidates whenever the outer search was pinned to a project.
         """
         if not boost_sources:
             return []
@@ -361,7 +386,11 @@ class SearchPipeline:
                 return []
             try:
                 hits = await self._storage.bm25_search(
-                    query, top_k=oversample, namespace_filter=None
+                    query,
+                    top_k=oversample,
+                    namespace_filter=None,
+                    scope_filter=scope_filter,
+                    project_context_root=project_context_root,
                 )
             except Exception:
                 logger.debug("rescue bm25 leg failed", exc_info=True)
@@ -373,7 +402,11 @@ class SearchPipeline:
                 return []
             try:
                 hits = await self._storage.dense_search(
-                    query_embedding, top_k=oversample, namespace_filter=None
+                    query_embedding,
+                    top_k=oversample,
+                    namespace_filter=None,
+                    scope_filter=scope_filter,
+                    project_context_root=project_context_root,
                 )
             except Exception:
                 logger.debug("rescue dense leg failed", exc_info=True)
@@ -740,7 +773,11 @@ class SearchPipeline:
             and self._session_summary_config.expansion_lookup_top_k > 0
         ):
             try:
-                boost_sources = await self._session_summary_boost_sources(query)
+                boost_sources = await self._session_summary_boost_sources(
+                    query,
+                    scope_filter=scope_filter,
+                    project_context_root=project_context_root,
+                )
                 if boost_sources:
                     rescue_results = await self._rescue_retrieval(
                         query,
@@ -749,6 +786,8 @@ class SearchPipeline:
                         boost_sources=boost_sources,
                         use_bm25=use_bm25,
                         use_dense=use_dense,
+                        scope_filter=scope_filter,
+                        project_context_root=project_context_root,
                     )
                     rescue_chunk_ids = {r.chunk.id for r in rescue_results}
             except Exception:
