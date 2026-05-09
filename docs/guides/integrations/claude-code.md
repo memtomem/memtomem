@@ -261,9 +261,24 @@ mm context settings-doctor --scope=project_local   # one-shot scope override
 
 The match is by canonical signature (event + matcher + command shape, with
 whitespace normalized) so a hand-edited variant of a memtomem-managed entry
-still classifies. Detection is non-mutating; the `mm context settings-migrate`
-subcommand (see [issue #872](https://github.com/memtomem/memtomem/issues/872))
-will be the action surface that moves duplicate entries into the active scope.
+still classifies. Detection is non-mutating; the action surface is the
+companion `mm context settings-migrate` subcommand:
+
+```bash
+mm context settings-migrate --from=user --to=project_local           # dry-run
+mm context settings-migrate --from=user --to=project_local --apply   # mutate
+mm context settings-migrate --from=user --to=project_local --json    # CI / scripting
+```
+
+Default is a dry-run preview; pass `--apply` to mutate disk. The migrator
+takes the canonical rule from `.memtomem/settings.json` (so the target
+ends up byte-clean rather than carrying the source-side whitespace
+variant) and removes the matched inner-hook entries from the source tier.
+Idempotent — re-running after a clean migration finds nothing to move.
+
+When the source or target lives outside the project root (e.g.
+`--from=user`, which resolves to `~/.claude/settings.json`), `--apply`
+prompts for confirmation; pass `--yes` to skip the prompt in scripts.
 
 ---
 
