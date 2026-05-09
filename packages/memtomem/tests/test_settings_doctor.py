@@ -101,11 +101,14 @@ class TestDetectorCanonical:
     def test_extracts_signatures(self, project_root):
         _write_canonical(project_root, _bundled_hook())
         signatures = load_canonical_signatures(project_root)
-        assert HookSignature(
-            event="PostToolUse",
-            matcher="Edit|Write",
-            command_shape="mm session start",
-        ) in signatures
+        assert (
+            HookSignature(
+                event="PostToolUse",
+                matcher="Edit|Write",
+                command_shape="mm session start",
+            )
+            in signatures
+        )
 
 
 class TestDetectDuplicateTiers:
@@ -123,9 +126,7 @@ class TestDetectDuplicateTiers:
         _write_settings(fake_home / ".claude" / "settings.json", _bundled_hook())
         assert detect_duplicate_tiers(project_root, active_scope="user") == []
 
-    def test_duplicate_in_user_when_active_is_project_local(
-        self, project_root, fake_home
-    ):
+    def test_duplicate_in_user_when_active_is_project_local(self, project_root, fake_home):
         _write_canonical(project_root, _bundled_hook())
         _write_settings(fake_home / ".claude" / "settings.json", _bundled_hook())
         duplicates = detect_duplicate_tiers(project_root, active_scope="project_local")
@@ -134,9 +135,7 @@ class TestDetectDuplicateTiers:
         assert duplicates[0].path == fake_home / ".claude" / "settings.json"
         assert len(duplicates[0].entries) == 1
 
-    def test_duplicate_in_project_shared_when_active_is_user(
-        self, project_root, fake_home
-    ):
+    def test_duplicate_in_project_shared_when_active_is_user(self, project_root, fake_home):
         _write_canonical(project_root, _bundled_hook())
         _write_settings(project_root / ".claude" / "settings.json", _bundled_hook())
         duplicates = detect_duplicate_tiers(project_root, active_scope="user")
@@ -155,22 +154,16 @@ class TestDetectDuplicateTiers:
         """Internal-whitespace variants still match (ADR-0010 §4)."""
         _write_canonical(project_root, _bundled_hook())
         # Same command but with extra spaces — must still be detected.
-        variant = {
-            "PostToolUse": [_rule("Edit|Write", "mm   session   start  ")]
-        }
+        variant = {"PostToolUse": [_rule("Edit|Write", "mm   session   start  ")]}
         _write_settings(fake_home / ".claude" / "settings.json", variant)
         duplicates = detect_duplicate_tiers(project_root, active_scope="project_local")
         assert len(duplicates) == 1
         assert duplicates[0].entries[0].command_shape == "mm session start"
 
-    def test_canonical_signature_matcher_whitespace_strip(
-        self, project_root, fake_home
-    ):
+    def test_canonical_signature_matcher_whitespace_strip(self, project_root, fake_home):
         """Leading/trailing whitespace in matcher unifies."""
         _write_canonical(project_root, _bundled_hook())
-        variant = {
-            "PostToolUse": [_rule("  Edit|Write  ", "mm session start")]
-        }
+        variant = {"PostToolUse": [_rule("  Edit|Write  ", "mm session start")]}
         _write_settings(fake_home / ".claude" / "settings.json", variant)
         duplicates = detect_duplicate_tiers(project_root, active_scope="project_local")
         assert len(duplicates) == 1
@@ -182,9 +175,7 @@ class TestDetectDuplicateTiers:
             {"SessionStart": [_rule("", "mm index")]},
         )
         # Other tier omits the matcher key entirely.
-        rule_no_matcher = {
-            "hooks": [{"type": "command", "command": "mm index", "timeout": 5000}]
-        }
+        rule_no_matcher = {"hooks": [{"type": "command", "command": "mm index", "timeout": 5000}]}
         _write_settings(
             fake_home / ".claude" / "settings.json",
             {"SessionStart": [rule_no_matcher]},
@@ -295,9 +286,7 @@ class TestSettingsDoctorCli:
 
         from memtomem.cli.context_cmd import settings_doctor_cmd
 
-        result = CliRunner().invoke(
-            settings_doctor_cmd, ["--scope=project_local"]
-        )
+        result = CliRunner().invoke(settings_doctor_cmd, ["--scope=project_local"])
         assert result.exit_code == 1, result.output
 
     def test_json_clean_schema(self, project_root, fake_home, monkeypatch):
@@ -350,9 +339,7 @@ class TestSyncWarning:
     warning before write and does NOT block the sync (ADR-0010 §4
     "informational, non-blocking")."""
 
-    def test_sync_emits_warning_for_other_tier(
-        self, project_root, fake_home, monkeypatch
-    ):
+    def test_sync_emits_warning_for_other_tier(self, project_root, fake_home, monkeypatch):
         _write_canonical(project_root, _bundled_hook())
         # Pre-populate user tier with the duplicate.
         _write_settings(fake_home / ".claude" / "settings.json", _bundled_hook())
@@ -373,9 +360,7 @@ class TestSyncWarning:
         assert "memtomem-managed hook" in result.output
         assert "user" in result.output
 
-    def test_diff_emits_warning_for_other_tier(
-        self, project_root, fake_home, monkeypatch
-    ):
+    def test_diff_emits_warning_for_other_tier(self, project_root, fake_home, monkeypatch):
         _write_canonical(project_root, _bundled_hook())
         _write_settings(fake_home / ".claude" / "settings.json", _bundled_hook())
         # Bare diff command runs through ``_print_settings_diff`` which
@@ -425,9 +410,7 @@ class TestWebDuplicateTierWarnings:
         async with AsyncClient(transport=transport, base_url="http://test") as c:
             yield c
 
-    async def test_get_includes_empty_warnings_when_clean(
-        self, client, project_root
-    ):
+    async def test_get_includes_empty_warnings_when_clean(self, client, project_root):
         _write_canonical(project_root, _bundled_hook())
         # No other tiers populated → empty list.
         response = await client.get("/api/settings-sync")
@@ -435,9 +418,7 @@ class TestWebDuplicateTierWarnings:
         data = response.json()
         assert data["duplicate_tier_warnings"] == []
 
-    async def test_get_includes_warnings_when_duplicates(
-        self, client, project_root, fake_home
-    ):
+    async def test_get_includes_warnings_when_duplicates(self, client, project_root, fake_home):
         _write_canonical(project_root, _bundled_hook())
         _write_settings(fake_home / ".claude" / "settings.json", _bundled_hook())
         response = await client.get("/api/settings-sync")
@@ -448,9 +429,7 @@ class TestWebDuplicateTierWarnings:
         assert warnings[0]["tier"] == "user"
         assert warnings[0]["entries"][0]["event"] == "PostToolUse"
 
-    async def test_post_includes_warnings(
-        self, client, project_root, fake_home
-    ):
+    async def test_post_includes_warnings(self, client, project_root, fake_home):
         _write_canonical(project_root, _bundled_hook())
         _write_settings(fake_home / ".claude" / "settings.json", _bundled_hook())
         response = await client.post(
