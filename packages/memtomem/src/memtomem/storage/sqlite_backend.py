@@ -413,7 +413,8 @@ class SqliteBackend(
                     """UPDATE chunks SET content=?, content_hash=?, source_file=?,
                        heading_hierarchy=?, chunk_type=?, start_line=?, end_line=?,
                        language=?, tags=?, namespace=?, updated_at=?,
-                       valid_from_unix=?, valid_to_unix=?
+                       valid_from_unix=?, valid_to_unix=?,
+                       scope=?, project_root=?
                        WHERE id=?""",
                     [
                         (
@@ -430,6 +431,8 @@ class SqliteBackend(
                             c.updated_at.isoformat(timespec="seconds"),
                             c.metadata.valid_from_unix,
                             c.metadata.valid_to_unix,
+                            c.metadata.scope,
+                            str(c.metadata.project_root) if c.metadata.project_root else None,
                             str(c.id),
                         )
                         for c, _ in to_update
@@ -470,8 +473,9 @@ class SqliteBackend(
                         chunk_type, start_line, end_line, language, tags,
                         namespace, created_at, updated_at,
                         overlap_before, overlap_after,
-                        valid_from_unix, valid_to_unix)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        valid_from_unix, valid_to_unix,
+                        scope, project_root)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     [
                         (
                             str(c.id),
@@ -491,6 +495,8 @@ class SqliteBackend(
                             c.metadata.overlap_after,
                             c.metadata.valid_from_unix,
                             c.metadata.valid_to_unix,
+                            c.metadata.scope,
+                            str(c.metadata.project_root) if c.metadata.project_root else None,
                         )
                         for c in to_insert
                     ],
@@ -1203,6 +1209,19 @@ class SqliteBackend(
             vfrom = row[19]
             vto = row[20]
 
+        # Scope axis columns (may not exist in older DBs) — columns 21,22
+        # after validity. ADR-0011: ``user`` is the default for legacy rows;
+        # ``project_root`` is NULL for user scope, an absolute path for
+        # project tiers.
+        scope_val: str = "user"
+        project_root_val: Path | None = None
+        if len(row) >= 22:
+            scope_val = row[21] or "user"
+        if len(row) >= 23:
+            raw_pr = row[22]
+            if raw_pr:
+                project_root_val = Path(raw_pr)
+
         metadata = ChunkMetadata(
             source_file=Path(source_file),
             heading_hierarchy=hh,
@@ -1216,6 +1235,8 @@ class SqliteBackend(
             overlap_after=oa,
             valid_from_unix=vfrom,
             valid_to_unix=vto,
+            scope=scope_val,
+            project_root=project_root_val,
         )
 
         # --- timestamps (always timezone-aware) ---

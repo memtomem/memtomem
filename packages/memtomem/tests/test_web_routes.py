@@ -84,6 +84,7 @@ class FakeConfig:
 
     class _Indexing:
         memory_dirs = [Path("/tmp/memories")]
+        project_memory_dirs: list[Path] = []
         supported_extensions = frozenset({".md", ".json"})
         max_chunk_tokens = 512
         min_chunk_tokens = 128
@@ -91,6 +92,9 @@ class FakeConfig:
         chunk_overlap_tokens = 0
         structured_chunk_mode = "original"
         exclude_patterns: list[str] = []
+
+        def all_index_roots(self):
+            return list(self.memory_dirs) + list(self.project_memory_dirs)
 
     class _Decay:
         enabled = False

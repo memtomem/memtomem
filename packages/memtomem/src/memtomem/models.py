@@ -38,6 +38,13 @@ class ChunkMetadata:
     # NULL means unbounded on that side; both NULL means always-valid.
     valid_from_unix: int | None = None
     valid_to_unix: int | None = None
+    # Scope axis (ADR-0011). ``user`` is the only scope today; project_shared
+    # / project_local are reserved for the read/write surface PRs.
+    # ``project_root`` is None for user scope, an absolute path for project
+    # scopes — required so a single user-local DB can hold chunks from
+    # multiple worktrees of the same project without path-prefix collisions.
+    scope: str = "user"
+    project_root: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -720,7 +720,7 @@ async def memory_dirs_status(
 
     stats = await memory_dir_stats(
         storage,
-        config.indexing.memory_dirs,
+        config.indexing.all_index_roots(),
         supported_extensions=config.indexing.supported_extensions,
     )
     return {"dirs": stats}
@@ -732,9 +732,9 @@ async def reindex_all(
     config=Depends(get_config),
     index_engine=Depends(get_index_engine),
 ):
-    """Re-index all memory_dirs."""
+    """Re-index every registered index root (user-tier + project-tier per ADR-0011)."""
     results = []
-    for d in config.indexing.memory_dirs:
+    for d in config.indexing.all_index_roots():
         resolved = d.expanduser().resolve()
         if not resolved.is_dir():
             results.append({"path": str(resolved), "error": "not a directory"})
@@ -979,7 +979,7 @@ async def index_stream(
     """Stream indexing progress as Server-Sent Events."""
     resolved = Path(path).expanduser().resolve()
     resolved_norm = Path(norm_path(resolved))
-    memory_dirs = [Path(norm_path(Path(d).expanduser())) for d in config.indexing.memory_dirs]
+    memory_dirs = [Path(norm_path(Path(d).expanduser())) for d in config.indexing.all_index_roots()]
     if not any(resolved_norm.is_relative_to(d) for d in memory_dirs):
         raise HTTPException(
             status_code=403,
@@ -1015,7 +1015,7 @@ async def trigger_index(
 ) -> IndexResponse:
     resolved = Path(req.path).expanduser().resolve()
     resolved_norm = Path(norm_path(resolved))
-    memory_dirs = [Path(norm_path(Path(d).expanduser())) for d in config.indexing.memory_dirs]
+    memory_dirs = [Path(norm_path(Path(d).expanduser())) for d in config.indexing.all_index_roots()]
     if not any(resolved_norm.is_relative_to(d) for d in memory_dirs):
         raise HTTPException(status_code=403, detail="Path is outside configured memory directories")
     stats = await index_engine.index_path(

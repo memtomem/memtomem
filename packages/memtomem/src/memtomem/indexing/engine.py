@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import os
 import time
@@ -24,6 +25,7 @@ from memtomem.config import (
     NamespaceConfig,
     NamespacePolicyRule,
     categorize_memory_dir,
+    classify_scope,
     memory_dir_kind,
     provider_for_category,
 )
@@ -517,7 +519,7 @@ class IndexEngine:
         # CLI, MCP tools). This public-entry check is kept so the call
         # returns early with zeroed stats without entering the lock.
         user_spec = _build_exclude_spec(self._config.exclude_patterns)
-        if _path_is_excluded(file_path, self._config.memory_dirs, user_spec):
+        if _path_is_excluded(file_path, self._config.all_index_roots(), user_spec):
             logger.debug("Skipping excluded file %s", file_path)
             return IndexingStats(
                 total_files=0,
@@ -589,10 +591,13 @@ class IndexEngine:
 
         if self._ns_config.enable_auto_ns:
             # Derive namespace from the immediate parent folder name,
-            # but skip if the file sits at the root of a memory_dir
-            # (otherwise the memory_dir folder name becomes the namespace).
+            # but skip if the file sits at the root of any index root
+            # (otherwise the root folder name becomes the namespace).
+            # ADR-0011: include project_memory_dirs so a file at the root
+            # of a registered project_shared dir does not pick up the
+            # ``memories`` literal as its namespace.
             parent = file_path.parent.resolve()
-            memory_roots = {Path(d).expanduser().resolve() for d in self._config.memory_dirs}
+            memory_roots = {Path(d).expanduser().resolve() for d in self._config.all_index_roots()}
             if parent not in memory_roots:
                 name = parent.name
                 if name and name not in (".", ""):
@@ -652,8 +657,14 @@ class IndexEngine:
         return "".join(parts)
 
     def _is_within_memory_dirs(self, path: Path) -> bool:
-        """Check that *path* is within at least one configured memory_dir."""
-        for d in self._config.memory_dirs:
+        """Check that *path* is within at least one configured index root.
+
+        Covers user-tier ``memory_dirs`` and project-tier
+        ``project_memory_dirs`` (ADR-0011). Method name kept for
+        backward compatibility with callers; the semantic is
+        "any registered index root".
+        """
+        for d in self._config.all_index_roots():
             root = Path(d).expanduser().resolve()
             try:
                 if path.is_relative_to(root):
@@ -685,7 +696,7 @@ class IndexEngine:
         # directory walks, but this guard ensures single-file callers like
         # ``index_path_stream(file)`` cannot smuggle credentials or noise.
         user_spec = _build_exclude_spec(self._config.exclude_patterns)
-        if _path_is_excluded(file_path, self._config.memory_dirs, user_spec):
+        if _path_is_excluded(file_path, self._config.all_index_roots(), user_spec):
             logger.debug("Skipping excluded file %s", file_path)
             return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
 
@@ -745,6 +756,14 @@ class IndexEngine:
         resolved_ns = self._resolve_namespace(file_path, namespace)
         if resolved_ns is not None:
             new_chunks = self._apply_namespace(new_chunks, resolved_ns)
+
+        # ADR-0011: tag every chunk with its resolved scope. Default
+        # ``("user", None)`` for files outside any registered project
+        # tier; scope-aware behavior lands in PR-C / PR-D once the read
+        # / write surfaces are spec'd.
+        scope_val, project_root = self._resolve_scope(file_path)
+        if scope_val != "user" or project_root is not None:
+            new_chunks = self._apply_scope(new_chunks, scope_val, project_root)
 
         if not new_chunks:
             # File exists but is empty / unparseable — delete stale chunks
@@ -1005,21 +1024,18 @@ class IndexEngine:
 
     @staticmethod
     def _apply_namespace(chunks: list[Chunk], namespace: str) -> list[Chunk]:
-        """Return new Chunk instances with the given namespace applied."""
+        """Return new Chunk instances with the given namespace applied.
+
+        Uses ``dataclasses.replace`` so any new ``ChunkMetadata`` fields
+        (e.g. the ADR-0011 ``scope`` / ``project_root`` columns) are
+        carried through automatically. The earlier explicit-constructor
+        shape silently dropped fields the writer hadn't been updated to
+        copy, which is the kind of bug a future field add would
+        otherwise reintroduce.
+        """
         result = []
         for c in chunks:
-            new_meta = ChunkMetadata(
-                source_file=c.metadata.source_file,
-                heading_hierarchy=c.metadata.heading_hierarchy,
-                chunk_type=c.metadata.chunk_type,
-                start_line=c.metadata.start_line,
-                end_line=c.metadata.end_line,
-                language=c.metadata.language,
-                tags=c.metadata.tags,
-                namespace=namespace,
-                overlap_before=c.metadata.overlap_before,
-                overlap_after=c.metadata.overlap_after,
-            )
+            new_meta = dataclasses.replace(c.metadata, namespace=namespace)
             result.append(
                 Chunk(
                     content=c.content,
@@ -1032,6 +1048,42 @@ class IndexEngine:
                 )
             )
         return result
+
+    @staticmethod
+    def _apply_scope(chunks: list[Chunk], scope: str, project_root: Path | None) -> list[Chunk]:
+        """Return new Chunk instances with the given scope + project_root.
+
+        ADR-0011 §2 plumbing: indexing tags every chunk with its resolved
+        scope so search can scope-filter without re-classifying paths at
+        query time. Mirrors :meth:`_apply_namespace`'s shape; uses
+        ``dataclasses.replace`` for the same field-evolution reason.
+        """
+        result = []
+        for c in chunks:
+            new_meta = dataclasses.replace(c.metadata, scope=scope, project_root=project_root)
+            result.append(
+                Chunk(
+                    content=c.content,
+                    metadata=new_meta,
+                    id=c.id,
+                    content_hash=c.content_hash,
+                    embedding=c.embedding,
+                    created_at=c.created_at,
+                    updated_at=c.updated_at,
+                )
+            )
+        return result
+
+    def _resolve_scope(self, file_path: Path) -> tuple[str, Path | None]:
+        """Classify ``file_path`` into ``(scope, project_root)`` (ADR-0011 §2).
+
+        Path-based — the same ``classify_scope`` helper that the config
+        module uses. Wrapped on the engine so callers stay decoupled
+        from the config-module helper's signature; future enhancements
+        (e.g. memoization, additional registry sources) land here
+        without touching call sites.
+        """
+        return classify_scope(file_path, self._config.project_memory_dirs)
 
     _EXCLUDED_DIRS = frozenset(
         {
@@ -1069,7 +1121,7 @@ class IndexEngine:
     def _discover_files(self, directory: Path, recursive: bool) -> list[Path]:
         supported = self._registry.supported_extensions() & self._config.supported_extensions
         user_spec = _build_exclude_spec(self._config.exclude_patterns)
-        memory_dirs = self._config.memory_dirs
+        memory_dirs = self._config.all_index_roots()
 
         def is_excluded(fp: Path, rel: Path | None) -> bool:
             # User negation cannot override built-in exclusions.
