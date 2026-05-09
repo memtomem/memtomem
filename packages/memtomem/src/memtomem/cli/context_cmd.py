@@ -2066,16 +2066,26 @@ async def _memory_migrate_run(
     )
 
     async with cli_components() as comp:
-        # Project-tier resolution. For ``from`` project tiers the source
-        # is expected at ``<root>/.memtomem/memories[.local]/<file>``;
-        # we lift project_root from the source path. For ``to`` project
-        # tiers without that anchor (e.g. user → project_shared), fall
-        # back to ``_find_project_root()`` walking from cwd.
+        # Project-tier resolution. For ``from`` project tiers we walk
+        # up the source path looking for the ``.memtomem`` ancestor;
+        # the project root is its parent. Pre-PR-D round 12 the inference
+        # assumed a fixed depth of three (``<root>/.memtomem/memories[.local]/<file>``)
+        # which broke nested layouts like
+        # ``<root>/.memtomem/memories/notes/foo.md`` — those left
+        # ``project_root=None`` and the user-tier fallback only fires
+        # when ``to_scope != "user"``, so migrating a nested
+        # project_shared file BACK to user scope errored out before
+        # ``resolve_memory_scope_dir`` could even run. Walking the
+        # ancestry chain handles arbitrary subdirectory depth and any
+        # ``memories`` / ``memories.local`` sibling under
+        # ``.memtomem/`` (memtomem indexes recursively under those
+        # roots, so subdirectories are first-class).
         project_root: Path | None = None
         if from_scope != "user":
-            guessed = source.parent.parent.parent
-            if guessed.exists() and source.parent.parent.name == ".memtomem":
-                project_root = guessed
+            for ancestor in source.parents:
+                if ancestor.name == ".memtomem":
+                    project_root = ancestor.parent
+                    break
         if project_root is None and to_scope != "user":
             cwd_root = _find_project_root()
             if (cwd_root / ".git").exists() or (cwd_root / "pyproject.toml").exists():

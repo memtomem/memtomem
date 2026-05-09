@@ -140,6 +140,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **ADR-0011 PR-D review round 12 — `mm context memory-migrate`
+  handles nested project-tier sources.** The pre-fix project_root
+  inference assumed a fixed depth of three
+  (``<root>/.memtomem/memories[.local]/<file>``) and hardcoded
+  ``source.parent.parent.parent``. Files in subdirectories like
+  ``<root>/.memtomem/memories/notes/foo.md`` left
+  ``project_root=None``, AND the fallback to ``_find_project_root()``
+  only ran for ``to_scope != "user"`` — so migrating a nested
+  project_shared file BACK to user scope errored out at
+  ``resolve_memory_scope_dir`` before any FS / DB mutation. Valid
+  nested project-tier memories were unmigratable. Now walks the
+  source's parents looking for the ``.memtomem`` ancestor, supporting
+  arbitrary subdirectory depth.
 - **ADR-0011 PR-D review round 11 — engine cooperates with migrate
   sidecar lock.** Round 10's ``mm context memory-migrate`` lock was
   one-sided: only the migrate command itself acquired the sibling

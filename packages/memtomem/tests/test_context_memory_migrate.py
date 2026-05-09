@@ -361,6 +361,92 @@ async def test_engine_index_file_acquires_sidecar_lock_for_watcher_cooperation(
     )
 
 
+@pytest.mark.asyncio
+async def test_memory_migrate_nested_project_source_to_user_walks_dot_memtomem_ancestor(
+    bm25_only_components, monkeypatch, tmp_path
+):
+    """ADR-0011 PR-D review round 12 (P2) pin: a project-tier source
+    nested under a subdirectory (e.g. ``.memtomem/memories/notes/foo.md``)
+    must still infer the correct ``project_root`` when migrating to
+    user scope.
+
+    Pre-fix shape: the inference only handled depth=3
+    (``<root>/.memtomem/memories[.local]/<file>``) by hardcoding
+    ``source.parent.parent.parent``. For nested files, the check
+    ``source.parent.parent.name == ".memtomem"`` was False, so
+    ``project_root`` stayed None, AND the fallback to
+    ``_find_project_root()`` only ran for ``to_scope != "user"``.
+    Migrating a nested project_shared file BACK to user scope
+    therefore errored out at ``resolve_memory_scope_dir(from_scope,
+    None, ...)`` before any FS / DB mutation — valid project-tier
+    files in subdirectories were unmigratable.
+
+    Post-fix: walk up the source's parents looking for the
+    ``.memtomem`` ancestor; project_root is its parent.
+    """
+    from memtomem.cli.context_cmd import _memory_migrate_run
+
+    comp, _user_mem_dir = bm25_only_components
+    project_root = tmp_path / "proj_nested"
+    proj_shared = project_root / ".memtomem" / "memories"
+    nested_dir = proj_shared / "notes" / "subtopic"
+    nested_dir.mkdir(parents=True)
+    (project_root / ".git").mkdir()
+    comp.config.indexing.project_memory_dirs = [proj_shared]
+
+    nested_src = nested_dir / "rule.md"
+    nested_src.write_text("## Rule\n\nharmless body.\n", encoding="utf-8")
+
+    chunk = Chunk(
+        content="harmless body.",
+        metadata=ChunkMetadata(
+            source_file=nested_src,
+            scope="project_shared",
+            project_root=project_root,
+            start_line=3,
+            end_line=3,
+        ),
+        embedding=[0.1] * 1024,
+    )
+    await comp.storage.upsert_chunks([chunk])
+    pre_chunk_id = chunk.id
+
+    _patch_cli_components(monkeypatch, comp)
+    monkeypatch.chdir(project_root)
+
+    # User-tier base under tmp_path so the migrate has a real
+    # destination directory to land in.
+    user_tier = tmp_path / "user_home" / ".memtomem" / "memories"
+    user_tier.mkdir(parents=True)
+    comp.config.indexing.memory_dirs = [user_tier]
+
+    # Migrate from project_shared → user. Pre-fix: errors before
+    # mutation. Post-fix: lands in user tier with chunk-id stable.
+    await _memory_migrate_run(
+        nested_src.resolve(),
+        from_scope="project_shared",
+        to_scope="user",
+        apply_=True,
+        yes=True,
+        confirm_project_shared=False,
+    )
+
+    # Source no longer exists under the project tier.
+    assert not nested_src.exists(), "nested project source should have moved"
+    # Target lands at the user-tier root with the original filename
+    # (the migrate flattens to the user-tier root since user tier
+    # doesn't have the same directory shape).
+    user_target = user_tier / "rule.md"
+    assert user_target.exists(), f"expected user-tier file at {user_target}"
+
+    # SQL pin: chunk row preserved, scope flipped to user, project_root cleared.
+    refreshed = await comp.storage.get_chunk(pre_chunk_id)
+    assert refreshed is not None, "chunk row should still exist with same UUID"
+    assert refreshed.metadata.scope == "user"
+    assert refreshed.metadata.project_root is None
+    assert refreshed.metadata.source_file == user_target
+
+
 def test_memory_migrate_yes_alone_rejects_project_shared(monkeypatch, fake_project_layout):
     """ADR-0011 PR-D review round 10 (M2) pin: ``--yes`` alone must
     NOT satisfy Gate B for ``--to project_shared``. Mirrors the
