@@ -27,16 +27,15 @@ job of the future ``mm context settings-migrate`` subcommand (#872).
 
 from __future__ import annotations
 
+import json
 import logging
 import re
-from dataclasses import dataclass, field
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
 
 from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
-    _MALFORMED,
-    _safe_load_json,
     resolve_scope_path,
 )
 
@@ -73,7 +72,28 @@ class DuplicateTier:
 
     tier: str
     path: Path
-    entries: tuple[HookSignature, ...] = field(default_factory=tuple)
+    entries: tuple[HookSignature, ...]
+
+
+def _load_settings_dict(path: Path) -> dict | None:
+    """Read a settings.json file; return ``None`` on any read failure.
+
+    Self-contained JSON load so this module doesn't depend on
+    :func:`memtomem.context.settings._safe_load_json` /
+    :data:`memtomem.context.settings._MALFORMED` (private to that
+    module). Returns ``None`` when the file is missing, unreadable, or
+    not valid JSON, **or** when the parsed root is not a dict —
+    callers can treat all three the same way (skip this tier).
+    """
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    return raw
 
 
 def _normalize_matcher(value: object) -> str:
@@ -141,11 +161,9 @@ def load_canonical_signatures(project_root: Path) -> set[HookSignature]:
     responsibility to fix.
     """
     canonical_path = project_root / CANONICAL_SETTINGS_FILE
-    if not canonical_path.is_file():
-        return set()
-    raw = _safe_load_json(canonical_path)
-    if raw is _MALFORMED or not isinstance(raw, dict):
-        logger.debug("canonical settings at %s unreadable; skipping", canonical_path)
+    raw = _load_settings_dict(canonical_path)
+    if raw is None:
+        logger.debug("canonical settings at %s missing or unreadable", canonical_path)
         return set()
     hooks = raw.get("hooks", {})
     return set(_iter_signatures(hooks))
@@ -201,11 +219,9 @@ def detect_duplicate_tiers(
             # report the same real file twice.
             continue
         seen_paths.add(tier_resolved)
-        if not tier_path.is_file():
-            continue
-        raw = _safe_load_json(tier_path)
-        if raw is _MALFORMED or not isinstance(raw, dict):
-            logger.debug("tier %s at %s unreadable; skipping", scope, tier_path)
+        raw = _load_settings_dict(tier_path)
+        if raw is None:
+            logger.debug("tier %s at %s missing or unreadable; skipping", scope, tier_path)
             continue
         hooks = raw.get("hooks", {})
         matched = tuple(sig for sig in _iter_signatures(hooks) if sig in canonical)
