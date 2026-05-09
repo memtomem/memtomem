@@ -26,7 +26,8 @@ import pytest
 from click.testing import CliRunner
 
 from memtomem.cli import cli
-from .helpers import set_home
+
+from .helpers import _MEMTOMEM_ENV_VARS, set_home
 
 
 def _make_memory_dir(home: str) -> str:
@@ -119,7 +120,18 @@ class TestFreshNoopIndexSubprocess:
         mem_dir = _make_memory_dir(str(home))
 
         env = os.environ.copy()
+        # Strip developer ``MEMTOMEM_*`` overrides — ``HOME`` only
+        # isolates ``~/.memtomem/config.json`` reads, but
+        # pydantic-settings still applies env-var overrides from the
+        # parent shell (e.g. ``MEMTOMEM_INDEXING__MEMORY_DIRS``
+        # pointing at a real path) which would un-hermeticize the
+        # subprocess. Mirrors what ``helpers.isolate_memtomem_env``
+        # does for in-process tests, and matches the pattern applied
+        # to ``test_context_cli_subprocess_e2e.py`` in #875.
+        for var in _MEMTOMEM_ENV_VARS:
+            env.pop(var, None)
         env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)  # Windows ``Path.home()`` priority
         env["XDG_CONFIG_HOME"] = str(home / ".config")
 
         def _run(*args: str) -> subprocess.CompletedProcess:
