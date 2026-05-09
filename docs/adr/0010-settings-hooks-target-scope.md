@@ -1,6 +1,6 @@
 # ADR-0010: Settings hooks target scope (user / project shared / project local)
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-05-09
 **Context:** PR #866 surfaced that settings hooks alone target user-scope
 while every other context-gateway artifact targets project-scope. This
@@ -251,22 +251,24 @@ default change), not a re-litigation of the choice.
   is the established pattern — ADR-0007 and ADR-0008 both layer onto
   ADR-0001's policies without amending it.
 
-## RFC
+## Open questions for the implementation issues
 
-This ADR is **Proposed**, not Accepted. Reviewers are encouraged to
-push back on:
+Accepted directly without the RFC dwell period — the v0.1.x install
+base is small enough that staged-flip + conservative defaults already
+cover migration risk, and there is no meaningful pool of feedback to
+wait on. The points below stay live for the implementation issues to
+resolve in their own scopes; they do not block this ADR:
 
-- The v1 default choice (keep `user` vs. flip to `project_local` on
-  day one).
-- The staged-flip trigger criteria in §5 (in particular, whether the
-  three "shipped in a tagged release" events are the right gates).
-- The `project_shared` / `project_local` naming.
-- The deferral of the project-level config layer — should it land in
-  the same epic, or is per-invocation `--scope=…` enough until a real
-  workflow demands persistence?
-
-**Discussion period: ≥ 1 week** before promotion to Accepted, mirroring
-ADR-0009's cadence.
+- The `project_shared` vs. `project_local` naming. If a clearer pair
+  emerges during implementation, the rename can land alongside the
+  config-field PR before any user-visible release.
+- The final name of the scoped doctor subcommand (§4 lists three
+  candidates). Picked in the implementation issue, not here.
+- Whether the project-level config layer (`<project>/.memtomem/
+  config.json`) should land in the same epic as the
+  `hooks.target_scope` field or wait for its own ADR. Default posture
+  per §3 is "wait"; revisit if the first follow-up PR finds it
+  unavoidable.
 
 ## References
 
