@@ -26,6 +26,7 @@ import pytest
 from click.testing import CliRunner
 
 from memtomem.cli import cli
+
 from .helpers import set_home
 
 
@@ -41,7 +42,7 @@ class TestFreshNoopIndexInline:
     def test_init_index_search_via_cli_runner(self, tmp_path, monkeypatch):
         """``CliRunner`` round-trip: init → index → search must all succeed.
 
-        Two-layer isolation needed in-process:
+        Three-layer isolation needed in-process:
 
         1. ``HOME`` env override — caught by ``Path.home()`` calls that run
            inside command functions (e.g. ``init_cmd.py`` config writer).
@@ -50,8 +51,18 @@ class TestFreshNoopIndexInline:
            ``cli_components`` existence check pointing at the real home.
            Previously masked locally by a pre-existing real ``~/.memtomem/
            config.json`` but exposed in CI (no leaked state).
+        3. Strip ``MEMTOMEM_*`` env overrides — pydantic-settings binds
+           any ``MEMTOMEM_<SECTION>__<KEY>`` from the parent shell into
+           the freshly built config, so a developer's
+           ``MEMTOMEM_SEARCH__ENABLE_BM25=false`` (or any indexing/storage
+           override) leaks into the test and the search assertion below
+           comes back as ``0 BM25 + 0 dense → 0 results``. Filter on the
+           full prefix so a future config section is covered automatically.
         """
         from memtomem.cli import _bootstrap
+
+        for var in [k for k in os.environ if k.startswith("MEMTOMEM_")]:
+            monkeypatch.delenv(var, raising=False)
 
         home = tmp_path / "home"
         home.mkdir()
@@ -119,7 +130,21 @@ class TestFreshNoopIndexSubprocess:
         mem_dir = _make_memory_dir(str(home))
 
         env = os.environ.copy()
+        # Strip developer ``MEMTOMEM_*`` overrides — ``HOME`` only
+        # isolates ``~/.memtomem/config.json`` reads, but
+        # pydantic-settings still applies env-var overrides from the
+        # parent shell (e.g. ``MEMTOMEM_INDEXING__MEMORY_DIRS``
+        # pointing at a real memory dir, or
+        # ``MEMTOMEM_SEARCH__ENABLE_BM25=false`` disabling the BM25
+        # path the assertions below rely on) which would
+        # un-hermeticize the subprocess. Filter on the full
+        # ``MEMTOMEM_`` prefix rather than a hand-curated list so any
+        # new top-level config section's env binding is covered
+        # automatically.
+        for var in [k for k in env if k.startswith("MEMTOMEM_")]:
+            env.pop(var, None)
         env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)  # Windows ``Path.home()`` priority
         env["XDG_CONFIG_HOME"] = str(home / ".config")
 
         def _run(*args: str) -> subprocess.CompletedProcess:
