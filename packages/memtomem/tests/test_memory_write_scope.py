@@ -336,6 +336,130 @@ async def test_mem_batch_add_project_shared_writes_to_project_dir(
     assert str(project_root / ".memtomem" / "memories") in out
 
 
+# ---------------------------------------------------------------------------
+# mem_consolidate_apply cross-scope rejection
+# (PR-D review #4: chunk_ids is the truth source, not group["source"]
+#  — protects against re-index / source rename between consolidate and apply.
+#  PR-D review #5: skip is user-visible in the MCP return string,
+#  not just a logger.warning.)
+# ---------------------------------------------------------------------------
+
+
+async def _stage_consolidate_group(
+    comp,
+    chunks: list[Chunk],
+    group_id: int = 0,
+    namespace: str | None = None,
+    source_path: Path | None = None,
+):
+    """Insert ``chunks`` into storage and pre-stage a scratch group entry.
+
+    Used by the consolidation tests below — bypasses the
+    ``mem_consolidate`` discovery path so we can pin specific
+    scope mixes per group.
+    """
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    await comp.storage.upsert_chunks(chunks)
+    group = {
+        "group_id": group_id,
+        "source": str(source_path or chunks[0].metadata.source_file),
+        "chunk_count": len(chunks),
+        "total_tokens": sum(len(c.content.split()) for c in chunks),
+        "namespace": namespace,
+        "previews": [],
+        "chunk_ids": [str(c.id) for c in chunks],
+    }
+    expires = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(timespec="seconds")
+    await comp.storage.scratch_set(
+        "consolidation_groups",
+        json.dumps([group], default=str),
+        expires_at=expires,
+    )
+
+
+def _fake_chunk(scope: str, source_file: Path, content: str = "x") -> Chunk:
+    return Chunk(
+        content=content,
+        metadata=ChunkMetadata(
+            source_file=source_file,
+            scope=scope,
+            project_root=source_file.parent.parent.parent if scope != "user" else None,
+            start_line=1,
+            end_line=2,
+        ),
+        embedding=[0.1] * 1024,
+    )
+
+
+@pytest.mark.asyncio
+async def test_mem_consolidate_apply_mixed_scope_returns_skip_message(
+    bm25_only_components, tmp_path
+):
+    """Mixed user + project_shared chunks → user-visible skip with reason."""
+    from memtomem.server.tools import consolidation
+
+    comp, mem_dir = bm25_only_components
+    user_md = mem_dir / "user.md"
+    user_md.write_text("## hi\n\nuser content\n")
+    proj_root = tmp_path / "proj_mixed"
+    proj_dir = proj_root / ".memtomem" / "memories"
+    proj_dir.mkdir(parents=True)
+    proj_md = proj_dir / "proj.md"
+    proj_md.write_text("## hi\n\nproject content\n")
+
+    chunks = [
+        _fake_chunk("user", user_md, "user one"),
+        _fake_chunk("project_shared", proj_md, "shared one"),
+    ]
+    await _stage_consolidate_group(comp, chunks, group_id=0)
+
+    app = AppContext.from_components(comp)
+    ctx = StubCtx(app)
+    out = await consolidation.mem_consolidate_apply(
+        group_id=0,
+        summary="combined",
+        ctx=ctx,
+    )
+    assert "skipped group 0" in out
+    assert "mixed memory scopes" in out
+    # Both scope names present so the caller knows which tiers conflict.
+    assert "user" in out
+    assert "project_shared" in out
+
+
+@pytest.mark.asyncio
+async def test_mem_consolidate_apply_project_shared_requires_confirm(
+    bm25_only_components, tmp_path
+):
+    """All-project_shared group still rejects without explicit confirm."""
+    from memtomem.server.tools import consolidation
+
+    comp, _ = bm25_only_components
+    proj_root = tmp_path / "proj_share"
+    proj_dir = proj_root / ".memtomem" / "memories"
+    proj_dir.mkdir(parents=True)
+    src = proj_dir / "p.md"
+    src.write_text("## hi\n\nproject content\n")
+
+    chunks = [
+        _fake_chunk("project_shared", src, "shared one"),
+        _fake_chunk("project_shared", src, "shared two"),
+    ]
+    await _stage_consolidate_group(comp, chunks, group_id=0)
+
+    app = AppContext.from_components(comp)
+    ctx = StubCtx(app)
+    out = await consolidation.mem_consolidate_apply(
+        group_id=0,
+        summary="combined",
+        ctx=ctx,
+    )
+    assert "scope='project_shared'" in out
+    assert "confirm_project_shared=True" in out
+
+
 def test_validate_path_accepts_project_memory_dirs(tmp_path):
     """``_validate_path`` rejects absolute paths outside both base lists,
     accepts paths under either ``memory_dirs`` or ``project_memory_dirs``.

@@ -126,6 +126,7 @@ async def mem_consolidate_apply(
     group_id: int,
     summary: str,
     keep_originals: bool = True,
+    confirm_project_shared: bool = False,
     ctx: CtxType = None,
 ) -> str:
     """Apply a consolidation by creating a summary chunk for a group.
@@ -138,6 +139,15 @@ async def mem_consolidate_apply(
     in the filesystem and in git history, and the summary can be
     hand-edited like any other markdown entry.
 
+    ADR-0011 cross-scope rejection: source chunks are loaded by
+    ``chunk_ids`` (the truth source for the group, robust to source
+    rename / re-index between ``mem_consolidate`` and the apply call)
+    and their persisted ``metadata.scope`` is inspected. Mixed-scope
+    groups are skipped — the resulting summary cannot inherit a single
+    trust tier from heterogeneous sources. Project-shared sources
+    require ``confirm_project_shared=True`` so the summary write does
+    not silently land in a git-tracked tier.
+
     The policy-driven ``auto_consolidate`` flow deliberately takes a
     different path (virtual chunk in the ``archive:summary`` namespace with
     content-embedded source hash for idempotency). See
@@ -149,9 +159,15 @@ async def mem_consolidate_apply(
         keep_originals: Keep original chunks (default True). If False,
             originals are soft-decayed (``importance_score *= 0.5``, floor
             0.3); never a hard delete.
+        confirm_project_shared: Required when the group's source chunks
+            live in scope='project_shared'. The summary inherits the
+            same scope and lands in the project's git-tracked memory
+            directory; the explicit confirm prevents silent commits to
+            shared trust tier.
     """
     import json
     from datetime import datetime, timezone
+    from uuid import UUID
 
     from memtomem.tools.consolidation_engine import (
         DECAY_FACTOR,
@@ -178,6 +194,41 @@ async def mem_consolidate_apply(
     if group is None:
         return f"Error: group_id {group_id} not found. Run mem_consolidate again."
 
+    # ADR-0011 cross-scope check. Load source chunks by id (the
+    # truth source); a re-index between ``mem_consolidate`` and
+    # ``mem_consolidate_apply`` would change ``group["source"]`` chunk
+    # set but leave the persisted UUIDs stable.
+    raw_ids = group.get("chunk_ids") or []
+    try:
+        chunk_uuids = [UUID(cid) for cid in raw_ids]
+    except (ValueError, TypeError):
+        return f"Error: group {group_id} contains invalid chunk_ids."
+    chunks_map = await app.storage.get_chunks_batch(chunk_uuids) if chunk_uuids else {}
+    source_scopes = {(c.metadata.scope or "user") for c in chunks_map.values()}
+    if len(source_scopes) > 1:
+        # Mixed-scope group — refuse because the summary would otherwise
+        # silently inherit one tier and lose the others. Surfaced in
+        # the MCP return string (not just logger.warning) so callers
+        # see the rejection reason.
+        logger.warning(
+            "mem_consolidate_apply: skipping group %s — mixed memory scopes %s",
+            group_id,
+            sorted(source_scopes),
+        )
+        return (
+            f"Error: skipped group {group_id}: mixed memory scopes "
+            f"({sorted(source_scopes)}). Re-run mem_consolidate with a "
+            "narrower filter so each group spans a single scope tier."
+        )
+    derived_scope = next(iter(source_scopes), "user") if source_scopes else "user"
+    if derived_scope == "project_shared" and not confirm_project_shared:
+        return (
+            f"Error: group {group_id} sources live in scope='project_shared'. "
+            "The consolidated summary would land in the project's "
+            "git-tracked memory tier. Pass confirm_project_shared=True to "
+            "proceed."
+        )
+
     # Agent path is file-first: append to a daily notes file + index. We use
     # ``_mem_add_core`` (not the MCP ``mem_add`` tool) so we can grab the
     # IndexingStats and recover the new chunk id without the old
@@ -195,6 +246,8 @@ async def mem_consolidate_apply(
         namespace=group.get("namespace"),
         template=None,
         ctx=ctx,
+        scope=derived_scope,
+        confirm_project_shared=confirm_project_shared,
     )
 
     if stats is None or not stats.new_chunk_ids:
