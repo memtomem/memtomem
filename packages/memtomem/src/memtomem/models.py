@@ -91,6 +91,50 @@ class NamespaceFilter:
         return NamespaceFilter(namespaces=(value,))
 
 
+@dataclass(frozen=True, slots=True)
+class ScopeFilter:
+    """Filter for scope-axis (ADR-0011) queries.
+
+    Sibling of :class:`NamespaceFilter`. Supports exact match (single or
+    union) and glob patterns over the three scope values
+    (``user`` / ``project_shared`` / ``project_local``). Comma-separated
+    lists are normalised to the union form.
+
+    The "context boundary" — the always-on rule that out-of-project
+    searches see only ``user`` and in-project searches see ``user`` plus
+    the current project's project-tier rows — lives in the SQL helper
+    (:func:`memtomem.storage.sqlite_scope.scope_context_sql`), not in
+    the filter itself. This keeps the filter a pure user-intent value;
+    the helper is the place where caller intent meets project context.
+    """
+
+    scopes: tuple[str, ...] = ()
+    pattern: str | None = None
+
+    @staticmethod
+    def parse(value: str | list[str] | None) -> ScopeFilter | None:
+        """Parse a user-supplied scope argument into a filter.
+
+        ``None`` returns ``None`` (caller falls back to the always-on
+        context-boundary rule). ``"project_*"`` parses as a glob. Comma
+        list and bare exact match work the same as for namespaces. The
+        scope alphabet is small (3 values), so this parser deliberately
+        does NOT validate against ``user`` / ``project_shared`` /
+        ``project_local`` — invalid scope strings produce an empty
+        result set rather than an error, mirroring the namespace parser
+        which also accepts arbitrary strings.
+        """
+        if value is None:
+            return None
+        if isinstance(value, list):
+            return ScopeFilter(scopes=tuple(value))
+        if "*" in value:
+            return ScopeFilter(pattern=value)
+        if "," in value:
+            return ScopeFilter(scopes=tuple(v.strip() for v in value.split(",")))
+        return ScopeFilter(scopes=(value,))
+
+
 @dataclass(slots=True)
 class Chunk:
     content: str

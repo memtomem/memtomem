@@ -1,17 +1,27 @@
 """Search pipeline: BM25 + Dense + RRF fusion.
 
 Stage order (keyword path, fixed — see ``CLAUDE.md`` invariants):
-expansion → BM25 + dense (parallel) → RRF fusion → cross-encoder
-rerank (optional) → source/tag filter → validity filter → time-decay
-→ MMR → access-freq boost → importance boost → context-window
-expansion.
+expansion → BM25 + dense (parallel, with always-on scope-context filter
+per ADR-0011 §6) → RRF fusion → cross-encoder rerank (optional) →
+source/tag filter → validity filter → time-decay → MMR → access-freq
+boost → importance boost → context-window expansion.
+
+The scope-context filter is applied **at the BM25 + dense storage
+calls** (not as a post-fusion stage) because the SQL fragment is the
+single chokepoint that prevents cross-project leak; running it at the
+storage layer rather than after fusion guarantees no candidate ever
+reaches the pipeline that the project-context boundary would have
+excluded. Tie-break ordering ``project_local > project_shared > user``
+applies at the same site (storage ORDER BY) so same-relevance ranks
+surface freshest-context-first.
 
 Empty-query path (``query=""`` / ``None`` with ``tag_filter`` /
 ``source_filter`` set, #750) routes through ``_filter_only_search``
 and skips expansion / BM25 / dense / RRF / rerank / MMR — none of
 those have a meaningful signal without a query. Validity → decay →
 access → importance → context-window still apply so the rank
-reflects recency × access × importance.
+reflects recency × access × importance. The scope-context filter
+applies in this branch too via ``recall_chunks``.
 """
 
 from __future__ import annotations
@@ -19,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from fnmatch import fnmatch
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from dataclasses import dataclass
@@ -36,7 +47,7 @@ from memtomem.config import (
     SearchConfig,
     SessionSummaryConfig,
 )
-from memtomem.models import ContextInfo, NamespaceFilter, SearchResult
+from memtomem.models import ContextInfo, NamespaceFilter, ScopeFilter, SearchResult
 from memtomem.search.fusion import reciprocal_rank_fusion
 
 logger = logging.getLogger(__name__)
@@ -217,6 +228,8 @@ class SearchPipeline:
         tag_filter: str | None,
         namespace: str | list[str] | None,
         context_window: int | None = None,
+        scope: str | list[str] | None = None,
+        project_context_root: Path | None = None,
     ) -> str:
         import hashlib
 
@@ -226,6 +239,10 @@ class SearchPipeline:
             rerank_signal = f"on:{rcfg.oversample}:{rcfg.min_pool}:{rcfg.max_pool}"
         else:
             rerank_signal = "off"
+        # ADR-0011: scope + project_context_root MUST participate in the cache
+        # key. Two callers from different projects must not share a cache slot
+        # — the always-on context-boundary fragment differs.
+        scope_signal = f"{scope}|{project_context_root}"
         raw = (
             f"{query}|{top_k}|{source_filter}|{tag_filter}|{namespace}"
             f"|bm25={self._config.enable_bm25}:{self._config.bm25_candidates}"
@@ -235,6 +252,7 @@ class SearchPipeline:
             f"|mmr={self._mmr_config.enabled}:{self._mmr_config.lambda_param}"
             f"|ctx_win={ctx_win}"
             f"|rerank={rerank_signal}"
+            f"|scope={scope_signal}"
         )
         return hashlib.md5(raw.encode()).hexdigest()
 
@@ -431,6 +449,8 @@ class SearchPipeline:
         namespace: str | list[str] | None,
         context_window: int | None,
         as_of_unix: int | None,
+        scope_filter: ScopeFilter | None = None,
+        project_context_root: Path | None = None,
     ) -> tuple[list[SearchResult], RetrievalStats]:
         """Empty-query path (#750): enumerate by filter, skip retrievers.
 
@@ -469,6 +489,8 @@ class SearchPipeline:
             source_filter=source_filter,
             tag_filter=tag_filter,
             namespace_filter=ns_filter,
+            scope_filter=scope_filter,
+            project_context_root=project_context_root,
             limit=candidate_limit,
         )
 
@@ -541,6 +563,8 @@ class SearchPipeline:
         rrf_weights: list[float] | None = None,
         context_window: int | None = None,
         as_of_unix: int | None = None,
+        scope: str | list[str] | None = None,
+        project_context_root: Path | None = None,
     ) -> tuple[list[SearchResult], RetrievalStats]:
         # #750: tag/source-only branch — no keyword to rank by, so the
         # filter takes over as the primary selector. We enumerate via
@@ -548,6 +572,7 @@ class SearchPipeline:
         # entirely; post-filter stages (validity, decay, access,
         # importance, ctx-window) still apply so ranking reflects
         # recency × access × importance.
+        scope_filter = ScopeFilter.parse(scope)
         query = (query or "").strip()
         if not query:
             if not (tag_filter or source_filter):
@@ -559,6 +584,8 @@ class SearchPipeline:
                 namespace=namespace,
                 context_window=context_window,
                 as_of_unix=as_of_unix,
+                scope_filter=scope_filter,
+                project_context_root=project_context_root,
             )
 
         top_k = self._config.default_top_k if top_k is None else top_k
@@ -574,7 +601,14 @@ class SearchPipeline:
         # staleness near a date boundary, which the RFC's date-only
         # bounds already absorb.
         cache_key = self._cache_key(
-            query, top_k, source_filter, tag_filter, namespace, context_window
+            query,
+            top_k,
+            source_filter,
+            tag_filter,
+            namespace,
+            context_window,
+            scope=scope,
+            project_context_root=project_context_root,
         )
         version_at_start = self._cache_version
         ttl_snapshot = self._cache_ttl
@@ -648,14 +682,24 @@ class SearchPipeline:
 
         if use_bm25:
             bm25_task = asyncio.create_task(
-                self._storage.bm25_search(query, top_k=bm25_k, namespace_filter=ns_filter)
+                self._storage.bm25_search(
+                    query,
+                    top_k=bm25_k,
+                    namespace_filter=ns_filter,
+                    scope_filter=scope_filter,
+                    project_context_root=project_context_root,
+                )
             )
         dense_error: str | None = None
         if use_dense:
             try:
                 query_embedding = await self._embedder.embed_query(query)
                 dense_results = await self._storage.dense_search(
-                    query_embedding, top_k=dense_k, namespace_filter=ns_filter
+                    query_embedding,
+                    top_k=dense_k,
+                    namespace_filter=ns_filter,
+                    scope_filter=scope_filter,
+                    project_context_root=project_context_root,
                 )
             except Exception as exc:
                 logger.warning("Dense search unavailable: %s", exc)

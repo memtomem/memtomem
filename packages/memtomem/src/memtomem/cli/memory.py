@@ -128,6 +128,15 @@ async def _add(
 @click.option("--limit", "-l", default=20, help="Number of recent chunks")
 @click.option("--source-filter", "-s", default=None, help="Filter by source")
 @click.option("--namespace", "-n", default=None, help="Namespace filter")
+@click.option(
+    "--scope",
+    default=None,
+    help=(
+        "Scope filter (ADR-0011): single, comma list, or glob. "
+        "Default: in-project = user + this project's tiers; "
+        "out-of-project = user only."
+    ),
+)
 @click.option("--format", "fmt", type=click.Choice(["table", "json", "plain"]), default="table")
 def recall(
     since: str | None,
@@ -135,11 +144,12 @@ def recall(
     limit: int,
     source_filter: str | None,
     namespace: str | None,
+    scope: str | None,
     fmt: str,
 ) -> None:
     """Recall recent memory chunks."""
     try:
-        asyncio.run(_recall(since, until, limit, source_filter, namespace, fmt))
+        asyncio.run(_recall(since, until, limit, source_filter, namespace, scope, fmt))
     except click.ClickException:
         raise
     except Exception as e:
@@ -152,11 +162,13 @@ async def _recall(
     limit: int,
     source_filter: str | None,
     namespace: str | None,
+    scope: str | None,
     fmt: str,
 ) -> None:
     from memtomem.cli._bootstrap import cli_components
-    from memtomem.models import NamespaceFilter
+    from memtomem.models import NamespaceFilter, ScopeFilter
     from memtomem.server.helpers import _parse_recall_date
+    from memtomem.server.tools.search import _resolve_project_context_root
 
     since_dt = _parse_recall_date(since) if since else None
     until_dt = _parse_recall_date(until) if until else None
@@ -166,12 +178,16 @@ async def _recall(
             namespace,
             system_prefixes=tuple(comp.config.search.system_namespace_prefixes),
         )
+        scope_filter = ScopeFilter.parse(scope)
+        project_context_root = _resolve_project_context_root(comp)
         chunks = await comp.storage.recall_chunks(
             since=since_dt,
             until=until_dt,
             limit=limit,
             source_filter=source_filter,
             namespace_filter=ns_filter,
+            scope_filter=scope_filter,
+            project_context_root=project_context_root,
         )
 
     if fmt == "json":

@@ -219,7 +219,13 @@ class TestPipelineEndToEndRescue:
 
         storage = _async_storage()
 
-        async def bm25_dispatch(query: str, top_k: int, namespace_filter=None):
+        async def bm25_dispatch(
+            query: str,
+            top_k: int,
+            namespace_filter=None,
+            scope_filter=None,
+            project_context_root=None,
+        ):
             # Archive lookup pattern
             if namespace_filter is not None and getattr(namespace_filter, "pattern", None) == (
                 "archive:session:*"
@@ -272,7 +278,13 @@ class TestPipelineEndToEndRescue:
                 return "archive:session:*"
             return "ORGANIC"
 
-        async def bm25_dispatch(query: str, top_k: int, namespace_filter=None):
+        async def bm25_dispatch(
+            query: str,
+            top_k: int,
+            namespace_filter=None,
+            scope_filter=None,
+            project_context_root=None,
+        ):
             label = _label(namespace_filter)
             bm25_calls.append(label)
             if label == "archive:session:*":
@@ -298,7 +310,9 @@ class TestPipelineEndToEndRescue:
         storage = _async_storage()
         archive_lookup_called = False
 
-        async def bm25_dispatch(query, top_k, namespace_filter=None):
+        async def bm25_dispatch(
+            query, top_k, namespace_filter=None, scope_filter=None, project_context_root=None
+        ):
             nonlocal archive_lookup_called
             if getattr(namespace_filter, "pattern", None) == "archive:session:*":
                 archive_lookup_called = True

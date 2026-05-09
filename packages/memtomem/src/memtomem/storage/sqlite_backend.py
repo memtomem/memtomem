@@ -16,7 +16,14 @@ import sqlite_vec
 
 from memtomem.config import StorageConfig
 from memtomem.errors import StorageError
-from memtomem.models import Chunk, ChunkMetadata, ChunkType, NamespaceFilter, SearchResult
+from memtomem.models import (
+    Chunk,
+    ChunkMetadata,
+    ChunkType,
+    NamespaceFilter,
+    ScopeFilter,
+    SearchResult,
+)
 from memtomem.storage import fts_tokenizer as _fts
 from memtomem.storage.sqlite_helpers import (
     deserialize_f32,
@@ -28,6 +35,7 @@ from memtomem.storage.sqlite_helpers import (
 )
 from memtomem.storage.sqlite_meta import MetaManager
 from memtomem.storage.sqlite_namespace import NamespaceOps
+from memtomem.storage.sqlite_scope import scope_context_sql, scope_sort_priority_case
 from memtomem.storage.mixins import (
     AnalyticsMixin,
     EntityMixin,
@@ -737,6 +745,8 @@ class SqliteBackend(
         query: str,
         top_k: int = 20,
         namespace_filter: NamespaceFilter | None = None,
+        scope_filter: ScopeFilter | None = None,
+        project_context_root: Path | None = None,
     ) -> list[SearchResult]:
         db = self._get_read_db()
         try:
@@ -746,6 +756,15 @@ class SqliteBackend(
                 frag, ns_params = namespace_sql(namespace_filter)
                 if frag:
                     ns_clause = f"AND c.{frag}"
+
+            # ADR-0011 §6: scope-context filter is ALWAYS appended even
+            # when the caller does not pass an explicit scope_filter,
+            # so cross-project leak is impossible by construction.
+            scope_frag, scope_params = scope_context_sql(
+                scope_filter, project_context_root, column_alias="c."
+            )
+            scope_clause = f"AND ({scope_frag})"
+            tie_break = scope_sort_priority_case("c.")
 
             # ``c.*`` carries the full chunks-row layout into ``_row_to_chunk``
             # so all defensive guards (overlap, importance, validity) activate.
@@ -759,17 +778,17 @@ class SqliteBackend(
                        ORDER BY rank
                        LIMIT ?
                    ) sub
-                   JOIN chunks c ON c.rowid = sub.rowid {ns_clause}
-                   ORDER BY sub.rank"""
+                   JOIN chunks c ON c.rowid = sub.rowid {ns_clause} {scope_clause}
+                   ORDER BY sub.rank, {tie_break}"""
 
             # Try AND first (default FTS5 behaviour)
             fts_query = _fts.tokenize_for_fts(query, for_query=True)
-            rows = db.execute(sql, [fts_query, top_k] + ns_params).fetchall()
+            rows = db.execute(sql, [fts_query, top_k] + ns_params + scope_params).fetchall()
 
             # Fall back to OR if AND returns nothing and query has multiple terms
             if not rows and " " in query.strip():
                 fts_query_or = _fts.tokenize_for_fts(query, for_query=True, use_or=True)
-                rows = db.execute(sql, [fts_query_or, top_k] + ns_params).fetchall()
+                rows = db.execute(sql, [fts_query_or, top_k] + ns_params + scope_params).fetchall()
 
         except sqlite3.OperationalError:
             raise
@@ -789,6 +808,8 @@ class SqliteBackend(
         embedding: list[float],
         top_k: int = 20,
         namespace_filter: NamespaceFilter | None = None,
+        scope_filter: ScopeFilter | None = None,
+        project_context_root: Path | None = None,
     ) -> list[SearchResult]:
         # bm25-only mode (dimension=0) — no chunks_vec table to query. Return
         # early instead of raising OperationalError that the search pipeline
@@ -804,6 +825,13 @@ class SqliteBackend(
             if frag:
                 ns_clause = f"AND c.{frag}"
 
+        # ADR-0011 §6: always-on scope-context fragment.
+        scope_frag, scope_params = scope_context_sql(
+            scope_filter, project_context_root, column_alias="c."
+        )
+        scope_clause = f"AND ({scope_frag})"
+        tie_break = scope_sort_priority_case("c.")
+
         import sqlite3 as _sqlite3
 
         try:
@@ -816,9 +844,9 @@ class SqliteBackend(
                        ORDER BY distance
                        LIMIT ?
                    ) sub
-                   JOIN chunks c ON c.rowid = sub.rowid {ns_clause}
-                   ORDER BY sub.distance""",
-                [serialize_f32(embedding), top_k] + ns_params,
+                   JOIN chunks c ON c.rowid = sub.rowid {ns_clause} {scope_clause}
+                   ORDER BY sub.distance, {tie_break}""",
+                [serialize_f32(embedding), top_k] + ns_params + scope_params,
             ).fetchall()
         except _sqlite3.OperationalError as exc:
             if "Dimension mismatch" in str(exc):
@@ -995,6 +1023,8 @@ class SqliteBackend(
         limit: int = 20,
         namespace_filter: NamespaceFilter | None = None,
         tag_filter: str | None = None,
+        scope_filter: ScopeFilter | None = None,
+        project_context_root: Path | None = None,
     ) -> list[Chunk]:
         db = self._get_read_db()
         conditions: list[str] = []
@@ -1028,11 +1058,17 @@ class SqliteBackend(
                 )
                 params.extend(tags)
 
+        # ADR-0011 §6: always-on scope-context fragment.
+        scope_frag, scope_params = scope_context_sql(scope_filter, project_context_root)
+        conditions.append(scope_frag)
+        params.extend(scope_params)
+
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         params.append(limit)
 
         rows = db.execute(
-            f"SELECT * FROM chunks {where} ORDER BY created_at DESC LIMIT ?",
+            f"SELECT * FROM chunks {where} "
+            f"ORDER BY created_at DESC, {scope_sort_priority_case()} LIMIT ?",
             params,
         ).fetchall()
         return [self._row_to_chunk(row) for row in rows]
