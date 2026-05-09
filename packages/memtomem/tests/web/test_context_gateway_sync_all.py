@@ -1,7 +1,6 @@
 """Browser tests for the Sync All flow on the Context Gateway dashboard.
 
-Audit goal (``scripts/context-gateway-review-plan.md`` 갭 3 +
-``~/.claude/plans/context-gateyway-sync-frolicking-rain.md``): pin the
+Audit goal (``scripts/context-gateway-review-plan.md`` gap 3): pin the
 ``ctx-sync-all-btn`` handler's user-facing trust gates and severity routing
 so a regression in (a) confirm modal, (b) settings POST ``aborted`` envelope
 handling, or (c) ``loadCtxOverview`` reload after sync surfaces in CI.
