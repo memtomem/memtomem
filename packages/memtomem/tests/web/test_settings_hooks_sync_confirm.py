@@ -18,9 +18,10 @@ The handler's contract (``static/settings-hooks-watchdog.js:158-188``):
   ``GET /api/settings-sync`` and the badge is rendered from
   ``data.status`` of the GET response (line 36-43).
 
-Stub sequence: an initial GET returns ``out_of_sync``; the post-sync GET
-returns ``in_sync``. The POST itself just acks. ``page.route`` with a
-counter closure differentiates the two GETs.
+Stub sequence: GETs return ``out_of_sync`` until the POST flips a state
+flag, then return ``in_sync``. State-based switching (rather than a
+GET-call counter) is robust against cold mount firing
+``loadHooksSync`` more than once — see ``_stub_settings_sync`` below.
 """
 
 from __future__ import annotations
@@ -110,33 +111,46 @@ def _open_hooks_sync(page) -> None:
     )
 
 
-def _stub_settings_sync(page, get_payloads: list[dict], post_handler=None) -> dict:
+def _stub_settings_sync(
+    page, before_post: dict, after_post: dict | None = None, post_handler=None
+) -> dict:
     """Single handler for ``/api/settings-sync`` that dispatches by HTTP
-    method. The GET serves a sequence (cold-mount → post-sync reload);
-    the POST defers to ``post_handler`` (or a default 200 ack).
+    method. GETs return ``before_post`` until the test flips
+    ``state["posted"] = True`` (typically inside the POST handler), then
+    return ``after_post`` for every subsequent GET. The POST defers to
+    ``post_handler`` (or a default 200 ack).
 
-    A combined handler is cleaner than registering two routes on the same
-    URL pattern and relying on ``route.fallback()`` ordering — the
-    last-wins semantics make stacked registrations easy to misread.
-    Returns ``state`` so the caller can read GET call count.
+    Why state-based instead of a payload-list rollover: cold mount may
+    fire ``loadHooksSync`` more than once
+    (``test_context_gateway_overview`` counts ``initial_calls >= 1`` for
+    the overview equivalent). A second cold-mount GET serving
+    ``after_post`` would render the post-action DOM before the user
+    clicked Sync Now, hiding the regression the spec is meant to assert
+    against. State-based switching keys on the actual user action.
     """
-    state = {"n": 0}
+    state: dict = {"posted": False, "get_count": 0}
 
     def _handler(route):
         if route.request.method == "GET":
-            idx = min(state["n"], len(get_payloads) - 1)
-            state["n"] += 1
+            state["get_count"] += 1
+            payload = after_post if (state["posted"] and after_post is not None) else before_post
             route.fulfill(
                 status=200,
                 content_type="application/json",
-                body=json.dumps(get_payloads[idx]),
+                body=json.dumps(payload),
             )
             return
-        if route.request.method == "POST" and post_handler is not None:
-            post_handler(route)
+        if route.request.method == "POST":
+            state["posted"] = True
+            if post_handler is not None:
+                post_handler(route)
+                return
+            # Default POST ack — used when callers don't care about the
+            # POST body (e.g. the cancel spec where confirming never
+            # happens; the flag will not be flipped because Cancel does
+            # not POST).
+            route.fulfill(status=200, content_type="application/json", body="{}")
             return
-        # Default POST ack — used when callers don't care about the POST
-        # body (e.g. the cancel spec where confirming never happens).
         route.fulfill(status=200, content_type="application/json", body="{}")
 
     page.route("**/api/settings-sync", _handler)
@@ -159,11 +173,13 @@ def test_hooks_sync_cancel_fires_no_post(page, mm_web_url: str) -> None:
         post_calls.append(route.request.url)
         route.fulfill(status=200, content_type="application/json", body="{}")
 
-    get_state = _stub_settings_sync(page, [_OUT_OF_SYNC_GET], post_handler=_post)
+    # Cancel never POSTs, so the GET payload only ever needs to reflect the
+    # cold-mount ``out_of_sync`` state.
+    get_state = _stub_settings_sync(page, _OUT_OF_SYNC_GET, post_handler=_post)
 
     page.goto(mm_web_url)
     _open_hooks_sync(page)
-    assert get_state["n"] >= 1, "cold-mount GET must have fired"
+    assert get_state["get_count"] >= 1, "cold-mount GET must have fired"
 
     page.locator("#hooks-sync-btn").click()
     page.wait_for_function(
@@ -226,11 +242,13 @@ def test_hooks_sync_confirm_transitions_badge_to_in_sync(page, mm_web_url: str) 
             ),
         )
 
-    get_state = _stub_settings_sync(page, [_OUT_OF_SYNC_GET, _IN_SYNC_GET], post_handler=_post)
+    get_state = _stub_settings_sync(
+        page, _OUT_OF_SYNC_GET, after_post=_IN_SYNC_GET, post_handler=_post
+    )
 
     page.goto(mm_web_url)
     _open_hooks_sync(page)
-    initial_get_count = get_state["n"]
+    initial_get_count = get_state["get_count"]
 
     page.locator("#hooks-sync-btn").click()
     page.wait_for_function(
@@ -299,10 +317,10 @@ def test_hooks_sync_confirm_transitions_badge_to_in_sync(page, mm_web_url: str) 
         f"in_sync badge must not use badge-danger, got {badge_classes!r}"
     )
 
-    # Two GETs must have happened: cold-mount + post-sync reload. A
-    # regression that drops ``loadHooksSync()`` after the POST keeps
-    # ``get_state["n"] == initial_get_count``.
-    assert get_state["n"] >= initial_get_count + 1, (
+    # At least one post-sync GET must have happened (cold-mount + ≥1
+    # post-sync reload). A regression that drops ``loadHooksSync()`` after
+    # the POST keeps ``get_count == initial_get_count``.
+    assert get_state["get_count"] > initial_get_count, (
         f"Confirm must trigger a post-sync GET reload; before = "
-        f"{initial_get_count}, after = {get_state['n']}"
+        f"{initial_get_count}, after = {get_state['get_count']}"
     )
