@@ -1857,8 +1857,12 @@ def settings_migrate_cmd(
             click.echo("\nRun with --apply to execute.")
         return
 
-    # --apply path
-    if plan.is_noop:
+    # --apply path. ``is_noop`` is True both when there is nothing to
+    # migrate at all AND when every move is a conflict (applicable_moves
+    # is empty in both cases). Differentiate so all-conflict still exits
+    # 1 — the user has unresolved drift to fix.
+    applicable = plan.applicable_moves
+    if plan.is_noop and not conflicts:
         if json_out:
             payload["applied"] = True
             click.echo(json.dumps(payload, indent=2))
@@ -1866,10 +1870,12 @@ def settings_migrate_cmd(
 
     # Host-write confirmation: target outside the project root requires
     # the same gate as `mm context sync --include=settings` so a stray
-    # `--apply` from a worktree can't silently rewrite ~/.claude/.
+    # `--apply` from a worktree can't silently rewrite ~/.claude/. Only
+    # prompt when we'd actually write — an all-conflict plan touches
+    # nothing on disk.
     target_outside = not _is_within(plan.target_path, root)
     source_outside = not _is_within(plan.source_path, root)
-    if (target_outside or source_outside) and not yes:
+    if applicable and (target_outside or source_outside) and not yes:
         if not json_out:
             click.secho(
                 "settings-migrate will modify the following files outside this project:",
@@ -1927,7 +1933,13 @@ def settings_migrate_cmd(
                 fg="green",
             )
         if not result.target_written and not result.source_written:
-            click.echo("  (no changes written — source was already clean)")
+            if conflicts:
+                click.secho(
+                    "  (no changes written — conflicts must be resolved first)",
+                    fg="yellow",
+                )
+            else:
+                click.echo("  (no changes written — source was already clean)")
 
     if conflicts:
         # Conflicts left in source; user must resolve manually before

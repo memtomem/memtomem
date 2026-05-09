@@ -161,6 +161,71 @@ class TestPlanMigration:
         # The rule written to target uses the canonical (clean) command.
         assert plan.moves[0].rule_to_write_at_target["hooks"][0]["command"] == "mm session start"
 
+    def test_target_same_matcher_different_inner_is_conflict(self, project_root, fake_home):
+        """Codex review (PR #876): target has the canonical matcher but
+        carries a *different* inner hook (user-authored). Without this
+        check the planner would set ``conflict_at_target=False``,
+        ``apply`` would append the canonical rule alongside the user's,
+        and Claude Code would fire both same-matcher rules — the kind of
+        silent double-execution ADR-0010 §4 was written to prevent.
+        """
+        _write_canonical(project_root, _bundled_hook())
+        # Source has the canonical entry.
+        _write_settings(fake_home / ".claude" / "settings.json", _settings_doc(_bundled_hook()))
+        # Target has a user-authored hook under the same matcher.
+        _write_settings(
+            project_root / ".claude" / "settings.local.json",
+            _settings_doc({"PostToolUse": [_rule("Edit|Write", inners=[_inner("user-script")])]}),
+        )
+        plan = plan_migration(project_root, source_scope="user", target_scope="project_local")
+        assert len(plan.moves) == 1
+        move = plan.moves[0]
+        assert move.conflict_at_target is True
+        assert move.already_at_target is False
+        assert "Resolve manually" in move.conflict_reason
+        # ``is_noop`` is True (applicable_moves is empty) — the apply
+        # path must still exit 1 to surface the unresolved drift.
+        assert plan.is_noop is True
+        assert plan.applicable_moves == ()
+
+    def test_target_near_match_with_drifted_timeout_is_conflict(self, project_root, fake_home):
+        """Codex review (PR #876): target has the same matcher AND the
+        same command, but a different ``timeout`` (or any other inner
+        key drift). The signature-only check would mark this as
+        ``already_at_target=True`` and ``apply`` would clean source
+        without writing target — leaving target permanently drifted
+        from ``.memtomem/settings.json``. The planner must classify
+        this as a conflict instead.
+        """
+        _write_canonical(project_root, _bundled_hook())
+        _write_settings(fake_home / ".claude" / "settings.json", _settings_doc(_bundled_hook()))
+        # Target has the canonical command but a different timeout.
+        drifted_inner = {"type": "command", "command": "mm session start", "timeout": 99999}
+        _write_settings(
+            project_root / ".claude" / "settings.local.json",
+            _settings_doc({"PostToolUse": [{"matcher": "Edit|Write", "hooks": [drifted_inner]}]}),
+        )
+        plan = plan_migration(project_root, source_scope="user", target_scope="project_local")
+        assert len(plan.moves) == 1
+        move = plan.moves[0]
+        assert move.conflict_at_target is True
+        assert move.already_at_target is False
+
+    def test_target_byte_equal_canonical_inner_is_already_at_target(self, project_root, fake_home):
+        """Sanity: when target carries an inner byte-equal to canonical,
+        the planner classifies it as ``already_at_target`` (not
+        conflict) — apply skips target write, source clean-up still
+        runs."""
+        _write_canonical(project_root, _bundled_hook())
+        _write_settings(fake_home / ".claude" / "settings.json", _settings_doc(_bundled_hook()))
+        _write_settings(
+            project_root / ".claude" / "settings.local.json",
+            _settings_doc(_bundled_hook()),
+        )
+        plan = plan_migration(project_root, source_scope="user", target_scope="project_local")
+        assert plan.moves[0].already_at_target is True
+        assert plan.moves[0].conflict_at_target is False
+
 
 # ── Apply unit tests ───────────────────────────────────────────────
 
@@ -243,6 +308,40 @@ class TestApplyMigration:
         commands = [inner.get("command") for inner in post[0].get("hooks", [])]
         assert "user-script" in commands
         assert "mm session start" not in commands
+
+    def test_conflict_leaves_both_source_and_target_untouched(self, project_root, fake_home):
+        """Codex review (PR #876): when ``conflict_at_target=True`` for
+        every move, ``apply_migration`` must not write either tier.
+        Otherwise we either silently double-fire (target append) or
+        silently drift target away from canonical (source clean-up
+        without target update)."""
+        _write_canonical(project_root, _bundled_hook())
+        _write_settings(fake_home / ".claude" / "settings.json", _settings_doc(_bundled_hook()))
+        # Target has a user-authored hook under the same matcher.
+        target_doc = _settings_doc(
+            {"PostToolUse": [_rule("Edit|Write", inners=[_inner("user-script")])]}
+        )
+        _write_settings(project_root / ".claude" / "settings.local.json", target_doc)
+
+        plan = plan_migration(project_root, source_scope="user", target_scope="project_local")
+        result = apply_migration(plan)
+        assert result.target_written is False
+        assert result.source_written is False
+
+        # Source still has the canonical entry.
+        source_after = _read_settings(fake_home / ".claude" / "settings.json")
+        post = source_after["hooks"]["PostToolUse"]
+        assert any(
+            inner.get("command") == "mm session start"
+            for rule in post
+            for inner in rule.get("hooks", [])
+        )
+        # Target still carries only the user-authored entry.
+        target_after = _read_settings(project_root / ".claude" / "settings.local.json")
+        target_post = target_after["hooks"]["PostToolUse"]
+        assert len(target_post) == 1
+        target_cmds = [inner.get("command") for inner in target_post[0].get("hooks", [])]
+        assert target_cmds == ["user-script"]
 
     def test_other_top_level_keys_preserved(self, project_root, fake_home):
         """Source's non-hooks top-level keys (e.g. ``permissions``)
@@ -379,6 +478,25 @@ class TestSettingsMigrateCli:
         result = CliRunner().invoke(settings_migrate_cmd, ["--from=user", "--to=user"])
         assert result.exit_code == 1
         assert "must differ" in result.output
+
+    def test_apply_with_target_conflict_exits_one(self, project_root, fake_home, monkeypatch):
+        """Codex review (PR #876): all-conflict apply must exit 1
+        (previously the ``is_noop`` early-return swallowed it)."""
+        _write_canonical(project_root, _bundled_hook())
+        _write_settings(fake_home / ".claude" / "settings.json", _settings_doc(_bundled_hook()))
+        _write_settings(
+            project_root / ".claude" / "settings.local.json",
+            _settings_doc({"PostToolUse": [_rule("Edit|Write", inners=[_inner("user-script")])]}),
+        )
+        monkeypatch.chdir(project_root)
+        from memtomem.cli.context_cmd import settings_migrate_cmd
+
+        result = CliRunner().invoke(
+            settings_migrate_cmd,
+            ["--from=user", "--to=project_local", "--apply", "--yes"],
+        )
+        assert result.exit_code == 1, result.output
+        assert "conflict" in result.output.lower()
 
     def test_project_to_project_no_host_prompt(self, project_root, fake_home, monkeypatch):
         """project_shared → project_local stays in-tree, so no

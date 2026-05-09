@@ -48,12 +48,23 @@ class MigrateMove:
     ``rule_to_write_at_target`` is the canonical ``{matcher, hooks}``
     rule that :func:`apply_migration` appends to target; the canonical
     inner shape (not the source-tier variant) is used so target ends
-    up byte-clean. ``already_at_target`` is True when target already
-    holds an inner hook with the same ``command_shape`` under the
-    same ``(event, matcher)`` — apply skips the target write but
-    still cleans the source entry. ``conflict_at_target`` is reserved
-    for a future planner enhancement (different inner shape under the
-    same matcher); the v1 planner never sets it.
+    up byte-clean. The three states a move can land in are decided by
+    :func:`_classify_target` and surface here as a pair of booleans:
+
+    * ``already_at_target=True``, ``conflict_at_target=False`` —
+      target already carries an inner **byte-equal** to the canonical
+      one. Target write is skipped; source is still cleaned.
+    * ``already_at_target=False``, ``conflict_at_target=False`` —
+      target either has no rule under ``(event, matcher)`` or has one
+      that we can extend safely. Target gets the canonical rule
+      appended; source is cleaned.
+    * ``conflict_at_target=True`` — target has a rule under
+      ``(event, matcher)`` whose inner hooks differ from canonical
+      (different ``timeout``, extra keys, or a wholly different
+      command). ``apply`` does **not** write target (would create a
+      same-matcher duplicate) and does **not** clean source (would
+      leave target permanently drifted from the canonical contract).
+      ``conflict_reason`` carries the human-readable explanation.
     """
 
     signature: HookSignature
@@ -180,18 +191,54 @@ def _target_rule_lookup(
     return out
 
 
-def _target_already_has(
+def _classify_target(
     target_index: dict[tuple[str, str], list[dict]],
     sig: HookSignature,
-) -> bool:
-    """True if any target rule under ``(event, matcher)`` carries an
-    inner hook with the same normalized command_shape."""
-    for rule in target_index.get((sig.event, sig.matcher), []):
+    canonical_inner: dict,
+) -> tuple[str, str]:
+    """Classify how target relates to a canonical inner under ``(event, matcher)``.
+
+    Three outcomes drive the planner:
+
+    * ``("missing", "")`` — no rule under ``(event, matcher)`` exists at
+      target. Safe: the canonical rule will be appended.
+    * ``("exact", "")`` — a rule under ``(event, matcher)`` carries an
+      inner **byte-equal** to ``canonical_inner``. Safe: target write is
+      skipped, source can still be cleaned (the canonical entry is
+      already exactly there).
+    * ``("conflict", reason)`` — a rule under ``(event, matcher)``
+      exists but **no** inner is byte-equal to ``canonical_inner``.
+      Refuse: blindly appending the canonical rule would create a
+      second same-matcher rule (Claude Code merges them additively, so
+      both would fire); skipping target while cleaning source would
+      drift away from the canonical contract since target has a
+      different inner shape (e.g. different ``timeout`` or extra keys).
+      The user resolves manually.
+
+    The ``signature``-level command-shape match (used by the detector
+    for "is this a memtomem-managed entry" classification) is too loose
+    here: a same-command-but-different-timeout inner at target is a
+    drift we must surface, not silently treat as already-present.
+    """
+    rules = target_index.get((sig.event, sig.matcher), [])
+    if not rules:
+        return ("missing", "")
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
         for inner in rule.get("hooks", []):
-            if isinstance(inner, dict):
-                if _normalize_command(inner.get("command", "")) == sig.command_shape:
-                    return True
-    return False
+            if isinstance(inner, dict) and inner == canonical_inner:
+                return ("exact", "")
+    label = f"{sig.event}:{sig.matcher}" if sig.matcher else sig.event
+    return (
+        "conflict",
+        (
+            f"target tier already has a rule under '{label}' whose inner "
+            f"hooks differ from the canonical entry. Resolve manually "
+            f"(remove the conflicting rule, then re-run migrate) before "
+            f"the source can be cleaned."
+        ),
+    )
 
 
 def plan_migration(
@@ -282,13 +329,14 @@ def plan_migration(
                         "matcher": sig.matcher,
                         "hooks": [canonical_inner],
                     }
-                    already = _target_already_has(target_index, sig)
+                    status, reason = _classify_target(target_index, sig, canonical_inner)
                     moves.append(
                         MigrateMove(
                             signature=sig,
                             rule_to_write_at_target=rule_to_write,
-                            already_at_target=already,
-                            conflict_at_target=False,
+                            already_at_target=(status == "exact"),
+                            conflict_at_target=(status == "conflict"),
+                            conflict_reason=reason,
                         )
                     )
 
