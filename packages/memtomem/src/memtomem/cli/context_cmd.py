@@ -69,6 +69,11 @@ from memtomem.context.settings_doctor import (
     detect_duplicate_tiers,
     format_warning,
 )
+from memtomem.context.settings_migrate import (
+    apply_migration,
+    format_plan_summary,
+    plan_migration,
+)
 from memtomem.context.skills import (
     diff_skills,
     extract_skills_to_canonical,
@@ -1699,9 +1704,241 @@ def settings_doctor_cmd(json_out: bool, scope_flag: str | None) -> None:
                     label = f"{sig.event}:{sig.matcher}" if sig.matcher else sig.event
                     click.echo(f"      [{label}] {sig.command_shape}")
             click.echo(
-                "\nRun the future `mm context settings-migrate` subcommand "
-                "(#872) to move these into the active scope."
+                "\nRun `mm context settings-migrate --from=<scope> "
+                "--to=<scope>` to move these into the active scope."
             )
 
     if duplicates:
         raise click.exceptions.Exit(1)
+
+
+# ── settings-migrate (ADR-0010 §4) ─────────────────────────────────
+
+
+_MIGRATE_SCOPE_FROM = click.option(
+    "--from",
+    "from_scope",
+    type=click.Choice(list(get_args(TargetScope))),
+    required=True,
+    help="Source tier holding the canonical-matched hook entries.",
+)
+
+
+_MIGRATE_SCOPE_TO = click.option(
+    "--to",
+    "to_scope",
+    type=click.Choice(list(get_args(TargetScope))),
+    required=True,
+    help="Target tier the entries move into.",
+)
+
+
+def _print_migrate_plan_human(plan, *, scope: str) -> None:
+    """Render the settings-migrate dry-run / pre-apply preview."""
+    if not plan.moves:
+        click.echo(
+            f"  no memtomem-managed hook entries in {plan.source_scope} "
+            f"({plan.source_path}) match the canonical source — nothing to migrate."
+        )
+        return
+
+    click.echo(
+        f"\nWill migrate hook entries from {plan.source_scope} ({plan.source_path}) "
+        f"→ {plan.target_scope} ({plan.target_path}):"
+    )
+    for move in plan.moves:
+        sig = move.signature
+        label = f"{sig.event}:{sig.matcher}" if sig.matcher else sig.event
+        if move.conflict_at_target:
+            glyph, color = "✗", "red"
+            note = f"skip (conflict: {move.conflict_reason})"
+        elif move.already_at_target:
+            glyph, color = "·", "cyan"
+            note = "already at target — source clean-up only"
+        else:
+            glyph, color = "→", "green"
+            note = "move"
+        click.secho(f"  {glyph}  [{label}]  {sig.command_shape}  ({note})", fg=color)
+
+
+@context.command("settings-migrate")
+@_MIGRATE_SCOPE_FROM
+@_MIGRATE_SCOPE_TO
+@click.option(
+    "--apply",
+    "apply_",
+    is_flag=True,
+    default=False,
+    help="Execute the migration. Default is a dry-run preview.",
+)
+@click.option(
+    "--yes",
+    "-y",
+    "yes",
+    is_flag=True,
+    default=False,
+    help="Skip the confirmation prompt and the host-write prompt. Requires --apply.",
+)
+@click.option(
+    "--json",
+    "json_out",
+    is_flag=True,
+    default=False,
+    help="Emit a structured JSON result instead of human-readable output.",
+)
+def settings_migrate_cmd(
+    from_scope: str,
+    to_scope: str,
+    apply_: bool,
+    yes: bool,
+    json_out: bool,
+) -> None:
+    """Move memtomem-managed hook entries between settings tiers.
+
+    Implements ADR-0010 §4's third follow-up. Reads canonical-signature-
+    matched entries from the source tier (``--from``) and lands them in
+    the target tier (``--to``) using the canonical rule from
+    ``.memtomem/settings.json`` so the target ends up byte-clean rather
+    than carrying any source-side whitespace variant. Idempotent —
+    re-running after a clean migration finds nothing to move.
+
+    Default is a dry-run; pass ``--apply`` to mutate disk. The host-
+    write prompt mirrors ``mm context sync --include=settings``: writes
+    outside the project root require an interactive confirmation (or
+    ``--yes``).
+
+    Exit codes: ``0`` clean (or dry-run), ``1`` user declined the
+    confirmation prompt or the plan reported conflicts requiring manual
+    resolution.
+    """
+    root = _find_project_root()
+    try:
+        plan = plan_migration(root, source_scope=from_scope, target_scope=to_scope)
+    except ValueError as exc:
+        if json_out:
+            click.echo(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+        else:
+            click.secho(f"error: {exc}", fg="red", err=True)
+        raise click.exceptions.Exit(1)
+
+    conflicts = [m for m in plan.moves if m.conflict_at_target]
+    summary = format_plan_summary(plan)
+
+    if json_out:
+        payload = {
+            "status": "noop" if plan.is_noop else ("conflicts" if conflicts else "ok"),
+            "applied": False,
+            "from": plan.source_scope,
+            "to": plan.target_scope,
+            "source_path": str(plan.source_path),
+            "target_path": str(plan.target_path),
+            "summary": summary,
+            "moves": [
+                {
+                    "event": m.signature.event,
+                    "matcher": m.signature.matcher,
+                    "command_preview": m.signature.command_shape,
+                    "already_at_target": m.already_at_target,
+                    "conflict_at_target": m.conflict_at_target,
+                    "conflict_reason": m.conflict_reason,
+                }
+                for m in plan.moves
+            ],
+        }
+    else:
+        _print_migrate_plan_human(plan, scope=from_scope)
+        if plan.moves:
+            click.echo(f"\nSummary: {summary}")
+
+    if not apply_:
+        if json_out:
+            click.echo(json.dumps(payload, indent=2))
+        else:
+            click.echo("\nRun with --apply to execute.")
+        return
+
+    # --apply path
+    if plan.is_noop:
+        if json_out:
+            payload["applied"] = True
+            click.echo(json.dumps(payload, indent=2))
+        return
+
+    # Host-write confirmation: target outside the project root requires
+    # the same gate as `mm context sync --include=settings` so a stray
+    # `--apply` from a worktree can't silently rewrite ~/.claude/.
+    target_outside = not _is_within(plan.target_path, root)
+    source_outside = not _is_within(plan.source_path, root)
+    if (target_outside or source_outside) and not yes:
+        if not json_out:
+            click.secho(
+                "settings-migrate will modify the following files outside this project:",
+                fg="yellow",
+            )
+            if target_outside:
+                click.echo(f"  {plan.target_path}  (target)")
+            if source_outside:
+                click.echo(f"  {plan.source_path}  (source)")
+            if not click.confirm("Continue?", default=False):
+                click.echo("Aborted.")
+                raise click.exceptions.Exit(1)
+        else:
+            # JSON callers must be explicit — refuse without --yes.
+            click.echo(
+                json.dumps(
+                    {
+                        "status": "needs_confirmation",
+                        "applied": False,
+                        "from": plan.source_scope,
+                        "to": plan.target_scope,
+                        "source_path": str(plan.source_path),
+                        "target_path": str(plan.target_path),
+                        "host_writes": [
+                            str(p)
+                            for p, outside in [
+                                (plan.target_path, target_outside),
+                                (plan.source_path, source_outside),
+                            ]
+                            if outside
+                        ],
+                        "hint": "Re-run with --yes after confirming.",
+                    },
+                    indent=2,
+                )
+            )
+            raise click.exceptions.Exit(1)
+
+    result = apply_migration(plan)
+
+    if json_out:
+        payload["applied"] = True
+        payload["target_written"] = result.target_written
+        payload["source_written"] = result.source_written
+        click.echo(json.dumps(payload, indent=2))
+    else:
+        if result.target_written:
+            click.secho(
+                f"  ✓ wrote target {plan.target_path}",
+                fg="green",
+            )
+        if result.source_written:
+            click.secho(
+                f"  ✓ cleaned source {plan.source_path}",
+                fg="green",
+            )
+        if not result.target_written and not result.source_written:
+            click.echo("  (no changes written — source was already clean)")
+
+    if conflicts:
+        # Conflicts left in source; user must resolve manually before
+        # re-running migrate. Match `mm context migrate`'s exit-1 on
+        # any partial failure.
+        raise click.exceptions.Exit(1)
+
+
+def _is_within(path: Path, project_root: Path) -> bool:
+    """``True`` when *path* resolves under *project_root*. Symlink-safe."""
+    try:
+        return path.resolve(strict=False).is_relative_to(project_root.resolve(strict=False))
+    except (OSError, RuntimeError):
+        return False

@@ -21,8 +21,8 @@ A tier counts as a duplicate when it holds a hook entry whose
 signature appears in the project's canonical ``.memtomem/settings.json``
 **and** the tier is not the active scope.
 
-This module is detection-only. Migration of duplicate entries is the
-job of the future ``mm context settings-migrate`` subcommand (#872).
+This module is detection-only. Migration of duplicate entries lives
+in :mod:`memtomem.context.settings_migrate`.
 """
 
 from __future__ import annotations
@@ -240,16 +240,16 @@ def detect_duplicate_tiers(
 def format_warning(duplicate: DuplicateTier, *, active_scope: str) -> str:
     """Human-readable warning string for one duplicate tier.
 
-    Names the offending tier path and points at the future
-    ``mm context settings-migrate`` (#872) subcommand per ADR-0010 §4.
-    Used by both the CLI sync surface and any caller that wants the
-    same wording.
+    Names the offending tier path and points at the
+    ``mm context settings-migrate`` subcommand per ADR-0010 §4. Used by
+    both the CLI sync surface and any caller that wants the same
+    wording.
     """
     count = len(duplicate.entries)
     plural = "entry" if count == 1 else "entries"
     return (
         f"memtomem-managed hook {plural} ({count}) already exist in the "
-        f"{duplicate.tier} tier ({duplicate.path}); the future "
-        f"`mm context settings-migrate` subcommand will move them. "
-        f"Active scope: {active_scope}."
+        f"{duplicate.tier} tier ({duplicate.path}); run "
+        f"`mm context settings-migrate --from={duplicate.tier} "
+        f"--to={active_scope}` to move them. Active scope: {active_scope}."
     )
