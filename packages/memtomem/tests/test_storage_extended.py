@@ -526,6 +526,31 @@ class TestStorageExtended:
         rec = await storage.get_ai_summary(Path("/tmp/never-saved.md"))
         assert rec is None
 
+    async def test_delete_ai_summary_clears_existing_row(self, components):
+        """``delete_ai_summary`` is the targeted eviction primitive used
+        by the summarizer's stale-cache cleanup paths (zero-chunk
+        reindex, LLM-failure on a signature-drifted source). Confirm it
+        actually removes the row — without this, the privacy-leak
+        regressions surface only in higher-level integration tests."""
+        storage = components.storage
+        path = Path("/tmp/dropme.md")
+        await storage.set_ai_summary(path, "prose", "sig", "en")
+        assert await storage.get_ai_summary(path) is not None
+
+        await storage.delete_ai_summary(path)
+
+        assert await storage.get_ai_summary(path) is None
+
+    async def test_delete_ai_summary_missing_is_noop(self, components):
+        """Idempotent — deleting a missing row must not raise.
+        The summarizer calls this on best-effort paths where it can't
+        always know whether a cache row exists; a raise here would
+        propagate up and break ``maybe_update_ai_summary``'s fail-soft
+        guarantee for indexing."""
+        storage = components.storage
+        # No prior set — must not raise.
+        await storage.delete_ai_summary(Path("/tmp/never-saved.md"))
+
     async def test_get_all_ai_summaries_excludes_other_meta_keys(self, components):
         """Embedding-dimension and other non-summary rows in
         ``_memtomem_meta`` must not leak into the summary listing — pin

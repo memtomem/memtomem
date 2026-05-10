@@ -1395,6 +1395,24 @@ class SqliteBackend(
         }
         self._meta.set_meta(_ai_summary_key(source_file), json.dumps(record))
 
+    async def delete_ai_summary(self, source_file: Path) -> None:
+        """Drop the AI summary cache row for ``source_file``, if any.
+
+        Called from the indexing pipeline when a refresh determines the
+        cache is stale — e.g., a reindex produced zero chunks (source
+        emptied / became unchunkable), or the LLM failed on a content-
+        drifted source. Idempotent: deleting a missing row is a no-op.
+        Standalone from ``delete_by_source`` so the summarizer can clear
+        the prose without also tearing down the chunk rows.
+        """
+        db = self._get_db()
+        db.execute(
+            "DELETE FROM _memtomem_meta WHERE key=?",
+            (_ai_summary_key(source_file),),
+        )
+        if not self._in_transaction:
+            db.commit()
+
     async def get_all_ai_summaries(self) -> dict[str, dict]:
         """Return ``{normalised_path: record}`` for every cached AI summary.
 

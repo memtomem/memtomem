@@ -144,16 +144,37 @@ async def maybe_update_ai_summary(
     Skip rules — earliest applies first:
 
     1. ``auto_summarize=False`` or no LLM provider → no-op (feature off).
-    2. No chunks → no-op (deleted source, nothing to summarise).
+    2. No chunks → drop any stale cache and return (the source has been
+       emptied or became unchunkable; the previously summarised content
+       no longer exists, so leaving the row would expose prose for a
+       non-existent file).
     3. Content signature matches the cached record's signature → skip
        even when the cached record's language differs from the current
        ``summary_language``. The bulk-regenerate flow handles language
        drift; doing it here would spend LLM cost on every reindex
        whenever a user flips ``summary_language``.
 
-    Failures (LLM error, empty output) leave the cache untouched.
+    Failure modes:
+
+    * Empty body after truncation (content collapsed to whitespace):
+      same shape as zero chunks — drop any stale cache, no LLM call.
+    * LLM error or empty output on a *signature-drifted* source: drop
+      the stale cache so the Source-tab falls back to the heuristic
+      excerpt instead of presenting prose summarising prior content.
+      Without this clear, ``/api/sources`` would keep rendering the
+      old AI summary for the new chunk set, which reads as a silent
+      data-integrity bug to users.
     """
-    if not config.auto_summarize or llm is None or not chunks:
+    if not config.auto_summarize or llm is None:
+        return
+
+    if not chunks:
+        # Source emptied or became unchunkable. Engine's transactional
+        # ``delete_chunks`` defers cache cleanup to this hook (so a
+        # rewrite isn't spuriously cleared mid-transaction); a genuine
+        # "now empty" reindex hits this branch and clears the row.
+        if await storage.get_ai_summary(source_path) is not None:
+            await storage.delete_ai_summary(source_path)
         return
 
     signature = compute_source_signature(chunks)
@@ -163,10 +184,25 @@ async def maybe_update_ai_summary(
 
     body = _build_body(chunks, config.summary_max_input_chars)
     if not body.strip():
+        # Same shape as zero chunks — content drifted into emptiness.
+        # Cached prose (if any) describes content that no longer exists,
+        # so drop it.
+        if cached is not None:
+            await storage.delete_ai_summary(source_path)
         return
 
     summary = await _generate(llm, body, config.summary_language, config.summary_max_tokens)
     if summary is None:
+        # LLM error or empty output. ``cached`` here can only be either
+        # ``None`` (no prior cache → nothing to do) or a record whose
+        # signature mismatched the new chunks (we'd have early-returned
+        # otherwise). The mismatched record is, by definition, prose
+        # about the *prior* content — keeping it would let the Source
+        # tab render an out-of-date summary against the new chunk set.
+        # Clear it so the heuristic excerpt takes over until the next
+        # successful refresh.
+        if cached is not None:
+            await storage.delete_ai_summary(source_path)
         return
 
     await storage.set_ai_summary(

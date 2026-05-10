@@ -162,6 +162,7 @@ def app():
     storage.count_language_drift = AsyncMock(return_value=0)
     storage.list_language_drift_paths = AsyncMock(return_value=[])
     storage.set_ai_summary = AsyncMock()
+    storage.delete_ai_summary = AsyncMock()
     storage.get_ai_summary = AsyncMock(return_value=None)
     storage.list_sessions = AsyncMock(return_value=[])
     storage.get_session_events = AsyncMock(return_value=[])

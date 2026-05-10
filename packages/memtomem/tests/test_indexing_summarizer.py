@@ -145,13 +145,16 @@ async def test_no_llm_provider_skips_quietly():
 
 
 @pytest.mark.asyncio
-async def test_no_chunks_skips_silently():
-    """An empty chunk list (deleted source between scan and summarise)
-    must short-circuit before signature computation — ``set_ai_summary``
-    on no chunks would persist a phantom summary."""
+async def test_no_chunks_no_cached_summary_is_pure_noop():
+    """An empty chunk list with no prior cache → no LLM call, no
+    storage writes. Engine's ``maybe_update_ai_summary`` is invoked
+    after every reindex, including ones that produce zero chunks for
+    a previously-unseen file (e.g., empty markdown skipped by the
+    chunker); the helper must not pretend a summary exists."""
     storage = MagicMock()
-    storage.get_ai_summary = AsyncMock()
+    storage.get_ai_summary = AsyncMock(return_value=None)
     storage.set_ai_summary = AsyncMock()
+    storage.delete_ai_summary = AsyncMock()
     llm = MagicMock()
     llm.generate = AsyncMock()
     config = _make_config()
@@ -160,6 +163,38 @@ async def test_no_chunks_skips_silently():
 
     llm.generate.assert_not_called()
     storage.set_ai_summary.assert_not_called()
+    storage.delete_ai_summary.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_zero_chunk_reindex_clears_existing_cache():
+    """When a previously-summarised source is reindexed into zero chunks
+    (file emptied, became unchunkable, or hit an exclusion filter), the
+    cached prose is now derived from content that no longer exists. The
+    transactional ``delete_chunks`` cleanup is gated on
+    ``not _in_transaction`` to support the rewrite case, so this hook
+    is the *only* place that catches a genuine "now empty" reindex —
+    leaving the cache here exposes stale, source-derived prose via
+    ``/api/sources`` after the chunks themselves are gone (privacy +
+    correctness regression)."""
+    storage = MagicMock()
+    storage.get_ai_summary = AsyncMock(
+        return_value={"summary": "stale prose", "signature": "old-sig", "language": "en"}
+    )
+    storage.set_ai_summary = AsyncMock()
+    storage.delete_ai_summary = AsyncMock()
+    llm = MagicMock()
+    llm.generate = AsyncMock()
+    config = _make_config()
+
+    await maybe_update_ai_summary(storage, llm, Path("/tmp/x.md"), [], config)
+
+    # No regeneration attempted; cache cleared so the next /api/sources
+    # call falls back to the heuristic excerpt (which itself returns
+    # nothing for a zero-chunk source — exactly the right behaviour).
+    llm.generate.assert_not_called()
+    storage.set_ai_summary.assert_not_called()
+    storage.delete_ai_summary.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -210,13 +245,16 @@ async def test_signature_miss_calls_llm_and_writes_record():
 
 
 @pytest.mark.asyncio
-async def test_llm_exception_does_not_propagate():
-    """LLM raise → log + return; cache must NOT be written. Guarantees
-    indexing never blocks on summarisation."""
+async def test_llm_exception_does_not_propagate_when_no_cache():
+    """LLM raise + no prior cache → log + return; nothing persisted,
+    nothing deleted. Guarantees indexing never blocks on summarisation
+    and the absence of a cache row stays absent (no phantom delete
+    that would mask a real bug)."""
     chunks = [_make_chunk("body", "h1")]
     storage = MagicMock()
     storage.get_ai_summary = AsyncMock(return_value=None)
     storage.set_ai_summary = AsyncMock()
+    storage.delete_ai_summary = AsyncMock()
     llm = MagicMock()
     llm.generate = AsyncMock(side_effect=RuntimeError("Ollama down"))
     config = _make_config()
@@ -225,17 +263,52 @@ async def test_llm_exception_does_not_propagate():
     await maybe_update_ai_summary(storage, llm, Path("/tmp/x.md"), chunks, config)
 
     storage.set_ai_summary.assert_not_called()
+    storage.delete_ai_summary.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_empty_llm_output_is_treated_as_failure():
-    """LLM returns whitespace / empty → no cache write. The fallback
-    heuristic still renders, so an under-trained model can't poison the
-    cache with a blank entry."""
-    chunks = [_make_chunk("body", "h1")]
+async def test_llm_failure_clears_stale_cache_on_signature_drift():
+    """Cached signature mismatches the new chunks (content drifted) and
+    the LLM call fails → the stale prose must be cleared so
+    ``/api/sources`` falls back to the heuristic excerpt instead of
+    rendering an out-of-date AI summary against the new chunk set.
+
+    This is the privacy/correctness path: pre-fix, a user editing a
+    file while the LLM provider was down would still see the *prior*
+    AI summary on the Source tab — labelled with the ✨ marker — even
+    though it no longer described the file's contents."""
+    chunks = [_make_chunk("new body", "hash-new")]
     storage = MagicMock()
-    storage.get_ai_summary = AsyncMock(return_value=None)
+    storage.get_ai_summary = AsyncMock(
+        return_value={"summary": "old prose", "signature": "hash-old", "language": "en"}
+    )
     storage.set_ai_summary = AsyncMock()
+    storage.delete_ai_summary = AsyncMock()
+    llm = MagicMock()
+    llm.generate = AsyncMock(side_effect=RuntimeError("Ollama down"))
+    config = _make_config()
+
+    await maybe_update_ai_summary(storage, llm, Path("/tmp/x.md"), chunks, config)
+
+    storage.set_ai_summary.assert_not_called()
+    # Stale prose must be evicted — that's the load-bearing assertion.
+    storage.delete_ai_summary.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_empty_llm_output_clears_stale_cache_on_signature_drift():
+    """Symmetric to the exception path: an LLM that returns
+    whitespace/empty on a signature-drifted source must also evict the
+    stale cache. Different upstream failure mode (model returned
+    nothing instead of raising), same downstream contract — heuristic
+    fallback rather than mismatched prose."""
+    chunks = [_make_chunk("new body", "hash-new")]
+    storage = MagicMock()
+    storage.get_ai_summary = AsyncMock(
+        return_value={"summary": "old prose", "signature": "hash-old", "language": "en"}
+    )
+    storage.set_ai_summary = AsyncMock()
+    storage.delete_ai_summary = AsyncMock()
     llm = MagicMock()
     llm.generate = AsyncMock(return_value="   \n\n  ")
     config = _make_config()
@@ -243,6 +316,28 @@ async def test_empty_llm_output_is_treated_as_failure():
     await maybe_update_ai_summary(storage, llm, Path("/tmp/x.md"), chunks, config)
 
     storage.set_ai_summary.assert_not_called()
+    storage.delete_ai_summary.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_llm_failure_no_cache_does_not_call_delete():
+    """When the LLM fails and no prior cache exists, we must NOT issue
+    a defensive ``delete_ai_summary`` — that path takes a write lock
+    on the SQLite file for nothing on every failure during the initial
+    summarisation pass (large corpora hitting a transient Ollama). Pin
+    the gate explicitly."""
+    chunks = [_make_chunk("body", "h1")]
+    storage = MagicMock()
+    storage.get_ai_summary = AsyncMock(return_value=None)
+    storage.set_ai_summary = AsyncMock()
+    storage.delete_ai_summary = AsyncMock()
+    llm = MagicMock()
+    llm.generate = AsyncMock(side_effect=RuntimeError("Ollama down"))
+    config = _make_config()
+
+    await maybe_update_ai_summary(storage, llm, Path("/tmp/x.md"), chunks, config)
+
+    storage.delete_ai_summary.assert_not_called()
 
 
 # ---- regenerate_for_paths ---------------------------------------------------
