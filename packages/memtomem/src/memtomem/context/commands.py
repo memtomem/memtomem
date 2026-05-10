@@ -45,6 +45,10 @@ from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, Layout, validate_name
 from memtomem.context._runtime_targets import runtime_artifact_names, runtime_fanout_root
+from memtomem.context.privacy_scan import (
+    raise_or_collect,
+    scan_artifact_tree,
+)
 from memtomem.context.agents import (
     _FRONT_MATTER_RE,
     _parse_flat_yaml,
@@ -429,6 +433,52 @@ def generate_all_commands(
                     )
                 )
                 continue
+            # ADR-0011 PR-E3 Gate A — scan canonical command bytes BEFORE
+            # render. Mirrors the agents.py flow; project_shared raises,
+            # user/project_local skip-warns. See agents.py block-comment
+            # for the strict=true ordering rationale.
+            scan = scan_artifact_tree(
+                cmd_path,
+                surface="cli_context_sync",
+                scope=scope,
+                project_root=project_root,
+                on_blocked="fail_fast",
+            )
+            if scan.blocked:
+                code, reason = raise_or_collect(
+                    scan.blocked[0],
+                    scope=scope,
+                    kind="command",
+                    artifact_name=cmd.name,
+                )
+                skipped.append((cmd.name, reason, code))
+                continue
+            # Resolve per-vendor override and scan its bytes — override
+            # replaces canonical at write time so unscanned-override
+            # would silently bypass Gate A.
+            vendor = GENERATOR_VENDOR.get(target)
+            override_path: Path | None = None
+            if vendor is not None:
+                override_path = _override.resolve(
+                    project_root, "commands", cmd.name, vendor, scope=scope
+                )
+                if override_path is not None:
+                    scan_override = scan_artifact_tree(
+                        override_path,
+                        surface="cli_context_sync",
+                        scope=scope,
+                        project_root=project_root,
+                        on_blocked="fail_fast",
+                    )
+                    if scan_override.blocked:
+                        code, reason = raise_or_collect(
+                            scan_override.blocked[0],
+                            scope=scope,
+                            kind="command",
+                            artifact_name=cmd.name,
+                        )
+                        skipped.append((cmd.name, reason, code))
+                        continue
             content, dropped_fields = gen.render(cmd)
             if dropped_fields:
                 if effective_drop == "error":
@@ -438,19 +488,9 @@ def generate_all_commands(
                 if effective_drop == "warn":
                     logger.warning("%s dropped %s from '%s'", target, dropped_fields, cmd.name)
             atomic_write_text(out_path, content)
-            # ADR-0008 Invariant 4: per-vendor override replaces the runtime file.
-            # Race: see PR-D' for the unified write path that closes the
-            # canonical→override window. Same pattern as skills.py:213-220.
-            vendor = GENERATOR_VENDOR.get(target)
-            if vendor is not None:
-                # ADR-0011 PR-E3: thread the resolved sync ``scope`` through
-                # to override resolution (same-tier-only lookup; see
-                # agents.py for the mirrored rationale).
-                override_path = _override.resolve(
-                    project_root, "commands", cmd.name, vendor, scope=scope
-                )
-                if override_path is not None:
-                    atomic_write_bytes(out_path, override_path.read_bytes())
+            # Both canonical and override bytes have passed Gate A above.
+            if override_path is not None:
+                atomic_write_bytes(out_path, override_path.read_bytes())
             generated.append((target, out_path))
             if dropped_fields:
                 dropped.append((target, cmd.name, dropped_fields))

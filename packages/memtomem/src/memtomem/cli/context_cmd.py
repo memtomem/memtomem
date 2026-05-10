@@ -190,15 +190,28 @@ def _print_skills_init(
         click.secho(f"    skipped {name}: {reason}", fg=color)
 
 
-def _print_skills_generate(root: Path) -> None:
-    result = generate_all_skills(root)
+def _print_skills_generate(
+    root: Path,
+    *,
+    scope: TargetScope = "project_shared",
+) -> None:
+    result = generate_all_skills(root, scope=scope)
     if result.generated:
         click.secho(f"  Skills fan-out: {len(result.generated)}", fg="green")
         for runtime, path in result.generated:
             rel = path.relative_to(root) if path.is_relative_to(root) else path
             click.echo(f"    {runtime:15s}  {rel}")
-    for runtime, reason, _code in result.skipped:
-        click.secho(f"  skipped {runtime}: {reason}", fg="yellow")
+    for runtime, reason, code in result.skipped:
+        color = (
+            "red"
+            if code
+            in (
+                skip_codes.PRIVACY_BLOCKED,
+                skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED,
+            )
+            else "yellow"
+        )
+        click.secho(f"  skipped {runtime}: {reason}", fg=color)
 
 
 def _print_skills_diff(root: Path) -> None:
@@ -262,9 +275,15 @@ def _print_agents_init(
         click.secho(f"    skipped {name}: {reason}", fg=color)
 
 
-def _print_agents_generate(root: Path, strict: bool, on_drop: str = "ignore") -> None:
+def _print_agents_generate(
+    root: Path,
+    strict: bool,
+    on_drop: str = "ignore",
+    *,
+    scope: TargetScope = "project_shared",
+) -> None:
     try:
-        result = generate_all_agents(root, strict=strict, on_drop=on_drop)
+        result = generate_all_agents(root, strict=strict, on_drop=on_drop, scope=scope)
     except StrictDropError as exc:
         click.secho(f"  [strict] {exc}", fg="red")
         raise click.Abort()
@@ -277,8 +296,17 @@ def _print_agents_generate(root: Path, strict: bool, on_drop: str = "ignore") ->
             except ValueError:
                 rel = path
             click.echo(f"    {runtime:15s}  {rel}")
-    for runtime, reason, _code in result.skipped:
-        click.secho(f"  skipped {runtime}: {reason}", fg="yellow")
+    for runtime, reason, code in result.skipped:
+        color = (
+            "red"
+            if code
+            in (
+                skip_codes.PRIVACY_BLOCKED,
+                skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED,
+            )
+            else "yellow"
+        )
+        click.secho(f"  skipped {runtime}: {reason}", fg=color)
     for runtime, agent_name, dropped in result.dropped:
         click.secho(
             f"  {runtime} dropped {dropped} from '{agent_name}'",
@@ -348,9 +376,15 @@ def _print_commands_init(
         click.secho(f"    skipped {name}: {reason}", fg=color)
 
 
-def _print_commands_generate(root: Path, strict: bool, on_drop: str = "ignore") -> None:
+def _print_commands_generate(
+    root: Path,
+    strict: bool,
+    on_drop: str = "ignore",
+    *,
+    scope: TargetScope = "project_shared",
+) -> None:
     try:
-        result = generate_all_commands(root, strict=strict, on_drop=on_drop)
+        result = generate_all_commands(root, strict=strict, on_drop=on_drop, scope=scope)
     except CommandStrictDropError as exc:
         click.secho(f"  [strict] {exc}", fg="red")
         raise click.Abort() from exc
@@ -363,8 +397,17 @@ def _print_commands_generate(root: Path, strict: bool, on_drop: str = "ignore") 
             except ValueError:
                 rel = path
             click.echo(f"    {runtime:17s}  {rel}")
-    for runtime, reason, _code in result.skipped:
-        click.secho(f"  skipped {runtime}: {reason}", fg="yellow")
+    for runtime, reason, code in result.skipped:
+        color = (
+            "red"
+            if code
+            in (
+                skip_codes.PRIVACY_BLOCKED,
+                skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED,
+            )
+            else "yellow"
+        )
+        click.secho(f"  skipped {runtime}: {reason}", fg=color)
     for runtime, cmd_name, dropped in result.dropped:
         click.secho(
             f"  {runtime} dropped {dropped} from '{cmd_name}'",
@@ -900,20 +943,31 @@ def generate_cmd(
     else:
         click.secho(f"  ({CONTEXT_FILENAME} missing — skipping project memory)", fg="yellow")
 
+    # ADR-0011 PR-E3: resolve the canonical-artifact scope once and thread
+    # it through the three include helpers. Defaults to ``project_shared``
+    # via ``_resolve_artifact_cli_scope`` (NOT ``_resolve_cli_scope``,
+    # which leaks ``cfg.hooks.target_scope`` into the artifact axis —
+    # ADR-0011 PR-E1 Codex review trip-wire).
+    artifact_scope = _resolve_artifact_cli_scope(scope_flag)
+
     if "skills" in inc:
         click.echo("")
-        _print_skills_generate(root)
+        _print_skills_generate(root, scope=artifact_scope)
 
     if "agents" in inc:
         click.echo("")
-        _print_agents_generate(root, strict=strict, on_drop=on_drop)
+        _print_agents_generate(root, strict=strict, on_drop=on_drop, scope=artifact_scope)
 
     if "commands" in inc:
         click.echo("")
-        _print_commands_generate(root, strict=strict, on_drop=on_drop)
+        _print_commands_generate(root, strict=strict, on_drop=on_drop, scope=artifact_scope)
 
     if "settings" in inc:
         click.echo("")
+        # Settings has its own (separate from artifact) scope axis — see
+        # ADR-0010. ``_resolve_cli_scope`` consults ``cfg.hooks.target_scope``;
+        # this is intentional for settings and intentionally NOT used for
+        # artifacts above.
         scope = _resolve_cli_scope(scope_flag)
         if _confirm_settings_host_writes(root, scope=scope, yes=yes):
             _print_settings_generate(root, scope=scope, allow_host_writes=True)
@@ -1033,20 +1087,31 @@ def sync_cmd(
     else:
         click.secho(f"  ({CONTEXT_FILENAME} missing — skipping project memory)", fg="yellow")
 
+    # ADR-0011 PR-E3: resolve the canonical-artifact scope once and thread
+    # it through the three include helpers. Defaults to ``project_shared``
+    # via ``_resolve_artifact_cli_scope`` (NOT ``_resolve_cli_scope``,
+    # which leaks ``cfg.hooks.target_scope`` into the artifact axis —
+    # ADR-0011 PR-E1 Codex review trip-wire).
+    artifact_scope = _resolve_artifact_cli_scope(scope_flag)
+
     if "skills" in inc:
         click.echo("")
-        _print_skills_generate(root)
+        _print_skills_generate(root, scope=artifact_scope)
 
     if "agents" in inc:
         click.echo("")
-        _print_agents_generate(root, strict=strict, on_drop=on_drop)
+        _print_agents_generate(root, strict=strict, on_drop=on_drop, scope=artifact_scope)
 
     if "commands" in inc:
         click.echo("")
-        _print_commands_generate(root, strict=strict, on_drop=on_drop)
+        _print_commands_generate(root, strict=strict, on_drop=on_drop, scope=artifact_scope)
 
     if "settings" in inc:
         click.echo("")
+        # Settings has its own (separate from artifact) scope axis — see
+        # ADR-0010. ``_resolve_cli_scope`` consults ``cfg.hooks.target_scope``;
+        # this is intentional for settings and intentionally NOT used for
+        # artifacts above.
         scope = _resolve_cli_scope(scope_flag)
         if _confirm_settings_host_writes(root, scope=scope, yes=yes):
             _print_settings_generate(root, scope=scope, allow_host_writes=True)

@@ -19,6 +19,8 @@ frontmatter rewriting without touching callers.
 from __future__ import annotations
 
 import logging
+import os
+import secrets
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +33,10 @@ from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, validate_name
 from memtomem.context._runtime_targets import runtime_artifact_names, runtime_fanout_root
+from memtomem.context.privacy_scan import (
+    raise_or_collect,
+    scan_artifact_tree,
+)
 from memtomem.context.scope_resolver import canonical_artifact_dir
 
 logger = logging.getLogger(__name__)
@@ -178,37 +184,83 @@ def list_canonical_skills(
 # ── Copy primitive ────────────────────────────────────────────────────
 
 
-def copy_skill(src: Path, dst: Path) -> None:
-    """Mirror a skill directory from ``src`` to ``dst``.
+def _stage_skill(src: Path, dst: Path) -> Path:
+    """Mirror ``src`` into a same-fs staging directory under ``dst.parent``.
 
-    ``src`` MUST contain ``SKILL.md``. If ``dst`` already exists and looks like
-    a skill directory (has its own ``SKILL.md``) it is replaced wholesale so
-    that removed files on the source side propagate. If ``dst`` exists but
-    does NOT look like a skill directory, the copy aborts with ``IsADirectoryError``
-    to avoid clobbering something the user put there by hand.
+    Picks ``dst.parent / .staging-<dst.name>-<pid>-<rand>.tmp`` so the
+    eventual promote-step (:func:`_promote_staging`) is a same-fs atomic
+    rename via :func:`os.replace`. Caller is responsible for cleanup on
+    failure (either by promoting into ``dst`` or by ``shutil.rmtree``-ing
+    the staging path).
 
-    Individual files are written atomically via
-    :func:`memtomem.context._atomic.atomic_write_bytes` so a crash mid-copy
-    leaves each file either fully-written or absent, never truncated.
-    Directory-level atomicity (the rmtree+mkdir window) is out of scope here.
+    ``src`` MUST contain ``SKILL.md``. ``dst.parent`` is created if it
+    does not yet exist.
     """
     manifest = src / SKILL_MANIFEST
     if not manifest.is_file():
         raise FileNotFoundError(f"source skill missing {SKILL_MANIFEST}: {src}")
 
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    suffix = f"{os.getpid()}-{secrets.token_hex(3)}"
+    staging = dst.parent / f".staging-{dst.name}-{suffix}.tmp"
+    if staging.exists():
+        # Crashed prior run — collision is unlikely (pid+rand) but if it
+        # happens, the leftover tree is from us; safe to remove.
+        shutil.rmtree(staging)
+    staging.mkdir()
+    copy_tree_atomic(src, staging)
+    return staging
+
+
+def _promote_staging(staging: Path, dst: Path) -> None:
+    """Atomic-replace ``dst`` with ``staging`` (same-fs precondition).
+
+    Cross-platform via :func:`os.replace`. When ``dst`` already exists,
+    moves it aside first then renames staging into place; rolls back on
+    any failure during the swap window (``feedback_stage_before_mutation_revert.md``).
+    """
     if dst.exists():
         if not dst.is_dir():
             raise NotADirectoryError(f"target exists and is not a directory: {dst}")
         if not (dst / SKILL_MANIFEST).is_file() and any(dst.iterdir()):
-            # Non-empty directory that is NOT a skill — refuse to overwrite.
             raise IsADirectoryError(
                 f"refusing to overwrite non-skill directory: {dst} "
                 f"(add a SKILL.md or remove the directory first)"
             )
-        shutil.rmtree(dst)
+        # Move-aside name uses the same {pid}-{rand} discipline as staging
+        # so concurrent runs (different pids) cannot collide.
+        suffix = f"{os.getpid()}-{secrets.token_hex(3)}"
+        old = dst.parent / f".old-{dst.name}-{suffix}.tmp"
+        os.replace(dst, old)
+        try:
+            os.replace(staging, dst)
+        except BaseException:
+            # Roll back: put the original tree back.
+            os.replace(old, dst)
+            raise
+        shutil.rmtree(old, ignore_errors=True)
+    else:
+        os.replace(staging, dst)
 
-    dst.mkdir(parents=True)
-    copy_tree_atomic(src, dst)
+
+def copy_skill(src: Path, dst: Path) -> None:
+    """Mirror a skill directory from ``src`` to ``dst`` via staging-then-promote.
+
+    Thin wrapper kept for callers that don't care about the staging step
+    (no privacy scan, no override merge — pure file copy). E3
+    sync-side flow uses :func:`_stage_skill` + :func:`_promote_staging`
+    directly so it can scan + override-apply between the two halves.
+
+    Individual files are written atomically via
+    :func:`memtomem.context._atomic.atomic_write_bytes`. Directory-level
+    atomicity is now provided by the staging+promote pair.
+    """
+    staging = _stage_skill(src, dst)
+    try:
+        _promote_staging(staging, dst)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
 
 
 # ── Fan-out: canonical → runtimes ─────────────────────────────────────
@@ -277,23 +329,67 @@ def generate_all_skills(
                     )
                 )
                 continue
-            copy_skill(skill_dir, dst)
-            # ADR-0008 Invariant 4: per-vendor override replaces SKILL.md only.
-            # Auxiliary files (scripts/, references/) stay from canonical.
-            vendor = GENERATOR_VENDOR.get(target)
-            if vendor is not None:
-                # ADR-0011 PR-E3: thread the resolved sync ``scope`` through
-                # to override resolution (same-tier-only lookup — narrow→broad
-                # is intentionally NOT used for default sync per ADR §4).
-                override_path = _override.resolve(
-                    project_root, "skills", skill_dir.name, vendor, scope=scope
-                )
-                if override_path is not None:
-                    atomic_write_bytes(
-                        dst / SKILL_MANIFEST,
-                        override_path.read_bytes(),
+            # ADR-0011 PR-E3 staging-dir-first scan flow:
+            #   1. _stage_skill — mirror canonical bytes into a same-fs
+            #      staging dir under dst.parent.
+            #   2. Apply vendor SKILL.md override IF any (per-scope, single-
+            #      tier lookup). Auxiliary files (scripts/, references/,
+            #      assets/) stay from canonical — preserves the
+            #      ``test_override_only_touches_skill_md_not_scripts``
+            #      invariant.
+            #   3. scan_artifact_tree — privacy walk against the FINAL
+            #      bytes (canonical + applied override). project_shared
+            #      block raises ClickException; user/project_local block
+            #      collects a skip.
+            #   4. On pass — _promote_staging atomic-replaces dst with
+            #      staging via os.replace (same-fs).
+            #   5. On block or any exception — finally clause removes
+            #      the staging tree without touching dst.
+            staging = _stage_skill(skill_dir, dst)
+            promoted = False
+            try:
+                # 2. Override apply (BEFORE scan — scan must see the bytes
+                # that will be promoted).
+                vendor = GENERATOR_VENDOR.get(target)
+                if vendor is not None:
+                    override_path = _override.resolve(
+                        project_root, "skills", skill_dir.name, vendor, scope=scope
                     )
-            generated.append((target, dst))
+                    if override_path is not None:
+                        atomic_write_bytes(
+                            staging / SKILL_MANIFEST,
+                            override_path.read_bytes(),
+                        )
+                # 3. Scan.
+                scan = scan_artifact_tree(
+                    staging,
+                    surface="cli_context_sync",
+                    scope=scope,
+                    project_root=project_root,
+                    on_blocked="fail_fast",
+                )
+                if scan.blocked:
+                    # raise_or_collect raises ClickException for project_shared;
+                    # otherwise returns (code, reason) and falls through to
+                    # the skip append.
+                    code, reason = raise_or_collect(
+                        scan.blocked[0],
+                        scope=scope,
+                        kind="skill",
+                        artifact_name=skill_dir.name,
+                    )
+                    skipped.append((skill_dir.name, reason, code))
+                else:
+                    # 4. Promote — atomic os.replace into dst.
+                    _promote_staging(staging, dst)
+                    promoted = True
+                    generated.append((target, dst))
+            finally:
+                # 5. Cleanup. Promote consumes staging via rename, so we
+                # only remove it when something else (block/exception)
+                # left it behind.
+                if not promoted and staging.exists():
+                    shutil.rmtree(staging, ignore_errors=True)
 
     return SkillSyncResult(generated=generated, skipped=skipped)
 
