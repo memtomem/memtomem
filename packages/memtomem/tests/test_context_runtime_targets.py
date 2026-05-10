@@ -1,0 +1,120 @@
+"""Tests for ADR-0011 PR-E ``context._runtime_targets`` runtime-side table.
+
+Pins the full RUNTIME_FANOUT_TABLE so coverage is mechanical and any
+future runtime addition forces a deliberate test update (no silent gaps).
+"""
+
+from __future__ import annotations
+
+from itertools import product
+from pathlib import Path
+
+import pytest
+
+from memtomem.context._runtime_targets import (
+    KNOWN_RUNTIMES,
+    RUNTIME_FANOUT_TABLE,
+    runtime_fanout_root,
+)
+from memtomem.context.scope_resolver import ArtifactKind
+
+
+ARTIFACTS: tuple[ArtifactKind, ...] = ("agents", "skills", "commands")
+SCOPES = ("user", "project_shared", "project_local")
+
+
+# ---------------------------------------------------------------------------
+# Table shape — every (artifact, runtime, scope) tuple is populated
+# ---------------------------------------------------------------------------
+
+
+def test_table_covers_full_cross_product() -> None:
+    """Table must contain every (artifact, runtime, scope) tuple — no gaps."""
+    expected = set(product(ARTIFACTS, KNOWN_RUNTIMES, SCOPES))
+    actual = set(RUNTIME_FANOUT_TABLE.keys())
+    missing = expected - actual
+    extra = actual - expected
+    assert not missing, f"missing tuples: {missing}"
+    assert not extra, f"extra tuples not in cross-product: {extra}"
+
+
+def test_all_project_local_entries_are_none() -> None:
+    """ADR §3: project_local has no runtime fan-out — every entry None."""
+    for (artifact, runtime, scope), value in RUNTIME_FANOUT_TABLE.items():
+        if scope == "project_local":
+            assert value is None, f"{(artifact, runtime, scope)} should be None (ADR §3)"
+
+
+def test_codex_commands_user_only() -> None:
+    """Codex CLI prompts are user-tier only by design (commands.py:5)."""
+    assert RUNTIME_FANOUT_TABLE[("commands", "codex", "user")] is not None
+    assert RUNTIME_FANOUT_TABLE[("commands", "codex", "project_shared")] is None
+    assert RUNTIME_FANOUT_TABLE[("commands", "codex", "project_local")] is None
+
+
+# ---------------------------------------------------------------------------
+# runtime_fanout_root — happy path resolution per scope
+# ---------------------------------------------------------------------------
+
+
+def test_user_scope_expands_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    out = runtime_fanout_root("agents", "claude", "user", project_root=None)
+    assert out == (tmp_path / ".claude" / "agents").resolve()
+
+
+def test_user_scope_codex_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    out = runtime_fanout_root("commands", "codex", "user", project_root=None)
+    assert out == (tmp_path / ".codex" / "prompts").resolve()
+
+
+def test_project_shared_joins_root(tmp_path: Path) -> None:
+    out = runtime_fanout_root("agents", "gemini", "project_shared", project_root=tmp_path)
+    assert out == (tmp_path / ".gemini" / "agents").resolve()
+
+
+def test_codex_skills_project_uses_dot_agents(tmp_path: Path) -> None:
+    """Codex skills project-scope path is .agents/skills, NOT .codex/skills."""
+    out = runtime_fanout_root("skills", "codex", "project_shared", project_root=tmp_path)
+    assert out == (tmp_path / ".agents" / "skills").resolve()
+
+
+def test_project_local_returns_none(tmp_path: Path) -> None:
+    """Every project_local lookup returns None (no fan-out)."""
+    for artifact, runtime in product(ARTIFACTS, KNOWN_RUNTIMES):
+        out = runtime_fanout_root(artifact, runtime, "project_local", project_root=tmp_path)
+        assert out is None, f"({artifact}, {runtime}, project_local) should be None"
+
+
+def test_codex_commands_project_shared_returns_none(tmp_path: Path) -> None:
+    out = runtime_fanout_root("commands", "codex", "project_shared", project_root=tmp_path)
+    assert out is None
+
+
+# ---------------------------------------------------------------------------
+# Fail-loud — no silent fallback
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_runtime_raises_keyerror(tmp_path: Path) -> None:
+    """An unknown runtime is a programming error — KeyError, not None."""
+    with pytest.raises(KeyError):
+        runtime_fanout_root("agents", "imaginary_runtime", "user", project_root=tmp_path)
+
+
+def test_unknown_artifact_raises_keyerror(tmp_path: Path) -> None:
+    with pytest.raises(KeyError):
+        runtime_fanout_root("imaginary_artifact", "claude", "user", project_root=tmp_path)  # type: ignore[arg-type]
+
+
+def test_project_scope_without_root_raises_valueerror() -> None:
+    """ValueError is preferred over silent None for missing project_root."""
+    with pytest.raises(ValueError, match="requires project_root"):
+        runtime_fanout_root("agents", "claude", "project_shared", project_root=None)
+
+
+def test_project_local_without_root_returns_none_first() -> None:
+    """project_local entries are None — that branch wins before the
+    project_root check, so passing None is harmless for project_local."""
+    assert runtime_fanout_root("agents", "claude", "project_local", project_root=None) is None

@@ -1,24 +1,24 @@
-"""Vendor override resolution — reads project tree only (ADR-0008 Invariant 1).
-
-Fan-out modules call :func:`resolve` per-vendor before writing to the
-runtime target. When the resolver returns a path, the caller MUST
-byte-copy that file to the vendor target and skip auto-conversion for
-that vendor (Invariant 4: full-file replacement).
-
-The resolver intentionally takes only ``project_root`` — never the wiki —
-to enforce Invariant 1: ``mm context install`` already copytreed the
-wiki's ``overrides/`` subdir into the project, so fan-out never needs
-the wiki at sync time. CI machines, archived projects, and machines
-without ``~/.memtomem-wiki/`` all run fan-out unchanged.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
+from memtomem.config import TargetScope
 from memtomem.context._names import OVERRIDE_FORMATS
+from memtomem.context.scope_resolver import (
+    ArtifactKind,
+    ContextScopeError,
+    canonical_artifact_dir,
+)
 
 __all__ = ["resolve"]
+
+
+# ADR-0011 PR-E: scope lookup order. Narrow tier wins on tie-break,
+# matching memory's project-aware default precedence (project_local
+# overrides project_shared overrides user). Single source of truth so
+# the migration / sync surfaces stay consistent.
+_SCOPE_LOOKUP_ORDER: tuple[TargetScope, ...] = ("project_local", "project_shared", "user")
 
 
 def resolve(
@@ -26,14 +26,54 @@ def resolve(
     asset_type: str,
     name: str,
     vendor: str,
+    *,
+    scope: TargetScope | None = None,
 ) -> Path | None:
-    """Returns project's overrides/<vendor>.<ext> if exists, else None.
+    """Returns the per-vendor override file for a canonical artifact.
 
-    Reads ONLY from project tree. ADR-0008 Invariant 1.
+    Layout (PRESERVED across scopes — ADR-0011 PR-E does not change this):
+
+        <canonical_artifact_dir(asset_type, scope, project_root)>
+          / <name> / "overrides" / f"{vendor}.{ext}"
+
+    Args:
+        project_root: Project root that owns the canonical subtree. For
+            ``scope="user"`` the project_root is unused but still required
+            (passed by every existing caller).
+        asset_type: One of ``agents`` / ``skills`` / ``commands``.
+        name: Artifact name (skill / agent / command identifier).
+        vendor: Runtime vendor key (``claude`` / ``gemini`` / ``codex``)
+            from :data:`memtomem.context._names.OVERRIDE_FORMATS`.
+        scope: When set, look only in that scope. When ``None`` (default,
+            preserves pre-PR-E behavior at the call sites in
+            ``agents.py`` / ``skills.py`` / ``commands.py``), search
+            narrow→broad in :data:`_SCOPE_LOOKUP_ORDER` and return the
+            first hit (project_local > project_shared > user).
+
+    Returns:
+        Path to the override file if it exists, else ``None``.
+
+    Reads ONLY from the canonical tree(s). ADR-0008 Invariant 1; ADR-0011
+    PR-E extends the invariant from project_shared-only to all three
+    scopes with narrow-wins tie-break.
     """
     fmt = OVERRIDE_FORMATS.get((asset_type, vendor))
     if fmt is None:
         return None
     _, ext = fmt
-    candidate = project_root / ".memtomem" / asset_type / name / "overrides" / f"{vendor}.{ext}"
-    return candidate if candidate.is_file() else None
+    artifact = cast(ArtifactKind, asset_type)
+
+    scopes = (scope,) if scope is not None else _SCOPE_LOOKUP_ORDER
+    for s in scopes:
+        try:
+            base = canonical_artifact_dir(artifact, s, project_root)
+        except ContextScopeError:
+            # ``scope="user"`` with project_root=None is fine — the user
+            # base is independent of project_root. But ``project_*`` with
+            # project_root=None raises; skip that scope rather than abort
+            # the whole lookup.
+            continue
+        candidate = base / name / "overrides" / f"{vendor}.{ext}"
+        if candidate.is_file():
+            return candidate
+    return None

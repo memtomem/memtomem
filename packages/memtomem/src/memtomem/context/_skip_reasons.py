@@ -17,6 +17,12 @@ from typing import Final, Literal
 NO_CANONICAL_ROOT: Final = "no_canonical_root"
 UNKNOWN_RUNTIME: Final = "unknown_runtime"
 PARSE_ERROR: Final = "parse_error"
+# ADR-0011 PR-E: emitted when ``_runtime_targets.RUNTIME_FANOUT_TABLE`` returns
+# ``None`` for the requested ``(artifact, runtime, scope)`` tuple — i.e. that
+# combination has no fan-out target by design (e.g. ``project_local`` per
+# ADR §3, or ``(commands, codex, project_*)`` since Codex CLI prompts live
+# user-only). Loud emit, not silent — feedback_defensive_noise.md.
+NO_PROJECT_FANOUT_FOR_RUNTIME: Final = "no_project_fanout_for_runtime"
 
 # Import (runtime → canonical) skip codes.
 INVALID_NAME: Final = "invalid_name"
@@ -31,6 +37,7 @@ SkipCode = Literal[
     "no_canonical_root",
     "unknown_runtime",
     "parse_error",
+    "no_project_fanout_for_runtime",
     "invalid_name",
     "already_imported",
     "canonical_exists",

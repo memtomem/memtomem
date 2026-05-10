@@ -27,7 +27,9 @@ from typing import Protocol
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import override as _override
 from memtomem.context._atomic import atomic_write_bytes, copy_tree_atomic
+from memtomem.config import TargetScope
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, validate_name
+from memtomem.context._runtime_targets import runtime_fanout_root
 
 logger = logging.getLogger(__name__)
 
@@ -36,13 +38,23 @@ SKILL_MANIFEST = "SKILL.md"
 
 
 class SkillGenerator(Protocol):
-    """Protocol for runtime-specific skill targets."""
+    """Protocol for runtime-specific skill targets.
+
+    ADR-0011 PR-E: ``target_dir`` accepts a ``scope`` keyword (default
+    ``project_shared``). Returns ``None`` when no fan-out by design.
+    """
 
     name: str
     output_root: str  # relative to project root, e.g. ".claude/skills"
 
-    def target_dir(self, project_root: Path, skill_name: str) -> Path:
-        """Return the directory that should hold the rendered skill."""
+    def target_dir(
+        self,
+        project_root: Path,
+        skill_name: str,
+        *,
+        scope: TargetScope = "project_shared",
+    ) -> Path | None:
+        """Return the directory that should hold the rendered skill (or ``None``)."""
         ...
 
 
@@ -61,8 +73,15 @@ class ClaudeSkillsGenerator:
     name: str = "claude_skills"
     output_root: str = ".claude/skills"
 
-    def target_dir(self, project_root: Path, skill_name: str) -> Path:
-        return project_root / self.output_root / skill_name
+    def target_dir(
+        self,
+        project_root: Path,
+        skill_name: str,
+        *,
+        scope: TargetScope = "project_shared",
+    ) -> Path | None:
+        root = runtime_fanout_root("skills", "claude", scope, project_root)
+        return None if root is None else root / skill_name
 
 
 @dataclass
@@ -70,8 +89,15 @@ class GeminiSkillsGenerator:
     name: str = "gemini_skills"
     output_root: str = ".gemini/skills"
 
-    def target_dir(self, project_root: Path, skill_name: str) -> Path:
-        return project_root / self.output_root / skill_name
+    def target_dir(
+        self,
+        project_root: Path,
+        skill_name: str,
+        *,
+        scope: TargetScope = "project_shared",
+    ) -> Path | None:
+        root = runtime_fanout_root("skills", "gemini", scope, project_root)
+        return None if root is None else root / skill_name
 
 
 @dataclass
@@ -82,8 +108,15 @@ class CodexSkillsGenerator:
     # slight amount of on-disk overlap — Gemini will silently de-dup it).
     output_root: str = ".agents/skills"
 
-    def target_dir(self, project_root: Path, skill_name: str) -> Path:
-        return project_root / self.output_root / skill_name
+    def target_dir(
+        self,
+        project_root: Path,
+        skill_name: str,
+        *,
+        scope: TargetScope = "project_shared",
+    ) -> Path | None:
+        root = runtime_fanout_root("skills", "codex", scope, project_root)
+        return None if root is None else root / skill_name
 
 
 _register(ClaudeSkillsGenerator())
@@ -207,12 +240,22 @@ def generate_all_skills(
             continue
         for skill_dir in canonicals:
             dst = gen.target_dir(project_root, skill_dir.name)
+            # ADR-0011 PR-E: target_dir may return None for scopes with no
+            # fan-out (default scope=project_shared never None here).
+            assert dst is not None, (
+                f"{target} target_dir returned None for default project_shared scope"
+            )
             copy_skill(skill_dir, dst)
             # ADR-0008 Invariant 4: per-vendor override replaces SKILL.md only.
             # Auxiliary files (scripts/, references/) stay from canonical.
             vendor = GENERATOR_VENDOR.get(target)
             if vendor is not None:
-                override_path = _override.resolve(project_root, "skills", skill_dir.name, vendor)
+                # ADR-0011 PR-E: pin scope=project_shared (see agents.py for
+                # the same rationale — default sync must not see draft
+                # project_local overrides).
+                override_path = _override.resolve(
+                    project_root, "skills", skill_dir.name, vendor, scope="project_shared"
+                )
                 if override_path is not None:
                     atomic_write_bytes(
                         dst / SKILL_MANIFEST,
@@ -343,6 +386,7 @@ def diff_skills(project_root: Path) -> list[tuple[str, str, str]]:
             else:
                 src = canonical_root / name
                 dst = gen.target_dir(project_root, name)
+                assert dst is not None  # ADR-0011 PR-E: default scope=project_shared never None
                 if _skill_dirs_equal(src, dst):
                     results.append((gen_name, name, "in sync"))
                 else:

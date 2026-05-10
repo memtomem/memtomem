@@ -41,7 +41,9 @@ from typing import Any, Protocol
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import override as _override
 from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
+from memtomem.config import TargetScope
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, Layout, validate_name
+from memtomem.context._runtime_targets import runtime_fanout_root
 
 logger = logging.getLogger(__name__)
 
@@ -423,12 +425,26 @@ def _subagent_to_codex_toml(agent: SubAgent) -> tuple[str, list[str]]:
 
 
 class AgentGenerator(Protocol):
-    """Protocol for runtime-specific sub-agent generators."""
+    """Protocol for runtime-specific sub-agent generators.
+
+    ``target_file`` accepts an ADR-0011 ``scope`` keyword (default
+    ``project_shared`` preserves pre-PR-E behavior). Returns ``None``
+    when the (runtime, scope) tuple has no fan-out by design — see
+    :data:`memtomem.context._runtime_targets.RUNTIME_FANOUT_TABLE`.
+    Callers must handle ``None`` and emit
+    ``skip_codes.NO_PROJECT_FANOUT_FOR_RUNTIME``.
+    """
 
     name: str
 
-    def target_file(self, project_root: Path, agent_name: str) -> Path:
-        """Return the file that should hold the rendered agent."""
+    def target_file(
+        self,
+        project_root: Path,
+        agent_name: str,
+        *,
+        scope: TargetScope = "project_shared",
+    ) -> Path | None:
+        """Return the file that should hold the rendered agent (or ``None``)."""
         ...
 
     def render(self, agent: SubAgent) -> tuple[str, list[str]]:
@@ -449,8 +465,15 @@ class ClaudeAgentsGenerator:
     name: str = "claude_agents"
     output_root: str = ".claude/agents"
 
-    def target_file(self, project_root: Path, agent_name: str) -> Path:
-        return project_root / self.output_root / f"{agent_name}.md"
+    def target_file(
+        self,
+        project_root: Path,
+        agent_name: str,
+        *,
+        scope: TargetScope = "project_shared",
+    ) -> Path | None:
+        root = runtime_fanout_root("agents", "claude", scope, project_root)
+        return None if root is None else root / f"{agent_name}.md"
 
     def render(self, agent: SubAgent) -> tuple[str, list[str]]:
         return _subagent_to_claude_md(agent)
@@ -461,8 +484,15 @@ class GeminiAgentsGenerator:
     name: str = "gemini_agents"
     output_root: str = ".gemini/agents"
 
-    def target_file(self, project_root: Path, agent_name: str) -> Path:
-        return project_root / self.output_root / f"{agent_name}.md"
+    def target_file(
+        self,
+        project_root: Path,
+        agent_name: str,
+        *,
+        scope: TargetScope = "project_shared",
+    ) -> Path | None:
+        root = runtime_fanout_root("agents", "gemini", scope, project_root)
+        return None if root is None else root / f"{agent_name}.md"
 
     def render(self, agent: SubAgent) -> tuple[str, list[str]]:
         return _subagent_to_gemini_md(agent)
@@ -473,8 +503,15 @@ class CodexAgentsGenerator:
     name: str = "codex_agents"
     output_root: str = ".codex/agents"
 
-    def target_file(self, project_root: Path, agent_name: str) -> Path:
-        return project_root / self.output_root / f"{agent_name}.toml"
+    def target_file(
+        self,
+        project_root: Path,
+        agent_name: str,
+        *,
+        scope: TargetScope = "project_shared",
+    ) -> Path | None:
+        root = runtime_fanout_root("agents", "codex", scope, project_root)
+        return None if root is None else root / f"{agent_name}.toml"
 
     def render(self, agent: SubAgent) -> tuple[str, list[str]]:
         return _subagent_to_codex_toml(agent)
@@ -572,13 +609,28 @@ def generate_all_agents(
                 if effective_drop == "warn":
                     logger.warning("%s dropped %s from '%s'", target, dropped_fields, agent.name)
             out_path = gen.target_file(project_root, agent.name)
+            # ADR-0011 PR-E: target_file may return None for scopes with no
+            # fan-out by design. Default kwarg is project_shared (existing
+            # behavior), which never returns None — so this branch is
+            # currently unreachable, but the assertion makes the contract
+            # explicit for E2/E3 callers that pass scope= kwargs.
+            assert out_path is not None, (
+                f"{target} target_file returned None for default project_shared scope"
+            )
             atomic_write_text(out_path, content)
             # ADR-0008 Invariant 4: per-vendor override replaces the runtime file.
             # Race: see PR-D' for the unified write path that closes the
             # canonical→override window. Same pattern as skills.py:213-220.
             vendor = GENERATOR_VENDOR.get(target)
             if vendor is not None:
-                override_path = _override.resolve(project_root, "agents", agent.name, vendor)
+                # ADR-0011 PR-E: pin scope=project_shared so default fan-out
+                # never picks up a draft project_local override (narrow→broad
+                # is intended for explicit cross-tier reads, not the default
+                # project_shared sync surface). E3 will thread the resolved
+                # scope through when sync becomes scope-aware.
+                override_path = _override.resolve(
+                    project_root, "agents", agent.name, vendor, scope="project_shared"
+                )
                 if override_path is not None:
                     atomic_write_bytes(out_path, override_path.read_bytes())
             generated.append((target, out_path))
@@ -742,6 +794,7 @@ def diff_agents(project_root: Path) -> list[tuple[str, str, str]]:
                 continue
             expected, _ = gen.render(agent)
             target = gen.target_file(project_root, name)
+            assert target is not None  # ADR-0011 PR-E: default scope=project_shared never None
             actual = target.read_text(encoding="utf-8") if target.is_file() else ""
             if expected.strip() == actual.strip():
                 results.append((gen_name, name, "in sync"))
