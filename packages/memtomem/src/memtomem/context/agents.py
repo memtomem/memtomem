@@ -602,20 +602,13 @@ def generate_all_agents(
             except AgentParseError as exc:
                 skipped.append((agent_path.name, f"parse error: {exc}", skip_codes.PARSE_ERROR))
                 continue
-            content, dropped_fields = gen.render(agent)
-            if dropped_fields:
-                if effective_drop == "error":
-                    raise StrictDropError(
-                        f"strict mode: {target} would drop {dropped_fields} from '{agent.name}'"
-                    )
-                if effective_drop == "warn":
-                    logger.warning("%s dropped %s from '%s'", target, dropped_fields, agent.name)
+            # ADR-0011 PR-E (#891): resolve the runtime target BEFORE render
+            # + dropped-field handling. ``None`` means NO_FANOUT per
+            # ``_runtime_targets.RUNTIME_FANOUT_TABLE``; emit a typed skip
+            # without invoking ``render`` so a strict caller doesn't raise
+            # ``StrictDropError`` for a runtime that has no fan-out by
+            # design (the fail-quiet contract).
             out_path = gen.target_file(project_root, agent.name)
-            # ADR-0011 PR-E (#891): None means NO_FANOUT per
-            # ``_runtime_targets.RUNTIME_FANOUT_TABLE``. Emit a typed skip
-            # so E3 scope wiring sees graceful behavior. Today's default
-            # scope=project_shared never reaches this branch for registered
-            # generators; the table is the contract source-of-truth.
             if out_path is None:
                 skipped.append(
                     (
@@ -625,6 +618,14 @@ def generate_all_agents(
                     )
                 )
                 continue
+            content, dropped_fields = gen.render(agent)
+            if dropped_fields:
+                if effective_drop == "error":
+                    raise StrictDropError(
+                        f"strict mode: {target} would drop {dropped_fields} from '{agent.name}'"
+                    )
+                if effective_drop == "warn":
+                    logger.warning("%s dropped %s from '%s'", target, dropped_fields, agent.name)
             atomic_write_text(out_path, content)
             # ADR-0008 Invariant 4: per-vendor override replaces the runtime file.
             # Race: see PR-D' for the unified write path that closes the

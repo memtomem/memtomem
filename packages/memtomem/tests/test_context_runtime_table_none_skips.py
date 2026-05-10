@@ -323,3 +323,75 @@ def test_diff_runtime_no_fanout_canonical_only_emits_zero_rows(
         f"expected zero rows for forced-None runtime {runtime_key!r} "
         f"with canonical-only seeding, got {matching_rows!r}"
     )
+
+
+@pytest.mark.parametrize(
+    "kind, seed, runner, runtime_key, registry",
+    [
+        (
+            "agents",
+            _seed_canonical_agent,
+            generate_all_agents,
+            "claude_agents",
+            AGENT_GENERATORS,
+        ),
+        (
+            "commands",
+            _seed_canonical_command,
+            generate_all_commands,
+            "claude_commands",
+            COMMAND_GENERATORS,
+        ),
+    ],
+)
+def test_generate_all_strict_no_fanout_emits_skip_not_strict_drop(
+    kind: str,
+    seed,
+    runner,
+    runtime_key: str,
+    registry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#891 (P2 ordering fold) — strict-mode + dropped fields + NO_FANOUT
+    runtime emits the typed skip, NOT ``StrictDropError``.
+
+    The ``generate_all_agents`` / ``generate_all_commands`` loop used to
+    call ``gen.render()`` and enforce ``on_drop="error"`` BEFORE the
+    ``target_file`` None check, so a no-fanout runtime under
+    ``strict=True`` would raise ``StrictDropError`` instead of emitting
+    ``NO_PROJECT_FANOUT_FOR_RUNTIME``. The fix resolves the runtime
+    target first; render/drop handling only runs when the runtime has
+    fan-out.
+
+    Skills doesn't have a render path (``copy_skill`` is a file copy with
+    no field-drop semantics), so this regression only applies to agents
+    and commands.
+    """
+    seed(tmp_path, name="foo")
+    gen = registry[runtime_key]
+    monkeypatch.setattr(gen, "target_file", lambda *args, **kwargs: None)
+    # Force render to report dropped fields. With strict=True / on_drop="error"
+    # the buggy ordering would raise StrictDropError; the fixed ordering
+    # short-circuits via NO_FANOUT skip BEFORE render is invoked.
+    monkeypatch.setattr(gen, "render", lambda artifact: ("rendered body", ["fake_dropped_field"]))
+
+    result = runner(tmp_path, runtimes=[runtime_key], strict=True)
+
+    matching_skips = [
+        skip
+        for skip in result.skipped
+        if skip[0] == "foo" and skip[2] == skip_codes.NO_PROJECT_FANOUT_FOR_RUNTIME
+    ]
+    assert len(matching_skips) == 1, (
+        f"expected exactly one NO_PROJECT_FANOUT_FOR_RUNTIME skip for 'foo' "
+        f"under strict + dropped-field-producing render, got {result.skipped!r}"
+    )
+    # The fixed ordering means render must NOT have been called for this
+    # NO_FANOUT runtime — a render call would have triggered StrictDropError.
+    # The fact that ``runner(...)`` returned at all (instead of raising) is
+    # the test contract; the skip presence is the typed positive marker.
+    generated_runtimes = {entry[0] for entry in result.generated}
+    assert runtime_key not in generated_runtimes, (
+        f"expected runtime {runtime_key!r} absent from generated, got {result.generated!r}"
+    )
