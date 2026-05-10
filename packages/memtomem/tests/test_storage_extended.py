@@ -381,6 +381,50 @@ class TestStorageExtended:
         stats = await storage.get_stats()
         assert stats["total_chunks"] == 1
 
+    async def test_reset_all_clears_ai_summary_cache(self, components):
+        """``reset_all`` honours its "Delete ALL data" contract by
+        clearing user-derived AI summary records, even though the
+        ``_memtomem_meta`` table itself is preserved for embedding
+        config. Without this, a user-triggered reset would leave LLM
+        summaries of the source content on disk, and the next
+        ``get_all_ai_summaries`` call would return prose for chunks
+        that no longer exist — breaking the privacy contract and the
+        Source-tab drift count. Pin so a future refactor of the meta
+        preservation rule can't silently regress."""
+        storage = components.storage
+        await storage.upsert_chunks([make_chunk(content="some content")])
+        await storage.set_ai_summary(Path("/tmp/test.md"), "Sensitive AI prose.", "sig", "en")
+        assert await storage.get_ai_summary(Path("/tmp/test.md")) is not None
+
+        deleted = await storage.reset_all()
+
+        # Counter must surface the cleared summaries so operators see
+        # the receipt; absence of the key would let a regression slip
+        # through with all-zero counts.
+        assert deleted.get("ai_summaries") == 1
+        assert await storage.get_ai_summary(Path("/tmp/test.md")) is None
+        # ``get_all_ai_summaries`` must also report empty — the prefix
+        # scan is the surface that drives the Source-tab banner.
+        assert await storage.get_all_ai_summaries() == {}
+
+    async def test_reset_all_preserves_embedding_meta_after_summary_clear(self, components):
+        """The fix that clears ``ai_summary:*`` rows must NOT take out
+        the embedding-config rows that share the same ``_memtomem_meta``
+        table — a too-broad ``DELETE FROM _memtomem_meta`` would force
+        every user to re-pick their embedding model after a reset.
+        Belt-and-suspenders alongside the existing
+        ``test_reset_all_preserves_embedding_meta`` (this variant runs
+        the path *with* a summary present so the LIKE filter is
+        actually exercised)."""
+        storage = components.storage
+        await storage.upsert_chunks([make_chunk(content="some content")])
+        await storage.set_ai_summary(Path("/tmp/test.md"), "S", "sig", "en")
+
+        await storage.reset_all()
+
+        stored_dim = storage._get_stored_dimension()
+        assert stored_dim is not None
+
     # ---- get_source_summaries (heuristic preview) ---------------------------
 
     async def test_source_summaries_picks_first_chunk_by_start_line(self, components):

@@ -344,7 +344,10 @@ class SqliteBackend(
 
         Deletes every row from chunks, FTS, vectors, and all auxiliary tables
         (access_log, query_history, sessions, etc.).  The ``_memtomem_meta``
-        table is preserved so embedding config survives.
+        table is preserved so embedding config survives, *except* for
+        ``ai_summary:*`` rows — those carry user-derived prose generated
+        from indexed source content and must respect the "Delete ALL data"
+        contract just like the chunks they were summarising.
 
         Returns a dict mapping table name → number of deleted rows.
         """
@@ -394,6 +397,24 @@ class SqliteBackend(
             else:
                 self._has_vec_table = False
             deleted["chunks_vec"] = chunk_count
+
+            # AI summary cache lives in ``_memtomem_meta`` (the table is
+            # otherwise preserved for embedding config). Rows under the
+            # ``ai_summary:`` prefix carry LLM-generated prose derived from
+            # indexed sources, so they must be cleared with the rest of
+            # the user data — leaving them behind would let
+            # ``get_all_ai_summaries`` keep returning content for chunks
+            # that no longer exist, and break the "Delete ALL data" UI
+            # contract.
+            ai_summary_count = db.execute(
+                "SELECT COUNT(*) FROM _memtomem_meta WHERE key LIKE ?",
+                (f"{_AI_SUMMARY_KEY_PREFIX}%",),
+            ).fetchone()[0]
+            db.execute(
+                "DELETE FROM _memtomem_meta WHERE key LIKE ?",
+                (f"{_AI_SUMMARY_KEY_PREFIX}%",),
+            )
+            deleted["ai_summaries"] = ai_summary_count
 
             if not self._in_transaction:
                 db.commit()
