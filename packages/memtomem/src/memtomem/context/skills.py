@@ -30,7 +30,7 @@ from memtomem.context._atomic import atomic_write_bytes, copy_tree_atomic
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, validate_name
-from memtomem.context._runtime_targets import runtime_fanout_root
+from memtomem.context._runtime_targets import runtime_artifact_names, runtime_fanout_root
 from memtomem.context.scope_resolver import canonical_artifact_dir
 
 logger = logging.getLogger(__name__)
@@ -129,11 +129,25 @@ _register(CodexSkillsGenerator())
 # ── Canonical helpers ─────────────────────────────────────────────────
 
 
-def canonical_skills_root(project_root: Path) -> Path:
-    return project_root / CANONICAL_SKILL_ROOT
+def canonical_skills_root(
+    project_root: Path,
+    *,
+    scope: TargetScope = "project_shared",
+) -> Path:
+    """Return the canonical skills root for ``scope`` (default ``project_shared``).
+
+    Pre-PR-E3 callers (no scope kwarg) keep the old behavior of
+    ``<project_root>/.memtomem/skills`` because that's exactly
+    :func:`canonical_artifact_dir` for ``scope="project_shared"``.
+    """
+    return canonical_artifact_dir("skills", scope, project_root)
 
 
-def list_canonical_skills(project_root: Path) -> list[Path]:
+def list_canonical_skills(
+    project_root: Path,
+    *,
+    scope: TargetScope = "project_shared",
+) -> list[Path]:
     """Return canonical skill directories sorted by name.
 
     A sub-directory only counts as a skill if it contains ``SKILL.md``. This
@@ -142,8 +156,11 @@ def list_canonical_skills(project_root: Path) -> list[Path]:
 
     Skill directory names are validated; entries that fail
     :func:`memtomem.context._names.validate_name` are skipped with a warning.
+
+    ADR-0011 PR-E3: ``scope`` selects the canonical root via
+    :func:`canonical_skills_root`.
     """
-    root = canonical_skills_root(project_root)
+    root = canonical_skills_root(project_root, scope=scope)
     if not root.is_dir():
         return []
     skills: list[Path] = []
@@ -216,6 +233,8 @@ class SkillSyncResult:
 def generate_all_skills(
     project_root: Path,
     runtimes: list[str] | None = None,
+    *,
+    scope: TargetScope = "project_shared",
 ) -> SkillSyncResult:
     """Fan out every canonical skill to the requested runtime targets.
 
@@ -223,11 +242,14 @@ def generate_all_skills(
         project_root: project root containing ``.memtomem/skills/``.
         runtimes: list of generator names. ``None`` means all registered
             runtimes (currently ``claude_skills`` + ``gemini_skills``).
+        scope: ADR-0011 PR-E3 — selects canonical root and runtime
+            fan-out destination. Default ``project_shared`` preserves
+            pre-PR-E3 behavior.
     """
     generated: list[tuple[str, Path]] = []
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
 
-    canonicals = list_canonical_skills(project_root)
+    canonicals = list_canonical_skills(project_root, scope=scope)
     if not canonicals:
         return SkillSyncResult(
             generated=generated,
@@ -241,12 +263,11 @@ def generate_all_skills(
             skipped.append((target, "unknown runtime", skip_codes.UNKNOWN_RUNTIME))
             continue
         for skill_dir in canonicals:
-            dst = gen.target_dir(project_root, skill_dir.name)
+            dst = gen.target_dir(project_root, skill_dir.name, scope=scope)
             # ADR-0011 PR-E (#891): None means NO_FANOUT per
             # ``_runtime_targets.RUNTIME_FANOUT_TABLE``. Emit a typed skip
-            # so E3 scope wiring sees graceful behavior. Today's default
-            # scope=project_shared never reaches this branch for registered
-            # generators; the table is the contract source-of-truth.
+            # so E3 scope wiring sees graceful behavior. The table is the
+            # contract source-of-truth.
             if dst is None:
                 skipped.append(
                     (
@@ -261,11 +282,11 @@ def generate_all_skills(
             # Auxiliary files (scripts/, references/) stay from canonical.
             vendor = GENERATOR_VENDOR.get(target)
             if vendor is not None:
-                # ADR-0011 PR-E: pin scope=project_shared (see agents.py for
-                # the same rationale — default sync must not see draft
-                # project_local overrides).
+                # ADR-0011 PR-E3: thread the resolved sync ``scope`` through
+                # to override resolution (same-tier-only lookup — narrow→broad
+                # is intentionally NOT used for default sync per ADR §4).
                 override_path = _override.resolve(
-                    project_root, "skills", skill_dir.name, vendor, scope="project_shared"
+                    project_root, "skills", skill_dir.name, vendor, scope=scope
                 )
                 if override_path is not None:
                     atomic_write_bytes(
@@ -453,7 +474,11 @@ def _skill_dirs_equal(a: Path, b: Path) -> bool:
     return True
 
 
-def diff_skills(project_root: Path) -> list[tuple[str, str, str]]:
+def diff_skills(
+    project_root: Path,
+    *,
+    scope: TargetScope = "project_shared",
+) -> list[tuple[str, str, str]]:
     """Compare canonical skills against every registered runtime.
 
     Returns a sorted list of ``(runtime, skill_name, status)`` tuples where
@@ -463,25 +488,25 @@ def diff_skills(project_root: Path) -> list[tuple[str, str, str]]:
     * ``"out of sync"`` — both sides exist but differ.
     * ``"missing target"`` — canonical has it, runtime does not.
     * ``"missing canonical"`` — runtime has it, canonical does not.
+
+    ADR-0011 PR-E3: ``scope`` selects both the canonical root and the
+    runtime fan-out roots (default ``project_shared``).
     """
     results: list[tuple[str, str, str]] = []
-    canonical_root = canonical_skills_root(project_root)
-    canonical_names = {p.name for p in list_canonical_skills(project_root)}
+    canonical_root = canonical_skills_root(project_root, scope=scope)
+    canonical_names = {p.name for p in list_canonical_skills(project_root, scope=scope)}
 
     for gen_name, gen in SKILL_GENERATORS.items():
-        # ADR-0011 PR-E (#891): probe NO_FANOUT for this runtime+scope. The
-        # table lookup ignores the artifact name, so a fixed probe name is
-        # safe. When None, the runtime has no fan-out by design — skip the
-        # whole runtime so canonical-only entries don't surface as
-        # ``missing target`` (the realistic NO_FANOUT shape).
-        if gen.target_dir(project_root, "__probe_891__") is None:
+        # ADR-0011 PR-E3 cleanup item #1: query the table directly via
+        # ``runtime_fanout_root``. Earlier code probed with a fixed skill
+        # name (``__probe_891__``) which leaked the table-shape assumption
+        # into the call shape — call-shape fragility, not name-independence.
+        runtime = gen_name.split("_", 1)[0]
+        if runtime_fanout_root("skills", runtime, scope, project_root) is None:
             continue
-        runtime_root = project_root / gen.output_root
-        runtime_names: set[str] = set()
-        if runtime_root.is_dir():
-            for entry in runtime_root.iterdir():
-                if entry.is_dir() and (entry / SKILL_MANIFEST).is_file():
-                    runtime_names.add(entry.name)
+        runtime_names = runtime_artifact_names(
+            "skills", runtime, project_root, scope, dir_manifest=SKILL_MANIFEST
+        )
 
         for name in sorted(canonical_names | runtime_names):
             if name in canonical_names and name not in runtime_names:
@@ -490,14 +515,12 @@ def diff_skills(project_root: Path) -> list[tuple[str, str, str]]:
                 results.append((gen_name, name, "missing canonical"))
             else:
                 src = canonical_root / name
-                dst = gen.target_dir(project_root, name)
-                # The upstream NO_FANOUT probe already filters out runtimes
-                # whose ``RUNTIME_FANOUT_TABLE`` entry is ``None``, so this
-                # branch is only reachable if the table lookup is per-name
-                # (which today's table is not). Keep the skip as a defensive
-                # silent fallback so the contract holds regardless.
-                if dst is None:
-                    continue
+                # Cleanup item #2: the upstream ``runtime_fanout_root`` guard
+                # above guarantees this runtime+scope has a fan-out root, so
+                # ``gen.target_dir`` cannot return ``None`` for any name.
+                # Earlier defensive ``if dst is None: continue`` removed.
+                dst = gen.target_dir(project_root, name, scope=scope)
+                assert dst is not None  # narrowed by upstream NO_FANOUT guard
                 if _skill_dirs_equal(src, dst):
                     results.append((gen_name, name, "in sync"))
                 else:

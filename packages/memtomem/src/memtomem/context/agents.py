@@ -44,7 +44,7 @@ from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, Layout, validate_name
-from memtomem.context._runtime_targets import runtime_fanout_root
+from memtomem.context._runtime_targets import runtime_artifact_names, runtime_fanout_root
 from memtomem.context.scope_resolver import canonical_artifact_dir
 
 logger = logging.getLogger(__name__)
@@ -235,7 +235,11 @@ def parse_canonical_agent(path: Path, *, layout: Layout = "flat") -> SubAgent:
     )
 
 
-def list_canonical_agents(project_root: Path) -> list[tuple[Path, Layout]]:
+def list_canonical_agents(
+    project_root: Path,
+    *,
+    scope: TargetScope = "project_shared",
+) -> list[tuple[Path, Layout]]:
     """Enumerate canonical agents in both flat and directory layouts.
 
     Flat layout (legacy): ``agents/<name>.md``. Directory layout (ADR-0008
@@ -243,8 +247,12 @@ def list_canonical_agents(project_root: Path) -> list[tuple[Path, Layout]]:
     the directory layout wins and a WARNING is logged so the silent flat
     file is visible. ``mm context migrate`` (PR-D) is the supported way
     to consolidate.
+
+    ADR-0011 PR-E3: ``scope`` selects the canonical root via
+    :func:`canonical_artifact_dir` (default ``project_shared`` preserves
+    pre-PR-E3 behavior of reading ``<project_root>/.memtomem/agents``).
     """
-    root = project_root / CANONICAL_AGENT_ROOT
+    root = canonical_artifact_dir("agents", scope, project_root)
     if not root.is_dir():
         return []
 
@@ -564,6 +572,8 @@ def generate_all_agents(
     runtimes: list[str] | None = None,
     strict: bool = False,
     on_drop: str = "ignore",
+    *,
+    scope: TargetScope = "project_shared",
 ) -> AgentSyncResult:
     """Fan out every canonical sub-agent to the requested runtimes.
 
@@ -574,6 +584,9 @@ def generate_all_agents(
             ``"error"`` — raise :class:`StrictDropError` immediately.
         strict: Legacy alias for ``on_drop="error"``. If *both* are supplied,
             ``on_drop`` takes precedence unless it is still the default.
+        scope: ADR-0011 PR-E3 — selects canonical root and runtime
+            fan-out destination. Default ``project_shared`` preserves
+            pre-PR-E3 behavior.
     """
     # Resolve legacy ``strict`` flag.
     effective_drop = on_drop if on_drop != "ignore" or not strict else "error"
@@ -582,7 +595,7 @@ def generate_all_agents(
     dropped: list[tuple[str, str, list[str]]] = []
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
 
-    canonicals = list_canonical_agents(project_root)
+    canonicals = list_canonical_agents(project_root, scope=scope)
     if not canonicals:
         return AgentSyncResult(
             generated=[],
@@ -608,7 +621,7 @@ def generate_all_agents(
             # without invoking ``render`` so a strict caller doesn't raise
             # ``StrictDropError`` for a runtime that has no fan-out by
             # design (the fail-quiet contract).
-            out_path = gen.target_file(project_root, agent.name)
+            out_path = gen.target_file(project_root, agent.name, scope=scope)
             if out_path is None:
                 skipped.append(
                     (
@@ -632,13 +645,13 @@ def generate_all_agents(
             # canonical→override window. Same pattern as skills.py:213-220.
             vendor = GENERATOR_VENDOR.get(target)
             if vendor is not None:
-                # ADR-0011 PR-E: pin scope=project_shared so default fan-out
-                # never picks up a draft project_local override (narrow→broad
-                # is intended for explicit cross-tier reads, not the default
-                # project_shared sync surface). E3 will thread the resolved
-                # scope through when sync becomes scope-aware.
+                # ADR-0011 PR-E3: thread the resolved sync ``scope`` through
+                # to override resolution. Same-tier override wins (narrow);
+                # broader-tier override is consulted only when the same-tier
+                # is absent. ``scope`` defaults to ``project_shared`` so the
+                # pre-PR-E3 sync surface keeps the prior behavior.
                 override_path = _override.resolve(
-                    project_root, "agents", agent.name, vendor, scope="project_shared"
+                    project_root, "agents", agent.name, vendor, scope=scope
                 )
                 if override_path is not None:
                     atomic_write_bytes(out_path, override_path.read_bytes())
@@ -830,46 +843,67 @@ def extract_agents_to_canonical(
 # ── Diff: canonical ↔ runtimes ──────────────────────────────────────
 
 
+# Per-runtime file suffix for agents fan-out. Used by ``diff_agents`` to
+# delegate to ``runtime_artifact_names``. Kept inline (rather than on each
+# generator) because (a) the suffix is a property of the on-disk format, not
+# of the runtime conversion, and (b) it's referenced from one site only.
+_AGENT_RUNTIME_SUFFIX: dict[str, str] = {
+    "claude": ".md",
+    "gemini": ".md",
+    "codex": ".toml",
+}
+
+
 def _runtime_agent_names(gen_name: str, project_root: Path) -> set[str]:
-    if gen_name == "codex_agents":
-        runtime_root = project_root / ".codex/agents"
-        suffix = ".toml"
-    elif gen_name == "claude_agents":
-        runtime_root = project_root / ".claude/agents"
-        suffix = ".md"
-    elif gen_name == "gemini_agents":
-        runtime_root = project_root / ".gemini/agents"
-        suffix = ".md"
-    else:
+    """Thin wrapper around :func:`runtime_artifact_names` for back-compat.
+
+    Pre-PR-E3 callers and tests pass ``gen_name`` (e.g. ``"claude_agents"``)
+    and an implicit ``project_shared`` scope. New callers should consume
+    :func:`runtime_artifact_names` directly with explicit scope.
+    """
+    runtime = gen_name.split("_", 1)[0]
+    suffix = _AGENT_RUNTIME_SUFFIX.get(runtime)
+    if suffix is None:
         return set()
-    if not runtime_root.is_dir():
-        return set()
-    return {p.stem for p in runtime_root.iterdir() if p.is_file() and p.suffix == suffix}
+    return runtime_artifact_names(
+        "agents", runtime, project_root, "project_shared", file_suffix=suffix
+    )
 
 
-def diff_agents(project_root: Path) -> list[tuple[str, str, str]]:
+def diff_agents(
+    project_root: Path,
+    *,
+    scope: TargetScope = "project_shared",
+) -> list[tuple[str, str, str]]:
     """Compare canonical agents against every registered runtime.
 
     Returns a list of ``(runtime, agent_name, status)`` where status is one of
     ``"in sync"``, ``"out of sync"``, ``"missing target"``, ``"missing canonical"``,
     ``"parse error"``.
+
+    ADR-0011 PR-E3: ``scope`` selects both the canonical source and the
+    runtime fan-out roots. Default ``project_shared`` preserves
+    pre-PR-E3 behavior.
     """
     results: list[tuple[str, str, str]] = []
     canonical_index = {
         path.parent.name if layout == "dir" else path.stem: (path, layout)
-        for path, layout in list_canonical_agents(project_root)
+        for path, layout in list_canonical_agents(project_root, scope=scope)
     }
     canonical_names = set(canonical_index)
 
     for gen_name, gen in AGENT_GENERATORS.items():
-        # ADR-0011 PR-E (#891): probe NO_FANOUT for this runtime+scope. The
-        # table lookup ignores the artifact name, so a fixed probe name is
-        # safe. When None, the runtime has no fan-out by design — skip the
-        # whole runtime so canonical-only entries don't surface as
-        # ``missing target`` (the realistic NO_FANOUT shape).
-        if gen.target_file(project_root, "__probe_891__") is None:
+        # ADR-0011 PR-E3 cleanup item #1: query the table directly via
+        # ``runtime_fanout_root``. Earlier code probed with a fixed agent
+        # name (``__probe_891__``) which leaked the table-shape assumption
+        # into the call shape — call-shape fragility, not name-independence.
+        runtime = gen_name.split("_", 1)[0]
+        if runtime_fanout_root("agents", runtime, scope, project_root) is None:
             continue
-        runtime_names = _runtime_agent_names(gen_name, project_root)
+        suffix = _AGENT_RUNTIME_SUFFIX.get(runtime, ".md")
+        runtime_names = runtime_artifact_names(
+            "agents", runtime, project_root, scope, file_suffix=suffix
+        )
         for name in sorted(canonical_names | runtime_names):
             if name in canonical_names and name not in runtime_names:
                 results.append((gen_name, name, "missing target"))
@@ -885,14 +919,12 @@ def diff_agents(project_root: Path) -> list[tuple[str, str, str]]:
                 results.append((gen_name, name, "parse error"))
                 continue
             expected, _ = gen.render(agent)
-            target = gen.target_file(project_root, name)
-            # The upstream NO_FANOUT probe already filters out runtimes
-            # whose ``RUNTIME_FANOUT_TABLE`` entry is ``None``, so this
-            # branch is only reachable if the table lookup is per-name
-            # (which today's table is not). Keep the skip as a defensive
-            # silent fallback so the contract holds regardless.
-            if target is None:
-                continue
+            # Cleanup item #2: the upstream ``runtime_fanout_root`` guard
+            # above guarantees this runtime+scope has a fan-out root, so
+            # ``gen.target_file`` cannot return ``None`` for any name.
+            # Earlier defensive ``if target is None: continue`` removed.
+            target = gen.target_file(project_root, name, scope=scope)
+            assert target is not None  # narrowed by upstream NO_FANOUT guard
             actual = target.read_text(encoding="utf-8") if target.is_file() else ""
             if expected.strip() == actual.strip():
                 results.append((gen_name, name, "in sync"))
