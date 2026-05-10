@@ -783,14 +783,24 @@ class TestSources:
         assert src["memory_dir"] == str(target.resolve())
 
     # ---- heuristic preview --------------------------------------------------
+    #
+    # The route resolves each source's preview/AI-summary via
+    # ``str(p) -> dict.get(...)``, where ``p`` comes from the
+    # ``get_source_files_with_counts`` mock (``Path("/tmp/test.md")``).
+    # On Windows ``str(Path("/tmp/test.md")) == "\\tmp\\test.md"`` —
+    # using a bare POSIX literal as the dict key here would silently
+    # miss on Windows runners (the failure mode shipped in PR #888 CI).
+    # Build the key from ``str(Path(...))`` so the test rides on the
+    # same normalisation the route uses.
 
     async def test_summary_derived_from_first_chunk(self, app, client: AsyncClient):
         """Title strips the leading ``#`` from
         ``heading_hierarchy[0]``, and excerpt comes from the first
         chunk's body. Pin both so a future refactor can't silently
         regress what users see in the Source tab without flipping a test."""
+        key = str(Path("/tmp/test.md"))
         app.state.storage.get_source_summaries.return_value = {
-            "/tmp/test.md": (
+            key: (
                 ["# Project Notes", "## Section"],
                 "Opening lines of the document.",
             )
@@ -804,9 +814,8 @@ class TestSources:
         """Excerpt caps at ~200 chars with a trailing ``…`` so a
         runaway opening paragraph can't blow out the row layout."""
         long_body = "word " * 200  # ~1000 chars
-        app.state.storage.get_source_summaries.return_value = {
-            "/tmp/test.md": (["# Title"], long_body)
-        }
+        key = str(Path("/tmp/test.md"))
+        app.state.storage.get_source_summaries.return_value = {key: (["# Title"], long_body)}
         resp = await client.get("/api/sources")
         src = resp.json()["sources"][0]
         assert src["excerpt"] is not None
@@ -828,8 +837,9 @@ class TestSources:
         """When ``get_all_ai_summaries`` returns a record, the response
         carries both ``ai_summary`` text and ``ai_summary_language`` so
         the UI can flag drift."""
+        key = str(Path("/tmp/test.md"))
         app.state.storage.get_all_ai_summaries.return_value = {
-            "/tmp/test.md": {
+            key: {
                 "summary": "AI-generated 2-sentence prose.",
                 "signature": "abc123",
                 "language": "en",
@@ -856,9 +866,14 @@ class TestSources:
         carries ``language_drift`` with count + setting. Banner UX
         relies on this conditional being non-null only when there's
         actual drift."""
+        # Drift count iterates ``ai_summaries.values()``, so the dict
+        # key choice is incidental to this assertion — but we still go
+        # through ``str(Path(...))`` so a future refactor that *does*
+        # key off the path doesn't reintroduce the Windows failure.
+        key = str(Path("/tmp/test.md"))
         app.state.config.indexing.summary_language = "ko"
         app.state.storage.get_all_ai_summaries.return_value = {
-            "/tmp/test.md": {
+            key: {
                 "summary": "x",
                 "signature": "s",
                 "language": "en",
@@ -872,9 +887,10 @@ class TestSources:
         assert data["language_drift"]["current_setting"] == "ko"
 
     async def test_language_drift_absent_when_all_records_match(self, app, client: AsyncClient):
+        key = str(Path("/tmp/test.md"))
         app.state.config.indexing.summary_language = "ko"
         app.state.storage.get_all_ai_summaries.return_value = {
-            "/tmp/test.md": {
+            key: {
                 "summary": "x",
                 "signature": "s",
                 "language": "ko",
