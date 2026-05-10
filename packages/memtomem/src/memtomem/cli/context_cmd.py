@@ -681,8 +681,12 @@ def init_cmd(
     scope = _resolve_artifact_cli_scope(scope_flag)
     has_project_signal = (root / ".git").exists() or (root / "pyproject.toml").exists()
 
-    # --scope project_* requires a real project context.
-    if scope != "user" and not has_project_signal:
+    # EXPLICIT --scope project_* requires a real project context. Implicit
+    # default (no --scope) preserves pre-PR-E2 behaviour where the command
+    # could run from any cwd (``_find_project_root`` falls back to cwd) —
+    # raising would be a back-compat regression for users who run
+    # ``mm context init`` from a fresh directory.
+    if scope_explicit and scope != "user" and not has_project_signal:
         raise click.ClickException(
             f"--scope={scope} requires a project root (with .git or pyproject.toml). "
             "Use --scope=user from outside a project, or run from inside one."
@@ -696,15 +700,29 @@ def init_cmd(
         if not click.confirm(prompt, default=False):
             raise click.Abort()
 
-    # context.md is project-tied (not scope-tiered). Skip silently when no
-    # project context resolves — `--scope user` from outside any project
-    # is a legitimate user-tier-only invocation.
-    if has_project_signal:
+    # context.md is project-tied (not scope-tiered). Two cases skip the
+    # write WITHOUT killing the rest of init:
+    #   - No project signal anywhere up the cwd chain (rare; ``mm context
+    #     init --scope user`` from a fresh /tmp dir).
+    #   - Existing context.md and the user declines the overwrite prompt
+    #     (common; user wants `--scope user --include=agents` to seed
+    #     ~/.memtomem/agents without touching the project's context.md).
+    # Pre-PR-E2 returned out of the function on decline, which silently
+    # killed the entire scoped seeding + import path. PR-E2 ties the
+    # decline to context.md only — scope dirs and `--include` continue.
+    write_context_md = has_project_signal
+    if write_context_md:
         ctx_path = _context_path(root)
-        if ctx_path.exists():
-            if not click.confirm(f"{CONTEXT_FILENAME} already exists. Overwrite?", default=False):
-                return
+        if ctx_path.exists() and not click.confirm(
+            f"{CONTEXT_FILENAME} already exists. Overwrite?", default=False
+        ):
+            click.secho(
+                f"  (skipped {CONTEXT_FILENAME} rewrite — continuing with scoped artifact seeding)",
+                fg="yellow",
+            )
+            write_context_md = False
 
+    if write_context_md:
         files = detect_agent_files(root)
         if not files:
             click.secho("No agent files found. Creating empty context template.", fg="yellow")

@@ -70,7 +70,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `docs/guides/getting-started.md`, and
   `docs/guides/configuration.md` (Moving `config.json` between machines).
 - **`mm context init --scope=...` + Gate A/B for canonical artifact
-  seeding (ADR-0011 PR-E2).** ``mm context init`` gains three new flags:
+  seeding (ADR-0011 PR-E2).** ``mm context init`` (no flag) preserves
+  pre-PR-E2 behaviour end-to-end: same context.md path, no Gate B
+  prompt, no project-signal hard-error from outside a real project.
+  All new behaviour is gated on EXPLICIT ``--scope`` use. ``mm context
+  init`` gains three new flags:
   ``--scope user|project_shared|project_local`` (the canonical artifact
   tier to seed), ``--confirm-project-shared`` (Gate B — required when
   ``--scope`` is explicitly ``project_shared``), and

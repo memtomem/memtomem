@@ -196,6 +196,61 @@ def test_init_scope_user_seeds_user_dirs(
     assert not (proj / ".memtomem" / "commands").exists()
 
 
+def test_init_scope_user_with_existing_context_md_keeps_user_dirs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    """PR #889 review C1/P2 — declining the context.md overwrite prompt
+    must NOT kill the scoped user-tier seeding. The decline applies only
+    to the context.md rewrite; scope dirs (and `--include` import) still
+    run."""
+    proj = _make_project(tmp_path)
+    monkeypatch.chdir(proj)
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+
+    # Pre-seed an existing context.md so the prompt fires.
+    (proj / ".memtomem").mkdir()
+    existing = proj / ".memtomem" / "context.md"
+    existing.write_text("# Pre-existing context\n", encoding="utf-8")
+    original_bytes = existing.read_bytes()
+
+    # User declines the overwrite ("n"); user-tier dirs MUST still be created.
+    result = runner.invoke(cli, ["context", "init", "--scope", "user"], input="n\n")
+    assert result.exit_code == 0, result.output
+    for kind in ("agents", "skills", "commands"):
+        assert (home / ".memtomem" / kind).is_dir(), (
+            f"user-tier {kind} should be created even after context.md decline"
+        )
+    # context.md untouched.
+    assert existing.read_bytes() == original_bytes
+    # Friendly skip notice surfaced.
+    assert "skipped" in result.output.lower() or "continuing" in result.output.lower()
+
+
+def test_init_implicit_no_scope_works_from_fresh_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    """PR #889 review C2 — implicit ``mm context init`` (no --scope) must
+    still work from a directory without ``.git``/``pyproject.toml``,
+    matching pre-PR-E2 behaviour. The scope-sanity raise is restricted
+    to EXPLICIT --scope project_*."""
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    monkeypatch.chdir(fresh)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    result = runner.invoke(cli, ["context", "init"], input="")
+    assert result.exit_code == 0, result.output
+    # Implicit scope = project_shared → seeds <cwd>/.memtomem/ (matching
+    # pre-PR-E2 fall-through where _find_project_root returned cwd).
+    for kind in ("agents", "skills", "commands"):
+        assert (fresh / ".memtomem" / kind).is_dir()
+
+
 # ── --scope project_local + .gitignore append ──────────────────────────
 
 

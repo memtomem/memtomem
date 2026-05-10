@@ -488,6 +488,7 @@ def _apply_command_gate_a(
     *,
     content_text: str,
     src: Path,
+    dst: Path,
     cmd_name: str,
     scope: TargetScope,
     runtime: str,
@@ -507,8 +508,12 @@ def _apply_command_gate_a(
         surface="cli_context_init",
         force_unsafe=force_unsafe_import,
         scope=scope,
+        # Mirror agents.py audit_context shape — SOC pipelines grep both
+        # ``source=`` and ``target=`` for incident triage; commands' earlier
+        # omission was a sibling-parity gap (PR #889 review D1).
         audit_context={
             "source": str(src),
+            "target": str(dst),
             "kind": "commands",
             "runtime": runtime,
             "command_name": cmd_name,
@@ -640,6 +645,7 @@ def extract_commands_to_canonical(
             if not _apply_command_gate_a(
                 content_text=content_text,
                 src=md_file,
+                dst=dst,
                 cmd_name=cmd_name,
                 scope=scope,
                 runtime="claude",
@@ -695,6 +701,7 @@ def extract_commands_to_canonical(
             if not _apply_command_gate_a(
                 content_text=canonical_content,
                 src=toml_file,
+                dst=dst,
                 cmd_name=cmd_name,
                 scope=scope,
                 runtime="gemini",
