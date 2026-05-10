@@ -16,6 +16,8 @@ from memtomem.context._runtime_targets import (
     RUNTIME_FANOUT_TABLE,
     runtime_fanout_root,
 )
+
+from .helpers import set_home
 from memtomem.context.scope_resolver import ArtifactKind
 
 
@@ -58,13 +60,13 @@ def test_codex_commands_user_only() -> None:
 
 
 def test_user_scope_expands_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, str(tmp_path))
     out = runtime_fanout_root("agents", "claude", "user", project_root=None)
     assert out == (tmp_path / ".claude" / "agents").resolve()
 
 
 def test_user_scope_codex_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, str(tmp_path))
     out = runtime_fanout_root("commands", "codex", "user", project_root=None)
     assert out == (tmp_path / ".codex" / "prompts").resolve()
 

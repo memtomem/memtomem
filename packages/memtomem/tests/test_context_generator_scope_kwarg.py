@@ -29,6 +29,8 @@ from memtomem.context.skills import (
     GeminiSkillsGenerator,
 )
 
+from .helpers import set_home
+
 
 # ---------------------------------------------------------------------------
 # Default kwarg preserves pre-PR-E behavior (project_shared)
@@ -62,7 +64,7 @@ def test_default_kwarg_matches_project_shared_commands(tmp_path: Path) -> None:
 
 
 def test_claude_agents_user_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, str(tmp_path))
     out = ClaudeAgentsGenerator().target_file(Path("/ignored"), "foo", scope="user")
     assert out == (tmp_path / ".claude" / "agents" / "foo.md").resolve()
 
@@ -77,13 +79,13 @@ def test_claude_agents_project_local_returns_none(tmp_path: Path) -> None:
 
 
 def test_gemini_agents_user_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, str(tmp_path))
     out = GeminiAgentsGenerator().target_file(Path("/ignored"), "foo", scope="user")
     assert out == (tmp_path / ".gemini" / "agents" / "foo.md").resolve()
 
 
 def test_codex_agents_user_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, str(tmp_path))
     out = CodexAgentsGenerator().target_file(Path("/ignored"), "foo", scope="user")
     assert out == (tmp_path / ".codex" / "agents" / "foo.toml").resolve()
 
@@ -99,7 +101,7 @@ def test_codex_agents_project_shared_uses_toml(tmp_path: Path) -> None:
 
 
 def test_claude_skills_user_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, str(tmp_path))
     out = ClaudeSkillsGenerator().target_dir(Path("/ignored"), "skill1", scope="user")
     assert out == (tmp_path / ".claude" / "skills" / "skill1").resolve()
 
@@ -120,7 +122,7 @@ def test_gemini_skills_project_local_returns_none(tmp_path: Path) -> None:
 
 
 def test_claude_commands_user_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_home(monkeypatch, str(tmp_path))
     out = ClaudeCommandsGenerator().target_file(Path("/ignored"), "cmd1", scope="user")
     assert out == (tmp_path / ".claude" / "commands" / "cmd1.md").resolve()
 

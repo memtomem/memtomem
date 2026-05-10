@@ -32,6 +32,7 @@ import pytest
 from click.testing import CliRunner
 
 from memtomem.cli import cli
+from .helpers import set_home
 from memtomem.cli.context_cmd import (
     _GITIGNORE_MARKER,
     _GITIGNORE_PATTERNS,
@@ -121,7 +122,7 @@ def test_init_default_no_scope_does_not_prompt(
     """#1 — implicit default (no --scope) preserves pre-PR-E2 non-interactive shape."""
     proj = _make_project(tmp_path)
     monkeypatch.chdir(proj)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
 
     result = runner.invoke(cli, ["context", "init"], input="")  # no input on prompts
     # Should succeed without prompting — context.md exists in proj/.memtomem/.
@@ -138,7 +139,7 @@ def test_init_explicit_project_shared_prompts_and_aborts_on_n(
 ) -> None:
     proj = _make_project(tmp_path)
     monkeypatch.chdir(proj)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
 
     result = runner.invoke(
         cli,
@@ -158,7 +159,7 @@ def test_init_explicit_project_shared_with_confirm_no_prompt(
 ) -> None:
     proj = _make_project(tmp_path)
     monkeypatch.chdir(proj)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
 
     result = runner.invoke(
         cli,
@@ -186,7 +187,7 @@ def test_init_scope_user_seeds_user_dirs(
     proj = _make_project(tmp_path)
     monkeypatch.chdir(proj)
     home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
 
     result = runner.invoke(cli, ["context", "init", "--scope", "user"])
     assert result.exit_code == 0, result.output
@@ -212,7 +213,7 @@ def test_init_scope_user_with_existing_context_md_keeps_user_dirs(
     proj = _make_project(tmp_path)
     monkeypatch.chdir(proj)
     home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
 
     # Pre-seed an existing context.md.
     (proj / ".memtomem").mkdir()
@@ -246,7 +247,7 @@ def test_init_scope_project_local_does_not_touch_context_md(
     Gate B."""
     proj = _make_project(tmp_path)
     monkeypatch.chdir(proj)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
 
     (proj / ".memtomem").mkdir()
     existing = proj / ".memtomem" / "context.md"
@@ -276,7 +277,7 @@ def test_init_scope_project_local_no_existing_context_md_does_not_create_one(
     directions (no overwrite, no fresh write)."""
     proj = _make_project(tmp_path)
     monkeypatch.chdir(proj)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
 
     result = runner.invoke(cli, ["context", "init", "--scope", "project_local"])
     assert result.exit_code == 0, result.output
@@ -299,7 +300,7 @@ def test_init_implicit_no_scope_works_from_fresh_dir(
     fresh = tmp_path / "fresh"
     fresh.mkdir()
     monkeypatch.chdir(fresh)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
 
     result = runner.invoke(cli, ["context", "init"], input="")
     assert result.exit_code == 0, result.output
@@ -324,7 +325,7 @@ def test_init_scope_project_local_seeds_local_dirs_and_gitignore(
 ) -> None:
     proj = _make_project(tmp_path)
     monkeypatch.chdir(proj)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
 
     result = runner.invoke(cli, ["context", "init", "--scope", "project_local"])
     assert result.exit_code == 0, result.output
@@ -345,7 +346,7 @@ def test_init_scope_project_local_gitignore_idempotent(
 ) -> None:
     proj = _make_project(tmp_path)
     monkeypatch.chdir(proj)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
 
     runner.invoke(cli, ["context", "init", "--scope", "project_local"])
     first = (proj / ".gitignore").read_bytes()
@@ -362,7 +363,7 @@ def test_init_scope_project_local_pyproject_only_warns(
     """#5 — pyproject.toml present, .git absent: warn but do not abort."""
     proj = _make_project(tmp_path, git=False, pyproject=True)
     monkeypatch.chdir(proj)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
 
     result = runner.invoke(cli, ["context", "init", "--scope", "project_local"])
     assert result.exit_code == 0, result.output
@@ -380,7 +381,7 @@ def test_init_scope_project_local_no_signal_aborts(
     proj = tmp_path / "proj"
     proj.mkdir()
     monkeypatch.chdir(proj)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
 
     result = runner.invoke(cli, ["context", "init", "--scope", "project_local"])
     assert result.exit_code != 0
@@ -429,7 +430,7 @@ def test_extract_agents_user_scope_blocks_secret_no_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     proj = _make_project(tmp_path)
 
     _seed_user_runtime_agents(home, "leak", f"---\nname: leak\n---\nuses {_AKIA_SECRET}\n")
@@ -453,7 +454,7 @@ def test_extract_agents_user_scope_force_unsafe_writes_and_audits(
     """#15 + ``feedback_force_unsafe_redaction_valve_only.md``:
     --force-unsafe-import must (a) write raw bytes AND (b) emit audit log."""
     home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     proj = _make_project(tmp_path)
 
     src = _seed_user_runtime_agents(home, "leak", f"---\nname: leak\n---\nuses {_AKIA_SECRET}\n")
@@ -476,7 +477,7 @@ def test_extract_agents_project_shared_blocked_hard_aborts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#2 — project_shared destination + blocked → ClickException."""
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     proj = _make_project(tmp_path)
     _seed_project_runtime_agents(proj, "leak", f"---\nname: leak\n---\nuses {_AKIA_SECRET}\n")
 
@@ -494,7 +495,7 @@ def test_extract_agents_project_shared_force_unsafe_still_aborts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """B-spec smoke #16 — --force-unsafe-import does NOT bypass project_shared."""
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     proj = _make_project(tmp_path)
     _seed_project_runtime_agents(proj, "leak", f"---\nname: leak\n---\nuses {_AKIA_SECRET}\n")
 
@@ -512,7 +513,7 @@ def test_extract_skills_per_file_walk_blocks_scripts_dir(
 ) -> None:
     """B2 — secret in scripts/leak.py blocks the entire skill (atomic)."""
     home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     proj = _make_project(tmp_path)
 
     skill = home / ".claude" / "skills" / "myskill"
@@ -533,7 +534,7 @@ def test_extract_skills_clean_skill_copies_normally(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     proj = _make_project(tmp_path)
 
     skill = home / ".claude" / "skills" / "clean"
@@ -557,7 +558,7 @@ def test_extract_commands_gemini_toml_secret_in_prompt_blocked(
 ) -> None:
     """B3 — Gemini TOML's `prompt` field secret caught after conversion."""
     home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     proj = _make_project(tmp_path)
 
     gem = home / ".gemini" / "commands"
@@ -579,7 +580,7 @@ def test_extract_commands_codex_not_imported(
 ) -> None:
     """Codex prompts intentionally not imported even at user scope."""
     home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     proj = _make_project(tmp_path)
 
     codex = home / ".codex" / "prompts"
@@ -626,7 +627,7 @@ def test_unknown_decision_raises_runtime_error(
 ) -> None:
     """B1 — unexpected enforce_write_guard decision is fail-loud."""
     home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, str(home))
     proj = _make_project(tmp_path)
     _seed_user_runtime_agents(home, "agt", "---\nname: agt\n---\nbody\n")
 

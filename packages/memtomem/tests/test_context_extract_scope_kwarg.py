@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from memtomem.context import _skip_reasons as skip_codes
+from .helpers import set_home
 from memtomem.context.agents import extract_agents_to_canonical
 from memtomem.context.commands import extract_commands_to_canonical
 from memtomem.context.skills import extract_skills_to_canonical
@@ -28,7 +29,7 @@ from memtomem.context.skills import extract_skills_to_canonical
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     h = tmp_path / "home"
     h.mkdir()
-    monkeypatch.setenv("HOME", str(h))
+    set_home(monkeypatch, str(h))
     return h
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from memtomem.context.override import resolve
+from .helpers import set_home
 
 
 VENDOR_EXT = "md"  # claude/agents → .md per OVERRIDE_FORMATS
@@ -90,7 +91,7 @@ def test_narrow_wins_local_over_shared(tmp_path: Path) -> None:
 def test_narrow_wins_shared_over_user_when_local_absent(tmp_path: Path, monkeypatch) -> None:
     project = tmp_path / "proj"
     user_base = tmp_path / "home" / ".memtomem"
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     _write_override(
         project,
         scope_dir_name="user:agents",
@@ -116,7 +117,7 @@ def test_broad_only_user_fallback(tmp_path: Path, monkeypatch) -> None:
     project = tmp_path / "proj"
     project.mkdir()
     user_base = tmp_path / "home" / ".memtomem"
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, str(tmp_path / "home"))
     user_override = _write_override(
         project,
         scope_dir_name="user:agents",
