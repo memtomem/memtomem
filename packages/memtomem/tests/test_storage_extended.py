@@ -380,3 +380,528 @@ class TestStorageExtended:
         await storage.upsert_chunks([new_chunk])
         stats = await storage.get_stats()
         assert stats["total_chunks"] == 1
+
+    async def test_reset_all_clears_ai_summary_cache(self, components):
+        """``reset_all`` honours its "Delete ALL data" contract by
+        clearing user-derived AI summary records, even though the
+        ``_memtomem_meta`` table itself is preserved for embedding
+        config. Without this, a user-triggered reset would leave LLM
+        summaries of the source content on disk, and the next
+        ``get_all_ai_summaries`` call would return prose for chunks
+        that no longer exist — breaking the privacy contract and the
+        Source-tab drift count. Pin so a future refactor of the meta
+        preservation rule can't silently regress."""
+        storage = components.storage
+        await storage.upsert_chunks([make_chunk(content="some content")])
+        await storage.set_ai_summary(Path("/tmp/test.md"), "Sensitive AI prose.", "sig", "en")
+        assert await storage.get_ai_summary(Path("/tmp/test.md")) is not None
+
+        deleted = await storage.reset_all()
+
+        # Counter must surface the cleared summaries so operators see
+        # the receipt; absence of the key would let a regression slip
+        # through with all-zero counts.
+        assert deleted.get("ai_summaries") == 1
+        assert await storage.get_ai_summary(Path("/tmp/test.md")) is None
+        # ``get_all_ai_summaries`` must also report empty — the prefix
+        # scan is the surface that drives the Source-tab banner.
+        assert await storage.get_all_ai_summaries() == {}
+
+    async def test_reset_all_preserves_embedding_meta_after_summary_clear(self, components):
+        """The fix that clears ``ai_summary:*`` rows must NOT take out
+        the embedding-config rows that share the same ``_memtomem_meta``
+        table — a too-broad ``DELETE FROM _memtomem_meta`` would force
+        every user to re-pick their embedding model after a reset.
+        Belt-and-suspenders alongside the existing
+        ``test_reset_all_preserves_embedding_meta`` (this variant runs
+        the path *with* a summary present so the LIKE filter is
+        actually exercised)."""
+        storage = components.storage
+        await storage.upsert_chunks([make_chunk(content="some content")])
+        await storage.set_ai_summary(Path("/tmp/test.md"), "S", "sig", "en")
+
+        await storage.reset_all()
+
+        stored_dim = storage._get_stored_dimension()
+        assert stored_dim is not None
+
+    # ---- get_source_summaries (heuristic preview) ---------------------------
+
+    async def test_source_summaries_picks_first_chunk_by_start_line(self, components):
+        """First-chunk pick is by ``start_line ASC`` — not insertion order.
+        Insert deeper section first so insertion order disagrees with the
+        expected pick; the test fails if the SQL silently falls back to
+        ``rowid``."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        storage = components.storage
+        src = Path("/tmp/notes.md")
+        chunks = [
+            Chunk(
+                content="Deep body.",
+                metadata=ChunkMetadata(
+                    source_file=src,
+                    heading_hierarchy=("# Notes", "## Deep"),
+                    start_line=50,
+                ),
+                content_hash="hash-deep",
+                embedding=[0.1] * 1024,
+            ),
+            Chunk(
+                content="First paragraph of the file.",
+                metadata=ChunkMetadata(
+                    source_file=src,
+                    heading_hierarchy=("# Notes",),
+                    start_line=1,
+                ),
+                content_hash="hash-first",
+                embedding=[0.1] * 1024,
+            ),
+        ]
+        await storage.upsert_chunks(chunks)
+
+        # ``norm_path`` resolves symlinks (macOS ``/tmp`` → ``/private/tmp``);
+        # pull the dict's value rather than hard-coding the unresolved key.
+        summaries = await storage.get_source_summaries()
+        assert len(summaries) == 1
+        hh, content = next(iter(summaries.values()))
+        assert hh == ["# Notes"]
+        assert content == "First paragraph of the file."
+
+    async def test_source_summaries_handles_empty_hierarchy(self, components):
+        """Files with body content but no heading come back with an empty
+        hierarchy list — callers substitute fallback UI."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        storage = components.storage
+        await storage.upsert_chunks(
+            [
+                Chunk(
+                    content="Just text.",
+                    metadata=ChunkMetadata(
+                        source_file=Path("/tmp/raw.md"),
+                        heading_hierarchy=(),
+                        start_line=1,
+                    ),
+                    content_hash="hash-raw",
+                    embedding=[0.1] * 1024,
+                ),
+            ]
+        )
+        summaries = await storage.get_source_summaries()
+        hh, content = next(iter(summaries.values()))
+        assert hh == []
+        assert content == "Just text."
+
+    # ---- AI summary cache (CRUD + drift) -----------------------------------
+
+    async def test_ai_summary_roundtrip(self, components):
+        """``set`` → ``get`` returns the full record (summary, signature,
+        language, generated_at)."""
+        storage = components.storage
+        path = Path("/tmp/notes.md")
+        await storage.set_ai_summary(
+            path, summary="Two-sentence prose.", signature="abc123", language="en"
+        )
+        rec = await storage.get_ai_summary(path)
+        assert rec is not None
+        assert rec["summary"] == "Two-sentence prose."
+        assert rec["signature"] == "abc123"
+        assert rec["language"] == "en"
+        assert "generated_at" in rec
+
+    async def test_ai_summary_overwrite(self, components):
+        """``set`` overwrites prior values — no append-only semantics."""
+        storage = components.storage
+        path = Path("/tmp/notes.md")
+        await storage.set_ai_summary(path, "first", "sig1", "en")
+        await storage.set_ai_summary(path, "second", "sig2", "ko")
+        rec = await storage.get_ai_summary(path)
+        assert rec["summary"] == "second"
+        assert rec["signature"] == "sig2"
+        assert rec["language"] == "ko"
+
+    async def test_ai_summary_missing_returns_none(self, components):
+        storage = components.storage
+        rec = await storage.get_ai_summary(Path("/tmp/never-saved.md"))
+        assert rec is None
+
+    async def test_delete_ai_summary_clears_existing_row(self, components):
+        """``delete_ai_summary`` is the targeted eviction primitive used
+        by the summarizer's stale-cache cleanup paths (zero-chunk
+        reindex, LLM-failure on a signature-drifted source). Confirm it
+        actually removes the row — without this, the privacy-leak
+        regressions surface only in higher-level integration tests."""
+        storage = components.storage
+        path = Path("/tmp/dropme.md")
+        await storage.set_ai_summary(path, "prose", "sig", "en")
+        assert await storage.get_ai_summary(path) is not None
+
+        await storage.delete_ai_summary(path)
+
+        assert await storage.get_ai_summary(path) is None
+
+    async def test_delete_ai_summary_missing_is_noop(self, components):
+        """Idempotent — deleting a missing row must not raise.
+        The summarizer calls this on best-effort paths where it can't
+        always know whether a cache row exists; a raise here would
+        propagate up and break ``maybe_update_ai_summary``'s fail-soft
+        guarantee for indexing."""
+        storage = components.storage
+        # No prior set — must not raise.
+        await storage.delete_ai_summary(Path("/tmp/never-saved.md"))
+
+    async def test_update_chunks_scope_for_source_moves_ai_summary(self, components):
+        """``update_chunks_scope_for_source`` rewrites a source's path
+        in place (used by ``mm context memory migrate`` and similar
+        in-tree relocations). The cache key is path-derived, so an
+        in-place rewrite without summary migration would leave the new
+        path summary-less *and* leave an orphan ``ai_summary:<old>``
+        row contributing to drift counts. Pin the rename: after the
+        migration, the old key is gone, the new key holds the same
+        record (path migrations don't change what the file is about,
+        so the prose stays valid)."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        storage = components.storage
+        old_path = Path("/tmp/old-location.md")
+        new_path = Path("/tmp/new-location.md")
+        await storage.upsert_chunks(
+            [
+                Chunk(
+                    content="body",
+                    metadata=ChunkMetadata(
+                        source_file=old_path,
+                        heading_hierarchy=("# H",),
+                        start_line=1,
+                    ),
+                    content_hash="hash-mig",
+                    embedding=[0.1] * 1024,
+                ),
+            ]
+        )
+        await storage.set_ai_summary(old_path, "Migrated prose.", "sig-mig", "en")
+
+        moved = await storage.update_chunks_scope_for_source(
+            old_path,
+            new_path,
+            new_scope="project_shared",
+            new_project_root=Path("/tmp"),
+        )
+        assert moved == 1
+
+        # Old path's cache row is gone — no orphan to leak into drift
+        # counts or ``get_all_ai_summaries``.
+        assert await storage.get_ai_summary(old_path) is None
+        # New path carries the migrated record; same prose, same
+        # signature, same language tag.
+        rec = await storage.get_ai_summary(new_path)
+        assert rec is not None
+        assert rec["summary"] == "Migrated prose."
+        assert rec["signature"] == "sig-mig"
+        assert rec["language"] == "en"
+
+    async def test_update_chunks_scope_for_source_no_summary_is_noop(self, components):
+        """When no AI summary exists for the moved source (LLM was
+        disabled, or generation hadn't run yet), the rename path is a
+        clean no-op — chunks move, no spurious meta rows appear at the
+        destination. Defends the ``IF EXISTS``-style branch against a
+        future "always insert at new" simplification."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        storage = components.storage
+        old_path = Path("/tmp/no-summary.md")
+        new_path = Path("/tmp/no-summary-moved.md")
+        await storage.upsert_chunks(
+            [
+                Chunk(
+                    content="body",
+                    metadata=ChunkMetadata(
+                        source_file=old_path,
+                        heading_hierarchy=("# H",),
+                        start_line=1,
+                    ),
+                    content_hash="hash-ns",
+                    embedding=[0.1] * 1024,
+                ),
+            ]
+        )
+
+        await storage.update_chunks_scope_for_source(
+            old_path,
+            new_path,
+            new_scope="user",
+            new_project_root=None,
+        )
+
+        assert await storage.get_ai_summary(old_path) is None
+        assert await storage.get_ai_summary(new_path) is None
+        # And neither side appears in the all-summaries scan.
+        assert await storage.get_all_ai_summaries() == {}
+
+    async def test_get_all_ai_summaries_excludes_other_meta_keys(self, components):
+        """Embedding-dimension and other non-summary rows in
+        ``_memtomem_meta`` must not leak into the summary listing — pin
+        the prefix scan."""
+        storage = components.storage
+        # ``initialize`` populates ``embedding_dimension``; force a read
+        # to guarantee at least one non-summary row sits alongside ours.
+        _ = storage._get_stored_dimension()
+        await storage.set_ai_summary(Path("/tmp/a.md"), "AAA", "sig-a", "en")
+        await storage.set_ai_summary(Path("/tmp/b.md"), "BBB", "sig-b", "ko")
+
+        summaries = await storage.get_all_ai_summaries()
+        assert len(summaries) == 2
+        for rec in summaries.values():
+            assert "summary" in rec
+            assert "language" in rec
+
+    async def test_count_language_drift_excludes_matching_entries(self, components):
+        """``count_language_drift("ko")`` counts only entries where
+        ``language != "ko"``. Pin the negative comparison so a future bug
+        flipping ``!=`` to ``==`` shows up immediately."""
+        storage = components.storage
+        await storage.set_ai_summary(Path("/tmp/en1.md"), "S1", "sig1", "en")
+        await storage.set_ai_summary(Path("/tmp/en2.md"), "S2", "sig2", "en")
+        await storage.set_ai_summary(Path("/tmp/ko1.md"), "S3", "sig3", "ko")
+
+        assert await storage.count_language_drift("ko") == 2
+        assert await storage.count_language_drift("en") == 1
+        assert await storage.count_language_drift("fr") == 3
+
+    async def test_list_language_drift_paths_returns_only_drifting(self, components):
+        storage = components.storage
+        await storage.set_ai_summary(Path("/tmp/en1.md"), "S1", "sig1", "en")
+        await storage.set_ai_summary(Path("/tmp/ko1.md"), "S2", "sig2", "ko")
+
+        ko_drift = await storage.list_language_drift_paths("ko")
+        assert len(ko_drift) == 1
+        assert "en1.md" in str(ko_drift[0])
+
+    async def test_delete_by_source_clears_ai_summary(self, components):
+        """Deleting a source's chunks must also drop its cached summary —
+        otherwise stale rows would surface in the next
+        ``get_all_ai_summaries`` call and the Source tab would reference
+        a deleted file."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        storage = components.storage
+        path = Path("/tmp/dropme.md")
+        await storage.upsert_chunks(
+            [
+                Chunk(
+                    content="body",
+                    metadata=ChunkMetadata(
+                        source_file=path,
+                        heading_hierarchy=("# H",),
+                        start_line=1,
+                    ),
+                    content_hash="hash-drop",
+                    embedding=[0.1] * 1024,
+                ),
+            ]
+        )
+        await storage.set_ai_summary(path, "AI prose.", "sig-drop", "en")
+        assert await storage.get_ai_summary(path) is not None
+
+        deleted = await storage.delete_by_source(path)
+        assert deleted == 1
+        # Summary must be gone — same record was keyed by norm_path of
+        # the source, so delete_by_source is responsible for cleanup.
+        assert await storage.get_ai_summary(path) is None
+
+    async def test_delete_by_source_clears_orphan_summary(self, components):
+        """Even when a summary exists with no chunks (orphan from a prior
+        bug or aborted index), ``delete_by_source`` clears it. Defends
+        the "no chunks but stale summary" path that would otherwise leak
+        past the zero-chunk early return."""
+        storage = components.storage
+        path = Path("/tmp/orphan.md")
+        await storage.set_ai_summary(path, "leftover", "sig-orphan", "en")
+
+        deleted = await storage.delete_by_source(path)
+        assert deleted == 0  # no chunks
+        assert await storage.get_ai_summary(path) is None
+
+    async def test_delete_chunks_clears_summary_when_source_emptied(self, components):
+        """Per-chunk ``delete_chunks`` (web chunk-delete fallback, dedup,
+        decay) must drop the AI summary cache once the *last* chunk for
+        a source is gone. Without this, deleting every chunk of a file
+        through the chunk endpoint would still leave LLM-generated prose
+        about that source on disk and exposed via
+        ``get_all_ai_summaries`` — privacy regression and a stale-data
+        source for the Source-tab drift count."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        storage = components.storage
+        src = Path("/tmp/single.md")
+        chunk = Chunk(
+            content="only chunk",
+            metadata=ChunkMetadata(
+                source_file=src,
+                heading_hierarchy=("# H",),
+                start_line=1,
+            ),
+            content_hash="hash-single",
+            embedding=[0.1] * 1024,
+        )
+        await storage.upsert_chunks([chunk])
+        await storage.set_ai_summary(src, "AI prose.", "sig-single", "en")
+
+        # Delete via chunk-id path — *not* delete_by_source.
+        deleted = await storage.delete_chunks([chunk.id])
+        assert deleted == 1
+        # Summary must be gone — source has zero remaining chunks.
+        assert await storage.get_ai_summary(src) is None
+
+    async def test_delete_chunks_preserves_summary_on_partial_delete(self, components):
+        """Partial deletion (some chunks remain for the source) leaves
+        the summary alone. Rationale: the signature will mismatch on
+        the next reindex and ``maybe_update_ai_summary`` regenerates
+        cleanly; clearing here would force a regenerate every time
+        dedup or decay shaves a single chunk off a multi-section file,
+        which is wasted LLM cost."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        storage = components.storage
+        src = Path("/tmp/multi.md")
+        chunks = [
+            Chunk(
+                content=f"section {i}",
+                metadata=ChunkMetadata(
+                    source_file=src,
+                    heading_hierarchy=(f"# H{i}",),
+                    start_line=i * 10,
+                ),
+                content_hash=f"hash-multi-{i}",
+                embedding=[0.1] * 1024,
+            )
+            for i in range(3)
+        ]
+        await storage.upsert_chunks(chunks)
+        await storage.set_ai_summary(src, "AI prose.", "sig-multi", "en")
+
+        # Delete just the first chunk — two remain.
+        deleted = await storage.delete_chunks([chunks[0].id])
+        assert deleted == 1
+        rec = await storage.get_ai_summary(src)
+        assert rec is not None
+        assert rec["summary"] == "AI prose."
+
+    async def test_delete_chunks_in_transaction_preserves_summary_for_rewrite(self, components):
+        """Reindex (``IndexingEngine._index_file``) wraps a delete +
+        upsert pair in a single ``storage.transaction()``. Mid-
+        transaction the source is *temporarily* empty, but the upsert
+        immediately follows — clearing the AI summary at the delete
+        step would mean a stale-but-renderable preview gets blown away
+        and never restored if the post-transaction
+        ``maybe_update_ai_summary`` no-ops (LLM down,
+        ``auto_summarize=False``, transient error). Pin the deferred-
+        cleanup contract: in-transaction ``delete_chunks`` leaves the
+        cache row alone."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        storage = components.storage
+        src = Path("/tmp/rewrite.md")
+        old_chunk = Chunk(
+            content="old content",
+            metadata=ChunkMetadata(source_file=src, heading_hierarchy=("# H",), start_line=1),
+            content_hash="hash-old",
+            embedding=[0.1] * 1024,
+        )
+        new_chunk = Chunk(
+            content="new content",
+            metadata=ChunkMetadata(source_file=src, heading_hierarchy=("# H",), start_line=1),
+            content_hash="hash-new",
+            embedding=[0.1] * 1024,
+        )
+        await storage.upsert_chunks([old_chunk])
+        await storage.set_ai_summary(src, "AI prose.", "sig-old", "en")
+
+        # Simulate the engine's reindex flow: delete-all + upsert-new
+        # in one transaction. Without the deferred-cleanup gate this
+        # test fails: ``delete_chunks`` would clear the summary while
+        # the source is briefly empty, before ``upsert_chunks`` lands.
+        async with storage.transaction():
+            await storage.delete_chunks([old_chunk.id])
+            await storage.upsert_chunks([new_chunk])
+
+        rec = await storage.get_ai_summary(src)
+        assert rec is not None
+        assert rec["summary"] == "AI prose."
+
+    async def test_delete_chunks_in_transaction_skips_cleanup(self, components):
+        """Deferred-cleanup gate is intentionally permissive: even when
+        an in-transaction delete truly empties a source (no follow-up
+        upsert), the cleanup is left to the outer scope. In practice
+        that's either ``delete_by_source`` (clears cache) or session-
+        end ``reset_all`` (also clears). Direct ``delete_chunks``
+        callers who wrap in a transaction with no upsert are an
+        unsupported pattern; documenting the trade-off here so a
+        future test asserting the *opposite* flags the design intent
+        first rather than silently inverting."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        storage = components.storage
+        src = Path("/tmp/empty-in-tx.md")
+        chunk = Chunk(
+            content="only",
+            metadata=ChunkMetadata(source_file=src, heading_hierarchy=("# H",), start_line=1),
+            content_hash="hash-only",
+            embedding=[0.1] * 1024,
+        )
+        await storage.upsert_chunks([chunk])
+        await storage.set_ai_summary(src, "old prose", "sig", "en")
+
+        async with storage.transaction():
+            await storage.delete_chunks([chunk.id])
+
+        # Stale but present — caller is expected to use
+        # delete_by_source / reset_all for final cleanup.
+        rec = await storage.get_ai_summary(src)
+        assert rec is not None
+
+    async def test_delete_chunks_handles_mixed_sources_atomically(self, components):
+        """A single ``delete_chunks`` call spanning multiple sources
+        clears summaries for the ones it fully empties and leaves the
+        others alone. Pin the per-source check so a future "clear all
+        affected summaries" shortcut can't slip through (that would be
+        the same bug as before, just inverted)."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        storage = components.storage
+        # source A: single chunk → will be fully emptied
+        src_a = Path("/tmp/empty-me.md")
+        chunk_a = Chunk(
+            content="only A",
+            metadata=ChunkMetadata(source_file=src_a, heading_hierarchy=("# A",), start_line=1),
+            content_hash="hash-A",
+            embedding=[0.1] * 1024,
+        )
+        # source B: two chunks, only one deleted → partial
+        src_b = Path("/tmp/keep-me.md")
+        chunks_b = [
+            Chunk(
+                content="B section 0",
+                metadata=ChunkMetadata(source_file=src_b, heading_hierarchy=("# B",), start_line=1),
+                content_hash="hash-B0",
+                embedding=[0.1] * 1024,
+            ),
+            Chunk(
+                content="B section 1",
+                metadata=ChunkMetadata(
+                    source_file=src_b, heading_hierarchy=("# B",), start_line=20
+                ),
+                content_hash="hash-B1",
+                embedding=[0.1] * 1024,
+            ),
+        ]
+        await storage.upsert_chunks([chunk_a, *chunks_b])
+        await storage.set_ai_summary(src_a, "A prose.", "sig-A", "en")
+        await storage.set_ai_summary(src_b, "B prose.", "sig-B", "en")
+
+        # Mixed batch: A's only chunk + B's first chunk.
+        await storage.delete_chunks([chunk_a.id, chunks_b[0].id])
+
+        assert await storage.get_ai_summary(src_a) is None  # fully emptied
+        assert await storage.get_ai_summary(src_b) is not None  # partial

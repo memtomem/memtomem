@@ -60,6 +60,17 @@ __all__ = ["SqliteBackend"]
 _REBUILD_FTS_BATCH_SIZE = 1000
 
 
+# Prefix for per-source AI summary records in the ``_memtomem_meta`` k/v
+# table. The full key is ``ai_summary:<resolved-NFC-path>`` so a prefix
+# scan (``key LIKE 'ai_summary:%'``) cleanly separates summary rows from
+# the embedding-meta keys that share the same table.
+_AI_SUMMARY_KEY_PREFIX = "ai_summary:"
+
+
+def _ai_summary_key(source_file: Path) -> str:
+    return f"{_AI_SUMMARY_KEY_PREFIX}{norm_path(source_file)}"
+
+
 def _rebuild_fts_retrieval(content: str, hierarchy_json: str) -> str:
     """Prefix ``content`` with its heading hierarchy for FTS indexing."""
     if hierarchy_json:
@@ -333,7 +344,10 @@ class SqliteBackend(
 
         Deletes every row from chunks, FTS, vectors, and all auxiliary tables
         (access_log, query_history, sessions, etc.).  The ``_memtomem_meta``
-        table is preserved so embedding config survives.
+        table is preserved so embedding config survives, *except* for
+        ``ai_summary:*`` rows — those carry user-derived prose generated
+        from indexed source content and must respect the "Delete ALL data"
+        contract just like the chunks they were summarising.
 
         Returns a dict mapping table name → number of deleted rows.
         """
@@ -383,6 +397,24 @@ class SqliteBackend(
             else:
                 self._has_vec_table = False
             deleted["chunks_vec"] = chunk_count
+
+            # AI summary cache lives in ``_memtomem_meta`` (the table is
+            # otherwise preserved for embedding config). Rows under the
+            # ``ai_summary:`` prefix carry LLM-generated prose derived from
+            # indexed sources, so they must be cleared with the rest of
+            # the user data — leaving them behind would let
+            # ``get_all_ai_summaries`` keep returning content for chunks
+            # that no longer exist, and break the "Delete ALL data" UI
+            # contract.
+            ai_summary_count = db.execute(
+                "SELECT COUNT(*) FROM _memtomem_meta WHERE key LIKE ?",
+                (f"{_AI_SUMMARY_KEY_PREFIX}%",),
+            ).fetchone()[0]
+            db.execute(
+                "DELETE FROM _memtomem_meta WHERE key LIKE ?",
+                (f"{_AI_SUMMARY_KEY_PREFIX}%",),
+            )
+            deleted["ai_summaries"] = ai_summary_count
 
             if not self._in_transaction:
                 db.commit()
@@ -598,9 +630,15 @@ class SqliteBackend(
         db = self._get_db()
         ids_str = [str(cid) for cid in chunk_ids]
 
-        # Batch fetch rowids in a single query (P2)
+        # Batch fetch rowids + source_file in a single query (P2). The
+        # ``source_file`` column travels along so that *after* the delete
+        # we can check which sources lost their last chunk and need their
+        # AI summary cache cleared — partial deletions leave the summary
+        # in place (the signature drifts and gets refreshed on the next
+        # reindex), but a fully-emptied source has no future reindex to
+        # rely on, so its cached prose has to go now.
         rows = db.execute(
-            f"SELECT id, rowid FROM chunks WHERE id IN ({placeholders(len(ids_str))})",
+            f"SELECT id, rowid, source_file FROM chunks WHERE id IN ({placeholders(len(ids_str))})",
             ids_str,
         ).fetchall()
 
@@ -609,6 +647,7 @@ class SqliteBackend(
 
         found_ids = [row[0] for row in rows]
         rowids = [row[1] for row in rows]
+        affected_sources = {row[2] for row in rows if row[2]}
 
         try:
             db.execute(
@@ -621,6 +660,44 @@ class SqliteBackend(
                 db.execute(
                     f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(rowids))})", rowids
                 )
+
+            # AI summary cache cleanup for sources that just lost their
+            # last chunk — but only when this delete is the *final*
+            # word. The reindex path in ``IndexingEngine._index_file``
+            # wraps a delete+upsert pair in a single transaction; if a
+            # source has no unchanged chunks the delete temporarily
+            # empties it before the upsert lands, and clearing here
+            # would drop a still-valid summary. The fail-soft contract
+            # for AI summaries (LLM error → keep old prose, indexing
+            # continues) requires that we don't pre-emptively flush
+            # the cache for what is really a rewrite.
+            #
+            # Skip cleanup when ``_in_transaction`` is True; the
+            # outer scope (post-upsert ``maybe_update_ai_summary``,
+            # explicit ``delete_by_source``, or session-end
+            # ``reset_all``) is responsible for resolving the cache
+            # state once the multi-step operation completes. Standalone
+            # ``delete_chunks`` calls (web chunk-delete fallback,
+            # dedup, decay sweeps) hit the cleanup branch as before.
+            #
+            # ``source_file`` is already in normalised form in the
+            # chunks table (see ``upsert_chunks`` → ``norm_path``),
+            # so we feed it directly to the meta-key prefix without
+            # re-resolving (resolving here would mismatch on macOS
+            # symlink cases like ``/tmp`` → ``/private/tmp`` because
+            # the original chunk row was stored as resolved already).
+            if not self._in_transaction:
+                for source_norm in affected_sources:
+                    remaining = db.execute(
+                        "SELECT 1 FROM chunks WHERE source_file=? LIMIT 1",
+                        (source_norm,),
+                    ).fetchone()
+                    if remaining is None:
+                        db.execute(
+                            "DELETE FROM _memtomem_meta WHERE key=?",
+                            (f"{_AI_SUMMARY_KEY_PREFIX}{source_norm}",),
+                        )
+
             if not self._in_transaction:
                 db.commit()
         except Exception as exc:
@@ -637,6 +714,16 @@ class SqliteBackend(
         ).fetchall()
 
         if not rows:
+            # Even with no chunks, an orphaned ai_summary cache row from a
+            # prior generation could linger — clear it unconditionally so
+            # the source-tab preview doesn't keep referencing a deleted
+            # file. Cheap (single row by primary key) so we don't gate it.
+            db.execute(
+                "DELETE FROM _memtomem_meta WHERE key=?",
+                (_ai_summary_key(source_file),),
+            )
+            if not self._in_transaction:
+                db.commit()
             return 0
 
         ids = [row[0] for row in rows]
@@ -651,6 +738,10 @@ class SqliteBackend(
                 db.execute(
                     f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(rowids))})", rowids
                 )
+            db.execute(
+                "DELETE FROM _memtomem_meta WHERE key=?",
+                (_ai_summary_key(source_file),),
+            )
             if not self._in_transaction:
                 db.commit()
         except Exception as exc:
@@ -736,6 +827,41 @@ class SqliteBackend(
                 f"UPDATE chunks_fts SET source_file=? WHERE rowid IN ({placeholders(len(rowids))})",
                 [new_norm, *rowids],
             )
+            # Move the AI summary cache row alongside the chunks. The
+            # cache key is derived from the source path, so an in-place
+            # path rewrite would otherwise leave an ``ai_summary:<old>``
+            # row attached to chunks that now live at <new> — the new
+            # path would render with no AI summary while the orphan row
+            # kept contributing to ``count_language_drift`` and
+            # ``get_all_ai_summaries``. The summary describes the same
+            # *content*, so renaming (rather than dropping) is the
+            # correct semantic: a path migration via ``mm context
+            # memory migrate`` doesn't change what the file is about,
+            # only where it lives.
+            #
+            # ``INSERT OR REPLACE`` against the new key is necessary
+            # because the destination path could already have its own
+            # cache row in pathological cases (e.g., the user moved
+            # files in opposite directions across two migrations); the
+            # source-of-truth for the migrated chunks is the row keyed
+            # by ``old`` because that's the one whose signature matched
+            # the chunk hashes we just rewrote. After the swap, delete
+            # the old key so the orphan can't drift back in.
+            old_summary_key = f"{_AI_SUMMARY_KEY_PREFIX}{old_norm}"
+            new_summary_key = f"{_AI_SUMMARY_KEY_PREFIX}{new_norm}"
+            old_summary = db.execute(
+                "SELECT value FROM _memtomem_meta WHERE key=?",
+                (old_summary_key,),
+            ).fetchone()
+            if old_summary is not None:
+                db.execute(
+                    "INSERT OR REPLACE INTO _memtomem_meta(key, value) VALUES (?, ?)",
+                    (new_summary_key, old_summary[0]),
+                )
+                db.execute(
+                    "DELETE FROM _memtomem_meta WHERE key=?",
+                    (old_summary_key,),
+                )
             if opened_tx:
                 db.commit()
         except Exception as exc:
@@ -1233,6 +1359,138 @@ class SqliteBackend(
         return [
             (Path(row[0]), row[1], row[2], row[3], row[4] or 0, row[5] or 0, row[6] or 0)
             for row in rows
+        ]
+
+    async def get_source_summaries(self) -> dict[str, tuple[list[str], str]]:
+        """Return ``{source_file_path_str: (heading_hierarchy, first_chunk_content)}``.
+
+        The "first chunk" is the section with the smallest ``start_line`` per
+        source. Powers the Source tab's heuristic preview (first heading +
+        first paragraph) — drives the fallback shown when no AI summary has
+        been generated yet, or when the LLM is disabled. Pure read-side
+        aggregation; no LLM, no extra storage column.
+        """
+        db = self._get_read_db()
+        rows = db.execute(
+            "SELECT source_file, content, heading_hierarchy FROM ("
+            "  SELECT source_file, content, heading_hierarchy,"
+            "         ROW_NUMBER() OVER ("
+            "           PARTITION BY source_file ORDER BY start_line, rowid"
+            "         ) AS rn"
+            "  FROM chunks"
+            ") WHERE rn = 1"
+        ).fetchall()
+        result: dict[str, tuple[list[str], str]] = {}
+        for source, content, hh_json in rows:
+            try:
+                hh = list(json.loads(hh_json)) if hh_json else []
+            except (json.JSONDecodeError, TypeError):
+                hh = []
+            result[source] = (hh, content or "")
+        return result
+
+    # ---- AI summary cache (per-source LLM-generated preview) ----------------
+
+    async def get_ai_summary(self, source_file: Path) -> dict | None:
+        """Return the cached AI summary record for ``source_file``, or None.
+
+        Record shape: ``{"summary": str, "signature": str, "language": str,
+        "generated_at": str}``. Returns None when no row exists or the JSON
+        is corrupt — callers treat both as "no cache, regenerate".
+        """
+        assert self._meta is not None
+        raw = self._meta.get_meta(_ai_summary_key(source_file))
+        if not raw:
+            return None
+        try:
+            obj = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Corrupt ai_summary record for %s", source_file)
+            return None
+        if not isinstance(obj, dict):
+            return None
+        return obj
+
+    async def set_ai_summary(
+        self,
+        source_file: Path,
+        summary: str,
+        signature: str,
+        language: str,
+    ) -> None:
+        """Persist an AI summary record. Overwrites any prior value."""
+        from datetime import datetime, timezone
+
+        assert self._meta is not None
+        record = {
+            "summary": summary,
+            "signature": signature,
+            "language": language,
+            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        self._meta.set_meta(_ai_summary_key(source_file), json.dumps(record))
+
+    async def delete_ai_summary(self, source_file: Path) -> None:
+        """Drop the AI summary cache row for ``source_file``, if any.
+
+        Called from the indexing pipeline when a refresh determines the
+        cache is stale — e.g., a reindex produced zero chunks (source
+        emptied / became unchunkable), or the LLM failed on a content-
+        drifted source. Idempotent: deleting a missing row is a no-op.
+        Standalone from ``delete_by_source`` so the summarizer can clear
+        the prose without also tearing down the chunk rows.
+        """
+        db = self._get_db()
+        db.execute(
+            "DELETE FROM _memtomem_meta WHERE key=?",
+            (_ai_summary_key(source_file),),
+        )
+        if not self._in_transaction:
+            db.commit()
+
+    async def get_all_ai_summaries(self) -> dict[str, dict]:
+        """Return ``{normalised_path: record}`` for every cached AI summary.
+
+        Prefix-scans ``_memtomem_meta`` for keys starting with
+        ``ai_summary:`` so unrelated meta rows (embedding dimension etc.)
+        don't leak in. Records with corrupt JSON are silently dropped — the
+        Source-tab API treats them as "no preview".
+        """
+        db = self._get_read_db()
+        rows = db.execute(
+            "SELECT key, value FROM _memtomem_meta WHERE key LIKE ?",
+            (f"{_AI_SUMMARY_KEY_PREFIX}%",),
+        ).fetchall()
+        result: dict[str, dict] = {}
+        for key, value in rows:
+            path = key[len(_AI_SUMMARY_KEY_PREFIX) :]
+            try:
+                obj = json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(obj, dict):
+                result[path] = obj
+        return result
+
+    async def count_language_drift(self, target_language: str) -> int:
+        """Count cached summaries whose ``language`` is not ``target_language``.
+
+        Drives the Source-tab "N summaries are in <X> (setting: <Y>)" banner.
+        Records missing a ``language`` field count as drift — treated as
+        legacy entries that need an explicit regeneration to resolve.
+        """
+        all_summaries = await self.get_all_ai_summaries()
+        return sum(1 for rec in all_summaries.values() if rec.get("language") != target_language)
+
+    async def list_language_drift_paths(self, target_language: str) -> list[Path]:
+        """Return paths whose cached summary language ≠ ``target_language``.
+
+        Bulk-regenerate endpoint consumes this to avoid touching entries
+        that already match the requested language.
+        """
+        all_summaries = await self.get_all_ai_summaries()
+        return [
+            Path(p) for p, rec in all_summaries.items() if rec.get("language") != target_language
         ]
 
     async def get_tag_counts(self) -> list[tuple[str, int]]:

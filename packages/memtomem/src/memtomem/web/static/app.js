@@ -2783,6 +2783,117 @@ function _renderSourcesNsChip() {
   }
 }
 
+// ---- AI summary language-drift banner -----------------------------------
+// Shown above the source list when one or more cached AI summaries are in
+// a language that doesn't match the current ``summary_language`` setting.
+// Two actions: bulk regenerate (kicks off the background job + polls) or
+// dismiss-for-session (sessionStorage, doesn't persist across reloads so
+// users see it again next session if drift is still present).
+
+function _renderLanguageDriftBanner(drift) {
+  const banner = document.getElementById('sources-language-drift');
+  if (!banner) return;
+  if (!drift || !drift.count) {
+    banner.hidden = true;
+    banner.innerHTML = '';
+    return;
+  }
+  if (sessionStorage.getItem('summaryDriftDismissed') === '1') {
+    banner.hidden = true;
+    banner.innerHTML = '';
+    return;
+  }
+  // Non-translated fallback strings ship as the source of truth — the
+  // i18n loader replaces them once locales are wired (see locales/*.json).
+  const tFn = (typeof t === 'function') ? t : ((_, fb) => fb);
+  const msg = tFn(
+    'sources.language_drift_banner',
+    `⚠️ ${drift.count} summaries don't match your language setting (${drift.current_setting})`,
+  ).replace('{count}', drift.count).replace('{current}', drift.current_setting);
+  const regenLabel = tFn('sources.regenerate_all_btn', 'Regenerate all');
+  const laterLabel = tFn('sources.regenerate_later_btn', 'Later');
+  banner.innerHTML = `
+    <span class="source-language-drift-msg">${escapeHtml(msg)}</span>
+    <button class="btn-primary btn-xs source-drift-regen-btn">${escapeHtml(regenLabel)}</button>
+    <button class="btn-ghost btn-xs source-drift-later-btn">${escapeHtml(laterLabel)}</button>
+  `;
+  banner.hidden = false;
+  banner.querySelector('.source-drift-regen-btn').addEventListener('click', _onRegenerateSummariesClicked);
+  banner.querySelector('.source-drift-later-btn').addEventListener('click', () => {
+    sessionStorage.setItem('summaryDriftDismissed', '1');
+    banner.hidden = true;
+    banner.innerHTML = '';
+  });
+}
+
+async function _onRegenerateSummariesClicked() {
+  const banner = document.getElementById('sources-language-drift');
+  if (!banner) return;
+  const tFn = (typeof t === 'function') ? t : ((_, fb) => fb);
+  // Disable both buttons while the request is in flight to avoid double
+  // POST. The polling loop replaces the button row with a progress chip.
+  banner.querySelectorAll('button').forEach(b => (b.disabled = true));
+  try {
+    const resp = await api('POST', '/api/sources/regenerate-summaries');
+    const total = (resp && resp.total) || 0;
+    if (total === 0) {
+      // Nothing to do — server already cleared its drift list. Refresh
+      // the source view so the banner disappears too.
+      showToast(tFn('sources.regenerate_done', 'Summaries regenerated.').replace('{processed}', 0), 'success');
+      sessionStorage.removeItem('summaryDriftDismissed');
+      await loadSources();
+      return;
+    }
+    _pollRegenerateStatus();
+  } catch (err) {
+    const failLabel = tFn(
+      'sources.regenerate_failed',
+      'Failed to start regeneration: {error}',
+    ).replace('{error}', (err && err.message) || '');
+    showToast(failLabel, 'error');
+    banner.querySelectorAll('button').forEach(b => (b.disabled = false));
+  }
+}
+
+let _regenPollTimer = null;
+async function _pollRegenerateStatus() {
+  // Mirror of ``_indexingPollUntilIdle``: 500ms cadence, stops when the
+  // server flips ``running`` to false. Updates the banner inline so users
+  // can watch progress without leaving the Source tab.
+  const banner = document.getElementById('sources-language-drift');
+  const tFn = (typeof t === 'function') ? t : ((_, fb) => fb);
+  const tick = async () => {
+    try {
+      const status = await api('GET', '/api/sources/regenerate-status');
+      if (banner && !banner.hidden) {
+        const progressLabel = tFn(
+          'sources.regenerate_in_progress',
+          'Regenerating {done}/{total}…',
+        ).replace('{done}', status.done).replace('{total}', status.total);
+        banner.innerHTML = `<span class="source-language-drift-msg">${escapeHtml(progressLabel)}</span>`;
+      }
+      if (!status.running) {
+        if (_regenPollTimer) {
+          clearInterval(_regenPollTimer);
+          _regenPollTimer = null;
+        }
+        const doneLabel = tFn('sources.regenerate_done', 'Regenerated {processed} summaries.')
+          .replace('{processed}', status.done);
+        showToast(doneLabel, 'success');
+        sessionStorage.removeItem('summaryDriftDismissed');
+        await loadSources();
+      }
+    } catch (err) {
+      // Transient error — keep polling unless it persists; another tick
+      // will retry. Don't dismiss the banner so the user can see it stuck.
+      console.warn('regenerate-status poll failed', err);
+    }
+  };
+  if (_regenPollTimer) clearInterval(_regenPollTimer);
+  _regenPollTimer = setInterval(tick, 500);
+  tick();
+}
+
 function navigateToSourcesByNs(nsName) {
   STATE.sourcesNsFilter = nsName;
   activateTab('sources');
@@ -2931,7 +3042,9 @@ async function loadSources() {
     STATE.memoryStatusByPath = statusByPath;
     STATE.memoryDirs = (STATE.serverConfig?.indexing?.memory_dirs) || Object.keys(statusByPath);
     STATE.allSources = (sourcesResp && sourcesResp.sources) || [];
+    STATE.sourcesLanguageDrift = (sourcesResp && sourcesResp.language_drift) || null;
     _renderSourcesNsChip();
+    _renderLanguageDriftBanner(STATE.sourcesLanguageDrift);
     renderSourceTree(_getFilteredSorted());
   } catch (err) {
     list.innerHTML = `<div class="empty-state"><p>Error: ${escapeHtml(err.message)}</p></div>`;
@@ -3561,12 +3674,36 @@ function _renderMemorySourceItem(s, maxChunks) {
     .filter(ns => ns !== 'default')
     .map(ns => `<span class="badge badge-ns source-ns-badge">${escapeHtml(ns)}</span>`)
     .join('');
+  // Three-tier preview: filename row1 (anchor) → title (heading
+  // subtitle) → AI summary OR heuristic excerpt (body preview). When an
+  // AI summary is cached the prose replaces the heuristic excerpt and
+  // is marked with a ✨ prefix; otherwise the heuristic excerpt fills
+  // the same slot. Title comes from the heading hierarchy regardless,
+  // so a row keeps a visible label even when the body slot is empty.
+  let summaryHtml = '';
+  const titlePart = s.title
+    ? `<div class="source-item-title">${escapeHtml(s.title)}</div>`
+    : '';
+  let bodyPart = '';
+  if (s.ai_summary) {
+    bodyPart =
+      `<div class="source-item-excerpt" data-ai="true">` +
+      `<span class="source-item-ai-badge" aria-hidden="true">✨</span> ` +
+      `${escapeHtml(s.ai_summary)}` +
+      `</div>`;
+  } else if (s.excerpt) {
+    bodyPart = `<div class="source-item-excerpt">${escapeHtml(s.excerpt)}</div>`;
+  }
+  if (titlePart || bodyPart) {
+    summaryHtml = `<div class="source-item-summary">${titlePart}${bodyPart}</div>`;
+  }
   item.innerHTML = `
     <div class="source-item-row1">
       <span class="source-type-dot" style="background:${fileTypeColor(s.path)}"></span>
       <span class="source-name">${escapeHtml(filename)}</span>
       ${nsBadges}
     </div>
+    ${summaryHtml}
     <div class="source-item-row2">
       ${s.chunk_count ?? '?'} chunks${size ? ' · ' + size : ''}${s.avg_tokens ? ' · avg ' + s.avg_tokens + ' tok' : ''}${age ? ' · ' + age : ''}
     </div>

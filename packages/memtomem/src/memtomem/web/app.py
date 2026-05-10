@@ -289,6 +289,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.search_pipeline = comp.search_pipeline
     app.state.index_engine = comp.index_engine
     app.state.dedup_scanner = DedupScanner(comp.storage, comp.embedder)
+    # Per-source AI summary regeneration job state (singleton, in-memory).
+    # ``None`` when no job has run; otherwise a counter dict mutated by the
+    # background task and read by ``GET /api/sources/regenerate-status``.
+    app.state.summary_regen = None
+    # Shared LLM provider (or ``None``) — exposed for the bulk-regenerate
+    # endpoint, which mirrors the indexing engine's per-source flow.
+    app.state.llm = comp.llm
 
     # Sync config to match DB-stored embedding info (prevents mismatch banner).
     # Skipped when the server entered degraded mode (issue #349) — in the

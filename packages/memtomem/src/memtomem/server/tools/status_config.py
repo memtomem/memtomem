@@ -297,6 +297,13 @@ def _revert_to_stored(app: AppContext) -> str:
         config=config.indexing,
         namespace_config=config.namespace,
         progress_threshold=config.embedding.progress_threshold,
+        # Preserve the LLM provider on rebuild — the engine consumes it
+        # for the per-source AI summary path (``maybe_update_ai_summary``
+        # in ``_index_file``), and dropping it here would silently
+        # disable summary generation after every embedding-reset /
+        # revert-to-stored until the server restart re-runs
+        # ``component_factory.create_components``.
+        llm=app.llm_provider,
     )
 
     storage.clear_embedding_mismatch()

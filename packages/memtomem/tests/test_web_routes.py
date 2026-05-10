@@ -92,6 +92,11 @@ class FakeConfig:
         chunk_overlap_tokens = 0
         structured_chunk_mode = "original"
         exclude_patterns: list[str] = []
+        # Per-source AI summary knobs; default off to match production.
+        auto_summarize = False
+        summary_language = "en"
+        summary_max_input_chars = 3000
+        summary_max_tokens = 256
 
         def all_index_roots(self):
             return list(self.memory_dirs) + list(self.project_memory_dirs)
@@ -150,6 +155,15 @@ def app():
             )
         ]
     )
+    # Heuristic + AI summary mocks. Default to empty so most tests don't
+    # have to reason about preview population — specific tests override.
+    storage.get_source_summaries = AsyncMock(return_value={})
+    storage.get_all_ai_summaries = AsyncMock(return_value={})
+    storage.count_language_drift = AsyncMock(return_value=0)
+    storage.list_language_drift_paths = AsyncMock(return_value=[])
+    storage.set_ai_summary = AsyncMock()
+    storage.delete_ai_summary = AsyncMock()
+    storage.get_ai_summary = AsyncMock(return_value=None)
     storage.list_sessions = AsyncMock(return_value=[])
     storage.get_session_events = AsyncMock(return_value=[])
     storage.upsert_chunks = AsyncMock()
@@ -210,6 +224,11 @@ def app():
     application.state.embedder = embedder
     application.state.search_pipeline = search_pipeline
     application.state.index_engine = index_engine
+    # Per-source AI summary endpoints look these up — default to no LLM
+    # configured / no regen job running. Tests that exercise the
+    # bulk-regenerate flow override ``app.state.llm`` directly.
+    application.state.llm = None
+    application.state.summary_regen = None
     cfg = FakeConfig()
     # _Indexing is a class-level singleton — reset mutable fields so tests that
     # mutate exclude_patterns or memory_dirs don't leak into later tests.
@@ -762,6 +781,186 @@ class TestSources:
         assert resp.status_code == 200
         src = resp.json()["sources"][0]
         assert src["memory_dir"] == str(target.resolve())
+
+    # ---- heuristic preview --------------------------------------------------
+    #
+    # The route resolves each source's preview/AI-summary via
+    # ``str(p) -> dict.get(...)``, where ``p`` comes from the
+    # ``get_source_files_with_counts`` mock (``Path("/tmp/test.md")``).
+    # On Windows ``str(Path("/tmp/test.md")) == "\\tmp\\test.md"`` —
+    # using a bare POSIX literal as the dict key here would silently
+    # miss on Windows runners (the failure mode shipped in PR #888 CI).
+    # Build the key from ``str(Path(...))`` so the test rides on the
+    # same normalisation the route uses.
+
+    async def test_summary_derived_from_first_chunk(self, app, client: AsyncClient):
+        """Title strips the leading ``#`` from
+        ``heading_hierarchy[0]``, and excerpt comes from the first
+        chunk's body. Pin both so a future refactor can't silently
+        regress what users see in the Source tab without flipping a test."""
+        key = str(Path("/tmp/test.md"))
+        app.state.storage.get_source_summaries.return_value = {
+            key: (
+                ["# Project Notes", "## Section"],
+                "Opening lines of the document.",
+            )
+        }
+        resp = await client.get("/api/sources")
+        src = resp.json()["sources"][0]
+        assert src["title"] == "Project Notes"
+        assert src["excerpt"] == "Opening lines of the document."
+
+    async def test_summary_excerpt_truncated_with_ellipsis(self, app, client: AsyncClient):
+        """Excerpt caps at ~200 chars with a trailing ``…`` so a
+        runaway opening paragraph can't blow out the row layout."""
+        long_body = "word " * 200  # ~1000 chars
+        key = str(Path("/tmp/test.md"))
+        app.state.storage.get_source_summaries.return_value = {key: (["# Title"], long_body)}
+        resp = await client.get("/api/sources")
+        src = resp.json()["sources"][0]
+        assert src["excerpt"] is not None
+        assert src["excerpt"].endswith("…")
+        assert len(src["excerpt"]) <= 200
+
+    async def test_summary_absent_yields_null_fields(self, app, client: AsyncClient):
+        """No first-chunk row → both heuristic fields are ``None``.
+        Default fixture exercises this; pin so an "always populate"
+        change can't sneak through."""
+        resp = await client.get("/api/sources")
+        src = resp.json()["sources"][0]
+        assert src["title"] is None
+        assert src["excerpt"] is None
+
+    # ---- AI summary in response --------------------------------------------
+
+    async def test_ai_summary_included_when_meta_present(self, app, client: AsyncClient):
+        """When ``get_all_ai_summaries`` returns a record, the response
+        carries both ``ai_summary`` text and ``ai_summary_language`` so
+        the UI can flag drift."""
+        key = str(Path("/tmp/test.md"))
+        app.state.storage.get_all_ai_summaries.return_value = {
+            key: {
+                "summary": "AI-generated 2-sentence prose.",
+                "signature": "abc123",
+                "language": "en",
+                "generated_at": "2026-01-01T00:00:00Z",
+            }
+        }
+        resp = await client.get("/api/sources")
+        src = resp.json()["sources"][0]
+        assert src["ai_summary"] == "AI-generated 2-sentence prose."
+        assert src["ai_summary_language"] == "en"
+
+    async def test_ai_summary_absent_when_no_record(self, app, client: AsyncClient):
+        resp = await client.get("/api/sources")
+        src = resp.json()["sources"][0]
+        assert src["ai_summary"] is None
+        assert src["ai_summary_language"] is None
+
+    # ---- language-drift banner ---------------------------------------------
+
+    async def test_language_drift_present_when_record_language_differs(
+        self, app, client: AsyncClient
+    ):
+        """Cached summary in ``en`` while config is ``ko`` → response
+        carries ``language_drift`` with count + setting. Banner UX
+        relies on this conditional being non-null only when there's
+        actual drift."""
+        # Drift count iterates ``ai_summaries.values()``, so the dict
+        # key choice is incidental to this assertion — but we still go
+        # through ``str(Path(...))`` so a future refactor that *does*
+        # key off the path doesn't reintroduce the Windows failure.
+        key = str(Path("/tmp/test.md"))
+        app.state.config.indexing.summary_language = "ko"
+        app.state.storage.get_all_ai_summaries.return_value = {
+            key: {
+                "summary": "x",
+                "signature": "s",
+                "language": "en",
+                "generated_at": "t",
+            }
+        }
+        resp = await client.get("/api/sources")
+        data = resp.json()
+        assert data["language_drift"] is not None
+        assert data["language_drift"]["count"] == 1
+        assert data["language_drift"]["current_setting"] == "ko"
+
+    async def test_language_drift_absent_when_all_records_match(self, app, client: AsyncClient):
+        key = str(Path("/tmp/test.md"))
+        app.state.config.indexing.summary_language = "ko"
+        app.state.storage.get_all_ai_summaries.return_value = {
+            key: {
+                "summary": "x",
+                "signature": "s",
+                "language": "ko",
+                "generated_at": "t",
+            }
+        }
+        resp = await client.get("/api/sources")
+        data = resp.json()
+        assert data["language_drift"] is None
+
+    async def test_language_drift_absent_when_no_summaries_cached(self, app, client: AsyncClient):
+        """Default fixture (empty ai_summaries) → no drift banner.
+        Without this, the UI would render an empty count banner."""
+        resp = await client.get("/api/sources")
+        data = resp.json()
+        assert data["language_drift"] is None
+
+    # ---- regenerate endpoints ----------------------------------------------
+
+    async def test_regenerate_summaries_rejected_when_disabled(self, app, client: AsyncClient):
+        """``auto_summarize=False`` → 400. Defense-in-depth: the UI
+        gates the button anyway, but a direct API client must get a
+        clear error."""
+        app.state.config.indexing.auto_summarize = False
+        resp = await client.post("/api/sources/regenerate-summaries")
+        assert resp.status_code == 400
+        assert "auto_summarize" in resp.json()["detail"]
+
+    async def test_regenerate_summaries_rejected_when_no_llm(self, app, client: AsyncClient):
+        """``auto_summarize=True`` but ``app.state.llm is None`` → 400.
+        Without this the background task would silently no-op while the
+        UI shows a phantom "in progress" state."""
+        app.state.config.indexing.auto_summarize = True
+        app.state.llm = None
+        resp = await client.post("/api/sources/regenerate-summaries")
+        assert resp.status_code == 400
+        assert "LLM" in resp.json()["detail"]
+
+    async def test_regenerate_status_default_is_idle_zero(self, app, client: AsyncClient):
+        """No job has run since startup → all counters zero, not running.
+        Pin so the UI's polling loop has a stable terminal state to
+        compare against."""
+        resp = await client.get("/api/sources/regenerate-status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data == {
+            "running": False,
+            "total": 0,
+            "done": 0,
+            "failed": 0,
+            "skipped": 0,
+        }
+
+    async def test_regenerate_summaries_with_no_drift_is_immediate_done(
+        self, app, client: AsyncClient
+    ):
+        """When ``list_language_drift_paths`` returns empty, the
+        endpoint reports ``started=True`` with ``total=0`` — UI treats
+        this as instant completion (no polling round trip)."""
+        app.state.config.indexing.auto_summarize = True
+        app.state.llm = MagicMock()  # any non-None
+        app.state.storage.list_language_drift_paths.return_value = []
+        resp = await client.post("/api/sources/regenerate-summaries")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data == {"started": True, "total": 0}
+        # Status reflects the "done immediately" state.
+        status = await client.get("/api/sources/regenerate-status")
+        assert status.json()["running"] is False
+        assert status.json()["total"] == 0
 
 
 # ---------------------------------------------------------------------------

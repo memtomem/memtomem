@@ -29,6 +29,34 @@ class SourceOut(BaseModel):
     # for orphans (no owning dir to classify). Drives the Sources page's
     # Memory / General sub-toggle.
     kind: MemoryDirKind | None = None
+    # Heuristic preview derived at read-time from the first indexed chunk:
+    # ``title`` is the file's first heading (``#`` markers stripped) and
+    # ``excerpt`` is up to ~200 chars of the first section's body. Both
+    # ``None`` when the file has no heading / no body. The Source tab
+    # falls back to these when no LLM-generated summary is cached yet.
+    title: str | None = None
+    excerpt: str | None = None
+    # LLM-generated 2-3 sentence prose summary (per-source AI preview).
+    # Populated from the ``ai_summary`` cache in ``_memtomem_meta`` when
+    # ``IndexingConfig.auto_summarize`` is enabled and a summary has been
+    # generated. ``ai_summary_language`` carries the language tag of the
+    # cached entry so the frontend can flag drift against the current
+    # ``summary_language`` setting.
+    ai_summary: str | None = None
+    ai_summary_language: str | None = None
+
+
+class LanguageDriftInfo(BaseModel):
+    """How many cached AI summaries are in a language that differs from the
+    current ``IndexingConfig.summary_language`` setting.
+
+    Surfaced in the ``/api/sources`` response when ``count > 0`` so the
+    Source tab can show a "regenerate all" banner. Always omitted (null in
+    JSON) when nothing drifts — keeps the banner trigger trivially derivable.
+    """
+
+    count: int
+    current_setting: str
 
 
 class SourcesResponse(BaseModel):
@@ -36,6 +64,37 @@ class SourcesResponse(BaseModel):
     total: int = 0
     offset: int = 0
     limit: int = 0
+    # Optional drift summary — populated only when one or more cached
+    # AI summaries are in a language that doesn't match the current
+    # config. The banner UI checks for non-null + count > 0.
+    language_drift: LanguageDriftInfo | None = None
+
+
+class RegenerateStartResponse(BaseModel):
+    """Reply from ``POST /api/sources/regenerate-summaries``.
+
+    ``started`` is True when this call kicked off a fresh job; False
+    means a job is already running (idempotent — caller polls status).
+    ``total`` is the number of paths the running job will touch.
+    """
+
+    started: bool
+    total: int
+
+
+class RegenerateStatusResponse(BaseModel):
+    """Reply from ``GET /api/sources/regenerate-status``.
+
+    All counters are 0 when no job has run since startup. ``running`` is
+    True while a background task is still iterating; the totals (done +
+    failed + skipped) eventually equal ``total`` once it completes.
+    """
+
+    running: bool
+    total: int
+    done: int
+    failed: int
+    skipped: int
 
 
 class ChunksListResponse(BaseModel):

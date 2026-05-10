@@ -34,6 +34,7 @@ from memtomem.models import Chunk, IndexingStats
 
 if TYPE_CHECKING:
     from memtomem.embedding.base import EmbeddingProvider
+    from memtomem.llm.base import LLMProvider
     from memtomem.storage.base import StorageBackend
 
 logger = logging.getLogger(__name__)
@@ -339,10 +340,16 @@ class IndexEngine:
         registry: ChunkerRegistry | None = None,
         namespace_config: NamespaceConfig | None = None,
         progress_threshold: int = 32,
+        llm: "LLMProvider | None" = None,
     ) -> None:
         self._storage = storage
         self._embedder = embedder
         self._config = config
+        # Optional LLM provider used by the per-source AI summary pipeline.
+        # ``None`` is the default — the summary path is fully gated behind
+        # ``IndexingConfig.auto_summarize``, and even when that flag is
+        # True the absence of a provider silently disables generation.
+        self._llm = llm
         # ``chunk_progress`` SSE events are only emitted when a single file
         # produces more than this many chunks (or always when set to 0).
         # Sourced from ``EmbeddingConfig.progress_threshold`` by callers
@@ -878,6 +885,17 @@ class IndexEngine:
 
             if diff_result.to_upsert:
                 await self._storage.upsert_chunks(diff_result.to_upsert)
+
+        # Per-source AI summary refresh — runs *after* the transaction so a
+        # slow LLM call never holds the chunk write lock. The signature
+        # check inside ``maybe_update_ai_summary`` skips files whose chunk
+        # set didn't change, so steady-state reindex pays nothing.
+        # ``new_chunks`` is the full current chunk set for the file (not
+        # just ``diff_result.to_upsert``); the signature must hash all
+        # current chunks to remain stable when only some changed.
+        from memtomem.indexing.summarizer import maybe_update_ai_summary
+
+        await maybe_update_ai_summary(self._storage, self._llm, file_path, new_chunks, self._config)
 
         return {
             "total": len(new_chunks),
