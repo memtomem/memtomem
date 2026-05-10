@@ -301,6 +301,16 @@ def extract_skills_to_canonical(
     ``project_shared`` destinations hard-abort via :class:`click.ClickException`
     on the first hit (with or without ``force_unsafe_import``).
 
+    Threat model — Gate A walks the source tree once and :func:`copy_skill`
+    re-reads the same files when the import proceeds; an adversarial
+    filesystem could swap bytes between the two reads (a TOCTOU window).
+    The current threat model is "accidental leak", not "adversarial
+    filesystem", so this gap is accepted: ``--force-unsafe-import`` is
+    not the path to bypass Gate A regardless, and ``project_shared``
+    hard-refuses without any bypass valve. Hardening to single-read +
+    in-memory copy is out of scope until a concrete adversarial-FS
+    threat appears.
+
     When ``only_name`` is set, every runtime entry with a different name is
     silently skipped before any validation/dedupe work.
     """
