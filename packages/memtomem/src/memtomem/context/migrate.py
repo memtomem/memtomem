@@ -526,11 +526,11 @@ _DIR_MANIFEST: dict[str, str] = {
 class MigrateScopeResult:
     """Outcome of one scope-tier migration plan or apply.
 
-    Set ``moved=False`` for dry-run results (preview only) and for
-    skipped rows. ``error`` is non-``None`` only on apply-time failures
-    that the helper recovered from (e.g. partial rollback succeeded);
-    fatal failures raise :class:`click.ClickException` and never produce
-    a ``MigrateScopeResult``.
+    Set ``moved=False`` for dry-run results (preview only). Fatal
+    failures raise :class:`click.ClickException` rather than producing
+    a result — the absence of an ``error`` field is deliberate
+    (Codex review #4 fold: dataclass vs raise hybrid is harder to
+    reason about than "raise on fail, return on success").
     """
 
     kind: ArtifactKind
@@ -542,7 +542,6 @@ class MigrateScopeResult:
     layout: Literal["dir", "flat"]
     moved: bool
     fanout_cleaned: list[Path] = field(default_factory=list)
-    error: str | None = None
 
 
 @contextmanager
@@ -884,13 +883,36 @@ def migrate_scope(
         except BaseException:
             # Roll back: put bytes back at src so the caller can retry
             # without manual cleanup.
+            #
+            # Codex review #1 (P-medium): when the same-FS rename-back
+            # fails — rare, but possible if e.g. ``src_path.parent`` was
+            # rmdir'd between rename and rollback — staging is now the
+            # ONLY copy of the user's bytes. Deleting it would silently
+            # destroy user data. Track that case explicitly and preserve
+            # staging when rename-back failed; log a loud ERROR pointing
+            # to the surviving path so manual recovery is possible.
+            rename_back_failed = False
             if src_consumed and not src_path.exists() and staging.exists():
-                # Same-FS fast path consumed src; rename staging back.
-                with contextlib.suppress(OSError):
+                try:
                     os.replace(staging, src_path)
-            # Drop staging if still present (EXDEV fallback path or the
-            # rename-back above failed).
-            if staging.exists():
+                except OSError as exc:
+                    rename_back_failed = True
+                    logger.error(
+                        "migrate_scope rollback: rename-back failed (%s); "
+                        "staging at %s is the ONLY surviving copy of the "
+                        "source bytes — manual recovery required (mv it back "
+                        "to %s).",
+                        exc,
+                        staging,
+                        src_path,
+                    )
+            # Drop staging only when the bytes are safe somewhere else:
+            # - src_consumed=False (EXDEV path): src still exists with the
+            #   bytes; staging is just a copy.
+            # - src_consumed=True, rename-back succeeded: src has the bytes again.
+            # - src_consumed=True, rename-back FAILED: staging is the bytes;
+            #   leave it so the user can recover.
+            if staging.exists() and not rename_back_failed:
                 if staging.is_dir():
                     shutil.rmtree(staging, ignore_errors=True)
                 else:

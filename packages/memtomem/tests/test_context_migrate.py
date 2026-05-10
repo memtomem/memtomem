@@ -1403,3 +1403,136 @@ def test_e4_unreadable_canonical_blocks_project_shared_promotion(scope_layout, m
     dst_root = _canonical_root_for(scope_layout, "agents", "project_shared")
     assert not (dst_root / "leak").exists()
     assert not list(dst_root.glob(".migrate-leak-*.tmp"))
+
+
+# ── PR-E4 Codex review fold #2: EXDEV + Gate A combined path ─────────
+
+
+def test_e4_exdev_then_gate_a_blocks_src_untouched(scope_layout, monkeypatch):
+    """Codex review #2 — EXDEV-fallback path must roll back cleanly when
+    Gate A then blocks. Combines two branches that Row 11 (clean EXDEV)
+    and Row 2 (same-FS Gate A block) cover separately:
+
+    1. ``os.rename`` raises EXDEV → ``_stage_move`` falls back to
+       ``copytree``, leaving src on disk and staging as a copy
+       (``src_consumed=False``).
+    2. Gate A scans staging, finds the secret, raises ClickException.
+    3. ``except BaseException`` rollback: src already exists (was never
+       renamed away), so the rename-back branch is a no-op; staging
+       (the copy) gets dropped via rmtree.
+
+    Pin: src is byte-identical to the pre-migrate state, dst absent,
+    no staging leftover, exit non-zero.
+    """
+    import errno as _errno
+    import os as os_mod
+
+    src = _write_canonical_dir(scope_layout, "agents", "user", "leak", _AGENT_BODY_SECRET)
+    real_rename = os_mod.rename
+    raised: dict[str, bool] = {"once": False}
+
+    def fake_rename(a, b):
+        # Trigger EXDEV on the FIRST os.rename call (the src→staging
+        # step inside _stage_move). Subsequent renames (none expected
+        # in this path because Gate A blocks before _promote_move) go
+        # through.
+        if not raised["once"]:
+            raised["once"] = True
+            raise OSError(_errno.EXDEV, "Cross-device link", str(a))
+        return real_rename(a, b)
+
+    monkeypatch.setattr("memtomem.context.migrate.os.rename", fake_rename)
+
+    result = _invoke_migrate(
+        _migrate_args(
+            "agents",
+            "leak",
+            from_scope="user",
+            to_scope="project_shared",
+            confirm_project_shared=True,
+        )
+    )
+    assert result.exit_code != 0, result.output
+    assert "Gate A" in result.output
+    assert raised["once"], "EXDEV branch should have triggered"
+
+    # POSITIVE: src untouched (EXDEV path never consumed it).
+    assert src.is_file()
+    assert src.read_text(encoding="utf-8") == _AGENT_BODY_SECRET
+    # NEGATIVE: dst absent + no staging tmp leftover (rollback dropped it).
+    dst_root = _canonical_root_for(scope_layout, "agents", "project_shared")
+    assert not (dst_root / "leak").exists()
+    assert not list(dst_root.glob(".migrate-leak-*.tmp"))
+
+
+# ── PR-E4 Codex review fold #1: rollback rename-back failure ─────────
+
+
+def test_e4_rollback_rename_back_failure_preserves_staging(scope_layout, monkeypatch, caplog):
+    """Codex review #1 — when the rollback rename-back fails, staging is
+    the only surviving copy of the user's bytes; do NOT delete it.
+
+    Setup: clean canonical at user-tier, Gate A would block (secret),
+    and ``os.replace`` is monkeypatched so the rollback's staging→src
+    rename-back call raises ``OSError``. The first ``os.replace`` in
+    the apply path is the rollback (Gate A blocks before
+    ``_promote_move`` runs).
+
+    Pin: error logged with the staging path, staging dir is NOT
+    deleted, exit non-zero. Pre-fix the cleanup branch unconditionally
+    deleted staging → user data lost.
+    """
+    import logging as _logging
+    import os as os_mod
+
+    src = _write_canonical_dir(scope_layout, "agents", "user", "leak", _AGENT_BODY_SECRET)
+    real_replace = os_mod.replace
+    rename_back_calls: list[tuple[Path, Path]] = []
+
+    def fake_replace(a, b):
+        # The first os.replace in this path is the rollback's
+        # staging→src rename-back. Trip it once so the rollback hits the
+        # OSError branch; subsequent os.replace calls (none expected
+        # along this code path) go through.
+        if not rename_back_calls:
+            rename_back_calls.append((Path(a), Path(b)))
+            raise OSError(13, "Permission denied", str(a))
+        return real_replace(a, b)
+
+    monkeypatch.setattr("memtomem.context.migrate.os.replace", fake_replace)
+    caplog.set_level(_logging.ERROR, logger="memtomem.context.migrate")
+
+    result = _invoke_migrate(
+        _migrate_args(
+            "agents",
+            "leak",
+            from_scope="user",
+            to_scope="project_shared",
+            confirm_project_shared=True,
+        )
+    )
+    assert result.exit_code != 0, result.output
+    # The Gate A path raised first; rollback hit the os.replace failure.
+    assert rename_back_calls, "rollback rename-back should have been attempted"
+
+    # POSITIVE: ERROR logged pointing at the surviving staging path so
+    # the user can recover manually.
+    assert any(
+        "rename-back failed" in r.getMessage() and ".migrate-leak-" in r.getMessage()
+        for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+    # POSITIVE: staging dir survives (the only copy of the bytes).
+    dst_root = _canonical_root_for(scope_layout, "agents", "project_shared")
+    surviving = list(dst_root.glob(".migrate-leak-*.tmp"))
+    assert len(surviving) == 1, surviving
+    # Bytes inside staging are byte-identical to the original src
+    # (it was renamed, not rewritten).
+    surviving_manifest = surviving[0] / "agent.md"
+    assert surviving_manifest.is_file()
+    assert surviving_manifest.read_text(encoding="utf-8") == _AGENT_BODY_SECRET
+
+    # NEGATIVE: src is gone (consumed by the initial os.rename); dst
+    # never landed.
+    assert not src.exists()
+    assert not (dst_root / "leak").exists()
