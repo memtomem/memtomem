@@ -171,6 +171,90 @@ class TestBinaryAssetGracefulPass:
         assert result.blocked == []
 
 
+class TestUnreadableFileFailsClosed:
+    """Pre-PR-E4 review the OSError branch was conflated with
+    UnicodeDecodeError and recorded as ``pass``. PR-E4's ``_stage_move``
+    can rename a ``chmod 000`` canonical file into staging without
+    reading bytes, so silent-pass would have promoted unreadable
+    secret-bearing content into project_shared. These pins check that
+    ``OSError`` from ``read_text`` raises a scope-aware ``ClickException``
+    rather than recording a pass.
+    """
+
+    def test_oserror_raises_click_exception_project_shared(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "agent.md"
+        path.write_text(CLEAN, encoding="utf-8")
+
+        real_read_text = Path.read_text
+
+        def explode(self: Path, *args: object, **kwargs: object) -> str:
+            if self == path:
+                raise PermissionError(13, "Permission denied", str(self))
+            return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "read_text", explode)
+
+        with pytest.raises(click.ClickException) as exc_info:
+            scan_artifact_tree(path, surface="t", scope="project_shared", project_root=tmp_path)
+        msg = exc_info.value.message
+        assert "cannot read" in msg
+        assert "agent.md" in msg
+        assert "scope='project_shared'" in msg
+        # Negative — the message must NOT echo the file's content even
+        # if the file were readable mid-flight.
+        assert CLEAN.strip() not in msg
+
+    def test_oserror_raises_click_exception_user_scope(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Fail-closed posture is uniform across scopes for unreadable
+        # files. Skip-warn semantics apply to *known* pattern hits at
+        # user/project_local — an unreadable file is not a known hit,
+        # it's an unknown.
+        path = tmp_path / "agent.md"
+        path.write_text(CLEAN, encoding="utf-8")
+        real_read_text = Path.read_text
+
+        def explode(self: Path, *args: object, **kwargs: object) -> str:
+            if self == path:
+                raise OSError(5, "Input/output error", str(self))
+            return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "read_text", explode)
+
+        with pytest.raises(click.ClickException) as exc_info:
+            scan_artifact_tree(path, surface="t", scope="user", project_root=tmp_path)
+        assert "scope='user'" in exc_info.value.message
+
+    def test_unreadable_in_tree_walk_fails_fast(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Tree walk should hard-abort on the first unreadable file and
+        # NOT continue scanning siblings — the staging tree as a whole
+        # is poisoned the moment any leaf cannot be inspected.
+        skill_root = _seed_skill(tmp_path / "foo")
+        unreadable = skill_root / "scripts" / "leak.sh"
+        real_read_text = Path.read_text
+
+        def explode(self: Path, *args: object, **kwargs: object) -> str:
+            if self == unreadable:
+                raise PermissionError(13, "Permission denied", str(self))
+            return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "read_text", explode)
+
+        with pytest.raises(click.ClickException) as exc_info:
+            scan_artifact_tree(
+                skill_root,
+                surface="t",
+                scope="project_shared",
+                project_root=tmp_path,
+            )
+        assert "leak.sh" in exc_info.value.message
+
+
 class TestRaiseOrCollect:
     def test_project_shared_raises(self) -> None:
         blocked = FileScan(Path("/tmp/foo/agent.md"), "blocked", 1)

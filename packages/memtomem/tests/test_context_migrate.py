@@ -1350,3 +1350,56 @@ def test_e4_row17_memory_dispatch_validates_inputs(monkeypatch, tmp_path):
     )
     assert r3.exit_code != 0
     assert "must differ" in r3.output
+
+
+# ── PR-E4 review fold: unreadable canonical cannot bypass Gate A ─────
+
+
+def test_e4_unreadable_canonical_blocks_project_shared_promotion(scope_layout, monkeypatch):
+    """Pre-fold this branch passed: ``_stage_move`` renames a chmod-000
+    file into staging without reading it, then ``scan_artifact_tree``
+    treated the read failure as ``pass`` (conflated with binary), and
+    the secret-bearing file got promoted into the git-tracked
+    ``project_shared`` tier with Gate A never inspecting it.
+
+    Pin: ``OSError`` on the staging-side read raises a
+    ``ClickException``, ``migrate_scope``'s rollback puts src back, and
+    the project_shared destination stays empty. Uses a monkeypatched
+    ``Path.read_text`` to simulate the unreadable file portably — real
+    ``chmod 000`` works on POSIX but is meaningless on Windows, and the
+    monkeypatch exercises the same ``OSError`` branch in both.
+    """
+    src = _write_canonical_dir(scope_layout, "agents", "user", "leak", _AGENT_BODY_SECRET)
+
+    real_read_text = Path.read_text
+
+    def explode_on_staged_read(self: Path, *args: object, **kwargs: object) -> str:
+        # The scan walks staging at <dst.parent>/.migrate-leak-<pid>-<rand>.tmp/.
+        # Match by name + the staging suffix marker so unrelated reads
+        # (CLI bootstrap, config loading) are unaffected.
+        if self.name == "agent.md" and ".migrate-leak-" in str(self.parent):
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", explode_on_staged_read)
+
+    result = _invoke_migrate(
+        _migrate_args(
+            "agents",
+            "leak",
+            from_scope="user",
+            to_scope="project_shared",
+            confirm_project_shared=True,
+        )
+    )
+    assert result.exit_code != 0, result.output
+    # Fail-loud message specifics — never echo the secret bytes.
+    assert "cannot read" in result.output
+    assert _SECRET_LITERAL not in result.output
+    # POSITIVE: src restored bytes-identical to the pre-migrate state.
+    assert src.is_file()
+    assert src.read_text(encoding="utf-8") == _AGENT_BODY_SECRET
+    # NEGATIVE: dst absent and no staging tmp left behind.
+    dst_root = _canonical_root_for(scope_layout, "agents", "project_shared")
+    assert not (dst_root / "leak").exists()
+    assert not list(dst_root.glob(".migrate-leak-*.tmp"))
