@@ -242,13 +242,20 @@ def generate_all_skills(
             continue
         for skill_dir in canonicals:
             dst = gen.target_dir(project_root, skill_dir.name)
-            # ADR-0011 PR-E: target_dir may return None for scopes with no
-            # fan-out (default scope=project_shared never None here). Raise
-            # explicitly so the contract survives `python -O`.
+            # ADR-0011 PR-E (#891): None means NO_FANOUT per
+            # ``_runtime_targets.RUNTIME_FANOUT_TABLE``. Emit a typed skip
+            # so E3 scope wiring sees graceful behavior. Today's default
+            # scope=project_shared never reaches this branch for registered
+            # generators; the table is the contract source-of-truth.
             if dst is None:
-                raise RuntimeError(
-                    f"{target} target_dir returned None for default project_shared scope"
+                skipped.append(
+                    (
+                        skill_dir.name,
+                        f"no fan-out for runtime {target} at this scope",
+                        skip_codes.NO_PROJECT_FANOUT_FOR_RUNTIME,
+                    )
                 )
+                continue
             copy_skill(skill_dir, dst)
             # ADR-0008 Invariant 4: per-vendor override replaces SKILL.md only.
             # Auxiliary files (scripts/, references/) stay from canonical.
@@ -462,6 +469,13 @@ def diff_skills(project_root: Path) -> list[tuple[str, str, str]]:
     canonical_names = {p.name for p in list_canonical_skills(project_root)}
 
     for gen_name, gen in SKILL_GENERATORS.items():
+        # ADR-0011 PR-E (#891): probe NO_FANOUT for this runtime+scope. The
+        # table lookup ignores the artifact name, so a fixed probe name is
+        # safe. When None, the runtime has no fan-out by design — skip the
+        # whole runtime so canonical-only entries don't surface as
+        # ``missing target`` (the realistic NO_FANOUT shape).
+        if gen.target_dir(project_root, "__probe_891__") is None:
+            continue
         runtime_root = project_root / gen.output_root
         runtime_names: set[str] = set()
         if runtime_root.is_dir():
@@ -477,13 +491,13 @@ def diff_skills(project_root: Path) -> list[tuple[str, str, str]]:
             else:
                 src = canonical_root / name
                 dst = gen.target_dir(project_root, name)
+                # The upstream NO_FANOUT probe already filters out runtimes
+                # whose ``RUNTIME_FANOUT_TABLE`` entry is ``None``, so this
+                # branch is only reachable if the table lookup is per-name
+                # (which today's table is not). Keep the skip as a defensive
+                # silent fallback so the contract holds regardless.
                 if dst is None:
-                    # ADR-0011 PR-E: default scope=project_shared never returns
-                    # None from the runtime table. `python -O` survives.
-                    raise RuntimeError(
-                        f"{gen_name} target_dir returned None — diff over default "
-                        f"project_shared scope should never see None per ADR-0011 PR-E"
-                    )
+                    continue
                 if _skill_dirs_equal(src, dst):
                     results.append((gen_name, name, "in sync"))
                 else:
