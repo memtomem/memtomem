@@ -611,16 +611,20 @@ def generate_all_agents(
                 if effective_drop == "warn":
                     logger.warning("%s dropped %s from '%s'", target, dropped_fields, agent.name)
             out_path = gen.target_file(project_root, agent.name)
-            # ADR-0011 PR-E: target_file may return None for scopes with no
-            # fan-out by design. Default kwarg is project_shared (existing
-            # behavior), which never returns None — so this branch is
-            # currently unreachable, but the explicit raise makes the
-            # contract survive `python -O` (which strips bare asserts) and
-            # gives E2/E3 callers passing scope= kwargs a fail-loud signal.
+            # ADR-0011 PR-E (#891): None means NO_FANOUT per
+            # ``_runtime_targets.RUNTIME_FANOUT_TABLE``. Emit a typed skip
+            # so E3 scope wiring sees graceful behavior. Today's default
+            # scope=project_shared never reaches this branch for registered
+            # generators; the table is the contract source-of-truth.
             if out_path is None:
-                raise RuntimeError(
-                    f"{target} target_file returned None for default project_shared scope"
+                skipped.append(
+                    (
+                        agent.name,
+                        f"no fan-out for runtime {target} at this scope",
+                        skip_codes.NO_PROJECT_FANOUT_FOR_RUNTIME,
+                    )
                 )
+                continue
             atomic_write_text(out_path, content)
             # ADR-0008 Invariant 4: per-vendor override replaces the runtime file.
             # Race: see PR-D' for the unified write path that closes the
@@ -857,6 +861,13 @@ def diff_agents(project_root: Path) -> list[tuple[str, str, str]]:
     canonical_names = set(canonical_index)
 
     for gen_name, gen in AGENT_GENERATORS.items():
+        # ADR-0011 PR-E (#891): probe NO_FANOUT for this runtime+scope. The
+        # table lookup ignores the artifact name, so a fixed probe name is
+        # safe. When None, the runtime has no fan-out by design — skip the
+        # whole runtime so canonical-only entries don't surface as
+        # ``missing target`` (the realistic NO_FANOUT shape).
+        if gen.target_file(project_root, "__probe_891__") is None:
+            continue
         runtime_names = _runtime_agent_names(gen_name, project_root)
         for name in sorted(canonical_names | runtime_names):
             if name in canonical_names and name not in runtime_names:
@@ -874,13 +885,13 @@ def diff_agents(project_root: Path) -> list[tuple[str, str, str]]:
                 continue
             expected, _ = gen.render(agent)
             target = gen.target_file(project_root, name)
+            # The upstream NO_FANOUT probe already filters out runtimes
+            # whose ``RUNTIME_FANOUT_TABLE`` entry is ``None``, so this
+            # branch is only reachable if the table lookup is per-name
+            # (which today's table is not). Keep the skip as a defensive
+            # silent fallback so the contract holds regardless.
             if target is None:
-                # ADR-0011 PR-E: default scope=project_shared never returns
-                # None from the runtime table. `python -O` survives.
-                raise RuntimeError(
-                    f"{gen_name} target_file returned None — diff over default "
-                    f"project_shared scope should never see None per ADR-0011 PR-E"
-                )
+                continue
             actual = target.read_text(encoding="utf-8") if target.is_file() else ""
             if expected.strip() == actual.strip():
                 results.append((gen_name, name, "in sync"))
