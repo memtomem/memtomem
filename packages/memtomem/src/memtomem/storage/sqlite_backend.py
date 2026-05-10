@@ -630,9 +630,15 @@ class SqliteBackend(
         db = self._get_db()
         ids_str = [str(cid) for cid in chunk_ids]
 
-        # Batch fetch rowids in a single query (P2)
+        # Batch fetch rowids + source_file in a single query (P2). The
+        # ``source_file`` column travels along so that *after* the delete
+        # we can check which sources lost their last chunk and need their
+        # AI summary cache cleared — partial deletions leave the summary
+        # in place (the signature drifts and gets refreshed on the next
+        # reindex), but a fully-emptied source has no future reindex to
+        # rely on, so its cached prose has to go now.
         rows = db.execute(
-            f"SELECT id, rowid FROM chunks WHERE id IN ({placeholders(len(ids_str))})",
+            f"SELECT id, rowid, source_file FROM chunks WHERE id IN ({placeholders(len(ids_str))})",
             ids_str,
         ).fetchall()
 
@@ -641,6 +647,7 @@ class SqliteBackend(
 
         found_ids = [row[0] for row in rows]
         rowids = [row[1] for row in rows]
+        affected_sources = {row[2] for row in rows if row[2]}
 
         try:
             db.execute(
@@ -653,6 +660,28 @@ class SqliteBackend(
                 db.execute(
                     f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(rowids))})", rowids
                 )
+
+            # AI summary cache cleanup for sources that just lost their
+            # last chunk. Per-source, indexed lookup so a 1000-chunk
+            # decay sweep across 50 sources costs at most 50 small
+            # COUNT(*) queries — well below the cost of the deletes
+            # themselves. ``source_file`` is already in normalised form
+            # in the chunks table (see ``upsert_chunks`` → ``norm_path``),
+            # so we feed it directly to the meta-key prefix without
+            # re-resolving (resolving here would mismatch on macOS
+            # symlink cases like ``/tmp`` → ``/private/tmp`` because the
+            # original chunk row was stored as resolved already).
+            for source_norm in affected_sources:
+                remaining = db.execute(
+                    "SELECT 1 FROM chunks WHERE source_file=? LIMIT 1",
+                    (source_norm,),
+                ).fetchone()
+                if remaining is None:
+                    db.execute(
+                        "DELETE FROM _memtomem_meta WHERE key=?",
+                        (f"{_AI_SUMMARY_KEY_PREFIX}{source_norm}",),
+                    )
+
             if not self._in_transaction:
                 db.commit()
         except Exception as exc:

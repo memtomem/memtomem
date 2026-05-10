@@ -609,3 +609,113 @@ class TestStorageExtended:
         deleted = await storage.delete_by_source(path)
         assert deleted == 0  # no chunks
         assert await storage.get_ai_summary(path) is None
+
+    async def test_delete_chunks_clears_summary_when_source_emptied(self, components):
+        """Per-chunk ``delete_chunks`` (web chunk-delete fallback, dedup,
+        decay) must drop the AI summary cache once the *last* chunk for
+        a source is gone. Without this, deleting every chunk of a file
+        through the chunk endpoint would still leave LLM-generated prose
+        about that source on disk and exposed via
+        ``get_all_ai_summaries`` — privacy regression and a stale-data
+        source for the Source-tab drift count."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        storage = components.storage
+        src = Path("/tmp/single.md")
+        chunk = Chunk(
+            content="only chunk",
+            metadata=ChunkMetadata(
+                source_file=src,
+                heading_hierarchy=("# H",),
+                start_line=1,
+            ),
+            content_hash="hash-single",
+            embedding=[0.1] * 1024,
+        )
+        await storage.upsert_chunks([chunk])
+        await storage.set_ai_summary(src, "AI prose.", "sig-single", "en")
+
+        # Delete via chunk-id path — *not* delete_by_source.
+        deleted = await storage.delete_chunks([chunk.id])
+        assert deleted == 1
+        # Summary must be gone — source has zero remaining chunks.
+        assert await storage.get_ai_summary(src) is None
+
+    async def test_delete_chunks_preserves_summary_on_partial_delete(self, components):
+        """Partial deletion (some chunks remain for the source) leaves
+        the summary alone. Rationale: the signature will mismatch on
+        the next reindex and ``maybe_update_ai_summary`` regenerates
+        cleanly; clearing here would force a regenerate every time
+        dedup or decay shaves a single chunk off a multi-section file,
+        which is wasted LLM cost."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        storage = components.storage
+        src = Path("/tmp/multi.md")
+        chunks = [
+            Chunk(
+                content=f"section {i}",
+                metadata=ChunkMetadata(
+                    source_file=src,
+                    heading_hierarchy=(f"# H{i}",),
+                    start_line=i * 10,
+                ),
+                content_hash=f"hash-multi-{i}",
+                embedding=[0.1] * 1024,
+            )
+            for i in range(3)
+        ]
+        await storage.upsert_chunks(chunks)
+        await storage.set_ai_summary(src, "AI prose.", "sig-multi", "en")
+
+        # Delete just the first chunk — two remain.
+        deleted = await storage.delete_chunks([chunks[0].id])
+        assert deleted == 1
+        rec = await storage.get_ai_summary(src)
+        assert rec is not None
+        assert rec["summary"] == "AI prose."
+
+    async def test_delete_chunks_handles_mixed_sources_atomically(self, components):
+        """A single ``delete_chunks`` call spanning multiple sources
+        clears summaries for the ones it fully empties and leaves the
+        others alone. Pin the per-source check so a future "clear all
+        affected summaries" shortcut can't slip through (that would be
+        the same bug as before, just inverted)."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        storage = components.storage
+        # source A: single chunk → will be fully emptied
+        src_a = Path("/tmp/empty-me.md")
+        chunk_a = Chunk(
+            content="only A",
+            metadata=ChunkMetadata(source_file=src_a, heading_hierarchy=("# A",), start_line=1),
+            content_hash="hash-A",
+            embedding=[0.1] * 1024,
+        )
+        # source B: two chunks, only one deleted → partial
+        src_b = Path("/tmp/keep-me.md")
+        chunks_b = [
+            Chunk(
+                content="B section 0",
+                metadata=ChunkMetadata(source_file=src_b, heading_hierarchy=("# B",), start_line=1),
+                content_hash="hash-B0",
+                embedding=[0.1] * 1024,
+            ),
+            Chunk(
+                content="B section 1",
+                metadata=ChunkMetadata(
+                    source_file=src_b, heading_hierarchy=("# B",), start_line=20
+                ),
+                content_hash="hash-B1",
+                embedding=[0.1] * 1024,
+            ),
+        ]
+        await storage.upsert_chunks([chunk_a, *chunks_b])
+        await storage.set_ai_summary(src_a, "A prose.", "sig-A", "en")
+        await storage.set_ai_summary(src_b, "B prose.", "sig-B", "en")
+
+        # Mixed batch: A's only chunk + B's first chunk.
+        await storage.delete_chunks([chunk_a.id, chunks_b[0].id])
+
+        assert await storage.get_ai_summary(src_a) is None  # fully emptied
+        assert await storage.get_ai_summary(src_b) is not None  # partial
