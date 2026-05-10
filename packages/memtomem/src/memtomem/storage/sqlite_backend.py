@@ -662,25 +662,41 @@ class SqliteBackend(
                 )
 
             # AI summary cache cleanup for sources that just lost their
-            # last chunk. Per-source, indexed lookup so a 1000-chunk
-            # decay sweep across 50 sources costs at most 50 small
-            # COUNT(*) queries — well below the cost of the deletes
-            # themselves. ``source_file`` is already in normalised form
-            # in the chunks table (see ``upsert_chunks`` → ``norm_path``),
+            # last chunk — but only when this delete is the *final*
+            # word. The reindex path in ``IndexingEngine._index_file``
+            # wraps a delete+upsert pair in a single transaction; if a
+            # source has no unchanged chunks the delete temporarily
+            # empties it before the upsert lands, and clearing here
+            # would drop a still-valid summary. The fail-soft contract
+            # for AI summaries (LLM error → keep old prose, indexing
+            # continues) requires that we don't pre-emptively flush
+            # the cache for what is really a rewrite.
+            #
+            # Skip cleanup when ``_in_transaction`` is True; the
+            # outer scope (post-upsert ``maybe_update_ai_summary``,
+            # explicit ``delete_by_source``, or session-end
+            # ``reset_all``) is responsible for resolving the cache
+            # state once the multi-step operation completes. Standalone
+            # ``delete_chunks`` calls (web chunk-delete fallback,
+            # dedup, decay sweeps) hit the cleanup branch as before.
+            #
+            # ``source_file`` is already in normalised form in the
+            # chunks table (see ``upsert_chunks`` → ``norm_path``),
             # so we feed it directly to the meta-key prefix without
             # re-resolving (resolving here would mismatch on macOS
-            # symlink cases like ``/tmp`` → ``/private/tmp`` because the
-            # original chunk row was stored as resolved already).
-            for source_norm in affected_sources:
-                remaining = db.execute(
-                    "SELECT 1 FROM chunks WHERE source_file=? LIMIT 1",
-                    (source_norm,),
-                ).fetchone()
-                if remaining is None:
-                    db.execute(
-                        "DELETE FROM _memtomem_meta WHERE key=?",
-                        (f"{_AI_SUMMARY_KEY_PREFIX}{source_norm}",),
-                    )
+            # symlink cases like ``/tmp`` → ``/private/tmp`` because
+            # the original chunk row was stored as resolved already).
+            if not self._in_transaction:
+                for source_norm in affected_sources:
+                    remaining = db.execute(
+                        "SELECT 1 FROM chunks WHERE source_file=? LIMIT 1",
+                        (source_norm,),
+                    ).fetchone()
+                    if remaining is None:
+                        db.execute(
+                            "DELETE FROM _memtomem_meta WHERE key=?",
+                            (f"{_AI_SUMMARY_KEY_PREFIX}{source_norm}",),
+                        )
 
             if not self._in_transaction:
                 db.commit()

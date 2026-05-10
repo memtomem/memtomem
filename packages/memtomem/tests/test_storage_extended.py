@@ -675,6 +675,79 @@ class TestStorageExtended:
         assert rec is not None
         assert rec["summary"] == "AI prose."
 
+    async def test_delete_chunks_in_transaction_preserves_summary_for_rewrite(self, components):
+        """Reindex (``IndexingEngine._index_file``) wraps a delete +
+        upsert pair in a single ``storage.transaction()``. Mid-
+        transaction the source is *temporarily* empty, but the upsert
+        immediately follows — clearing the AI summary at the delete
+        step would mean a stale-but-renderable preview gets blown away
+        and never restored if the post-transaction
+        ``maybe_update_ai_summary`` no-ops (LLM down,
+        ``auto_summarize=False``, transient error). Pin the deferred-
+        cleanup contract: in-transaction ``delete_chunks`` leaves the
+        cache row alone."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        storage = components.storage
+        src = Path("/tmp/rewrite.md")
+        old_chunk = Chunk(
+            content="old content",
+            metadata=ChunkMetadata(source_file=src, heading_hierarchy=("# H",), start_line=1),
+            content_hash="hash-old",
+            embedding=[0.1] * 1024,
+        )
+        new_chunk = Chunk(
+            content="new content",
+            metadata=ChunkMetadata(source_file=src, heading_hierarchy=("# H",), start_line=1),
+            content_hash="hash-new",
+            embedding=[0.1] * 1024,
+        )
+        await storage.upsert_chunks([old_chunk])
+        await storage.set_ai_summary(src, "AI prose.", "sig-old", "en")
+
+        # Simulate the engine's reindex flow: delete-all + upsert-new
+        # in one transaction. Without the deferred-cleanup gate this
+        # test fails: ``delete_chunks`` would clear the summary while
+        # the source is briefly empty, before ``upsert_chunks`` lands.
+        async with storage.transaction():
+            await storage.delete_chunks([old_chunk.id])
+            await storage.upsert_chunks([new_chunk])
+
+        rec = await storage.get_ai_summary(src)
+        assert rec is not None
+        assert rec["summary"] == "AI prose."
+
+    async def test_delete_chunks_in_transaction_skips_cleanup(self, components):
+        """Deferred-cleanup gate is intentionally permissive: even when
+        an in-transaction delete truly empties a source (no follow-up
+        upsert), the cleanup is left to the outer scope. In practice
+        that's either ``delete_by_source`` (clears cache) or session-
+        end ``reset_all`` (also clears). Direct ``delete_chunks``
+        callers who wrap in a transaction with no upsert are an
+        unsupported pattern; documenting the trade-off here so a
+        future test asserting the *opposite* flags the design intent
+        first rather than silently inverting."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        storage = components.storage
+        src = Path("/tmp/empty-in-tx.md")
+        chunk = Chunk(
+            content="only",
+            metadata=ChunkMetadata(source_file=src, heading_hierarchy=("# H",), start_line=1),
+            content_hash="hash-only",
+            embedding=[0.1] * 1024,
+        )
+        await storage.upsert_chunks([chunk])
+        await storage.set_ai_summary(src, "old prose", "sig", "en")
+
+        async with storage.transaction():
+            await storage.delete_chunks([chunk.id])
+
+        # Stale but present — caller is expected to use
+        # delete_by_source / reset_all for final cleanup.
+        rec = await storage.get_ai_summary(src)
+        assert rec is not None
+
     async def test_delete_chunks_handles_mixed_sources_atomically(self, components):
         """A single ``delete_chunks`` call spanning multiple sources
         clears summaries for the ones it fully empties and leaves the

@@ -251,3 +251,41 @@ async def test_mem_embedding_reset_revert_to_stored_swaps_runtime(degraded_compo
     assert app.config.embedding.dimension == 0
     assert app.storage.embedding_mismatch is None
     assert "DEGRADED" not in await mem_stats(ctx=ctx)  # type: ignore[arg-type]
+
+
+async def test_revert_to_stored_preserves_llm_on_index_engine(degraded_components):
+    """``_revert_to_stored`` rebuilds the index engine so the runtime
+    picks up the new (downgraded) embedder. The rebuild must thread
+    ``app.llm_provider`` through to the new ``IndexEngine`` — the
+    engine consumes it for the per-source AI summary path
+    (``maybe_update_ai_summary`` in ``_index_file``). Without explicit
+    propagation, the ``llm`` constructor argument silently defaults
+    to ``None`` and per-source summarisation stops generating new
+    entries until the server is restarted, even though
+    ``indexing.auto_summarize`` and ``llm.enabled`` are still on.
+    Pin both axes (engine swapped + LLM survives) so a future
+    refactor of the rebuild call site can't drop the kwarg
+    unnoticed."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    comp = degraded_components
+    # Inject a sentinel LLM into the live components so we can detect
+    # propagation. Real degraded fixture builds with ``llm=None``;
+    # poking the field directly mirrors what production does after
+    # ``component_factory`` wires in ``create_llm``. ``close()`` must
+    # be an ``AsyncMock`` so the fixture's ``close_components`` teardown
+    # can ``await comp.llm.close()`` without choking.
+    sentinel_llm = MagicMock(name="sentinel_llm")
+    sentinel_llm.close = AsyncMock()
+    comp.llm = sentinel_llm
+
+    app = _make_app(comp)
+    ctx = _StubCtx(app)
+    pre_index = app.index_engine
+
+    await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
+
+    assert app.index_engine is not pre_index
+    # The engine must still reference the same LLM instance — anything
+    # else means the rebuild path silently dropped it.
+    assert app.index_engine._llm is sentinel_llm
