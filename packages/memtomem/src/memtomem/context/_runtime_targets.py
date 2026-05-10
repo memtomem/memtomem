@@ -27,11 +27,15 @@ Design rules:
    yet. Tests assert ``project_*`` entries are ``None``; the user
    entry returns ``~/.codex/prompts`` so a future
    ``CodexCommandsGenerator`` can land without table churn.
-5. **Codex skills user-tier path is a TBD** — Codex's own docs are
-   ambiguous between ``~/.codex/skills`` and ``~/.agents/skills``.
-   We mirror the project-scope path (``.agents/skills``) into the
-   user tier as a placeholder; revise in PR-E follow-up if the
-   Codex CLI's user-scope skill discovery is confirmed elsewhere.
+5. **Codex skills user-tier path is ``~/.agents/skills``** — verified
+   externally against the Agent Skills Open Specification (Anthropic
+   2025-12 release, OpenAI Codex adoption documented in-repo at
+   ``context/skills.py:12-13``). The user-scope path follows the same
+   spec-aligned convention as the project-scope tail
+   (``.agents/skills`` — see ``context/detector.py:34-39`` for the
+   in-repo anchor). Both paths are vendor-neutral by design so a
+   skill installed once is discovered by Claude / Gemini / Codex
+   through their respective alias resolution.
 """
 
 from __future__ import annotations
@@ -55,7 +59,7 @@ _CODEX_AGENTS_REL = Path(".codex/agents")
 
 _CLAUDE_SKILLS_REL = Path(".claude/skills")
 _GEMINI_SKILLS_REL = Path(".gemini/skills")
-_CODEX_SKILLS_REL = Path(".agents/skills")  # NOT .codex/skills — see skills.py:80
+_CODEX_SKILLS_REL = Path(".agents/skills")  # NOT .codex/skills — see skills.py module docstring
 
 _CLAUDE_COMMANDS_REL = Path(".claude/commands")
 _GEMINI_COMMANDS_REL = Path(".gemini/commands")
@@ -82,7 +86,9 @@ RUNTIME_FANOUT_TABLE: dict[tuple[ArtifactKind, str, TargetScope], Path | None] =
     ("skills", "gemini", "user"): Path("~/.gemini/skills"),
     ("skills", "gemini", "project_shared"): _GEMINI_SKILLS_REL,
     ("skills", "gemini", "project_local"): NO_FANOUT,
-    ("skills", "codex", "user"): Path("~/.agents/skills"),  # TBD per docstring rule 5
+    ("skills", "codex", "user"): Path(
+        "~/.agents/skills"
+    ),  # Agent Skills Open Spec — see docstring rule 5
     ("skills", "codex", "project_shared"): _CODEX_SKILLS_REL,
     ("skills", "codex", "project_local"): NO_FANOUT,
     # ── commands ─────────────────────────────────────────────────────
