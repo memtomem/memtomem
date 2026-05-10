@@ -129,6 +129,49 @@ def scan_artifact_tree(
     return ScanResult(decisions=decisions, blocked=blocked)
 
 
+def scan_text_content(
+    text: str,
+    *,
+    source_path: Path,
+    surface: str,
+    scope: TargetScope,
+    project_root: Path | None,
+) -> FileScan:
+    """Scan an already-loaded content string against :func:`enforce_write_guard`.
+
+    Distinct from :func:`scan_artifact_tree` (which opens the path
+    itself): callers that have already read the bytes pass the in-memory
+    text here and use the SAME bytes for the downstream parse / write.
+    Closes the scan→read TOCTOU window flagged by Codex review on the
+    PR-E3 commit (concurrent edit between scan and write would otherwise
+    let unscanned bytes fan out).
+
+    ``force_unsafe`` is hardcoded ``False`` per ADR §5 (sync has no
+    escape valve regardless of scope).
+
+    Returns a :class:`FileScan` with the path attribution preserved for
+    downstream messaging; caller branches on
+    ``decision in ("blocked", "blocked_project_shared")`` and feeds the
+    result through :func:`raise_or_collect`.
+    """
+    audit_context: dict[str, object] = {
+        "kind": "sync",
+        "scope": scope,
+        "path": str(source_path),
+    }
+    if project_root is not None:
+        audit_context["project_root"] = str(project_root)
+    guard = privacy.enforce_write_guard(
+        text,
+        surface=surface,
+        force_unsafe=False,
+        scope=scope,
+        audit_context=audit_context,
+        record_outcome=True,
+    )
+    return FileScan(source_path, guard.decision, len(guard.hits))
+
+
 def format_scan_block_message(
     blocked: FileScan,
     *,

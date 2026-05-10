@@ -47,7 +47,7 @@ from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, Layout, 
 from memtomem.context._runtime_targets import runtime_artifact_names, runtime_fanout_root
 from memtomem.context.privacy_scan import (
     raise_or_collect,
-    scan_artifact_tree,
+    scan_text_content,
 )
 from memtomem.context.scope_resolver import canonical_artifact_dir
 
@@ -195,36 +195,37 @@ _KNOWN_AGENT_KEYS = frozenset(
 )
 
 
-def parse_canonical_agent(path: Path, *, layout: Layout = "flat") -> SubAgent:
-    """Parse a canonical agent file into a :class:`SubAgent`.
-
-    ``layout`` selects the default-name fallback when the frontmatter omits
-    ``name``: ``"flat"`` (legacy ``agents/<name>.md``) uses ``path.stem``;
-    ``"dir"`` (ADR-0008 ``agents/<name>/agent.md``) uses
-    ``path.parent.name``. Callers normally get ``layout`` from
-    :func:`list_canonical_agents`.
+def _parse_canonical_agent_text(
+    content: str,
+    *,
+    source: Path,
+    layout: Layout = "flat",
+) -> SubAgent:
+    """Parse already-loaded canonical agent text. Used by both the path-based
+    :func:`parse_canonical_agent` (for backwards compat) and the sync flow
+    that captures bytes once to close the scan→write TOCTOU window
+    (PR-E3 Codex review fold).
     """
-    content = path.read_text(encoding="utf-8")
     # Normalize CRLF → LF so ``_FRONT_MATTER_RE`` (which anchors on ``\n``) matches
     # files authored on Windows or by editors that emit CRLF.
     content = content.replace("\r\n", "\n")
     m = _FRONT_MATTER_RE.match(content)
     if not m:
-        raise AgentParseError(f"missing YAML frontmatter: {path}")
+        raise AgentParseError(f"missing YAML frontmatter: {source}")
     frontmatter = _parse_flat_yaml(m.group(1))
 
     unknown = sorted(set(frontmatter) - _KNOWN_AGENT_KEYS)
     if unknown:
-        logger.warning("unknown frontmatter keys %s in %s (ignored)", unknown, path)
+        logger.warning("unknown frontmatter keys %s in %s (ignored)", unknown, source)
 
     body = content[m.end() :].lstrip("\n").rstrip() + "\n"
 
-    default_name = path.parent.name if layout == "dir" else path.stem
+    default_name = source.parent.name if layout == "dir" else source.stem
     name = frontmatter.get("name") or default_name
     try:
         name = validate_name(str(name), kind="agent name")
     except InvalidNameError as exc:
-        raise AgentParseError(f"{exc} (source: {path})") from exc
+        raise AgentParseError(f"{exc} (source: {source})") from exc
     description = frontmatter.get("description") or ""
     return SubAgent(
         name=name,
@@ -237,6 +238,19 @@ def parse_canonical_agent(path: Path, *, layout: Layout = "flat") -> SubAgent:
         kind=(str(frontmatter["kind"]) if frontmatter.get("kind") else None),
         temperature=_coerce_float(frontmatter.get("temperature")),
     )
+
+
+def parse_canonical_agent(path: Path, *, layout: Layout = "flat") -> SubAgent:
+    """Parse a canonical agent file into a :class:`SubAgent`.
+
+    ``layout`` selects the default-name fallback when the frontmatter omits
+    ``name``: ``"flat"`` (legacy ``agents/<name>.md``) uses ``path.stem``;
+    ``"dir"`` (ADR-0008 ``agents/<name>/agent.md``) uses
+    ``path.parent.name``. Callers normally get ``layout`` from
+    :func:`list_canonical_agents`.
+    """
+    content = path.read_text(encoding="utf-8")
+    return _parse_canonical_agent_text(content, source=path, layout=layout)
 
 
 def list_canonical_agents(
@@ -614,8 +628,19 @@ def generate_all_agents(
             skipped.append((target, "unknown runtime", skip_codes.UNKNOWN_RUNTIME))
             continue
         for agent_path, layout in canonicals:
+            # PR-E3 Codex review fold: read canonical bytes ONCE and use
+            # the captured buffer for both Gate A scan AND parse, closing
+            # the scan→write TOCTOU window. A concurrent edit between
+            # scan and parse would otherwise let an attacker present
+            # clean bytes to scan and unsafe bytes to render.
             try:
-                agent = parse_canonical_agent(agent_path, layout=layout)
+                agent_bytes = agent_path.read_bytes()
+            except OSError as exc:
+                skipped.append((agent_path.name, f"unreadable: {exc}", skip_codes.PARSE_ERROR))
+                continue
+            agent_text = agent_bytes.decode("utf-8", errors="replace")
+            try:
+                agent = _parse_canonical_agent_text(agent_text, source=agent_path, layout=layout)
             except AgentParseError as exc:
                 skipped.append((agent_path.name, f"parse error: {exc}", skip_codes.PARSE_ERROR))
                 continue
@@ -635,35 +660,31 @@ def generate_all_agents(
                     )
                 )
                 continue
-            # ADR-0011 PR-E3 Gate A — scan canonical bytes BEFORE render.
-            # project_shared block raises ClickException; user/project_local
-            # block emits PRIVACY_BLOCKED skip and continues to next runtime.
-            # Scan-before-render also keeps strict=true semantics correct:
-            # a NO_FANOUT runtime never reaches render (#892 P2 fold), and
-            # a privacy-blocked canonical never reaches render either, so
-            # render+drop handling only runs for clean fan-outs.
-            scan = scan_artifact_tree(
-                agent_path,
+            # ADR-0011 PR-E3 Gate A — scan the IN-MEMORY canonical bytes
+            # (same buffer the parse used). project_shared block raises
+            # ClickException; user/project_local block emits
+            # PRIVACY_BLOCKED skip and continues to next runtime.
+            file_scan = scan_text_content(
+                agent_text,
+                source_path=agent_path,
                 surface="cli_context_sync",
                 scope=scope,
                 project_root=project_root,
-                on_blocked="fail_fast",
             )
-            if scan.blocked:
+            if file_scan.decision in ("blocked", "blocked_project_shared"):
                 code, reason = raise_or_collect(
-                    scan.blocked[0],
+                    file_scan,
                     scope=scope,
                     kind="agent",
                     artifact_name=agent.name,
                 )
                 skipped.append((agent.name, reason, code))
                 continue
-            # Resolve per-vendor override (single-tier scope) and scan its
-            # bytes — the override path replaces the rendered canonical
-            # before write, so unscanned-override would silently bypass
-            # Gate A.
+            # Resolve per-vendor override and scan its bytes — read once,
+            # scan once, write the same buffer. Same TOCTOU close as
+            # canonical above.
             vendor = GENERATOR_VENDOR.get(target)
-            override_path: Path | None = None
+            override_bytes: bytes | None = None
             if vendor is not None:
                 # ADR-0011 PR-E3: thread the resolved sync ``scope`` through
                 # to override resolution. Same-tier-only lookup (narrow→broad
@@ -672,16 +693,24 @@ def generate_all_agents(
                     project_root, "agents", agent.name, vendor, scope=scope
                 )
                 if override_path is not None:
-                    scan_override = scan_artifact_tree(
-                        override_path,
+                    try:
+                        override_bytes = override_path.read_bytes()
+                    except OSError as exc:
+                        skipped.append(
+                            (agent.name, f"override unreadable: {exc}", skip_codes.PARSE_ERROR)
+                        )
+                        continue
+                    override_text = override_bytes.decode("utf-8", errors="replace")
+                    file_scan = scan_text_content(
+                        override_text,
+                        source_path=override_path,
                         surface="cli_context_sync",
                         scope=scope,
                         project_root=project_root,
-                        on_blocked="fail_fast",
                     )
-                    if scan_override.blocked:
+                    if file_scan.decision in ("blocked", "blocked_project_shared"):
                         code, reason = raise_or_collect(
-                            scan_override.blocked[0],
+                            file_scan,
                             scope=scope,
                             kind="agent",
                             artifact_name=agent.name,
@@ -698,10 +727,10 @@ def generate_all_agents(
                     logger.warning("%s dropped %s from '%s'", target, dropped_fields, agent.name)
             atomic_write_text(out_path, content)
             # ADR-0008 Invariant 4: per-vendor override replaces the runtime file.
-            # Both canonical and override bytes have already passed Gate A
-            # above; the write below is unconditional once we reach here.
-            if override_path is not None:
-                atomic_write_bytes(out_path, override_path.read_bytes())
+            # Use the SAME captured buffer that passed Gate A — never
+            # re-read from disk (would re-open the TOCTOU window).
+            if override_bytes is not None:
+                atomic_write_bytes(out_path, override_bytes)
             generated.append((target, out_path))
             if dropped_fields:
                 dropped.append((target, agent.name, dropped_fields))

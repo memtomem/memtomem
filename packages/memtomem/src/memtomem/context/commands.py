@@ -47,7 +47,7 @@ from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, Layout, 
 from memtomem.context._runtime_targets import runtime_artifact_names, runtime_fanout_root
 from memtomem.context.privacy_scan import (
     raise_or_collect,
-    scan_artifact_tree,
+    scan_text_content,
 )
 from memtomem.context.agents import (
     _FRONT_MATTER_RE,
@@ -92,17 +92,19 @@ class CommandParseError(ValueError):
     """Raised when a canonical command file cannot be parsed."""
 
 
-def parse_canonical_command(path: Path, *, layout: Layout = "flat") -> SlashCommand:
-    """Parse a canonical command file into a :class:`SlashCommand`.
-
-    ``layout`` selects the default-name fallback when the frontmatter omits
-    ``name``: ``"flat"`` (legacy ``commands/<name>.md``) uses ``path.stem``;
-    ``"dir"`` (ADR-0008 ``commands/<name>/command.md``) uses
-    ``path.parent.name``.
+def _parse_canonical_command_text(
+    content: str,
+    *,
+    source: Path,
+    layout: Layout = "flat",
+) -> SlashCommand:
+    """Parse already-loaded canonical command text. Used by both the path-based
+    :func:`parse_canonical_command` (back-compat) and the sync flow that
+    captures bytes once to close the scan→write TOCTOU window
+    (PR-E3 Codex review fold).
     """
-    default_name = path.parent.name if layout == "dir" else path.stem
+    default_name = source.parent.name if layout == "dir" else source.stem
 
-    content = path.read_text(encoding="utf-8")
     # Share agents.py's CRLF normalization — the shared ``_FRONT_MATTER_RE``
     # anchors on ``\n`` only, so a CRLF file would otherwise parse as "no
     # frontmatter" and silently fall through to the filename-based default.
@@ -115,7 +117,7 @@ def parse_canonical_command(path: Path, *, layout: Layout = "flat") -> SlashComm
         try:
             stem = validate_name(default_name, kind="command name")
         except InvalidNameError as exc:
-            raise CommandParseError(f"{exc} (source: {path})") from exc
+            raise CommandParseError(f"{exc} (source: {source})") from exc
         return SlashCommand(name=stem, description="", body=body)
 
     frontmatter = _parse_flat_yaml(m.group(1))
@@ -125,7 +127,7 @@ def parse_canonical_command(path: Path, *, layout: Layout = "flat") -> SlashComm
     try:
         name = validate_name(name, kind="command name")
     except InvalidNameError as exc:
-        raise CommandParseError(f"{exc} (source: {path})") from exc
+        raise CommandParseError(f"{exc} (source: {source})") from exc
     description = str(frontmatter.get("description") or "")
     argument_hint_raw = frontmatter.get("argument-hint") or frontmatter.get("argument_hint")
     allowed_tools_raw = frontmatter.get("allowed-tools") or frontmatter.get("allowed_tools")
@@ -156,6 +158,18 @@ def parse_canonical_command(path: Path, *, layout: Layout = "flat") -> SlashComm
         allowed_tools=allowed_tools,
         model=(str(frontmatter["model"]) if frontmatter.get("model") else None),
     )
+
+
+def parse_canonical_command(path: Path, *, layout: Layout = "flat") -> SlashCommand:
+    """Parse a canonical command file into a :class:`SlashCommand`.
+
+    ``layout`` selects the default-name fallback when the frontmatter omits
+    ``name``: ``"flat"`` (legacy ``commands/<name>.md``) uses ``path.stem``;
+    ``"dir"`` (ADR-0008 ``commands/<name>/command.md``) uses
+    ``path.parent.name``.
+    """
+    content = path.read_text(encoding="utf-8")
+    return _parse_canonical_command_text(content, source=path, layout=layout)
 
 
 def list_canonical_commands(
@@ -412,8 +426,17 @@ def generate_all_commands(
             skipped.append((target, "unknown runtime", skip_codes.UNKNOWN_RUNTIME))
             continue
         for cmd_path, layout in canonicals:
+            # PR-E3 Codex review fold: read canonical bytes ONCE and use
+            # the captured buffer for both Gate A scan AND parse, closing
+            # the scan→write TOCTOU window (mirror of agents.py logic).
             try:
-                cmd = parse_canonical_command(cmd_path, layout=layout)
+                cmd_bytes = cmd_path.read_bytes()
+            except OSError as exc:
+                skipped.append((cmd_path.name, f"unreadable: {exc}", skip_codes.PARSE_ERROR))
+                continue
+            cmd_text = cmd_bytes.decode("utf-8", errors="replace")
+            try:
+                cmd = _parse_canonical_command_text(cmd_text, source=cmd_path, layout=layout)
             except CommandParseError as exc:
                 skipped.append((cmd_path.name, f"parse error: {exc}", skip_codes.PARSE_ERROR))
                 continue
@@ -433,46 +456,51 @@ def generate_all_commands(
                     )
                 )
                 continue
-            # ADR-0011 PR-E3 Gate A — scan canonical command bytes BEFORE
-            # render. Mirrors the agents.py flow; project_shared raises,
-            # user/project_local skip-warns. See agents.py block-comment
-            # for the strict=true ordering rationale.
-            scan = scan_artifact_tree(
-                cmd_path,
+            # ADR-0011 PR-E3 Gate A — scan the IN-MEMORY canonical bytes
+            # (same buffer the parse used). Mirrors the agents.py flow.
+            file_scan = scan_text_content(
+                cmd_text,
+                source_path=cmd_path,
                 surface="cli_context_sync",
                 scope=scope,
                 project_root=project_root,
-                on_blocked="fail_fast",
             )
-            if scan.blocked:
+            if file_scan.decision in ("blocked", "blocked_project_shared"):
                 code, reason = raise_or_collect(
-                    scan.blocked[0],
+                    file_scan,
                     scope=scope,
                     kind="command",
                     artifact_name=cmd.name,
                 )
                 skipped.append((cmd.name, reason, code))
                 continue
-            # Resolve per-vendor override and scan its bytes — override
-            # replaces canonical at write time so unscanned-override
-            # would silently bypass Gate A.
+            # Resolve per-vendor override and scan its bytes — read once,
+            # scan once, write the same buffer.
             vendor = GENERATOR_VENDOR.get(target)
-            override_path: Path | None = None
+            override_bytes: bytes | None = None
             if vendor is not None:
                 override_path = _override.resolve(
                     project_root, "commands", cmd.name, vendor, scope=scope
                 )
                 if override_path is not None:
-                    scan_override = scan_artifact_tree(
-                        override_path,
+                    try:
+                        override_bytes = override_path.read_bytes()
+                    except OSError as exc:
+                        skipped.append(
+                            (cmd.name, f"override unreadable: {exc}", skip_codes.PARSE_ERROR)
+                        )
+                        continue
+                    override_text = override_bytes.decode("utf-8", errors="replace")
+                    file_scan = scan_text_content(
+                        override_text,
+                        source_path=override_path,
                         surface="cli_context_sync",
                         scope=scope,
                         project_root=project_root,
-                        on_blocked="fail_fast",
                     )
-                    if scan_override.blocked:
+                    if file_scan.decision in ("blocked", "blocked_project_shared"):
                         code, reason = raise_or_collect(
-                            scan_override.blocked[0],
+                            file_scan,
                             scope=scope,
                             kind="command",
                             artifact_name=cmd.name,
@@ -488,9 +516,9 @@ def generate_all_commands(
                 if effective_drop == "warn":
                     logger.warning("%s dropped %s from '%s'", target, dropped_fields, cmd.name)
             atomic_write_text(out_path, content)
-            # Both canonical and override bytes have passed Gate A above.
-            if override_path is not None:
-                atomic_write_bytes(out_path, override_path.read_bytes())
+            # Use the SAME captured override buffer that passed Gate A.
+            if override_bytes is not None:
+                atomic_write_bytes(out_path, override_bytes)
             generated.append((target, out_path))
             if dropped_fields:
                 dropped.append((target, cmd.name, dropped_fields))

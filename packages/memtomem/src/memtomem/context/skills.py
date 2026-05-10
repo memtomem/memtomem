@@ -28,7 +28,12 @@ from typing import Protocol
 
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import override as _override
-from memtomem.context._atomic import atomic_write_bytes, copy_tree_atomic
+from memtomem.context._atomic import (
+    _file_lock,
+    _lock_path_for,
+    atomic_write_bytes,
+    copy_tree_atomic,
+)
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, validate_name
@@ -208,7 +213,16 @@ def _stage_skill(src: Path, dst: Path) -> Path:
         # happens, the leftover tree is from us; safe to remove.
         shutil.rmtree(staging)
     staging.mkdir()
-    copy_tree_atomic(src, staging)
+    # Codex review fold: if ``copy_tree_atomic`` raises after partial
+    # copy, the caller would never see ``staging`` (no return value),
+    # leaving an unscanned partial tree under the runtime fan-out root.
+    # Clean up here before re-raising so Gate A's staging-dir-first
+    # contract holds even on copy failure.
+    try:
+        copy_tree_atomic(src, staging)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
     return staging
 
 
@@ -333,8 +347,10 @@ def generate_all_skills(
             #   1. _stage_skill — mirror canonical bytes into a same-fs
             #      staging dir under dst.parent.
             #   2. Apply vendor SKILL.md override IF any (per-scope, single-
-            #      tier lookup). Auxiliary files (scripts/, references/,
-            #      assets/) stay from canonical — preserves the
+            #      tier lookup) — read override bytes ONCE and reuse them
+            #      so the scan sees the exact bytes that get promoted.
+            #      Auxiliary files (scripts/, references/, assets/) stay
+            #      from canonical — preserves the
             #      ``test_override_only_touches_skill_md_not_scripts``
             #      invariant.
             #   3. scan_artifact_tree — privacy walk against the FINAL
@@ -345,51 +361,60 @@ def generate_all_skills(
             #      staging via os.replace (same-fs).
             #   5. On block or any exception — finally clause removes
             #      the staging tree without touching dst.
-            staging = _stage_skill(skill_dir, dst)
-            promoted = False
-            try:
-                # 2. Override apply (BEFORE scan — scan must see the bytes
-                # that will be promoted).
-                vendor = GENERATOR_VENDOR.get(target)
-                if vendor is not None:
-                    override_path = _override.resolve(
-                        project_root, "skills", skill_dir.name, vendor, scope=scope
-                    )
-                    if override_path is not None:
-                        atomic_write_bytes(
-                            staging / SKILL_MANIFEST,
-                            override_path.read_bytes(),
+            #
+            # Concurrency (PR-E3 Codex review fold): the entire
+            # stage+scan+promote sequence runs inside a sidecar flock at
+            # ``_lock_path_for(dst)`` so two parallel ``mm context sync``
+            # invocations cannot interleave their dst→old→staging→dst
+            # swaps. Without the lock, a second invocation could
+            # recreate ``dst`` between the move-aside and the rename-in,
+            # leaving the rollback path with no clean dst to restore.
+            with _file_lock(_lock_path_for(dst)):
+                staging = _stage_skill(skill_dir, dst)
+                promoted = False
+                try:
+                    # 2. Override apply (BEFORE scan — scan must see the bytes
+                    # that will be promoted).
+                    vendor = GENERATOR_VENDOR.get(target)
+                    if vendor is not None:
+                        override_path = _override.resolve(
+                            project_root, "skills", skill_dir.name, vendor, scope=scope
                         )
-                # 3. Scan.
-                scan = scan_artifact_tree(
-                    staging,
-                    surface="cli_context_sync",
-                    scope=scope,
-                    project_root=project_root,
-                    on_blocked="fail_fast",
-                )
-                if scan.blocked:
-                    # raise_or_collect raises ClickException for project_shared;
-                    # otherwise returns (code, reason) and falls through to
-                    # the skip append.
-                    code, reason = raise_or_collect(
-                        scan.blocked[0],
+                        if override_path is not None:
+                            atomic_write_bytes(
+                                staging / SKILL_MANIFEST,
+                                override_path.read_bytes(),
+                            )
+                    # 3. Scan.
+                    scan = scan_artifact_tree(
+                        staging,
+                        surface="cli_context_sync",
                         scope=scope,
-                        kind="skill",
-                        artifact_name=skill_dir.name,
+                        project_root=project_root,
+                        on_blocked="fail_fast",
                     )
-                    skipped.append((skill_dir.name, reason, code))
-                else:
-                    # 4. Promote — atomic os.replace into dst.
-                    _promote_staging(staging, dst)
-                    promoted = True
-                    generated.append((target, dst))
-            finally:
-                # 5. Cleanup. Promote consumes staging via rename, so we
-                # only remove it when something else (block/exception)
-                # left it behind.
-                if not promoted and staging.exists():
-                    shutil.rmtree(staging, ignore_errors=True)
+                    if scan.blocked:
+                        # raise_or_collect raises ClickException for project_shared;
+                        # otherwise returns (code, reason) and falls through to
+                        # the skip append.
+                        code, reason = raise_or_collect(
+                            scan.blocked[0],
+                            scope=scope,
+                            kind="skill",
+                            artifact_name=skill_dir.name,
+                        )
+                        skipped.append((skill_dir.name, reason, code))
+                    else:
+                        # 4. Promote — atomic os.replace into dst.
+                        _promote_staging(staging, dst)
+                        promoted = True
+                        generated.append((target, dst))
+                finally:
+                    # 5. Cleanup. Promote consumes staging via rename, so we
+                    # only remove it when something else (block/exception)
+                    # left it behind.
+                    if not promoted and staging.exists():
+                        shutil.rmtree(staging, ignore_errors=True)
 
     return SkillSyncResult(generated=generated, skipped=skipped)
 
