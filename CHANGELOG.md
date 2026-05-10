@@ -75,8 +75,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   prompt, no project-signal hard-error from outside a real project —
   with idempotent canonical sub-dir seeding (``agents/``, ``skills/``,
   ``commands/``) added under ``<proj>/.memtomem/`` (or ``<cwd>/`` when
-  no project root is found). All new gating behaviour is restricted
-  to EXPLICIT ``--scope`` invocations. ``mm context init`` gains
+  no project root is found, in which case a yellow hint suggests
+  ``--scope=user`` for the cross-project case). All new gating
+  behaviour is restricted to EXPLICIT ``--scope`` invocations. ``mm context init`` gains
   three new flags:
   ``--scope user|project_shared|project_local`` (the canonical artifact
   tier to seed), ``--confirm-project-shared`` (Gate B — required when
