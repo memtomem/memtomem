@@ -69,29 +69,32 @@ def format_project_shared_block_message(
 
 
 @dataclass(frozen=True)
-class GateAOutcome:
-    """Result of :func:`apply_gate_a` for a single content scan.
+class GateAProceed:
+    """:func:`apply_gate_a` outcome — content passed Gate A; caller should write."""
 
-    On the project_shared hard-abort path the helper raises
-    :class:`click.ClickException` directly — callers never observe a
-    ``proceed=False`` outcome with a project_shared scope.
+
+@dataclass(frozen=True)
+class GateABlocked:
+    """:func:`apply_gate_a` outcome — content was blocked at Gate A.
+
+    Only emitted for non-``project_shared`` scopes. ``project_shared``
+    block hits raise :class:`click.ClickException` inside the helper.
 
     Attributes:
-        proceed: ``True`` iff the caller should write the content.
-            ``False`` means the caller should record a skip using
-            ``code`` / ``hits_count`` / ``hint``.
-        code: ``PRIVACY_BLOCKED`` or ``PRIVACY_BLOCKED_PROJECT_SHARED``
-            when ``proceed`` is ``False``; ``None`` otherwise.
+        code: ``PRIVACY_BLOCKED`` or ``PRIVACY_BLOCKED_PROJECT_SHARED``.
         hits_count: Number of privacy pattern hits — count only, never
-            echo bytes. Zero when ``proceed`` is ``True``.
+            echo bytes.
         hint: ``" — pass --force-unsafe-import to bypass"`` for
             ``decision == "blocked"``, otherwise ``""``.
     """
 
-    proceed: bool
-    code: skip_codes.SkipCode | None
+    code: skip_codes.SkipCode
     hits_count: int
     hint: str
+
+
+# Discriminated union — callers narrow with ``isinstance(outcome, GateABlocked)``.
+GateAOutcome = GateAProceed | GateABlocked
 
 
 def apply_gate_a(
@@ -100,7 +103,7 @@ def apply_gate_a(
     src: Path,
     scope: TargetScope,
     force_unsafe_import: bool,
-    audit_context: dict[str, str],
+    audit_context: dict[str, object],
     message_kind: str,
     imported_so_far: int,
 ) -> GateAOutcome:
@@ -108,15 +111,15 @@ def apply_gate_a(
 
     Outcomes:
       * ``decision in ("pass", "bypassed")`` — return
-        :class:`GateAOutcome` with ``proceed=True``.
+        :class:`GateAProceed`.
       * ``decision in ("blocked", "blocked_project_shared")`` AND
         ``scope == "project_shared"`` — raise :class:`click.ClickException`
         via :func:`format_project_shared_block_message`. The
         ``project_shared`` ban is hard regardless of
         ``force_unsafe_import`` (ADR-0011 §5).
       * ``decision in ("blocked", "blocked_project_shared")`` AND
-        ``scope != "project_shared"`` — return :class:`GateAOutcome`
-        with ``proceed=False`` and the matching ``code`` / ``hint``.
+        ``scope != "project_shared"`` — return :class:`GateABlocked`
+        with the matching ``code`` / ``hits_count`` / ``hint``.
       * Anything else — :class:`RuntimeError` (fail-loud on enum drift).
 
     Args:
@@ -166,15 +169,10 @@ def apply_gate_a(
             else skip_codes.PRIVACY_BLOCKED
         )
         hint = " — pass --force-unsafe-import to bypass" if guard.decision == "blocked" else ""
-        return GateAOutcome(
-            proceed=False,
-            code=code,
-            hits_count=len(guard.hits),
-            hint=hint,
-        )
+        return GateABlocked(code=code, hits_count=len(guard.hits), hint=hint)
     if guard.decision not in ("pass", "bypassed"):
         # Symmetric assertion — fail-loud on unknown decision so a
         # future privacy enum addition surfaces here rather than
         # silently dropping the write.
         raise RuntimeError(f"enforce_write_guard returned unexpected decision: {guard.decision!r}")
-    return GateAOutcome(proceed=True, code=None, hits_count=0, hint="")
+    return GateAProceed()

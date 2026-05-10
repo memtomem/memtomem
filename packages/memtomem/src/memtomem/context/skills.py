@@ -27,7 +27,7 @@ from typing import Protocol
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import override as _override
 from memtomem.context._atomic import atomic_write_bytes, copy_tree_atomic
-from memtomem.context._gate_a import GateAOutcome, apply_gate_a
+from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, validate_name
 from memtomem.context._runtime_targets import runtime_fanout_root
@@ -369,7 +369,7 @@ def extract_skills_to_canonical(
             # hard-abort path raises ClickException inside apply_gate_a;
             # the rglob loop only sees ``proceed=False`` for non-
             # project_shared scopes.
-            blocked: tuple[Path, GateAOutcome] | None = None
+            blocked: tuple[Path, GateABlocked] | None = None
             for src_file in sorted(skill_dir.rglob("*")):
                 if not src_file.is_file():
                     continue
@@ -394,7 +394,7 @@ def extract_skills_to_canonical(
                     message_kind="skill",
                     imported_so_far=len(imported),
                 )
-                if not outcome.proceed:
+                if isinstance(outcome, GateABlocked):
                     blocked = (src_file, outcome)
                     break
 

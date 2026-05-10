@@ -41,7 +41,7 @@ from typing import Any, Protocol
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import override as _override
 from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
-from memtomem.context._gate_a import apply_gate_a
+from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, Layout, validate_name
 from memtomem.context._runtime_targets import runtime_fanout_root
@@ -803,7 +803,7 @@ def extract_agents_to_canonical(
                 message_kind="agent",
                 imported_so_far=len(imported),
             )
-            if not outcome.proceed:
+            if isinstance(outcome, GateABlocked):
                 skipped.append(
                     (
                         agent_name,
@@ -813,7 +813,7 @@ def extract_agents_to_canonical(
                 )
                 seen[agent_name] = runtime_label
                 continue
-            # outcome.proceed is True — write.
+            # outcome is GateAProceed — write.
             dst.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_bytes(dst, content_bytes)
             imported.append((dst, layout))

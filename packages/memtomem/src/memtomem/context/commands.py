@@ -41,7 +41,7 @@ from typing import Protocol
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import override as _override
 from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
-from memtomem.context._gate_a import apply_gate_a
+from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, Layout, validate_name
 from memtomem.context._runtime_targets import runtime_fanout_root
@@ -594,7 +594,7 @@ def extract_commands_to_canonical(
                 message_kind="command",
                 imported_so_far=len(imported),
             )
-            if not outcome.proceed:
+            if isinstance(outcome, GateABlocked):
                 skipped.append(
                     (
                         cmd_name,
@@ -662,7 +662,7 @@ def extract_commands_to_canonical(
                 message_kind="command",
                 imported_so_far=len(imported),
             )
-            if not outcome.proceed:
+            if isinstance(outcome, GateABlocked):
                 skipped.append(
                     (
                         cmd_name,
