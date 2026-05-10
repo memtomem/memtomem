@@ -743,17 +743,23 @@ def test_unknown_decision_raises_runtime_error(
 # ── D2 — audit_context shape pins (PR-E follow-up) ─────────────────────
 
 
-def _capture_guard_audit(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, str]]:
+def _capture_guard_audit(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, object]]:
     """Spy ``privacy.enforce_write_guard`` and capture the first call's audit_context.
 
     Returns a dict the caller can read after the extract function returns.
     The spy still has to return a real ``WriteGuardResult`` so the extract
     pipeline proceeds normally — we want the audit-context capture, not
     the proceed/block decision.
-    """
-    captured: dict[str, dict[str, str]] = {}
 
-    def spy(content_text: str, *, audit_context: dict[str, str], **kw: Any) -> WriteGuardResult:
+    Spy signature mirrors the chokepoint (``dict[str, object]``) so a
+    future producer that legitimately routes a non-string field (e.g.
+    an ``item_idx: int`` from a batch ingress surface) flows through
+    this spy without a type mismatch. Current producers all pass
+    string-only values; the assertions still pin those shapes.
+    """
+    captured: dict[str, dict[str, object]] = {}
+
+    def spy(content_text: str, *, audit_context: dict[str, object], **kw: Any) -> WriteGuardResult:
         if "first" not in captured:
             captured["first"] = dict(audit_context)
         return WriteGuardResult("pass", [])

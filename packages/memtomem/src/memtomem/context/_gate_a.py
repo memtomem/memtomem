@@ -130,19 +130,33 @@ def apply_gate_a(
             ``project_shared`` ClickException only — never echoed for
             non-project_shared skips.
         scope: Destination scope.
-        force_unsafe_import: Caller's bypass flag. Only honoured for
-            ``user`` / ``project_local`` scopes.
+        force_unsafe_import: Caller's bypass flag — the value of the
+            CLI's ``--force-unsafe-import`` flag (or its MCP equivalent).
+            Forwarded to :func:`privacy.enforce_write_guard` as the
+            ``force_unsafe`` kwarg; the kept-distinct names mark the
+            "this is the import-side bypass valve" call site
+            (``project_shared`` ignores it regardless).
         audit_context: Caller-supplied dict, passed verbatim to
             :func:`privacy.enforce_write_guard`. Helper does not inject
             or rename keys (so SOC-pipeline grep on per-kind fields like
             ``agent_name`` / ``source_file`` / ``runtime`` is preserved).
+            Typed ``dict[str, object]`` to match the chokepoint signature
+            (``privacy.enforce_write_guard``); current callers pass
+            ``dict[str, str]`` literals which mypy widens at the call
+            site. Non-string values are supported by
+            :func:`privacy._sanitize_audit_value`.
         message_kind: Singular display noun for the ClickException
             ("agent" / "skill" / "command"). Distinct from the plural
             ``kind`` field that callers usually carry inside
             ``audit_context``.
         imported_so_far: Number of artifacts already imported in this
             run; passed through to the cleanup hint in the
-            ClickException message.
+            ClickException message. **Invariant**: callers must compute
+            this from a list that is appended to only AFTER ``apply_gate_a``
+            returns ``GateAProceed`` (i.e. no mid-scan mutation). A future
+            partial-copy refactor that appends to the imported list
+            inside the scan loop would silently change the cleanup-hint
+            count and must update this contract.
     """
     guard = privacy.enforce_write_guard(
         content_text,
