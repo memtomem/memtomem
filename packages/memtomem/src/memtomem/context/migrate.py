@@ -884,35 +884,57 @@ def migrate_scope(
             # Roll back: put bytes back at src so the caller can retry
             # without manual cleanup.
             #
-            # Codex review #1 (P-medium): when the same-FS rename-back
-            # fails — rare, but possible if e.g. ``src_path.parent`` was
-            # rmdir'd between rename and rollback — staging is now the
-            # ONLY copy of the user's bytes. Deleting it would silently
-            # destroy user data. Track that case explicitly and preserve
-            # staging when rename-back failed; log a loud ERROR pointing
-            # to the surviving path so manual recovery is possible.
-            rename_back_failed = False
-            if src_consumed and not src_path.exists() and staging.exists():
+            # The cleanup rule is: staging is deleted only when we KNOW
+            # the bytes are safe elsewhere. There are exactly three safe
+            # cases; everything else preserves staging as a recovery copy
+            # and logs a loud ERROR pointing the user at it.
+            #
+            # Codex review #1 fold caught the "rename-back fails →
+            # staging gets deleted" path. Re-review then caught a
+            # subtler one: ``not src_path.exists()`` was a TOCTOU — an
+            # external writer (``mm context install``, a manual file op,
+            # any tool that does not take our sidecar lock) can recreate
+            # ``src_path`` between our ``os.rename`` and rollback. The
+            # old guard would skip rename-back (src "already there") and
+            # the cleanup branch would delete staging anyway, even
+            # though the bytes at src now belong to someone else.
+            cleanup_staging = False
+            if not src_consumed:
+                # EXDEV fallback: src was never consumed, staging is
+                # just a copy. Safe to drop.
+                cleanup_staging = True
+            elif src_path.exists():
+                # Same-FS path consumed src, but src has reappeared —
+                # not by us. Don't overwrite the new src bytes; don't
+                # delete staging either. User reconciles manually.
+                logger.error(
+                    "migrate_scope rollback: src %s reappeared during apply "
+                    "(another writer outside our lock); preserving staging "
+                    "at %s as a recovery copy — manual reconciliation "
+                    "required.",
+                    src_path,
+                    staging,
+                )
+            elif staging.exists():
+                # Same-FS path consumed src; src is gone as expected;
+                # try the rename-back. Success consumes staging (cleanup
+                # is a no-op then); failure preserves staging.
                 try:
                     os.replace(staging, src_path)
+                    cleanup_staging = True
                 except OSError as exc:
-                    rename_back_failed = True
                     logger.error(
                         "migrate_scope rollback: rename-back failed (%s); "
                         "staging at %s is the ONLY surviving copy of the "
-                        "source bytes — manual recovery required (mv it back "
-                        "to %s).",
+                        "source bytes — manual recovery required (mv it "
+                        "back to %s).",
                         exc,
                         staging,
                         src_path,
                     )
-            # Drop staging only when the bytes are safe somewhere else:
-            # - src_consumed=False (EXDEV path): src still exists with the
-            #   bytes; staging is just a copy.
-            # - src_consumed=True, rename-back succeeded: src has the bytes again.
-            # - src_consumed=True, rename-back FAILED: staging is the bytes;
-            #   leave it so the user can recover.
-            if staging.exists() and not rename_back_failed:
+            # else: src_consumed and staging is gone too — nothing to do.
+
+            if cleanup_staging and staging.exists():
                 if staging.is_dir():
                     shutil.rmtree(staging, ignore_errors=True)
                 else:

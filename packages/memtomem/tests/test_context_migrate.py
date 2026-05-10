@@ -1536,3 +1536,78 @@ def test_e4_rollback_rename_back_failure_preserves_staging(scope_layout, monkeyp
     # never landed.
     assert not src.exists()
     assert not (dst_root / "leak").exists()
+
+
+# ── PR-E4 Codex re-review fold: src reappears via external race ──────
+
+
+def test_e4_rollback_src_reappears_preserves_staging(scope_layout, monkeypatch, caplog):
+    """Codex re-review fold — when ``src_path`` reappears during apply
+    (an external writer outside our sidecar lock — e.g.,
+    ``mm context install`` running in parallel, a user manually
+    recreating the canonical), the rollback must NOT silently delete
+    staging. The new src bytes might be unrelated to ours; staging is
+    the only verified copy of the original.
+
+    Triggered by monkeypatching ``scan_artifact_tree`` in the
+    ``migrate`` module so that BEFORE Gate A would block, the racer
+    recreates ``src_path`` with different bytes. Then Gate A blocks,
+    rollback enters the ``src_path.exists()`` branch, logs ERROR, and
+    preserves staging.
+
+    Pin (Codex re-review):
+      * src reappeared bytes are preserved verbatim — rollback does
+        not overwrite them.
+      * staging directory survives — original bytes recoverable.
+      * ERROR log includes the "reappeared" marker + both paths.
+    """
+    import logging as _logging
+
+    src = _write_canonical_dir(scope_layout, "agents", "user", "leak", _AGENT_BODY_SECRET)
+
+    from memtomem.context import migrate as migrate_mod
+
+    real_scan = migrate_mod.scan_artifact_tree
+    racer_bytes = "racer wrote different bytes\n"
+
+    def fake_scan_with_racer(*args, **kwargs):
+        # Recreate src with different bytes BEFORE the scan returns.
+        # The scan itself runs against staging — Gate A will block on
+        # the original secret. By the time rollback runs, src exists
+        # again from the racer's write.
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text(racer_bytes, encoding="utf-8")
+        return real_scan(*args, **kwargs)
+
+    monkeypatch.setattr(migrate_mod, "scan_artifact_tree", fake_scan_with_racer)
+    caplog.set_level(_logging.ERROR, logger="memtomem.context.migrate")
+
+    result = _invoke_migrate(
+        _migrate_args(
+            "agents",
+            "leak",
+            from_scope="user",
+            to_scope="project_shared",
+            confirm_project_shared=True,
+        )
+    )
+    assert result.exit_code != 0, result.output
+
+    # POSITIVE: ERROR logged with the "reappeared" marker.
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("reappeared during apply" in m and ".migrate-leak-" in m for m in messages), messages
+
+    # POSITIVE: racer bytes preserved at src (not overwritten by rollback).
+    assert src.is_file()
+    assert src.read_text(encoding="utf-8") == racer_bytes
+
+    # POSITIVE: staging dir survives with the ORIGINAL secret-bearing bytes.
+    dst_root = _canonical_root_for(scope_layout, "agents", "project_shared")
+    surviving = list(dst_root.glob(".migrate-leak-*.tmp"))
+    assert len(surviving) == 1, surviving
+    surviving_manifest = surviving[0] / "agent.md"
+    assert surviving_manifest.is_file()
+    assert surviving_manifest.read_text(encoding="utf-8") == _AGENT_BODY_SECRET
+
+    # NEGATIVE: dst never landed.
+    assert not (dst_root / "leak").exists()
