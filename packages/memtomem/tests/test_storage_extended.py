@@ -551,6 +551,94 @@ class TestStorageExtended:
         # No prior set — must not raise.
         await storage.delete_ai_summary(Path("/tmp/never-saved.md"))
 
+    async def test_update_chunks_scope_for_source_moves_ai_summary(self, components):
+        """``update_chunks_scope_for_source`` rewrites a source's path
+        in place (used by ``mm context memory migrate`` and similar
+        in-tree relocations). The cache key is path-derived, so an
+        in-place rewrite without summary migration would leave the new
+        path summary-less *and* leave an orphan ``ai_summary:<old>``
+        row contributing to drift counts. Pin the rename: after the
+        migration, the old key is gone, the new key holds the same
+        record (path migrations don't change what the file is about,
+        so the prose stays valid)."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        storage = components.storage
+        old_path = Path("/tmp/old-location.md")
+        new_path = Path("/tmp/new-location.md")
+        await storage.upsert_chunks(
+            [
+                Chunk(
+                    content="body",
+                    metadata=ChunkMetadata(
+                        source_file=old_path,
+                        heading_hierarchy=("# H",),
+                        start_line=1,
+                    ),
+                    content_hash="hash-mig",
+                    embedding=[0.1] * 1024,
+                ),
+            ]
+        )
+        await storage.set_ai_summary(old_path, "Migrated prose.", "sig-mig", "en")
+
+        moved = await storage.update_chunks_scope_for_source(
+            old_path,
+            new_path,
+            new_scope="project_shared",
+            new_project_root=Path("/tmp"),
+        )
+        assert moved == 1
+
+        # Old path's cache row is gone — no orphan to leak into drift
+        # counts or ``get_all_ai_summaries``.
+        assert await storage.get_ai_summary(old_path) is None
+        # New path carries the migrated record; same prose, same
+        # signature, same language tag.
+        rec = await storage.get_ai_summary(new_path)
+        assert rec is not None
+        assert rec["summary"] == "Migrated prose."
+        assert rec["signature"] == "sig-mig"
+        assert rec["language"] == "en"
+
+    async def test_update_chunks_scope_for_source_no_summary_is_noop(self, components):
+        """When no AI summary exists for the moved source (LLM was
+        disabled, or generation hadn't run yet), the rename path is a
+        clean no-op — chunks move, no spurious meta rows appear at the
+        destination. Defends the ``IF EXISTS``-style branch against a
+        future "always insert at new" simplification."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        storage = components.storage
+        old_path = Path("/tmp/no-summary.md")
+        new_path = Path("/tmp/no-summary-moved.md")
+        await storage.upsert_chunks(
+            [
+                Chunk(
+                    content="body",
+                    metadata=ChunkMetadata(
+                        source_file=old_path,
+                        heading_hierarchy=("# H",),
+                        start_line=1,
+                    ),
+                    content_hash="hash-ns",
+                    embedding=[0.1] * 1024,
+                ),
+            ]
+        )
+
+        await storage.update_chunks_scope_for_source(
+            old_path,
+            new_path,
+            new_scope="user",
+            new_project_root=None,
+        )
+
+        assert await storage.get_ai_summary(old_path) is None
+        assert await storage.get_ai_summary(new_path) is None
+        # And neither side appears in the all-summaries scan.
+        assert await storage.get_all_ai_summaries() == {}
+
     async def test_get_all_ai_summaries_excludes_other_meta_keys(self, components):
         """Embedding-dimension and other non-summary rows in
         ``_memtomem_meta`` must not leak into the summary listing — pin

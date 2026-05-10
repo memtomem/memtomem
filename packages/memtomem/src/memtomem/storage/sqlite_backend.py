@@ -827,6 +827,41 @@ class SqliteBackend(
                 f"UPDATE chunks_fts SET source_file=? WHERE rowid IN ({placeholders(len(rowids))})",
                 [new_norm, *rowids],
             )
+            # Move the AI summary cache row alongside the chunks. The
+            # cache key is derived from the source path, so an in-place
+            # path rewrite would otherwise leave an ``ai_summary:<old>``
+            # row attached to chunks that now live at <new> — the new
+            # path would render with no AI summary while the orphan row
+            # kept contributing to ``count_language_drift`` and
+            # ``get_all_ai_summaries``. The summary describes the same
+            # *content*, so renaming (rather than dropping) is the
+            # correct semantic: a path migration via ``mm context
+            # memory migrate`` doesn't change what the file is about,
+            # only where it lives.
+            #
+            # ``INSERT OR REPLACE`` against the new key is necessary
+            # because the destination path could already have its own
+            # cache row in pathological cases (e.g., the user moved
+            # files in opposite directions across two migrations); the
+            # source-of-truth for the migrated chunks is the row keyed
+            # by ``old`` because that's the one whose signature matched
+            # the chunk hashes we just rewrote. After the swap, delete
+            # the old key so the orphan can't drift back in.
+            old_summary_key = f"{_AI_SUMMARY_KEY_PREFIX}{old_norm}"
+            new_summary_key = f"{_AI_SUMMARY_KEY_PREFIX}{new_norm}"
+            old_summary = db.execute(
+                "SELECT value FROM _memtomem_meta WHERE key=?",
+                (old_summary_key,),
+            ).fetchone()
+            if old_summary is not None:
+                db.execute(
+                    "INSERT OR REPLACE INTO _memtomem_meta(key, value) VALUES (?, ?)",
+                    (new_summary_key, old_summary[0]),
+                )
+                db.execute(
+                    "DELETE FROM _memtomem_meta WHERE key=?",
+                    (old_summary_key,),
+                )
             if opened_tx:
                 db.commit()
         except Exception as exc:
