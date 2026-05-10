@@ -614,12 +614,65 @@ mark {
 .source-item.active { border-color: var(--accent); background: rgba(var(--accent-rgb),0.08); }
 .source-item-row1 { display: flex; align-items: center; gap: 6px; }
 .source-type-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-.source-name { font-family: var(--mono); font-size: 0.78rem; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.source-name { font-family: var(--mono); font-size: 0.78rem; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
 .source-ns-badge { font-size: 0.58rem; padding: 0 4px; line-height: 1.4; }
 .source-item-row2 {
   font-size: 0.68rem; color: var(--muted); font-family: var(--mono);
   padding-left: 14px;
 }
+
+/* Heuristic preview block: title (first heading) + body (heuristic
+ * excerpt OR AI summary). Three-tier visual hierarchy keeps the
+ * filename (mono + bold, in row1) as the row anchor and clearly
+ * subordinates the supplemental preview:
+ *   - title: sans, single-line, muted — the "what is this" label
+ *   - body (heuristic excerpt): smaller, faded — fallback preview
+ *   - body (AI prose, [data-ai="true"]): smaller, slightly stronger
+ *     muted, line-clamp 3 — semantically richer so it earns more rows.
+ * Title weight stays at 400 (no italic — Korean fonts synthesise italic
+ * poorly and many sources here are KO/EN mixed). */
+.source-item-summary { padding-left: 14px; margin-top: 2px; }
+.source-item-title {
+  font-size: 0.72rem; color: var(--muted); font-weight: 400;
+  line-height: 1.3;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1;
+  overflow: hidden;
+}
+.source-item-excerpt {
+  font-size: 0.68rem; color: var(--muted); opacity: 0.78;
+  line-height: 1.35; margin-top: 1px;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.source-item-excerpt[data-ai="true"] {
+  /* AI-generated prose earns slightly more visual weight: full opacity,
+   * accent-tinted ✨ marker, and 3-line clamp since 2-3 sentence prose
+   * naturally runs longer than the 200-char heuristic excerpt. */
+  opacity: 1;
+  color: var(--text);
+  -webkit-line-clamp: 3;
+}
+.source-item-ai-badge {
+  display: inline-block;
+  margin-right: 2px;
+  color: var(--accent);
+}
+
+/* AI-summary language drift banner: yellow-tinted notice above the
+ * source list when one or more cached summaries are in a language that
+ * doesn't match ``IndexingConfig.summary_language``. Hidden by default
+ * (``hidden`` attribute on the host element); the JS toggles it. */
+.source-language-drift-banner {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; margin: 4px 8px 6px;
+  background: rgba(255, 200, 64, 0.08);
+  border: 1px solid rgba(255, 200, 64, 0.3);
+  border-radius: var(--radius);
+  font-size: 0.74rem; color: var(--text);
+}
+.source-language-drift-msg { flex: 1; min-width: 0; }
+.source-drift-regen-btn,
+.source-drift-later-btn { flex-shrink: 0; }
 
 /* Chunk count mini bar */
 .source-chunk-bar { height: 2px; background: var(--border); border-radius: 1px; margin-top: 4px; overflow: hidden; }

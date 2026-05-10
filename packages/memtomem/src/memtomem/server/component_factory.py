@@ -130,14 +130,6 @@ async def create_components(config: Mem2MemConfig | None = None) -> Components:
         )
     registry = ChunkerRegistry(chunkers)
 
-    index_engine = IndexEngine(
-        storage=storage,
-        embedder=embedder,
-        config=config.indexing,
-        registry=registry,
-        namespace_config=config.namespace,
-        progress_threshold=config.embedding.progress_threshold,
-    )
     # Create optional reranker
     reranker = None
     if config.rerank.enabled:
@@ -145,12 +137,26 @@ async def create_components(config: Mem2MemConfig | None = None) -> Components:
 
         reranker = create_reranker(config.rerank)
 
-    # Create optional LLM provider (before SearchPipeline so it can be passed in)
+    # Create optional LLM provider once and share it with both the index
+    # engine (per-source AI summary) and the search pipeline. Created
+    # before ``IndexEngine`` so the engine can hold the same instance —
+    # one shared client keeps connection-pool / rate-limit behaviour
+    # consistent across the two consumers.
     llm: LLMProvider | None = None
     if config.llm.enabled:
         from memtomem.llm.factory import create_llm
 
         llm = create_llm(config.llm)
+
+    index_engine = IndexEngine(
+        storage=storage,
+        embedder=embedder,
+        config=config.indexing,
+        registry=registry,
+        namespace_config=config.namespace,
+        progress_threshold=config.embedding.progress_threshold,
+        llm=llm,
+    )
 
     search_pipeline = SearchPipeline(
         storage=storage,

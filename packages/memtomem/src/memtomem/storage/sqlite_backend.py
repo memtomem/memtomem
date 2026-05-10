@@ -60,6 +60,17 @@ __all__ = ["SqliteBackend"]
 _REBUILD_FTS_BATCH_SIZE = 1000
 
 
+# Prefix for per-source AI summary records in the ``_memtomem_meta`` k/v
+# table. The full key is ``ai_summary:<resolved-NFC-path>`` so a prefix
+# scan (``key LIKE 'ai_summary:%'``) cleanly separates summary rows from
+# the embedding-meta keys that share the same table.
+_AI_SUMMARY_KEY_PREFIX = "ai_summary:"
+
+
+def _ai_summary_key(source_file: Path) -> str:
+    return f"{_AI_SUMMARY_KEY_PREFIX}{norm_path(source_file)}"
+
+
 def _rebuild_fts_retrieval(content: str, hierarchy_json: str) -> str:
     """Prefix ``content`` with its heading hierarchy for FTS indexing."""
     if hierarchy_json:
@@ -637,6 +648,16 @@ class SqliteBackend(
         ).fetchall()
 
         if not rows:
+            # Even with no chunks, an orphaned ai_summary cache row from a
+            # prior generation could linger — clear it unconditionally so
+            # the source-tab preview doesn't keep referencing a deleted
+            # file. Cheap (single row by primary key) so we don't gate it.
+            db.execute(
+                "DELETE FROM _memtomem_meta WHERE key=?",
+                (_ai_summary_key(source_file),),
+            )
+            if not self._in_transaction:
+                db.commit()
             return 0
 
         ids = [row[0] for row in rows]
@@ -651,6 +672,10 @@ class SqliteBackend(
                 db.execute(
                     f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(rowids))})", rowids
                 )
+            db.execute(
+                "DELETE FROM _memtomem_meta WHERE key=?",
+                (_ai_summary_key(source_file),),
+            )
             if not self._in_transaction:
                 db.commit()
         except Exception as exc:
@@ -1233,6 +1258,120 @@ class SqliteBackend(
         return [
             (Path(row[0]), row[1], row[2], row[3], row[4] or 0, row[5] or 0, row[6] or 0)
             for row in rows
+        ]
+
+    async def get_source_summaries(self) -> dict[str, tuple[list[str], str]]:
+        """Return ``{source_file_path_str: (heading_hierarchy, first_chunk_content)}``.
+
+        The "first chunk" is the section with the smallest ``start_line`` per
+        source. Powers the Source tab's heuristic preview (first heading +
+        first paragraph) — drives the fallback shown when no AI summary has
+        been generated yet, or when the LLM is disabled. Pure read-side
+        aggregation; no LLM, no extra storage column.
+        """
+        db = self._get_read_db()
+        rows = db.execute(
+            "SELECT source_file, content, heading_hierarchy FROM ("
+            "  SELECT source_file, content, heading_hierarchy,"
+            "         ROW_NUMBER() OVER ("
+            "           PARTITION BY source_file ORDER BY start_line, rowid"
+            "         ) AS rn"
+            "  FROM chunks"
+            ") WHERE rn = 1"
+        ).fetchall()
+        result: dict[str, tuple[list[str], str]] = {}
+        for source, content, hh_json in rows:
+            try:
+                hh = list(json.loads(hh_json)) if hh_json else []
+            except (json.JSONDecodeError, TypeError):
+                hh = []
+            result[source] = (hh, content or "")
+        return result
+
+    # ---- AI summary cache (per-source LLM-generated preview) ----------------
+
+    async def get_ai_summary(self, source_file: Path) -> dict | None:
+        """Return the cached AI summary record for ``source_file``, or None.
+
+        Record shape: ``{"summary": str, "signature": str, "language": str,
+        "generated_at": str}``. Returns None when no row exists or the JSON
+        is corrupt — callers treat both as "no cache, regenerate".
+        """
+        assert self._meta is not None
+        raw = self._meta.get_meta(_ai_summary_key(source_file))
+        if not raw:
+            return None
+        try:
+            obj = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Corrupt ai_summary record for %s", source_file)
+            return None
+        if not isinstance(obj, dict):
+            return None
+        return obj
+
+    async def set_ai_summary(
+        self,
+        source_file: Path,
+        summary: str,
+        signature: str,
+        language: str,
+    ) -> None:
+        """Persist an AI summary record. Overwrites any prior value."""
+        from datetime import datetime, timezone
+
+        assert self._meta is not None
+        record = {
+            "summary": summary,
+            "signature": signature,
+            "language": language,
+            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        self._meta.set_meta(_ai_summary_key(source_file), json.dumps(record))
+
+    async def get_all_ai_summaries(self) -> dict[str, dict]:
+        """Return ``{normalised_path: record}`` for every cached AI summary.
+
+        Prefix-scans ``_memtomem_meta`` for keys starting with
+        ``ai_summary:`` so unrelated meta rows (embedding dimension etc.)
+        don't leak in. Records with corrupt JSON are silently dropped — the
+        Source-tab API treats them as "no preview".
+        """
+        db = self._get_read_db()
+        rows = db.execute(
+            "SELECT key, value FROM _memtomem_meta WHERE key LIKE ?",
+            (f"{_AI_SUMMARY_KEY_PREFIX}%",),
+        ).fetchall()
+        result: dict[str, dict] = {}
+        for key, value in rows:
+            path = key[len(_AI_SUMMARY_KEY_PREFIX) :]
+            try:
+                obj = json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(obj, dict):
+                result[path] = obj
+        return result
+
+    async def count_language_drift(self, target_language: str) -> int:
+        """Count cached summaries whose ``language`` is not ``target_language``.
+
+        Drives the Source-tab "N summaries are in <X> (setting: <Y>)" banner.
+        Records missing a ``language`` field count as drift — treated as
+        legacy entries that need an explicit regeneration to resolve.
+        """
+        all_summaries = await self.get_all_ai_summaries()
+        return sum(1 for rec in all_summaries.values() if rec.get("language") != target_language)
+
+    async def list_language_drift_paths(self, target_language: str) -> list[Path]:
+        """Return paths whose cached summary language ≠ ``target_language``.
+
+        Bulk-regenerate endpoint consumes this to avoid touching entries
+        that already match the requested language.
+        """
+        all_summaries = await self.get_all_ai_summaries()
+        return [
+            Path(p) for p, rec in all_summaries.items() if rec.get("language") != target_language
         ]
 
     async def get_tag_counts(self) -> list[tuple[str, int]]:

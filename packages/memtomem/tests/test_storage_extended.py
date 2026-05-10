@@ -380,3 +380,188 @@ class TestStorageExtended:
         await storage.upsert_chunks([new_chunk])
         stats = await storage.get_stats()
         assert stats["total_chunks"] == 1
+
+    # ---- get_source_summaries (heuristic preview) ---------------------------
+
+    async def test_source_summaries_picks_first_chunk_by_start_line(self, components):
+        """First-chunk pick is by ``start_line ASC`` — not insertion order.
+        Insert deeper section first so insertion order disagrees with the
+        expected pick; the test fails if the SQL silently falls back to
+        ``rowid``."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        storage = components.storage
+        src = Path("/tmp/notes.md")
+        chunks = [
+            Chunk(
+                content="Deep body.",
+                metadata=ChunkMetadata(
+                    source_file=src,
+                    heading_hierarchy=("# Notes", "## Deep"),
+                    start_line=50,
+                ),
+                content_hash="hash-deep",
+                embedding=[0.1] * 1024,
+            ),
+            Chunk(
+                content="First paragraph of the file.",
+                metadata=ChunkMetadata(
+                    source_file=src,
+                    heading_hierarchy=("# Notes",),
+                    start_line=1,
+                ),
+                content_hash="hash-first",
+                embedding=[0.1] * 1024,
+            ),
+        ]
+        await storage.upsert_chunks(chunks)
+
+        # ``norm_path`` resolves symlinks (macOS ``/tmp`` → ``/private/tmp``);
+        # pull the dict's value rather than hard-coding the unresolved key.
+        summaries = await storage.get_source_summaries()
+        assert len(summaries) == 1
+        hh, content = next(iter(summaries.values()))
+        assert hh == ["# Notes"]
+        assert content == "First paragraph of the file."
+
+    async def test_source_summaries_handles_empty_hierarchy(self, components):
+        """Files with body content but no heading come back with an empty
+        hierarchy list — callers substitute fallback UI."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        storage = components.storage
+        await storage.upsert_chunks(
+            [
+                Chunk(
+                    content="Just text.",
+                    metadata=ChunkMetadata(
+                        source_file=Path("/tmp/raw.md"),
+                        heading_hierarchy=(),
+                        start_line=1,
+                    ),
+                    content_hash="hash-raw",
+                    embedding=[0.1] * 1024,
+                ),
+            ]
+        )
+        summaries = await storage.get_source_summaries()
+        hh, content = next(iter(summaries.values()))
+        assert hh == []
+        assert content == "Just text."
+
+    # ---- AI summary cache (CRUD + drift) -----------------------------------
+
+    async def test_ai_summary_roundtrip(self, components):
+        """``set`` → ``get`` returns the full record (summary, signature,
+        language, generated_at)."""
+        storage = components.storage
+        path = Path("/tmp/notes.md")
+        await storage.set_ai_summary(
+            path, summary="Two-sentence prose.", signature="abc123", language="en"
+        )
+        rec = await storage.get_ai_summary(path)
+        assert rec is not None
+        assert rec["summary"] == "Two-sentence prose."
+        assert rec["signature"] == "abc123"
+        assert rec["language"] == "en"
+        assert "generated_at" in rec
+
+    async def test_ai_summary_overwrite(self, components):
+        """``set`` overwrites prior values — no append-only semantics."""
+        storage = components.storage
+        path = Path("/tmp/notes.md")
+        await storage.set_ai_summary(path, "first", "sig1", "en")
+        await storage.set_ai_summary(path, "second", "sig2", "ko")
+        rec = await storage.get_ai_summary(path)
+        assert rec["summary"] == "second"
+        assert rec["signature"] == "sig2"
+        assert rec["language"] == "ko"
+
+    async def test_ai_summary_missing_returns_none(self, components):
+        storage = components.storage
+        rec = await storage.get_ai_summary(Path("/tmp/never-saved.md"))
+        assert rec is None
+
+    async def test_get_all_ai_summaries_excludes_other_meta_keys(self, components):
+        """Embedding-dimension and other non-summary rows in
+        ``_memtomem_meta`` must not leak into the summary listing — pin
+        the prefix scan."""
+        storage = components.storage
+        # ``initialize`` populates ``embedding_dimension``; force a read
+        # to guarantee at least one non-summary row sits alongside ours.
+        _ = storage._get_stored_dimension()
+        await storage.set_ai_summary(Path("/tmp/a.md"), "AAA", "sig-a", "en")
+        await storage.set_ai_summary(Path("/tmp/b.md"), "BBB", "sig-b", "ko")
+
+        summaries = await storage.get_all_ai_summaries()
+        assert len(summaries) == 2
+        for rec in summaries.values():
+            assert "summary" in rec
+            assert "language" in rec
+
+    async def test_count_language_drift_excludes_matching_entries(self, components):
+        """``count_language_drift("ko")`` counts only entries where
+        ``language != "ko"``. Pin the negative comparison so a future bug
+        flipping ``!=`` to ``==`` shows up immediately."""
+        storage = components.storage
+        await storage.set_ai_summary(Path("/tmp/en1.md"), "S1", "sig1", "en")
+        await storage.set_ai_summary(Path("/tmp/en2.md"), "S2", "sig2", "en")
+        await storage.set_ai_summary(Path("/tmp/ko1.md"), "S3", "sig3", "ko")
+
+        assert await storage.count_language_drift("ko") == 2
+        assert await storage.count_language_drift("en") == 1
+        assert await storage.count_language_drift("fr") == 3
+
+    async def test_list_language_drift_paths_returns_only_drifting(self, components):
+        storage = components.storage
+        await storage.set_ai_summary(Path("/tmp/en1.md"), "S1", "sig1", "en")
+        await storage.set_ai_summary(Path("/tmp/ko1.md"), "S2", "sig2", "ko")
+
+        ko_drift = await storage.list_language_drift_paths("ko")
+        assert len(ko_drift) == 1
+        assert "en1.md" in str(ko_drift[0])
+
+    async def test_delete_by_source_clears_ai_summary(self, components):
+        """Deleting a source's chunks must also drop its cached summary —
+        otherwise stale rows would surface in the next
+        ``get_all_ai_summaries`` call and the Source tab would reference
+        a deleted file."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        storage = components.storage
+        path = Path("/tmp/dropme.md")
+        await storage.upsert_chunks(
+            [
+                Chunk(
+                    content="body",
+                    metadata=ChunkMetadata(
+                        source_file=path,
+                        heading_hierarchy=("# H",),
+                        start_line=1,
+                    ),
+                    content_hash="hash-drop",
+                    embedding=[0.1] * 1024,
+                ),
+            ]
+        )
+        await storage.set_ai_summary(path, "AI prose.", "sig-drop", "en")
+        assert await storage.get_ai_summary(path) is not None
+
+        deleted = await storage.delete_by_source(path)
+        assert deleted == 1
+        # Summary must be gone — same record was keyed by norm_path of
+        # the source, so delete_by_source is responsible for cleanup.
+        assert await storage.get_ai_summary(path) is None
+
+    async def test_delete_by_source_clears_orphan_summary(self, components):
+        """Even when a summary exists with no chunks (orphan from a prior
+        bug or aborted index), ``delete_by_source`` clears it. Defends
+        the "no chunks but stale summary" path that would otherwise leak
+        past the zero-chunk early return."""
+        storage = components.storage
+        path = Path("/tmp/orphan.md")
+        await storage.set_ai_summary(path, "leftover", "sig-orphan", "en")
+
+        deleted = await storage.delete_by_source(path)
+        assert deleted == 0  # no chunks
+        assert await storage.get_ai_summary(path) is None

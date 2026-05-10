@@ -249,12 +249,36 @@ class IndexingConfig(BaseSettings):
     # dedup makes both paths idempotent.
     startup_backfill: bool = False
 
+    # AI per-source summary (Source tab "✨ AI" preview). Disabled by default —
+    # requires ``llm.enabled=true`` and a configured provider, and produces one
+    # LLM call per indexed file on first run. Re-indexing skips unchanged files
+    # via a content_hash signature, so steady-state cost is zero. Language drift
+    # (e.g., ``summary_language="ko"`` after summaries were generated as ``"en"``)
+    # is surfaced as an explicit opt-in banner in the Web UI rather than auto-
+    # regenerating, since the bulk regen is the only place that would re-spend
+    # the LLM budget without a content change.
+    auto_summarize: bool = False
+    # Output language for AI summaries — fixed string (e.g., ``"en"``, ``"ko"``)
+    # rather than auto-detect to keep prompts cacheable and behaviour predictable
+    # across mixed-language source corpora. Surfaced verbatim in the prompt
+    # ("write the summary in <language>"); arbitrary ISO codes work.
+    summary_language: str = "en"
+    # Cap on bytes of source body sent to the LLM — protects against runaway
+    # cost on huge files. The first ~5 chunks are joined and truncated to this
+    # limit; larger documents still get a representative head-of-doc summary.
+    summary_max_input_chars: int = 3000
+    # Output token cap — 256 is comfortably above 2-3 sentence prose for both
+    # English and Korean. Smaller values risk mid-sentence truncation.
+    summary_max_tokens: int = 256
+
     @field_validator(
         "max_chunk_tokens",
         "min_chunk_tokens",
         "target_chunk_tokens",
         "chunk_overlap_tokens",
         "paragraph_split_threshold",
+        "summary_max_input_chars",
+        "summary_max_tokens",
     )
     @classmethod
     def must_be_non_negative(cls, v: int, info: ValidationInfo) -> int:
@@ -843,6 +867,10 @@ MUTABLE_FIELDS: dict[str, set[str]] = {
         "exclude_patterns",
         "auto_discover",
         "supported_extensions",
+        "auto_summarize",
+        "summary_language",
+        "summary_max_input_chars",
+        "summary_max_tokens",
     },
     "embedding": {"batch_size", "progress_threshold"},
     "decay": {"enabled", "half_life_days"},
@@ -874,6 +902,10 @@ FIELD_CONSTRAINTS: dict[str, dict] = {
         "validator": _validate_exclude_patterns,
     },
     "indexing.auto_discover": {"type": bool},
+    "indexing.auto_summarize": {"type": bool},
+    "indexing.summary_language": {"type": str},
+    "indexing.summary_max_input_chars": {"type": int, "min": 200, "max": 50000},
+    "indexing.summary_max_tokens": {"type": int, "min": 32, "max": 2048},
     "embedding.batch_size": {"type": int, "min": 1, "max": 1024},
     "embedding.progress_threshold": {"type": int, "min": 0, "max": 100000},
     "decay.enabled": {"type": bool},

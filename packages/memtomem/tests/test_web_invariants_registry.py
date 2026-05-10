@@ -83,6 +83,7 @@ _CSRF_PROTECTED: frozenset[str] = frozenset(
         "settings_sync.apply_settings_sync",
         "settings_sync.resolve_conflict",
         "sources.delete_source",
+        "sources.regenerate_summaries",
         "system.add_memory",
         "system.add_memory_dir",
         "system.embed_text",
@@ -140,6 +141,11 @@ _REDACTION_EXEMPT: dict[str, str] = {
     "context_skills.delete_skill": "delete-only, no payload",
     "scratch.delete_scratch": "delete-only, no payload",
     "sources.delete_source": "delete-only, no payload",
+    "sources.regenerate_summaries": (
+        "no user-supplied content — body is empty; trigger only "
+        "rewrites cached LLM summaries from chunks already validated "
+        "at index time"
+    ),
     # Structured artifacts (skills/commands/agents) — separate redaction
     # policy lives in ``memtomem.context`` ingest path; the HTTP layer
     # validates the schema only.
