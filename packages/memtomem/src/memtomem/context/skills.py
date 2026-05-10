@@ -246,10 +246,12 @@ def generate_all_skills(
         for skill_dir in canonicals:
             dst = gen.target_dir(project_root, skill_dir.name)
             # ADR-0011 PR-E: target_dir may return None for scopes with no
-            # fan-out (default scope=project_shared never None here).
-            assert dst is not None, (
-                f"{target} target_dir returned None for default project_shared scope"
-            )
+            # fan-out (default scope=project_shared never None here). Raise
+            # explicitly so the contract survives `python -O`.
+            if dst is None:
+                raise RuntimeError(
+                    f"{target} target_dir returned None for default project_shared scope"
+                )
             copy_skill(skill_dir, dst)
             # ADR-0008 Invariant 4: per-vendor override replaces SKILL.md only.
             # Auxiliary files (scripts/, references/) stay from canonical.
@@ -498,7 +500,13 @@ def diff_skills(project_root: Path) -> list[tuple[str, str, str]]:
             else:
                 src = canonical_root / name
                 dst = gen.target_dir(project_root, name)
-                assert dst is not None  # ADR-0011 PR-E: default scope=project_shared never None
+                if dst is None:
+                    # ADR-0011 PR-E: default scope=project_shared never returns
+                    # None from the runtime table. `python -O` survives.
+                    raise RuntimeError(
+                        f"{gen_name} target_dir returned None — diff over default "
+                        f"project_shared scope should never see None per ADR-0011 PR-E"
+                    )
                 if _skill_dirs_equal(src, dst):
                     results.append((gen_name, name, "in sync"))
                 else:

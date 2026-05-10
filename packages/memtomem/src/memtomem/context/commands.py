@@ -413,10 +413,12 @@ def generate_all_commands(
                     logger.warning("%s dropped %s from '%s'", target, dropped_fields, cmd.name)
             out_path = gen.target_file(project_root, cmd.name)
             # ADR-0011 PR-E: target_file may return None for scopes with no
-            # fan-out (default scope=project_shared never None here).
-            assert out_path is not None, (
-                f"{target} target_file returned None for default project_shared scope"
-            )
+            # fan-out (default scope=project_shared never None here). Raise
+            # explicitly so the contract survives `python -O`.
+            if out_path is None:
+                raise RuntimeError(
+                    f"{target} target_file returned None for default project_shared scope"
+                )
             atomic_write_text(out_path, content)
             # ADR-0008 Invariant 4: per-vendor override replaces the runtime file.
             # Race: see PR-D' for the unified write path that closes the
@@ -771,7 +773,13 @@ def diff_commands(project_root: Path) -> list[tuple[str, str, str]]:
                 continue
             expected, _ = gen.render(cmd)
             target = gen.target_file(project_root, name)
-            assert target is not None  # ADR-0011 PR-E: default scope=project_shared never None
+            if target is None:
+                # ADR-0011 PR-E: default scope=project_shared never returns
+                # None from the runtime table. `python -O` survives.
+                raise RuntimeError(
+                    f"{gen_name} target_file returned None — diff over default "
+                    f"project_shared scope should never see None per ADR-0011 PR-E"
+                )
             actual = target.read_text(encoding="utf-8") if target.is_file() else ""
             if expected.strip() == actual.strip():
                 results.append((gen_name, name, "in sync"))
