@@ -201,32 +201,78 @@ def test_init_scope_user_with_existing_context_md_keeps_user_dirs(
     monkeypatch: pytest.MonkeyPatch,
     runner: CliRunner,
 ) -> None:
-    """PR #889 review C1/P2 — declining the context.md overwrite prompt
-    must NOT kill the scoped user-tier seeding. The decline applies only
-    to the context.md rewrite; scope dirs (and `--include` import) still
-    run."""
+    """PR #889 review C1/P2 round 1 + round 2 — ``--scope user`` is
+    artifact-only: the project's context.md must NOT be prompted on or
+    rewritten. Pre-seeded context.md stays untouched, no prompt fires,
+    user-tier dirs are seeded."""
     proj = _make_project(tmp_path)
     monkeypatch.chdir(proj)
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
 
-    # Pre-seed an existing context.md so the prompt fires.
+    # Pre-seed an existing context.md.
     (proj / ".memtomem").mkdir()
     existing = proj / ".memtomem" / "context.md"
     existing.write_text("# Pre-existing context\n", encoding="utf-8")
     original_bytes = existing.read_bytes()
 
-    # User declines the overwrite ("n"); user-tier dirs MUST still be created.
-    result = runner.invoke(cli, ["context", "init", "--scope", "user"], input="n\n")
+    # No input piped — the prompt must NOT fire (round 2 fix).
+    result = runner.invoke(cli, ["context", "init", "--scope", "user"], input="")
     assert result.exit_code == 0, result.output
     for kind in ("agents", "skills", "commands"):
-        assert (home / ".memtomem" / kind).is_dir(), (
-            f"user-tier {kind} should be created even after context.md decline"
-        )
-    # context.md untouched.
+        assert (home / ".memtomem" / kind).is_dir(), f"user-tier {kind} should be created"
+    # context.md untouched (negative pin per
+    # feedback_pin_invert_symmetric_assertion.md).
     assert existing.read_bytes() == original_bytes
-    # Friendly skip notice surfaced.
-    assert "skipped" in result.output.lower() or "continuing" in result.output.lower()
+    # Prompt prose did NOT fire — symmetric prose-side check.
+    assert "already exists. Overwrite?" not in result.output
+
+
+def test_init_scope_project_local_does_not_touch_context_md(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    """PR #889 review P2 round 2 — ``--scope project_local`` is the
+    gitignored draft tier. Writing to or prompting on the project_shared
+    context.md would violate the local-tier contract and bypass
+    Gate B."""
+    proj = _make_project(tmp_path)
+    monkeypatch.chdir(proj)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    (proj / ".memtomem").mkdir()
+    existing = proj / ".memtomem" / "context.md"
+    existing.write_text("# Pre-existing context\n", encoding="utf-8")
+    original_bytes = existing.read_bytes()
+
+    result = runner.invoke(cli, ["context", "init", "--scope", "project_local"], input="")
+    assert result.exit_code == 0, result.output
+    # *.local dirs created.
+    for kind in ("agents", "skills", "commands"):
+        assert (proj / ".memtomem" / f"{kind}.local").is_dir()
+    # context.md untouched + no prompt.
+    assert existing.read_bytes() == original_bytes
+    assert "already exists. Overwrite?" not in result.output
+
+
+def test_init_scope_project_local_no_existing_context_md_does_not_create_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    """``--scope project_local`` on a fresh project must not create
+    context.md either — the artifact-only contract holds in both
+    directions (no overwrite, no fresh write)."""
+    proj = _make_project(tmp_path)
+    monkeypatch.chdir(proj)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    result = runner.invoke(cli, ["context", "init", "--scope", "project_local"])
+    assert result.exit_code == 0, result.output
+    assert not (proj / ".memtomem" / "context.md").exists(), (
+        "project_local must not synthesize project_shared context.md"
+    )
 
 
 def test_init_implicit_no_scope_works_from_fresh_dir(

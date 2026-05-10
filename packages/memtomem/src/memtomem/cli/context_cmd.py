@@ -700,17 +700,22 @@ def init_cmd(
         if not click.confirm(prompt, default=False):
             raise click.Abort()
 
-    # context.md is project-tied (not scope-tiered). Two cases skip the
-    # write WITHOUT killing the rest of init:
-    #   - No project signal anywhere up the cwd chain (rare; ``mm context
-    #     init --scope user`` from a fresh /tmp dir).
-    #   - Existing context.md and the user declines the overwrite prompt
-    #     (common; user wants `--scope user --include=agents` to seed
-    #     ~/.memtomem/agents without touching the project's context.md).
-    # Pre-PR-E2 returned out of the function on decline, which silently
-    # killed the entire scoped seeding + import path. PR-E2 ties the
-    # decline to context.md only — scope dirs and `--include` continue.
-    write_context_md = has_project_signal
+    # context.md is a **project_shared** artifact in nature: it lives at
+    # ``<proj>/.memtomem/context.md``, gets git-tracked when the project
+    # has a ``.git`` (just like the project_shared canonical tree), and
+    # is the source of truth for ``mm context generate``'s fan-out.
+    # Artifact-only scopes (``--scope user``, ``--scope project_local``)
+    # MUST NOT mutate or even prompt on it — that would (a) violate the
+    # local/user scope contract, (b) bypass Gate B for an effective
+    # project_shared write, and (c) re-introduce the "existing context.md
+    # blocks scoped seeding" surprise the C1 review fix ostensibly closed
+    # (PR #889 review P2 round 2). The write fires only when:
+    #   - implicit invocation (no --scope) AND a project context exists
+    #     (pre-PR-E2 back-compat — ``mm context init`` writes context.md), OR
+    #   - explicit ``--scope project_shared`` AND a project context
+    #     exists (Gate B already opted in upstream of this branch).
+    artifact_only_scope = scope_explicit and scope in ("user", "project_local")
+    write_context_md = has_project_signal and not artifact_only_scope
     if write_context_md:
         ctx_path = _context_path(root)
         if ctx_path.exists() and not click.confirm(
