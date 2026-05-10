@@ -529,6 +529,55 @@ def test_extract_skills_per_file_walk_blocks_scripts_dir(
     assert not (home / ".memtomem" / "skills" / "myskill").exists()
 
 
+def test_extract_skills_project_shared_blocked_hard_aborts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skills #2 — project_shared destination + blocked → ClickException.
+
+    PR-E follow-up D2 part 2 — skills.py refactor moved Gate A through
+    apply_gate_a; the rglob loop now never observes a project_shared
+    block (the helper raises before returning). This test pins the
+    contract for the skills kind so the atomic-skill semantic is
+    preserved across the refactor.
+    """
+    home = tmp_path / "home"
+    set_home(monkeypatch, str(home))
+    proj = _make_project(tmp_path)
+
+    skill = proj / ".claude" / "skills" / "myskill"
+    (skill / "scripts").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: myskill\n---\nclean body\n", encoding="utf-8")
+    (skill / "scripts" / "leak.py").write_text(f"# uses {_AKIA_SECRET}\n", encoding="utf-8")
+
+    with pytest.raises(click.ClickException) as exc_info:
+        extract_skills_to_canonical(proj, scope="project_shared")
+    msg = exc_info.value.message
+    assert "Gate A" in msg
+    assert "project_shared" in msg
+    # No partial copy — even SKILL.md must NOT exist in canonical.
+    assert not (proj / ".memtomem" / "skills" / "myskill").exists()
+
+
+def test_extract_skills_project_shared_force_unsafe_still_aborts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skills B-spec smoke #16 — --force-unsafe-import does NOT bypass project_shared."""
+    home = tmp_path / "home"
+    set_home(monkeypatch, str(home))
+    proj = _make_project(tmp_path)
+
+    skill = proj / ".claude" / "skills" / "myskill"
+    (skill / "scripts").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: myskill\n---\nclean body\n", encoding="utf-8")
+    (skill / "scripts" / "leak.py").write_text(f"# uses {_AKIA_SECRET}\n", encoding="utf-8")
+
+    with pytest.raises(click.ClickException) as exc_info:
+        extract_skills_to_canonical(proj, scope="project_shared", force_unsafe_import=True)
+    assert "no force bypass" in exc_info.value.message.lower()
+
+
 def test_extract_skills_clean_skill_copies_normally(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -709,10 +758,11 @@ def _capture_guard_audit(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str,
             captured["first"] = dict(audit_context)
         return WriteGuardResult("pass", [])
 
-    # Patch through both paths — agents/commands go via _gate_a; skills
-    # still goes through its inline call site (until Commit 4b lands).
+    # All three kinds (agents / skills / commands) now route through
+    # _gate_a.apply_gate_a, which dereferences ``privacy.enforce_write_guard``
+    # at call time — patching the helper module's namespace catches every
+    # caller.
     monkeypatch.setattr("memtomem.context._gate_a.privacy.enforce_write_guard", spy)
-    monkeypatch.setattr("memtomem.context.skills.privacy.enforce_write_guard", spy)
     return captured
 
 
