@@ -38,13 +38,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-import click
-
-from memtomem import privacy
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import override as _override
 from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
-from memtomem.context._gate_a import format_project_shared_block_message
+from memtomem.context._gate_a import apply_gate_a
 from memtomem.config import TargetScope
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, Layout, validate_name
 from memtomem.context._runtime_targets import runtime_fanout_root
@@ -782,65 +779,41 @@ def extract_agents_to_canonical(
             # ``errors="replace"`` so non-UTF8 bytes cannot mask an
             # embedded ASCII secret (the replacement char `�` does
             # not overlap with any provider-token alphanumeric pattern).
+            # Project_shared hard-abort (git-history-is-forever) is
+            # raised inside ``apply_gate_a`` — Files imported earlier in
+            # this run that passed Gate A stay (each was scanned
+            # independently).
             try:
                 content_bytes = md_file.read_bytes()
             except OSError as exc:
                 skipped.append((agent_name, f"unreadable: {exc}", skip_codes.PARSE_ERROR))
                 continue
             content_text = content_bytes.decode("utf-8", errors="replace")
-            guard = privacy.enforce_write_guard(
-                content_text,
-                surface="cli_context_init",
-                force_unsafe=force_unsafe_import,
+            outcome = apply_gate_a(
+                content_text=content_text,
+                src=md_file,
                 scope=scope,
+                force_unsafe_import=force_unsafe_import,
                 audit_context={
                     "source": str(md_file),
                     "target": str(dst),
                     "kind": "agents",
                     "agent_name": agent_name,
                 },
-                record_outcome=True,
+                message_kind="agent",
+                imported_so_far=len(imported),
             )
-            if guard.decision in ("blocked", "blocked_project_shared"):
-                if scope == "project_shared":
-                    # Hard-abort: project_shared writes go into git
-                    # history and cannot be retracted from any clone or
-                    # reflog. Files imported earlier in this run that
-                    # passed Gate A stay (each was scanned independently).
-                    raise click.ClickException(
-                        format_project_shared_block_message(
-                            md_file,
-                            hits_count=len(guard.hits),
-                            scope=scope,
-                            kind="agent",
-                            imported_so_far=len(imported),
-                        )
-                    )
-                code: skip_codes.SkipCode = (
-                    skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED
-                    if guard.decision == "blocked_project_shared"
-                    else skip_codes.PRIVACY_BLOCKED
-                )
-                hint = (
-                    " — pass --force-unsafe-import to bypass" if guard.decision == "blocked" else ""
-                )
+            if not outcome.proceed:
                 skipped.append(
                     (
                         agent_name,
-                        f"blocked: {len(guard.hits)} privacy pattern hit(s){hint}",
-                        code,
+                        f"blocked: {outcome.hits_count} privacy pattern hit(s){outcome.hint}",
+                        outcome.code,
                     )
                 )
                 seen[agent_name] = runtime_label
                 continue
-            if guard.decision not in ("pass", "bypassed"):
-                # Symmetric assertion — fail-loud on unknown decision so
-                # a future privacy enum addition surfaces here rather
-                # than silently dropping the write.
-                raise RuntimeError(
-                    f"enforce_write_guard returned unexpected decision: {guard.decision!r}"
-                )
-            # decision in ("pass", "bypassed") — proceed.
+            # outcome.proceed is True — write.
             dst.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_bytes(dst, content_bytes)
             imported.append((dst, layout))

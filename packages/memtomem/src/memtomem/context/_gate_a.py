@@ -1,19 +1,34 @@
-"""ADR-0011 PR-E2 — Gate A error formatting helpers shared across extract paths.
+"""ADR-0011 PR-E2 — Gate A helpers shared across extract paths.
 
-Centralises the user-facing error message format for ``project_shared`` Gate A
-hard-abort so ``extract_agents_to_canonical``, ``extract_skills_to_canonical``,
-and ``extract_commands_to_canonical`` cannot drift on the wording. The message
-deliberately echoes only the hit count and source path — never the matched
-bytes themselves (``feedback_force_unsafe_redaction_valve_only.md`` and the
+Centralises both the user-facing error message format for
+``project_shared`` Gate A hard-abort and the proceed-gate decision logic
+so ``extract_agents_to_canonical``, ``extract_skills_to_canonical``, and
+``extract_commands_to_canonical`` cannot drift on either the wording or
+the per-decision branching. The message deliberately echoes only the hit
+count and source path — never the matched bytes themselves
+(``feedback_force_unsafe_redaction_valve_only.md`` and the
 ``RedactionHit`` docstring on the privacy module both pin the
 "never echo secrets" contract).
+
+The proceed-gate helper :func:`apply_gate_a` keeps the audit_context
+dictionary opaque — callers continue to supply their own per-kind
+field shape (``agent_name`` vs ``command_name`` vs ``skill_name``;
+``source`` vs ``source_file``; ``runtime``; etc.) — so a future
+"normalise the audit shape" refactor cannot silently break SOC-pipeline
+grep on those fields. The display-side singular noun is a separate
+``message_kind`` parameter.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
+import click
+
+from memtomem import privacy
 from memtomem.config import TargetScope
+from memtomem.context import _skip_reasons as skip_codes
 
 
 def format_project_shared_block_message(
@@ -51,3 +66,115 @@ def format_project_shared_block_message(
         f"  Retry with --scope=user or --scope=project_local, or remove the "
         f"secret from {src} first.{tail}"
     )
+
+
+@dataclass(frozen=True)
+class GateAOutcome:
+    """Result of :func:`apply_gate_a` for a single content scan.
+
+    On the project_shared hard-abort path the helper raises
+    :class:`click.ClickException` directly — callers never observe a
+    ``proceed=False`` outcome with a project_shared scope.
+
+    Attributes:
+        proceed: ``True`` iff the caller should write the content.
+            ``False`` means the caller should record a skip using
+            ``code`` / ``hits_count`` / ``hint``.
+        code: ``PRIVACY_BLOCKED`` or ``PRIVACY_BLOCKED_PROJECT_SHARED``
+            when ``proceed`` is ``False``; ``None`` otherwise.
+        hits_count: Number of privacy pattern hits — count only, never
+            echo bytes. Zero when ``proceed`` is ``True``.
+        hint: ``" — pass --force-unsafe-import to bypass"`` for
+            ``decision == "blocked"``, otherwise ``""``.
+    """
+
+    proceed: bool
+    code: skip_codes.SkipCode | None
+    hits_count: int
+    hint: str
+
+
+def apply_gate_a(
+    *,
+    content_text: str,
+    src: Path,
+    scope: TargetScope,
+    force_unsafe_import: bool,
+    audit_context: dict[str, str],
+    message_kind: str,
+    imported_so_far: int,
+) -> GateAOutcome:
+    """Run :func:`privacy.enforce_write_guard` and decide proceed / skip / abort.
+
+    Outcomes:
+      * ``decision in ("pass", "bypassed")`` — return
+        :class:`GateAOutcome` with ``proceed=True``.
+      * ``decision in ("blocked", "blocked_project_shared")`` AND
+        ``scope == "project_shared"`` — raise :class:`click.ClickException`
+        via :func:`format_project_shared_block_message`. The
+        ``project_shared`` ban is hard regardless of
+        ``force_unsafe_import`` (ADR-0011 §5).
+      * ``decision in ("blocked", "blocked_project_shared")`` AND
+        ``scope != "project_shared"`` — return :class:`GateAOutcome`
+        with ``proceed=False`` and the matching ``code`` / ``hint``.
+      * Anything else — :class:`RuntimeError` (fail-loud on enum drift).
+
+    Args:
+        content_text: Bytes-decoded content to scan. Caller decodes with
+            ``errors="replace"`` so non-UTF8 bytes cannot mask an
+            embedded ASCII secret.
+        src: The source file the content was read from. Surfaced in the
+            ``project_shared`` ClickException only — never echoed for
+            non-project_shared skips.
+        scope: Destination scope.
+        force_unsafe_import: Caller's bypass flag. Only honoured for
+            ``user`` / ``project_local`` scopes.
+        audit_context: Caller-supplied dict, passed verbatim to
+            :func:`privacy.enforce_write_guard`. Helper does not inject
+            or rename keys (so SOC-pipeline grep on per-kind fields like
+            ``agent_name`` / ``source_file`` / ``runtime`` is preserved).
+        message_kind: Singular display noun for the ClickException
+            ("agent" / "skill" / "command"). Distinct from the plural
+            ``kind`` field that callers usually carry inside
+            ``audit_context``.
+        imported_so_far: Number of artifacts already imported in this
+            run; passed through to the cleanup hint in the
+            ClickException message.
+    """
+    guard = privacy.enforce_write_guard(
+        content_text,
+        surface="cli_context_init",
+        force_unsafe=force_unsafe_import,
+        scope=scope,
+        audit_context=audit_context,
+        record_outcome=True,
+    )
+    if guard.decision in ("blocked", "blocked_project_shared"):
+        if scope == "project_shared":
+            raise click.ClickException(
+                format_project_shared_block_message(
+                    src,
+                    hits_count=len(guard.hits),
+                    scope=scope,
+                    kind=message_kind,
+                    imported_so_far=imported_so_far,
+                )
+            )
+        code: skip_codes.SkipCode = (
+            skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED
+            if guard.decision == "blocked_project_shared"
+            else skip_codes.PRIVACY_BLOCKED
+        )
+        hint = " — pass --force-unsafe-import to bypass" if guard.decision == "blocked" else ""
+        return GateAOutcome(
+            proceed=False,
+            code=code,
+            hits_count=len(guard.hits),
+            hint=hint,
+        )
+    if guard.decision not in ("pass", "bypassed"):
+        # Symmetric assertion — fail-loud on unknown decision so a
+        # future privacy enum addition surfaces here rather than
+        # silently dropping the write.
+        raise RuntimeError(f"enforce_write_guard returned unexpected decision: {guard.decision!r}")
+    return GateAOutcome(proceed=True, code=None, hits_count=0, hint="")
