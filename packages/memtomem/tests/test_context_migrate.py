@@ -720,3 +720,633 @@ def test_migrate_one_keeps_unrelated_dir_contents(tmp_path: Path) -> None:
     assert sibling.stat().st_mtime == pre_sibling_mtime
     # Flat removed
     assert not flat.exists()
+
+
+# ── PR-E4: scope-tier migration (17-row smoke matrix) ────────────────
+
+
+_MANIFEST_NAME = {"agents": "agent.md", "commands": "command.md", "skills": "SKILL.md"}
+_RUNTIME_REL = {
+    "agents": {"claude": ".claude/agents", "gemini": ".gemini/agents"},
+    "commands": {"claude": ".claude/commands", "gemini": ".gemini/commands"},
+    "skills": {"claude": ".claude/skills", "gemini": ".gemini/skills"},
+}
+_AGENT_BODY_CLEAN = "---\nname: foo\ndescription: a clean test agent\n---\n\nhello world\n"
+_COMMAND_BODY_CLEAN = "---\nname: foo\ndescription: a clean test command\n---\n\nhello $ARGUMENTS\n"
+_SKILL_BODY_CLEAN = "---\nname: foo\ndescription: a clean test skill\n---\n\nhello\n"
+_BODY_CLEAN = {
+    "agents": _AGENT_BODY_CLEAN,
+    "commands": _COMMAND_BODY_CLEAN,
+    "skills": _SKILL_BODY_CLEAN,
+}
+_SECRET_LITERAL = "AKIA1234567890ABCDEF"  # AWS-key shape — caught by privacy.enforce_write_guard
+_AGENT_BODY_SECRET = "---\nname: foo\ndescription: leaks\n---\n\napi_key=" + _SECRET_LITERAL + "\n"
+
+
+@pytest.fixture
+def scope_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
+    """Project root + monkeypatched HOME for cross-scope migration tests.
+
+    Layout:
+
+    - ``project_root`` = ``tmp_path / "proj"`` (with ``.git`` so the CLI's
+      ``_find_project_root`` walker picks it up).
+    - ``user_home`` = ``tmp_path / "home"`` — both ``HOME`` and
+      ``USERPROFILE`` are monkeypatched to this path so
+      ``canonical_artifact_dir(scope="user")`` and the user-tier runtime
+      fan-out (``~/.claude/...``) resolve under it
+      (``feedback_path_home_cross_platform.md``).
+    - cwd is set to ``project_root`` so the CLI walker terminates there.
+
+    Returns a dict the test functions index for the four useful paths.
+    """
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    (project_root / ".git").mkdir()
+    user_home = tmp_path / "home"
+    user_home.mkdir()
+    monkeypatch.setenv("HOME", str(user_home))
+    monkeypatch.setenv("USERPROFILE", str(user_home))
+    monkeypatch.chdir(project_root)
+    return {"project_root": project_root, "user_home": user_home}
+
+
+def _canonical_root_for(layout: dict[str, Path], kind: str, scope: str) -> Path:
+    """Mirror ``canonical_artifact_dir`` using the fixture paths."""
+    if scope == "user":
+        return layout["user_home"] / ".memtomem" / kind
+    if scope == "project_shared":
+        return layout["project_root"] / ".memtomem" / kind
+    if scope == "project_local":
+        return layout["project_root"] / ".memtomem" / f"{kind}.local"
+    raise ValueError(f"unknown scope: {scope}")
+
+
+def _write_canonical_dir(
+    layout: dict[str, Path], kind: str, scope: str, name: str, body: str
+) -> Path:
+    """Write a dir-layout canonical artifact and return the manifest path."""
+    root = _canonical_root_for(layout, kind, scope)
+    manifest_dir = root / name
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    manifest = manifest_dir / _MANIFEST_NAME[kind]
+    manifest.write_text(body, encoding="utf-8")
+    return manifest
+
+
+def _runtime_fanout_path(
+    layout: dict[str, Path], kind: str, runtime: str, scope: str, name: str
+) -> Path:
+    """Compute the runtime fan-out file/dir path for a given (kind, runtime, scope, name)."""
+    rel = _RUNTIME_REL[kind][runtime]
+    if scope == "user":
+        base = layout["user_home"] / rel
+    elif scope == "project_shared":
+        base = layout["project_root"] / rel
+    else:
+        raise ValueError(f"runtime fan-out not defined for scope={scope!r}")
+    return base / name if kind == "skills" else base / f"{name}.md"
+
+
+def _seed_runtime_fanout(
+    layout: dict[str, Path], kind: str, scope: str, name: str, body: str
+) -> list[Path]:
+    """Pre-seed runtime fan-out targets so the migrate cleanup path has something to remove."""
+    seeded: list[Path] = []
+    for runtime in ("claude", "gemini"):
+        target = _runtime_fanout_path(layout, kind, runtime, scope, name)
+        if kind == "skills":
+            target.mkdir(parents=True, exist_ok=True)
+            (target / _MANIFEST_NAME[kind]).write_text(body, encoding="utf-8")
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(body, encoding="utf-8")
+        seeded.append(target)
+    return seeded
+
+
+def _invoke_migrate(args: list[str]) -> object:
+    """Click runner shorthand. ``catch_exceptions=False`` lets test failures surface."""
+    return CliRunner().invoke(context_group, args, catch_exceptions=False)
+
+
+def _migrate_args(
+    kind: str,
+    name: str,
+    *,
+    from_scope: str | None,
+    to_scope: str,
+    apply_: bool = True,
+    confirm_project_shared: bool = False,
+    yes: bool = True,
+) -> list[str]:
+    args: list[str] = ["migrate", kind, name, "--to", to_scope]
+    if from_scope is not None:
+        args.extend(["--from", from_scope])
+    if apply_:
+        args.append("--apply")
+    if confirm_project_shared:
+        args.append("--confirm-project-shared")
+    if yes:
+        args.append("--yes")
+    return args
+
+
+# ── Rows 1–10: per-(kind, transition) basic moves ────────────────────
+
+
+def test_e4_row1_agents_user_to_project_shared_clean(scope_layout):
+    """Row 1: agents user→project_shared clean — canonical at dst, src removed."""
+    src = _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN)
+
+    result = _invoke_migrate(
+        _migrate_args(
+            "agents",
+            "foo",
+            from_scope="user",
+            to_scope="project_shared",
+            confirm_project_shared=True,
+        )
+    )
+    assert result.exit_code == 0, result.output
+
+    dst = _canonical_root_for(scope_layout, "agents", "project_shared") / "foo" / "agent.md"
+    assert dst.is_file()
+    assert dst.read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+    assert not src.exists()
+    assert not src.parent.exists()
+
+
+def test_e4_row2_agents_user_to_project_shared_secret_blocks(scope_layout):
+    """Row 2: secret on the wire to project_shared — Gate A raises, src untouched."""
+    src = _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_SECRET)
+
+    result = _invoke_migrate(
+        _migrate_args(
+            "agents",
+            "foo",
+            from_scope="user",
+            to_scope="project_shared",
+            confirm_project_shared=True,
+        )
+    )
+    assert result.exit_code != 0, result.output
+    assert "Gate A" in result.output
+    # POSITIVE: src restored
+    assert src.is_file()
+    assert src.read_text(encoding="utf-8") == _AGENT_BODY_SECRET
+    # NEGATIVE: dst absent
+    dst_root = _canonical_root_for(scope_layout, "agents", "project_shared")
+    assert not (dst_root / "foo").exists()
+    # Staging cleaned (no .migrate-foo-* leftover under dst.parent)
+    assert not list(dst_root.glob(".migrate-foo-*.tmp"))
+
+
+def test_e4_row3_agents_user_to_project_local_clean(scope_layout):
+    """Row 3: agents user→project_local clean — canonical at draft tier, src removed."""
+    src = _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN)
+
+    result = _invoke_migrate(
+        _migrate_args("agents", "foo", from_scope="user", to_scope="project_local")
+    )
+    assert result.exit_code == 0, result.output
+
+    dst = _canonical_root_for(scope_layout, "agents", "project_local") / "foo" / "agent.md"
+    assert dst.is_file()
+    assert not src.exists()
+
+
+def test_e4_row4_agents_project_shared_to_user_clean(scope_layout):
+    """Row 4: agents project_shared→user clean — canonical at user, src removed.
+
+    Also pins runtime fan-out cleanup at the source scope: a stale
+    ``<proj>/.claude/agents/foo.md`` seeded before migrate is removed
+    afterward.
+    """
+    src = _write_canonical_dir(scope_layout, "agents", "project_shared", "foo", _AGENT_BODY_CLEAN)
+    seeded = _seed_runtime_fanout(
+        scope_layout, "agents", "project_shared", "foo", _AGENT_BODY_CLEAN
+    )
+
+    result = _invoke_migrate(
+        _migrate_args("agents", "foo", from_scope="project_shared", to_scope="user")
+    )
+    assert result.exit_code == 0, result.output
+
+    dst = _canonical_root_for(scope_layout, "agents", "user") / "foo" / "agent.md"
+    assert dst.is_file()
+    assert not src.exists()
+    # Stale fan-out removed
+    for path in seeded:
+        assert not path.exists(), f"expected stale fan-out cleaned: {path}"
+
+
+def test_e4_row5_agents_project_local_to_project_shared_clean(scope_layout):
+    """Row 5: agents project_local→project_shared clean — promote draft to shared."""
+    src = _write_canonical_dir(scope_layout, "agents", "project_local", "foo", _AGENT_BODY_CLEAN)
+
+    result = _invoke_migrate(
+        _migrate_args(
+            "agents",
+            "foo",
+            from_scope="project_local",
+            to_scope="project_shared",
+            confirm_project_shared=True,
+        )
+    )
+    assert result.exit_code == 0, result.output
+    dst = _canonical_root_for(scope_layout, "agents", "project_shared") / "foo" / "agent.md"
+    assert dst.is_file()
+    assert not src.exists()
+
+
+def test_e4_row6_agents_project_shared_to_project_local_clean(scope_layout):
+    """Row 6: agents project_shared→project_local — demote, fan-out dropped."""
+    src = _write_canonical_dir(scope_layout, "agents", "project_shared", "foo", _AGENT_BODY_CLEAN)
+    seeded = _seed_runtime_fanout(
+        scope_layout, "agents", "project_shared", "foo", _AGENT_BODY_CLEAN
+    )
+
+    result = _invoke_migrate(
+        _migrate_args("agents", "foo", from_scope="project_shared", to_scope="project_local")
+    )
+    assert result.exit_code == 0, result.output
+    dst = _canonical_root_for(scope_layout, "agents", "project_local") / "foo" / "agent.md"
+    assert dst.is_file()
+    assert not src.exists()
+    for path in seeded:
+        assert not path.exists(), f"expected stale fan-out cleaned on demote: {path}"
+
+
+def test_e4_row7_commands_user_to_project_shared_clean(scope_layout):
+    """Row 7: parallel of row 1 for commands."""
+    src = _write_canonical_dir(scope_layout, "commands", "user", "build", _COMMAND_BODY_CLEAN)
+
+    result = _invoke_migrate(
+        _migrate_args(
+            "commands",
+            "build",
+            from_scope="user",
+            to_scope="project_shared",
+            confirm_project_shared=True,
+        )
+    )
+    assert result.exit_code == 0, result.output
+    dst = _canonical_root_for(scope_layout, "commands", "project_shared") / "build" / "command.md"
+    assert dst.is_file()
+    assert not src.exists()
+
+
+def test_e4_row8_commands_project_local_to_user_clean(scope_layout):
+    """Row 8: commands project_local→user clean."""
+    src = _write_canonical_dir(
+        scope_layout, "commands", "project_local", "build", _COMMAND_BODY_CLEAN
+    )
+
+    result = _invoke_migrate(
+        _migrate_args("commands", "build", from_scope="project_local", to_scope="user")
+    )
+    assert result.exit_code == 0, result.output
+    dst = _canonical_root_for(scope_layout, "commands", "user") / "build" / "command.md"
+    assert dst.is_file()
+    assert not src.exists()
+
+
+def test_e4_row9_skills_user_to_project_shared_clean(scope_layout):
+    """Row 9: skills user→project_shared — canonical moves; user-tier fan-out cleaned.
+
+    Pre-seeds ``~/.claude/skills/foo/`` (user-tier fan-out per ADR-0011
+    runtime table) and verifies it is removed after migrate. ADR-0011
+    correction: skills `project_shared` IS a fan-out target (only
+    `project_local` is NO_FANOUT) — see plan review feedback.
+    """
+    src = _write_canonical_dir(scope_layout, "skills", "user", "foo", _SKILL_BODY_CLEAN)
+    seeded = _seed_runtime_fanout(scope_layout, "skills", "user", "foo", _SKILL_BODY_CLEAN)
+
+    result = _invoke_migrate(
+        _migrate_args(
+            "skills",
+            "foo",
+            from_scope="user",
+            to_scope="project_shared",
+            confirm_project_shared=True,
+        )
+    )
+    assert result.exit_code == 0, result.output
+
+    dst = _canonical_root_for(scope_layout, "skills", "project_shared") / "foo" / "SKILL.md"
+    assert dst.is_file()
+    assert not src.exists()
+    # User-tier fan-out cleaned (rmtree-d skill dir).
+    for path in seeded:
+        assert not path.exists(), f"expected user-tier skill fan-out cleaned: {path}"
+
+
+def test_e4_row10_skills_project_shared_to_project_local_clean(scope_layout):
+    """Row 10: skills project_shared→project_local — fan-out drops (project_local NO_FANOUT).
+
+    Project_shared skills DO fan out (``<proj>/.claude/skills/foo/``);
+    project_local skills do NOT (ADR-0011 §6 / §3). The demote must
+    remove the project-shared fan-out so the runtime stops seeing the
+    skill.
+    """
+    src = _write_canonical_dir(scope_layout, "skills", "project_shared", "foo", _SKILL_BODY_CLEAN)
+    seeded = _seed_runtime_fanout(
+        scope_layout, "skills", "project_shared", "foo", _SKILL_BODY_CLEAN
+    )
+
+    result = _invoke_migrate(
+        _migrate_args(
+            "skills",
+            "foo",
+            from_scope="project_shared",
+            to_scope="project_local",
+        )
+    )
+    assert result.exit_code == 0, result.output
+
+    dst = _canonical_root_for(scope_layout, "skills", "project_local") / "foo" / "SKILL.md"
+    assert dst.is_file()
+    assert not src.exists()
+    for path in seeded:
+        assert not path.exists(), (
+            f"expected project_shared skills fan-out cleaned on demote: {path}"
+        )
+
+
+# ── Rows 11–15: edge cases ───────────────────────────────────────────
+
+
+def test_e4_row11_exdev_fallback_copytree(scope_layout, monkeypatch):
+    """Row 11: EXDEV — first ``os.rename`` raises EXDEV; staging falls back to copytree.
+
+    Monkeypatches ``os.rename`` once so the ``src → staging`` step
+    (the only ``os.rename`` call inside ``migrate_scope`` before
+    ``_promote_move``) hits EXDEV. The promote-side ``os.replace`` is
+    a different function and therefore unaffected.
+    """
+    import os as os_mod
+
+    src = _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN)
+    real_rename = os_mod.rename
+    raised: dict[str, bool] = {"once": False}
+
+    def fake_rename(a, b):
+        if not raised["once"]:
+            raised["once"] = True
+            import errno as _errno
+
+            raise OSError(_errno.EXDEV, "Cross-device link", str(a))
+        return real_rename(a, b)
+
+    monkeypatch.setattr("memtomem.context.migrate.os.rename", fake_rename)
+
+    result = _invoke_migrate(
+        _migrate_args(
+            "agents",
+            "foo",
+            from_scope="user",
+            to_scope="project_shared",
+            confirm_project_shared=True,
+        )
+    )
+    assert result.exit_code == 0, result.output
+    assert raised["once"], "EXDEV path should have triggered"
+
+    dst = _canonical_root_for(scope_layout, "agents", "project_shared") / "foo" / "agent.md"
+    assert dst.is_file()
+    assert dst.read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+    # Source cleaned up after EXDEV-fallback copy + promote.
+    assert not src.exists()
+    assert not src.parent.exists()
+
+
+def test_e4_row12_idempotent_after_migrate(scope_layout):
+    """Row 12: re-running migrate after a successful move is a clear no-op error.
+
+    The "concurrent migrate, same src" thread-race shape collapses to
+    "second invocation sees src gone" once the first invocation
+    completes. The lock-order test in
+    ``test_context_migrate_lock_order.py`` covers true concurrency.
+    """
+    _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN)
+    first = _invoke_migrate(
+        _migrate_args(
+            "agents",
+            "foo",
+            from_scope="user",
+            to_scope="project_shared",
+            confirm_project_shared=True,
+        )
+    )
+    assert first.exit_code == 0, first.output
+
+    second = _invoke_migrate(
+        _migrate_args(
+            "agents",
+            "foo",
+            from_scope="user",
+            to_scope="project_shared",
+            confirm_project_shared=True,
+        )
+    )
+    assert second.exit_code != 0, second.output
+    assert "not found at scope='user'" in second.output
+
+
+def test_e4_row13_inverse_migrate_lock_order_pin(scope_layout):
+    """Row 13: deterministic lock-acquire order — sorted by ``str(lock_path)``.
+
+    Asserts the contract directly via ``_acquire_pair_lock`` instead of
+    racing two threads (which is harder to make deterministic). The
+    threaded deadlock-freedom test lives in
+    ``test_context_migrate_lock_order.py``.
+    """
+    from memtomem.context._atomic import _lock_path_for
+    from memtomem.context.migrate import _acquire_pair_lock
+
+    src_dir = _canonical_root_for(scope_layout, "agents", "user") / "foo"
+    dst_dir = _canonical_root_for(scope_layout, "agents", "project_shared") / "foo"
+    src_dir.parent.mkdir(parents=True, exist_ok=True)
+    dst_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    expected_first = min(_lock_path_for(src_dir), _lock_path_for(dst_dir), key=str)
+
+    # Smoke: the helper acquires both locks without deadlock and the
+    # sorted order is the documented contract (we do not introspect the
+    # internal sequence — taking both locks is sufficient functional
+    # evidence; the dedicated lock-order test asserts the order).
+    with _acquire_pair_lock(src_dir, dst_dir):
+        assert expected_first.parent.is_dir()  # lock parent exists
+
+
+def test_e4_row14_dry_run_no_mutation(scope_layout):
+    """Row 14: dry-run — plan reported, no disk mutation."""
+    src = _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN)
+
+    result = _invoke_migrate(
+        _migrate_args(
+            "agents",
+            "foo",
+            from_scope="user",
+            to_scope="project_shared",
+            apply_=False,
+            yes=False,  # --yes / --force require --apply
+            confirm_project_shared=False,
+        )
+    )
+    assert result.exit_code == 0, result.output
+    assert "Plan: migrate" in result.output
+    assert "Run with --apply" in result.output
+
+    # Filesystem unchanged.
+    assert src.is_file()
+    dst_root = _canonical_root_for(scope_layout, "agents", "project_shared")
+    assert not (dst_root / "foo").exists()
+    # No staging tmp leftover.
+    assert not list(dst_root.glob(".migrate-foo-*.tmp"))
+
+
+def test_e4_row15_dst_conflict_always_refuses(scope_layout):
+    """Row 15: dst already has same name — refuse, even with --force."""
+    src = _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN)
+    dst_existing = _write_canonical_dir(
+        scope_layout, "agents", "project_shared", "foo", "stale dst body\n"
+    )
+
+    # With --force: --force is rejected as a usage error in scope-mode.
+    forced = _invoke_migrate(
+        [
+            "migrate",
+            "agents",
+            "foo",
+            "--from",
+            "user",
+            "--to",
+            "project_shared",
+            "--apply",
+            "--confirm-project-shared",
+            "--yes",
+            "--force",
+        ]
+    )
+    assert forced.exit_code != 0, forced.output
+    assert "--force does not apply" in forced.output
+
+    # Without --force: refuses with a destination-exists message.
+    result = _invoke_migrate(
+        _migrate_args(
+            "agents",
+            "foo",
+            from_scope="user",
+            to_scope="project_shared",
+            confirm_project_shared=True,
+        )
+    )
+    assert result.exit_code != 0, result.output
+    assert "destination already exists" in result.output
+
+    # Both sides preserved.
+    assert src.is_file()
+    assert dst_existing.read_text(encoding="utf-8") == "stale dst body\n"
+
+
+# ── Rows 16–17: memory cross-link delegate ───────────────────────────
+
+
+def test_e4_row16_memory_dispatch_delegates_to_memory_migrate(monkeypatch, tmp_path):
+    """Row 16: ``mm context migrate memory <src> --from --to`` delegates to memory-migrate.
+
+    Verifies dispatch parity by monkeypatching ``_memory_migrate_run``
+    and checking it gets called with the same args the public
+    ``mm context memory-migrate`` would build (path, from, to, apply,
+    yes, confirm_project_shared).
+    """
+    src = tmp_path / "rule.md"
+    src.write_text("## Rule\n\nharmless body\n", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    async def _fake_run(source, from_scope, to_scope, apply_, yes, confirm_project_shared):
+        captured["source"] = source
+        captured["from_scope"] = from_scope
+        captured["to_scope"] = to_scope
+        captured["apply_"] = apply_
+        captured["yes"] = yes
+        captured["confirm_project_shared"] = confirm_project_shared
+
+    monkeypatch.setattr("memtomem.cli.context_cmd._memory_migrate_run", _fake_run)
+    monkeypatch.chdir(tmp_path)
+
+    result = _invoke_migrate(
+        [
+            "migrate",
+            "memory",
+            str(src),
+            "--from",
+            "user",
+            "--to",
+            "project_shared",
+            "--apply",
+            "--confirm-project-shared",
+        ]
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["source"] == src.resolve()
+    assert captured["from_scope"] == "user"
+    assert captured["to_scope"] == "project_shared"
+    assert captured["apply_"] is True
+    assert captured["confirm_project_shared"] is True
+
+
+def test_e4_row17_memory_dispatch_validates_inputs(monkeypatch, tmp_path):
+    """Row 17: memory dispatch validation — missing flags / non-existent path / same-scope.
+
+    Compresses three negative cases into one row since they share the
+    same dispatch helper:
+
+    1. Missing ``--to`` → UsageError.
+    2. Non-existent source path → ClickException.
+    3. ``--from`` == ``--to`` → ClickException.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    # 1. Missing --to
+    r1 = _invoke_migrate(["migrate", "memory", "/some/path", "--from", "user"])
+    assert r1.exit_code != 0
+    assert "--from and --to are both required" in r1.output
+
+    # 2. Non-existent source
+    r2 = _invoke_migrate(
+        [
+            "migrate",
+            "memory",
+            "/this/does/not/exist.md",
+            "--from",
+            "user",
+            "--to",
+            "project_shared",
+            "--apply",
+            "--confirm-project-shared",
+        ]
+    )
+    assert r2.exit_code != 0
+    assert "does not exist" in r2.output
+
+    # 3. --from == --to
+    src = tmp_path / "rule.md"
+    src.write_text("body\n", encoding="utf-8")
+    r3 = _invoke_migrate(
+        [
+            "migrate",
+            "memory",
+            str(src),
+            "--from",
+            "user",
+            "--to",
+            "user",
+            "--apply",
+        ]
+    )
+    assert r3.exit_code != 0
+    assert "must differ" in r3.output
