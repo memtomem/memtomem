@@ -169,6 +169,10 @@ def test_init_explicit_project_shared_with_confirm_no_prompt(
     assert "Continue?" not in result.output
     for kind in ("agents", "skills", "commands"):
         assert (proj / ".memtomem" / kind).is_dir()
+    # Truth table row 2 — explicit --scope project_shared DOES write context.md
+    # (artifact-only-scope qualifier is False here, so the project_shared
+    # write fires). Pinned per round-3 review nit N1.
+    assert (proj / ".memtomem" / "context.md").exists()
 
 
 # ── --scope user seeds user dirs ───────────────────────────────────────
@@ -225,7 +229,10 @@ def test_init_scope_user_with_existing_context_md_keeps_user_dirs(
     # feedback_pin_invert_symmetric_assertion.md).
     assert existing.read_bytes() == original_bytes
     # Prompt prose did NOT fire — symmetric prose-side check.
-    assert "already exists. Overwrite?" not in result.output
+    # Single-keyword grep — robust against prompt-prose reordering
+    # ("already exists. Overwrite?" → "Overwrite this file?" wouldn't
+    # silently pass). Round-3 review nit N2.
+    assert "Overwrite" not in result.output
 
 
 def test_init_scope_project_local_does_not_touch_context_md(
@@ -253,7 +260,10 @@ def test_init_scope_project_local_does_not_touch_context_md(
         assert (proj / ".memtomem" / f"{kind}.local").is_dir()
     # context.md untouched + no prompt.
     assert existing.read_bytes() == original_bytes
-    assert "already exists. Overwrite?" not in result.output
+    # Single-keyword grep — robust against prompt-prose reordering
+    # ("already exists. Overwrite?" → "Overwrite this file?" wouldn't
+    # silently pass). Round-3 review nit N2.
+    assert "Overwrite" not in result.output
 
 
 def test_init_scope_project_local_no_existing_context_md_does_not_create_one(
@@ -283,7 +293,9 @@ def test_init_implicit_no_scope_works_from_fresh_dir(
     """PR #889 review C2 — implicit ``mm context init`` (no --scope) must
     still work from a directory without ``.git``/``pyproject.toml``,
     matching pre-PR-E2 behaviour. The scope-sanity raise is restricted
-    to EXPLICIT --scope project_*."""
+    to EXPLICIT --scope project_*. Round-3 review D-new-1 also surfaces
+    a yellow hint here pointing to ``--scope=user`` for the
+    cross-project case."""
     fresh = tmp_path / "fresh"
     fresh.mkdir()
     monkeypatch.chdir(fresh)
@@ -295,6 +307,11 @@ def test_init_implicit_no_scope_works_from_fresh_dir(
     # pre-PR-E2 fall-through where _find_project_root returned cwd).
     for kind in ("agents", "skills", "commands"):
         assert (fresh / ".memtomem" / kind).is_dir()
+    # Round-3 D-new-1 — non-project warning surfaced. We assert on the
+    # most stable substring "--scope=user" (the actionable hint) rather
+    # than the full prose so future wording polish doesn't break this
+    # pin.
+    assert "--scope=user" in result.output
 
 
 # ── --scope project_local + .gitignore append ──────────────────────────

@@ -692,6 +692,21 @@ def init_cmd(
             "Use --scope=user from outside a project, or run from inside one."
         )
 
+    # Round-3 review D-new-1: when implicit ``mm context init`` runs in
+    # a directory with no ``.git``/``pyproject.toml`` we still proceed
+    # (back-compat with pre-PR-E2), but the user is silently dropping
+    # ``.memtomem/`` into a non-project location which is rarely what
+    # they want. Surface a yellow hint pointing to ``--scope=user`` for
+    # the cross-project case. Block is intentionally NOT raised — the
+    # back-compat path stays open.
+    if not scope_explicit and not has_project_signal:
+        click.secho(
+            f"  warning: no .git or pyproject.toml in {root} — "
+            "creating .memtomem/ here. Use --scope=user for cross-project "
+            "artifacts (writes to ~/.memtomem/ instead).",
+            fg="yellow",
+        )
+
     # Gate B — only on EXPLICIT --scope project_shared. Implicit default
     # (no --scope) keeps pre-PR-E2 behavior so non-interactive CI invocations
     # of `mm context init` don't suddenly start prompting.
