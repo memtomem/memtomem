@@ -38,9 +38,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+import click
+
+from memtomem import privacy
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import override as _override
 from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
+from memtomem.context._gate_a import format_project_shared_block_message
 from memtomem.config import TargetScope
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, Layout, validate_name
 from memtomem.context._runtime_targets import runtime_fanout_root
@@ -49,6 +53,7 @@ from memtomem.context.agents import (
     _parse_flat_yaml,
     _toml_scalar,
 )
+from memtomem.context.scope_resolver import canonical_artifact_dir
 
 logger = logging.getLogger(__name__)
 
@@ -479,45 +484,131 @@ def _resolve_command_extract_target(canonical_root: Path, cmd_name: str) -> tupl
     return dir_target, "dir"
 
 
+def _apply_command_gate_a(
+    *,
+    content_text: str,
+    src: Path,
+    cmd_name: str,
+    scope: TargetScope,
+    runtime: str,
+    force_unsafe_import: bool,
+    imported_so_far: int,
+    skipped: list[tuple[str, str, skip_codes.SkipCode]],
+) -> bool:
+    """Apply Gate A to one command file's scanned content.
+
+    Returns ``True`` when the caller should proceed with the write,
+    ``False`` when the file was rejected and recorded into ``skipped``
+    (or, for ``project_shared`` destinations, raised as
+    :class:`click.ClickException`).
+    """
+    guard = privacy.enforce_write_guard(
+        content_text,
+        surface="cli_context_init",
+        force_unsafe=force_unsafe_import,
+        scope=scope,
+        audit_context={
+            "source": str(src),
+            "kind": "commands",
+            "runtime": runtime,
+            "command_name": cmd_name,
+        },
+        record_outcome=True,
+    )
+    if guard.decision in ("blocked", "blocked_project_shared"):
+        if scope == "project_shared":
+            raise click.ClickException(
+                format_project_shared_block_message(
+                    src,
+                    hits_count=len(guard.hits),
+                    scope=scope,
+                    kind="command",
+                    imported_so_far=imported_so_far,
+                )
+            )
+        code: skip_codes.SkipCode = (
+            skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED
+            if guard.decision == "blocked_project_shared"
+            else skip_codes.PRIVACY_BLOCKED
+        )
+        hint = " — pass --force-unsafe-import to bypass" if guard.decision == "blocked" else ""
+        skipped.append(
+            (
+                cmd_name,
+                f"blocked: {len(guard.hits)} privacy pattern hit(s){hint}",
+                code,
+            )
+        )
+        return False
+    if guard.decision not in ("pass", "bypassed"):
+        raise RuntimeError(f"enforce_write_guard returned unexpected decision: {guard.decision!r}")
+    return True
+
+
 def extract_commands_to_canonical(
     project_root: Path,
     overwrite: bool = False,
     only_name: str | None = None,
+    *,
+    scope: TargetScope = "project_shared",
+    force_unsafe_import: bool = False,
 ) -> ExtractResult:
-    """Import existing Claude/Gemini command files into ``.memtomem/commands/``.
+    """Import existing Claude/Gemini command files into the scoped canonical dir.
 
     Phase 3's conversion is lossless in both directions (only two TOML fields,
     placeholder rewrite is reversible), so Gemini commands can be round-tripped
     back into canonical form — unlike Phase 2 Codex TOML.
 
     Codex prompts (``~/.codex/prompts/*.md``) are intentionally **not**
-    imported even though the format is byte-compatible with Claude — the
-    user-scope path spans projects, which would break the "import runtime
-    files from *this* project" semantic (matching the Phase 2 Codex sub-agent
-    policy). Use ``.memtomem/commands/`` as the single authoring surface and
-    let ``generate_all_commands`` populate Codex.
+    imported even though the format is byte-compatible with Claude. The
+    Codex CLI's prompt directory is user-scope (cross-project) and our
+    runtime fan-out table reserves a ``("commands", "codex", "user")``
+    slot for future symmetry, but the import side keeps the existing
+    "use ``.memtomem/commands/`` as the single authoring surface and let
+    ``generate_all_commands`` populate Codex" semantic.
 
-    First occurrence wins: Claude runtime first, then Gemini.  Returns an
-    :class:`ExtractResult` with both imported paths and skipped items so the
-    caller can warn the user about silent deduplication.
+    ADR-0011 PR-E2: ``scope`` selects both the canonical destination and
+    the source runtime root (per-scope import). ``project_local`` has no
+    runtime fan-out by design and short-circuits to an empty result.
+
+    Each branch (Claude bytes-passthrough, Gemini TOML→Markdown) applies
+    Gate A separately. The Gemini branch scans the **converted Markdown**
+    — that is what gets persisted, and the converted body inherits any
+    secret embedded in the source ``prompt`` field.
+
+    First occurrence wins: Claude runtime first, then Gemini.
 
     When ``only_name`` is set, every runtime file with a different stem is
-    silently skipped before any validation/dedupe work. Callers (e.g. the
-    single-item import route) can detect "no such runtime artifact" by
-    inspecting an empty ``imported`` + ``skipped``.
+    silently skipped before any validation/dedupe work.
 
     Layout policy: new commands (no existing canonical) land in directory
     layout per ADR-0008. Existing flat-layout entries are preserved by
     PR-C — migration to directory layout is a separate command (PR-D).
     """
-    canonical_root = project_root / CANONICAL_COMMAND_ROOT
+    if scope == "project_local":
+        return ExtractResult(
+            imported=[],
+            skipped=[
+                (
+                    "<all>",
+                    "project_local has no runtime fan-out (ADR-0011 §3)",
+                    skip_codes.NO_PROJECT_FANOUT_FOR_RUNTIME,
+                )
+            ],
+        )
+
+    canonical_root = canonical_artifact_dir("commands", scope, project_root)
     imported: list[tuple[Path, Layout]] = []
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
     seen: dict[str, str] = {}  # cmd_name → first runtime label
 
-    # Claude — direct copy (both sides are Markdown+YAML frontmatter).
-    claude_dir = project_root / ".claude/commands"
-    if claude_dir.is_dir():
+    # ── Claude branch — byte-level passthrough (Markdown + YAML) ──
+    try:
+        claude_dir = runtime_fanout_root("commands", "claude", scope, project_root)
+    except KeyError:
+        claude_dir = None
+    if claude_dir is not None and claude_dir.is_dir():
+        claude_label = f"claude ({claude_dir})"
         for md_file in sorted(claude_dir.glob("*.md")):
             cmd_name = md_file.stem
             if only_name is not None and cmd_name != only_name:
@@ -526,28 +617,50 @@ def extract_commands_to_canonical(
                 validate_name(cmd_name, kind="command name")
             except InvalidNameError as exc:
                 skipped.append((cmd_name, f"invalid name: {exc}", skip_codes.INVALID_NAME))
-                logger.warning("skip %r from .claude/commands: invalid name", cmd_name)
+                logger.warning("skip %r from %s: invalid name", cmd_name, claude_label)
                 continue
             if cmd_name in seen:
                 reason = f"already imported from {seen[cmd_name]}"
                 skipped.append((cmd_name, reason, skip_codes.ALREADY_IMPORTED))
-                logger.warning("skip %s from .claude/commands: %s", cmd_name, reason)
+                logger.warning("skip %s from %s: %s", cmd_name, claude_label, reason)
                 continue
             dst, layout = _resolve_command_extract_target(canonical_root, cmd_name)
             if dst.exists() and not overwrite:
                 reason = "canonical exists (use --overwrite)"
                 skipped.append((cmd_name, reason, skip_codes.CANONICAL_EXISTS))
-                logger.warning("skip %s from .claude/commands: %s", cmd_name, reason)
-                seen[cmd_name] = ".claude/commands"
+                logger.warning("skip %s from %s: %s", cmd_name, claude_label, reason)
+                seen[cmd_name] = claude_label
+                continue
+            try:
+                content_bytes = md_file.read_bytes()
+            except OSError as exc:
+                skipped.append((cmd_name, f"unreadable: {exc}", skip_codes.PARSE_ERROR))
+                continue
+            content_text = content_bytes.decode("utf-8", errors="replace")
+            if not _apply_command_gate_a(
+                content_text=content_text,
+                src=md_file,
+                cmd_name=cmd_name,
+                scope=scope,
+                runtime="claude",
+                force_unsafe_import=force_unsafe_import,
+                imported_so_far=len(imported),
+                skipped=skipped,
+            ):
+                seen[cmd_name] = claude_label
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_bytes(dst, md_file.read_bytes())
+            atomic_write_bytes(dst, content_bytes)
             imported.append((dst, layout))
-            seen[cmd_name] = ".claude/commands"
+            seen[cmd_name] = claude_label
 
-    # Gemini — TOML → canonical Markdown conversion.
-    gemini_dir = project_root / ".gemini/commands"
-    if gemini_dir.is_dir():
+    # ── Gemini branch — TOML → canonical Markdown conversion ──
+    try:
+        gemini_dir = runtime_fanout_root("commands", "gemini", scope, project_root)
+    except KeyError:
+        gemini_dir = None
+    if gemini_dir is not None and gemini_dir.is_dir():
+        gemini_label = f"gemini ({gemini_dir})"
         for toml_file in sorted(gemini_dir.glob("*.toml")):
             cmd_name = toml_file.stem
             if only_name is not None and cmd_name != only_name:
@@ -556,31 +669,47 @@ def extract_commands_to_canonical(
                 validate_name(cmd_name, kind="command name")
             except InvalidNameError as exc:
                 skipped.append((cmd_name, f"invalid name: {exc}", skip_codes.INVALID_NAME))
-                logger.warning("skip %r from .gemini/commands: invalid name", cmd_name)
+                logger.warning("skip %r from %s: invalid name", cmd_name, gemini_label)
                 continue
             if cmd_name in seen:
                 reason = f"already imported from {seen[cmd_name]}"
                 skipped.append((cmd_name, reason, skip_codes.ALREADY_IMPORTED))
-                logger.warning("skip %s from .gemini/commands: %s", cmd_name, reason)
+                logger.warning("skip %s from %s: %s", cmd_name, gemini_label, reason)
                 continue
             dst, layout = _resolve_command_extract_target(canonical_root, cmd_name)
             if dst.exists() and not overwrite:
                 reason = "canonical exists (use --overwrite)"
                 skipped.append((cmd_name, reason, skip_codes.CANONICAL_EXISTS))
-                logger.warning("skip %s from .gemini/commands: %s", cmd_name, reason)
-                seen[cmd_name] = ".gemini/commands"
+                logger.warning("skip %s from %s: %s", cmd_name, gemini_label, reason)
+                seen[cmd_name] = gemini_label
                 continue
             try:
                 canonical_content = _gemini_toml_to_canonical(toml_file)
             except (tomllib.TOMLDecodeError, OSError):
                 skipped.append((cmd_name, "TOML parse error", skip_codes.TOML_PARSE_ERROR))
-                logger.warning("skip %s from .gemini/commands: TOML parse error", cmd_name)
+                logger.warning("skip %s from %s: TOML parse error", cmd_name, gemini_label)
+                continue
+            # Scan the CONVERTED Markdown — that's what gets persisted.
+            # A secret in the source `prompt = "..."` field flows into
+            # the body, so this catches it without re-scanning the raw TOML.
+            if not _apply_command_gate_a(
+                content_text=canonical_content,
+                src=toml_file,
+                cmd_name=cmd_name,
+                scope=scope,
+                runtime="gemini",
+                force_unsafe_import=force_unsafe_import,
+                imported_so_far=len(imported),
+                skipped=skipped,
+            ):
+                seen[cmd_name] = gemini_label
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(dst, canonical_content)
             imported.append((dst, layout))
-            seen[cmd_name] = ".gemini/commands"
+            seen[cmd_name] = gemini_label
 
+    # Codex prompts intentionally not imported (see docstring rationale).
     return ExtractResult(imported=imported, skipped=skipped)
 
 

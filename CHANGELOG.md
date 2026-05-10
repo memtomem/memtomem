@@ -69,6 +69,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   serialization (#836). Inbound links from `README.md`,
   `docs/guides/getting-started.md`, and
   `docs/guides/configuration.md` (Moving `config.json` between machines).
+- **`mm context init --scope=...` + Gate A/B for canonical artifact
+  seeding (ADR-0011 PR-E2).** ``mm context init`` gains three new flags:
+  ``--scope user|project_shared|project_local`` (the canonical artifact
+  tier to seed), ``--confirm-project-shared`` (Gate B — required when
+  ``--scope`` is explicitly ``project_shared``), and
+  ``--force-unsafe-import`` (Gate A bypass valve for the runtime-import
+  path; user / project_local destinations only). Without ``--scope`` the
+  command preserves pre-PR-E2 behaviour: writes context.md and seeds the
+  implicit ``project_shared`` canonical tree under
+  ``<proj>/.memtomem/{agents,skills,commands}/``. With ``--scope user``
+  the command instead reads ``~/.claude/agents`` etc. and seeds
+  ``~/.memtomem/{agents,skills,commands}/``. With
+  ``--scope project_local`` the command seeds the gitignored draft tier
+  ``<proj>/.memtomem/{agents,skills,commands}.local/`` and idempotently
+  appends a comment-marked block to ``<proj>/.gitignore`` (covering
+  ``.memtomem/*.local/`` and ``.memtomem/.staging/``). Gate A re-scans
+  every imported file's bytes via ``enforce_write_guard``: ``user`` /
+  ``project_local`` destinations skip-and-warn on hits (or honour
+  ``--force-unsafe-import`` with audit-log + raw bytes through);
+  ``project_shared`` destinations hard-abort with a
+  :class:`click.ClickException` on any hit, with or without
+  ``--force-unsafe-import`` (ADR §5: git history is forever). Skill
+  imports walk the entire source skill tree (``scripts/``,
+  ``references/``, ``assets/``) — one blocked file aborts the whole
+  skill atomically. Gemini command imports scan the converted Markdown
+  body (where the source ``prompt`` field lands) rather than the raw
+  TOML.
 
 ### Changed
 

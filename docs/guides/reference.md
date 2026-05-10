@@ -1067,7 +1067,11 @@ mm reset --yes                         # skip confirmation prompt
 
 # Agent context sync
 mm context detect                      # find agent config files
-mm context init                        # create unified context.md
+mm context init                        # create unified context.md (project_shared default)
+mm context init --scope user           # seed user-tier canonical (~/.memtomem/{agents,skills,commands}/)
+mm context init --scope project_local  # seed gitignored draft tier + auto-append .gitignore
+mm context init --scope project_shared --confirm-project-shared       # Gate B: explicit opt-in
+mm context init --include=agents --scope user --force-unsafe-import   # bypass Gate A on existing leaks
 mm context generate --agent all        # generate all agent files
 mm context diff                        # check sync status
 mm context sync                        # sync context.md → agent files
@@ -1076,6 +1080,22 @@ mm context diff --include=settings     # check hook sync status
 # Note: cursor / codex / copilot fold ## Rules + ## Style into a single block;
 # `generate` warns on stderr when both sections are populated. context.md is
 # the source of truth — edit there, not in generated files.
+#
+# `--scope` semantics (ADR-0011 PR-E2):
+#   user            → seeds ~/.memtomem/{agents,skills,commands}/; imports from
+#                     ~/.claude/agents, ~/.gemini/agents, ~/.claude/skills, etc.
+#   project_shared  → seeds <proj>/.memtomem/{agents,skills,commands}/; imports
+#                     from <proj>/.claude/agents etc.; git-tracked. Requires
+#                     --confirm-project-shared when --scope is explicit.
+#   project_local   → seeds <proj>/.memtomem/{agents,skills,commands}.local/;
+#                     auto-appends .memtomem/*.local/ + .memtomem/.staging/ to
+#                     <proj>/.gitignore (idempotent). No runtime fan-out
+#                     by design (ADR §3) — nothing to import.
+#
+# Gate A on `--include=...` import path: every source file is re-scanned
+# for secrets via enforce_write_guard. user / project_local destinations
+# can bypass with --force-unsafe-import (audit-logged); project_shared
+# destinations hard-refuse on any hit (no force bypass available).
 
 # Sessions & activity
 mm session start                                              # start a tracked session

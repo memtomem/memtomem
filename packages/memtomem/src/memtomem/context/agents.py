@@ -38,12 +38,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+import click
+
+from memtomem import privacy
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import override as _override
 from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
+from memtomem.context._gate_a import format_project_shared_block_message
 from memtomem.config import TargetScope
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, Layout, validate_name
 from memtomem.context._runtime_targets import runtime_fanout_root
+from memtomem.context.scope_resolver import canonical_artifact_dir
 
 logger = logging.getLogger(__name__)
 
@@ -677,12 +682,28 @@ def extract_agents_to_canonical(
     project_root: Path,
     overwrite: bool = False,
     only_name: str | None = None,
+    *,
+    scope: TargetScope = "project_shared",
+    force_unsafe_import: bool = False,
 ) -> ExtractResult:
     """Import existing Claude / Gemini agent files into ``.memtomem/agents/``.
 
     Codex TOML is **not** imported (one-way conversion; too lossy to round-trip
     without reconstructing fields we dropped on the way out). First occurrence
     wins across runtimes (Claude before Gemini — deterministic order).
+
+    ADR-0011 PR-E2: ``scope`` selects both the canonical destination and the
+    runtime source (per-scope import — ``scope="user"`` reads
+    ``~/.claude/agents`` etc. via :func:`runtime_fanout_root` and writes into
+    ``~/.memtomem/agents/``). ``project_local`` has no runtime fan-out by
+    design (ADR §3) and short-circuits to an empty result.
+
+    Gate A (``privacy.enforce_write_guard``) re-scans every source file's
+    bytes before write. ``project_shared`` destinations hard-abort via
+    :class:`click.ClickException` on any blocked content (with or without
+    ``force_unsafe_import``); ``user`` / ``project_local`` destinations
+    skip-and-warn unless ``force_unsafe_import=True`` flips the decision
+    to ``"bypassed"`` and writes raw bytes through.
 
     Returns an :class:`ExtractResult` with both imported paths and skipped
     items so the caller can warn the user about silent deduplication.
@@ -696,18 +717,38 @@ def extract_agents_to_canonical(
     layout per ADR-0008. Existing flat-layout entries are preserved by
     PR-C — migration to directory layout is a separate command (PR-D).
     """
-    canonical_root = project_root / CANONICAL_AGENT_ROOT
+    if scope == "project_local":
+        # ADR §3 — gitignored draft tier has no runtime fan-out, so there
+        # is nothing to import. Loud-emit (NO_PROJECT_FANOUT_FOR_RUNTIME)
+        # rather than returning silently empty so callers/tests can pin
+        # the explicit reason.
+        return ExtractResult(
+            imported=[],
+            skipped=[
+                (
+                    "<all>",
+                    "project_local has no runtime fan-out (ADR-0011 §3)",
+                    skip_codes.NO_PROJECT_FANOUT_FOR_RUNTIME,
+                )
+            ],
+        )
+
+    canonical_root = canonical_artifact_dir("agents", scope, project_root)
     imported: list[tuple[Path, Layout]] = []
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
     seen: dict[str, str] = {}  # agent_name → first runtime label
 
-    for runtime_dir in (
-        project_root / ".claude/agents",
-        project_root / ".gemini/agents",
-    ):
-        if not runtime_dir.is_dir():
+    for runtime in ("claude", "gemini"):
+        try:
+            runtime_dir = runtime_fanout_root("agents", runtime, scope, project_root)
+        except KeyError:
+            # Defensive — every (agents, claude|gemini, scope) tuple is in
+            # the table at PR-E1 land time, so this only fires on a future
+            # runtime added without table churn.
             continue
-        runtime_label = runtime_dir.relative_to(project_root).as_posix()
+        if runtime_dir is None or not runtime_dir.is_dir():
+            continue
+        runtime_label = f"{runtime} ({runtime_dir})"
         for md_file in sorted(runtime_dir.glob("*.md")):
             agent_name = md_file.stem
             if only_name is not None and agent_name != only_name:
@@ -734,8 +775,72 @@ def extract_agents_to_canonical(
                 logger.warning("skip %s from %s: %s", agent_name, runtime_label, reason)
                 seen[agent_name] = runtime_label
                 continue
+
+            # Gate A — re-scan the source bytes before any write. Use
+            # ``errors="replace"`` so non-UTF8 bytes cannot mask an
+            # embedded ASCII secret (the replacement char `�` does
+            # not overlap with any provider-token alphanumeric pattern).
+            try:
+                content_bytes = md_file.read_bytes()
+            except OSError as exc:
+                skipped.append((agent_name, f"unreadable: {exc}", skip_codes.PARSE_ERROR))
+                continue
+            content_text = content_bytes.decode("utf-8", errors="replace")
+            guard = privacy.enforce_write_guard(
+                content_text,
+                surface="cli_context_init",
+                force_unsafe=force_unsafe_import,
+                scope=scope,
+                audit_context={
+                    "source": str(md_file),
+                    "target": str(dst),
+                    "kind": "agents",
+                    "agent_name": agent_name,
+                },
+                record_outcome=True,
+            )
+            if guard.decision in ("blocked", "blocked_project_shared"):
+                if scope == "project_shared":
+                    # Hard-abort: project_shared writes go into git
+                    # history and cannot be retracted from any clone or
+                    # reflog. Files imported earlier in this run that
+                    # passed Gate A stay (each was scanned independently).
+                    raise click.ClickException(
+                        format_project_shared_block_message(
+                            md_file,
+                            hits_count=len(guard.hits),
+                            scope=scope,
+                            kind="agent",
+                            imported_so_far=len(imported),
+                        )
+                    )
+                code: skip_codes.SkipCode = (
+                    skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED
+                    if guard.decision == "blocked_project_shared"
+                    else skip_codes.PRIVACY_BLOCKED
+                )
+                hint = (
+                    " — pass --force-unsafe-import to bypass" if guard.decision == "blocked" else ""
+                )
+                skipped.append(
+                    (
+                        agent_name,
+                        f"blocked: {len(guard.hits)} privacy pattern hit(s){hint}",
+                        code,
+                    )
+                )
+                seen[agent_name] = runtime_label
+                continue
+            if guard.decision not in ("pass", "bypassed"):
+                # Symmetric assertion — fail-loud on unknown decision so
+                # a future privacy enum addition surfaces here rather
+                # than silently dropping the write.
+                raise RuntimeError(
+                    f"enforce_write_guard returned unexpected decision: {guard.decision!r}"
+                )
+            # decision in ("pass", "bypassed") — proceed.
             dst.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_bytes(dst, md_file.read_bytes())
+            atomic_write_bytes(dst, content_bytes)
             imported.append((dst, layout))
             seen[agent_name] = runtime_label
 

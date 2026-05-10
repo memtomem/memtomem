@@ -29,6 +29,14 @@ INVALID_NAME: Final = "invalid_name"
 ALREADY_IMPORTED: Final = "already_imported"
 CANONICAL_EXISTS: Final = "canonical_exists"
 TOML_PARSE_ERROR: Final = "toml_parse_error"
+# ADR-0011 PR-E2: emitted when ``enforce_write_guard`` blocks an import to a
+# user/project_local destination. ``PRIVACY_BLOCKED_PROJECT_SHARED`` is the
+# distinct signal that a force-unsafe bypass was attempted into git-tracked
+# memory and hard-refused (ADR §5). project_shared destinations RAISE
+# ``ClickException`` rather than skipping, so these codes only appear in
+# ``ExtractResult.skipped`` for user / project_local destinations.
+PRIVACY_BLOCKED: Final = "privacy_blocked"
+PRIVACY_BLOCKED_PROJECT_SHARED: Final = "privacy_blocked_project_shared"
 
 # Closed set of skip codes — typing dataclass `skipped` triples and route
 # response builders against `SkipCode` catches typos at the construction site
@@ -42,4 +50,6 @@ SkipCode = Literal[
     "already_imported",
     "canonical_exists",
     "toml_parse_error",
+    "privacy_blocked",
+    "privacy_blocked_project_shared",
 ]

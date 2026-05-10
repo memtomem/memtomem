@@ -10,6 +10,7 @@ import click
 from memtomem.context.agents import (
     ON_DROP_LEVELS,
     StrictDropError,
+    canonical_agent_name,
     diff_agents,
     extract_agents_to_canonical,
     generate_all_agents,
@@ -74,11 +75,13 @@ from memtomem.context.settings_migrate import (
     format_plan_summary,
     plan_migration,
 )
+from memtomem.context.scope_resolver import canonical_artifact_dir
 from memtomem.context.skills import (
     diff_skills,
     extract_skills_to_canonical,
     generate_all_skills,
 )
+from memtomem.context import _skip_reasons as skip_codes
 from memtomem.wiki.store import WikiNotFoundError, WikiStore
 from typing import get_args
 
@@ -150,16 +153,41 @@ def _print_skills_detect(root: Path) -> None:
         click.echo(f"    {s.agent:15s}  {rel}  ({s.size} bytes)")
 
 
-def _print_skills_init(root: Path, overwrite: bool) -> None:
-    result = extract_skills_to_canonical(root, overwrite=overwrite)
+def _print_skills_init(
+    root: Path,
+    overwrite: bool,
+    *,
+    scope: TargetScope = "project_shared",
+    force_unsafe_import: bool = False,
+) -> None:
+    result = extract_skills_to_canonical(
+        root,
+        overwrite=overwrite,
+        scope=scope,
+        force_unsafe_import=force_unsafe_import,
+    )
+    dest_label = (
+        canonical_artifact_dir("skills", scope, root)
+        if scope != "project_local"
+        else "(skipped — project_local has no runtime fan-out)"
+    )
     if result.imported:
-        click.secho(f"  Imported {len(result.imported)} skill(s) → .memtomem/skills/", fg="green")
+        click.secho(f"  Imported {len(result.imported)} skill(s) → {dest_label}", fg="green")
         for p in result.imported:
             click.echo(f"    {p.name}")
     else:
-        click.echo("  (no runtime skills to import)")
-    for name, reason, _code in result.skipped:
-        click.secho(f"    skipped {name}: {reason}", fg="yellow")
+        click.echo(f"  (no runtime skills imported into {scope})")
+    for name, reason, code in result.skipped:
+        color = (
+            "red"
+            if code
+            in (
+                skip_codes.PRIVACY_BLOCKED,
+                skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED,
+            )
+            else "yellow"
+        )
+        click.secho(f"    skipped {name}: {reason}", fg=color)
 
 
 def _print_skills_generate(root: Path) -> None:
@@ -197,18 +225,41 @@ def _print_agents_detect(root: Path) -> None:
         click.echo(f"    {a.agent:15s}  {rel}  ({a.size} bytes)")
 
 
-def _print_agents_init(root: Path, overwrite: bool) -> None:
-    result = extract_agents_to_canonical(root, overwrite=overwrite)
+def _print_agents_init(
+    root: Path,
+    overwrite: bool,
+    *,
+    scope: TargetScope = "project_shared",
+    force_unsafe_import: bool = False,
+) -> None:
+    result = extract_agents_to_canonical(
+        root,
+        overwrite=overwrite,
+        scope=scope,
+        force_unsafe_import=force_unsafe_import,
+    )
+    dest_label = (
+        canonical_artifact_dir("agents", scope, root)
+        if scope != "project_local"
+        else "(skipped — project_local has no runtime fan-out)"
+    )
     if result.imported:
-        click.secho(
-            f"  Imported {len(result.imported)} sub-agent(s) → .memtomem/agents/", fg="green"
-        )
-        for p in result.imported:
-            click.echo(f"    {p.stem}")
+        click.secho(f"  Imported {len(result.imported)} sub-agent(s) → {dest_label}", fg="green")
+        for path, layout in result.imported:
+            click.echo(f"    {canonical_agent_name(path, layout)}")
     else:
-        click.echo("  (no runtime sub-agents to import)")
-    for name, reason, _code in result.skipped:
-        click.secho(f"    skipped {name}: {reason}", fg="yellow")
+        click.echo(f"  (no runtime sub-agents imported into {scope})")
+    for name, reason, code in result.skipped:
+        color = (
+            "red"
+            if code
+            in (
+                skip_codes.PRIVACY_BLOCKED,
+                skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED,
+            )
+            else "yellow"
+        )
+        click.secho(f"    skipped {name}: {reason}", fg=color)
 
 
 def _print_agents_generate(root: Path, strict: bool, on_drop: str = "ignore") -> None:
@@ -259,18 +310,42 @@ def _print_commands_detect(root: Path) -> None:
         click.echo(f"    {c.agent:17s}  {rel}  ({c.size} bytes)")
 
 
-def _print_commands_init(root: Path, overwrite: bool) -> None:
-    result = extract_commands_to_canonical(root, overwrite=overwrite)
+def _print_commands_init(
+    root: Path,
+    overwrite: bool,
+    *,
+    scope: TargetScope = "project_shared",
+    force_unsafe_import: bool = False,
+) -> None:
+    result = extract_commands_to_canonical(
+        root,
+        overwrite=overwrite,
+        scope=scope,
+        force_unsafe_import=force_unsafe_import,
+    )
+    dest_label = (
+        canonical_artifact_dir("commands", scope, root)
+        if scope != "project_local"
+        else "(skipped — project_local has no runtime fan-out)"
+    )
     if result.imported:
-        click.secho(
-            f"  Imported {len(result.imported)} command(s) → .memtomem/commands/", fg="green"
-        )
-        for p in result.imported:
-            click.echo(f"    {p.stem}")
+        click.secho(f"  Imported {len(result.imported)} command(s) → {dest_label}", fg="green")
+        for path, layout in result.imported:
+            display = path.parent.name if layout == "dir" else path.stem
+            click.echo(f"    {display}")
     else:
-        click.echo("  (no runtime commands to import)")
-    for name, reason, _code in result.skipped:
-        click.secho(f"    skipped {name}: {reason}", fg="yellow")
+        click.echo(f"  (no runtime commands imported into {scope})")
+    for name, reason, code in result.skipped:
+        color = (
+            "red"
+            if code
+            in (
+                skip_codes.PRIVACY_BLOCKED,
+                skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED,
+            )
+            else "yellow"
+        )
+        click.secho(f"    skipped {name}: {reason}", fg=color)
 
 
 def _print_commands_generate(root: Path, strict: bool, on_drop: str = "ignore") -> None:
@@ -326,6 +401,67 @@ def _resolve_cli_scope(override: str | None) -> str:
     load_config_d(cfg, quiet=True)
     load_config_overrides(cfg, migrate=False)
     return cfg.hooks.target_scope
+
+
+def _resolve_artifact_cli_scope(scope_flag: str | None) -> TargetScope:
+    """Resolve ``--scope`` for non-memory artifact CLI commands (ADR-0011 PR-E2).
+
+    Unlike :func:`_resolve_cli_scope` this does NOT consult
+    ``cfg.hooks.target_scope``: artifact storage location is a different
+    feature axis from settings host placement. Leaning on the hooks
+    default would silently flip the artifact target whenever a user
+    pinned ``hooks.target_scope = "user"`` for unrelated reasons (e.g.
+    Cursor-style settings layout), which Codex flagged as a
+    ``_resolve_cli_scope`` default-leak risk in PR-E1 review. The
+    artifact-side default is fixed at ``"project_shared"`` to match the
+    pre-PR-E2 import behavior — implicit invocation stays back-compat.
+    """
+    if scope_flag is not None:
+        return scope_flag  # type: ignore[return-value]
+    return "project_shared"
+
+
+# ── ADR-0011 PR-E2 — `.gitignore` auto-append for project_local tier ──
+
+_GITIGNORE_MARKER = "# memtomem local artifacts (ADR-0011 project_local tier)"
+_GITIGNORE_PATTERNS: tuple[str, ...] = (".memtomem/*.local/", ".memtomem/.staging/")
+
+
+def _append_gitignore_marker(project_root: Path) -> tuple[bool, str]:
+    """Idempotent grep-then-append of the project_local block on ``.gitignore``.
+
+    The grep is on the comment marker line, NOT the pattern lines — users
+    may legitimately have ``.memtomem/.staging/`` listed elsewhere for
+    unrelated reasons, and we do not want to consider those "already
+    present".
+
+    Returns ``(wrote, msg)``:
+      - ``(False, "no_git_repo_pyproject_only")`` — ``.git`` absent but
+        ``pyproject.toml`` is present. ``.gitignore`` is meaningful only
+        in a git working tree, so we skip the write and surface a
+        specific warning so the user knows to ``git init`` first.
+      - ``(False, "no_project_signal")`` — neither ``.git`` nor
+        ``pyproject.toml`` present.
+      - ``(False, "already_present")`` — marker comment already on disk.
+      - ``(True, "appended")`` — newly written.
+    """
+    has_git = (project_root / ".git").exists()
+    has_pyproject = (project_root / "pyproject.toml").exists()
+    if not has_git:
+        return (
+            False,
+            "no_git_repo_pyproject_only" if has_pyproject else "no_project_signal",
+        )
+    gi = project_root / ".gitignore"
+    existing = gi.read_text(encoding="utf-8") if gi.exists() else ""
+    if _GITIGNORE_MARKER in existing:
+        return False, "already_present"
+    block = "\n" if existing and not existing.endswith("\n") else ""
+    block += f"\n{_GITIGNORE_MARKER}\n"
+    block += "\n".join(_GITIGNORE_PATTERNS) + "\n"
+    with gi.open("a", encoding="utf-8") as fh:
+        fh.write(block)
+    return True, "appended"
 
 
 def _print_settings_detect(root: Path, scope: str) -> None:
@@ -500,63 +636,165 @@ def detect_cmd(include: tuple[str, ...]) -> None:
 @click.option(
     "--overwrite",
     is_flag=True,
-    help="Overwrite existing entries in .memtomem/skills/ when importing from runtimes.",
+    help="Overwrite existing canonical entries when importing from runtimes.",
 )
-def init_cmd(include: tuple[str, ...], overwrite: bool) -> None:
-    """Create .memtomem/context.md from existing agent files."""
+@_SCOPE_OPTION
+@click.option(
+    "--confirm-project-shared",
+    is_flag=True,
+    default=False,
+    help=(
+        "Confirm seeding the git-tracked project_shared canonical tier. "
+        "Required when --scope is explicitly set to project_shared."
+    ),
+)
+@click.option(
+    "--force-unsafe-import",
+    is_flag=True,
+    default=False,
+    help=(
+        "Bypass Gate A on existing runtime files being imported. "
+        "user / project_local destinations only — project_shared "
+        "hard-refuses (ADR-0011 §5)."
+    ),
+)
+def init_cmd(
+    include: tuple[str, ...],
+    overwrite: bool,
+    scope_flag: str | None,
+    confirm_project_shared: bool,
+    force_unsafe_import: bool,
+) -> None:
+    """Seed canonical artifact dirs and (optionally) import existing runtime files.
+
+    Without ``--scope`` the command preserves pre-PR-E2 behavior: writes
+    ``<proj>/.memtomem/context.md`` and (with ``--include``) imports under
+    ``<proj>/.memtomem/{agents,skills,commands}/`` (the implicit
+    ``project_shared`` tier). Pass ``--scope=user`` /
+    ``--scope=project_local`` to seed at the user or local-draft tier
+    instead. ADR-0011 §5 Gate A scans every imported file's bytes for
+    secrets; project_shared hard-refuses on any hit.
+    """
     inc = _parse_include(include)
     root = _find_project_root()
-    ctx_path = _context_path(root)
+    scope_explicit = scope_flag is not None
+    scope = _resolve_artifact_cli_scope(scope_flag)
+    has_project_signal = (root / ".git").exists() or (root / "pyproject.toml").exists()
 
-    if ctx_path.exists():
-        if not click.confirm(f"{CONTEXT_FILENAME} already exists. Overwrite?", default=False):
-            return
+    # --scope project_* requires a real project context.
+    if scope != "user" and not has_project_signal:
+        raise click.ClickException(
+            f"--scope={scope} requires a project root (with .git or pyproject.toml). "
+            "Use --scope=user from outside a project, or run from inside one."
+        )
 
-    # Detect existing files
-    files = detect_agent_files(root)
-    if not files:
-        click.secho("No agent files found. Creating empty context template.", fg="yellow")
-        sections: dict[str, str] = {
-            "Project": "- Name: \n- Language: \n- Package manager: ",
-            "Commands": "- Build: \n- Test: \n- Lint: ",
-            "Architecture": "",
-            "Rules": "",
-            "Style": "",
-        }
-    else:
-        # Pick the richest file to extract from
-        best = max(files, key=lambda f: f.size)
-        click.echo(f"Extracting from {best.agent}: {best.path.name} ({best.size} bytes)")
-        content = best.path.read_text(encoding="utf-8")
-        sections = extract_sections_from_agent_file(content)
+    # Gate B — only on EXPLICIT --scope project_shared. Implicit default
+    # (no --scope) keeps pre-PR-E2 behavior so non-interactive CI invocations
+    # of `mm context init` don't suddenly start prompting.
+    if scope_explicit and scope == "project_shared" and not confirm_project_shared:
+        prompt = f"\n--scope=project_shared writes to git-tracked {root}/.memtomem/. Continue?"
+        if not click.confirm(prompt, default=False):
+            raise click.Abort()
 
-        # Merge other files for missing sections
-        for f in files:
-            if f.path == best.path:
-                continue
-            other_content = f.path.read_text(encoding="utf-8")
-            other_sections = extract_sections_from_agent_file(other_content)
-            for key, val in other_sections.items():
-                if key not in sections and val.strip():
-                    sections[key] = val
+    # context.md is project-tied (not scope-tiered). Skip silently when no
+    # project context resolves — `--scope user` from outside any project
+    # is a legitimate user-tier-only invocation.
+    if has_project_signal:
+        ctx_path = _context_path(root)
+        if ctx_path.exists():
+            if not click.confirm(f"{CONTEXT_FILENAME} already exists. Overwrite?", default=False):
+                return
 
-    ctx_path.parent.mkdir(parents=True, exist_ok=True)
-    ctx_path.write_text(sections_to_markdown(sections), encoding="utf-8")
-    click.secho(f"Created {CONTEXT_FILENAME}", fg="green")
-    click.echo(f"  Sections: {', '.join(sections.keys())}")
-    click.echo("  Edit this file, then run 'mm context generate' to sync.")
+        files = detect_agent_files(root)
+        if not files:
+            click.secho("No agent files found. Creating empty context template.", fg="yellow")
+            sections: dict[str, str] = {
+                "Project": "- Name: \n- Language: \n- Package manager: ",
+                "Commands": "- Build: \n- Test: \n- Lint: ",
+                "Architecture": "",
+                "Rules": "",
+                "Style": "",
+            }
+        else:
+            best = max(files, key=lambda f: f.size)
+            click.echo(f"Extracting from {best.agent}: {best.path.name} ({best.size} bytes)")
+            content = best.path.read_text(encoding="utf-8")
+            sections = extract_sections_from_agent_file(content)
+            for f in files:
+                if f.path == best.path:
+                    continue
+                other_content = f.path.read_text(encoding="utf-8")
+                other_sections = extract_sections_from_agent_file(other_content)
+                for key, val in other_sections.items():
+                    if key not in sections and val.strip():
+                        sections[key] = val
 
+        ctx_path.parent.mkdir(parents=True, exist_ok=True)
+        ctx_path.write_text(sections_to_markdown(sections), encoding="utf-8")
+        click.secho(f"Created {CONTEXT_FILENAME}", fg="green")
+        click.echo(f"  Sections: {', '.join(sections.keys())}")
+        click.echo("  Edit this file, then run 'mm context generate' to sync.")
+
+    # Seed canonical sub-artifact dirs at the resolved scope (idempotent).
+    for kind in ("agents", "skills", "commands"):
+        d = canonical_artifact_dir(kind, scope, root)
+        d.mkdir(parents=True, exist_ok=True)
+        click.secho(f"  Created {d}", fg="green")
+
+    # project_local — auto-append the .gitignore block so the local-draft
+    # tier and staging dir never end up tracked by accident.
+    if scope == "project_local":
+        wrote, msg = _append_gitignore_marker(root)
+        if wrote:
+            click.secho(
+                "  Appended .gitignore marker (.memtomem/*.local/, .memtomem/.staging/)",
+                fg="green",
+            )
+        elif msg == "already_present":
+            click.echo("  (.gitignore marker already present — idempotent)")
+        elif msg == "no_git_repo_pyproject_only":
+            click.secho(
+                "  warning: project root resolved via pyproject.toml but `.git` "
+                "missing — .gitignore not appended. Run `git init` first to "
+                "git-protect the local tier.",
+                fg="yellow",
+            )
+        elif msg == "no_project_signal":
+            click.secho(
+                "  warning: no .git and no pyproject.toml in project root — "
+                ".gitignore append skipped.",
+                fg="yellow",
+            )
+
+    # --include runtime-import path. Gate A is applied inside each
+    # extract_*_to_canonical helper (per-file for agents/commands;
+    # tree walk for skills).
     if "skills" in inc:
         click.echo("")
-        _print_skills_init(root, overwrite=overwrite)
+        _print_skills_init(
+            root,
+            overwrite=overwrite,
+            scope=scope,
+            force_unsafe_import=force_unsafe_import,
+        )
 
     if "agents" in inc:
         click.echo("")
-        _print_agents_init(root, overwrite=overwrite)
+        _print_agents_init(
+            root,
+            overwrite=overwrite,
+            scope=scope,
+            force_unsafe_import=force_unsafe_import,
+        )
 
     if "commands" in inc:
         click.echo("")
-        _print_commands_init(root, overwrite=overwrite)
+        _print_commands_init(
+            root,
+            overwrite=overwrite,
+            scope=scope,
+            force_unsafe_import=force_unsafe_import,
+        )
 
 
 @context.command("generate")
