@@ -7,6 +7,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Web tier badges + `/api/add` project-tier rejection hint (ADR-0011
+  PR-F Web/docs slice, #929).** Memory sources/chunks and context
+  Skills/Commands/Subagents list rows now carry literal tier badges
+  (`user`, `project_shared`, `project_local`) per ADR-0016. Web list
+  routes accept `?target_scope=` for canonical tier selection and keep
+  `project_local` hidden by default unless explicitly requested; context
+  rows in `project_local` annotate the draft/no-runtime-fan-out behavior
+  inline. `POST /api/add` now rejects unconfirmed
+  `scope=project_shared` writes with `403 detail=blocked_project_shared`,
+  a CLI remediation hint, and docs URL, mirroring MCP Gate B. Gate A also
+  receives the resolved scope so `force_unsafe` cannot bypass
+  `project_shared` protections through Web writes.
 - **Memory scope axis schema (ADR-0011 PR-B).** First-time start of an
   upgraded server runs a one-shot SQLite migration that adds two new
   columns to ``chunks``: ``scope TEXT NOT NULL DEFAULT 'user'`` (one
@@ -96,9 +108,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   (``scripts/``, ``references/``, ``assets/``) stay byte-equal to
   canonical even when an override is staged for ``SKILL.md`` —
   ``test_override_only_touches_skill_md_not_scripts`` invariant
-  preserved. Web routes pass explicit ``scope="project_shared"`` to
-  preserve current behavior; PR-F (UI badges) replaces with
-  request-driven scope.
+  preserved. The Web PR-F slice in #929 replaced the transitional
+  hardcoded route scope with request-driven tier selection.
 - **`mm context init --scope=...` + Gate A/B for canonical artifact
   seeding (ADR-0011 PR-E2).** ``mm context init`` (no flag) keeps the
   pre-PR-E2 failure-mode shape — same context.md path, no Gate B
