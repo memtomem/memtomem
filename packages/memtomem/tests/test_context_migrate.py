@@ -1298,8 +1298,8 @@ def test_e4_row16_memory_dispatch_delegates_to_memory_migrate(monkeypatch, tmp_p
 
     captured: dict[str, object] = {}
 
-    async def _fake_run(source, from_scope, to_scope, apply_, yes, confirm_project_shared):
-        captured["source"] = source
+    async def _fake_run(sources, from_scope, to_scope, apply_, yes, confirm_project_shared):
+        captured["sources"] = sources
         captured["from_scope"] = from_scope
         captured["to_scope"] = to_scope
         captured["apply_"] = apply_
@@ -1323,7 +1323,10 @@ def test_e4_row16_memory_dispatch_delegates_to_memory_migrate(monkeypatch, tmp_p
         ]
     )
     assert result.exit_code == 0, result.output
-    assert captured["source"] == src.resolve()
+    # Issue #886: _memory_migrate_run takes a list (glob input support);
+    # dispatch wraps a single path in a one-element list for parity with
+    # the public ``mm context memory-migrate`` single-file path.
+    assert captured["sources"] == [src.resolve()]
     assert captured["from_scope"] == "user"
     assert captured["to_scope"] == "project_shared"
     assert captured["apply_"] is True

@@ -166,7 +166,7 @@ async def test_memory_migrate_apply_user_to_project_shared_chunk_ids_preserved(
     # explicit ``--confirm-project-shared``; ``--yes`` alone is no
     # longer sufficient (mirrors the round-7 ``mm mem add`` parity fix).
     await _memory_migrate_run(
-        src.resolve(),
+        [src.resolve()],
         from_scope="user",
         to_scope="project_shared",
         apply_=True,
@@ -423,7 +423,7 @@ async def test_memory_migrate_nested_project_source_to_user_walks_dot_memtomem_a
     # Migrate from project_shared → user. Pre-fix: errors before
     # mutation. Post-fix: lands in user tier with chunk-id stable.
     await _memory_migrate_run(
-        nested_src.resolve(),
+        [nested_src.resolve()],
         from_scope="project_shared",
         to_scope="user",
         apply_=True,
@@ -599,7 +599,7 @@ async def test_memory_migrate_compensation_real_backend_preserves_chunk_scope(
 
     with pytest.raises(Exception):  # SystemExit from click.ClickException
         await _memory_migrate_run(
-            src.resolve(),
+            [src.resolve()],
             from_scope="user",
             to_scope="project_local",
             apply_=True,
@@ -689,3 +689,289 @@ def test_memory_migrate_unregistered_target_tier_refused(monkeypatch, fake_proje
     comp.storage.update_chunks_scope_for_source.assert_not_called()
     assert src.exists()
     assert not (layout["proj_shared"] / "rule.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# 6) Issue #886 — chunk_links lineage preservation + glob input
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_memory_migrate_preserves_chunk_links_lineage_count(
+    bm25_only_components, monkeypatch, tmp_path
+):
+    """Issue #886 regression pin: ``chunk_links`` row count is N pre/post.
+
+    The v1 chunk-id-stable single-DB rename keeps ``chunks.id`` constant,
+    so the entire ``chunk_links`` neighborhood (incoming + outgoing edges
+    on the moved chunks) survives untouched. This test wires a real link
+    between a chunk in source A (moving) and a chunk in source B (staying)
+    and asserts the link row is byte-identical after the migrate. Pre-#886
+    nothing pinned this — a future refactor that decided to DELETE link
+    rows during rename would have been silent.
+    """
+    from memtomem.cli.context_cmd import _memory_migrate_run
+
+    comp, mem_dir = bm25_only_components
+    project_root = tmp_path / "proj_lineage"
+    proj_shared = project_root / ".memtomem" / "memories"
+    proj_shared.mkdir(parents=True)
+    (project_root / ".git").mkdir()
+    comp.config.indexing.project_memory_dirs = [proj_shared]
+
+    src_a = mem_dir / "rule_a.md"
+    src_b = mem_dir / "rule_b.md"
+    src_a.write_text("## A\n\nbody A.\n", encoding="utf-8")
+    src_b.write_text("## B\n\nbody B.\n", encoding="utf-8")
+
+    chunk_a = Chunk(
+        content="body A.",
+        metadata=ChunkMetadata(
+            source_file=src_a, scope="user", project_root=None, start_line=3, end_line=3
+        ),
+        embedding=[0.1] * 1024,
+    )
+    chunk_b = Chunk(
+        content="body B.",
+        metadata=ChunkMetadata(
+            source_file=src_b, scope="user", project_root=None, start_line=3, end_line=3
+        ),
+        embedding=[0.1] * 1024,
+    )
+    await comp.storage.upsert_chunks([chunk_a, chunk_b])
+
+    # Hand-wire a link a → b so the moved source has one outgoing edge
+    # in its neighborhood. Direct SQL keeps the test independent of
+    # mem_agent_share's surface (which has its own coverage).
+    db = comp.storage._get_db()
+    db.execute(
+        "INSERT INTO chunk_links "
+        "(source_id, target_id, link_type, namespace_target, created_at) "
+        "VALUES (?, ?, 'shared', 'default', '2026-05-11T00:00:00')",
+        (str(chunk_a.id), str(chunk_b.id)),
+    )
+    db.commit()
+
+    pre_count = db.execute("SELECT COUNT(*) FROM chunk_links").fetchone()[0]
+    pre_row = db.execute(
+        "SELECT source_id, target_id, link_type, namespace_target "
+        "FROM chunk_links WHERE target_id=?",
+        (str(chunk_b.id),),
+    ).fetchone()
+    assert pre_count == 1
+
+    _patch_cli_components(monkeypatch, comp)
+    monkeypatch.chdir(project_root)
+
+    # Migrate A only; B stays in user tier. Lineage row touches both
+    # endpoints — if rename silently dropped it, post_count would be 0.
+    await _memory_migrate_run(
+        [src_a.resolve()],
+        from_scope="user",
+        to_scope="project_shared",
+        apply_=True,
+        yes=True,
+        confirm_project_shared=True,
+    )
+
+    post_count = db.execute("SELECT COUNT(*) FROM chunk_links").fetchone()[0]
+    post_row = db.execute(
+        "SELECT source_id, target_id, link_type, namespace_target "
+        "FROM chunk_links WHERE target_id=?",
+        (str(chunk_b.id),),
+    ).fetchone()
+
+    assert post_count == pre_count, f"chunk_links count drifted: pre={pre_count} post={post_count}"
+    assert post_row == pre_row, (
+        "link row endpoints / metadata must be byte-identical after rename "
+        "(chunk-id-stable single-DB rename promise)"
+    )
+
+    # And both chunks still reachable by ID; A's source flipped, B's didn't.
+    refreshed_a = await comp.storage.get_chunk(chunk_a.id)
+    refreshed_b = await comp.storage.get_chunk(chunk_b.id)
+    assert refreshed_a is not None and refreshed_b is not None
+    assert refreshed_a.metadata.scope == "project_shared"
+    assert refreshed_a.metadata.source_file == proj_shared / "rule_a.md"
+    assert refreshed_b.metadata.scope == "user"
+    assert refreshed_b.metadata.source_file == src_b
+
+
+def test_memory_migrate_lineage_display_reflects_neighborhood_size(
+    monkeypatch, fake_project_layout
+):
+    """Issue #886: plan output reports the actual ``chunk_links``
+    neighborhood size, not the hard-coded ``0 dropped`` string from v1.
+
+    The displayed value pins the design contract for single-DB rename
+    (the entire neighborhood is preserved); when cross-DB lands later,
+    the same line surfaces "N preserved, K dropped" with a real K.
+    """
+    from memtomem.cli.context_cmd import memory_migrate_cmd
+
+    layout = fake_project_layout
+    src = layout["src"]
+
+    comp = AsyncMock()
+    comp.config.indexing.memory_dirs = [layout["user_tier"]]
+    comp.config.indexing.project_memory_dirs = [layout["proj_shared"]]
+    comp.storage = AsyncMock()
+    comp.storage.count_chunks_by_source = AsyncMock(return_value=5)
+    comp.storage.count_chunk_links_for_source = AsyncMock(return_value=3)
+    comp.storage.update_chunks_scope_for_source = AsyncMock()
+    comp.search_pipeline = AsyncMock()
+    _patch_cli_components(monkeypatch, comp)
+    monkeypatch.chdir(layout["project_root"])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        memory_migrate_cmd,
+        [str(src), "--from", "user", "--to", "project_shared"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "chunk_links lineage: 3 preserved, 0 dropped" in result.output
+    # The pre-#886 hard-coded "0 dropped (chunk-id-stable single-DB rename)"
+    # tail must not reappear via a future refactor.
+    assert "chunk-id-stable single-DB rename" not in result.output
+
+
+def test_memory_migrate_glob_pre_flight_all_or_nothing_on_privacy(monkeypatch, fake_project_layout):
+    """Issue #886: glob pre-flight rejects the WHOLE batch on any privacy
+    hit, before any FS move happens.
+
+    Three user-tier files; the middle one carries a secret pattern; the
+    target is ``project_shared`` (Gate A active). The command must exit
+    non-zero and leave all three files at source — including the clean
+    ones — because per ADR-0011 §5 we don't half-migrate a batch.
+    """
+    from memtomem.cli.context_cmd import memory_migrate_cmd
+
+    layout = fake_project_layout
+    user_tier = layout["user_tier"]
+
+    f1 = user_tier / "rule_one.md"
+    f2 = user_tier / "rule_two.md"
+    f3 = user_tier / "rule_three.md"
+    f1.write_text("## One\n\nclean body.\n", encoding="utf-8")
+    f2.write_text(f"## Two\n\n{_SECRET}\n", encoding="utf-8")
+    f3.write_text("## Three\n\nclean body.\n", encoding="utf-8")
+    # Default fixture's rule.md must not match the glob, so rename it out
+    # of the way before patterning ``rule_*.md``.
+    layout["src"].unlink()
+
+    comp = AsyncMock()
+    comp.config.indexing.memory_dirs = [user_tier]
+    comp.config.indexing.project_memory_dirs = [layout["proj_shared"]]
+    comp.storage = AsyncMock()
+    comp.storage.count_chunks_by_source = AsyncMock(return_value=1)
+    comp.storage.count_chunk_links_for_source = AsyncMock(return_value=0)
+    comp.storage.update_chunks_scope_for_source = AsyncMock()
+    comp.search_pipeline = AsyncMock()
+    _patch_cli_components(monkeypatch, comp)
+    monkeypatch.chdir(layout["project_root"])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        memory_migrate_cmd,
+        [
+            str(user_tier / "rule_*.md"),
+            "--from",
+            "user",
+            "--to",
+            "project_shared",
+            "--apply",
+            "--confirm-project-shared",
+        ],
+    )
+    assert result.exit_code != 0
+    out = result.output + str(result.exception or "")
+    assert "Gate A" in out
+    assert "rule_two.md" in out
+    # All three files still at source — no half-batch on disk.
+    assert f1.exists()
+    assert f2.exists()
+    assert f3.exists()
+    target_dir = layout["proj_shared"]
+    assert not (target_dir / "rule_one.md").exists()
+    assert not (target_dir / "rule_two.md").exists()
+    assert not (target_dir / "rule_three.md").exists()
+    # And no DB UPDATE fired even for the clean files.
+    comp.storage.update_chunks_scope_for_source.assert_not_called()
+
+
+def test_memory_migrate_glob_apply_aborts_on_mid_batch_db_failure(monkeypatch, fake_project_layout):
+    """Issue #886: mid-batch DB failure reverts THAT file, leaves earlier
+    completed files migrated, and aborts before touching remaining files.
+
+    Three user-tier files migrate to ``project_local`` (skip Gate A so
+    we test the DB-failure branch cleanly). DB UPDATE raises on the 2nd
+    call. Per-file FS-revert restores file 2 to its source path; file 1
+    stays at target (already committed); file 3 is never attempted.
+    Deterministic resumption point — the user can fix the cause and
+    re-run on the remaining {f2, f3} glob.
+    """
+    from memtomem.cli.context_cmd import memory_migrate_cmd
+
+    layout = fake_project_layout
+    user_tier = layout["user_tier"]
+    proj_local = layout["proj_local"]
+
+    f1 = user_tier / "rule_one.md"
+    f2 = user_tier / "rule_two.md"
+    f3 = user_tier / "rule_three.md"
+    f1.write_text("## One\n\nclean body.\n", encoding="utf-8")
+    f2.write_text("## Two\n\nclean body.\n", encoding="utf-8")
+    f3.write_text("## Three\n\nclean body.\n", encoding="utf-8")
+    layout["src"].unlink()
+
+    comp = AsyncMock()
+    comp.config.indexing.memory_dirs = [user_tier]
+    comp.config.indexing.project_memory_dirs = [proj_local]
+    comp.storage = AsyncMock()
+    comp.storage.count_chunks_by_source = AsyncMock(return_value=1)
+    comp.storage.count_chunk_links_for_source = AsyncMock(return_value=0)
+
+    call_count = {"n": 0}
+
+    async def _fail_second(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise RuntimeError("simulated DB failure on file 2")
+        return 1
+
+    comp.storage.update_chunks_scope_for_source = AsyncMock(side_effect=_fail_second)
+    comp.search_pipeline = AsyncMock()
+    _patch_cli_components(monkeypatch, comp)
+    monkeypatch.chdir(layout["project_root"])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        memory_migrate_cmd,
+        [
+            str(user_tier / "rule_*.md"),
+            "--from",
+            "user",
+            "--to",
+            "project_local",
+            "--apply",
+            "--yes",
+        ],
+    )
+    assert result.exit_code != 0
+    out = result.output + str(result.exception or "")
+    assert "DB update failed" in out
+    assert "rule_two.md" in out
+    assert "1 of 3 migrated" in out
+
+    # File 1: migrated to project_local. File 2: reverted to source.
+    # File 3: never touched.
+    assert not f1.exists(), "file 1 should be moved to target (already committed)"
+    assert (proj_local / "rule_one.md").exists()
+    assert f2.exists(), "file 2 should be reverted to source on DB failure"
+    assert not (proj_local / "rule_two.md").exists()
+    assert f3.exists(), "file 3 should be untouched (batch aborted)"
+    assert not (proj_local / "rule_three.md").exists()
+
+    # update_chunks_scope_for_source was called twice (file 1 succeeded,
+    # file 2 raised); file 3 was never attempted.
+    assert comp.storage.update_chunks_scope_for_source.call_count == 2
