@@ -814,6 +814,7 @@ class SqliteBackend(
         scope: str,
         source_exact: Path | None = None,
         source_prefix: Path | None = None,
+        project_root: Path | None = None,
         batch_size: int = 500,
     ) -> AsyncIterator[ChunkAuditRow]:
         """Stream chunks in ``scope`` for a privacy audit walk.
@@ -829,14 +830,39 @@ class SqliteBackend(
         are normalised via :func:`norm_path` before the query, mirroring
         the storage layer's existing source-path equality contract used
         by :meth:`list_chunks_by_source` and friends.
+
+        ``project_root`` is the ADR-0011 / ADR-0016 / issue #934 cross-
+        project isolation gate. When ``scope`` is a project tier
+        (``project_shared`` / ``project_local``) and multiple project
+        roots share the same SQLite DB, the caller passes the current
+        project root so the audit only walks rows owned by that root.
+        ``None`` (the default) means "no project filter" — the
+        ``--scope=user`` path always passes ``None`` because the user
+        tier is global by design. Mixing ``scope='user'`` with a
+        non-None ``project_root`` is a caller bug and is rejected up
+        front; user-tier rows have ``project_root IS NULL`` in the
+        chunks table so the filter would silently elide every user row.
         """
         if source_exact is not None and source_prefix is not None:
             raise ValueError(
                 "iter_chunks_for_audit: source_exact and source_prefix are mutually exclusive"
             )
+        if scope == "user" and project_root is not None:
+            raise ValueError(
+                "iter_chunks_for_audit: project_root must be None when scope='user' "
+                "(user-tier rows have project_root IS NULL by contract)"
+            )
 
         where_parts = ["COALESCE(scope, 'user') = ?"]
         params: list[object] = [scope]
+        if project_root is not None:
+            # ADR-0011 / issue #934 cross-project isolation. ``project_root``
+            # in the chunks table is the string returned by ``norm_path``
+            # at write time, so we apply the same normalisation here to
+            # keep the equality contract byte-exact across platforms (the
+            # source-path normalisation pattern above).
+            where_parts.append("project_root = ?")
+            params.append(norm_path(project_root))
         if source_exact is not None:
             where_parts.append("source_file = ?")
             params.append(norm_path(source_exact))

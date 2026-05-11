@@ -3109,17 +3109,67 @@ async def _memory_migrate_run(
 
 
 # ---------------------------------------------------------------------------
-# rescan — privacy-only audit over project-root generated context files
+# rescan — privacy-only audit, scope-aware across the three-tier model
 # ---------------------------------------------------------------------------
 #
-# ADR-0011 follow-up (issue #885). The v1 target set is exactly the set
-# returned by ``detect_agent_files`` — the project-root generated files
-# (CLAUDE.md, .cursorrules, GEMINI.md, AGENTS.md, .github/copilot-
-# instructions.md). Agents / skills / commands runtime fanout (the
-# scope-tiered ``_runtime_targets.py`` table) is intentionally out of
-# scope and tracked separately.
+# ADR-0011 / ADR-0016 follow-up (issue #934). The target set is now
+# scope-dependent so a privacy audit can be run per tier without
+# leaking into unrelated worktrees that happen to share state:
+#
+# - ``--scope=user`` walks ``~/.memtomem/{agents,skills,commands}/``
+#   (canonical user tier). No project-root scanner files — those are
+#   project-rooted by definition.
+# - ``--scope=project_shared`` walks ``<root>/.memtomem/{agents,skills,
+#   commands}/`` PLUS the project-root scanner files returned by
+#   ``detect_agent_files(root)`` (CLAUDE.md, .cursorrules, GEMINI.md,
+#   AGENTS.md, .github/copilot-instructions.md). Those scanner files
+#   ARE the runtime fan-out of project_shared into the project root —
+#   dropping them would silently regress v1 coverage from issue #885.
+# - ``--scope=project_local`` walks ``<root>/.memtomem/{agents,skills,
+#   commands}.local/`` only. No scanner files: per ADR-0011 §3 /
+#   ADR-0016 §7 ``project_local`` is gitignored draft tier with NO
+#   runtime fan-out — surfacing scanner-file violations under a
+#   ``project_local`` audit would mislead the operator about the
+#   tier's actual reach.
+#
+# Project tiers require a project context (``.git`` or
+# ``pyproject.toml``); the marker check mirrors ``mm context init
+# --scope`` at lines 737-748. Symlink-escape defence: descendants
+# whose ``resolve()`` lands outside ``root.resolve()`` are dropped
+# from the project-tier scan so a stray symlink into a sibling
+# project's ``.memtomem/`` cannot pull foreign files into the
+# decisions list.
 
 _RESCAN_SCOPE_CHOICES = list(get_args(TargetScope))
+_RESCAN_ARTIFACT_KINDS: tuple[str, ...] = ("agents", "skills", "commands")
+
+
+def _rescan_targets(scope: TargetScope, project_root: Path | None) -> list[Path]:
+    """Resolve the per-scope file/directory set the rescan walks.
+
+    See the module-level comment block above the command for the full
+    per-tier specification. Non-existent paths are silently dropped —
+    rescan is an audit, not an inventory check, so a missing
+    ``agents.local/`` does not constitute a failure.
+    """
+    targets: list[Path] = []
+    if scope == "user":
+        for kind in _RESCAN_ARTIFACT_KINDS:
+            targets.append(canonical_artifact_dir(kind, "user", None))  # type: ignore[arg-type]
+    elif scope == "project_shared":
+        assert project_root is not None  # gated by caller
+        for kind in _RESCAN_ARTIFACT_KINDS:
+            targets.append(
+                canonical_artifact_dir(kind, "project_shared", project_root)  # type: ignore[arg-type]
+            )
+        targets.extend(entry.path for entry in detect_agent_files(project_root))
+    elif scope == "project_local":
+        assert project_root is not None  # gated by caller
+        for kind in _RESCAN_ARTIFACT_KINDS:
+            targets.append(
+                canonical_artifact_dir(kind, "project_local", project_root)  # type: ignore[arg-type]
+            )
+    return [t for t in targets if t.exists()]
 
 
 @context.command("rescan")
@@ -3128,9 +3178,10 @@ _RESCAN_SCOPE_CHOICES = list(get_args(TargetScope))
     type=click.Choice(_RESCAN_SCOPE_CHOICES),
     required=True,
     help=(
-        "Guard decision scope. The same artifact set is scanned regardless "
-        "of --scope; the value flows into enforce_write_guard's scope= "
-        "argument. v1 always calls with force_unsafe=False."
+        "Tier to audit. Selects BOTH the canonical artifact directories "
+        "walked AND the scope= value forwarded to enforce_write_guard. "
+        "Required — there is no implicit default so audits are explicit "
+        "and CI-readable. v1 always calls with force_unsafe=False."
     ),
 )
 @click.option(
@@ -3152,7 +3203,7 @@ def rescan_cmd(
     as_json: bool,
     quiet: bool,
 ) -> None:
-    """Re-run the privacy guard over project-root generated context files.
+    """Re-run the privacy guard over scope-tiered context artifacts.
 
     Read-only: no file is modified. The guard is invoked with
     ``record_outcome=False`` so the rescan does not double-count outcomes
@@ -3161,30 +3212,72 @@ def rescan_cmd(
 
     Exit codes: 0 if no violations, 1 if any violation found.
     """
-    root = _find_project_root()
-    detected = detect_agent_files(root)
+    # ADR-0011 / issue #934: project tiers require a real project marker
+    # so the audit can't accidentally walk a sibling worktree's tree
+    # via ``_find_project_root``'s cwd fallback.
+    project_root: Path | None
+    if scope == "user":
+        project_root = None
+    else:
+        candidate = _find_project_root()
+        has_signal = (candidate / ".git").exists() or (candidate / "pyproject.toml").exists()
+        if not has_signal:
+            raise click.ClickException(
+                f"--scope={scope} requires a project root (with .git or "
+                "pyproject.toml). Use --scope=user from outside a project, "
+                "or run from inside one."
+            )
+        project_root = candidate
+
+    targets = _rescan_targets(scope, project_root)
 
     scanned = 0
     violations: list[dict] = []
+    # Resolve once so the symlink-escape check is a cheap path-prefix
+    # equality rather than a per-file resolve()-then-resolve() pair.
+    resolved_root = project_root.resolve() if project_root is not None else None
 
-    for entry in detected:
+    for target in targets:
         result = scan_artifact_tree(
-            entry.path,
+            target,
             surface="cli_context_rescan",
             scope=scope,
-            project_root=root,
+            project_root=project_root,
             on_blocked="skip_warn",
             record_outcome=False,
         )
         for fs in result.decisions:
+            # Symlink-escape defence (project tiers only). ``rglob`` in
+            # ``scan_artifact_tree`` follows symlinks; if a descendant of
+            # ``<root>/.memtomem/...`` resolves outside ``root`` it is
+            # almost certainly a misconfigured / hostile link — drop it
+            # from the audit rather than pretend the foreign file
+            # belongs to this project. User tier is exempt because the
+            # user canonical dir lives outside any project root by
+            # design.
+            if resolved_root is not None:
+                try:
+                    resolved_fs = fs.path.resolve()
+                except OSError:
+                    # Defensive: unresolvable symlink — fail closed by
+                    # skipping rather than including. The fail-closed
+                    # contract on read errors lives in scan_artifact_tree
+                    # itself (PrivacyScanReadError); ``resolve()`` here
+                    # is purely for the project-anchor check.
+                    continue
+                if not resolved_fs.is_relative_to(resolved_root):
+                    continue
             scanned += 1
             if fs.decision == "pass":
                 continue
+            display_path = (
+                fs.path.relative_to(project_root)
+                if project_root is not None and fs.path.is_relative_to(project_root)
+                else fs.path
+            )
             violations.append(
                 {
-                    "path": str(
-                        fs.path.relative_to(root) if fs.path.is_relative_to(root) else fs.path
-                    ),
+                    "path": str(display_path),
                     "scope": scope,
                     "decision": fs.decision,
                     "hits": [

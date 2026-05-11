@@ -265,3 +265,102 @@ class TestPagination:
 
         rows = await _collect(backend, scope="user", batch_size=3)
         assert len(rows) == 7
+
+
+class TestProjectRootFilter:
+    """ADR-0011 / ADR-0016 / issue #934 cross-project isolation pin.
+
+    Before this filter existed, two projects sharing a single SQLite DB
+    could both write ``scope='project_shared'`` chunks; a rescan in
+    project A would walk B's chunks too and surface false positives /
+    leak B's content into A's audit log.
+    """
+
+    @pytest.mark.asyncio
+    async def test_project_shared_filter_excludes_other_project(self, backend, tmp_path):
+        proj_a = norm_path(tmp_path / "proj_a")
+        proj_b = norm_path(tmp_path / "proj_b")
+        a_id = _seed(
+            backend,
+            source_file=norm_path(tmp_path / "proj_a" / "doc.md"),
+            scope="project_shared",
+            project_root=proj_a,
+        )
+        _seed(
+            backend,
+            source_file=norm_path(tmp_path / "proj_b" / "doc.md"),
+            scope="project_shared",
+            project_root=proj_b,
+        )
+
+        rows = await _collect(
+            backend,
+            scope="project_shared",
+            project_root=Path(proj_a),
+        )
+        assert [r.chunk_id for r in rows] == [a_id]
+        assert rows[0].project_root == Path(proj_a)
+
+    @pytest.mark.asyncio
+    async def test_project_local_filter_excludes_other_project(self, backend, tmp_path):
+        proj_a = norm_path(tmp_path / "proj_a")
+        proj_b = norm_path(tmp_path / "proj_b")
+        a_id = _seed(
+            backend,
+            source_file=norm_path(tmp_path / "proj_a" / "local.md"),
+            scope="project_local",
+            project_root=proj_a,
+        )
+        _seed(
+            backend,
+            source_file=norm_path(tmp_path / "proj_b" / "local.md"),
+            scope="project_local",
+            project_root=proj_b,
+        )
+
+        rows = await _collect(
+            backend,
+            scope="project_local",
+            project_root=Path(proj_a),
+        )
+        assert [r.chunk_id for r in rows] == [a_id]
+
+    @pytest.mark.asyncio
+    async def test_none_project_root_walks_every_project(self, backend, tmp_path):
+        """Back-compat: callers that don't pass ``project_root`` still see
+        every row in the requested scope. Pre-#934 callers (and the v1
+        bootstrap path) rely on this — only the CLI gate-up-front pattern
+        opts into the cross-project filter.
+        """
+        proj_a = norm_path(tmp_path / "proj_a")
+        proj_b = norm_path(tmp_path / "proj_b")
+        a_id = _seed(
+            backend,
+            source_file=norm_path(tmp_path / "proj_a" / "doc.md"),
+            scope="project_shared",
+            project_root=proj_a,
+        )
+        b_id = _seed(
+            backend,
+            source_file=norm_path(tmp_path / "proj_b" / "doc.md"),
+            scope="project_shared",
+            project_root=proj_b,
+        )
+
+        rows = await _collect(backend, scope="project_shared")
+        assert {r.chunk_id for r in rows} == {a_id, b_id}
+
+    @pytest.mark.asyncio
+    async def test_user_scope_with_project_root_raises(self, backend, tmp_path):
+        """Defensive contract: user-tier rows have project_root IS NULL
+        in the chunks table, so combining ``scope='user'`` with a
+        ``project_root`` filter would silently elide every user row.
+        The storage layer rejects the mix up front so a caller bug is
+        immediately visible.
+        """
+        with pytest.raises(ValueError, match="user-tier rows have project_root IS NULL"):
+            await _collect(
+                backend,
+                scope="user",
+                project_root=tmp_path,
+            )
