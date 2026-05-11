@@ -1540,7 +1540,9 @@ def status_cmd() -> None:
     # word ("installed") stays accurate for both groups.
     installed_count = sum(1 for r in rows if r.tier != "project_local")
     draft_count = sum(1 for r in rows if r.tier == "project_local")
-    draft_suffix = f" (+ {draft_count} local draft{'s' if draft_count != 1 else ''})" if draft_count else ""
+    draft_suffix = (
+        f" (+ {draft_count} local draft{'s' if draft_count != 1 else ''})" if draft_count else ""
+    )
     if wiki_head is None:
         wiki_root = wiki.root
         click.echo(
