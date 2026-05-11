@@ -1844,6 +1844,37 @@ def _migrate_scope_dispatch(
 
     _print_migrate_scope_result(result, apply_=apply_)
 
+    # ADR-0011 project_local contract: ``.memtomem/*.local/`` and the
+    # staging dir must be gitignored. ``mm context init --scope
+    # project_local`` already appends the marker, but a user can land
+    # on project_local for the first time via ``mm context migrate
+    # <kind> <name> --to project_local --apply`` without ever running
+    # init — without this call the new local-draft tier shows up in
+    # ``git status`` and risks being committed by accident
+    # (#895 P2 review #3 fold).
+    if apply_ and to_scope == "project_local":
+        wrote, msg = _append_gitignore_marker(project_root)
+        if wrote:
+            click.secho(
+                "  Appended .gitignore marker (.memtomem/*.local/, .memtomem/.staging/)",
+                fg="green",
+            )
+        elif msg == "no_git_repo_pyproject_only":
+            click.secho(
+                "  warning: project root resolved via pyproject.toml but `.git` "
+                "missing — .gitignore not appended. Run `git init` first to "
+                "git-protect the local tier.",
+                fg="yellow",
+            )
+        elif msg == "no_project_signal":
+            click.secho(
+                "  warning: no .git and no pyproject.toml in project root — "
+                ".gitignore append skipped.",
+                fg="yellow",
+            )
+        # ``already_present`` is silent — the marker is already there,
+        # the user does not need a redundant green tick on every migrate.
+
 
 def _print_migrate_scope_result(result: MigrateScopeResult, *, apply_: bool) -> None:
     """User-facing summary for one scope-tier migration.

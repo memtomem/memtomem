@@ -1713,6 +1713,105 @@ def test_e4_gemini_commands_toml_cleanup_on_migrate(scope_layout):
         assert not path.exists(), f"expected stale fan-out cleaned: {path}"
 
 
+def test_e4_migrate_to_project_local_appends_gitignore_marker(scope_layout):
+    """#895 P2 review #3: ``--to project_local --apply`` must append the
+    project_local block to ``.gitignore`` so the new local-draft tier
+    is not visible to ``git status``.
+
+    Pre-fix, only ``mm context init --scope project_local`` appended the
+    marker; users who landed on project_local first via migrate ended up
+    with ``.memtomem/agents.local/foo/`` tracked by git.
+    """
+    from memtomem.cli.context_cmd import _GITIGNORE_MARKER, _GITIGNORE_PATTERNS
+
+    src = _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN)
+    gi = scope_layout["project_root"] / ".gitignore"
+    assert not gi.exists()  # baseline — no marker yet
+
+    result = _invoke_migrate(
+        _migrate_args("agents", "foo", from_scope="user", to_scope="project_local")
+    )
+    assert result.exit_code == 0, result.output
+
+    dst = _canonical_root_for(scope_layout, "agents", "project_local") / "foo" / "agent.md"
+    assert dst.is_file()
+    assert not src.exists()
+    # POSITIVE pins: marker + both glob patterns now on disk.
+    text = gi.read_text(encoding="utf-8")
+    assert _GITIGNORE_MARKER in text
+    for pat in _GITIGNORE_PATTERNS:
+        assert pat in text
+
+
+def test_e4_migrate_to_project_local_gitignore_is_idempotent(scope_layout):
+    """Second migrate to project_local with an existing marker must NOT
+    duplicate the block. Mirrors the ``mm context init`` idempotency
+    guarantee — the marker comment line is the dedup key.
+    """
+    from memtomem.cli.context_cmd import _GITIGNORE_MARKER
+
+    # Pre-seed the marker as ``init`` would have done.
+    gi = scope_layout["project_root"] / ".gitignore"
+    gi.write_text(f"# pre-existing user content\n\n{_GITIGNORE_MARKER}\n.memtomem/*.local/\n")
+    before = gi.read_text(encoding="utf-8")
+
+    _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN)
+    result = _invoke_migrate(
+        _migrate_args("agents", "foo", from_scope="user", to_scope="project_local")
+    )
+    assert result.exit_code == 0, result.output
+
+    after = gi.read_text(encoding="utf-8")
+    # Single occurrence of the marker — no duplicate block appended.
+    assert after.count(_GITIGNORE_MARKER) == 1
+    assert after == before  # byte-identical
+
+
+def test_e4_migrate_to_project_shared_does_not_touch_gitignore(scope_layout):
+    """Negative pin: a migrate landing in ``project_shared`` (the
+    git-tracked tier) must NOT append the project_local block. The
+    marker semantic is "this scope is gitignored" — appending on the
+    wrong scope would mislead future readers of ``.gitignore``.
+    """
+    _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN)
+    gi = scope_layout["project_root"] / ".gitignore"
+    assert not gi.exists()
+
+    result = _invoke_migrate(
+        _migrate_args(
+            "agents",
+            "foo",
+            from_scope="user",
+            to_scope="project_shared",
+            confirm_project_shared=True,
+        )
+    )
+    assert result.exit_code == 0, result.output
+    # NEGATIVE: .gitignore was never created.
+    assert not gi.exists()
+
+
+def test_e4_migrate_dry_run_does_not_touch_gitignore(scope_layout):
+    """Dry-run preview must not mutate ``.gitignore`` either — the
+    contract is "no on-disk writes without ``--apply``".
+    """
+    _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN)
+    gi = scope_layout["project_root"] / ".gitignore"
+
+    result = _invoke_migrate(
+        _migrate_args(
+            "agents",
+            "foo",
+            from_scope="user",
+            to_scope="project_local",
+            apply_=False,
+            yes=False,  # ``--yes`` is rejected without ``--apply``
+        )
+    )
+    assert result.exit_code == 0, result.output
+    assert not gi.exists()
+
+
 def test_e4_codex_agents_toml_cleanup_on_migrate(scope_layout):
     """Sibling regression: codex agents write ``.toml`` too. The migrate
     cleanup must use the right suffix so a project_shared→user move

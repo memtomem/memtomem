@@ -273,18 +273,26 @@ def format_scan_block_message(
         scope: Destination scope. Always ``"project_shared"`` in
             practice; other scopes never invoke this helper.
         kind: Singular display noun ("agent" / "skill" / "command").
+            Used as-is in the prose; pluralised to "<kind>s" inside
+            the embedded ``mm context migrate`` command because that
+            CLI only accepts the plural choices ``agents`` /
+            ``commands`` / ``skills`` / ``memory`` (#895 P2 review #3
+            — the pre-fix hint produced ``mm context migrate agent ...``
+            and tripped Click's invalid-choice error when users
+            followed the remediation).
         artifact_name: The artifact's canonical name when known (e.g.
             "leak"). Used in the remediation hint —
-            ``mm context migrate <kind> <artifact_name> ...``. ``None``
+            ``mm context migrate <kind>s <artifact_name> ...``. ``None``
             falls back to a generic hint.
 
     Returns:
         Multi-line string carried by :class:`PrivacyBlockedError`.
     """
+    cli_kind = f"{kind}s"  # singular → plural for the migrate CLI choice
     target_hint = (
-        f"mm context migrate {kind} {artifact_name} --to project_local"
+        f"mm context migrate {cli_kind} {artifact_name} --to project_local"
         if artifact_name is not None
-        else f"mm context migrate {kind} <name> --to project_local"
+        else f"mm context migrate {cli_kind} <name> --to project_local"
     )
     return (
         f"Gate A: {blocked.path.name} contains {blocked.hits_count} privacy "

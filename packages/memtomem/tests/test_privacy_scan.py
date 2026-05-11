@@ -292,8 +292,13 @@ class TestRaiseOrCollect:
         assert "Gate A" in msg
         assert "agent.md" in msg
         assert "1 privacy pattern hit" in msg
-        # Remediation hint mentions migrate + project_local.
-        assert "mm context migrate agent foo" in msg
+        # Remediation hint mentions migrate + project_local. Plural
+        # "agents" (not "agent") because the migrate CLI only accepts
+        # the plural asset-type choices (#895 P2 review #3 fold —
+        # the pre-fix hint embedded the singular and tripped Click's
+        # invalid-choice error when users followed the remediation).
+        assert "mm context migrate agents foo" in msg
+        assert "mm context migrate agent foo" not in msg
         assert "--to project_local" in msg
         # Positive contract: the wording is "fan-out", not "import"
         # (parallel to apply_gate_a's import-side wording).
