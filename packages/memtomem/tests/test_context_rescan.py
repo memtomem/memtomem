@@ -191,11 +191,13 @@ class TestContextRescanProjectMarkerGate:
         """User tier is global by design — no project context required.
         Point ``$HOME`` at an empty tmp dir so the test doesn't read the
         real ``~/.memtomem``. ``canonical_artifact_dir`` resolves
-        ``~/.memtomem`` via ``Path.expanduser()`` which reads ``$HOME``.
+        ``~/.memtomem`` via ``Path.expanduser()`` which reads ``$HOME``
+        on POSIX and ``$USERPROFILE`` on Windows.
         """
         home = tmp_path / "user_home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
         monkeypatch.chdir(tmp_path)
 
         result = runner.invoke(cli, ["context", "rescan", "--scope", "user"])
@@ -215,6 +217,9 @@ class TestContextRescanScopeTargetSets:
         home = tmp_path / "user_home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
+        # Path.expanduser() reads $USERPROFILE on Windows; HOME alone leaks
+        # to the real runner profile and the audit scans 0 files.
+        monkeypatch.setenv("USERPROFILE", str(home))
         # Seed a secret under user canonical agents at $HOME/.memtomem/.
         _write_secret_artifact(home, ".memtomem", "agents", "shared", "agent.md")
         # Also seed a project root with a CLAUDE.md secret — must NOT
