@@ -347,6 +347,7 @@
   "settings.ctx.sync_disabled_tooltip": "아직 fan-out 할 canonical {type} 이 없습니다. 가져오기를 먼저 누르세요.",
   "settings.ctx.sync_all_disabled_tooltip": "아직 fan-out 할 canonical 아티팩트가 없습니다. 각 섹션에서 가져오기를 먼저 누르세요.",
   "settings.ctx.project_local_no_fanout_tooltip": "project_local은 런타임 fan-out이 없는 초안 티어입니다.",
+  "settings.ctx.readonly_tier_tooltip": "이 항목을 열거나 수정하려면 project_shared 티어로 전환하세요. 다른 티어는 이번 릴리스에서 목록 보기 전용입니다.",
   "settings.ctx.runtime_only_detail_hint": "런타임 미리보기 — 아직 .memtomem/ 에 없습니다.",
   "settings.ctx.import_this": "이 {type} 가져오기",
   "settings.ctx.runtime_output": "런타임 출력",

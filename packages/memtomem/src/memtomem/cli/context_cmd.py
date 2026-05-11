@@ -1531,8 +1531,7 @@ _PROJECT_LOCAL_ANNOTATION = "(draft, no fan-out)"
     default="project_shared",
     show_default=True,
     help=(
-        "Canonical artifact tier to show. project_local rows are drafts "
-        "with no runtime fan-out."
+        "Canonical artifact tier to show. project_local rows are drafts with no runtime fan-out."
     ),
 )
 def status_cmd(scope_flag: TargetScope) -> None:

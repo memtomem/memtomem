@@ -134,6 +134,22 @@ function _ctxWithTargetScope(url) {
   return `${url}${url.includes('?') ? '&' : '?'}${param}`;
 }
 
+// Item-level routes (read/edit/delete/diff/sync/import) currently hardcode
+// the project_shared canonical resolver — see context_skills.py
+// _canonical_skill_dir and siblings in context_agents/commands. Until those
+// routes accept target_scope, gate the surface that would cross tiers and
+// either 404 or mutate a same-named project_shared artifact (review P1 on
+// #940). Reads-only tier filter for now; widen when backend lands scope.
+function _ctxIsReadonlyTier() {
+  return _ctxTargetScope !== 'project_shared';
+}
+
+function _ctxBlockedByTier() {
+  if (!_ctxIsReadonlyTier()) return false;
+  showToast(t('settings.ctx.readonly_tier_tooltip'), 'info');
+  return true;
+}
+
 function _ctxTierControls(type) {
   return `<div class="ctx-tier-filter" data-type="${escapeHtml(type)}" role="group" aria-label="${escapeHtml(t('settings.ctx.tier_filter'))}">
     <button type="button" data-scope="user" class="${_ctxTargetScope === 'user' ? 'active' : ''}">user</button>
@@ -512,6 +528,12 @@ window.addEventListener('langchange', () => {
 // Sync All button
 document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () => {
   const btn = document.getElementById('ctx-sync-all-btn');
+  // Sync routes hardcode the project_shared canonical resolver. On non-shared
+  // tiers the call would fan out the wrong (same-name) project_shared
+  // artifacts. Block before issuing any POST. The project_local-specific
+  // tooltip path below stays for the existing "drafts have no fan-out" UX;
+  // this catch precedes it so user-tier also surfaces the right message.
+  if (_ctxBlockedByTier()) return;
   if (btn.dataset.runtimeOnly === 'true') {
     showToast(t('settings.ctx.sync_all_disabled_tooltip'),
       'info');
@@ -765,16 +787,19 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
     // re-insert the runtime-only banner above the fresh list.
     if (seq !== _ctxListSeq[type]) return;
     const items = data[type] || [];
-    // project_local lists return draft items, but the detail / rendered /
-    // diff / edit / delete endpoints downstream of loadCtxDetail today
+    // project_local AND user lists return items, but the detail / rendered
+    // / diff / edit / delete endpoints downstream of loadCtxDetail today
     // resolve only project_shared canonicals — a click on a draft would
-    // 404 or, worse, open a same-named shared artifact (review P2 on
+    // 404 or, worse, open a same-named shared artifact (review P1/P2 on
     // PR #940). Render those cards as read-only until the detail surface
     // is tier-aware so the broken affordance is removed at the source.
     // TODO(#940-followup): thread target_scope through read/rendered/
-    // diff/put/delete and re-enable click navigation for project_local.
-    const isReadonlyTier = _ctxTargetScope === 'project_local';
-    const clickable = _ctxScopeIsServerCwd(scope) && !isReadonlyTier;
+    // diff/put/delete and re-enable click navigation for the non-shared
+    // tiers. The same gate widening — user AND project_local both block
+    // — is mirrored on Sync All / Sync / Import / Create via
+    // ``_ctxBlockedByTier`` so write-side affordances stay consistent
+    // with the read-side readonly card.
+    const clickable = _ctxScopeIsServerCwd(scope) && !_ctxIsReadonlyTier();
     container.innerHTML = _ctxRenderItemsHtml(
       items,
       type,
@@ -1563,6 +1588,10 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
 
 document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
   btn.addEventListener('click', async () => {
+    // Sync route hardcodes the project_shared canonical resolver — see
+    // review P1 on #940. Block before the confirm dialog so non-shared
+    // tiers don't fan out a same-named project_shared artifact by mistake.
+    if (_ctxBlockedByTier()) return;
     const type = btn.dataset.type;
     // Guard against pressing Sync when the cwd has no canonical artifacts —
     // the request would resolve to a `no_canonical_root` skip with an info
@@ -1622,6 +1651,7 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
 
 document.querySelectorAll('.ctx-import-btn').forEach(btn => {
   btn.addEventListener('click', async () => {
+    if (_ctxBlockedByTier()) return;
     const type = btn.dataset.type;
     // Overwrite is opt-in: the default skip-when-canonical-exists rule
     // protects user-maintained canonicals from a stray Import wiping
@@ -1688,6 +1718,7 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
 
 document.querySelectorAll('.ctx-create-btn').forEach(btn => {
   btn.addEventListener('click', () => {
+    if (_ctxBlockedByTier()) return;
     const type = btn.dataset.type;
     const listEl = qs(`ctx-${type}-list`);
     if (listEl.querySelector('.ctx-create-form')) return;

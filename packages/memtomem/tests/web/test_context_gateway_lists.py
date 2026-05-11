@@ -276,6 +276,108 @@ def test_context_list_card_renders_project_local_tier_badge_with_annotation(
     assert card_name.locator(".badge-tier--project_local").count() == 1
 
 
+def test_context_list_non_shared_tier_renders_cards_readonly(page, mm_web_url: str) -> None:
+    """Cards on non-shared tier render readonly with no click handler (P1 #940).
+
+    Item-level GET/PUT/DELETE/diff/import routes hardcode the project_shared
+    canonical resolver (``context_skills.py::_canonical_skill_dir`` and
+    siblings). On user / project_local tiers a wired-up click would either
+    404 or, worse, open a same-named project_shared artifact. The
+    ``clickable`` gate in ``_loadScopeGroupItems`` (widened to cover both
+    non-shared tiers, not just project_local) decorates cards with
+    ``ctx-card--readonly`` and skips listener attachment so the broken
+    affordance is removed at the source.
+    """
+    install_default_stubs(page)
+    # The shared ``_stub_*`` helpers register patterns without trailing ``**``
+    # so they miss URLs that carry ``?target_scope=...``. This test triggers
+    # a tier switch which adds that query string, so register wider patterns
+    # locally; last-route-wins puts these ahead of the catch-all.
+    _skills_payload = {
+        "skills": [
+            {
+                "name": "draft-skill",
+                "canonical_path": ".memtomem/skills.local/draft-skill",
+                "target_scope": "project_local",
+                "runtimes": [],
+            }
+        ],
+        "scanned_dirs": [],
+    }
+    page.route(
+        "**/api/context/projects**",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_CWD_PROJECTS_WITH_NON_CWD_MISSING),
+        ),
+    )
+    page.route(
+        "**/api/context/skills**",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_skills_payload),
+        ),
+    )
+
+    # Counter-route on the item detail URL. ``install_default_stubs`` already
+    # registered ``**/api/**`` as a catch-all, but last-route-wins lets us
+    # observe the specific URL the click would hit. An empty list at the end
+    # of the test proves the gate suppressed the GET entirely.
+    detail_calls: list[str] = []
+
+    def _on_detail(route):
+        detail_calls.append(route.request.url)
+        route.fulfill(status=200, content_type="application/json", body="{}")
+
+    page.route("**/api/context/skills/draft-skill**", _on_detail)
+
+    page.goto(mm_web_url)
+    _open_skills_list(page)
+
+    # Switch tier via the list's filter row — same path a real user takes.
+    page.locator("#ctx-skills-list .ctx-tier-filter button[data-scope='project_local']").click()
+    page.wait_for_function(
+        "() => {"
+        "  const b = document.querySelector("
+        "    '#ctx-skills-list .ctx-tier-filter button[data-scope=\"project_local\"]');"
+        "  return b && b.classList.contains('active');"
+        "}",
+        timeout=3_000,
+    )
+    # Re-render populates the cwd scope group's items lazily on open;
+    # the cwd group is open by default. Wait for the card to land.
+    page.wait_for_selector(
+        "#ctx-skills-list details[data-scope-id='cwd-scope'] .ctx-card",
+        timeout=5_000,
+    )
+
+    card = page.locator("#ctx-skills-list details[data-scope-id='cwd-scope'] .ctx-card").first
+    # Cards on non-shared tier carry the readonly marker class. CSS uses this
+    # to dim the affordance; the JS uses the same ``clickable`` flag to skip
+    # listener attachment, so a click yields no behavior at all.
+    card_classes = card.get_attribute("class") or ""
+    assert "ctx-card--readonly" in card_classes, (
+        f"non-shared-tier card should carry ctx-card--readonly, got class={card_classes!r}"
+    )
+
+    card.click()
+
+    # No item-detail fetch fires, and the card never gains active state.
+    # ``wait_for_timeout(250)`` gives any leaked handler a chance to flush —
+    # the assertion fails fast (single tick) on regression rather than
+    # depending on the test runner's natural cadence.
+    page.wait_for_timeout(250)
+    assert detail_calls == [], (
+        f"item-detail GET must be blocked on non-shared tier, got: {detail_calls}"
+    )
+    card_classes_post = card.get_attribute("class") or ""
+    assert "active" not in card_classes_post, (
+        f"unwired click must not flip the card to active, got class={card_classes_post!r}"
+    )
+
+
 def test_q_pr4_langchange_rerenders_runtime_only_banner(page, mm_web_url: str) -> None:
     """``_ctxRefreshSectionState`` writes the runtime-only banner via
     ``textContent`` (not innerHTML), but the staleness mechanism is the
