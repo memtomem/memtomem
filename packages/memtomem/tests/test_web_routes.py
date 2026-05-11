@@ -908,6 +908,134 @@ class TestSources:
         data = resp.json()
         assert data["language_drift"] is None
 
+    # ---- canonical-residency tier (ADR-0016 §7 — #924) ----------------------
+    #
+    # Sources surface a per-row ``target_scope`` so the SPA can render a
+    # tier badge without rebuilding the classification client-side. The
+    # route also honors ``?target_scope=`` — omitting it hides
+    # ``project_local`` rows per ADR-0015 §4a.
+
+    async def test_user_tier_default_when_path_outside_project_dirs(self, app, client: AsyncClient):
+        """Any source path that isn't under a registered
+        ``project_memory_dir`` classifies as ``user`` — same fallback the
+        indexer applies at config.py:1495-1507. Default fixture's
+        ``/tmp/test.md`` lives outside the project memory tree, so the
+        badge token must be the user-tier default."""
+        resp = await client.get("/api/sources")
+        src = resp.json()["sources"][0]
+        assert src["target_scope"] == "user"
+
+    async def test_project_shared_tier_classified_from_path(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        """A source under a registered ``project_memory_dirs`` shared
+        directory classifies as ``project_shared``. Pin the
+        path-pattern resolution end-to-end so a regression in
+        ``classify_scope`` (or in the route's wire-up) surfaces here
+        rather than as a silently-wrong tier badge."""
+        proj_root = tmp_path / "proj"
+        shared_dir = proj_root / ".memtomem" / "memories"
+        shared_dir.mkdir(parents=True)
+        source = shared_dir / "note.md"
+        source.touch()
+
+        app.state.config.indexing.memory_dirs = []
+        app.state.config.indexing.project_memory_dirs = [shared_dir]
+        app.state.storage.get_source_files_with_counts.return_value = [
+            (source, 2, "2026-04-29T10:00:00", "default", 100, 50, 200),
+        ]
+
+        resp = await client.get("/api/sources")
+        src = resp.json()["sources"][0]
+        assert src["target_scope"] == "project_shared"
+
+    async def test_project_local_hidden_by_default(self, app, client: AsyncClient, tmp_path: Path):
+        """ADR-0015 §4a — ``project_local`` sources are hidden in
+        overview / list views unless explicitly requested. Pin the
+        default-omit behavior; the only way to surface this tier is
+        ``?target_scope=project_local``.
+        """
+        proj_root = tmp_path / "proj"
+        local_dir = proj_root / ".memtomem" / "memories.local"
+        local_dir.mkdir(parents=True)
+        source = local_dir / "draft.md"
+        source.touch()
+
+        app.state.config.indexing.memory_dirs = []
+        app.state.config.indexing.project_memory_dirs = [local_dir]
+        app.state.storage.get_source_files_with_counts.return_value = [
+            (source, 1, "2026-04-29T10:00:00", "default", 100, 50, 200),
+        ]
+
+        resp = await client.get("/api/sources")
+        assert resp.json()["total"] == 0, (
+            "project_local sources must be hidden when ?target_scope= is omitted"
+        )
+
+    async def test_project_local_visible_with_explicit_filter(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        """Symmetric pin against the default-hidden case — passing
+        ``?target_scope=project_local`` is the only way to surface
+        these rows. Without this test the previous case could pass
+        vacuously even if the filter never actually narrowed to the
+        local tier."""
+        proj_root = tmp_path / "proj"
+        local_dir = proj_root / ".memtomem" / "memories.local"
+        local_dir.mkdir(parents=True)
+        source = local_dir / "draft.md"
+        source.touch()
+
+        app.state.config.indexing.memory_dirs = []
+        app.state.config.indexing.project_memory_dirs = [local_dir]
+        app.state.storage.get_source_files_with_counts.return_value = [
+            (source, 1, "2026-04-29T10:00:00", "default", 100, 50, 200),
+        ]
+
+        resp = await client.get("/api/sources", params={"target_scope": "project_local"})
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["sources"][0]["target_scope"] == "project_local"
+
+    async def test_target_scope_filter_narrows_to_one_tier(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        """``?target_scope=user`` excludes a registered project_shared
+        source even though it would otherwise pass the default filter.
+        Pins that the filter is *narrow-to-one* (not *omit-only-local*)."""
+        proj_root = tmp_path / "proj"
+        shared_dir = proj_root / ".memtomem" / "memories"
+        shared_dir.mkdir(parents=True)
+        shared_src = shared_dir / "note.md"
+        shared_src.touch()
+        user_src = tmp_path / "user.md"
+        user_src.touch()
+
+        app.state.config.indexing.memory_dirs = [tmp_path]
+        app.state.config.indexing.project_memory_dirs = [shared_dir]
+        app.state.storage.get_source_files_with_counts.return_value = [
+            (shared_src, 2, "2026-04-29T10:00:00", "default", 100, 50, 200),
+            (user_src, 1, "2026-04-29T10:00:00", "default", 100, 50, 200),
+        ]
+
+        resp_user = await client.get("/api/sources", params={"target_scope": "user"})
+        rows = resp_user.json()["sources"]
+        assert len(rows) == 1
+        assert rows[0]["target_scope"] == "user"
+
+        # Symmetric narrow: ``project_shared`` excludes the user-tier row.
+        resp_shared = await client.get("/api/sources", params={"target_scope": "project_shared"})
+        rows_shared = resp_shared.json()["sources"]
+        assert len(rows_shared) == 1
+        assert rows_shared[0]["target_scope"] == "project_shared"
+
+    async def test_invalid_target_scope_returns_422(self, client: AsyncClient):
+        """Literal validation refuses unknown tier tokens at the query
+        layer too — same guardrail as ``/api/add``."""
+        resp = await client.get("/api/sources", params={"target_scope": "draft"})
+        assert resp.status_code == 422
+
     # ---- regenerate endpoints ----------------------------------------------
 
     async def test_regenerate_summaries_rejected_when_disabled(self, app, client: AsyncClient):
@@ -996,6 +1124,69 @@ class TestChunksList:
         app.state.storage.get_all_source_files.return_value = [Path("/tmp/other.md")]
         resp = await client.get("/api/chunks", params={"source": "/tmp/test.md"})
         assert resp.status_code == 403
+
+    async def test_chunk_out_carries_target_scope_from_meta(self, app, client: AsyncClient):
+        """ADR-0016 §7 — ``ChunkOut.target_scope`` is sourced from
+        ``ChunkMetadata.scope`` so the SPA's tier badge always agrees
+        with the canonical-residency tier persisted in storage. Pin
+        all three literal tokens; rendering relies on them verbatim
+        (no display aliases — pinned by the Tiered Context Gateway v2
+        memory)."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        def _chunk_with_scope(scope: str) -> Chunk:
+            return Chunk(
+                content=f"content for {scope}",
+                metadata=ChunkMetadata(
+                    source_file=Path("/tmp/test.md"),
+                    heading_hierarchy=("Overview",),
+                    tags=(),
+                    namespace="default",
+                    start_line=1,
+                    end_line=2,
+                    scope=scope,
+                ),
+                id=CHUNK_ID,
+                content_hash="h",
+                embedding=[0.1] * 768,
+                created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )
+
+        for token in ("user", "project_shared", "project_local"):
+            app.state.storage.list_chunks_by_source.return_value = [_chunk_with_scope(token)]
+            resp = await client.get("/api/chunks", params={"source": "/tmp/test.md"})
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["chunks"][0]["target_scope"] == token, (
+                f"target_scope on ChunkOut did not echo meta.scope={token!r}"
+            )
+
+    async def test_chunk_out_target_scope_defaults_to_user(self, app, client: AsyncClient):
+        """Legacy chunks whose persisted ``scope`` is an empty string fall
+        back to the user-tier badge. Pins the ``chunk_to_out`` fallback
+        so a partially-migrated DB doesn't produce empty-string badges."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        legacy = Chunk(
+            content="legacy",
+            metadata=ChunkMetadata(
+                source_file=Path("/tmp/test.md"),
+                heading_hierarchy=(),
+                tags=(),
+                namespace="default",
+                start_line=1,
+                end_line=2,
+                scope="",  # legacy empty-string row
+            ),
+            id=CHUNK_ID,
+            content_hash="h",
+            embedding=[0.1] * 768,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        app.state.storage.list_chunks_by_source.return_value = [legacy]
+        resp = await client.get("/api/chunks", params={"source": "/tmp/test.md"})
+        assert resp.json()["chunks"][0]["target_scope"] == "user"
 
 
 # ---------------------------------------------------------------------------
@@ -1716,6 +1907,212 @@ class TestAddMemoryRedaction:
         snap = privacy.snapshot()["by_tool"]["web_api_add"]
         assert snap["pass"] == 1
         assert snap["blocked"] == 0
+
+
+# ---------------------------------------------------------------------------
+# POST /api/add — project-tier (ADR-0011 §5 Gate B / ADR-0016 §7) — #924
+#
+# Mirror the MCP ``mem_add`` Gate B at ``memory_crud.py:204`` and the Web
+# parallel on the chunks DELETE path at ``chunks.py:157``. project_shared
+# writes via ``/api/add`` require an explicit ``confirm_project_shared=true``;
+# the 4xx payload carries the CLI hint + docs URL so the SPA renders
+# "rejected, here's the equivalent invocation" without rewriting the prose.
+# ---------------------------------------------------------------------------
+
+
+class TestAddMemoryProjectTier:
+    async def test_invalid_scope_returns_422(self, client: AsyncClient):
+        """Pydantic Literal validation rejects unknown tier tokens.
+
+        Cheap guardrail: the API only accepts the three canonical tokens —
+        any typo (e.g. ``user_local``) lands a 422 before the route runs,
+        so a misspelled tier can't silently fall back to user-tier writes.
+        """
+        resp = await client.post(
+            "/api/add",
+            json={"content": "x", "scope": "user_local"},
+        )
+        assert resp.status_code == 422, resp.text
+
+    async def test_project_shared_without_confirm_returns_403_with_hint(self, client: AsyncClient):
+        """Gate B fires before the redaction guard runs. The 4xx body must
+        carry the literal CLI hint + docs URL so the SPA can render the
+        rejection without rebuilding the prose client-side.
+        """
+        resp = await client.post(
+            "/api/add",
+            json={"content": "Plain prose.", "scope": "project_shared"},
+        )
+        assert resp.status_code == 403, resp.text
+        body = resp.json()
+        # FastAPI wraps the raised ``detail`` dict under ``detail`` again
+        # (mirrors the redaction-error nesting at line 1685 above).
+        detail = body.get("detail") if isinstance(body.get("detail"), dict) else body
+        assert detail["detail"] == "blocked_project_shared"
+        assert detail["surface"] == "web_api_add"
+        assert detail["scope"] == "project_shared"
+        assert "confirm_project_shared" in detail["message"]
+        assert detail["cli_hint"] == "mm mem add --scope project_shared"
+        # Docs URL must point at the canonical-residency ADR — pin the
+        # filename so a re-org of the ADR tree gets caught here rather
+        # than producing a silently dead link in production toasts.
+        assert "0011-canonical-artifact-scope-hierarchy" in detail["docs_url"]
+
+    async def test_project_shared_confirm_required_even_with_clean_content(
+        self, client: AsyncClient
+    ):
+        """The redaction guard would normally let plain prose through;
+        Gate B must still refuse without confirm. Pins that the gates
+        compose in the right order (Gate B → redaction, not the other
+        way around) so a clean payload can't sneak past Gate B.
+        """
+        resp = await client.post(
+            "/api/add",
+            json={"content": "Plain prose, no secrets.", "scope": "project_shared"},
+        )
+        assert resp.status_code == 403
+        # Critically, the 4xx must be the project-tier shape, not
+        # the redaction shape — the latter would mean Gate B never ran.
+        detail = resp.json().get("detail", {})
+        assert detail.get("detail") == "blocked_project_shared", (
+            f"expected Gate B 4xx shape, got: {detail!r}"
+        )
+
+    async def test_project_local_bypasses_gate_b(self, app, client: AsyncClient, tmp_path):
+        """ADR-0011 §3: project_local does NOT require confirm_project_shared
+        — it's the draft tier (zero-to-one fan-out for non-memory artifacts;
+        memory still fans out per its own contract). Only project_shared
+        is git-tracked and gate-B-confirmed.
+        """
+        # Register the project_local tier so the route's
+        # ``is_project_tier_registered`` check passes. Mirrors the
+        # ``mm context memory-migrate`` registration guard the MCP add
+        # path enforces at memory_crud.py:296-300.
+        proj_root = tmp_path / "proj"
+        local_dir = proj_root / ".memtomem" / "memories.local"
+        local_dir.mkdir(parents=True)
+        app.state.project_root = proj_root
+        app.state.config.indexing.memory_dirs = [tmp_path / "user_mem"]
+        (tmp_path / "user_mem").mkdir()
+        app.state.config.indexing.project_memory_dirs = [local_dir]
+
+        resp = await client.post(
+            "/api/add",
+            json={"content": "Draft note.", "scope": "project_local"},
+        )
+        assert resp.status_code == 200, resp.text
+        path = Path(resp.json()["file"]).resolve()
+        assert local_dir.resolve() in path.parents, (
+            f"project_local write landed at {path}, expected under {local_dir}"
+        )
+
+    async def test_project_shared_with_confirm_routes_to_shared_dir(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """With ``confirm_project_shared=true`` the write proceeds and
+        the resolved path lands under ``<proj>/.memtomem/memories``.
+        Pins write-surface parity with the MCP ``mem_add`` shared-tier
+        routing at memory_crud.py:286-289.
+        """
+        proj_root = tmp_path / "proj"
+        shared_dir = proj_root / ".memtomem" / "memories"
+        shared_dir.mkdir(parents=True)
+        app.state.project_root = proj_root
+        app.state.config.indexing.memory_dirs = [tmp_path / "user_mem"]
+        (tmp_path / "user_mem").mkdir()
+        app.state.config.indexing.project_memory_dirs = [shared_dir]
+
+        resp = await client.post(
+            "/api/add",
+            json={
+                "content": "Team note.",
+                "scope": "project_shared",
+                "confirm_project_shared": True,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        path = Path(resp.json()["file"]).resolve()
+        assert shared_dir.resolve() in path.parents, (
+            f"project_shared write landed at {path}, expected under {shared_dir}"
+        )
+
+    async def test_project_shared_resolves_via_registered_root_not_raw_cwd(
+        self, app, client: AsyncClient, tmp_path, monkeypatch
+    ):
+        """ADR-0011 PR-F parity with MCP ``mem_add`` (memory_crud.py:285
+        via search.py:73-96): when the server runs from a subdirectory
+        of a registered project, ``scope=project_shared`` must resolve
+        against the registered project root, not the raw cwd. Without
+        ``_resolve_project_context_from_dirs`` wiring, the route would
+        land on ``<cwd>/.memtomem/memories`` (which doesn't exist /
+        isn't registered) and 422 the operator — while MCP correctly
+        writes under ``<project_root>/.memtomem/memories``. Codex
+        review #924 Major finding.
+        """
+        proj_root = tmp_path / "proj"
+        subdir = proj_root / "src" / "deep"
+        subdir.mkdir(parents=True)
+        shared_dir = proj_root / ".memtomem" / "memories"
+        shared_dir.mkdir(parents=True)
+
+        # Simulate "server launched from a subdirectory of a project".
+        # The MCP path resolves project_root from cwd via
+        # ``_resolve_project_context_from_dirs`` — pin that the Web
+        # path now uses the same resolver, so a cwd inside the project
+        # finds its way to the registered root regardless of where on
+        # the tree the process was started.
+        monkeypatch.chdir(subdir)
+        # ``app.state.project_root`` stays at the (now-wrong) subdir
+        # value the lifespan would have captured if it ran here. The
+        # fix is that the route now ignores it in favor of the
+        # registered-root resolver; if a regression reverts to using
+        # ``app.state.project_root`` raw, this test fails because
+        # ``<subdir>/.memtomem/memories`` is unregistered.
+        app.state.project_root = subdir
+        app.state.config.indexing.memory_dirs = [tmp_path / "user_mem"]
+        (tmp_path / "user_mem").mkdir()
+        app.state.config.indexing.project_memory_dirs = [shared_dir]
+
+        resp = await client.post(
+            "/api/add",
+            json={
+                "content": "Team note from a subdirectory.",
+                "scope": "project_shared",
+                "confirm_project_shared": True,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        path = Path(resp.json()["file"]).resolve()
+        assert shared_dir.resolve() in path.parents, (
+            f"project_shared write from subdir landed at {path}, "
+            f"expected under registered root {shared_dir}"
+        )
+
+    async def test_project_tier_unregistered_returns_422(self, app, client: AsyncClient, tmp_path):
+        """Refuse if the resolved project-tier dir isn't in
+        ``project_memory_dirs`` — otherwise the row's persisted scope
+        would flip to ``project_shared`` but the read surface / watcher
+        couldn't see it. Mirrors the MCP gate at
+        ``memory_crud.py:296-300``.
+        """
+        proj_root = tmp_path / "proj"
+        proj_root.mkdir()
+        app.state.project_root = proj_root
+        app.state.config.indexing.memory_dirs = [tmp_path / "user_mem"]
+        (tmp_path / "user_mem").mkdir()
+        # Intentionally leave project_memory_dirs empty so the registration
+        # check refuses the write.
+        app.state.config.indexing.project_memory_dirs = []
+
+        resp = await client.post(
+            "/api/add",
+            json={
+                "content": "x",
+                "scope": "project_shared",
+                "confirm_project_shared": True,
+            },
+        )
+        assert resp.status_code == 422, resp.text
 
 
 # ---------------------------------------------------------------------------

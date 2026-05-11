@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from memtomem.config import TargetScope
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context.agents import (
@@ -85,10 +86,17 @@ def _agent_to_dict(agent: SubAgent) -> dict:
 @router.get("/context/agents")
 async def list_agents(
     project_root: Path = Depends(resolve_scope_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description=(
+            "Canonical-residency tier to list. project_local is shown only "
+            "when explicitly requested."
+        ),
+    ),
 ) -> dict:
     """List canonical agents. Accepts ``?scope_id=`` like list_skills."""
-    canonicals = list_canonical_agents(project_root)
-    diffs = diff_agents(project_root)
+    canonicals = list_canonical_agents(project_root, scope=target_scope)
+    diffs = diff_agents(project_root, scope=target_scope)
 
     by_name: dict[str, list[dict]] = {}
     for runtime, agent_name, status in diffs:
@@ -102,14 +110,22 @@ async def list_agents(
         agents.append(
             {
                 "name": name,
-                "canonical_path": str(agent_path.relative_to(project_root)),
+                "canonical_path": _safe_rel(agent_path, project_root),
+                "target_scope": target_scope,
                 "runtimes": by_name.get(name, []),
             }
         )
 
     for agent_name, runtimes in by_name.items():
         if agent_name not in canonical_names:
-            agents.append({"name": agent_name, "canonical_path": None, "runtimes": runtimes})
+            agents.append(
+                {
+                    "name": agent_name,
+                    "canonical_path": None,
+                    "target_scope": target_scope,
+                    "runtimes": runtimes,
+                }
+            )
 
     return {
         "agents": agents,

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+from memtomem.config import TargetScope
 
 
 class AddMemoryRequest(BaseModel):
@@ -16,6 +20,15 @@ class AddMemoryRequest(BaseModel):
     # surfaces the matched-pattern count and asks the user to confirm
     # before retrying with this flag set.
     force_unsafe: bool = False
+    # ADR-0011 Gate B / ADR-0016 §7: explicit tier selection for the
+    # canonical residency of this write. Defaults to ``user`` so the
+    # existing SPA flow (which does not yet send the field) keeps writing
+    # to the user-tier ``memory_dirs[0]``. Project tiers require explicit
+    # opt-in from the caller; ``project_shared`` additionally requires
+    # ``confirm_project_shared=True`` (Gate B confirm — mirrors the MCP
+    # ``mem_add`` kwarg and the chunks.py PATCH/DELETE confirm pattern).
+    scope: TargetScope = "user"
+    confirm_project_shared: bool = False
 
 
 class RedactionBlockedResponse(BaseModel):
@@ -27,6 +40,27 @@ class RedactionBlockedResponse(BaseModel):
     detail: str = "redaction_blocked"
     hits: int
     surface: str
+
+
+class ProjectTierBlockedResponse(BaseModel):
+    """Body shape returned with HTTP 403 when ``/api/add`` is rejected
+    for a ``scope='project_shared'`` write without an explicit
+    ``confirm_project_shared=true`` (ADR-0011 §5 Gate B — Web-side
+    parallel of the MCP ``confirm_project_shared`` kwarg).
+
+    ``cli_hint`` names the equivalent CLI invocation so the SPA can
+    surface "rejected — to proceed, either retry with confirm or run
+    this command" without rewriting the message client-side. ``docs_url``
+    points at the canonical-residency ADR; ADR-0011 §1's settings-row
+    cleanup landed in PR #925 so the link target is stable.
+    """
+
+    detail: Literal["blocked_project_shared"] = "blocked_project_shared"
+    surface: str
+    scope: TargetScope
+    message: str
+    cli_hint: str
+    docs_url: str
 
 
 class AddMemoryResponse(BaseModel):

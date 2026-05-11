@@ -25,6 +25,7 @@ from memtomem.context.skills import (
     generate_all_skills,
     list_canonical_skills,
 )
+from memtomem.config import TargetScope
 from memtomem.web.deps import get_project_root
 from memtomem.web.routes._locks import _gateway_lock
 from memtomem.web.routes.context_projects import resolve_scope_root
@@ -61,6 +62,13 @@ def _safe_rel(p: Path, project_root: Path) -> str:
 @router.get("/context/skills")
 async def list_skills(
     project_root: Path = Depends(resolve_scope_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description=(
+            "Canonical-residency tier to list. project_local is shown only "
+            "when explicitly requested."
+        ),
+    ),
 ) -> dict:
     """List canonical skills with per-runtime sync status.
 
@@ -69,8 +77,8 @@ async def list_skills(
     for that scope's root. PR2 keeps mutating endpoints (POST/PUT/DELETE/
     sync/import) on cwd only — multi-scope writes ship in PR3.
     """
-    canonicals = list_canonical_skills(project_root)
-    diffs = diff_skills(project_root)
+    canonicals = list_canonical_skills(project_root, scope=target_scope)
+    diffs = diff_skills(project_root, scope=target_scope)
 
     # Group diff tuples by skill name
     by_name: dict[str, list[dict]] = {}
@@ -82,7 +90,8 @@ async def list_skills(
         skills.append(
             {
                 "name": skill_dir.name,
-                "canonical_path": str(skill_dir.relative_to(project_root)),
+                "canonical_path": _safe_rel(skill_dir, project_root),
+                "target_scope": target_scope,
                 "runtimes": by_name.get(skill_dir.name, []),
             }
         )
@@ -95,6 +104,7 @@ async def list_skills(
                 {
                     "name": skill_name,
                     "canonical_path": None,
+                    "target_scope": target_scope,
                     "runtimes": runtimes,
                 }
             )

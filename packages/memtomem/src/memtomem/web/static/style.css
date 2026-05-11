@@ -2603,6 +2603,18 @@ select:focus-visible {
 .badge-retrieval--dense   { background: rgba(116, 185, 255, 0.15); color: #5ba4f5; }
 .badge-retrieval--reranked{ background: rgba(232, 67, 147, 0.15); color: #e84393; }
 
+/* ── Canonical-residency tier badges (ADR-0016 §7) ──
+ * Three literal tokens rendered as-is — no display aliases
+ * (project memory "Tiered Context Gateway v2" pins this contract).
+ * Colors track the trust axis: user (cool, low risk),
+ * project_shared (warm, git-tracked), project_local (neutral, draft).
+ */
+.badge-tier { font-family: var(--mono); font-size: 0.65rem; letter-spacing: 0.02em; }
+.badge-tier--user           { background: rgba(116, 185, 255, 0.15); color: #5ba4f5; }
+.badge-tier--project_shared { background: rgba(253, 203, 110, 0.18); color: #e0a800; }
+.badge-tier--project_local  { background: rgba(123, 127, 150, 0.18); color: var(--muted); }
+.tier-fanout-annotation { font-size: 0.65rem; color: var(--muted); margin-left: 4px; font-style: italic; }
+
 /* ── Namespaces Tab ── */
 .ns-layout { display: flex; flex-direction: column; gap: 16px; padding: 20px; overflow-y: auto; }
 .ns-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }

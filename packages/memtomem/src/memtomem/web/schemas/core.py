@@ -24,6 +24,13 @@ class ChunkOut(BaseModel):
     # surfaces a badge with ∞ sentinel for the unbounded side.
     valid_from_unix: int | None = None
     valid_to_unix: int | None = None
+    # ADR-0016 §7 canonical-residency tier. Always one of the three
+    # literal tokens ``user`` / ``project_shared`` / ``project_local``
+    # — no display aliases (the SPA renders the token verbatim per the
+    # PR-F badge contract). Mirrors ``ChunkMetadata.scope`` in
+    # ``memtomem/models.py``; missing on legacy chunks defaults to
+    # ``user`` via ``chunk_to_out``.
+    target_scope: str = "user"
 
 
 class ContextInfoOut(BaseModel):
@@ -72,6 +79,7 @@ def chunk_to_out(chunk) -> ChunkOut:
         updated_at=chunk.updated_at,
         valid_from_unix=meta.valid_from_unix,
         valid_to_unix=meta.valid_to_unix,
+        target_scope=meta.scope or "user",
     )
 
 

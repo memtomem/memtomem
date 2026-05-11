@@ -1232,6 +1232,7 @@ async def uploads_usage() -> UploadUsageResponse:
 @router.post("/add", response_model=AddMemoryResponse, dependencies=[Depends(require_configured)])
 async def add_memory(
     req: AddMemoryRequest,
+    request: Request,
     index_engine=Depends(get_index_engine),
     storage=Depends(get_storage),
     config=Depends(get_config),
@@ -1240,15 +1241,57 @@ async def add_memory(
 
     from memtomem import privacy
 
+    # ADR-0011 §5 Gate B (PR-F slice 4): project_shared writes go to git;
+    # require an explicit ``confirm_project_shared=true`` so the SPA
+    # cannot silently commit PII to a tracked tier through a default-bool
+    # oversight. Mirrors the MCP ``mem_add`` gate at
+    # ``memory_crud.py:204`` and the Web parallel on the chunks DELETE
+    # path at ``chunks.py:157``. project_local is NOT Gate B-gated —
+    # only the canonical-residency tier choice + ADR-0011 §3's
+    # zero-fan-out rule applies. The 4xx body carries the CLI hint /
+    # docs link so the SPA renders "rejected, here's the equivalent
+    # invocation" without rewriting the prose client-side.
+    if req.scope == "project_shared" and not req.confirm_project_shared:
+        logger.info(
+            "web add_memory rejected project_shared write without confirmation",
+            extra={"file": req.file, "namespace": req.namespace},
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "detail": "blocked_project_shared",
+                "surface": "web_api_add",
+                "scope": req.scope,
+                "message": (
+                    "scope='project_shared' writes to a git-tracked directory. "
+                    "Re-submit with confirm_project_shared=true to proceed."
+                ),
+                "cli_hint": "mm mem add --scope project_shared",
+                "docs_url": (
+                    "https://github.com/memtomem/memtomem/blob/main/docs/adr/"
+                    "0011-canonical-artifact-scope-hierarchy.md"
+                ),
+            },
+        )
+
     # Trust-boundary redaction guard. Mirrors MCP ``mem_add`` so the
     # same secret patterns block writes regardless of which surface
     # the agent or user came in through. ``force_unsafe`` is opt-in
-    # via the SPA's confirm-and-retry UX after the first 403.
+    # via the SPA's confirm-and-retry UX after the first 403. Threading
+    # ``scope`` here makes Gate A's hard-refusal of ``force_unsafe=True``
+    # on project_shared writes fire on the Web path too (ADR-0011 PR-D
+    # round 7 parity — same fix as the chunks PATCH path at
+    # ``chunks.py:73-86``).
     guard = privacy.enforce_write_guard(
         req.content,
         surface="web_api_add",
         force_unsafe=req.force_unsafe,
-        audit_context={"namespace": req.namespace, "file": req.file},
+        scope=req.scope,
+        audit_context={
+            "namespace": req.namespace,
+            "file": req.file,
+            "scope": req.scope,
+        },
     )
     if guard.decision == "blocked":
         raise HTTPException(
@@ -1257,6 +1300,21 @@ async def add_memory(
                 "detail": "redaction_blocked",
                 "hits": len(guard.hits),
                 "surface": "web_api_add",
+            },
+        )
+    if guard.decision == "blocked_project_shared":
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "detail": "blocked_project_shared",
+                "hits": len(guard.hits),
+                "surface": "web_api_add",
+                "message": (
+                    "force_unsafe is not permitted on scope='project_shared' "
+                    "writes (git history is forever). Re-submit with "
+                    "scope='project_local' or scope='user' to bypass, or "
+                    "hand-edit the canonical file."
+                ),
             },
         )
 
@@ -1268,7 +1326,52 @@ async def add_memory(
     # remains as a last-resort fallback when no dirs are configured at
     # all (``require_configured`` already guards the common case).
     mdirs = config.indexing.memory_dirs
-    base = Path(mdirs[0] if mdirs else "~/.memtomem/memories").expanduser().resolve()
+    user_base = Path(mdirs[0] if mdirs else "~/.memtomem/memories").expanduser().resolve()
+
+    # ADR-0011 §4 PR-F slice 4: resolve the canonical-residency base
+    # directory per tier. User tier stays on ``memory_dirs[0]`` for
+    # back-compat. Project tiers route through ``resolve_memory_scope_dir``
+    # against the server's project root so writes land in
+    # ``<proj>/.memtomem/memories[/.local]/`` — the same path the MCP
+    # ``mem_add(scope=...)`` flow uses. Refuses unregistered project-tier
+    # dirs upfront so the row's persisted scope cannot diverge from what
+    # the read surface / watcher can actually see.
+    if req.scope == "user":
+        base = user_base
+    else:
+        from memtomem.memory_scope import (
+            MemoryScopeError,
+            is_project_tier_registered,
+            project_tier_registration_error,
+            resolve_memory_scope_dir,
+        )
+        from memtomem.server.tools.search import _resolve_project_context_from_dirs
+
+        # ADR-0011 PR-F parity with MCP ``mem_add`` (memory_crud.py:285
+        # via search.py:73-96): resolve the *registered* project root
+        # containing the server's cwd rather than using ``cwd`` itself.
+        # ``app.state.project_root`` was set to ``Path.cwd()`` in the
+        # lifespan; if the server is launched from a subdirectory of a
+        # registered project, the raw cwd has no ``.memtomem/memories``
+        # tree, so ``resolve_memory_scope_dir`` would land on the wrong
+        # directory and ``is_project_tier_registered`` would 422 — while
+        # MCP correctly writes under the project root. Falls back to
+        # the lifespan cwd only if no registered tier covers the cwd
+        # (the 422 below then surfaces the operator-actionable
+        # "register your project_memory_dirs first" error).
+        pmdirs = config.indexing.project_memory_dirs
+        project_root = _resolve_project_context_from_dirs(pmdirs)
+        if project_root is None:
+            project_root = Path(request.app.state.project_root)
+        try:
+            base = resolve_memory_scope_dir(req.scope, project_root, user_base=user_base)
+        except MemoryScopeError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if not is_project_tier_registered(base, pmdirs):
+            raise HTTPException(
+                status_code=422,
+                detail=project_tier_registration_error(base, req.scope),
+            )
 
     if req.file:
         raw = req.file

@@ -29,6 +29,13 @@ class SourceOut(BaseModel):
     # for orphans (no owning dir to classify). Drives the Sources page's
     # Memory / General sub-toggle.
     kind: MemoryDirKind | None = None
+    # ADR-0016 §7 canonical-residency tier of the source itself,
+    # path-classified via :func:`memtomem.config.classify_scope`. Always
+    # one of ``user`` / ``project_shared`` / ``project_local``. The
+    # SPA renders this verbatim as a per-row tier badge; the route also
+    # supports ``?target_scope=`` filtering (project_local hidden by
+    # default per ADR-0015 §4a).
+    target_scope: str = "user"
     # Heuristic preview derived at read-time from the first indexed chunk:
     # ``title`` is the file's first heading (``#`` markers stripped) and
     # ``excerpt`` is up to ~200 chars of the first section's body. Both

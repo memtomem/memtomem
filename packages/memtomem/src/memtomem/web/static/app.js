@@ -248,6 +248,40 @@ class RedactionBlockedError extends Error {
   }
 }
 
+// ADR-0011 §5 Gate B — project_shared writes without an explicit
+// ``confirm_project_shared=true`` return HTTP 403 with the structured
+// payload defined by ``ProjectTierBlockedResponse``. The SPA preserves
+// ``cli_hint`` + ``docs_url`` on the error object so the caller can
+// surface "rejected, here's the equivalent CLI invocation" without
+// rewriting the prose client-side (the localized title + body live in
+// the locale files; the hint / link come from the server so they stay
+// in lockstep with the back-end vocabulary).
+class ProjectTierBlockedError extends Error {
+  constructor({ surface, scope, message, cli_hint, docs_url }) {
+    super(message || 'blocked_project_shared');
+    this.name = 'ProjectTierBlockedError';
+    this.surface = surface;
+    this.scope = scope;
+    this.cliHint = cli_hint;
+    this.docsUrl = docs_url;
+  }
+}
+
+// Shared formatter for the project-tier rejection toast. Returns the
+// multi-line string both ``addMemoryFromCompose``'s catch-arm and the
+// Playwright spec build off the same code path — without this helper
+// the test would silently pass even if the production catch-arm
+// stopped showing one of the actionable fields (Codex review #924).
+// Both ``cliHint`` and ``docsUrl`` are optional because the Gate A
+// hard-refusal for ``force_unsafe=true`` on project_shared reuses
+// the ``blocked_project_shared`` discriminant without those fields.
+function formatProjectTierBlockedToast(err) {
+  const lines = [err.message];
+  if (err.cliHint) lines.push(`$ ${err.cliHint}`);
+  if (err.docsUrl) lines.push(err.docsUrl);
+  return lines.join('\n');
+}
+
 async function api(method, path, body, opts = {}) {
   if (typeof opts !== 'object' || Array.isArray(opts)) opts = {};
   const fetchOpts = { method, headers: { 'Content-Type': 'application/json' } };
@@ -269,6 +303,19 @@ async function api(method, path, body, opts = {}) {
       throw new RedactionBlockedError({
         hits: err.detail.hits,
         surface: err.detail.surface,
+      });
+    }
+    if (
+      res.status === 403 &&
+      err && typeof err.detail === 'object' && err.detail !== null &&
+      err.detail.detail === 'blocked_project_shared'
+    ) {
+      throw new ProjectTierBlockedError({
+        surface: err.detail.surface,
+        scope: err.detail.scope,
+        message: err.detail.message,
+        cli_hint: err.detail.cli_hint,
+        docs_url: err.detail.docs_url,
       });
     }
     // Harden against ``[object Object]`` when ``detail`` is itself a dict
@@ -573,6 +620,26 @@ function _formatValidityDate(unix) {
 // without a window so the caller can ${validityBadge} unconditionally.
 // Uses _formatValidityDate which produces strict ISO date strings —
 // no XSS surface in the interpolated content.
+// ADR-0016 §7 canonical-residency tier badge for memory rows. Returns
+// "" for the user tier (the default — keeps the common case visually
+// quiet) and a token-literal span for ``project_shared`` /
+// ``project_local``. The three tokens are rendered verbatim (no
+// display aliases — pinned by the Tiered Context Gateway v2 contract).
+// ``isContextRow`` adds the ``(no runtime fan-out)`` annotation for
+// project_local context artifacts (agents / skills / commands) per
+// ADR-0011 §3 — memory rows skip the annotation because project_local
+// memory still fans out via memory's own contract.
+function _tierBadgeHtml(targetScope, { isContextRow = false } = {}) {
+  if (!targetScope || targetScope === 'user') return '';
+  if (targetScope !== 'project_shared' && targetScope !== 'project_local') return '';
+  const cls = `badge badge-tier badge-tier--${targetScope}`;
+  const badge = ` <span class="${cls}" data-tier="${targetScope}">${targetScope}</span>`;
+  if (isContextRow && targetScope === 'project_local') {
+    return `${badge}<span class="tier-fanout-annotation">(no runtime fan-out)</span>`;
+  }
+  return badge;
+}
+
 function _validityBadgeHtml(validFromUnix, validToUnix) {
   const hasWindow = validFromUnix !== null && validFromUnix !== undefined
     || validToUnix !== null && validToUnix !== undefined;
@@ -2044,6 +2111,12 @@ function _buildResultItem(r) {
   item.setAttribute('aria-label', ariaParts.join(', '));
   const nsBadge = r.chunk.namespace && r.chunk.namespace !== 'default'
     ? ` <span class="badge badge-ns">${escapeHtml(r.chunk.namespace)}</span>` : '';
+  // ADR-0016 §7 canonical-residency tier badge. Default-omit for the
+  // user tier so the common case stays visually quiet — only the
+  // non-default tiers (project_shared / project_local) earn pixels.
+  // The token is rendered verbatim per the PR-F display-alias-free
+  // contract pinned in the Tiered Context Gateway v2 memory.
+  const tierBadge = _tierBadgeHtml(r.chunk.target_scope);
   const validityBadge = _validityBadgeHtml(r.chunk.valid_from_unix, r.chunk.valid_to_unix);
   const scorePct = STATE.maxResultScore > 0 ? Math.round((r.score / STATE.maxResultScore) * 100) : 0;
   const barColor = scorePct > 70 ? 'var(--green)' : scorePct > 40 ? 'var(--accent)' : 'var(--muted)';
@@ -2056,7 +2129,7 @@ function _buildResultItem(r) {
       <span class="result-filename">${escapeHtml(fname)}</span>
       <span class="score-badge">${r.score.toFixed(3)}</span>
       <span class="badge badge-retrieval badge-retrieval--${escapeAttr(r.source)}">${escapeHtml(r.source)}</span>
-      ${nsBadge}${validityBadge}
+      ${nsBadge}${tierBadge}${validityBadge}
     </div>
     <div class="result-item-meta">${escapeHtml(dir)} \u00b7 #${r.rank} \u00b7 ${escapeHtml(age)}</div>
     <div class="result-score-bar"><div class="result-score-fill" style="width:${scorePct}%;background:${barColor}"></div></div>
@@ -3840,6 +3913,7 @@ async function browseSource(path, limit = 100) {
           <div class="chunk-card-meta">
             <span class="badge badge-gray">${c.chunk_type.replace('_',' ')}</span>
             <span class="chunk-card-lines">lines ${c.start_line}–${c.end_line}</span>
+            ${_tierBadgeHtml(c.target_scope)}
             ${c.heading_hierarchy.length ? `<span class="hierarchy-trail">${escapeHtml(c.heading_hierarchy.join(' › '))}</span>` : ''}
             <div class="chunk-card-actions">
               <button class="btn-ghost btn-xs card-copy-btn" title="Copy content">Copy</button>
@@ -4261,7 +4335,15 @@ qs('add-btn').addEventListener('click', async () => {
     _markDataStale();
     loadStats();
   } catch (err) {
-    showToast(t('toast.save_failed', { error: err.message }), 'error');
+    if (err && err.name === 'ProjectTierBlockedError') {
+      // Render the rejection message + literal CLI hint via the shared
+      // formatter so the Playwright spec exercises the same code path
+      // (today's compose form doesn't expose a tier picker so this
+      // catch-arm is dev-tools / API-only — see #924 PR description).
+      showToast(formatProjectTierBlockedToast(err), 'error');
+    } else {
+      showToast(t('toast.save_failed', { error: err.message }), 'error');
+    }
   } finally {
     btnLoading(btn, false);
   }
