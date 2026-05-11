@@ -30,6 +30,8 @@ import json
 
 import pytest
 
+from .conftest import install_default_stubs
+
 pytestmark = pytest.mark.browser
 
 
@@ -69,25 +71,6 @@ _IN_SYNC_GET = {
         ],
     },
 }
-
-
-def _install_default_stubs(page) -> None:
-    """Mirrors ``test_redaction_blocked_retry._install_default_stubs``."""
-
-    def _ok(route, payload):
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(payload),
-        )
-
-    page.route("**/api/**", lambda r: _ok(r, {}))
-    page.route("**/api/system/ui-mode", lambda r: _ok(r, {"mode": "prod"}))
-    page.route("**/api/system/model-readiness", lambda r: _ok(r, {"ready": True}))
-    page.route("**/api/sources", lambda r: _ok(r, {"sources": []}))
-    page.route("**/api/namespaces", lambda r: _ok(r, {"namespaces": []}))
-    page.route("**/api/stats", lambda r: _ok(r, {}))
-    page.route("**/api/privacy/patterns", lambda r: _ok(r, {"patterns": []}))
 
 
 def _open_hooks_sync(page) -> None:
@@ -165,7 +148,7 @@ def test_hooks_sync_cancel_fires_no_post(page, mm_web_url: str) -> None:
 
     Negative half of the symmetric cancel/confirm pair.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
 
     post_calls: list[str] = []
 
@@ -217,7 +200,7 @@ def test_hooks_sync_confirm_transitions_badge_to_in_sync(page, mm_web_url: str) 
     Symmetric pin: positive on the in-sync badge text + class, negative
     on the cold-mount conflict/pending text not lingering.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
 
     post_calls: list[str] = []
 

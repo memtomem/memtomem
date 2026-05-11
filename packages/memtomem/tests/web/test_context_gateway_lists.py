@@ -23,30 +23,9 @@ import json
 
 import pytest
 
+from .conftest import install_default_stubs
+
 pytestmark = pytest.mark.browser
-
-
-def _install_default_stubs(page) -> None:
-    """Mirrors ``test_context_gateway_overview._install_default_stubs``.
-
-    Last-route-wins: catch-all goes first; specific overrides go last in
-    each spec body.
-    """
-
-    def _ok(route, payload):
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(payload),
-        )
-
-    page.route("**/api/**", lambda r: _ok(r, {}))
-    page.route("**/api/system/ui-mode", lambda r: _ok(r, {"mode": "prod"}))
-    page.route("**/api/system/model-readiness", lambda r: _ok(r, {"ready": True}))
-    page.route("**/api/sources", lambda r: _ok(r, {"sources": []}))
-    page.route("**/api/namespaces", lambda r: _ok(r, {"namespaces": []}))
-    page.route("**/api/stats", lambda r: _ok(r, {}))
-    page.route("**/api/privacy/patterns", lambda r: _ok(r, {"patterns": []}))
 
 
 def _open_skills_list(page) -> None:
@@ -183,7 +162,7 @@ def test_q_pr4_langchange_rerenders_scope_badge_inline_text(page, mm_web_url: st
     EN ``(missing)`` → KO ``(없음)``. The ``scope_experimental`` chip
     shares the same English/Korean string so it can't carry this
     assertion — ``scope_missing`` is the canary."""
-    _install_default_stubs(page)
+    install_default_stubs(page)
     _stub_projects(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
     _stub_skills(page, _CWD_SKILLS_ITEMS)
     page.goto(mm_web_url)
@@ -225,7 +204,7 @@ def test_q_pr4_langchange_rerenders_runtime_badge_label(page, mm_web_url: str) -
     ``loadCtxList`` re-issue must rebuild the badges so EN ``In sync`` →
     KO ``동기화됨``.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
     _stub_projects(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
     _stub_skills(page, _CWD_SKILLS_ITEMS)
     page.goto(mm_web_url)
@@ -303,7 +282,7 @@ def test_q_pr4_langchange_rerenders_runtime_only_banner(page, mm_web_url: str) -
     same — ``I18N.applyDOM`` doesn't walk it. The listener's
     ``loadCtxList`` re-issue must rebuild the banner with the new locale.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
     # Single cwd-only scope with a runtime-only item triggers the banner.
     _stub_projects(
         page,
@@ -365,7 +344,7 @@ def test_q_pr4_langchange_clears_import_status_box(page, mm_web_url: str) -> Non
     caching the receipt — caching would resurrect a stale message in
     misleading form after navigation.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
     _stub_projects(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
     _stub_skills(page, _CWD_SKILLS_ITEMS)
     page.goto(mm_web_url)
@@ -422,7 +401,7 @@ def test_q_pr4_langchange_preserves_unsaved_edit_buffer(page, mm_web_url: str) -
     server's freshly-fetched canonical_content) and the edit pane
     remains visible.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
     _stub_projects(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
     _stub_skills(page, _CWD_SKILLS_ITEMS)
     page.route(
@@ -513,7 +492,7 @@ def test_q_pr4_langchange_preserves_mtime_for_dirty_buffer(page, mm_web_url: str
     still equals A so the next Save's PUT body carries the original
     pre-edit mtime.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
     _stub_projects(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
     _stub_skills(page, _CWD_SKILLS_ITEMS)
     # Two distinct mtime values — A is the mtime the user started
@@ -621,7 +600,7 @@ def test_q_pr4_rapid_toggle_preserves_edit_buffer(page, mm_web_url: str) -> None
     with the textarea reverting to the server's freshly-fetched
     canonical content.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
     _stub_projects(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
     _stub_skills(page, _CWD_SKILLS_ITEMS)
     page.route(
@@ -710,7 +689,7 @@ def test_q_pr4_langchange_rerenders_dropped_chips_in_diff_pane(page, mm_web_url:
     ``autoOpenDiff: true`` so ``_ctxLoadDiff`` runs on re-mount —
     review finding P1.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
     _stub_projects(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
     _stub_skills(page, _CWD_SKILLS_ITEMS)
     # Canonical detail GET (any name match).
@@ -792,7 +771,7 @@ def test_q_pr4_langchange_rerenders_runtime_only_detail(page, mm_web_url: str) -
     Pin: EN ``Runtime preview — not yet in .memtomem/.`` → KO
     ``런타임 미리보기 — 아직 .memtomem/ 에 없습니다.``
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
     _stub_projects(
         page,
         {
@@ -874,7 +853,7 @@ def test_q_pr4_langchange_off_section_does_not_call_loadCtxList(page, mm_web_url
     Mirror of ``test_langchange_off_overview_does_not_refetch_overview``
     in the overview suite.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
 
     projects_calls: list[str] = []
 
