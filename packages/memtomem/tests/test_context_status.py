@@ -437,6 +437,74 @@ def test_classify_status_absent_local_dirs_do_not_crash(wiki_root: Path, tmp_pat
     assert rows == []
 
 
+def _seed_local_flat_draft(project: Path, asset_type: str, name: str) -> None:
+    """Create a flat-layout draft ``<proj>/.memtomem/<asset_type>.local/<name>.md``.
+
+    Flat layout is the legacy single-file shape for agents and commands
+    (skills have always been dir-only). Used by tests covering the
+    flat-layout side of the project_local scan.
+    """
+    local_root = project / ".memtomem" / f"{asset_type}.local"
+    local_root.mkdir(parents=True, exist_ok=True)
+    (local_root / f"{name}.md").write_bytes(b"# flat draft\n")
+
+
+def test_classify_status_scans_flat_layout_agents_and_commands(
+    wiki_root: Path, tmp_path: Path
+) -> None:
+    """Flat-layout drafts at ``.local/<name>.md`` are emitted for agents and commands.
+
+    Mirrors migrate._detect_source_scope's dual-layout recognition. Skills
+    are dir-only and covered by the sibling skip test.
+    """
+    _initialized_wiki(wiki_root)
+    _seed_local_flat_draft(tmp_path, "agents", "flat-agent")
+    _seed_local_flat_draft(tmp_path, "commands", "flat-cmd")
+
+    _, rows = classify_status(tmp_path)
+
+    by_kind = {(r.asset_type, r.name): r for r in rows}
+    assert ("agents", "flat-agent") in by_kind
+    assert ("commands", "flat-cmd") in by_kind
+    for row in (by_kind["agents", "flat-agent"], by_kind["commands", "flat-cmd"]):
+        assert row.tier == "project_local"
+        assert row.state == "local-draft"
+
+
+def test_classify_status_skills_flat_layout_is_not_recognised(
+    wiki_root: Path, tmp_path: Path
+) -> None:
+    """A ``.md`` at the top of ``skills.local/`` is NOT emitted — skills are dir-only.
+
+    Pins parity with migrate._detect_source_scope's ``if kind == "skills":
+    continue`` after the dir probe (migrate.py:792).
+    """
+    _initialized_wiki(wiki_root)
+    _seed_local_flat_draft(tmp_path, "skills", "bogus-flat-skill")
+
+    _, rows = classify_status(tmp_path)
+
+    assert rows == []
+
+
+def test_classify_status_dir_layout_shadows_flat_sibling(wiki_root: Path, tmp_path: Path) -> None:
+    """When a name has both dir and flat layout in the same .local/, dir wins.
+
+    Mirrors the ``continue`` in migrate._detect_source_scope after a
+    successful dir match — the flat sibling is silently shadowed to
+    avoid a duplicate row.
+    """
+    _initialized_wiki(wiki_root)
+    _seed_local_draft(tmp_path, "agents", "twin", "agent.md")
+    _seed_local_flat_draft(tmp_path, "agents", "twin")
+
+    _, rows = classify_status(tmp_path)
+
+    twin_rows = [r for r in rows if r.asset_type == "agents" and r.name == "twin"]
+    assert len(twin_rows) == 1
+    assert twin_rows[0].tier == "project_local"
+
+
 def test_classify_status_shows_both_rows_on_name_collision(wiki_root: Path, tmp_path: Path) -> None:
     """Same name in lock.json and .local/ → two rows, project_shared before project_local."""
     _initialized_wiki(wiki_root)

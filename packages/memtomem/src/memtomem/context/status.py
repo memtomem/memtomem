@@ -205,10 +205,19 @@ def _scan_project_local_drafts(project_root: Path) -> Iterator[StatusRow]:
     """Yield ``StatusRow``s for every valid project_local draft on disk.
 
     Walks ``<proj>/.memtomem/{agents,commands,skills}.local/`` and emits
-    one row per ``<name>/`` subdirectory whose kind-specific manifest
-    file is present (``agent.md`` / ``command.md`` / ``SKILL.md``). The
-    presence of the manifest is the same validity probe migrate uses
-    to recognise a directory-layout artifact (``migrate._detect_source_scope``).
+    one row per valid artifact. Both layouts that ``migrate._detect_source_scope``
+    accepts are recognised:
+
+    - **Directory layout** (all three kinds): ``<root>/<name>/`` containing
+      the kind-specific manifest file (``agent.md`` / ``command.md`` /
+      ``SKILL.md``). The manifest presence is the validity probe.
+    - **Flat layout** (agents and commands only; skills are dir-only by
+      design — see ``migrate._detect_source_scope``): ``<root>/<name>.md``
+      as a single file. ``<name>`` is the file stem.
+
+    When the same name exists in both layouts at the same tier the
+    directory wins (mirrors migrate's ``continue`` after a dir match),
+    so flat siblings of a directory artifact are silently shadowed.
 
     Emitted rows carry ``tier="project_local"``, ``state="local-draft"``,
     and empty ``pin_commit``/``installed_at`` — project_local artifacts
@@ -226,18 +235,43 @@ def _scan_project_local_drafts(project_root: Path) -> Iterator[StatusRow]:
         if not local_root.is_dir():
             continue
         manifest = _LOCAL_DRAFT_MANIFEST[asset_type]
+        seen_names: set[str] = set()
+
         for entry in sorted(local_root.iterdir(), key=lambda p: p.name):
             if not entry.is_dir():
                 continue
             if not (entry / manifest).is_file():
                 # Skip directories that don't satisfy the kind's
                 # manifest contract — same convention as migrate's
-                # source-scope probe. A future flat-layout sweep would
-                # add a sibling check here.
+                # source-scope probe.
                 continue
+            seen_names.add(entry.name)
             yield StatusRow(
                 asset_type=asset_type,  # type: ignore[arg-type]
                 name=entry.name,
+                pin_commit="",
+                installed_at="",
+                state="local-draft",
+                dirty_file_count=0,
+                reason=None,
+                tier="project_local",
+            )
+
+        if asset_type == "skills":
+            # Skills have no flat layout (migrate._detect_source_scope:792).
+            continue
+        for entry in sorted(local_root.iterdir(), key=lambda p: p.name):
+            if not entry.is_file() or entry.suffix != ".md":
+                continue
+            name = entry.stem
+            if name in seen_names:
+                # Dir-layout wins on collision (same convention as
+                # migrate._detect_source_scope's `continue` after a
+                # dir match).
+                continue
+            yield StatusRow(
+                asset_type=asset_type,  # type: ignore[arg-type]
+                name=name,
                 pin_commit="",
                 installed_at="",
                 state="local-draft",
