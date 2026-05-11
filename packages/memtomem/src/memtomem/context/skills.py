@@ -355,7 +355,17 @@ def generate_all_skills(
                 for lock_path in sorted({_lock_path_for(dst) for _, _, _, dst in work}, key=str):
                     stack.enter_context(_file_lock(lock_path))
                 for target, _gen, skill_dir, dst in work:
-                    staging = _stage_skill(skill_dir, dst)
+                    # Unreadable canonical: typed PARSE_ERROR skip rather than
+                    # an exception bubbling up — symmetric with agents.py /
+                    # commands.py read_bytes failure handling. Privacy block
+                    # is the only failure that still aborts the batch.
+                    try:
+                        staging = _stage_skill(skill_dir, dst)
+                    except OSError as exc:
+                        skipped.append(
+                            (skill_dir.name, f"unreadable: {exc}", skip_codes.PARSE_ERROR)
+                        )
+                        continue
                     staged.append((target, staging, dst))
 
                     vendor = GENERATOR_VENDOR.get(target)
@@ -364,10 +374,23 @@ def generate_all_skills(
                             project_root, "skills", skill_dir.name, vendor, scope=scope
                         )
                         if override_path is not None:
-                            atomic_write_bytes(
-                                staging / SKILL_MANIFEST,
-                                override_path.read_bytes(),
-                            )
+                            try:
+                                override_bytes = override_path.read_bytes()
+                            except OSError as exc:
+                                skipped.append(
+                                    (
+                                        skill_dir.name,
+                                        f"override unreadable: {exc}",
+                                        skip_codes.PARSE_ERROR,
+                                    )
+                                )
+                                # Drop this pair from the promote queue and
+                                # clean its orphaned staging tree. The pop
+                                # targets the entry we just appended.
+                                staged.pop()
+                                shutil.rmtree(staging, ignore_errors=True)
+                                continue
+                            atomic_write_bytes(staging / SKILL_MANIFEST, override_bytes)
 
                     scan = scan_artifact_tree(
                         staging,
@@ -441,7 +464,14 @@ def generate_all_skills(
             # recreate ``dst`` between the move-aside and the rename-in,
             # leaving the rollback path with no clean dst to restore.
             with _file_lock(_lock_path_for(dst)):
-                staging = _stage_skill(skill_dir, dst)
+                # Unreadable canonical: typed PARSE_ERROR skip rather than
+                # an exception bubbling up — symmetric with agents.py /
+                # commands.py read_bytes failure handling.
+                try:
+                    staging = _stage_skill(skill_dir, dst)
+                except OSError as exc:
+                    skipped.append((skill_dir.name, f"unreadable: {exc}", skip_codes.PARSE_ERROR))
+                    continue
                 promoted = False
                 try:
                     # 2. Override apply (BEFORE scan — scan must see the bytes
@@ -452,10 +482,20 @@ def generate_all_skills(
                             project_root, "skills", skill_dir.name, vendor, scope=scope
                         )
                         if override_path is not None:
-                            atomic_write_bytes(
-                                staging / SKILL_MANIFEST,
-                                override_path.read_bytes(),
-                            )
+                            try:
+                                override_bytes = override_path.read_bytes()
+                            except OSError as exc:
+                                skipped.append(
+                                    (
+                                        skill_dir.name,
+                                        f"override unreadable: {exc}",
+                                        skip_codes.PARSE_ERROR,
+                                    )
+                                )
+                                # promoted stays False; finally clause rmtrees
+                                # the staging tree.
+                                continue
+                            atomic_write_bytes(staging / SKILL_MANIFEST, override_bytes)
                     # 3. Scan.
                     scan = scan_artifact_tree(
                         staging,

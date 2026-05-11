@@ -152,6 +152,121 @@ class TestGenerateAllSkills:
         assert "codex_skills" in SKILL_GENERATORS
 
 
+class TestUnreadableSources:
+    """OSError on canonical stage or override read becomes a typed
+    ``PARSE_ERROR`` skip, mirroring ``agents.py`` / ``commands.py``
+    ``read_bytes`` failure handling. Per-item skip rather than batch abort
+    — only privacy blocks escalate to a raise (#900 inventory matrix gap)."""
+
+    def test_unreadable_canonical_is_typed_skip_and_keeps_batch_running(
+        self, tmp_path, monkeypatch
+    ):
+        # Two canonicals — "alpha" healthy, "broken" simulates an OSError
+        # from _stage_skill (e.g. unreadable file inside the canonical tree).
+        _make_canonical_skill(tmp_path, "alpha")
+        _make_canonical_skill(tmp_path, "broken")
+
+        from memtomem.context import skills as skills_module
+
+        real_stage = skills_module._stage_skill
+
+        def fake_stage(src, dst):
+            if src.name == "broken":
+                raise PermissionError("permission denied")
+            return real_stage(src, dst)
+
+        monkeypatch.setattr(skills_module, "_stage_skill", fake_stage)
+
+        result = generate_all_skills(tmp_path, runtimes=["claude_skills"])
+
+        # alpha promoted, broken typed-skipped, batch not aborted.
+        assert ("claude_skills", tmp_path / ".claude/skills/alpha") in result.generated
+        assert (tmp_path / ".claude/skills/alpha/SKILL.md").is_file()
+        assert not (tmp_path / ".claude/skills/broken").exists()
+        assert any(
+            entry[0] == "broken"
+            and entry[1].startswith("unreadable:")
+            and entry[2] == "parse_error"
+            for entry in result.skipped
+        )
+        # No orphaned staging tree under the runtime fan-out parent.
+        assert list((tmp_path / ".claude/skills").glob(".staging-*.tmp")) == []
+
+    def test_unreadable_override_is_typed_skip_and_keeps_batch_running(self, tmp_path, monkeypatch):
+        # Two skills — "alpha" healthy, "withoverride" has a resolved override
+        # whose bytes cannot be read (resolve returns a Path; read_bytes raises).
+        _make_canonical_skill(tmp_path, "alpha")
+        _make_canonical_skill(tmp_path, "withoverride")
+
+        from memtomem.context import skills as skills_module
+
+        real_resolve = skills_module._override.resolve
+        broken_override = tmp_path / "no-such-dir" / "override.md"
+
+        def fake_resolve(project_root, kind, name, vendor, *, scope=None):
+            if name == "withoverride":
+                return broken_override
+            return real_resolve(project_root, kind, name, vendor, scope=scope)
+
+        monkeypatch.setattr(skills_module._override, "resolve", fake_resolve)
+
+        result = generate_all_skills(tmp_path, runtimes=["claude_skills"])
+
+        # alpha promoted, withoverride typed-skipped, no orphaned staging.
+        assert ("claude_skills", tmp_path / ".claude/skills/alpha") in result.generated
+        assert (tmp_path / ".claude/skills/alpha/SKILL.md").is_file()
+        assert not (tmp_path / ".claude/skills/withoverride").exists()
+        assert any(
+            entry[0] == "withoverride"
+            and entry[1].startswith("override unreadable:")
+            and entry[2] == "parse_error"
+            for entry in result.skipped
+        )
+        assert list((tmp_path / ".claude/skills").glob(".staging-*.tmp")) == []
+
+    def test_unreadable_canonical_in_user_scope_is_typed_skip(self, tmp_path, monkeypatch):
+        # Exercises the non-project_shared (per-pair) path. Layout parallels
+        # the project_shared canonical test but with scope="user", which
+        # routes through canonical_skills_root → ~/.memtomem/skills/.
+        from memtomem.context import skills as skills_module
+        from memtomem.context.skills import canonical_skills_root
+
+        from .helpers import set_home
+
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        set_home(monkeypatch, fake_home)
+
+        user_root = canonical_skills_root(tmp_path, scope="user")
+        user_root.mkdir(parents=True, exist_ok=True)
+        for name in ("alpha", "broken"):
+            skill = user_root / name
+            skill.mkdir()
+            (skill / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
+
+        real_stage = skills_module._stage_skill
+
+        def fake_stage(src, dst):
+            if src.name == "broken":
+                raise PermissionError("permission denied")
+            return real_stage(src, dst)
+
+        monkeypatch.setattr(skills_module, "_stage_skill", fake_stage)
+
+        result = generate_all_skills(tmp_path, runtimes=["claude_skills"], scope="user")
+
+        # alpha promoted under ~/.claude/skills; broken typed-skipped.
+        claude_user_dir = fake_home / ".claude/skills"
+        assert (claude_user_dir / "alpha/SKILL.md").is_file()
+        assert not (claude_user_dir / "broken").exists()
+        assert any(
+            entry[0] == "broken"
+            and entry[1].startswith("unreadable:")
+            and entry[2] == "parse_error"
+            for entry in result.skipped
+        )
+
+
 class TestDetectSkillDirs:
     def test_detects_claude_skills(self, tmp_path):
         skill = tmp_path / ".claude/skills/a"
