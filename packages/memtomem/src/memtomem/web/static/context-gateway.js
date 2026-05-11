@@ -458,7 +458,7 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
   }
   const ok = await showConfirm({
     title: t('settings.ctx.sync_all'),
-    message: t('settings.ctx.confirm_sync').replace('{type}', 'all'),
+    message: t('settings.ctx.confirm_sync_all'),
     confirmText: t('settings.ctx.sync'),
   });
   if (!ok) return;

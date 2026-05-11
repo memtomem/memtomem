@@ -302,6 +302,7 @@
   "settings.ctx.confirm_delete_msg": "This will remove the canonical artifact from .memtomem/.",
   "settings.ctx.confirm_cascade_codex": "This will also delete files in ~/.codex/ (user-scope). Continue?",
   "settings.ctx.confirm_sync": "Fan out {type} to all runtimes?",
+  "settings.ctx.confirm_sync_all": "Fan out all canonical artifacts to all runtimes?",
   "settings.ctx.confirm_import": "Import {type} from runtimes into .memtomem/?",
   "settings.ctx.confirm_import_overwrite_label": "Overwrite existing canonical files",
   "settings.ctx.sync_success": "Sync completed",
