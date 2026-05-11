@@ -118,7 +118,15 @@ The canonical / runtime layout per scope per artifact type:
 | **agents**   | `~/.memtomem/agents/<name>.md`                | `<proj>/.memtomem/agents/<name>.md`              | `<proj>/.memtomem/agents.local/<name>.md`                | user → `~/.claude/agents/`; project_shared → `<proj>/.claude/agents/`; project_local → no fan-out |
 | **skills**   | `~/.memtomem/skills/<name>/SKILL.md`          | `<proj>/.memtomem/skills/<name>/SKILL.md`        | `<proj>/.memtomem/skills.local/<name>/SKILL.md`          | user → `~/.claude/skills/<name>/`; project_shared → `<proj>/.claude/skills/<name>/`; project_local → no fan-out |
 | **commands** | `~/.memtomem/commands/<name>.md`              | `<proj>/.memtomem/commands/<name>.md`            | `<proj>/.memtomem/commands.local/<name>.md`              | user → `~/.claude/commands/`; project_shared → `<proj>/.claude/commands/`; project_local → no fan-out |
-| **settings** (ADR-0010, included for completeness) | `~/.claude/settings.json` | `<proj>/.claude/settings.json`                   | `<proj>/.claude/settings.local.json`                     | settings have no canonical/runtime split — they ARE the runtime |
+| **settings** (ADR-0010, special case per ADR-0016 §2) | `<proj>/.memtomem/settings.json` (canonical is single regardless of tier) | ↑ same | ↑ same | `user` → `~/.claude/settings.json`; `project_shared` → `<proj>/.claude/settings.json`; `project_local` → `<proj>/.claude/settings.local.json` |
+
+Settings inverts the tier ↔ residency mapping the other rows share: per
+ADR-0016 §2, the `target_scope` axis on settings hooks selects the
+**runtime fan-out target**, not the canonical residency (the canonical
+is `<proj>/.memtomem/settings.json` by ADR-0010 §Background, regardless
+of the configured `target_scope`). The other four artifacts in this
+table couple canonical residency and runtime fan-out through
+`RUNTIME_FANOUT_TABLE`; settings is the documented exception.
 
 ### 2. v1 defaults preserve current behavior, zero behavior change for existing installs
 
