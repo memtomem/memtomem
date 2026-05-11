@@ -265,6 +265,38 @@ def test_q_pr4_langchange_rerenders_runtime_badge_label(page, mm_web_url: str) -
     assert "In sync" not in post_text, f"EN 'In sync' must not survive KO toggle: {post_text!r}"
 
 
+def test_context_list_card_renders_project_local_tier_badge_with_annotation(
+    page, mm_web_url: str
+) -> None:
+    """Context artifact cards render the literal tier token and the
+    project_local zero-runtime-fan-out annotation inline with the name.
+    """
+    _install_default_stubs(page)
+    _stub_projects(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
+    _stub_skills(
+        page,
+        {
+            "skills": [
+                {
+                    "name": "draft-skill",
+                    "canonical_path": ".memtomem/skills.local/draft-skill",
+                    "target_scope": "project_local",
+                    "runtimes": [],
+                }
+            ],
+            "scanned_dirs": [],
+        },
+    )
+    page.goto(mm_web_url)
+    _open_skills_list(page)
+
+    card_name = page.locator("#ctx-skills-list .ctx-card-name").first
+    text = card_name.text_content() or ""
+    assert "project_local" in text
+    assert "no runtime fan-out" in text
+    assert card_name.locator(".badge-tier--project_local").count() == 1
+
+
 def test_q_pr4_langchange_rerenders_runtime_only_banner(page, mm_web_url: str) -> None:
     """``_ctxRefreshSectionState`` writes the runtime-only banner via
     ``textContent`` (not innerHTML), but the staleness mechanism is the

@@ -672,10 +672,11 @@ function _ctxRenderItemsHtml(items, type, projectRoot, scannedDirs, { clickable 
     // because the list response carries the per-runtime statuses;
     // ``loadCtxDetail`` would otherwise need a second fetch.
     const outOfSync = (item.runtimes || []).some(r => r.status === 'out of sync');
+    const tierBadge = _tierBadgeHtml(item.target_scope, { isContextRow: true });
     html += `<div class="${cardClass}" data-name="${escapeHtml(item.name)}"${canonAttr} data-out-of-sync="${outOfSync}">
       <div class="ctx-card-header">
         <div>
-          <div class="ctx-card-name">${escapeHtml(item.name)}</div>
+          <div class="ctx-card-name">${escapeHtml(item.name)}${tierBadge}</div>
           ${item.canonical_path ? `<div class="ctx-card-path">${escapeHtml(item.canonical_path)}</div>` : '<div class="ctx-card-path text-muted">(runtime only)</div>'}
         </div>
         ${renderRuntimeBadges(item.runtimes)}

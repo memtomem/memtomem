@@ -8,7 +8,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from memtomem.config import MemoryDirKind, memory_dir_kind
+from memtomem.config import MemoryDirKind, TargetScope, classify_scope, memory_dir_kind
 from memtomem.indexing.engine import norm_dir_prefix
 from memtomem.indexing.summarizer import regenerate_for_paths
 from memtomem.storage.sqlite_helpers import norm_path
@@ -76,6 +76,18 @@ async def list_sources(
             "registered (so they don't disappear from the UI)."
         ),
     ),
+    target_scope: TargetScope | None = Query(
+        None,
+        description=(
+            "ADR-0016 §7 canonical-residency tier filter. Default (omit) "
+            "shows ``user`` + ``project_shared`` only; ``project_local`` "
+            "is hidden until explicitly requested (ADR-0015 §4a — keeps "
+            "the draft tier out of overview unless the operator opts in). "
+            "Passing one of the three literal tokens narrows the list "
+            "to that tier; passing ``project_local`` is the only way to "
+            "surface those sources."
+        ),
+    ),
     storage=Depends(get_storage),
     config=Depends(get_config),
 ) -> SourcesResponse:
@@ -111,6 +123,14 @@ async def list_sources(
         ),
         key=lambda t: -len(t[0]),
     )
+
+    # ADR-0011 / ADR-0016: pre-resolve project_memory_dirs so the
+    # per-source ``classify_scope`` lookup can refuse unregistered
+    # project-tier paths (the public API of ``classify_scope`` falls
+    # back to ``"user"`` for any path under ``.memtomem/...`` whose
+    # owning project_memory_dir was not registered, mirroring the
+    # indexer's safety net at config.py:1495-1507).
+    pmdirs = config.indexing.project_memory_dirs
 
     all_sources: list[SourceOut] = []
     for p, cnt, last_indexed_iso, ns_csv, avg_tok, min_tok, max_tok in sorted(rows):
@@ -165,6 +185,26 @@ async def list_sources(
             if kind == "general" and source_kind == "memory":
                 continue
 
+        # ADR-0016 §7: path-classify the source's canonical-residency
+        # tier. ``classify_scope`` returns ``"user"`` for any path that
+        # is not under a registered project_memory_dir (including
+        # otherwise project-shaped paths whose owning dir was not
+        # registered) — matches the indexer's persisted scope so the
+        # badge agrees with the chunk's stored ``meta.scope``.
+        source_scope, _src_project_root = classify_scope(p, pmdirs)
+
+        # ADR-0015 §4a project_local default-hidden rule. When the
+        # caller passes ``?target_scope=`` we narrow to exactly that
+        # tier (the only way to surface ``project_local`` sources).
+        # When omitted, ``project_local`` rows fall out — keeps the
+        # draft tier out of overview / list views unless the operator
+        # explicitly asks for it.
+        if target_scope is None:
+            if source_scope == "project_local":
+                continue
+        elif source_scope != target_scope:
+            continue
+
         path_str = str(p)
         hh, first_content = summaries.get(path_str, ([], ""))
         title, excerpt = _derive_summary(hh, first_content)
@@ -185,6 +225,7 @@ async def list_sources(
                 max_tokens=max_tok,
                 memory_dir=memory_dir_str,
                 kind=source_kind,
+                target_scope=source_scope,
                 title=title,
                 excerpt=excerpt,
                 ai_summary=ai_summary_text,

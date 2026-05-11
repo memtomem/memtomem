@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from memtomem.config import TargetScope
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context.commands import (
@@ -71,10 +72,17 @@ def _safe_rel(p: Path, project_root: Path) -> str:
 @router.get("/context/commands")
 async def list_commands(
     project_root: Path = Depends(resolve_scope_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description=(
+            "Canonical-residency tier to list. project_local is shown only "
+            "when explicitly requested."
+        ),
+    ),
 ) -> dict:
     """List canonical commands. Accepts ``?scope_id=`` like list_skills."""
-    canonicals = list_canonical_commands(project_root)
-    diffs = diff_commands(project_root)
+    canonicals = list_canonical_commands(project_root, scope=target_scope)
+    diffs = diff_commands(project_root, scope=target_scope)
 
     by_name: dict[str, list[dict]] = {}
     for runtime, cmd_name, status in diffs:
@@ -88,14 +96,22 @@ async def list_commands(
         commands.append(
             {
                 "name": name,
-                "canonical_path": str(cmd_path.relative_to(project_root)),
+                "canonical_path": _safe_rel(cmd_path, project_root),
+                "target_scope": target_scope,
                 "runtimes": by_name.get(name, []),
             }
         )
 
     for cmd_name, runtimes in by_name.items():
         if cmd_name not in canonical_names:
-            commands.append({"name": cmd_name, "canonical_path": None, "runtimes": runtimes})
+            commands.append(
+                {
+                    "name": cmd_name,
+                    "canonical_path": None,
+                    "target_scope": target_scope,
+                    "runtimes": runtimes,
+                }
+            )
 
     return {
         "commands": commands,

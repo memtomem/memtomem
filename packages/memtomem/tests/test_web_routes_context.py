@@ -498,6 +498,32 @@ class TestListSkills:
         names = [s["name"] for s in data["skills"]]
         assert "alpha" in names
         assert "beta" in names
+        assert {s["target_scope"] for s in data["skills"]} == {"project_shared"}
+
+    @pytest.mark.anyio
+    async def test_project_local_visible_only_with_explicit_target_scope(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        local = tmp_path / ".memtomem" / "skills.local" / "draft"
+        local.mkdir(parents=True)
+        (local / SKILL_MANIFEST).write_text("# Draft\n", encoding="utf-8")
+
+        default = await client.get("/api/context/skills")
+        assert all(s["name"] != "draft" for s in default.json()["skills"])
+
+        explicit = await client.get(
+            "/api/context/skills",
+            params={"target_scope": "project_local"},
+        )
+        data = explicit.json()
+        assert explicit.status_code == 200, explicit.text
+        assert data["skills"][0]["name"] == "draft"
+        assert data["skills"][0]["target_scope"] == "project_local"
+
+    @pytest.mark.anyio
+    async def test_invalid_target_scope_returns_422(self, client: AsyncClient):
+        r = await client.get("/api/context/skills", params={"target_scope": "draft"})
+        assert r.status_code == 422
 
     @pytest.mark.anyio
     async def test_includes_runtime_status(self, client: AsyncClient, tmp_path: Path):
@@ -877,8 +903,30 @@ class TestListCommands:
     async def test_with_items(self, client: AsyncClient, tmp_path: Path):
         _make_command(tmp_path, "review")
         r = await client.get("/api/context/commands")
-        names = [c["name"] for c in r.json()["commands"]]
+        rows = r.json()["commands"]
+        names = [c["name"] for c in rows]
         assert "review" in names
+        assert {c["target_scope"] for c in rows if c["name"] == "review"} == {"project_shared"}
+
+    @pytest.mark.anyio
+    async def test_project_local_visible_only_with_explicit_target_scope(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        local_dir = tmp_path / ".memtomem" / "commands.local"
+        local_dir.mkdir(parents=True)
+        (local_dir / "draft.md").write_text(_CMD_CONTENT, encoding="utf-8")
+
+        default = await client.get("/api/context/commands")
+        assert all(c["name"] != "draft" for c in default.json()["commands"])
+
+        explicit = await client.get(
+            "/api/context/commands",
+            params={"target_scope": "project_local"},
+        )
+        rows = explicit.json()["commands"]
+        assert explicit.status_code == 200, explicit.text
+        assert rows[0]["name"] == "draft"
+        assert rows[0]["target_scope"] == "project_local"
 
 
 class TestReadCommand:
@@ -1107,8 +1155,30 @@ class TestListAgents:
     async def test_with_items(self, client: AsyncClient, tmp_path: Path):
         _make_agent(tmp_path, "reviewer")
         r = await client.get("/api/context/agents")
-        names = [a["name"] for a in r.json()["agents"]]
+        rows = r.json()["agents"]
+        names = [a["name"] for a in rows]
         assert "reviewer" in names
+        assert {a["target_scope"] for a in rows if a["name"] == "reviewer"} == {"project_shared"}
+
+    @pytest.mark.anyio
+    async def test_project_local_visible_only_with_explicit_target_scope(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        local_dir = tmp_path / ".memtomem" / "agents.local"
+        local_dir.mkdir(parents=True)
+        (local_dir / "draft.md").write_text(_AGENT_CONTENT, encoding="utf-8")
+
+        default = await client.get("/api/context/agents")
+        assert all(a["name"] != "draft" for a in default.json()["agents"])
+
+        explicit = await client.get(
+            "/api/context/agents",
+            params={"target_scope": "project_local"},
+        )
+        rows = explicit.json()["agents"]
+        assert explicit.status_code == 200, explicit.text
+        assert rows[0]["name"] == "draft"
+        assert rows[0]["target_scope"] == "project_local"
 
 
 class TestReadAgent:
