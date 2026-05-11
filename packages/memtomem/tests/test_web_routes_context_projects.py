@@ -123,6 +123,71 @@ async def test_get_projects_counts_directory_layout_commands_agents(client, cwd_
 
 
 @pytest.mark.asyncio
+async def test_get_projects_counts_multiple_dir_layout_drafts(client, cwd_root: Path) -> None:
+    """Multiple directory-layout drafts must NOT collapse into one count.
+
+    Review-pass on the #934 follow-up surfaced that
+    ``list_canonical_{commands,agents}`` returns ``(Path, Layout)`` with
+    the Path pointing at the manifest file — so under directory layout
+    ``p.stem`` is always ``"command"`` / ``"agent"`` and every draft
+    folds into the same name-keyed entry. Two real drafts at
+    ``commands/deploy/command.md`` and ``commands/ship/command.md``
+    would have counted as one ``"command"`` row, masking the actual
+    inventory in the UI's count badges.
+
+    The fix uses the parent directory name for dir-layout entries.
+    Asserting **exact** counts here (not ``>=``) pins the no-collapse
+    contract — pre-fix the assertion would have read 1 instead of 2.
+    """
+    for name in ("deploy", "ship"):
+        cmd_dir = cwd_root / ".memtomem" / "commands" / name
+        cmd_dir.mkdir(parents=True)
+        (cmd_dir / "command.md").write_text(f"# {name}\n", encoding="utf-8")
+
+    for name in ("reviewer", "summarizer"):
+        agent_dir = cwd_root / ".memtomem" / "agents" / name
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "agent.md").write_text(f"# {name}\n", encoding="utf-8")
+
+    resp = await client.get("/api/context/projects")
+    assert resp.status_code == 200
+    counts = resp.json()["scopes"][0]["counts"]
+    assert counts["commands"] == 2, (
+        f"two dir-layout commands must count as 2 distinct names, "
+        f"not collapse to 1 via p.stem='command' (got {counts})"
+    )
+    assert counts["agents"] == 2, (
+        f"two dir-layout agents must count as 2 distinct names, "
+        f"not collapse to 1 via p.stem='agent' (got {counts})"
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_projects_counts_flat_and_dir_layout_mix(client, cwd_root: Path) -> None:
+    """Flat-layout drafts still count by file stem.
+
+    Pin-and-invert: the layout-aware extractor must keep using ``p.stem``
+    for flat layout — switching wholesale to ``p.parent.name`` would
+    collapse every flat-layout artifact under ``commands/`` /
+    ``agents/`` into the canonical-root name.
+    """
+    cmd_root = cwd_root / ".memtomem" / "commands"
+    cmd_root.mkdir(parents=True)
+    # Flat layout: <root>/commands/<name>.md
+    (cmd_root / "build.md").write_text("# build\n", encoding="utf-8")
+    # Dir layout: <root>/commands/<name>/command.md
+    (cmd_root / "deploy").mkdir()
+    (cmd_root / "deploy" / "command.md").write_text("# deploy\n", encoding="utf-8")
+
+    resp = await client.get("/api/context/projects")
+    assert resp.status_code == 200
+    counts = resp.json()["scopes"][0]["counts"]
+    assert counts["commands"] == 2, (
+        f"flat 'build' + dir 'deploy' must count as 2, not collapse (got {counts})"
+    )
+
+
+@pytest.mark.asyncio
 async def test_get_projects_after_add(client, tmp_path: Path) -> None:
     other = tmp_path / "inflearn"
     other.mkdir()

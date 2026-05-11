@@ -23,6 +23,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from memtomem.context._names import Layout
 from memtomem.context.agents import diff_agents, list_canonical_agents
 from memtomem.context.commands import diff_commands, list_canonical_commands
 from memtomem.context.projects import (
@@ -93,6 +94,21 @@ def resolve_scope_root(
 # ── GET /context/projects ────────────────────────────────────────────────
 
 
+def _canonical_artifact_name(path: Path, layout: Layout) -> str:
+    """Return the artifact name for a ``(Path, Layout)`` pair.
+
+    Flat layout: ``<root>/<name>.md`` — the file stem IS the artifact name.
+    Dir layout: ``<root>/<name>/{command,agent}.md`` — the file stem is
+    always the manifest filename (``"command"`` / ``"agent"``), so
+    multiple drafts would collapse to one entry in a name-keyed count.
+    Fall back to the parent directory name for dir layout so each draft
+    contributes a distinct entry — observed shape: two drafts at
+    ``commands/deploy/command.md`` and ``commands/ship/command.md``
+    should yield two distinct counted names, not one ``"command"``.
+    """
+    return path.parent.name if layout == "dir" else path.stem
+
+
 def _counts_for(root: Path) -> dict[str, int]:
     """Per-type unique-name counts for a project root.
 
@@ -118,10 +134,16 @@ def _counts_for(root: Path) -> dict[str, int]:
     try:
         names = {name for _runtime, name, _status in diff_commands(root)}
         # ``list_canonical_commands`` returns ``list[tuple[Path, Layout]]``
-        # since ADR-0008 PR-C (#624) added directory layout. Unpack the
-        # tuple — ``p.stem`` on the raw tuple raised AttributeError and
-        # the blanket ``except Exception`` below silently zeroed the count.
-        names.update(p.stem for p, _layout in list_canonical_commands(root))
+        # since ADR-0008 PR-C (#624) added directory layout. Name
+        # extraction must be layout-aware (review on PR for #934
+        # follow-up): ``p.stem`` is ``"command"`` for every dir-layout
+        # entry, so multiple drafts collapsed into one counted name and
+        # surfaced a phantom ``"command"`` row that masked the real
+        # canonical names. ``_canonical_artifact_name`` returns the
+        # parent directory name for dir layout, the file stem for flat.
+        names.update(
+            _canonical_artifact_name(p, layout) for p, layout in list_canonical_commands(root)
+        )
         counts["commands"] = len(names)
     except Exception:
         logger.warning("counts: commands failed for %s", root, exc_info=True)
@@ -129,9 +151,13 @@ def _counts_for(root: Path) -> dict[str, int]:
 
     try:
         names = {name for _runtime, name, _status in diff_agents(root)}
-        # Same tuple-unpack as commands above; ``list_canonical_agents``
-        # also returns ``list[tuple[Path, Layout]]`` post PR-C.
-        names.update(p.stem for p, _layout in list_canonical_agents(root))
+        # Same layout-aware extraction as commands above;
+        # ``list_canonical_agents`` returns the same tuple shape with the
+        # same manifest-name collapse (every dir entry has p.stem ==
+        # "agent").
+        names.update(
+            _canonical_artifact_name(p, layout) for p, layout in list_canonical_agents(root)
+        )
         counts["agents"] = len(names)
     except Exception:
         logger.warning("counts: agents failed for %s", root, exc_info=True)
