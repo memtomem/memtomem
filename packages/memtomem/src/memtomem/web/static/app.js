@@ -718,6 +718,20 @@ function _indexingTryStart() {
   if (indicator) show(indicator);
   return true;
 }
+async function _indexingTryStartOrRefresh() {
+  if (!STATE.indexing) return _indexingTryStart();
+  try {
+    const r = await api('GET', '/api/indexing/active');
+    if (!r || !r.active) {
+      _indexingEnd();
+      return _indexingTryStart();
+    }
+  } catch (err) {
+    console.warn('[indexing-active preflight]', err);
+  }
+  showToast(t('toast.indexing_in_progress'), 'info');
+  return false;
+}
 function _indexingEnd() {
   STATE.indexing = false;
   const indicator = qs('indexing-indicator');
@@ -4673,7 +4687,7 @@ async function runAutoTag() {
 async function runIndexStream() {
   const path     = qs('index-path').value.trim();
   if (!path) { setMsg(qs('index-msg'), 'Please enter a path to index.', true); return; }
-  if (!_indexingTryStart()) return;
+  if (!(await _indexingTryStartOrRefresh())) return;
   const recursive = qs('index-recursive').checked;
   const force     = qs('index-force').checked;
   const namespace = qs('index-namespace').value.trim();
