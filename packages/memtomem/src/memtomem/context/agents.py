@@ -253,6 +253,40 @@ def parse_canonical_agent(path: Path, *, layout: Layout = "flat") -> SubAgent:
     return _parse_canonical_agent_text(content, source=path, layout=layout)
 
 
+def _resolve_agent_under_root(canonical_root: Path, agent_name: str) -> tuple[Path, Layout] | None:
+    dir_target = canonical_root / agent_name / AGENT_DIR_FILENAME
+    flat_target = canonical_root / f"{agent_name}.md"
+    has_dir = dir_target.is_file()
+    has_flat = flat_target.is_file()
+    if has_dir and has_flat:
+        logger.warning(
+            "agents/%s: reverse-sync updates dir layout (%s/agent.md); the flat "
+            "file (%s.md) is now silently divergent. Remove it or run "
+            "`mm context migrate` (PR-D).",
+            agent_name,
+            agent_name,
+            agent_name,
+        )
+        return dir_target, "dir"
+    if has_dir:
+        return dir_target, "dir"
+    if has_flat:
+        return flat_target, "flat"
+    return None
+
+
+def resolve_canonical_agent(project_root: Path, name: str) -> tuple[Path, Layout] | None:
+    """Return the canonical ``(path, layout)`` for ``name`` if it exists.
+
+    Directory layout wins when both the legacy flat file and ADR-0008
+    directory layout are present. Name validation is intentionally left to
+    callers so existing 400 behavior remains at the route/CLI boundary.
+    """
+    return _resolve_agent_under_root(
+        canonical_artifact_dir("agents", "project_shared", project_root), name
+    )
+
+
 def list_canonical_agents(
     project_root: Path,
     *,
@@ -774,25 +808,10 @@ def _resolve_agent_extract_target(canonical_root: Path, agent_name: str) -> tupl
       flat only     → flat (preserve existing layout; PR-C does not migrate)
       neither       → dir (ADR-0008 layout for new agents)
     """
-    dir_target = canonical_root / agent_name / AGENT_DIR_FILENAME
-    flat_target = canonical_root / f"{agent_name}.md"
-    has_dir = dir_target.is_file()
-    has_flat = flat_target.is_file()
-    if has_dir and has_flat:
-        logger.warning(
-            "agents/%s: reverse-sync updates dir layout (%s/agent.md); the flat "
-            "file (%s.md) is now silently divergent. Remove it or run "
-            "`mm context migrate` (PR-D).",
-            agent_name,
-            agent_name,
-            agent_name,
-        )
-        return dir_target, "dir"
-    if has_dir:
-        return dir_target, "dir"
-    if has_flat:
-        return flat_target, "flat"
-    return dir_target, "dir"
+    resolved = _resolve_agent_under_root(canonical_root, agent_name)
+    if resolved is not None:
+        return resolved
+    return canonical_root / agent_name / AGENT_DIR_FILENAME, "dir"
 
 
 def extract_agents_to_canonical(
@@ -1055,4 +1074,5 @@ __all__ = [
     "generate_all_agents",
     "list_canonical_agents",
     "parse_canonical_agent",
+    "resolve_canonical_agent",
 ]

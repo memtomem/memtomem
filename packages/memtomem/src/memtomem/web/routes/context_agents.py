@@ -23,6 +23,7 @@ from memtomem.context.agents import (
     generate_all_agents,
     list_canonical_agents,
     parse_canonical_agent,
+    resolve_canonical_agent,
 )
 from memtomem.context.detector import AGENT_DIRS
 from memtomem.context.privacy_scan import PrivacyScanError
@@ -58,6 +59,11 @@ def _canonical_agent_path(project_root: Path, raw_name: str) -> Path:
     """
     name = validate_name(raw_name, kind="agent")
     return _agents_root(project_root) / f"{name}.md"
+
+
+def _resolve_existing_agent(project_root: Path, raw_name: str):
+    name = validate_name(raw_name, kind="agent")
+    return name, resolve_canonical_agent(project_root, name)
 
 
 def _agent_to_dict(agent: SubAgent) -> dict:
@@ -120,9 +126,10 @@ async def read_agent(
     name: str,
     project_root: Path = Depends(get_project_root),
 ) -> dict:
-    agent_path = _canonical_agent_path(project_root, name)
-    if not agent_path.is_file():
+    name, resolved = _resolve_existing_agent(project_root, name)
+    if resolved is None:
         raise KeyError(name)
+    agent_path, layout = resolved
 
     content = agent_path.read_text(encoding="utf-8")
     # mtime_ns is serialized as a string because JavaScript Number cannot
@@ -131,7 +138,7 @@ async def read_agent(
 
     fields: dict = {}
     try:
-        parsed = parse_canonical_agent(agent_path)
+        parsed = parse_canonical_agent(agent_path, layout=layout)
         fields = _agent_to_dict(parsed)
     except AgentParseError:
         pass
@@ -147,13 +154,14 @@ async def rendered_agent(
     name: str,
     project_root: Path = Depends(get_project_root),
 ) -> JSONResponse:
-    agent_path = _canonical_agent_path(project_root, name)
-    if not agent_path.is_file():
+    name, resolved = _resolve_existing_agent(project_root, name)
+    if resolved is None:
         raise KeyError(name)
+    agent_path, layout = resolved
 
     content = agent_path.read_text(encoding="utf-8")
     try:
-        parsed = parse_canonical_agent(agent_path)
+        parsed = parse_canonical_agent(agent_path, layout=layout)
     except AgentParseError as exc:
         return JSONResponse(status_code=422, content={"detail": f"Parse error: {exc}"})
 
@@ -203,17 +211,18 @@ async def create_agent(
     body: AgentCreateRequest,
     project_root: Path = Depends(get_project_root),
 ) -> dict:
-    agent_path = _canonical_agent_path(project_root, body.name)
+    name = validate_name(body.name, kind="agent")
 
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                if agent_path.exists():
-                    raise ValueError(f"Agent '{body.name}' already exists")
+                if resolve_canonical_agent(project_root, name) is not None:
+                    raise HTTPException(409, detail=f"Agent '{name}' already exists")
+                agent_path = _canonical_agent_path(project_root, name)
                 atomic_write_text(agent_path, body.content)
     except TimeoutError:
         raise HTTPException(503, "Agent create timed out — another sync may be in progress")
-    return {"name": body.name, "canonical_path": str(agent_path.relative_to(project_root))}
+    return {"name": name, "canonical_path": str(agent_path.relative_to(project_root))}
 
 
 # ── Update ───────────────────────────────────────────────────────────────
@@ -236,9 +245,10 @@ async def update_agent(
     body: AgentUpdateRequest,
     project_root: Path = Depends(get_project_root),
 ) -> JSONResponse:
-    agent_path = _canonical_agent_path(project_root, name)
-    if not agent_path.is_file():
+    name, resolved = _resolve_existing_agent(project_root, name)
+    if resolved is None:
         raise KeyError(name)
+    agent_path, _layout = resolved
 
     try:
         body_mtime_ns = int(body.mtime_ns)
@@ -291,7 +301,7 @@ async def delete_agent(
     cascade: bool = Query(False),
     project_root: Path = Depends(get_project_root),
 ) -> dict:
-    agent_path = _canonical_agent_path(project_root, name)
+    name, resolved = _resolve_existing_agent(project_root, name)
 
     try:
         async with asyncio.timeout(60):
@@ -299,7 +309,8 @@ async def delete_agent(
                 removed: list[str] = []
                 skipped: list[dict[str, str]] = []
 
-                if agent_path.is_file():
+                if resolved is not None:
+                    agent_path, _layout = resolved
                     try:
                         agent_path.unlink()
                         removed.append(_safe_rel(agent_path, project_root))
@@ -334,10 +345,11 @@ async def diff_agent(
     name: str,
     project_root: Path = Depends(get_project_root),
 ) -> dict:
-    agent_path = _canonical_agent_path(project_root, name)
+    name, resolved = _resolve_existing_agent(project_root, name)
 
     canonical_content = None
-    if agent_path.is_file():
+    if resolved is not None:
+        agent_path, _layout = resolved
         canonical_content = agent_path.read_text(encoding="utf-8")
 
     runtimes = []

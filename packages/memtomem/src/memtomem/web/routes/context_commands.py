@@ -22,6 +22,7 @@ from memtomem.context.commands import (
     generate_all_commands,
     list_canonical_commands,
     parse_canonical_command,
+    resolve_canonical_command,
 )
 from memtomem.context.detector import COMMAND_DIRS
 from memtomem.context.privacy_scan import PrivacyScanError
@@ -50,6 +51,11 @@ def _canonical_command_path(project_root: Path, raw_name: str) -> Path:
     """Validate the name via core and return the canonical command path."""
     name = validate_name(raw_name, kind="command")
     return _commands_root(project_root) / f"{name}.md"
+
+
+def _resolve_existing_command(project_root: Path, raw_name: str):
+    name = validate_name(raw_name, kind="command")
+    return name, resolve_canonical_command(project_root, name)
 
 
 def _safe_rel(p: Path, project_root: Path) -> str:
@@ -106,9 +112,10 @@ async def read_command(
     name: str,
     project_root: Path = Depends(get_project_root),
 ) -> dict:
-    cmd_path = _canonical_command_path(project_root, name)
-    if not cmd_path.is_file():
+    name, resolved = _resolve_existing_command(project_root, name)
+    if resolved is None:
         raise KeyError(name)
+    cmd_path, layout = resolved
 
     content = cmd_path.read_text(encoding="utf-8")
     # mtime_ns serialized as string (JS bigint-unsafe).
@@ -116,7 +123,7 @@ async def read_command(
 
     fields: dict = {}
     try:
-        parsed = parse_canonical_command(cmd_path)
+        parsed = parse_canonical_command(cmd_path, layout=layout)
         fields = {
             "description": parsed.description,
             "argument_hint": parsed.argument_hint,
@@ -143,13 +150,14 @@ async def rendered_command(
     name: str,
     project_root: Path = Depends(get_project_root),
 ) -> JSONResponse:
-    cmd_path = _canonical_command_path(project_root, name)
-    if not cmd_path.is_file():
+    name, resolved = _resolve_existing_command(project_root, name)
+    if resolved is None:
         raise KeyError(name)
+    cmd_path, layout = resolved
 
     content = cmd_path.read_text(encoding="utf-8")
     try:
-        parsed = parse_canonical_command(cmd_path)
+        parsed = parse_canonical_command(cmd_path, layout=layout)
     except CommandParseError as exc:
         return JSONResponse(status_code=422, content={"detail": f"Parse error: {exc}"})
 
@@ -199,17 +207,18 @@ async def create_command(
     body: CommandCreateRequest,
     project_root: Path = Depends(get_project_root),
 ) -> dict:
-    cmd_path = _canonical_command_path(project_root, body.name)
+    name = validate_name(body.name, kind="command")
 
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                if cmd_path.exists():
-                    raise ValueError(f"Command '{body.name}' already exists")
+                if resolve_canonical_command(project_root, name) is not None:
+                    raise HTTPException(409, detail=f"Command '{name}' already exists")
+                cmd_path = _canonical_command_path(project_root, name)
                 atomic_write_text(cmd_path, body.content)
     except TimeoutError:
         raise HTTPException(503, "Command create timed out — another sync may be in progress")
-    return {"name": body.name, "canonical_path": str(cmd_path.relative_to(project_root))}
+    return {"name": name, "canonical_path": str(cmd_path.relative_to(project_root))}
 
 
 # ── Update ───────────────────────────────────────────────────────────────
@@ -232,9 +241,10 @@ async def update_command(
     body: CommandUpdateRequest,
     project_root: Path = Depends(get_project_root),
 ) -> JSONResponse:
-    cmd_path = _canonical_command_path(project_root, name)
-    if not cmd_path.is_file():
+    name, resolved = _resolve_existing_command(project_root, name)
+    if resolved is None:
         raise KeyError(name)
+    cmd_path, _layout = resolved
 
     try:
         body_mtime_ns = int(body.mtime_ns)
@@ -280,7 +290,7 @@ async def delete_command(
     cascade: bool = Query(False),
     project_root: Path = Depends(get_project_root),
 ) -> dict:
-    cmd_path = _canonical_command_path(project_root, name)
+    name, resolved = _resolve_existing_command(project_root, name)
 
     try:
         async with asyncio.timeout(60):
@@ -288,7 +298,8 @@ async def delete_command(
                 removed: list[str] = []
                 skipped: list[dict[str, str]] = []
 
-                if cmd_path.is_file():
+                if resolved is not None:
+                    cmd_path, _layout = resolved
                     try:
                         cmd_path.unlink()
                         removed.append(_safe_rel(cmd_path, project_root))
@@ -323,10 +334,11 @@ async def diff_command(
     name: str,
     project_root: Path = Depends(get_project_root),
 ) -> dict:
-    cmd_path = _canonical_command_path(project_root, name)
+    name, resolved = _resolve_existing_command(project_root, name)
 
     canonical_content = None
-    if cmd_path.is_file():
+    if resolved is not None:
+        cmd_path, _layout = resolved
         canonical_content = cmd_path.read_text(encoding="utf-8")
 
     runtimes = []

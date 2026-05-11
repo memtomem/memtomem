@@ -172,6 +172,40 @@ def parse_canonical_command(path: Path, *, layout: Layout = "flat") -> SlashComm
     return _parse_canonical_command_text(content, source=path, layout=layout)
 
 
+def _resolve_command_under_root(canonical_root: Path, cmd_name: str) -> tuple[Path, Layout] | None:
+    dir_target = canonical_root / cmd_name / COMMAND_DIR_FILENAME
+    flat_target = canonical_root / f"{cmd_name}.md"
+    has_dir = dir_target.is_file()
+    has_flat = flat_target.is_file()
+    if has_dir and has_flat:
+        logger.warning(
+            "commands/%s: reverse-sync updates dir layout (%s/command.md); the "
+            "flat file (%s.md) is now silently divergent. Remove it or run "
+            "`mm context migrate` (PR-D).",
+            cmd_name,
+            cmd_name,
+            cmd_name,
+        )
+        return dir_target, "dir"
+    if has_dir:
+        return dir_target, "dir"
+    if has_flat:
+        return flat_target, "flat"
+    return None
+
+
+def resolve_canonical_command(project_root: Path, name: str) -> tuple[Path, Layout] | None:
+    """Return the canonical ``(path, layout)`` for ``name`` if it exists.
+
+    Directory layout wins when both the legacy flat file and ADR-0008
+    directory layout are present. Name validation is intentionally left to
+    callers so existing 400 behavior remains at the route/CLI boundary.
+    """
+    return _resolve_command_under_root(
+        canonical_artifact_dir("commands", "project_shared", project_root), name
+    )
+
+
 def list_canonical_commands(
     project_root: Path,
     *,
@@ -565,25 +599,10 @@ def _resolve_command_extract_target(canonical_root: Path, cmd_name: str) -> tupl
     dir+flat both → dir wins (silent flat divergence WARNed);
     dir only → dir; flat only → flat (preserve); neither → dir (ADR layout).
     """
-    dir_target = canonical_root / cmd_name / COMMAND_DIR_FILENAME
-    flat_target = canonical_root / f"{cmd_name}.md"
-    has_dir = dir_target.is_file()
-    has_flat = flat_target.is_file()
-    if has_dir and has_flat:
-        logger.warning(
-            "commands/%s: reverse-sync updates dir layout (%s/command.md); the "
-            "flat file (%s.md) is now silently divergent. Remove it or run "
-            "`mm context migrate` (PR-D).",
-            cmd_name,
-            cmd_name,
-            cmd_name,
-        )
-        return dir_target, "dir"
-    if has_dir:
-        return dir_target, "dir"
-    if has_flat:
-        return flat_target, "flat"
-    return dir_target, "dir"
+    resolved = _resolve_command_under_root(canonical_root, cmd_name)
+    if resolved is not None:
+        return resolved
+    return canonical_root / cmd_name / COMMAND_DIR_FILENAME, "dir"
 
 
 def extract_commands_to_canonical(
@@ -881,4 +900,5 @@ __all__ = [
     "generate_all_commands",
     "list_canonical_commands",
     "parse_canonical_command",
+    "resolve_canonical_command",
 ]

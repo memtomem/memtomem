@@ -535,3 +535,173 @@ async def test_DELETE_existing_removes_canonical(
     data = r.json()
     assert len(data["deleted"]) == 1
     assert not adapter["manifest"](gateway_root, "bye").exists()
+
+
+# ---------------------------------------------------------------------------
+# ADR-0008 directory-layout agents / commands (issue #899)
+# ---------------------------------------------------------------------------
+
+
+def _make_canonical_agent_dir(root: Path, name: str, content: str | None = None) -> Path:
+    path = root / ".memtomem" / "agents" / name / "agent.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content if content is not None else _agent_content(name), encoding="utf-8")
+    return path
+
+
+def _make_canonical_command_dir(root: Path, name: str, content: str | None = None) -> Path:
+    path = root / ".memtomem" / "commands" / name / "command.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content if content is not None else _command_content(), encoding="utf-8")
+    return path
+
+
+DIR_LAYOUT_MATRIX = [
+    pytest.param(
+        {
+            "type": "agents",
+            "list_url": "/api/context/agents",
+            "detail": lambda n: f"/api/context/agents/{n}",
+            "rendered": lambda n: f"/api/context/agents/{n}/rendered",
+            "diff": lambda n: f"/api/context/agents/{n}/diff",
+            "create_body": lambda n: {"name": n, "content": _agent_content(n)},
+            "flat_manifest": lambda root, n: root / ".memtomem" / "agents" / f"{n}.md",
+            "make_flat": _make_canonical_agent,
+            "make_dir": _make_canonical_agent_dir,
+            "dir_body": lambda n: _agent_content(n).replace("Body", "DIR BODY"),
+            "flat_body": lambda n: _agent_content(n).replace("Body", "FLAT BODY"),
+            "warn_fragment": "agents/both: reverse-sync updates dir layout",
+        },
+        id="agents-dir-layout",
+    ),
+    pytest.param(
+        {
+            "type": "commands",
+            "list_url": "/api/context/commands",
+            "detail": lambda n: f"/api/context/commands/{n}",
+            "rendered": lambda n: f"/api/context/commands/{n}/rendered",
+            "diff": lambda n: f"/api/context/commands/{n}/diff",
+            "create_body": lambda n: {"name": n, "content": _command_content()},
+            "flat_manifest": lambda root, n: root / ".memtomem" / "commands" / f"{n}.md",
+            "make_flat": _make_canonical_command,
+            "make_dir": _make_canonical_command_dir,
+            "dir_body": lambda n: _command_content().replace("Body", "DIR BODY"),
+            "flat_body": lambda n: _command_content().replace("Body", "FLAT BODY"),
+            "warn_fragment": "commands/both: reverse-sync updates dir layout",
+        },
+        id="commands-dir-layout",
+    ),
+]
+
+
+@pytest.mark.parametrize("adapter", DIR_LAYOUT_MATRIX)
+@pytest.mark.anyio
+async def test_dir_layout_detail_and_rendered_routes_return_200(
+    adapter: dict,
+    client: AsyncClient,
+    gateway_root: Path,
+):
+    adapter["make_dir"](gateway_root, "dir-item")
+
+    detail = await client.get(adapter["detail"]("dir-item"))
+    assert detail.status_code == 200, (adapter["type"], detail.text)
+    assert "Body" in detail.json()["content"]
+
+    rendered = await client.get(adapter["rendered"]("dir-item"))
+    assert rendered.status_code == 200, (adapter["type"], rendered.text)
+
+
+@pytest.mark.parametrize("adapter", DIR_LAYOUT_MATRIX)
+@pytest.mark.anyio
+async def test_dir_layout_update_uses_dir_file_and_preserves_mtime_409(
+    adapter: dict,
+    client: AsyncClient,
+    gateway_root: Path,
+):
+    target = adapter["make_dir"](gateway_root, "dir-cas")
+    read = await client.get(adapter["detail"]("dir-cas"))
+    mtime_ns = read.json()["mtime_ns"]
+
+    update = await client.put(
+        adapter["detail"]("dir-cas"),
+        json={"content": "UPDATED\n", "mtime_ns": mtime_ns},
+    )
+    assert update.status_code == 200, (adapter["type"], update.text)
+    assert target.read_text(encoding="utf-8") == "UPDATED\n"
+
+    stale = await client.put(
+        adapter["detail"]("dir-cas"),
+        json={"content": "STALE\n", "mtime_ns": mtime_ns},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["status"] == "aborted"
+    assert target.read_text(encoding="utf-8") == "UPDATED\n"
+
+
+@pytest.mark.parametrize("adapter", DIR_LAYOUT_MATRIX)
+@pytest.mark.anyio
+async def test_dir_layout_delete_removes_dir_file_only(
+    adapter: dict,
+    client: AsyncClient,
+    gateway_root: Path,
+):
+    target = adapter["make_dir"](gateway_root, "dir-delete")
+
+    r = await client.delete(adapter["detail"]("dir-delete"))
+    assert r.status_code == 200, (adapter["type"], r.text)
+    assert not target.exists()
+    assert target.parent.is_dir()
+
+
+@pytest.mark.parametrize("adapter", DIR_LAYOUT_MATRIX)
+@pytest.mark.anyio
+async def test_dir_layout_diff_returns_200(
+    adapter: dict,
+    client: AsyncClient,
+    gateway_root: Path,
+):
+    adapter["make_dir"](gateway_root, "dir-diff")
+
+    r = await client.get(adapter["diff"]("dir-diff"))
+    assert r.status_code == 200, (adapter["type"], r.text)
+    assert r.json()["canonical_content"] is not None
+
+
+@pytest.mark.parametrize("adapter", DIR_LAYOUT_MATRIX)
+@pytest.mark.anyio
+async def test_POST_rejects_existing_flat_or_dir_layout_without_shadowing(
+    adapter: dict,
+    client: AsyncClient,
+    gateway_root: Path,
+):
+    adapter["make_dir"](gateway_root, "dir-exists")
+    dir_resp = await client.post(adapter["list_url"], json=adapter["create_body"]("dir-exists"))
+    assert dir_resp.status_code == 409, (adapter["type"], dir_resp.text)
+    assert not adapter["flat_manifest"](gateway_root, "dir-exists").exists()
+
+    adapter["make_flat"](gateway_root, "flat-exists")
+    flat_resp = await client.post(adapter["list_url"], json=adapter["create_body"]("flat-exists"))
+    assert flat_resp.status_code == 409, (adapter["type"], flat_resp.text)
+
+
+@pytest.mark.parametrize("adapter", DIR_LAYOUT_MATRIX)
+@pytest.mark.anyio
+async def test_both_layouts_detail_prefers_dir_and_warns(
+    adapter: dict,
+    client: AsyncClient,
+    gateway_root: Path,
+    caplog: pytest.LogCaptureFixture,
+):
+    adapter["make_flat"](gateway_root, "both")
+    adapter["flat_manifest"](gateway_root, "both").write_text(
+        adapter["flat_body"]("both"), encoding="utf-8"
+    )
+    adapter["make_dir"](gateway_root, "both", adapter["dir_body"]("both"))
+
+    with caplog.at_level(logging.WARNING):
+        r = await client.get(adapter["detail"]("both"))
+
+    assert r.status_code == 200, (adapter["type"], r.text)
+    assert "DIR BODY" in r.json()["content"]
+    assert "FLAT BODY" not in r.json()["content"]
+    assert adapter["warn_fragment"] in caplog.text
