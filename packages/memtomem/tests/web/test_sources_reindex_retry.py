@@ -47,9 +47,7 @@ def _install_default_stubs(page) -> None:
     )
 
 
-def test_sources_reindex_retries_when_local_indexing_flag_is_stale(
-    page, mm_web_url: str
-) -> None:
+def test_sources_reindex_retries_when_local_indexing_flag_is_stale(page, mm_web_url: str) -> None:
     """Stale client ``STATE.indexing`` must not block a new Sources reindex.
 
     The server reports idle via ``/api/indexing/active``; ``mdReindexOne`` must
@@ -97,4 +95,3 @@ def test_sources_reindex_retries_when_local_indexing_flag_is_stale(
     assert "path=%2Ftmp%2Fmemories" in constructed["eventSourceUrl"]
     assert constructed["stateIndexing"] is True
     assert constructed["buttonDisabled"] is True
-
