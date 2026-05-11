@@ -1381,6 +1381,24 @@ class SqliteBackend(
         ).fetchone()
         return int(row[0]) if row else 0
 
+    async def count_chunk_links_for_source(self, source_file: Path) -> int:
+        # ADR-0011 #886: `mm context memory-migrate` reports the size of the
+        # chunk_links "neighborhood" attached to a moving source. For v1
+        # single-DB chunk-id-stable rename the entire neighborhood is
+        # preserved (chunks.id never changes, FK rows are untouched), so
+        # the displayed "N preserved, 0 dropped" line is computed from this
+        # value rather than hard-coded. Cross-DB migration (deferred) is
+        # where the dropped half would start to matter.
+        db = self._get_read_db()
+        norm = norm_path(source_file)
+        row = db.execute(
+            "SELECT COUNT(*) FROM chunk_links "
+            "WHERE source_id IN (SELECT id FROM chunks WHERE source_file=?) "
+            "   OR target_id IN (SELECT id FROM chunks WHERE source_file=?)",
+            (norm, norm),
+        ).fetchone()
+        return int(row[0]) if row else 0
+
     async def list_chunks_by_tag(self, tag: str, limit: int = 10) -> list[Chunk]:
         # Thin wrapper over ``recall_chunks(tag_filter=...)`` — the post-fusion
         # tag-filter path (#750) already implements the json_each EXISTS match
