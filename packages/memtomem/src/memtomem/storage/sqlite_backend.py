@@ -33,6 +33,12 @@ from memtomem.storage.sqlite_helpers import (
     placeholders,
     serialize_f32,
 )
+from memtomem.storage.orphan_gc import (
+    OrphanProjectReport,
+    SweepResult,
+    find_orphan_project_roots,
+    sweep_orphan_project_root,
+)
 from memtomem.storage.sqlite_meta import MetaManager
 from memtomem.storage.sqlite_namespace import NamespaceOps
 from memtomem.storage.sqlite_scope import scope_context_sql, scope_sort_priority_case
@@ -749,6 +755,31 @@ class SqliteBackend(
                 db.rollback()
             raise StorageError(f"delete_by_source failed, transaction rolled back: {exc}") from exc
         return len(rows)
+
+    async def find_orphan_project_roots(self) -> list[OrphanProjectReport]:
+        """Detect project-tier chunks whose ``project_root`` no longer exists on disk.
+
+        Thin async wrapper around :func:`memtomem.storage.orphan_gc.find_orphan_project_roots`
+        so the CLI (``mm gc orphan-projects``) can call it via the
+        Components stack while the underlying pure function stays
+        unit-testable against a synthetic ``sqlite3.Connection``. See
+        ADR-0011 follow-up #884 for the surface contract.
+        """
+        return find_orphan_project_roots(self._get_read_db())
+
+    async def sweep_orphan_project_root(self, project_root: str) -> SweepResult:
+        """Delete every project-tier chunk under ``project_root`` in one transaction.
+
+        Thin async wrapper around
+        :func:`memtomem.storage.orphan_gc.sweep_orphan_project_root` that
+        threads in :attr:`_has_vec_table` so the helper need not poke at
+        the backend's invariants. See ADR-0011 follow-up #884.
+        """
+        return sweep_orphan_project_root(
+            self._get_db(),
+            project_root,
+            has_vec_table=self._has_vec_table,
+        )
 
     async def list_scopes_by_source(self, source_file: Path) -> set[str]:
         """Return the distinct persisted scopes for chunks from ``source_file``."""
