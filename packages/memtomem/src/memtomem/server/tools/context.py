@@ -556,14 +556,14 @@ async def mem_context_diff(
     Args:
         include: Comma-separated extra artifact kinds
             (``skills``, ``agents``, ``commands``, ``settings``).
-        scope: ADR-0010 host-write target-scope override for ``settings``
-            diff (``project_shared`` default, ``user``, or ``project_local``).
-            Only affects the ``settings`` axis — skills / agents / commands
-            diff is a read-only enumeration of runtime filesystem entries
-            where scope has no effect. MCP has no cwd to infer from, so
-            callers must pass ``scope`` explicitly to target a non-default
-            settings tier (mirrors ``mem_context_generate`` /
-            ``mem_context_sync`` scope semantics).
+        scope: ADR-0011 canonical artifact tier for the skills / agents /
+            commands diff (``project_shared`` default, ``user``, or
+            ``project_local``). The same value is also forwarded as the
+            ADR-0010 host-write target-scope override for ``settings``,
+            mirroring ``mem_context_generate`` / ``mem_context_sync``
+            (``cli/context_cmd.py:963-987``). MCP has no cwd to infer
+            from, so callers must pass ``scope`` explicitly to target a
+            non-default tier.
     """
     from memtomem.context.agents import diff_agents
     from memtomem.context.commands import diff_commands
@@ -574,6 +574,7 @@ async def mem_context_diff(
 
     inc = _parse_include(include)
     root = _find_project_root()
+    artifact_scope = _resolve_artifact_mcp_scope(scope)
     ctx_path = root / CONTEXT_FILENAME
 
     lines: list[str] = []
@@ -599,7 +600,7 @@ async def mem_context_diff(
         lines.append(f"({CONTEXT_FILENAME} missing — skipping project memory)")
 
     if "skills" in inc:
-        rows = diff_skills(root)
+        rows = diff_skills(root, scope=artifact_scope)
         if rows:
             if lines:
                 lines.append("")
@@ -610,7 +611,7 @@ async def mem_context_diff(
             lines.append("No skills to compare.")
 
     if "agents" in inc:
-        rows = diff_agents(root)
+        rows = diff_agents(root, scope=artifact_scope)
         if rows:
             if lines:
                 lines.append("")
@@ -621,7 +622,7 @@ async def mem_context_diff(
             lines.append("No sub-agents to compare.")
 
     if "commands" in inc:
-        rows = diff_commands(root)
+        rows = diff_commands(root, scope=artifact_scope)
         if rows:
             if lines:
                 lines.append("")
