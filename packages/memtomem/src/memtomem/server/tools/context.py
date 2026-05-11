@@ -175,6 +175,7 @@ async def mem_context_generate(
     )
     from memtomem.context.generator import GENERATORS
     from memtomem.context.parser import CONTEXT_FILENAME, parse_context
+    from memtomem.context.privacy_scan import PrivacyScanError
     from memtomem.context.skills import generate_all_skills
 
     inc = _parse_include(include)
@@ -205,7 +206,10 @@ async def mem_context_generate(
         results.append(f"({CONTEXT_FILENAME} missing — skipping project memory)")
 
     if "skills" in inc:
-        skill_result = generate_all_skills(root)
+        try:
+            skill_result = generate_all_skills(root)
+        except PrivacyScanError as exc:
+            return f"privacy block: {exc.message}"
         if skill_result.generated:
             results.append("")
             results.append(f"Skills fan-out: {len(skill_result.generated)}")
@@ -220,6 +224,8 @@ async def mem_context_generate(
             agent_result = generate_all_agents(root, strict=strict)
         except StrictDropError as exc:
             return f"strict error: {exc}"
+        except PrivacyScanError as exc:
+            return f"privacy block: {exc.message}"
         if agent_result.generated:
             results.append("")
             results.append(f"Sub-agent fan-out: {len(agent_result.generated)}")
@@ -239,6 +245,8 @@ async def mem_context_generate(
             command_result = generate_all_commands(root, strict=strict)
         except CommandStrictDropError as exc:
             return f"strict error: {exc}"
+        except PrivacyScanError as exc:
+            return f"privacy block: {exc.message}"
         if command_result.generated:
             results.append("")
             results.append(f"Command fan-out: {len(command_result.generated)}")
@@ -404,6 +412,7 @@ async def mem_context_sync(
     from memtomem.context.detector import detect_agent_files
     from memtomem.context.generator import GENERATORS
     from memtomem.context.parser import CONTEXT_FILENAME, parse_context
+    from memtomem.context.privacy_scan import PrivacyScanError
     from memtomem.context.skills import generate_all_skills
 
     inc = _parse_include(include)
@@ -437,7 +446,10 @@ async def mem_context_sync(
         results.append(f"({CONTEXT_FILENAME} missing — skipping project memory)")
 
     if "skills" in inc:
-        skill_result = generate_all_skills(root)
+        try:
+            skill_result = generate_all_skills(root)
+        except PrivacyScanError as exc:
+            return f"privacy block: {exc.message}"
         if skill_result.generated:
             if results:
                 results.append("")
@@ -453,6 +465,8 @@ async def mem_context_sync(
             agent_result = generate_all_agents(root, strict=strict)
         except StrictDropError as exc:
             return f"strict error: {exc}"
+        except PrivacyScanError as exc:
+            return f"privacy block: {exc.message}"
         if agent_result.generated:
             if results:
                 results.append("")
@@ -473,6 +487,8 @@ async def mem_context_sync(
             command_result = generate_all_commands(root, strict=strict)
         except CommandStrictDropError as exc:
             return f"strict error: {exc}"
+        except PrivacyScanError as exc:
+            return f"privacy block: {exc.message}"
         if command_result.generated:
             if results:
                 results.append("")

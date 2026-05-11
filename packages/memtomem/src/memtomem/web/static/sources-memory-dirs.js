@@ -1091,7 +1091,11 @@ async function mdOpenOne(path, btn) {
 // ``progress`` events the Index tab already consumes and surfaces them as a
 // live ``done/total`` counter on the reindex button itself.
 async function mdReindexOne(path, btn) {
-  if (typeof _indexingTryStart === 'function' && !_indexingTryStart()) return;
+  if (typeof _indexingTryStartOrRefresh === 'function') {
+    if (!(await _indexingTryStartOrRefresh())) return;
+  } else if (typeof _indexingTryStart === 'function' && !_indexingTryStart()) {
+    return;
+  }
   if (btn) btnLoading(btn, true);
   // Cache the original button label so we can restore it after the run —
   // ``btnLoading`` only toggles disabled+spinner, it doesn't snapshot text.
@@ -1229,7 +1233,11 @@ async function mdReindexOne(path, btn) {
 }
 
 async function mdReindexAll(btn) {
-  if (typeof _indexingTryStart === 'function' && !_indexingTryStart()) return;
+  if (typeof _indexingTryStartOrRefresh === 'function') {
+    if (!(await _indexingTryStartOrRefresh())) return;
+  } else if (typeof _indexingTryStart === 'function' && !_indexingTryStart()) {
+    return;
+  }
   if (btn) btnLoading(btn, true);
   try {
     const resp = await api('POST', '/api/reindex', undefined, { timeout: 300_000 });

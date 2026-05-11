@@ -156,3 +156,47 @@ def runtime_fanout_root(
             "requires project_root for a project-tier scope."
         )
     return (project_root / entry).resolve()
+
+
+def runtime_artifact_names(
+    artifact: ArtifactKind,
+    runtime: str,
+    project_root: Path | None,
+    scope: TargetScope,
+    *,
+    file_suffix: str | None = None,
+    dir_manifest: str | None = None,
+) -> set[str]:
+    """Return artifact names present under the runtime fan-out root.
+
+    Replaces the per-module helpers ``_runtime_agent_names`` /
+    ``_runtime_command_names`` and the inline runtime-listing in
+    ``diff_skills`` (ADR-0011 PR-E3 cleanup item #4 — collapses three
+    implementations onto one source of truth so the
+    ``RUNTIME_FANOUT_TABLE`` shape is the only place a runtime root is
+    spelled out).
+
+    Pass exactly one of:
+
+    * ``file_suffix`` (e.g. ``".md"`` / ``".toml"``) — return the
+      ``stem`` of every regular file matching the suffix. Used for
+      agents and commands fan-out where each artifact is one file.
+    * ``dir_manifest`` (e.g. ``"SKILL.md"``) — return the ``name`` of
+      every directory containing the named manifest file. Used for
+      skills where each artifact is a directory tree.
+
+    Returns the empty set when the table entry is ``NO_FANOUT`` or
+    when the resolved root does not yet exist on disk (caller treats
+    "no runtime listing" the same as "table says no fan-out").
+    """
+    if (file_suffix is None) == (dir_manifest is None):
+        raise ValueError(
+            "runtime_artifact_names requires exactly one of file_suffix= or dir_manifest=."
+        )
+    root = runtime_fanout_root(artifact, runtime, scope, project_root)
+    if root is None or not root.is_dir():
+        return set()
+    if file_suffix is not None:
+        return {p.stem for p in root.iterdir() if p.is_file() and p.suffix == file_suffix}
+    assert dir_manifest is not None  # mypy narrow
+    return {p.name for p in root.iterdir() if p.is_dir() and (p / dir_manifest).is_file()}

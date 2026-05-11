@@ -44,7 +44,11 @@ from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, Layout, validate_name
-from memtomem.context._runtime_targets import runtime_fanout_root
+from memtomem.context._runtime_targets import runtime_artifact_names, runtime_fanout_root
+from memtomem.context.privacy_scan import (
+    raise_or_collect,
+    scan_text_content,
+)
 from memtomem.context.agents import (
     _FRONT_MATTER_RE,
     _parse_flat_yaml,
@@ -88,17 +92,19 @@ class CommandParseError(ValueError):
     """Raised when a canonical command file cannot be parsed."""
 
 
-def parse_canonical_command(path: Path, *, layout: Layout = "flat") -> SlashCommand:
-    """Parse a canonical command file into a :class:`SlashCommand`.
-
-    ``layout`` selects the default-name fallback when the frontmatter omits
-    ``name``: ``"flat"`` (legacy ``commands/<name>.md``) uses ``path.stem``;
-    ``"dir"`` (ADR-0008 ``commands/<name>/command.md``) uses
-    ``path.parent.name``.
+def _parse_canonical_command_text(
+    content: str,
+    *,
+    source: Path,
+    layout: Layout = "flat",
+) -> SlashCommand:
+    """Parse already-loaded canonical command text. Used by both the path-based
+    :func:`parse_canonical_command` (back-compat) and the sync flow that
+    captures bytes once to close the scan→write TOCTOU window
+    (PR-E3 Codex review fold).
     """
-    default_name = path.parent.name if layout == "dir" else path.stem
+    default_name = source.parent.name if layout == "dir" else source.stem
 
-    content = path.read_text(encoding="utf-8")
     # Share agents.py's CRLF normalization — the shared ``_FRONT_MATTER_RE``
     # anchors on ``\n`` only, so a CRLF file would otherwise parse as "no
     # frontmatter" and silently fall through to the filename-based default.
@@ -111,7 +117,7 @@ def parse_canonical_command(path: Path, *, layout: Layout = "flat") -> SlashComm
         try:
             stem = validate_name(default_name, kind="command name")
         except InvalidNameError as exc:
-            raise CommandParseError(f"{exc} (source: {path})") from exc
+            raise CommandParseError(f"{exc} (source: {source})") from exc
         return SlashCommand(name=stem, description="", body=body)
 
     frontmatter = _parse_flat_yaml(m.group(1))
@@ -121,7 +127,7 @@ def parse_canonical_command(path: Path, *, layout: Layout = "flat") -> SlashComm
     try:
         name = validate_name(name, kind="command name")
     except InvalidNameError as exc:
-        raise CommandParseError(f"{exc} (source: {path})") from exc
+        raise CommandParseError(f"{exc} (source: {source})") from exc
     description = str(frontmatter.get("description") or "")
     argument_hint_raw = frontmatter.get("argument-hint") or frontmatter.get("argument_hint")
     allowed_tools_raw = frontmatter.get("allowed-tools") or frontmatter.get("allowed_tools")
@@ -154,15 +160,35 @@ def parse_canonical_command(path: Path, *, layout: Layout = "flat") -> SlashComm
     )
 
 
-def list_canonical_commands(project_root: Path) -> list[tuple[Path, Layout]]:
+def parse_canonical_command(path: Path, *, layout: Layout = "flat") -> SlashCommand:
+    """Parse a canonical command file into a :class:`SlashCommand`.
+
+    ``layout`` selects the default-name fallback when the frontmatter omits
+    ``name``: ``"flat"`` (legacy ``commands/<name>.md``) uses ``path.stem``;
+    ``"dir"`` (ADR-0008 ``commands/<name>/command.md``) uses
+    ``path.parent.name``.
+    """
+    content = path.read_text(encoding="utf-8")
+    return _parse_canonical_command_text(content, source=path, layout=layout)
+
+
+def list_canonical_commands(
+    project_root: Path,
+    *,
+    scope: TargetScope = "project_shared",
+) -> list[tuple[Path, Layout]]:
     """Enumerate canonical commands in both flat and directory layouts.
 
     Flat layout (legacy): ``commands/<name>.md``. Directory layout (ADR-0008
     PR-C+): ``commands/<name>/command.md``. When the same name has both
     forms, the directory layout wins and a WARNING is logged so the silent
     flat file is visible.
+
+    ADR-0011 PR-E3: ``scope`` selects the canonical root via
+    :func:`canonical_artifact_dir` (default ``project_shared`` preserves
+    pre-PR-E3 behavior).
     """
-    root = project_root / CANONICAL_COMMAND_ROOT
+    root = canonical_artifact_dir("commands", scope, project_root)
     if not root.is_dir():
         return []
 
@@ -363,6 +389,8 @@ def generate_all_commands(
     runtimes: list[str] | None = None,
     strict: bool = False,
     on_drop: str = "ignore",
+    *,
+    scope: TargetScope = "project_shared",
 ) -> CommandSyncResult:
     """Fan out every canonical command to the requested runtimes.
 
@@ -373,6 +401,9 @@ def generate_all_commands(
             ``"error"`` — raise :class:`StrictDropError` immediately.
         strict: Legacy alias for ``on_drop="error"``. If *both* are supplied,
             ``on_drop`` takes precedence unless it is still the default.
+        scope: ADR-0011 PR-E3 — selects canonical root and runtime
+            fan-out destination. Default ``project_shared`` preserves
+            pre-PR-E3 behavior.
     """
     effective_drop = on_drop if on_drop != "ignore" or not strict else "error"
 
@@ -380,7 +411,7 @@ def generate_all_commands(
     dropped: list[tuple[str, str, list[str]]] = []
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
 
-    canonicals = list_canonical_commands(project_root)
+    canonicals = list_canonical_commands(project_root, scope=scope)
     if not canonicals:
         return CommandSyncResult(
             generated=[],
@@ -389,14 +420,31 @@ def generate_all_commands(
         )
 
     targets = runtimes if runtimes is not None else list(COMMAND_GENERATORS.keys())
+
+    # ── Phase 1: parse + scan every (target, command) pair — pure read pass. ──
+    # See agents.py for the rationale (project_shared atomicity, ADR §5).
+    # The first project_shared Gate A hit raises immediately via
+    # :func:`raise_or_collect`, so no partial runtime fan-out can land
+    # on disk (#895 P2 review #5).
+    pending: list[tuple[str, CommandGenerator, SlashCommand, Path, bytes | None]] = []
+
     for target in targets:
         gen = COMMAND_GENERATORS.get(target)
         if gen is None:
             skipped.append((target, "unknown runtime", skip_codes.UNKNOWN_RUNTIME))
             continue
         for cmd_path, layout in canonicals:
+            # PR-E3 Codex review fold: read canonical bytes ONCE and use
+            # the captured buffer for both Gate A scan AND parse, closing
+            # the scan→write TOCTOU window (mirror of agents.py logic).
             try:
-                cmd = parse_canonical_command(cmd_path, layout=layout)
+                cmd_bytes = cmd_path.read_bytes()
+            except OSError as exc:
+                skipped.append((cmd_path.name, f"unreadable: {exc}", skip_codes.PARSE_ERROR))
+                continue
+            cmd_text = cmd_bytes.decode("utf-8", errors="replace")
+            try:
+                cmd = _parse_canonical_command_text(cmd_text, source=cmd_path, layout=layout)
             except CommandParseError as exc:
                 skipped.append((cmd_path.name, f"parse error: {exc}", skip_codes.PARSE_ERROR))
                 continue
@@ -406,7 +454,7 @@ def generate_all_commands(
             # without invoking ``render`` so a strict caller doesn't raise
             # ``StrictDropError`` for a runtime that has no fan-out by
             # design (the fail-quiet contract).
-            out_path = gen.target_file(project_root, cmd.name)
+            out_path = gen.target_file(project_root, cmd.name, scope=scope)
             if out_path is None:
                 skipped.append(
                     (
@@ -416,31 +464,78 @@ def generate_all_commands(
                     )
                 )
                 continue
-            content, dropped_fields = gen.render(cmd)
-            if dropped_fields:
-                if effective_drop == "error":
-                    raise StrictDropError(
-                        f"strict mode: {target} would drop {dropped_fields} from '{cmd.name}'"
-                    )
-                if effective_drop == "warn":
-                    logger.warning("%s dropped %s from '%s'", target, dropped_fields, cmd.name)
-            atomic_write_text(out_path, content)
-            # ADR-0008 Invariant 4: per-vendor override replaces the runtime file.
-            # Race: see PR-D' for the unified write path that closes the
-            # canonical→override window. Same pattern as skills.py:213-220.
+            # ADR-0011 PR-E3 Gate A — scan the IN-MEMORY canonical bytes
+            # (same buffer the parse used). Mirrors the agents.py flow.
+            file_scan = scan_text_content(
+                cmd_text,
+                source_path=cmd_path,
+                surface="cli_context_sync",
+                scope=scope,
+                project_root=project_root,
+            )
+            if file_scan.decision in ("blocked", "blocked_project_shared"):
+                code, reason = raise_or_collect(
+                    file_scan,
+                    scope=scope,
+                    kind="command",
+                    artifact_name=cmd.name,
+                )
+                skipped.append((cmd.name, reason, code))
+                continue
+            # Resolve per-vendor override and scan its bytes — read once,
+            # scan once, hand the bytes to Phase 2.
             vendor = GENERATOR_VENDOR.get(target)
+            override_bytes: bytes | None = None
             if vendor is not None:
-                # ADR-0011 PR-E: pin scope=project_shared (see agents.py for
-                # the same rationale — default sync must not see draft
-                # project_local overrides).
                 override_path = _override.resolve(
-                    project_root, "commands", cmd.name, vendor, scope="project_shared"
+                    project_root, "commands", cmd.name, vendor, scope=scope
                 )
                 if override_path is not None:
-                    atomic_write_bytes(out_path, override_path.read_bytes())
-            generated.append((target, out_path))
-            if dropped_fields:
-                dropped.append((target, cmd.name, dropped_fields))
+                    try:
+                        override_bytes = override_path.read_bytes()
+                    except OSError as exc:
+                        skipped.append(
+                            (cmd.name, f"override unreadable: {exc}", skip_codes.PARSE_ERROR)
+                        )
+                        continue
+                    override_text = override_bytes.decode("utf-8", errors="replace")
+                    file_scan = scan_text_content(
+                        override_text,
+                        source_path=override_path,
+                        surface="cli_context_sync",
+                        scope=scope,
+                        project_root=project_root,
+                    )
+                    if file_scan.decision in ("blocked", "blocked_project_shared"):
+                        code, reason = raise_or_collect(
+                            file_scan,
+                            scope=scope,
+                            kind="command",
+                            artifact_name=cmd.name,
+                        )
+                        skipped.append((cmd.name, reason, code))
+                        continue
+            pending.append((target, gen, cmd, out_path, override_bytes))
+
+    # ── Phase 2: render + atomic write every pending pair. ──
+    # By construction Phase 1 raised on any project_shared block, so
+    # every queued write here is clean.
+    for target, gen, cmd, out_path, override_bytes in pending:
+        content, dropped_fields = gen.render(cmd)
+        if dropped_fields:
+            if effective_drop == "error":
+                raise StrictDropError(
+                    f"strict mode: {target} would drop {dropped_fields} from '{cmd.name}'"
+                )
+            if effective_drop == "warn":
+                logger.warning("%s dropped %s from '%s'", target, dropped_fields, cmd.name)
+        atomic_write_text(out_path, content)
+        # Use the SAME captured override buffer that passed Gate A.
+        if override_bytes is not None:
+            atomic_write_bytes(out_path, override_bytes)
+        generated.append((target, out_path))
+        if dropped_fields:
+            dropped.append((target, cmd.name, dropped_fields))
 
     return CommandSyncResult(generated=generated, dropped=dropped, skipped=skipped)
 
@@ -692,44 +787,51 @@ def extract_commands_to_canonical(
 # ── Diff: canonical ↔ runtimes ──────────────────────────────────────
 
 
-def _runtime_command_names(gen_name: str, project_root: Path) -> set[str]:
-    """Return the set of command ``stem`` names present on disk for a runtime."""
-    if gen_name == "claude_commands":
-        runtime_root = project_root / ".claude/commands"
-        suffix = ".md"
-    elif gen_name == "gemini_commands":
-        runtime_root = project_root / ".gemini/commands"
-        suffix = ".toml"
-    else:
-        return set()
-    if not runtime_root.is_dir():
-        return set()
-    return {p.stem for p in runtime_root.iterdir() if p.is_file() and p.suffix == suffix}
+# Per-runtime file suffix for commands fan-out. Used by ``diff_commands``
+# to delegate to ``runtime_artifact_names``.
+_COMMAND_RUNTIME_SUFFIX: dict[str, str] = {
+    "claude": ".md",
+    "gemini": ".toml",
+    # Codex: project-tier has no fan-out (RUNTIME_FANOUT_TABLE returns None);
+    # user-tier prompts use ``.md`` per Codex docs.
+    "codex": ".md",
+}
 
 
-def diff_commands(project_root: Path) -> list[tuple[str, str, str]]:
+def diff_commands(
+    project_root: Path,
+    *,
+    scope: TargetScope = "project_shared",
+) -> list[tuple[str, str, str]]:
     """Compare canonical commands against every registered runtime.
 
     Returns ``(runtime, command_name, status)`` where status is one of
     ``"in sync"``, ``"out of sync"``, ``"missing target"``,
     ``"missing canonical"``, or ``"parse error"``.
+
+    ADR-0011 PR-E3: ``scope`` selects both the canonical source and the
+    runtime fan-out roots. Default ``project_shared`` preserves
+    pre-PR-E3 behavior.
     """
     results: list[tuple[str, str, str]] = []
     canonical_index = {
         path.parent.name if layout == "dir" else path.stem: (path, layout)
-        for path, layout in list_canonical_commands(project_root)
+        for path, layout in list_canonical_commands(project_root, scope=scope)
     }
     canonical_names = set(canonical_index)
 
     for gen_name, gen in COMMAND_GENERATORS.items():
-        # ADR-0011 PR-E (#891): probe NO_FANOUT for this runtime+scope. The
-        # table lookup ignores the artifact name, so a fixed probe name is
-        # safe. When None, the runtime has no fan-out by design — skip the
-        # whole runtime so canonical-only entries don't surface as
-        # ``missing target`` (the realistic NO_FANOUT shape).
-        if gen.target_file(project_root, "__probe_891__") is None:
+        # ADR-0011 PR-E3 cleanup item #1: query the table directly via
+        # ``runtime_fanout_root``. Earlier code probed with a fixed command
+        # name (``__probe_891__``) which leaked the table-shape assumption
+        # into the call shape — call-shape fragility, not name-independence.
+        runtime = gen_name.split("_", 1)[0]
+        if runtime_fanout_root("commands", runtime, scope, project_root) is None:
             continue
-        runtime_names = _runtime_command_names(gen_name, project_root)
+        suffix = _COMMAND_RUNTIME_SUFFIX.get(runtime, ".md")
+        runtime_names = runtime_artifact_names(
+            "commands", runtime, project_root, scope, file_suffix=suffix
+        )
 
         for name in sorted(canonical_names | runtime_names):
             if name in canonical_names and name not in runtime_names:
@@ -746,14 +848,12 @@ def diff_commands(project_root: Path) -> list[tuple[str, str, str]]:
                 results.append((gen_name, name, "parse error"))
                 continue
             expected, _ = gen.render(cmd)
-            target = gen.target_file(project_root, name)
-            # The upstream NO_FANOUT probe already filters out runtimes
-            # whose ``RUNTIME_FANOUT_TABLE`` entry is ``None``, so this
-            # branch is only reachable if the table lookup is per-name
-            # (which today's table is not). Keep the skip as a defensive
-            # silent fallback so the contract holds regardless.
-            if target is None:
-                continue
+            # Cleanup item #2: the upstream ``runtime_fanout_root`` guard
+            # above guarantees this runtime+scope has a fan-out root, so
+            # ``gen.target_file`` cannot return ``None`` for any name.
+            # Earlier defensive ``if target is None: continue`` removed.
+            target = gen.target_file(project_root, name, scope=scope)
+            assert target is not None  # narrowed by upstream NO_FANOUT guard
             actual = target.read_text(encoding="utf-8") if target.is_file() else ""
             if expected.strip() == actual.strip():
                 results.append((gen_name, name, "in sync"))
