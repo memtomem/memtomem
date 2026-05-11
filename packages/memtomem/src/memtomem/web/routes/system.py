@@ -1234,6 +1234,7 @@ async def add_memory(
     req: AddMemoryRequest,
     index_engine=Depends(get_index_engine),
     storage=Depends(get_storage),
+    config=Depends(get_config),
 ) -> AddMemoryResponse:
     from datetime import datetime, timezone
 
@@ -1259,6 +1260,16 @@ async def add_memory(
             },
         )
 
+    # Write-surface parity with MCP ``mem_add``: route the default-dated
+    # file to the configured user-tier ``memory_dirs[0]``. Before this
+    # fix the route hardcoded ``~/.memtomem/memories``, ignoring the
+    # user's configured destination and silently diverging from MCP and
+    # CLI which already honor ``memory_dirs[0]``. The historical default
+    # remains as a last-resort fallback when no dirs are configured at
+    # all (``require_configured`` already guards the common case).
+    mdirs = config.indexing.memory_dirs
+    base = Path(mdirs[0] if mdirs else "~/.memtomem/memories").expanduser().resolve()
+
     if req.file:
         raw = req.file
         if raw.startswith("/") or raw.startswith("\\") or ".." in raw:
@@ -1266,7 +1277,6 @@ async def add_memory(
                 status_code=422,
                 detail="File path must be relative and must not contain '..'",
             )
-        base = Path("~/.memtomem/memories").expanduser().resolve()
         target = (base / raw).resolve()
         if not str(target).startswith(str(base)):
             raise HTTPException(
@@ -1275,7 +1285,6 @@ async def add_memory(
             )
     else:
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        base = Path("~/.memtomem/memories").expanduser().resolve()
         target = (base / f"{date_str}.md").resolve()
 
     target.parent.mkdir(parents=True, exist_ok=True)

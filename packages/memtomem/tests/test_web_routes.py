@@ -1613,6 +1613,46 @@ class TestAddMemory:
         )
         assert resp.status_code == 422
 
+    async def test_add_memory_writes_under_configured_memory_dirs_default(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        # /api/add must honor ``config.indexing.memory_dirs[0]`` for the
+        # default-dated file, matching MCP ``mem_add``. Before the
+        # write-surface parity fix the route hardcoded
+        # ``~/.memtomem/memories`` and silently ignored configured dirs,
+        # which meant prod users (and this test suite under a real HOME)
+        # had their entries leak outside the configured corpus.
+        app.state.config.indexing.memory_dirs = [tmp_path]
+        resp = await client.post(
+            "/api/add",
+            json={"content": "Parity check."},
+        )
+        assert resp.status_code == 200, resp.text
+        path = Path(resp.json()["file"]).resolve()
+        assert tmp_path.resolve() in path.parents, (
+            f"daily file {path} did not land under configured memory_dirs[0] {tmp_path}"
+        )
+        legacy = Path("~/.memtomem/memories").expanduser().resolve()
+        assert legacy not in path.parents, (
+            f"daily file regressed to hardcoded {legacy} (write-surface divergence)"
+        )
+
+    async def test_add_memory_writes_under_configured_memory_dirs_explicit_file(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        # Explicit ``file=`` (relative) must also resolve under
+        # ``memory_dirs[0]``, not the legacy ``~/.memtomem/memories``.
+        app.state.config.indexing.memory_dirs = [tmp_path]
+        resp = await client.post(
+            "/api/add",
+            json={"content": "Parity check.", "file": "notes/topic.md"},
+        )
+        assert resp.status_code == 200, resp.text
+        path = Path(resp.json()["file"]).resolve()
+        assert tmp_path.resolve() in path.parents, (
+            f"explicit-file write {path} did not land under {tmp_path}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Redaction guard wire-in for the web write surfaces. The helper-level
