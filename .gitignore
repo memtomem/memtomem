@@ -56,6 +56,9 @@ BUG_REPORT.md
 main.py
 scripts/
 .agents-dev/
+# dev-trio plugin: per-run Codex/Gemini reviewer transcripts. Contain local
+# paths, session metadata, prompts, and reviewer output — never commit.
+.dev-trio/
 
 # Experimental plugins kept private until promoted
 packages/memtomem-openclaw-plugin/
