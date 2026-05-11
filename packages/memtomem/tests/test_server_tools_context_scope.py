@@ -73,3 +73,59 @@ async def test_mem_context_sync_scope_user_reads_user_canonical(
     assert "Sub-agent fan-out:" in out
     assert (home / ".claude" / "agents" / "ok.md").is_file()
     assert not (project / ".claude" / "agents" / "ok.md").exists()
+
+
+@pytest.mark.anyio
+async def test_mem_context_init_implicit_outside_project_warns_and_seeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Implicit init (no scope=) from outside a project must keep pre-PR-E2
+    back-compat — warn + seed .memtomem/ here, not return an error.
+
+    Mirrors the CLI gate at ``cli/context_cmd.py:744`` which only refuses
+    when ``scope_explicit`` is true.
+    """
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    monkeypatch.chdir(bare)
+    set_home(monkeypatch, tmp_path / "home")
+
+    out = await mem_context_init()
+
+    assert out.startswith("Initialized:")
+    assert "warning: no .git or pyproject.toml" in out
+    for kind in ("agents", "skills", "commands"):
+        assert (bare / ".memtomem" / kind).is_dir()
+
+
+@pytest.mark.anyio
+async def test_mem_context_init_project_shared_privacy_block_surfaces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """project_shared Gate A hard-aborts via click.ClickException
+    (apply_gate_a in _gate_a.py:171). The MCP handler must catch it and
+    surface a ``privacy block:`` message rather than letting it fall
+    through to tool_handler as ``internal error``.
+    """
+    project = _make_project(tmp_path, monkeypatch)
+    set_home(monkeypatch, tmp_path / "home")
+
+    leaky_agent = project / ".claude" / "agents"
+    leaky_agent.mkdir(parents=True)
+    (leaky_agent / "leak.md").write_text(
+        "---\nname: leak\ndescription: leak\n---\nuses AKIAIOSFODNN7EXAMPLE\n",
+        encoding="utf-8",
+    )
+
+    out = await mem_context_init(
+        include="agents",
+        scope="project_shared",
+        confirm_project_shared=True,
+    )
+
+    assert out.startswith("privacy block:")
+    assert "Gate A" in out
+    assert "internal error" not in out.lower()
+    assert not (project / ".memtomem" / "agents" / "leak.md").exists()

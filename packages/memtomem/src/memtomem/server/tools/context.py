@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import click
+
 from memtomem.config import TargetScope
 from memtomem.server import mcp
 from memtomem.server.context import CtxType
@@ -128,7 +130,11 @@ async def mem_context_init(
     artifact_scope = _resolve_artifact_mcp_scope(scope)
     has_project_signal = (root / ".git").exists() or (root / "pyproject.toml").exists()
 
-    if artifact_scope != "user" and not has_project_signal:
+    # EXPLICIT scope=project_* requires a real project context, mirroring
+    # the CLI gate at cli/context_cmd.py:744. Implicit default (no scope=)
+    # preserves pre-PR-E2 backward compatibility — falls through to the
+    # warning + seed-here path below, the same way the CLI does.
+    if scope_explicit and artifact_scope != "user" and not has_project_signal:
         return (
             f"--scope={artifact_scope} requires a project root "
             "(with .git or pyproject.toml). Use scope='user' from outside a project."
@@ -231,6 +237,11 @@ async def mem_context_init(
             )
         except PrivacyScanError as exc:
             return f"privacy block: {exc.message}"
+        except click.ClickException as exc:
+            # apply_gate_a hard-aborts project_shared privacy hits via
+            # click.ClickException (_gate_a.py:171). Surface its message
+            # so MCP callers see the actionable block, not "internal error".
+            return f"privacy block: {exc.message}"
         results.append(f"Imported skills: {len(skill_result.imported)}")
         for path in skill_result.imported:
             results.append(f"  {path.name}")
@@ -247,6 +258,8 @@ async def mem_context_init(
             )
         except PrivacyScanError as exc:
             return f"privacy block: {exc.message}"
+        except click.ClickException as exc:
+            return f"privacy block: {exc.message}"
         results.append(f"Imported sub-agents: {len(agent_result.imported)}")
         for path, layout in agent_result.imported:
             results.append(f"  {canonical_agent_name(path, layout)}")
@@ -262,6 +275,8 @@ async def mem_context_init(
                 force_unsafe_import=force_unsafe_import,
             )
         except PrivacyScanError as exc:
+            return f"privacy block: {exc.message}"
+        except click.ClickException as exc:
             return f"privacy block: {exc.message}"
         results.append(f"Imported commands: {len(command_result.imported)}")
         for path, layout in command_result.imported:
