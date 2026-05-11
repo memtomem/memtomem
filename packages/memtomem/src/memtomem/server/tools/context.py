@@ -873,9 +873,6 @@ async def mem_context_migrate(
     force bypass — git history is forever (ADR-0011 §5). Rejections
     surface as ``privacy block: ...`` in the returned text.
     """
-    import contextlib
-    import io
-
     from memtomem.cli.context_cmd import (
         _memory_migrate_run,
         _resolve_memory_migrate_sources,
@@ -907,55 +904,62 @@ async def mem_context_migrate(
     except click.ClickException as exc:
         return f"error: {exc.message}"
 
-    # ``_memory_migrate_run`` uses ``click.echo``/``click.secho`` for all
-    # user-facing output (plan listing, apply summary). Capture stdout +
-    # stderr so the MCP wrapper returns a single text payload, the same
-    # way a CLI invocation would render. Gate A privacy blocks emit to
-    # stderr via ``err=True`` then ``raise click.exceptions.Exit(1)``;
-    # we translate that into the ``privacy block:`` shape the other
-    # context tools use.
-    stdout_buf = io.StringIO()
-    stderr_buf = io.StringIO()
+    # Per-call output buffers passed into ``_memory_migrate_run``.
+    # We deliberately do NOT use ``contextlib.redirect_stdout`` /
+    # ``redirect_stderr``: both swap ``sys.stdout`` / ``sys.stderr``
+    # process-globally for the duration of the ``with`` block, and the
+    # block awaits the heavy helper. While this coroutine is suspended
+    # on I/O, any other concurrent MCP tool call that prints (or that
+    # internally ``click.echo``s) would land in our buffer — and our
+    # output would land in theirs. Routing through per-call lists keeps
+    # each call's output strictly local; the helper falls back to its
+    # original ``click.secho`` behaviour when both buffers are ``None``
+    # (CLI path). Codex review-pass on PR #926.
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
     try:
-        with (
-            contextlib.redirect_stdout(stdout_buf),
-            contextlib.redirect_stderr(stderr_buf),
-        ):
-            await _memory_migrate_run(
-                sources,
-                from_scope,
-                to_scope,
-                apply_,
-                # ``yes=True`` because the MCP wrapper has already
-                # gated Gate B above via the explicit
-                # ``confirm_project_shared`` argument. ``yes`` only
-                # suppresses the ``click.confirm`` prompt that the CLI
-                # falls through to when ``confirm_project_shared`` is
-                # missing — irrelevant for MCP, which has no TTY.
-                yes=True,
-                confirm_project_shared=confirm_project_shared,
-            )
+        await _memory_migrate_run(
+            sources,
+            from_scope,
+            to_scope,
+            apply_,
+            # ``yes=True`` because the MCP wrapper has already gated
+            # Gate B above via the explicit ``confirm_project_shared``
+            # argument. ``yes`` only suppresses the ``click.confirm``
+            # prompt that the CLI falls through to when
+            # ``confirm_project_shared`` is missing — irrelevant for
+            # MCP, which has no TTY.
+            yes=True,
+            confirm_project_shared=confirm_project_shared,
+            stdout_buf=stdout_lines,
+            stderr_buf=stderr_lines,
+        )
     except PrivacyScanError as exc:
         return f"privacy block: {exc.message}"
     except click.exceptions.Exit:
-        # Gate A privacy block — the helper printed the rejection text
-        # to stderr before exiting. Surface as a privacy block so the
-        # MCP caller can branch on the prefix.
-        stderr_text = stderr_buf.getvalue().strip()
+        # Gate A privacy block — the helper recorded the rejection text
+        # in ``stderr_lines`` before exiting. Surface as a privacy
+        # block so the MCP caller can branch on the prefix.
+        stderr_text = "\n".join(stderr_lines).strip()
         if "Gate A:" in stderr_text:
             return f"privacy block: {stderr_text}"
         return f"error: {stderr_text or 'migration exited unexpectedly'}"
     except click.ClickException as exc:
+        # Mid-batch failures (DB UPDATE failed, double-failure path)
+        # record per-file partial-progress lines in ``stderr_lines``
+        # BEFORE raising ``ClickException``. Append those so the MCP
+        # caller sees the K-of-N batch state, not just the bare error
+        # message — Codex flagged this on PR #926.
+        stderr_tail = "\n".join(stderr_lines).strip()
+        if stderr_tail:
+            return f"error: {exc.message}\n{stderr_tail}"
         return f"error: {exc.message}"
 
-    output = stdout_buf.getvalue()
-    # Apply-time success line is emitted via ``click.secho(... fg='green')``
-    # which is not on stderr; the buffer already contains it. stderr is
-    # only populated for refusals / failures — append it if non-empty
-    # so the MCP caller doesn't lose the partial-progress message after
-    # a mid-batch failure that did not raise (no such path exists today,
-    # but the helper may grow one).
-    stderr_tail = stderr_buf.getvalue().strip()
+    stdout_text = "\n".join(stdout_lines).rstrip()
+    # Helper paths that reach here without raising have nothing in
+    # ``stderr_lines`` today; defensively concatenate so a future
+    # warning-but-don't-raise path is not silently dropped.
+    stderr_tail = "\n".join(stderr_lines).strip()
     if stderr_tail:
-        output = f"{output.rstrip()}\n{stderr_tail}"
-    return output.rstrip() or "Nothing to migrate."
+        stdout_text = f"{stdout_text}\n{stderr_tail}" if stdout_text else stderr_tail
+    return stdout_text or "Nothing to migrate."

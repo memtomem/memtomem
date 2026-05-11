@@ -101,25 +101,45 @@ def _stub_components(layout):
 
 
 @pytest.mark.anyio
-async def test_mem_context_migrate_unknown_from_scope_rejected_without_helper(
+@pytest.mark.parametrize(
+    ("from_scope", "to_scope", "expected_label"),
+    [
+        ("bogus", "user", "from_scope='bogus'"),
+        ("user", "bogus", "to_scope='bogus'"),
+    ],
+)
+async def test_mem_context_migrate_unknown_scope_rejected_without_helper(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    from_scope: str,
+    to_scope: str,
+    expected_label: str,
 ) -> None:
-    """Bogus ``from_scope`` must return a clean error string without
-    spinning up ``cli_components``. Otherwise the helper raises a
-    ``MemoryScopeError`` wrapped in ``ClickException`` deeper in, which
-    works but pays the bootstrap cost for a vocabulary typo.
+    """Bogus ``from_scope`` / ``to_scope`` must return a clean error string
+    without spinning up ``cli_components``. Both axes are validated
+    against the same {user, project_shared, project_local} vocabulary so
+    the helper never sees an invalid scope.
     """
     src = tmp_path / "rule.md"
     src.write_text("body", encoding="utf-8")
 
+    # Sentinel pins that the helper is never reached.
+    invoked = []
+
+    async def _sentinel(*args, **kwargs):  # noqa: ANN001
+        invoked.append((args, kwargs))
+
+    monkeypatch.setattr("memtomem.cli.context_cmd._memory_migrate_run", _sentinel)
+
     out = await mem_context_migrate(
         source=str(src),
-        from_scope="bogus",
-        to_scope="user",
+        from_scope=from_scope,
+        to_scope=to_scope,
     )
     assert out.startswith("error:")
-    assert "Unknown from_scope='bogus'" in out
+    assert expected_label in out
+    assert "Unknown" in out
+    assert invoked == []
 
 
 @pytest.mark.anyio
@@ -307,3 +327,62 @@ async def test_mem_context_migrate_no_glob_match_returns_clean_error(
     )
     assert out.startswith("error:")
     assert "No .md files matched" in out
+
+
+# ---------------------------------------------------------------------------
+# 7) Mid-batch DB failure — partial-progress stderr surfaces in the error.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_mem_context_migrate_mid_batch_db_failure_includes_partial_progress(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_project_layout,
+) -> None:
+    """``_memory_migrate_run`` raises ``ClickException`` for a DB UPDATE
+    failure but emits partial-progress lines ("DB update failed on
+    file N of M; reverted that file. K of M migrated; remaining ...")
+    to stderr BEFORE raising. The MCP wrapper must include that stderr
+    tail in the returned error so the caller learns the K-of-N batch
+    state — bare ``error: {exc.message}`` is insufficient. Codex
+    flagged this on PR #926.
+    """
+    layout = fake_project_layout
+    # Two clean sources so the helper enters batch mode (is_batch=True)
+    # and emits the per-file failure narration. layout["src"] is the
+    # first one (rule.md).
+    src2 = layout["user_tier"] / "second.md"
+    src2.write_text("## Second\n\nharmless body.\n", encoding="utf-8")
+
+    comp = _stub_components(layout)
+    # First file UPDATE succeeds, second raises — the helper reverts the
+    # second file's FS move and emits "DB update failed on file 2 of 2".
+    update_calls = {"n": 0}
+
+    async def _flaky_update(*_a, **_kw):
+        update_calls["n"] += 1
+        if update_calls["n"] == 2:
+            raise RuntimeError("simulated DB failure on file 2")
+        return 2
+
+    comp.storage.update_chunks_scope_for_source = _flaky_update
+    _patch_cli_components(monkeypatch, comp)
+    monkeypatch.chdir(layout["project_root"])
+
+    out = await mem_context_migrate(
+        source=str(layout["user_tier"] / "*.md"),
+        from_scope="user",
+        to_scope="project_local",
+        apply_=True,
+    )
+    assert out.startswith("error:")
+    # Bare ClickException message is present.
+    assert "DB update failed" in out
+    # AND the partial-progress narration that lived only in stderr
+    # before this fix.
+    assert "DB update failed on file 2 of 2" in out
+    assert "remaining" in out
+    # File 1 actually migrated; file 2's move was reverted.
+    assert (layout["proj_local"] / "rule.md").exists()
+    assert not (layout["proj_local"] / "second.md").exists()
+    assert src2.exists()

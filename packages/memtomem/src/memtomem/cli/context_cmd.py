@@ -2726,7 +2726,23 @@ async def _memory_migrate_run(
     apply_: bool,
     yes: bool,
     confirm_project_shared: bool,
+    *,
+    stdout_buf: list[str] | None = None,
+    stderr_buf: list[str] | None = None,
 ) -> None:
+    """Apply or dry-run a memory-migrate plan over the resolved sources.
+
+    ``stdout_buf`` / ``stderr_buf``: when provided, every plan/summary/
+    error message that the CLI would emit via ``click.echo`` /
+    ``click.secho`` is appended to the corresponding list INSTEAD of
+    being written to the global ``sys.stdout`` / ``sys.stderr``. Used by
+    the MCP wrapper (``mem_context_migrate``) to capture per-call
+    output without ``contextlib.redirect_stdout`` — which would leak
+    output from other concurrent MCP tool calls into the migrate
+    response while this coroutine is suspended on I/O. When both
+    buffers are ``None`` (CLI default) the helper behaves exactly as
+    before.
+    """
     import shutil
     from contextlib import ExitStack
 
@@ -2739,6 +2755,24 @@ async def _memory_migrate_run(
         project_tier_registration_error,
         resolve_memory_scope_dir,
     )
+
+    # Routed emit: when capture buffers are provided (MCP path) the
+    # message is appended to the buffer ONLY; nothing touches
+    # ``sys.stdout`` / ``sys.stderr``. Default (CLI path) calls
+    # ``click.secho`` so the terminal output and color codes are
+    # preserved. Avoids the process-global ``redirect_stdout``
+    # cross-request leakage flagged by Codex on PR #926.
+    def _emit_out(msg: str, fg: str | None = None) -> None:
+        if stdout_buf is not None:
+            stdout_buf.append(msg)
+        else:
+            click.secho(msg, fg=fg)
+
+    def _emit_err(msg: str, fg: str | None = None) -> None:
+        if stderr_buf is not None:
+            stderr_buf.append(msg)
+        else:
+            click.secho(msg, fg=fg, err=True)
 
     async with cli_components() as comp:
         # Project-tier resolution. For ``from`` project tiers we walk
@@ -2860,12 +2894,11 @@ async def _memory_migrate_run(
                     record_outcome=False,
                 )
                 if guard.decision in ("blocked", "blocked_project_shared"):
-                    click.secho(
+                    _emit_err(
                         f"  ✗ Gate A: {src.name} matches {len(guard.hits)} privacy "
                         f"pattern(s); migration to scope='{to_scope}' rejected. "
                         "git history is forever — no force bypass available.",
                         fg="red",
-                        err=True,
                     )
                     raise click.exceptions.Exit(1)
 
@@ -2873,26 +2906,26 @@ async def _memory_migrate_run(
 
         is_batch = len(plan) > 1
         for entry in plan:
-            click.echo(f"Plan: migrate {entry['source'].name}")
-            click.echo(f"  from {from_scope}: {entry['source']}")
-            click.echo(f"  to   {to_scope}: {entry['target']}")
-            click.echo(f"  chunks affected: {entry['affected']}")
+            _emit_out(f"Plan: migrate {entry['source'].name}")
+            _emit_out(f"  from {from_scope}: {entry['source']}")
+            _emit_out(f"  to   {to_scope}: {entry['target']}")
+            _emit_out(f"  chunks affected: {entry['affected']}")
             # ``N preserved, 0 dropped`` for single-DB chunk-id-stable
             # rename: chunks.id never changes so the entire chunk_links
             # neighborhood survives untouched. Cross-DB migration (#911,
             # deferred per ADR-0012) is where ``dropped`` could become non-zero.
-            click.echo(f"  chunk_links lineage: {entry['lineage']} preserved, 0 dropped")
+            _emit_out(f"  chunk_links lineage: {entry['lineage']} preserved, 0 dropped")
 
         if is_batch:
             total_chunks = sum(int(e["affected"]) for e in plan)
             total_lineage = sum(int(e["lineage"]) for e in plan)
-            click.echo(
+            _emit_out(
                 f"\nTotal: {len(plan)} files, {total_chunks} chunks affected, "
                 f"{total_lineage} chunk_links preserved"
             )
 
         if not apply_:
-            click.echo("\nRun with --apply to execute.")
+            _emit_out("\nRun with --apply to execute.")
             return
 
         # ADR-0011 PR-D review round 10 (M2): require an explicit
@@ -2982,22 +3015,20 @@ async def _memory_migrate_run(
                     if guard.decision in ("blocked", "blocked_project_shared"):
                         n_done = len(completed)
                         n_total = len(plan)
-                        click.secho(
+                        _emit_err(
                             f"  ✗ Gate A: {src.name} matches {len(guard.hits)} "
                             f"privacy pattern(s) at apply time (content changed "
                             "since pre-flight); migration to "
                             f"scope='{to_scope}' rejected. git history is "
                             "forever — no force bypass available.",
                             fg="red",
-                            err=True,
                         )
                         if is_batch:
-                            click.secho(
+                            _emit_err(
                                 f"  {n_done} of {n_total} migrated before this "
                                 f"file; remaining {n_total - n_done - 1} "
                                 "file(s) untouched.",
                                 fg="red",
-                                err=True,
                             )
                         raise click.exceptions.Exit(1)
 
@@ -3031,33 +3062,30 @@ async def _memory_migrate_run(
                         # how many earlier files are already migrated
                         # before they go inspect the divergent
                         # source/target pair.
-                        click.secho(
+                        _emit_err(
                             f"  ✗ DB update failed AND filesystem rollback "
                             f"failed for {src.name}; source/target may diverge. "
                             "Inspect both paths.",
                             fg="red",
-                            err=True,
                         )
                         if is_batch:
-                            click.secho(
+                            _emit_err(
                                 f"  Batch state: {n_done} of {n_total} migrated "
                                 f"before file {i}; remaining "
                                 f"{n_total - n_done - 1} file(s) untouched.",
                                 fg="red",
-                                err=True,
                             )
                         raise click.ClickException(
                             f"DB update failed AND filesystem rollback failed: "
                             f"db_error={exc!r}; rollback_error={revert_exc!r}"
                         ) from exc
                     if is_batch:
-                        click.secho(
+                        _emit_err(
                             f"  ✗ DB update failed on file {i} of {n_total} "
                             f"({src.name}); reverted that file. {n_done} of "
                             f"{n_total} migrated; remaining "
                             f"{n_total - n_done - 1} file(s) untouched.",
                             fg="red",
-                            err=True,
                         )
                     raise click.ClickException(
                         f"DB update failed; filesystem move reverted: {exc}"
@@ -3067,14 +3095,14 @@ async def _memory_migrate_run(
         comp.search_pipeline.invalidate_cache()
         if is_batch:
             total_rows = sum(c[2] for c in completed)
-            click.secho(
+            _emit_out(
                 f"  ✓ moved {len(completed)} files → {to_scope} tier; "
                 f"{total_rows} chunk row(s) updated.",
                 fg="green",
             )
         else:
             src, _tgt, updated = completed[0]
-            click.secho(
+            _emit_out(
                 f"  ✓ moved {src.name} → {to_scope} tier; {updated} chunk row(s) updated.",
                 fg="green",
             )
