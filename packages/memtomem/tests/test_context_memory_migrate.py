@@ -1040,6 +1040,76 @@ def test_memory_migrate_glob_rejects_duplicate_target_basenames(monkeypatch, fak
     comp.storage.update_chunks_scope_for_source.assert_not_called()
 
 
+def test_memory_migrate_glob_rejects_case_only_target_collision(
+    monkeypatch, fake_project_layout, tmp_path
+):
+    """Codex review round 2: the collision guard's dedup key must
+    normalize for case-insensitive filesystems (macOS APFS, Windows
+    NTFS). Two source files ``a/Rule.md`` and ``b/rule.md`` resolve
+    to distinct ``Path`` objects (``to_dir/Rule.md`` vs
+    ``to_dir/rule.md``) but flatten to the *same* directory entry on
+    those FSes — without a casefold'd key the second ``shutil.move``
+    would silently overwrite the first migrated file.
+
+    This test is FS-independent: it uses a casefold'd-set key in the
+    code under test, so the rejection fires on any host regardless of
+    whether the filesystem is actually case-insensitive.
+    """
+    from memtomem.cli.context_cmd import memory_migrate_cmd
+
+    layout = fake_project_layout
+    user_tier = layout["user_tier"]
+
+    sub_a = user_tier / "a"
+    sub_b = user_tier / "b"
+    sub_a.mkdir()
+    sub_b.mkdir()
+    (sub_a / "Rule.md").write_text("## A\n\nbody.\n", encoding="utf-8")
+    (sub_b / "rule.md").write_text("## B\n\nbody.\n", encoding="utf-8")
+    # Default fixture's top-level rule.md isn't matched by the **/*.md
+    # glob pattern below (lives outside the a/ b/ subtree we target),
+    # so leave it in place as a sentinel.
+
+    comp = AsyncMock()
+    comp.config.indexing.memory_dirs = [user_tier]
+    comp.config.indexing.project_memory_dirs = [layout["proj_local"]]
+    comp.storage = AsyncMock()
+    comp.storage.count_chunks_by_source = AsyncMock(return_value=1)
+    comp.storage.count_chunk_links_for_source = AsyncMock(return_value=0)
+    comp.storage.update_chunks_scope_for_source = AsyncMock()
+    comp.search_pipeline = AsyncMock()
+    _patch_cli_components(monkeypatch, comp)
+    monkeypatch.chdir(layout["project_root"])
+
+    runner = CliRunner()
+    # Use a/?ule.md to match both casings via a single positional
+    # rather than relying on shell-glob ordering. ``?`` is one
+    # character in Python ``glob``, so it matches ``R`` and ``r``.
+    result = runner.invoke(
+        memory_migrate_cmd,
+        [
+            str(user_tier / "?" / "?ule.md"),
+            "--from",
+            "user",
+            "--to",
+            "project_local",
+            "--apply",
+            "--yes",
+        ],
+    )
+    assert result.exit_code != 0
+    out = result.output + str(result.exception or "")
+    assert "Duplicate target after rename" in out
+    assert "case-insensitive" in out
+    # Both subdir sources still in place; no FS moves anywhere.
+    assert (sub_a / "Rule.md").exists()
+    assert (sub_b / "rule.md").exists()
+    # Target tier has neither file (any casing).
+    assert not (layout["proj_local"] / "Rule.md").exists()
+    assert not (layout["proj_local"] / "rule.md").exists()
+    comp.storage.update_chunks_scope_for_source.assert_not_called()
+
+
 def test_memory_migrate_apply_pass_aborts_on_post_preflight_secret(
     monkeypatch, fake_project_layout
 ):
