@@ -36,18 +36,19 @@ import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from memtomem.context import _skip_reasons as skip_codes
-from memtomem.context import override as _override
 from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
-from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, Layout, validate_name
+from memtomem.context._names import InvalidNameError, Layout, validate_name
 from memtomem.context._runtime_targets import runtime_artifact_names, runtime_fanout_root
-from memtomem.context.privacy_scan import (
-    raise_or_collect,
-    scan_text_content,
+from memtomem.context._sync_atomic import (
+    AtomicSyncAdapter,
+    AtomicSyncResult,
+    StrictDropError as _EngineStrictDropError,
+    sync_atomic_artifact,
 )
 from memtomem.context.agents import (
     _FRONT_MATTER_RE,
@@ -392,12 +393,16 @@ _register(GeminiCommandsGenerator())
 # ── Fan-out: canonical → runtimes ───────────────────────────────────
 
 
+# Sister subclass (issue #900) — see the matching comment in
+# :mod:`memtomem.context.agents`. Distinct class so identity stays
+# module-specific (``AgentSyncResult is not CommandSyncResult``).
 @dataclass
-class CommandSyncResult:
-    generated: list[tuple[str, Path]]  # (runtime, target_file)
-    dropped: list[tuple[str, str, list[str]]]  # (runtime, command_name, dropped_fields)
-    # (runtime_or_command, human_reason, reason_code) — see :mod:`memtomem.context._skip_reasons`.
-    skipped: list[tuple[str, str, skip_codes.SkipCode]]
+class CommandSyncResult(AtomicSyncResult):
+    """Module-specific result subclass — see :class:`AtomicSyncResult`."""
+
+
+class StrictDropError(_EngineStrictDropError):
+    """Module-specific strict-drop error — see :class:`_EngineStrictDropError`."""
 
 
 @dataclass
@@ -414,8 +419,20 @@ class ExtractResult:
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = field(default_factory=list)
 
 
-class StrictDropError(ValueError):
-    """Raised under ``strict=True`` / ``on_drop="error"`` when a conversion would drop fields."""
+# Issue #900 extraction — see the matching adapter in
+# :mod:`memtomem.context.agents` for the design rationale.
+_COMMAND_ADAPTER: AtomicSyncAdapter[SlashCommand] = AtomicSyncAdapter(
+    kind="command",
+    artifact_label="commands",
+    list_canonical=list_canonical_commands,
+    parse_canonical_text=_parse_canonical_command_text,
+    parse_error_type=CommandParseError,
+    name_of=lambda c: c.name,
+    generators=COMMAND_GENERATORS,
+    result_type=CommandSyncResult,
+    strict_drop_error_type=StrictDropError,
+    logger=logger,
+)
 
 
 def generate_all_commands(
@@ -428,6 +445,10 @@ def generate_all_commands(
 ) -> CommandSyncResult:
     """Fan out every canonical command to the requested runtimes.
 
+    Thin wrapper that binds the command-specific adapter and delegates to
+    :func:`memtomem.context._sync_atomic.sync_atomic_artifact` — see that
+    function for the full Phase 1 / Phase 2 contract.
+
     Args:
         on_drop: Severity when fields are dropped during conversion.
             ``"ignore"`` (default) — silently record in ``result.dropped``.
@@ -439,139 +460,18 @@ def generate_all_commands(
             fan-out destination. Default ``project_shared`` preserves
             pre-PR-E3 behavior.
     """
-    effective_drop = on_drop if on_drop != "ignore" or not strict else "error"
-
-    generated: list[tuple[str, Path]] = []
-    dropped: list[tuple[str, str, list[str]]] = []
-    skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
-
-    canonicals = list_canonical_commands(project_root, scope=scope)
-    if not canonicals:
-        return CommandSyncResult(
-            generated=[],
-            dropped=[],
-            skipped=[("<all>", "no canonical commands", skip_codes.NO_CANONICAL_ROOT)],
-        )
-
-    targets = runtimes if runtimes is not None else list(COMMAND_GENERATORS.keys())
-
-    # ── Phase 1: parse + scan every (target, command) pair — pure read pass. ──
-    # See agents.py for the rationale (project_shared atomicity, ADR §5).
-    # The first project_shared Gate A hit raises immediately via
-    # :func:`raise_or_collect`, so no partial runtime fan-out can land
-    # on disk (#895 P2 review #5).
-    pending: list[tuple[str, CommandGenerator, SlashCommand, Path, bytes | None]] = []
-
-    for target in targets:
-        gen = COMMAND_GENERATORS.get(target)
-        if gen is None:
-            skipped.append((target, "unknown runtime", skip_codes.UNKNOWN_RUNTIME))
-            continue
-        for cmd_path, layout in canonicals:
-            # PR-E3 Codex review fold: read canonical bytes ONCE and use
-            # the captured buffer for both Gate A scan AND parse, closing
-            # the scan→write TOCTOU window (mirror of agents.py logic).
-            try:
-                cmd_bytes = cmd_path.read_bytes()
-            except OSError as exc:
-                skipped.append((cmd_path.name, f"unreadable: {exc}", skip_codes.PARSE_ERROR))
-                continue
-            cmd_text = cmd_bytes.decode("utf-8", errors="replace")
-            try:
-                cmd = _parse_canonical_command_text(cmd_text, source=cmd_path, layout=layout)
-            except CommandParseError as exc:
-                skipped.append((cmd_path.name, f"parse error: {exc}", skip_codes.PARSE_ERROR))
-                continue
-            # ADR-0011 PR-E (#891): resolve the runtime target BEFORE render
-            # + dropped-field handling. ``None`` means NO_FANOUT per
-            # ``_runtime_targets.RUNTIME_FANOUT_TABLE``; emit a typed skip
-            # without invoking ``render`` so a strict caller doesn't raise
-            # ``StrictDropError`` for a runtime that has no fan-out by
-            # design (the fail-quiet contract).
-            out_path = gen.target_file(project_root, cmd.name, scope=scope)
-            if out_path is None:
-                skipped.append(
-                    (
-                        cmd.name,
-                        f"no fan-out for runtime {target} at this scope",
-                        skip_codes.NO_PROJECT_FANOUT_FOR_RUNTIME,
-                    )
-                )
-                continue
-            # ADR-0011 PR-E3 Gate A — scan the IN-MEMORY canonical bytes
-            # (same buffer the parse used). Mirrors the agents.py flow.
-            file_scan = scan_text_content(
-                cmd_text,
-                source_path=cmd_path,
-                surface="cli_context_sync",
-                scope=scope,
-                project_root=project_root,
-            )
-            if file_scan.decision in ("blocked", "blocked_project_shared"):
-                code, reason = raise_or_collect(
-                    file_scan,
-                    scope=scope,
-                    kind="command",
-                    artifact_name=cmd.name,
-                )
-                skipped.append((cmd.name, reason, code))
-                continue
-            # Resolve per-vendor override and scan its bytes — read once,
-            # scan once, hand the bytes to Phase 2.
-            vendor = GENERATOR_VENDOR.get(target)
-            override_bytes: bytes | None = None
-            if vendor is not None:
-                override_path = _override.resolve(
-                    project_root, "commands", cmd.name, vendor, scope=scope
-                )
-                if override_path is not None:
-                    try:
-                        override_bytes = override_path.read_bytes()
-                    except OSError as exc:
-                        skipped.append(
-                            (cmd.name, f"override unreadable: {exc}", skip_codes.PARSE_ERROR)
-                        )
-                        continue
-                    override_text = override_bytes.decode("utf-8", errors="replace")
-                    file_scan = scan_text_content(
-                        override_text,
-                        source_path=override_path,
-                        surface="cli_context_sync",
-                        scope=scope,
-                        project_root=project_root,
-                    )
-                    if file_scan.decision in ("blocked", "blocked_project_shared"):
-                        code, reason = raise_or_collect(
-                            file_scan,
-                            scope=scope,
-                            kind="command",
-                            artifact_name=cmd.name,
-                        )
-                        skipped.append((cmd.name, reason, code))
-                        continue
-            pending.append((target, gen, cmd, out_path, override_bytes))
-
-    # ── Phase 2: render + atomic write every pending pair. ──
-    # By construction Phase 1 raised on any project_shared block, so
-    # every queued write here is clean.
-    for target, gen, cmd, out_path, override_bytes in pending:
-        content, dropped_fields = gen.render(cmd)
-        if dropped_fields:
-            if effective_drop == "error":
-                raise StrictDropError(
-                    f"strict mode: {target} would drop {dropped_fields} from '{cmd.name}'"
-                )
-            if effective_drop == "warn":
-                logger.warning("%s dropped %s from '%s'", target, dropped_fields, cmd.name)
-        atomic_write_text(out_path, content)
-        # Use the SAME captured override buffer that passed Gate A.
-        if override_bytes is not None:
-            atomic_write_bytes(out_path, override_bytes)
-        generated.append((target, out_path))
-        if dropped_fields:
-            dropped.append((target, cmd.name, dropped_fields))
-
-    return CommandSyncResult(generated=generated, dropped=dropped, skipped=skipped)
+    # See note on the matching ``cast`` in agents.py.
+    return cast(
+        "CommandSyncResult",
+        sync_atomic_artifact(
+            _COMMAND_ADAPTER,
+            project_root,
+            runtimes,
+            strict=strict,
+            on_drop=on_drop,
+            scope=scope,
+        ),
+    )
 
 
 # ── Reverse: runtime → canonical ────────────────────────────────────

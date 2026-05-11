@@ -36,18 +36,20 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from memtomem.context import _skip_reasons as skip_codes
-from memtomem.context import override as _override
-from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
+from memtomem.context._atomic import atomic_write_bytes
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
-from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, Layout, validate_name
+from memtomem.context._names import InvalidNameError, Layout, validate_name
 from memtomem.context._runtime_targets import runtime_artifact_names, runtime_fanout_root
-from memtomem.context.privacy_scan import (
-    raise_or_collect,
-    scan_text_content,
+from memtomem.context._sync_atomic import (
+    ON_DROP_LEVELS,
+    AtomicSyncAdapter,
+    AtomicSyncResult,
+    StrictDropError as _EngineStrictDropError,
+    sync_atomic_artifact,
 )
 from memtomem.context.scope_resolver import canonical_artifact_dir
 
@@ -587,12 +589,23 @@ _register(CodexAgentsGenerator())
 # ── Fan-out: canonical → runtimes ───────────────────────────────────
 
 
+# Sister subclass (issue #900): inherits the engine's result shape but
+# stays a distinct class so ``AgentSyncResult is CommandSyncResult`` is
+# False and ``type(result).__name__ == "AgentSyncResult"`` matches the
+# pre-extraction API. External callers consume it by attribute access
+# (``.generated``, ``.dropped``, ``.skipped``) — those attributes come
+# from the parent dataclass.
 @dataclass
-class AgentSyncResult:
-    generated: list[tuple[str, Path]]  # (runtime, target_file)
-    dropped: list[tuple[str, str, list[str]]]  # (runtime, agent_name, dropped_fields)
-    # (runtime_or_agent, human_reason, reason_code) — see :mod:`memtomem.context._skip_reasons`.
-    skipped: list[tuple[str, str, skip_codes.SkipCode]]
+class AgentSyncResult(AtomicSyncResult):
+    """Module-specific result subclass — see :class:`AtomicSyncResult`."""
+
+
+# Sister subclass for the same reason — ``agents.StrictDropError is
+# commands.StrictDropError`` stays False so an ``except StrictDropError``
+# block imported from ``memtomem.context.agents`` only catches the
+# agents-flavored raise.
+class StrictDropError(_EngineStrictDropError):
+    """Module-specific strict-drop error — see :class:`_EngineStrictDropError`."""
 
 
 @dataclass
@@ -611,12 +624,24 @@ class ExtractResult:
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = field(default_factory=list)
 
 
-class StrictDropError(ValueError):
-    """Raised under ``strict=True`` / ``on_drop="error"`` when a conversion would drop fields."""
-
-
-# Valid severity levels for the ``on_drop`` parameter.
-ON_DROP_LEVELS = ("ignore", "warn", "error")
+# Issue #900 extraction: the previously per-module ``generate_all_agents``
+# body is now :func:`memtomem.context._sync_atomic.sync_atomic_artifact`.
+# The adapter below bundles the agent-specific callables the engine plugs
+# into. Behavior is byte-for-byte identical (TOCTOU close on canonical and
+# override bytes, Phase 1 raise-early atomicity for ``project_shared``,
+# Phase 2 strict-drop partial-write boundary pinned by #908).
+_AGENT_ADAPTER: AtomicSyncAdapter[SubAgent] = AtomicSyncAdapter(
+    kind="agent",
+    artifact_label="agents",
+    list_canonical=list_canonical_agents,
+    parse_canonical_text=_parse_canonical_agent_text,
+    parse_error_type=AgentParseError,
+    name_of=lambda a: a.name,
+    generators=AGENT_GENERATORS,
+    result_type=AgentSyncResult,
+    strict_drop_error_type=StrictDropError,
+    logger=logger,
+)
 
 
 def generate_all_agents(
@@ -629,6 +654,10 @@ def generate_all_agents(
 ) -> AgentSyncResult:
     """Fan out every canonical sub-agent to the requested runtimes.
 
+    Thin wrapper that binds the agent-specific adapter and delegates to
+    :func:`memtomem.context._sync_atomic.sync_atomic_artifact` — see that
+    function for the full Phase 1 / Phase 2 contract.
+
     Args:
         on_drop: Severity when fields are dropped during conversion.
             ``"ignore"`` (default) — silently record in ``result.dropped``.
@@ -640,160 +669,21 @@ def generate_all_agents(
             fan-out destination. Default ``project_shared`` preserves
             pre-PR-E3 behavior.
     """
-    # Resolve legacy ``strict`` flag.
-    effective_drop = on_drop if on_drop != "ignore" or not strict else "error"
-
-    generated: list[tuple[str, Path]] = []
-    dropped: list[tuple[str, str, list[str]]] = []
-    skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
-
-    canonicals = list_canonical_agents(project_root, scope=scope)
-    if not canonicals:
-        return AgentSyncResult(
-            generated=[],
-            dropped=[],
-            skipped=[("<all>", "no canonical agents", skip_codes.NO_CANONICAL_ROOT)],
-        )
-
-    targets = runtimes if runtimes is not None else list(AGENT_GENERATORS.keys())
-
-    # ── Phase 1: parse + scan every (target, agent) pair — pure read pass. ──
-    # No filesystem mutation happens here. For ``scope='project_shared'``
-    # the first Gate A hit raises immediately via :func:`raise_or_collect`,
-    # so Phase 2 never starts and no partial runtime fan-out can land on
-    # disk (#895 P2 review #5). For user / project_local scopes, blocks
-    # collect into ``skipped`` as before.
-    #
-    # ``pending`` is a list of write descriptors: one per (target, agent)
-    # pair that passed every gate. Each entry carries the immutable
-    # snapshot Phase 2 needs (parsed agent + override bytes that already
-    # passed Gate A) so the write loop never re-reads canonical from
-    # disk and the scan→write TOCTOU window stays closed.
-    pending: list[tuple[str, str, AgentGenerator, SubAgent, Path, bytes | None]] = []
-
-    for target in targets:
-        gen = AGENT_GENERATORS.get(target)
-        if gen is None:
-            skipped.append((target, "unknown runtime", skip_codes.UNKNOWN_RUNTIME))
-            continue
-        for agent_path, layout in canonicals:
-            # PR-E3 Codex review fold: read canonical bytes ONCE and use
-            # the captured buffer for both Gate A scan AND parse, closing
-            # the scan→write TOCTOU window. A concurrent edit between
-            # scan and parse would otherwise let an attacker present
-            # clean bytes to scan and unsafe bytes to render.
-            try:
-                agent_bytes = agent_path.read_bytes()
-            except OSError as exc:
-                skipped.append((agent_path.name, f"unreadable: {exc}", skip_codes.PARSE_ERROR))
-                continue
-            agent_text = agent_bytes.decode("utf-8", errors="replace")
-            try:
-                agent = _parse_canonical_agent_text(agent_text, source=agent_path, layout=layout)
-            except AgentParseError as exc:
-                skipped.append((agent_path.name, f"parse error: {exc}", skip_codes.PARSE_ERROR))
-                continue
-            # ADR-0011 PR-E (#891): resolve the runtime target BEFORE render
-            # + dropped-field handling. ``None`` means NO_FANOUT per
-            # ``_runtime_targets.RUNTIME_FANOUT_TABLE``; emit a typed skip
-            # without invoking ``render`` so a strict caller doesn't raise
-            # ``StrictDropError`` for a runtime that has no fan-out by
-            # design (the fail-quiet contract).
-            out_path = gen.target_file(project_root, agent.name, scope=scope)
-            if out_path is None:
-                skipped.append(
-                    (
-                        agent.name,
-                        f"no fan-out for runtime {target} at this scope",
-                        skip_codes.NO_PROJECT_FANOUT_FOR_RUNTIME,
-                    )
-                )
-                continue
-            # ADR-0011 PR-E3 Gate A — scan the IN-MEMORY canonical bytes
-            # (same buffer the parse used). project_shared block raises
-            # PrivacyBlockedError; user/project_local block emits
-            # PRIVACY_BLOCKED skip and continues to next runtime.
-            file_scan = scan_text_content(
-                agent_text,
-                source_path=agent_path,
-                surface="cli_context_sync",
-                scope=scope,
-                project_root=project_root,
-            )
-            if file_scan.decision in ("blocked", "blocked_project_shared"):
-                code, reason = raise_or_collect(
-                    file_scan,
-                    scope=scope,
-                    kind="agent",
-                    artifact_name=agent.name,
-                )
-                skipped.append((agent.name, reason, code))
-                continue
-            # Resolve per-vendor override and scan its bytes — read once,
-            # scan once, hand the bytes to Phase 2. Same TOCTOU close as
-            # canonical above.
-            vendor = GENERATOR_VENDOR.get(target)
-            override_bytes: bytes | None = None
-            if vendor is not None:
-                # ADR-0011 PR-E3: thread the resolved sync ``scope`` through
-                # to override resolution. Same-tier-only lookup (narrow→broad
-                # is intentionally NOT used for default sync per ADR §4).
-                override_path = _override.resolve(
-                    project_root, "agents", agent.name, vendor, scope=scope
-                )
-                if override_path is not None:
-                    try:
-                        override_bytes = override_path.read_bytes()
-                    except OSError as exc:
-                        skipped.append(
-                            (agent.name, f"override unreadable: {exc}", skip_codes.PARSE_ERROR)
-                        )
-                        continue
-                    override_text = override_bytes.decode("utf-8", errors="replace")
-                    file_scan = scan_text_content(
-                        override_text,
-                        source_path=override_path,
-                        surface="cli_context_sync",
-                        scope=scope,
-                        project_root=project_root,
-                    )
-                    if file_scan.decision in ("blocked", "blocked_project_shared"):
-                        code, reason = raise_or_collect(
-                            file_scan,
-                            scope=scope,
-                            kind="agent",
-                            artifact_name=agent.name,
-                        )
-                        skipped.append((agent.name, reason, code))
-                        continue
-            pending.append((target, agent.name, gen, agent, out_path, override_bytes))
-
-    # ── Phase 2: render + atomic write every pending pair. ──
-    # By construction Phase 1 raised on any project_shared privacy block,
-    # so reaching this loop means every queued write is clean. The only
-    # remaining mid-loop raise is StrictDropError, which is opt-in
-    # (``on_drop="error"`` or legacy ``strict=True``) and is an unrelated
-    # atomicity boundary — pre-existing behavior.
-    for target, _name, gen, agent, out_path, override_bytes in pending:
-        content, dropped_fields = gen.render(agent)
-        if dropped_fields:
-            if effective_drop == "error":
-                raise StrictDropError(
-                    f"strict mode: {target} would drop {dropped_fields} from '{agent.name}'"
-                )
-            if effective_drop == "warn":
-                logger.warning("%s dropped %s from '%s'", target, dropped_fields, agent.name)
-        atomic_write_text(out_path, content)
-        # ADR-0008 Invariant 4: per-vendor override replaces the runtime file.
-        # Use the SAME captured buffer that passed Gate A — never
-        # re-read from disk (would re-open the TOCTOU window).
-        if override_bytes is not None:
-            atomic_write_bytes(out_path, override_bytes)
-        generated.append((target, out_path))
-        if dropped_fields:
-            dropped.append((target, agent.name, dropped_fields))
-
-    return AgentSyncResult(generated=generated, dropped=dropped, skipped=skipped)
+    # Runtime type matches AgentSyncResult because _AGENT_ADAPTER's
+    # ``result_type`` is AgentSyncResult; mypy can't infer that through the
+    # engine's AtomicSyncResult signature, so cast to preserve the public
+    # type annotation.
+    return cast(
+        "AgentSyncResult",
+        sync_atomic_artifact(
+            _AGENT_ADAPTER,
+            project_root,
+            runtimes,
+            strict=strict,
+            on_drop=on_drop,
+            scope=scope,
+        ),
+    )
 
 
 # ── Reverse: runtime → canonical ────────────────────────────────────
