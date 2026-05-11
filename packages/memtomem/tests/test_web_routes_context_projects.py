@@ -181,6 +181,79 @@ async def test_get_projects_project_local_counts_only_with_explicit_target_scope
     assert data["scopes"][0]["counts"]["skills"] == 1
 
 
+@pytest.mark.asyncio
+async def test_get_projects_project_local_dir_layout_commands_agents_count_distinctly(
+    client, cwd_root: Path
+) -> None:
+    """Multiple dir-layout project_local drafts must NOT collapse into one.
+
+    Review P2 on PR #940: ``list_canonical_{commands,agents}`` returns
+    ``(Path, Layout)`` where the Path points at the manifest file. For
+    directory-layout drafts at ``commands.local/<name>/command.md`` and
+    ``agents.local/<name>/agent.md`` the file stem is always
+    ``"command"`` / ``"agent"`` respectively, so a naive ``p.stem``
+    extractor folded every draft into a single phantom entry. Acute for
+    ``target_scope=project_local`` because ``diff_commands`` returns
+    nothing (project_local has no runtime fan-out per ADR-0011 §3 /
+    ADR-0016 §7) — the canonical count IS the entire signal, so a
+    collapse turns two drafts into a count of 1.
+
+    Asserts **exact** counts (not ``>=``) so the test fails pre-fix.
+    """
+    for name in ("deploy", "ship"):
+        cmd_dir = cwd_root / ".memtomem" / "commands.local" / name
+        cmd_dir.mkdir(parents=True)
+        (cmd_dir / "command.md").write_text(f"# {name}\n", encoding="utf-8")
+
+    for name in ("reviewer", "summarizer"):
+        agent_dir = cwd_root / ".memtomem" / "agents.local" / name
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "agent.md").write_text(f"# {name}\n", encoding="utf-8")
+
+    resp = await client.get(
+        "/api/context/projects",
+        params={"target_scope": "project_local"},
+    )
+    assert resp.status_code == 200
+    counts = resp.json()["scopes"][0]["counts"]
+    assert counts["commands"] == 2, (
+        f"two dir-layout project_local commands must count as 2 distinct "
+        f"names, not collapse to 1 via p.stem='command' (got {counts})"
+    )
+    assert counts["agents"] == 2, (
+        f"two dir-layout project_local agents must count as 2 distinct "
+        f"names, not collapse to 1 via p.stem='agent' (got {counts})"
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_projects_project_shared_dir_layout_commands_agents_count_distinctly(
+    client, cwd_root: Path
+) -> None:
+    """Same no-collapse contract for the project_shared (default) tier.
+
+    The bug pre-dates PR #940 — directory-layout drafts under
+    ``.memtomem/commands/`` collapsed too — but PR #940 made it more
+    visible by exposing a per-tier count. Pinning project_shared here
+    keeps the layout-aware helper honest after future refactors.
+    """
+    for name in ("deploy", "ship"):
+        cmd_dir = cwd_root / ".memtomem" / "commands" / name
+        cmd_dir.mkdir(parents=True)
+        (cmd_dir / "command.md").write_text(f"# {name}\n", encoding="utf-8")
+
+    for name in ("reviewer", "summarizer"):
+        agent_dir = cwd_root / ".memtomem" / "agents" / name
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "agent.md").write_text(f"# {name}\n", encoding="utf-8")
+
+    resp = await client.get("/api/context/projects")
+    assert resp.status_code == 200
+    counts = resp.json()["scopes"][0]["counts"]
+    assert counts["commands"] == 2, counts
+    assert counts["agents"] == 2, counts
+
+
 # ── ?scope_id= on /context/skills ───────────────────────────────────────
 
 

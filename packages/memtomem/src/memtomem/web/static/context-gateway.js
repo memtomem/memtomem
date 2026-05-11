@@ -272,40 +272,48 @@ function _renderCtxOverview(data) {
   const syncAllBtn = document.getElementById('ctx-sync-all-btn');
   if (syncAllBtn) {
     if (_ctxTargetScope === 'project_local') {
+      // project_local has no runtime fan-out (ADR-0011 §3 / ADR-0016 §7),
+      // so the Sync All button is disabled in this tier. We deliberately
+      // do NOT ``return`` here — falling through lets the overview-card
+      // click-to-navigate handler below still wire up, so the user can
+      // drill into project_local lists from the overview tiles. Review
+      // P2 (PR #940): the early return was making every overview tile
+      // inert in this tier, leaving the count badges with no way to
+      // navigate to the corresponding list.
       syncAllBtn.dataset.runtimeOnly = 'true';
       syncAllBtn.title = t('settings.ctx.project_local_no_fanout_tooltip');
       syncAllBtn.setAttribute('aria-disabled', 'true');
-      return;
-    }
-    // Mirror the overview-tile gate: in prod the Custom Commands
-    // surface is hidden, so its missing_canonical count must not
-    // gate the Sync All button (otherwise prod users would see Sync
-    // All disabled because of an artifact set they can't even see).
-    const syncKinds = STATE.uiMode === 'dev'
-      ? ['skills', 'commands', 'agents']
-      : ['skills', 'agents'];
-    const totals = syncKinds.reduce((acc, k) => {
-      const d = data[k] || {};
-      acc.total += d.total || 0;
-      acc.runtimeOnly += d.missing_canonical || 0;
-      return acc;
-    }, { total: 0, runtimeOnly: 0 });
-    if (totals.total > 0 && totals.runtimeOnly === totals.total) {
-      syncAllBtn.dataset.runtimeOnly = 'true';
-      syncAllBtn.title = t('settings.ctx.sync_all_disabled_tooltip');
-      syncAllBtn.setAttribute('aria-disabled', 'true');
     } else {
-      delete syncAllBtn.dataset.runtimeOnly;
-      syncAllBtn.removeAttribute('aria-disabled');
-      // The button has a default ``data-i18n-title`` (sync_all_tooltip);
-      // wiping the attribute outright would clobber the locale-driven
-      // hover tooltip that ``I18N.applyDOM`` set on page load.
-      // Restore it from the dataset key instead.
-      const titleKey = syncAllBtn.dataset.i18nTitle;
-      if (titleKey) {
-        syncAllBtn.title = t(titleKey);
+      // Mirror the overview-tile gate: in prod the Custom Commands
+      // surface is hidden, so its missing_canonical count must not
+      // gate the Sync All button (otherwise prod users would see Sync
+      // All disabled because of an artifact set they can't even see).
+      const syncKinds = STATE.uiMode === 'dev'
+        ? ['skills', 'commands', 'agents']
+        : ['skills', 'agents'];
+      const totals = syncKinds.reduce((acc, k) => {
+        const d = data[k] || {};
+        acc.total += d.total || 0;
+        acc.runtimeOnly += d.missing_canonical || 0;
+        return acc;
+      }, { total: 0, runtimeOnly: 0 });
+      if (totals.total > 0 && totals.runtimeOnly === totals.total) {
+        syncAllBtn.dataset.runtimeOnly = 'true';
+        syncAllBtn.title = t('settings.ctx.sync_all_disabled_tooltip');
+        syncAllBtn.setAttribute('aria-disabled', 'true');
       } else {
-        syncAllBtn.removeAttribute('title');
+        delete syncAllBtn.dataset.runtimeOnly;
+        syncAllBtn.removeAttribute('aria-disabled');
+        // The button has a default ``data-i18n-title`` (sync_all_tooltip);
+        // wiping the attribute outright would clobber the locale-driven
+        // hover tooltip that ``I18N.applyDOM`` set on page load.
+        // Restore it from the dataset key instead.
+        const titleKey = syncAllBtn.dataset.i18nTitle;
+        if (titleKey) {
+          syncAllBtn.title = t(titleKey);
+        } else {
+          syncAllBtn.removeAttribute('title');
+        }
       }
     }
   }
@@ -757,12 +765,22 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
     // re-insert the runtime-only banner above the fresh list.
     if (seq !== _ctxListSeq[type]) return;
     const items = data[type] || [];
+    // project_local lists return draft items, but the detail / rendered /
+    // diff / edit / delete endpoints downstream of loadCtxDetail today
+    // resolve only project_shared canonicals — a click on a draft would
+    // 404 or, worse, open a same-named shared artifact (review P2 on
+    // PR #940). Render those cards as read-only until the detail surface
+    // is tier-aware so the broken affordance is removed at the source.
+    // TODO(#940-followup): thread target_scope through read/rendered/
+    // diff/put/delete and re-enable click navigation for project_local.
+    const isReadonlyTier = _ctxTargetScope === 'project_local';
+    const clickable = _ctxScopeIsServerCwd(scope) && !isReadonlyTier;
     container.innerHTML = _ctxRenderItemsHtml(
       items,
       type,
       scope.root,
       data.scanned_dirs || [],
-      { clickable: _ctxScopeIsServerCwd(scope) },
+      { clickable },
     );
 
     if (_ctxScopeIsServerCwd(scope)) {
@@ -772,24 +790,26 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
       // classList toggle that risks drift across re-renders.
       _ctxRefreshSectionState(type, items, data.scanned_dirs || []);
 
-      const listEl = qs(`ctx-${type}-list`);
-      container.querySelectorAll('.ctx-card').forEach(card => {
-        card.addEventListener('click', () => {
-          listEl.querySelectorAll('.ctx-card').forEach(c => c.classList.remove('active'));
-          card.classList.add('active');
-          // Runtime-only items have no canonical file; calling the GET detail
-          // endpoint returns 404. Branch into the diff-backed renderer so the
-          // user sees the actual runtime contents instead of a "not found".
-          if (card.dataset.canonicalPath) {
-            loadCtxDetail(type, card.dataset.name, {
-              autoOpenDiff: card.dataset.outOfSync === 'true',
-            });
-          } else {
-            const detailEl = qs(`ctx-${type}-detail`);
-            _ctxLoadRuntimeOnlyDetail(type, card.dataset.name, detailEl);
-          }
+      if (clickable) {
+        const listEl = qs(`ctx-${type}-list`);
+        container.querySelectorAll('.ctx-card').forEach(card => {
+          card.addEventListener('click', () => {
+            listEl.querySelectorAll('.ctx-card').forEach(c => c.classList.remove('active'));
+            card.classList.add('active');
+            // Runtime-only items have no canonical file; calling the GET detail
+            // endpoint returns 404. Branch into the diff-backed renderer so the
+            // user sees the actual runtime contents instead of a "not found".
+            if (card.dataset.canonicalPath) {
+              loadCtxDetail(type, card.dataset.name, {
+                autoOpenDiff: card.dataset.outOfSync === 'true',
+              });
+            } else {
+              const detailEl = qs(`ctx-${type}-detail`);
+              _ctxLoadRuntimeOnlyDetail(type, card.dataset.name, detailEl);
+            }
+          });
         });
-      });
+      }
     }
   } catch (err) {
     // Late-failing fetch from a previous invocation must not paint

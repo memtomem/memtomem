@@ -23,8 +23,12 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from memtomem.context.agents import diff_agents, list_canonical_agents
-from memtomem.context.commands import diff_commands, list_canonical_commands
+from memtomem.context.agents import canonical_agent_name, diff_agents, list_canonical_agents
+from memtomem.context.commands import (
+    canonical_command_name,
+    diff_commands,
+    list_canonical_commands,
+)
 from memtomem.context.projects import (
     KnownProjectsStore,
     ProjectScope,
@@ -119,10 +123,21 @@ def _counts_for(root: Path, *, target_scope: TargetScope) -> dict[str, int]:
     try:
         names = {name for _runtime, name, _status in diff_commands(root, scope=target_scope)}
         # ``list_canonical_commands`` returns ``list[tuple[Path, Layout]]``
-        # since ADR-0008 PR-C (#624) added directory layout. Unpack the
-        # tuple — ``p.stem`` on the raw tuple raised AttributeError and
-        # the blanket ``except Exception`` below silently zeroed the count.
-        names.update(p.stem for p, _layout in list_canonical_commands(root, scope=target_scope))
+        # since ADR-0008 PR-C (#624) added directory layout. Name extraction
+        # MUST be layout-aware: under directory layout the manifest is
+        # ``<name>/command.md`` so ``p.stem == "command"`` collapses every
+        # draft to a single ``"command"`` row, undercounting the actual
+        # inventory and polluting the union with a phantom name. Especially
+        # acute for ``target_scope=project_local`` where ``diff_commands``
+        # returns nothing (no runtime fan-out — ADR-0011 §3 / ADR-0016 §7)
+        # so the canonical count is the only contributor (review P2 on
+        # PR #940). Use ``canonical_command_name`` — the single source of
+        # truth for path → name dispatch, mirrored by
+        # ``canonical_agent_name`` below.
+        names.update(
+            canonical_command_name(p, layout)
+            for p, layout in list_canonical_commands(root, scope=target_scope)
+        )
         counts["commands"] = len(names)
     except Exception:
         logger.warning("counts: commands failed for %s", root, exc_info=True)
@@ -130,9 +145,14 @@ def _counts_for(root: Path, *, target_scope: TargetScope) -> dict[str, int]:
 
     try:
         names = {name for _runtime, name, _status in diff_agents(root, scope=target_scope)}
-        # Same tuple-unpack as commands above; ``list_canonical_agents``
-        # also returns ``list[tuple[Path, Layout]]`` post PR-C.
-        names.update(p.stem for p, _layout in list_canonical_agents(root, scope=target_scope))
+        # Same layout-aware extraction as commands above — directory-layout
+        # agents at ``<name>/agent.md`` collapse to a phantom ``"agent"``
+        # name under ``p.stem``. ``canonical_agent_name`` is the agent-side
+        # mirror of ``canonical_command_name``.
+        names.update(
+            canonical_agent_name(p, layout)
+            for p, layout in list_canonical_agents(root, scope=target_scope)
+        )
         counts["agents"] = len(names)
     except Exception:
         logger.warning("counts: agents failed for %s", root, exc_info=True)
