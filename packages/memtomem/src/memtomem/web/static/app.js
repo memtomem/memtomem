@@ -3242,9 +3242,14 @@ function _renderMemorySourceTree(sources, list) {
     const bucket = byProvider[provider];
 
     const categoriesAll = CATEGORY_ORDER.filter(c => bucket.byCategory[c]);
+    // Filter narrows indexed dirs (chunks>0) by source matches, but always
+    // keeps "Discovered" dirs (chunks=0 && files>0) regardless of filter
+    // state — without this branch, any NS/path filter ever set on the page
+    // makes all Discovered dirs vanish at once (the original ``Claude (0)``
+    // guard was scoped to indexed-empty rows, not Discovered ones).
     const visibleCatsRaw = filterActive
       ? categoriesAll
-          .map(cat => [cat, bucket.byCategory[cat].filter(d => (sourcesByDir[d] || []).length > 0)])
+          .map(cat => [cat, bucket.byCategory[cat].filter(d => (sourcesByDir[d] || []).length > 0 || isDiscovered(d))])
           .filter(([, dirs]) => dirs.length > 0)
       : categoriesAll.map(cat => [cat, bucket.byCategory[cat]]);
 
