@@ -642,13 +642,26 @@ def test_server_main_acquires_portalocker_pid_lock(
         server_mod.main()
 
         assert pid_file.exists(), "main() must create the pid file"
+        # Cross-platform: pid file must be non-empty. ``LockFileEx`` blocks
+        # *content* reads from other handles on Windows (#819), but file
+        # metadata via ``stat`` is unaffected — so a regression where
+        # ``main()`` creates and locks an empty pid file would still trip
+        # this assertion on Windows. ``probe_pid_file`` (and uninstall /
+        # status diagnostics) call ``read_text().strip()`` on the file when
+        # it isn't currently locked, so an empty pid file would surface as
+        # ``int("")`` → ``pid=None`` in ``ServerState`` — degraded UX even
+        # though liveness still works.
+        assert pid_file.stat().st_size > 0, (
+            "pid file must not be empty — main() must write its pid before "
+            "returning, on every platform"
+        )
         # POSIX-only: read pid-file content via a fresh handle. Windows
         # ``LockFileEx`` blocks reads from other handles, so this would
         # raise ``PermissionError`` (#819). The lock-owning handle lives
         # in ``main()``'s closure (``_lock_fp``) and isn't reachable from
-        # here. The cross-platform ``probe_pid_file`` assertion below is
-        # the load-bearing check; the content read is just additional
-        # POSIX-side coverage.
+        # here. The cross-platform ``stat().st_size`` check above pins the
+        # "non-empty" half of the contract; the exact-pid check below is
+        # additional POSIX-side coverage that the value is *this* process.
         if os.name != "nt":
             assert pid_file.read_text().strip() == str(os.getpid()), (
                 "pid file must contain this process's pid"
