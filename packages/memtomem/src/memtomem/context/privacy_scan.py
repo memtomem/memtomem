@@ -103,13 +103,35 @@ def scan_artifact_tree(
         audit_context: dict[str, object] = {**audit_context_base, "path": str(path)}
         try:
             text = path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
-            # Binary asset (PNG, etc.) or transient read failure: out of
-            # scope for the regex-based pattern set. Recording as ``pass``
-            # is safe-by-default — false negatives are bounded by the
-            # pattern set's ASCII-only character classes.
+        except UnicodeDecodeError:
+            # Binary asset (PNG, etc.): out of scope for the regex-based
+            # pattern set. Recording as ``pass`` is safe-by-default —
+            # ASCII-only character classes in the pattern set cannot
+            # match non-text payloads.
             decisions.append(FileScan(path, "pass", 0))
             continue
+        except OSError as exc:
+            # Read failure (permissions, transient I/O, missing file).
+            # Pre-PR-E4 review this was conflated with UnicodeDecodeError
+            # and recorded as ``pass`` — but ``UnicodeDecodeError`` reads
+            # the bytes (regex would have nothing to match), while
+            # ``OSError`` means we never even saw the bytes. PR-E4's
+            # ``_stage_move`` can rename a ``chmod 000`` canonical file
+            # into staging without reading it, so silent-pass would have
+            # let an unreadable file containing a secret promote into
+            # ``project_shared`` with Gate A never inspecting it.
+            #
+            # Fail closed: hard-abort the scan with a scope-aware
+            # ClickException. The exception propagates through callers'
+            # rollback paths (``migrate_scope`` re-renames staging back
+            # to src; ``generate_all_skills`` removes staging in its
+            # finally block) so no half-promoted state survives.
+            raise click.ClickException(
+                f"Gate A: cannot read {path} (errno={exc.errno}); refusing to "
+                f"fan-out / migrate to scope='{scope}'. An unreadable file "
+                "cannot be scanned for secrets — fix the permission or "
+                "remove the file before re-running."
+            ) from exc
 
         guard = privacy.enforce_write_guard(
             text,
