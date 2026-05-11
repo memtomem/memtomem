@@ -369,6 +369,125 @@ def test_cli_status_wiki_absent_renders_with_annotation(
     assert "foo" in result.output
 
 
+# ── project_local draft scan tests (#923) ────────────────────────────────
+
+
+def _seed_local_draft(project: Path, asset_type: str, name: str, manifest: str) -> None:
+    """Create ``<proj>/.memtomem/<asset_type>.local/<name>/<manifest>``.
+
+    Matches the canonical-side path scope_resolver.canonical_artifact_dir
+    resolves for ``project_local``. The manifest file is what
+    classify_status's draft scanner uses to confirm the dir is a real
+    artifact (same probe migrate uses).
+    """
+    draft_dir = project / ".memtomem" / f"{asset_type}.local" / name
+    draft_dir.mkdir(parents=True)
+    (draft_dir / manifest).write_bytes(b"# draft\n")
+
+
+def test_classify_status_scans_project_local_drafts(wiki_root: Path, tmp_path: Path) -> None:
+    """All three artifact kinds produce project_local rows from real on-disk dirs."""
+    _initialized_wiki(wiki_root)
+    _seed_local_draft(tmp_path, "agents", "draft-agent", "agent.md")
+    _seed_local_draft(tmp_path, "commands", "draft-cmd", "command.md")
+    _seed_local_draft(tmp_path, "skills", "draft-skill", "SKILL.md")
+
+    _, rows = classify_status(tmp_path)
+
+    by_kind = {(r.asset_type, r.name): r for r in rows}
+    assert ("agents", "draft-agent") in by_kind
+    assert ("commands", "draft-cmd") in by_kind
+    assert ("skills", "draft-skill") in by_kind
+    for row in (
+        by_kind["agents", "draft-agent"],
+        by_kind["commands", "draft-cmd"],
+        by_kind["skills", "draft-skill"],
+    ):
+        assert row.tier == "project_local"
+        assert row.state == "local-draft"
+        assert row.pin_commit == ""
+        assert row.installed_at == ""
+        assert row.reason is None
+
+
+def test_classify_status_skips_directories_missing_kind_manifest(
+    wiki_root: Path, tmp_path: Path
+) -> None:
+    """A directory under ``agents.local/`` without ``agent.md`` is NOT emitted.
+
+    Mirrors migrate._detect_source_scope's contract: a directory only
+    counts as an artifact when its kind-specific manifest is present.
+    """
+    _initialized_wiki(wiki_root)
+    bogus = tmp_path / ".memtomem" / "agents.local" / "no-manifest-here"
+    bogus.mkdir(parents=True)
+    (bogus / "README.md").write_bytes(b"# not the manifest\n")
+
+    _, rows = classify_status(tmp_path)
+
+    assert rows == []
+
+
+def test_classify_status_absent_local_dirs_do_not_crash(wiki_root: Path, tmp_path: Path) -> None:
+    """No ``.local/`` directories on disk → scanner yields nothing, no error."""
+    _initialized_wiki(wiki_root)
+
+    _, rows = classify_status(tmp_path)
+
+    assert rows == []
+
+
+def test_classify_status_shows_both_rows_on_name_collision(wiki_root: Path, tmp_path: Path) -> None:
+    """Same name in lock.json and .local/ → two rows, project_shared before project_local."""
+    _initialized_wiki(wiki_root)
+    pin = _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    _setup_installed_at_pin(tmp_path, "skills", "foo", {"SKILL.md": b"v1\n"}, pin)
+    _seed_local_draft(tmp_path, "skills", "foo", "SKILL.md")
+
+    _, rows = classify_status(tmp_path)
+
+    foo_rows = [r for r in rows if r.asset_type == "skills" and r.name == "foo"]
+    assert len(foo_rows) == 2
+    assert foo_rows[0].tier == "project_shared"
+    assert foo_rows[0].state == "ok"
+    assert foo_rows[1].tier == "project_local"
+    assert foo_rows[1].state == "local-draft"
+
+
+def test_cli_status_renders_draft_no_fanout_annotation(
+    wiki_root: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """CLI output for a project_local row carries the exact ``(draft, no fan-out)`` string."""
+    _initialized_wiki(wiki_root)
+    _seed_local_draft(tmp_path, "agents", "draft-only", "agent.md")
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["status"])
+
+    assert result.exit_code == 0
+    assert "draft-only" in result.output
+    assert "(draft, no fan-out)" in result.output
+    assert "1 local-draft" in result.output
+
+
+def test_cli_status_no_annotation_on_project_shared_rows(
+    wiki_root: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """The annotation is absent for lockfile-tracked (project_shared) rows."""
+    _initialized_wiki(wiki_root)
+    pin = _seed_wiki_skill(wiki_root, "shared-skill", {"SKILL.md": b"v1\n"})
+    _setup_installed_at_pin(tmp_path, "skills", "shared-skill", {"SKILL.md": b"v1\n"}, pin)
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["status"])
+
+    assert result.exit_code == 0
+    assert "shared-skill" in result.output
+    assert "(draft, no fan-out)" not in result.output
+
+
 # ── unused-fixture helpers (silence ruff F401) ───────────────────────────
 
 _ = pytest  # keep pytest import alive if no test uses it directly
@@ -387,3 +506,7 @@ def test_status_row_dataclass_shape() -> None:
     )
     assert row.asset_type == "skills"
     assert row.dirty_file_count == 0
+    # New tier field defaults to project_shared so existing call sites
+    # (and the lockfile-walk branch in classify_status) remain valid
+    # without explicit tier= updates.
+    assert row.tier == "project_shared"

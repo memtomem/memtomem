@@ -29,8 +29,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from memtomem.config import TargetScope
+from memtomem.context.agents import AGENT_DIR_FILENAME
+from memtomem.context.commands import COMMAND_DIR_FILENAME
 from memtomem.context.dirty import is_asset_dirty
 from memtomem.context.lockfile import Lockfile, LockfileVersionError
+from memtomem.context.scope_resolver import canonical_artifact_dir
+from memtomem.context.skills import SKILL_MANIFEST
 from memtomem.wiki.store import WikiNotFoundError, WikiStore
 
 __all__ = [
@@ -40,7 +45,13 @@ __all__ = [
 ]
 
 
-StatusState = Literal["ok", "behind", "dirty", "missing", "stale-pin"]
+StatusState = Literal["ok", "behind", "dirty", "missing", "stale-pin", "local-draft"]
+
+_LOCAL_DRAFT_MANIFEST: dict[str, str] = {
+    "agents": AGENT_DIR_FILENAME,
+    "commands": COMMAND_DIR_FILENAME,
+    "skills": SKILL_MANIFEST,
+}
 
 
 @dataclass(frozen=True)
@@ -58,6 +69,14 @@ class StatusRow:
     parens after the row. Common contents: ``"N file(s) modified
     locally"`` for dirty, ``"dest missing"`` for missing, ``"pin <abbr>
     not reachable"`` / ``"wiki not present"`` for stale-pin.
+
+    ``tier`` distinguishes lockfile-tracked installs (``project_shared``)
+    from locally-authored drafts discovered by walking
+    ``<proj>/.memtomem/<artifact>.local/`` (``project_local``). The CLI
+    appends ``(draft, no fan-out)`` after project_local rows per ADR-0011
+    §3 / ADR-0016 §7. ``user`` tier is reserved for a future scan;
+    today's `mm context install` only writes project_shared, so no
+    ``user``-tier rows are produced.
     """
 
     asset_type: Literal["skills", "agents", "commands"]
@@ -67,6 +86,7 @@ class StatusRow:
     state: StatusState
     dirty_file_count: int
     reason: str | None
+    tier: TargetScope = "project_shared"
 
 
 def classify_status(
@@ -159,12 +179,72 @@ def classify_status(
                 state=state,
                 dirty_file_count=dirty_count,
                 reason=reason,
+                tier="project_shared",
             )
         )
 
-    # iter_entries yields alphabetical (agents → commands → skills);
-    # rows preserve that order — see Lockfile.iter_entries docstring.
+    rows.extend(_scan_project_local_drafts(project_root_path))
+
+    # Final order: alphabetical by (asset_type, name); within a name,
+    # project_shared (lockfile-tracked install) renders before
+    # project_local (locally-authored draft). A name colliding across
+    # tiers therefore produces two adjacent rows under the same section
+    # header, shared first.
+    rows.sort(key=lambda r: (r.asset_type, r.name, _TIER_RENDER_ORDER[r.tier]))
     return wiki_head, rows
+
+
+_TIER_RENDER_ORDER: dict[str, int] = {
+    "user": 0,
+    "project_shared": 1,
+    "project_local": 2,
+}
+
+
+def _scan_project_local_drafts(project_root: Path) -> Iterator[StatusRow]:
+    """Yield ``StatusRow``s for every valid project_local draft on disk.
+
+    Walks ``<proj>/.memtomem/{agents,commands,skills}.local/`` and emits
+    one row per ``<name>/`` subdirectory whose kind-specific manifest
+    file is present (``agent.md`` / ``command.md`` / ``SKILL.md``). The
+    presence of the manifest is the same validity probe migrate uses
+    to recognise a directory-layout artifact (``migrate._detect_source_scope``).
+
+    Emitted rows carry ``tier="project_local"``, ``state="local-draft"``,
+    and empty ``pin_commit``/``installed_at`` — project_local artifacts
+    are not currently tracked in the lockfile (install path is
+    project_shared-only today; locally-authored drafts never enter
+    ``lock.json``). The CLI render layer appends ``(draft, no fan-out)``
+    to these rows per ADR-0011 §3 / ADR-0016 §7.
+    """
+    for asset_type in ("agents", "commands", "skills"):
+        local_root = canonical_artifact_dir(
+            asset_type,  # type: ignore[arg-type]
+            "project_local",
+            project_root,
+        )
+        if not local_root.is_dir():
+            continue
+        manifest = _LOCAL_DRAFT_MANIFEST[asset_type]
+        for entry in sorted(local_root.iterdir(), key=lambda p: p.name):
+            if not entry.is_dir():
+                continue
+            if not (entry / manifest).is_file():
+                # Skip directories that don't satisfy the kind's
+                # manifest contract — same convention as migrate's
+                # source-scope probe. A future flat-layout sweep would
+                # add a sibling check here.
+                continue
+            yield StatusRow(
+                asset_type=asset_type,  # type: ignore[arg-type]
+                name=entry.name,
+                pin_commit="",
+                installed_at="",
+                state="local-draft",
+                dirty_file_count=0,
+                reason=None,
+                tier="project_local",
+            )
 
 
 def load_with_recovery(project_root: Path | str) -> tuple[dict, str | None]:

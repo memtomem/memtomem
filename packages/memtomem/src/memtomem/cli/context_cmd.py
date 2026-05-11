@@ -1502,7 +1502,14 @@ _STATUS_GLYPH: dict[str, tuple[str, str]] = {
     "dirty": ("✗", "yellow"),
     "missing": ("!", "red"),
     "stale-pin": ("⚠", "red"),
+    "local-draft": ("·", "magenta"),
 }
+
+# ADR-0011 §3 / ADR-0016 §7: project_local agents / commands / skills never
+# reach a runtime fan-out path. The annotation flags the row inline so a
+# reader of ``mm context status`` understands the entry is a draft tier with
+# no Claude Code (or other agent) discovery path.
+_PROJECT_LOCAL_ANNOTATION = "(draft, no fan-out)"
 
 
 @context.command("status")
@@ -1528,33 +1535,61 @@ def status_cmd() -> None:
         click.secho(f"  ✗ lock.json: {lockfile_error}", fg="red", err=True)
 
     # Header — counts + wiki HEAD (or "wiki not present" annotation).
+    # Lockfile-tracked installs (project_shared) drive the "installed"
+    # count; project_local rows are surfaced separately so the header
+    # word ("installed") stays accurate for both groups.
+    installed_count = sum(1 for r in rows if r.tier != "project_local")
+    draft_count = sum(1 for r in rows if r.tier == "project_local")
+    draft_suffix = f" (+ {draft_count} local draft{'s' if draft_count != 1 else ''})" if draft_count else ""
     if wiki_head is None:
         wiki_root = wiki.root
         click.echo(
-            f".memtomem/ — {len(rows)} asset(s) installed — "
+            f".memtomem/ — {installed_count} asset(s) installed{draft_suffix} — "
             f"wiki not present at {wiki_root}; pin reachability not checked"
         )
     else:
-        click.echo(f".memtomem/ — {len(rows)} asset(s) installed — wiki HEAD {wiki_head[:12]}")
+        click.echo(
+            f".memtomem/ — {installed_count} asset(s) installed{draft_suffix} — "
+            f"wiki HEAD {wiki_head[:12]}"
+        )
 
     if not rows and lockfile_error is None:
         click.echo("\nNo wiki assets installed in this project.")
         return
 
-    # Sectioned by asset type, preserving iter_entries() order
-    # (alphabetical: agents → commands → skills, names alpha within).
+    # Sectioned by asset type, preserving classify_status() order
+    # (alphabetical: agents → commands → skills, names alpha within,
+    # project_shared rows before project_local rows on a name collision).
     last_type: str | None = None
-    summary: dict[str, int] = {"ok": 0, "behind": 0, "dirty": 0, "missing": 0, "stale-pin": 0}
+    summary: dict[str, int] = {
+        "ok": 0,
+        "behind": 0,
+        "dirty": 0,
+        "missing": 0,
+        "stale-pin": 0,
+        "local-draft": 0,
+    }
     for row in rows:
         if row.asset_type != last_type:
             click.secho(f"\n{row.asset_type}", fg="cyan")
             last_type = row.asset_type
         glyph, color = _STATUS_GLYPH[row.state]
-        installed_date = row.installed_at[:10] if row.installed_at else "—"
-        line = (
-            f"  {glyph}  {row.name:24s}  {(row.pin_commit or '?')[:12]}  installed {installed_date}"
-        )
-        if row.reason:
+        # Local-draft rows have no lockfile metadata — render the
+        # pin and installed-at columns as dashes rather than the
+        # "?"/"—" placeholders the lockfile-tracked branches use, so
+        # the visual distinction is obvious to a reader scanning the
+        # column.
+        if row.tier == "project_local":
+            line = f"  {glyph}  {row.name:24s}  {'—':<12}  {'(no install record)':<23}"
+        else:
+            installed_date = row.installed_at[:10] if row.installed_at else "—"
+            line = (
+                f"  {glyph}  {row.name:24s}  "
+                f"{(row.pin_commit or '?')[:12]}  installed {installed_date}"
+            )
+        if row.tier == "project_local":
+            line += f"  {_PROJECT_LOCAL_ANNOTATION}"
+        elif row.reason:
             line += f"  ({row.reason})"
         click.secho(line, fg=color)
         summary[row.state] += 1
@@ -1562,7 +1597,7 @@ def status_cmd() -> None:
     if rows:
         parts = [
             f"{summary[k]} {k}"
-            for k in ("ok", "behind", "dirty", "missing", "stale-pin")
+            for k in ("ok", "behind", "dirty", "missing", "stale-pin", "local-draft")
             if summary[k] > 0
         ]
         if parts:
