@@ -1869,6 +1869,40 @@ class TestEmbeddingStatus:
         data = resp.json()
         assert data["has_mismatch"] is False
 
+    async def test_coverage_reports_full(self, app, client: AsyncClient):
+        app.state.storage.get_dense_coverage = AsyncMock(
+            return_value={"total": 100, "with_dense": 100}
+        )
+        resp = await client.get("/api/embedding-status")
+        assert resp.status_code == 200
+        cov = resp.json()["coverage"]
+        assert cov == {"total": 100, "with_dense": 100, "percent": 100.0}
+
+    async def test_coverage_reports_bm25_only(self, app, client: AsyncClient):
+        # The motivating failure mode: chunks indexed but ``chunks_vec``
+        # never populated (embedder init crashed, NoopEmbedder fallback,
+        # etc.). The UI uses this 0% signal to flag a BM25-only run.
+        app.state.storage.get_dense_coverage = AsyncMock(
+            return_value={"total": 100, "with_dense": 0}
+        )
+        resp = await client.get("/api/embedding-status")
+        cov = resp.json()["coverage"]
+        assert cov["total"] == 100
+        assert cov["with_dense"] == 0
+        assert cov["percent"] == 0.0
+
+    async def test_coverage_partial_rounds_to_one_decimal(self, app, client: AsyncClient):
+        # 1/3 -> 33.3333… ; the schema commits to one decimal so a
+        # partial-coverage banner reads consistently.
+        app.state.storage.get_dense_coverage = AsyncMock(return_value={"total": 3, "with_dense": 1})
+        resp = await client.get("/api/embedding-status")
+        assert resp.json()["coverage"]["percent"] == 33.3
+
+    async def test_coverage_handles_empty_db(self, app, client: AsyncClient):
+        app.state.storage.get_dense_coverage = AsyncMock(return_value={"total": 0, "with_dense": 0})
+        cov = (await client.get("/api/embedding-status")).json()["coverage"]
+        assert cov == {"total": 0, "with_dense": 0, "percent": 0.0}
+
 
 # ---------------------------------------------------------------------------
 # GET /locales/*.json  (i18n files served via StaticFiles)

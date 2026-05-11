@@ -21,6 +21,7 @@ def _mock_components(
     source_files: list[Path] | None = None,
     stored_embedding_info: dict | None = None,
     embedding_mismatch: dict | None = None,
+    dense_coverage: dict | None = None,
 ) -> SimpleNamespace:
     """Build a minimal ``Components``-shaped mock for ``mm status`` tests.
 
@@ -31,6 +32,11 @@ def _mock_components(
     A ``SimpleNamespace`` covers all of that without dragging in the real
     ``Components`` dataclass (which would require building a SqliteBackend
     and an embedder).
+
+    ``dense_coverage`` opts in to a stubbed ``get_dense_coverage`` so the
+    report's coverage line is exercised. Leaving it ``None`` keeps the
+    attribute off the namespace — ``hasattr`` returns False and the
+    formatter skips the line, matching older storage doubles.
     """
     storage = SimpleNamespace(
         get_stats=AsyncMock(
@@ -40,6 +46,8 @@ def _mock_components(
         stored_embedding_info=stored_embedding_info,
         embedding_mismatch=embedding_mismatch,
     )
+    if dense_coverage is not None:
+        storage.get_dense_coverage = AsyncMock(return_value=dense_coverage)
     return SimpleNamespace(
         config=Mem2MemConfig(),
         storage=storage,
@@ -115,6 +123,66 @@ class TestStatusOutput:
         assert result.exit_code == 0, result.output
         assert "2 orphaned" in result.output
         assert "mem_cleanup_orphans" in result.output
+
+    def test_dense_coverage_line_emitted_full(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        comp = _mock_components(
+            total_chunks=42,
+            total_sources=7,
+            dense_coverage={"total": 42, "with_dense": 42},
+        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = runner.invoke(cli, ["status"])
+        assert result.exit_code == 0, result.output
+        assert "Dense vectors: 42/42 (100.0%)" in result.output
+        # Full coverage is the happy path — no hint suffix should appear.
+        assert "BM25-only" not in result.output
+        assert "partial dense coverage" not in result.output
+
+    def test_dense_coverage_line_flags_bm25_only(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The motivating failure: chunks indexed without an embedding
+        # row, so dense retrieval returns nothing while BM25 still
+        # works. The hint must be loud enough that users connect the
+        # dots without reading code.
+        comp = _mock_components(
+            total_chunks=42,
+            total_sources=7,
+            dense_coverage={"total": 42, "with_dense": 0},
+        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = runner.invoke(cli, ["status"])
+        assert result.exit_code == 0, result.output
+        assert "Dense vectors: 0/42 (0.0%)" in result.output
+        assert "BM25-only" in result.output
+        assert "dense retrieval will return nothing" in result.output
+
+    def test_dense_coverage_line_flags_partial(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        comp = _mock_components(
+            total_chunks=42,
+            total_sources=7,
+            dense_coverage={"total": 42, "with_dense": 21},
+        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = runner.invoke(cli, ["status"])
+        assert result.exit_code == 0, result.output
+        assert "Dense vectors: 21/42 (50.0%)" in result.output
+        assert "partial dense coverage" in result.output
+
+    def test_dense_coverage_line_skipped_when_method_missing(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # No ``dense_coverage=`` → helper omits the method on the
+        # storage namespace → formatter skips the line entirely.
+        comp = _mock_components(total_chunks=42, total_sources=7)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = runner.invoke(cli, ["status"])
+        assert result.exit_code == 0, result.output
+        assert "Dense vectors:" not in result.output
 
     def test_embedding_mismatch_warning_block_emitted(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch

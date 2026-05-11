@@ -288,6 +288,38 @@ class TestStorageExtended:
         total = sum(d["count"] for d in dist)
         assert total == 1
 
+    # ---- get_dense_coverage --------------------------------------------------
+
+    async def test_dense_coverage_empty_db(self, components):
+        storage = components.storage
+        cov = await storage.get_dense_coverage()
+        assert cov == {"total": 0, "with_dense": 0}
+
+    async def test_dense_coverage_full_after_upsert(self, components):
+        storage = components.storage
+        c1 = make_chunk(content="one", embedding=_varied_embedding(0.1), source="a.md")
+        c2 = make_chunk(content="two", embedding=_varied_embedding(0.2), source="b.md")
+        await storage.upsert_chunks([c1, c2])
+
+        cov = await storage.get_dense_coverage()
+        assert cov == {"total": 2, "with_dense": 2}
+
+    async def test_dense_coverage_zero_when_vec_table_dropped(self, components):
+        # ``reset_embedding_meta`` drops and recreates ``chunks_vec`` but
+        # leaves ``chunks`` intact, which is the production shape of the
+        # BM25-only failure mode this telemetry surfaces. The new vec
+        # table is created with the requested dimension but holds no
+        # rows until something re-embeds, so coverage should land at 0/N.
+        storage = components.storage
+        chunk = make_chunk(content="before reset", embedding=_varied_embedding(0.1))
+        await storage.upsert_chunks([chunk])
+
+        await storage.reset_embedding_meta(dimension=1024, provider="onnx", model="bge-m3")
+
+        cov = await storage.get_dense_coverage()
+        assert cov["total"] == 1
+        assert cov["with_dense"] == 0
+
     # ---- reset_embedding_meta ------------------------------------------------
 
     async def test_reset_embedding_meta_changes_dimension(self, components):

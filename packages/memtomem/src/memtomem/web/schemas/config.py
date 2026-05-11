@@ -126,12 +126,27 @@ class EmbeddingConfigInfo(BaseModel):
     model: str
 
 
+class EmbeddingCoverage(BaseModel):
+    """Dense-vector coverage rollup for the ``chunks`` table.
+
+    ``total`` is the chunk row count; ``with_dense`` is the subset that
+    also has an embedding row in ``chunks_vec``. ``percent`` rounds to
+    one decimal. When ``total == 0`` ``percent`` is ``0.0`` so callers
+    can render the field directly without a divide-by-zero branch.
+    """
+
+    total: int
+    with_dense: int
+    percent: float
+
+
 class EmbeddingStatusResponse(BaseModel):
     has_mismatch: bool
     dimension_mismatch: bool = False
     model_mismatch: bool = False
     stored: EmbeddingConfigInfo | None = None
     configured: EmbeddingConfigInfo | None = None
+    coverage: EmbeddingCoverage | None = None
 
 
 class EmbeddingResetResponse(BaseModel):

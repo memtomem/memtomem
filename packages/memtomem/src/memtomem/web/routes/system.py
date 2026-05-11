@@ -57,6 +57,7 @@ from memtomem.web.schemas.config import (
     ConfigSearchOut,
     ConfigStorageOut,
     EmbeddingConfigInfo,
+    EmbeddingCoverage,
     EmbeddingResetResponse,
     EmbeddingStatusResponse,
     ModelComponent,
@@ -768,15 +769,34 @@ async def get_embedding_status(storage=Depends(get_storage)) -> EmbeddingStatusR
         else None
     )
 
+    # Dense-vector coverage so the UI can flag "BM25-only" runs without
+    # forcing the user to peek at sqlite. ``get_dense_coverage`` falls
+    # back to ``with_dense=0`` when the vec virtual table is absent, so
+    # we always have a numeric pair to render. Storage backends that
+    # don't implement the method (e.g. mocked test doubles) leave the
+    # field at ``None`` rather than 500ing this endpoint — the warning
+    # banner the field feeds is informational, not load-bearing.
+    coverage_out: EmbeddingCoverage | None = None
+    if hasattr(storage, "get_dense_coverage"):
+        try:
+            cov = await storage.get_dense_coverage()
+            total = int(cov["total"])
+            with_dense = int(cov["with_dense"])
+            pct = round((with_dense / total) * 100, 1) if total > 0 else 0.0
+            coverage_out = EmbeddingCoverage(total=total, with_dense=with_dense, percent=pct)
+        except Exception:
+            logger.debug("dense coverage query failed", exc_info=True)
+
     mismatch = getattr(storage, "embedding_mismatch", None)
     if mismatch is None:
-        return EmbeddingStatusResponse(has_mismatch=False, stored=stored_out)
+        return EmbeddingStatusResponse(has_mismatch=False, stored=stored_out, coverage=coverage_out)
     return EmbeddingStatusResponse(
         has_mismatch=True,
         dimension_mismatch=mismatch["dimension_mismatch"],
         model_mismatch=mismatch["model_mismatch"],
         stored=EmbeddingConfigInfo(**mismatch["stored"]),
         configured=EmbeddingConfigInfo(**mismatch["configured"]),
+        coverage=coverage_out,
     )
 
 

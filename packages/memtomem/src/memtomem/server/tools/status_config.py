@@ -107,6 +107,31 @@ async def format_status_report(app: AppContext) -> str:
     except Exception:
         logger.debug("Orphan detection failed", exc_info=True)
 
+    # Dense-vector coverage line. The hint at the end surfaces the
+    # BM25-only run case loudly: an embedder that crashed mid-init or
+    # fell back to NoopEmbedder will still index chunks into ``chunks``
+    # + ``chunks_fts`` but skip ``chunks_vec`` entirely, so semantic
+    # search returns nothing while keyword search keeps working. The
+    # check is gated on ``hasattr`` so older storage doubles that
+    # haven't grown the method don't break the report.
+    if hasattr(app.storage, "get_dense_coverage"):
+        try:
+            cov = await app.storage.get_dense_coverage()
+            total = int(cov["total"])
+            with_dense = int(cov["with_dense"])
+            if total > 0:
+                pct = round((with_dense / total) * 100, 1)
+                hint = ""
+                if with_dense == 0:
+                    hint = "  (BM25-only — dense retrieval will return nothing)"
+                elif with_dense < total:
+                    hint = "  (partial dense coverage — some chunks BM25-only)"
+                lines.append(f"Dense vectors: {with_dense}/{total} ({pct}%){hint}")
+            else:
+                lines.append("Dense vectors: 0/0")
+        except Exception:
+            logger.debug("dense coverage query failed", exc_info=True)
+
     # Immutable fields — these cannot be changed via mem_config at runtime.
     # Surfacing them here so operators are not surprised when a `mm config set`
     # on one of these paths fails silently.
