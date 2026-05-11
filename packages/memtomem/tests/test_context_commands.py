@@ -206,6 +206,28 @@ class TestStrictMode:
         result = generate_all_commands(tmp_path, strict=True)
         assert len(result.generated) == 2
 
+    def test_strict_drop_preserves_earlier_writes(self, tmp_path):
+        # Pre-existing partial-write boundary documented on issue #900:
+        # Phase 2 raises StrictDropError for the first dropping canonical,
+        # but earlier canonicals in pending order have already been written.
+        # Canonicals iterate in sorted-name order (list_canonical_commands),
+        # so "alpha-minimal" is processed before "beta-full". gemini_commands
+        # is used because claude_commands supports the full command schema
+        # and never drops fields.
+        _make_canonical_command(tmp_path, "alpha-minimal", SAMPLE_MINIMAL_COMMAND)
+        _make_canonical_command(tmp_path, "beta-full", SAMPLE_FULL_COMMAND)
+
+        with pytest.raises(StrictDropError):
+            generate_all_commands(tmp_path, runtimes=["gemini_commands"], on_drop="error")
+
+        runtime_dir = tmp_path / ".gemini" / "commands"
+        assert (runtime_dir / "alpha-minimal.toml").is_file()
+        assert not (runtime_dir / "beta-full.toml").exists()
+        # atomic_write_* uses tempfile.mkstemp with prefix=f".{path.name}.";
+        # since the raise fires before atomic_write_text for beta-full,
+        # no temp file should exist for it.
+        assert list(runtime_dir.glob(".beta-full.toml.*.tmp")) == []
+
 
 class TestExtractCommandsToCanonical:
     def test_imports_claude_command(self, tmp_path):
