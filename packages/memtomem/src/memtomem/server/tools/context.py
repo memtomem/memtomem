@@ -385,6 +385,7 @@ async def mem_context_generate(
     agent: str = "all",
     include: str = "",
     strict: bool = False,
+    scope: str = "",
     allow_host_writes: bool = False,
     ctx: CtxType = None,
 ) -> str:
@@ -396,6 +397,11 @@ async def mem_context_generate(
             (``skills``, ``agents``, ``commands``, ``settings``).
         strict: Promote dropped-field warnings to errors when converting
             sub-agents or slash commands.
+        scope: ADR-0011 canonical artifact tier for skills / agents /
+            commands fan-out: ``project_shared`` (default), ``user``, or
+            ``project_local``. The same value is also forwarded as the
+            ADR-0010 host-write target-scope override for ``settings``
+            (mirrors the CLI at ``cli/context_cmd.py:963-987``).
         allow_host_writes: When ``include="settings"`` writes a settings
             file outside the project root (today only
             ``~/.claude/settings.json``), refuse with a
@@ -415,6 +421,8 @@ async def mem_context_generate(
 
     inc = _parse_include(include)
     root = _find_project_root()
+    artifact_scope = _resolve_artifact_mcp_scope(scope)
+    settings_scope = _resolve_mcp_scope(scope.strip() or None)
     ctx_path = root / CONTEXT_FILENAME
 
     results: list[str] = []
@@ -442,7 +450,7 @@ async def mem_context_generate(
 
     if "skills" in inc:
         try:
-            skill_result = generate_all_skills(root)
+            skill_result = generate_all_skills(root, scope=artifact_scope)
         except PrivacyScanError as exc:
             return f"privacy block: {exc.message}"
         if skill_result.generated:
@@ -456,7 +464,7 @@ async def mem_context_generate(
 
     if "agents" in inc:
         try:
-            agent_result = generate_all_agents(root, strict=strict)
+            agent_result = generate_all_agents(root, strict=strict, scope=artifact_scope)
         except StrictDropError as exc:
             return f"strict error: {exc}"
         except PrivacyScanError as exc:
@@ -477,7 +485,7 @@ async def mem_context_generate(
 
     if "commands" in inc:
         try:
-            command_result = generate_all_commands(root, strict=strict)
+            command_result = generate_all_commands(root, strict=strict, scope=artifact_scope)
         except CommandStrictDropError as exc:
             return f"strict error: {exc}"
         except PrivacyScanError as exc:
@@ -500,7 +508,7 @@ async def mem_context_generate(
         from memtomem.context.settings import generate_all_settings
 
         settings_results = generate_all_settings(
-            root, scope=_resolve_mcp_scope(), allow_host_writes=allow_host_writes
+            root, scope=settings_scope, allow_host_writes=allow_host_writes
         )
         for sname, sr in settings_results.items():
             if sr.status == "ok":

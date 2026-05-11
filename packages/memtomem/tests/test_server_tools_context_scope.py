@@ -1,4 +1,4 @@
-"""MCP parity pins for ADR-0011 context init/sync scope handling."""
+"""MCP parity pins for ADR-0011 context init/generate/sync scope handling."""
 
 from __future__ import annotations
 
@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 
 from memtomem.context.scope_resolver import canonical_artifact_dir
-from memtomem.server.tools.context import mem_context_init, mem_context_sync
+from memtomem.server.tools.context import (
+    mem_context_generate,
+    mem_context_init,
+    mem_context_sync,
+)
 
 from .helpers import set_home
 
@@ -97,6 +101,36 @@ async def test_mem_context_init_implicit_outside_project_warns_and_seeds(
     assert "warning: no .git or pyproject.toml" in out
     for kind in ("agents", "skills", "commands"):
         assert (bare / ".memtomem" / kind).is_dir()
+
+
+@pytest.mark.anyio
+async def test_mem_context_generate_scope_user_reads_user_canonical(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``mem_context_generate(scope="user")`` must fan out from the
+    ``user`` canonical tier — the CLI ``mm context generate --scope=user``
+    already does this (see ``cli/context_cmd.py:963-987``). Without
+    ``scope=`` the default ``project_shared`` tier is read, so a
+    user-scope canonical agent is invisible.
+    """
+    project = _make_project(tmp_path, monkeypatch)
+    home = tmp_path / "home"
+    set_home(monkeypatch, home)
+    user_canonical = canonical_artifact_dir("agents", "user", project)
+    user_canonical.mkdir(parents=True)
+    (user_canonical / "scoped.md").write_text(_clean_agent_body("scoped"), encoding="utf-8")
+
+    # Default (no scope=) reads project_shared and finds nothing — pins the
+    # bug that motivated this fix.
+    default_out = await mem_context_generate(include="agents")
+    assert "Sub-agent fan-out:" not in default_out
+    assert not (home / ".claude" / "agents" / "scoped.md").exists()
+
+    # scope="user" picks up the user-tier canonical.
+    scoped_out = await mem_context_generate(include="agents", scope="user")
+    assert "Sub-agent fan-out:" in scoped_out
+    assert (home / ".claude" / "agents" / "scoped.md").is_file()
 
 
 @pytest.mark.anyio
