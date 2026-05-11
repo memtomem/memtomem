@@ -6,9 +6,10 @@ import json
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from memtomem.privacy import scan as _privacy_scan
+from memtomem.config import TargetScope
 from memtomem.web.deps import get_hooks_target_scope, get_project_root
 
 try:
@@ -39,6 +40,25 @@ def _count_statuses(triples: list[tuple[str, str, str]]) -> dict:
         key = status.replace(" ", "_")
         counts[key] = counts.get(key, 0) + 1
     return {"total": len(names), **counts}
+
+
+def _count_context_statuses(
+    triples: list[tuple[str, str, str]],
+    canonical_names: set[str],
+) -> dict:
+    """Summarise runtime diffs plus canonical-only draft rows.
+
+    ``project_local`` agents / skills / commands have no runtime fan-out, so
+    their diff list can be empty even when canonical drafts exist. Count the
+    canonical names explicitly so overview totals match list views.
+    """
+    result = _count_statuses(triples)
+    runtime_names = {name for _runtime, name, _status in triples}
+    canonical_only = canonical_names - runtime_names
+    if canonical_only:
+        result["total"] = len(runtime_names | canonical_names)
+        result["local_draft"] = len(canonical_only)
+    return result
 
 
 def _classify_exception(exc: BaseException) -> str:
@@ -111,29 +131,55 @@ def _error_payload(exc: BaseException, *, shape: str = "total") -> dict:
 async def context_overview(
     project_root: Path = Depends(get_project_root),
     scope: str = Depends(get_hooks_target_scope),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description=(
+            "Canonical-residency tier to summarize. project_local is shown only "
+            "when explicitly requested."
+        ),
+    ),
 ) -> dict:
     """Aggregate sync status across skills, commands, agents, and settings."""
-    from memtomem.context.agents import diff_agents
-    from memtomem.context.commands import diff_commands
+    from memtomem.context.agents import canonical_agent_name, diff_agents, list_canonical_agents
+    from memtomem.context.commands import (
+        canonical_command_name,
+        diff_commands,
+        list_canonical_commands,
+    )
     from memtomem.context.settings import diff_settings
-    from memtomem.context.skills import diff_skills
+    from memtomem.context.skills import diff_skills, list_canonical_skills
 
     result: dict[str, dict[str, int | bool | str]] = {}
 
     try:
-        result["skills"] = _count_statuses(diff_skills(project_root))
+        result["skills"] = _count_context_statuses(
+            diff_skills(project_root, scope=target_scope),
+            {p.name for p in list_canonical_skills(project_root, scope=target_scope)},
+        )
     except Exception as exc:
         logger.exception("diff_skills failed")
         result["skills"] = _error_payload(exc, shape="total")
 
     try:
-        result["commands"] = _count_statuses(diff_commands(project_root))
+        result["commands"] = _count_context_statuses(
+            diff_commands(project_root, scope=target_scope),
+            {
+                canonical_command_name(p, layout)
+                for p, layout in list_canonical_commands(project_root, scope=target_scope)
+            },
+        )
     except Exception as exc:
         logger.exception("diff_commands failed")
         result["commands"] = _error_payload(exc, shape="total")
 
     try:
-        result["agents"] = _count_statuses(diff_agents(project_root))
+        result["agents"] = _count_context_statuses(
+            diff_agents(project_root, scope=target_scope),
+            {
+                canonical_agent_name(p, layout)
+                for p, layout in list_canonical_agents(project_root, scope=target_scope)
+            },
+        )
     except Exception as exc:
         logger.exception("diff_agents failed")
         result["agents"] = _error_payload(exc, shape="total")
@@ -186,4 +232,4 @@ async def context_overview(
         logger.exception("diff_settings failed")
         result["settings"] = _error_payload(exc, shape="status")
 
-    return result
+    return {"target_scope": target_scope, **result}

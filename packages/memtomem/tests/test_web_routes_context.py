@@ -86,7 +86,30 @@ class TestOverview:
         _make_skill(tmp_path, "code-review")
         r = await client.get("/api/context/overview")
         data = r.json()
+        assert data["target_scope"] == "project_shared"
         assert data["skills"]["total"] >= 1
+
+    @pytest.mark.anyio
+    async def test_project_local_overview_visible_only_with_explicit_target_scope(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        local = tmp_path / ".memtomem" / "skills.local" / "draft"
+        local.mkdir(parents=True)
+        (local / SKILL_MANIFEST).write_text("# Draft\n", encoding="utf-8")
+
+        default = await client.get("/api/context/overview")
+        assert default.json()["target_scope"] == "project_shared"
+        assert default.json()["skills"]["total"] == 0
+
+        explicit = await client.get(
+            "/api/context/overview",
+            params={"target_scope": "project_local"},
+        )
+        data = explicit.json()
+        assert explicit.status_code == 200
+        assert data["target_scope"] == "project_local"
+        assert data["skills"]["total"] == 1
+        assert data["skills"]["local_draft"] == 1
 
 
 class TestSettingsCountShape:

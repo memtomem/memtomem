@@ -121,6 +121,42 @@ let _ctxOverviewSeq = 0;
 // review P2 / #825). Cleared on fetch errors so the next call falls
 // back to a fresh fetch path.
 let _ctxOverviewCache = null;
+let _ctxTargetScope = 'project_shared';
+
+function _ctxTargetScopeParam() {
+  if (_ctxTargetScope === 'project_shared') return '';
+  return `target_scope=${encodeURIComponent(_ctxTargetScope)}`;
+}
+
+function _ctxWithTargetScope(url) {
+  const param = _ctxTargetScopeParam();
+  if (!param) return url;
+  return `${url}${url.includes('?') ? '&' : '?'}${param}`;
+}
+
+function _ctxTierControls(type) {
+  return `<div class="ctx-tier-filter" data-type="${escapeHtml(type)}" role="group" aria-label="${escapeHtml(t('settings.ctx.tier_filter'))}">
+    <button type="button" data-scope="user" class="${_ctxTargetScope === 'user' ? 'active' : ''}">user</button>
+    <button type="button" data-scope="project_shared" class="${_ctxTargetScope === 'project_shared' ? 'active' : ''}">project_shared</button>
+    <button type="button" data-scope="project_local" class="${_ctxTargetScope === 'project_local' ? 'active' : ''}">project_local</button>
+  </div>`;
+}
+
+function _ctxWireTierControls() {
+  document.querySelectorAll('.ctx-tier-filter button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const next = btn.dataset.scope;
+      if (!next || next === _ctxTargetScope) return;
+      _ctxTargetScope = next;
+      const type = btn.closest('.ctx-tier-filter')?.dataset.type || '';
+      if (type === 'overview') {
+        loadCtxOverview();
+      } else if (type) {
+        loadCtxList(type);
+      }
+    });
+  });
+}
 
 function _renderCtxOverview(data) {
   const el = qs('ctx-overview-content');
@@ -137,7 +173,8 @@ function _renderCtxOverview(data) {
     { key: 'settings', label: t('settings.hooks.title'),        section: 'hooks-sync' },
   ];
 
-  let html = '<div class="ctx-overview-grid">';
+  let html = _ctxTierControls('overview');
+  html += '<div class="ctx-overview-grid">';
   for (const typ of types) {
       if (typ.devOnly && STATE.uiMode !== 'dev') continue;
       const d = data[typ.key] || {};
@@ -156,6 +193,7 @@ function _renderCtxOverview(data) {
       const missingCanonical = d.missing_canonical || 0;
       const outOfSync = d.out_of_sync || 0;
       const parseError = d.parse_error || 0;
+      const localDraft = d.local_draft || 0;
       const issueCount = missingTarget + missingCanonical + outOfSync + parseError;
       const hasIssue = d.error || issueCount > 0
         || d.status === 'out_of_sync' || d.status === 'error';
@@ -168,7 +206,7 @@ function _renderCtxOverview(data) {
       const isEmpty = total === 0 && !d.error && !hasIssue;
       const badgeCls = d.error
         ? 'badge-danger'
-        : (isEmpty ? 'badge-gray' : (hasIssue ? 'badge-warning' : 'badge-success'));
+        : (isEmpty || localDraft > 0 ? 'badge-gray' : (hasIssue ? 'badge-warning' : 'badge-success'));
 
       // Pick the most actionable status to surface in the badge. Order
       // matters: ``error`` and the empty-tile case both pre-empt the count
@@ -202,6 +240,8 @@ function _renderCtxOverview(data) {
         badgeText = `${missingCanonical} ${t('settings.ctx.badge_missing_canonical')}`;
       } else if (outOfSync > 0) {
         badgeText = `${outOfSync} ${t('settings.ctx.badge_out_of_sync')}`;
+      } else if (localDraft > 0) {
+        badgeText = `${localDraft} ${t('settings.ctx.badge_local_draft')}`;
       } else {
         badgeText = `${inSync}/${total} ${t('settings.ctx.badge_synced')}`;
       }
@@ -214,6 +254,7 @@ function _renderCtxOverview(data) {
     }
     html += '</div>';
     el.innerHTML = html;
+    _ctxWireTierControls();
 
   // Gate the Sync All button: when every artifact type's items are
   // entirely runtime-only (no canonicals to fan out), Sync All resolves
@@ -224,6 +265,12 @@ function _renderCtxOverview(data) {
   // stays as a fallback for users who don't hover (mobile, keyboard).
   const syncAllBtn = document.getElementById('ctx-sync-all-btn');
   if (syncAllBtn) {
+    if (_ctxTargetScope === 'project_local') {
+      syncAllBtn.dataset.runtimeOnly = 'true';
+      syncAllBtn.title = t('settings.ctx.project_local_no_fanout_tooltip');
+      syncAllBtn.setAttribute('aria-disabled', 'true');
+      return;
+    }
     // Mirror the overview-tile gate: in prod the Custom Commands
     // surface is hidden, so its missing_canonical count must not
     // gate the Sync All button (otherwise prod users would see Sync
@@ -268,7 +315,7 @@ async function loadCtxOverview() {
   const el = qs('ctx-overview-content');
   panelLoading(el);
   try {
-    const res = await fetch('/api/context/overview');
+    const res = await fetch(_ctxWithTargetScope('/api/context/overview'));
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Failed to load overview');
     const data = await res.json();
     if (seq !== _ctxOverviewSeq) return;
@@ -689,8 +736,11 @@ function _ctxRenderItemsHtml(items, type, projectRoot, scannedDirs, { clickable 
 async function _loadScopeGroupItems(type, scope, container, seq) {
   panelLoading(container);
   try {
-    const params = _ctxScopeIsServerCwd(scope) ? '' : `?scope_id=${encodeURIComponent(scope.scope_id)}`;
-    const res = await fetch(`/api/context/${type}${params}`);
+    const params = new URLSearchParams();
+    if (_ctxTargetScope !== 'project_shared') params.set('target_scope', _ctxTargetScope);
+    if (!_ctxScopeIsServerCwd(scope)) params.set('scope_id', scope.scope_id);
+    const query = params.toString();
+    const res = await fetch(`/api/context/${type}${query ? `?${query}` : ''}`);
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Failed to load ${type}`);
     const data = await res.json();
     // Bail if a newer ``loadCtxList`` invocation has superseded this one
@@ -751,7 +801,16 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
 function _ctxRefreshSectionState(type, cwdItems, scannedDirs) {
   const canonicalCount = cwdItems.filter(i => i.canonical_path).length;
   const sectionEl = document.getElementById(`settings-ctx-${type}`);
-  if (sectionEl) sectionEl.dataset.canonicalCount = String(canonicalCount);
+  if (sectionEl) {
+    sectionEl.dataset.canonicalCount = String(
+      _ctxTargetScope === 'project_local' ? 0 : canonicalCount,
+    );
+    if (_ctxTargetScope === 'project_local') {
+      sectionEl.dataset.noFanout = 'true';
+    } else {
+      delete sectionEl.dataset.noFanout;
+    }
+  }
 
   const listEl = qs(`ctx-${type}-list`);
   if (!listEl) return;
@@ -783,10 +842,13 @@ async function loadCtxList(type) {
   // pinned to a previous canonical-count state. _ctxRefreshSectionState resets
   // it when the cwd group resolves successfully.
   const sectionEl = document.getElementById(`settings-ctx-${type}`);
-  if (sectionEl) delete sectionEl.dataset.canonicalCount;
+  if (sectionEl) {
+    delete sectionEl.dataset.canonicalCount;
+    delete sectionEl.dataset.noFanout;
+  }
 
   try {
-    const res = await fetch('/api/context/projects');
+    const res = await fetch(_ctxWithTargetScope('/api/context/projects'));
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Failed to load projects');
     const data = await res.json();
     if (seq !== _ctxListSeq[type]) return;
@@ -798,7 +860,7 @@ async function loadCtxList(type) {
       return;
     }
 
-    let html = '';
+    let html = _ctxTierControls(type);
     for (const scope of scopes) {
       const isCwd = _ctxScopeIsServerCwd(scope);
       const count = _ctxScopeCount(scope, type);
@@ -822,6 +884,7 @@ async function loadCtxList(type) {
       </details>`;
     }
     listEl.innerHTML = html;
+    _ctxWireTierControls();
 
     // Wire up: lazy fetch on toggle, immediate fetch for the open cwd group,
     // and the per-scope remove (×) button. ``seq`` is threaded into the
@@ -1481,8 +1544,10 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
     // shape of feedback for "this button does nothing right now."
     const section = btn.closest('.settings-section');
     if (section?.dataset.canonicalCount === '0') {
-      showToast(t('settings.ctx.sync_disabled_tooltip').replace('{type}', type),
-        'info');
+      const message = section?.dataset.noFanout === 'true'
+        ? t('settings.ctx.project_local_no_fanout_tooltip')
+        : t('settings.ctx.sync_disabled_tooltip').replace('{type}', type);
+      showToast(message, 'info');
       return;
     }
     const ok = await showConfirm({

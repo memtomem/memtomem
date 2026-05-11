@@ -313,6 +313,7 @@ def test_cli_status_empty_lockfile_exits_0(
     result = runner.invoke(context_group, ["status"])
     assert result.exit_code == 0
     assert "No wiki assets installed" in result.output
+    assert "scope project_shared" in result.output
 
 
 def test_cli_status_renders_states(
@@ -531,12 +532,29 @@ def test_cli_status_renders_draft_no_fanout_annotation(
 
     monkeypatch.chdir(tmp_path)
     runner = CliRunner()
-    result = runner.invoke(context_group, ["status"])
+    result = runner.invoke(context_group, ["status", "--scope", "project_local"])
 
     assert result.exit_code == 0
     assert "draft-only" in result.output
     assert "(draft, no fan-out)" in result.output
     assert "1 local-draft" in result.output
+    assert "scope project_local" in result.output
+
+
+def test_cli_status_default_hides_project_local_drafts(
+    wiki_root: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """Default status view stays on project_shared; project_local is opt-in."""
+    _initialized_wiki(wiki_root)
+    _seed_local_draft(tmp_path, "agents", "draft-only", "agent.md")
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["status"])
+
+    assert result.exit_code == 0
+    assert "draft-only" not in result.output
+    assert "(draft, no fan-out)" not in result.output
 
 
 def test_cli_status_no_annotation_on_project_shared_rows(
