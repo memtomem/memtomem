@@ -84,6 +84,7 @@ def _parse_include(include: str) -> set[str]:
 async def mem_context_init(
     include: str = "",
     overwrite: bool = False,
+    overwrite_context_md: bool = False,
     scope: str = "",
     confirm_project_shared: bool = False,
     force_unsafe_import: bool = False,
@@ -97,7 +98,14 @@ async def mem_context_init(
             ``settings`` is accepted for parity with other context tools
             but has no init-time import action.
         overwrite: Overwrite existing canonical entries during runtime
-            import.
+            import. Does **not** govern ``.memtomem/context.md`` rewrite
+            — see ``overwrite_context_md``.
+        overwrite_context_md: Allow rewriting an existing
+            ``.memtomem/context.md`` from detected agent files. Kept
+            separate from ``overwrite`` so artifact-import refresh cannot
+            silently clobber hand-edited project memory. Mirrors the
+            CLI's separate confirmation prompt at
+            ``cli/context_cmd.py:789-798`` (which defaults to "No").
         scope: Artifact storage scope: ``project_shared`` (default),
             ``user``, or ``project_local``.
         confirm_project_shared: Required when ``scope="project_shared"``
@@ -158,8 +166,11 @@ async def mem_context_init(
     write_context_md = has_project_signal and not artifact_only_scope
     ctx_path = root / CONTEXT_FILENAME
 
-    if write_context_md and ctx_path.exists() and not overwrite:
-        results.append(f"skipped {CONTEXT_FILENAME} rewrite (already exists)")
+    if write_context_md and ctx_path.exists() and not overwrite_context_md:
+        results.append(
+            f"skipped {CONTEXT_FILENAME} rewrite (already exists; "
+            "pass overwrite_context_md=True to replace)"
+        )
         write_context_md = False
 
     if write_context_md:

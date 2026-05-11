@@ -191,6 +191,36 @@ async def test_mem_context_sync_artifact_only_skips_settings_scope_resolve(
 
 
 @pytest.mark.anyio
+async def test_mem_context_init_overwrite_does_not_clobber_context_md(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``overwrite=True`` is for artifact imports only — it must NOT
+    rewrite an existing ``.memtomem/context.md``. The CLI keeps
+    context.md rewrite behind a separate confirmation prompt
+    (``cli/context_cmd.py:789-798``) that defaults to "No"; the MCP
+    surface mirrors that with the explicit ``overwrite_context_md``
+    flag (default False).
+    """
+    project = _make_project(tmp_path, monkeypatch)
+    set_home(monkeypatch, tmp_path / "home")
+
+    ctx_path = project / ".memtomem" / "context.md"
+    ctx_path.parent.mkdir(parents=True)
+    handcrafted = "# hand-edited\n\nimportant project memory\n"
+    ctx_path.write_text(handcrafted, encoding="utf-8")
+
+    # overwrite=True targets artifact imports only — context.md is preserved.
+    out = await mem_context_init(include="agents", overwrite=True)
+    assert "skipped" in out and "context.md rewrite" in out
+    assert ctx_path.read_text(encoding="utf-8") == handcrafted
+
+    # Explicit overwrite_context_md=True is required to replace it.
+    out = await mem_context_init(overwrite_context_md=True)
+    assert ctx_path.read_text(encoding="utf-8") != handcrafted
+
+
+@pytest.mark.anyio
 async def test_mem_context_init_project_shared_privacy_block_surfaces(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
