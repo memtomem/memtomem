@@ -7,6 +7,12 @@ re-embedding or recreating chunks. The rescan is **privacy-only** by design:
 chunk identity, content, validity windows, and access stats are not
 touched. Quarantine / soft-delete is a v2 concern (issue #885 follow-up).
 
+Issue #934 (ADR-0011 / ADR-0016 follow-up) wires the three-tier model
+into the rescan: ``--scope=project_shared`` / ``--scope=project_local``
+require a project context (``.git`` or ``pyproject.toml`` marker) so the
+audit cannot accidentally walk chunks owned by an unrelated project in
+the same SQLite database. ``--scope=user`` stays global by design.
+
 ``mm add`` / ``mm recall`` intentionally remain top-level CLI commands —
 folding them into ``mm mem`` is a separate UX migration tracked outside
 this issue.
@@ -22,6 +28,7 @@ from typing import get_args
 import click
 
 from memtomem import privacy
+from memtomem.cli.context_cmd import _find_project_root
 from memtomem.config import TargetScope
 
 
@@ -113,12 +120,30 @@ def rescan_cmd(
     if source is not None:
         source_exact, source_prefix = _resolve_source_filter(source)
 
+    # ADR-0011 / ADR-0016 / issue #934 cross-project isolation gate.
+    # Project tiers must run from inside a real project so the audit
+    # cannot accidentally walk chunks owned by a sibling project that
+    # shares the same SQLite DB. Mirror ``mm context init --scope``'s
+    # marker check at ``cli/context_cmd.py:737-748``.
+    project_root: Path | None = None
+    if scope != "user":
+        root = _find_project_root()
+        has_signal = (root / ".git").exists() or (root / "pyproject.toml").exists()
+        if not has_signal:
+            raise click.ClickException(
+                f"--scope={scope} requires a project root (with .git or "
+                "pyproject.toml). Use --scope=user from outside a project, "
+                "or run from inside one."
+            )
+        project_root = root
+
     try:
         result = asyncio.run(
             _rescan(
                 scope=scope,
                 source_exact=source_exact,
                 source_prefix=source_prefix,
+                project_root=project_root,
             )
         )
     except click.ClickException:
@@ -166,6 +191,7 @@ async def _rescan(
     scope: TargetScope,
     source_exact: Path | None,
     source_prefix: Path | None,
+    project_root: Path | None,
 ) -> tuple[int, list[dict]]:
     from memtomem.cli._bootstrap import cli_components
 
@@ -177,6 +203,7 @@ async def _rescan(
             scope=scope,
             source_exact=source_exact,
             source_prefix=source_prefix,
+            project_root=project_root,
         ):
             scanned += 1
             guard = privacy.enforce_write_guard(

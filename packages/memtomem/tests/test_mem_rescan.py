@@ -60,10 +60,15 @@ def _mock_storage(rows_by_scope: dict[str, list[ChunkAuditRow]]) -> SimpleNamesp
         scope: str,
         source_exact: Path | None = None,
         source_prefix: Path | None = None,
+        project_root: Path | None = None,
         batch_size: int = 500,
     ) -> AsyncIterator[ChunkAuditRow]:
         # Replicates the SQLite backend's exact / prefix split so the CLI's
-        # source-filter contract is exercised end-to-end.
+        # source-filter contract is exercised end-to-end. The
+        # ``project_root`` filter (issue #934) is also honoured here so the
+        # cross-project isolation case can be reproduced without spinning
+        # up a real SQLite DB — when ``project_root`` is set, only rows
+        # whose ``project_root`` matches are yielded.
         for row in rows_by_scope.get(scope, []):
             if source_exact is not None and row.source != source_exact:
                 continue
@@ -72,6 +77,8 @@ def _mock_storage(rows_by_scope: dict[str, list[ChunkAuditRow]]) -> SimpleNamesp
                     row.source.relative_to(source_prefix)
                 except ValueError:
                     continue
+            if project_root is not None and row.project_root != project_root:
+                continue
             yield row
 
     storage = SimpleNamespace(iter_chunks_for_audit=iter_chunks_for_audit)
@@ -84,6 +91,19 @@ def _patched_cli_components(comp: SimpleNamespace):
         yield comp
 
     return fake
+
+
+def _stub_project_root(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    """Make the issue-#934 project-marker gate believe we're inside a
+    real project rooted at ``root``.
+
+    The CLI gate calls ``_find_project_root()`` and then verifies
+    ``.git`` / ``pyproject.toml`` exists. Writing ``pyproject.toml`` on
+    disk satisfies the second half; patching the lookup satisfies the
+    first regardless of cwd, so the test does not have to manage cwd.
+    """
+    (root / "pyproject.toml").write_text("[project]\nname='fixture'\n")
+    monkeypatch.setattr("memtomem.cli.mem_cmd._find_project_root", lambda: root)
 
 
 @pytest.fixture
@@ -123,13 +143,23 @@ class TestRescanRegistration:
 class TestRescanBehaviour:
     """Privacy-only audit semantics."""
 
+    @pytest.fixture(autouse=True)
+    def _project_marker(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Issue #934: ``--scope=project_shared`` requires a project root.
+        These tests focus on the audit pipeline, not the gate, so we
+        always stub a marker. The user-scope test in this class still
+        works because the gate is short-circuited for ``--scope=user``.
+        """
+        _stub_project_root(monkeypatch, tmp_path)
+
     def test_clean_chunks_exit_zero(
-        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
+        proj = str(tmp_path)
         rows = {
             "project_shared": [
-                _row("c1", "/proj/docs/a.md", _SAFE_CONTENT),
-                _row("c2", "/proj/docs/b.md", _SAFE_CONTENT),
+                _row("c1", "/proj/docs/a.md", _SAFE_CONTENT, project_root=proj),
+                _row("c2", "/proj/docs/b.md", _SAFE_CONTENT, project_root=proj),
             ]
         }
         comp = _mock_storage(rows)
@@ -141,11 +171,11 @@ class TestRescanBehaviour:
         assert "2 chunks scanned" in result.output
 
     def test_secret_chunk_exits_one(
-        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         rows = {
             "project_shared": [
-                _row("c1", "/proj/docs/secret.md", _SECRET_CONTENT),
+                _row("c1", "/proj/docs/secret.md", _SECRET_CONTENT, project_root=str(tmp_path)),
             ]
         }
         comp = _mock_storage(rows)
@@ -160,12 +190,12 @@ class TestRescanBehaviour:
         assert "span=[" in result.output
 
     def test_secret_chunk_clean_inverse_passes(
-        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Pin-and-invert: same fixture shape without the secret exits 0."""
         rows = {
             "project_shared": [
-                _row("c1", "/proj/docs/safe.md", _SAFE_CONTENT),
+                _row("c1", "/proj/docs/safe.md", _SAFE_CONTENT, project_root=str(tmp_path)),
             ]
         }
         comp = _mock_storage(rows)
@@ -174,10 +204,12 @@ class TestRescanBehaviour:
         result = runner.invoke(cli, ["mem", "rescan", "--scope", "project_shared"])
         assert result.exit_code == 0, result.output
 
-    def test_json_output_schema(self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_json_output_schema(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         rows = {
             "project_shared": [
-                _row("c1", "/proj/docs/secret.md", _SECRET_CONTENT),
+                _row("c1", "/proj/docs/secret.md", _SECRET_CONTENT, project_root=str(tmp_path)),
             ]
         }
         comp = _mock_storage(rows)
@@ -202,7 +234,7 @@ class TestRescanBehaviour:
         assert h["span_end"] > h["span_start"]
 
     def test_decision_is_blocked_not_blocked_project_shared(
-        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """v1 calls force_unsafe=False, so project_shared secret hits return
         decision='blocked', NOT 'blocked_project_shared' (which requires
@@ -210,7 +242,7 @@ class TestRescanBehaviour:
         """
         rows = {
             "project_shared": [
-                _row("c1", "/proj/x.md", _SECRET_CONTENT),
+                _row("c1", "/proj/x.md", _SECRET_CONTENT, project_root=str(tmp_path)),
             ]
         }
         comp = _mock_storage(rows)
@@ -240,14 +272,14 @@ class TestRescanBehaviour:
         assert payload["violations"][0]["scope"] == "user"
 
     def test_no_counter_drift_with_record_outcome_false(
-        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """The CLI passes record_outcome=False, so a violating rescan must
         not bump privacy._outcomes counters. End-to-end pin.
         """
         rows = {
             "project_shared": [
-                _row("c1", "/p/x.md", _SECRET_CONTENT),
+                _row("c1", "/p/x.md", _SECRET_CONTENT, project_root=str(tmp_path)),
             ]
         }
         comp = _mock_storage(rows)
@@ -265,6 +297,10 @@ class TestRescanBehaviour:
 class TestSourceFilter:
     """`--source` cwd-relative resolution and matching contract."""
 
+    @pytest.fixture(autouse=True)
+    def _project_marker(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _stub_project_root(monkeypatch, tmp_path)
+
     def test_source_exact_file_filter(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -273,10 +309,11 @@ class TestSourceFilter:
         b = tmp_path / "b.md"
         a.write_text("placeholder")
         b.write_text("placeholder")
+        proj = str(tmp_path)
         rows = {
             "project_shared": [
-                _row("a-id", str(a), _SECRET_CONTENT),
-                _row("b-id", str(b), _SECRET_CONTENT),
+                _row("a-id", str(a), _SECRET_CONTENT, project_root=proj),
+                _row("b-id", str(b), _SECRET_CONTENT, project_root=proj),
             ]
         }
         comp = _mock_storage(rows)
@@ -301,10 +338,11 @@ class TestSourceFilter:
         outside = tmp_path / "y.md"
         inside.write_text("p")
         outside.write_text("p")
+        proj = str(tmp_path)
         rows = {
             "project_shared": [
-                _row("inside", str(inside), _SECRET_CONTENT),
-                _row("outside", str(outside), _SECRET_CONTENT),
+                _row("inside", str(inside), _SECRET_CONTENT, project_root=proj),
+                _row("outside", str(outside), _SECRET_CONTENT, project_root=proj),
             ]
         }
         comp = _mock_storage(rows)
@@ -339,3 +377,98 @@ class TestSourceFilter:
             ],
         )
         assert result.exit_code == 2, result.output
+
+
+class TestProjectMarkerGate:
+    """Issue #934 ADR-0011 / ADR-0016 cross-project isolation gate.
+
+    The CLI refuses ``--scope=project_shared`` / ``--scope=project_local``
+    without a real project marker (``.git`` or ``pyproject.toml``) so a
+    shared SQLite DB can't accidentally leak chunks across worktrees.
+    ``--scope=user`` is unaffected because user-tier rows are global by
+    design.
+    """
+
+    def test_project_shared_refused_without_project_marker(
+        self,
+        runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        # No pyproject.toml, no .git → marker check fails.
+        monkeypatch.setattr("memtomem.cli.mem_cmd._find_project_root", lambda: tmp_path)
+
+        result = runner.invoke(cli, ["mem", "rescan", "--scope", "project_shared"])
+        assert result.exit_code != 0
+        assert "requires a project root" in result.output
+        # Make sure storage was never touched — the gate runs before
+        # ``cli_components`` is opened.
+
+    def test_project_local_refused_without_project_marker(
+        self,
+        runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.setattr("memtomem.cli.mem_cmd._find_project_root", lambda: tmp_path)
+
+        result = runner.invoke(cli, ["mem", "rescan", "--scope", "project_local"])
+        assert result.exit_code != 0
+        assert "requires a project root" in result.output
+
+    def test_user_scope_does_not_require_project_marker(
+        self,
+        runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        # No marker, no patch. User tier short-circuits the gate.
+        monkeypatch.setattr("memtomem.cli.mem_cmd._find_project_root", lambda: tmp_path)
+        comp = _mock_storage({"user": []})
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["mem", "rescan", "--scope", "user"])
+        assert result.exit_code == 0, result.output
+
+    def test_project_shared_isolated_from_other_project(
+        self,
+        runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Two ``project_shared`` chunks in one mock DB — one tagged to
+        the current project, one to a sibling. The CLI passes the
+        current project_root into the audit; the mock honours it; the
+        sibling row never appears in the output.
+        """
+        proj_a = tmp_path / "proj_a"
+        proj_b = tmp_path / "proj_b"
+        proj_a.mkdir()
+        proj_b.mkdir()
+        _stub_project_root(monkeypatch, proj_a)
+
+        rows = {
+            "project_shared": [
+                _row(
+                    "a-secret",
+                    str(proj_a / "x.md"),
+                    _SECRET_CONTENT,
+                    project_root=str(proj_a),
+                ),
+                _row(
+                    "b-secret",
+                    str(proj_b / "x.md"),
+                    _SECRET_CONTENT,
+                    project_root=str(proj_b),
+                ),
+            ]
+        }
+        comp = _mock_storage(rows)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["mem", "rescan", "--scope", "project_shared", "--json"])
+        assert result.exit_code == 1, result.output
+        payload = json.loads(result.output)
+        assert payload["scanned"] == 1
+        assert payload["violations"][0]["chunk_id"] == "a-secret"
+        assert all("b-secret" not in str(v) for v in payload["violations"])
