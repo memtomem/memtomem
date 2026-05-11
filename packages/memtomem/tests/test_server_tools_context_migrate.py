@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -91,7 +91,11 @@ def _stub_components(layout):
     comp.storage.count_chunks_by_source = AsyncMock(return_value=2)
     comp.storage.count_chunk_links_for_source = AsyncMock(return_value=0)
     comp.storage.update_chunks_scope_for_source = AsyncMock(return_value=2)
-    comp.search_pipeline = AsyncMock()
+    # ``invalidate_cache`` is called synchronously in production
+    # (``cli/context_cmd.py`` post-apply step); using ``AsyncMock`` here
+    # would leave an unawaited coroutine and fail under
+    # ``pytest -W error``. A plain ``Mock`` keeps it sync.
+    comp.search_pipeline = Mock()
     return comp
 
 
