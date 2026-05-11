@@ -126,6 +126,7 @@ from memtomem.server.tools.policy import (
 )  # noqa: E402, F401
 from memtomem.server.tools.context import (
     mem_context_detect,
+    mem_context_init,
     mem_context_generate,
     mem_context_diff,
     mem_context_sync,
