@@ -25,6 +25,7 @@ from memtomem.context.agents import (
     parse_canonical_agent,
 )
 from memtomem.context.detector import AGENT_DIRS
+from memtomem.context.privacy_scan import PrivacyScanError
 from memtomem.web.deps import get_project_root
 from memtomem.web.routes.context_projects import resolve_scope_root
 from memtomem.web.routes._locks import _gateway_lock
@@ -386,6 +387,12 @@ async def sync_agents(
                 result = generate_all_agents(project_root, on_drop=on_drop)
     except TimeoutError:
         raise HTTPException(503, "Agents sync timed out — another sync may be in progress")
+    except PrivacyScanError as exc:
+        # 422 Unprocessable Entity — request is well-formed but the canonical
+        # bytes violate the project_shared privacy gate. ADR-0011 §5: no
+        # bypass valve, so the user must remove the secret or migrate the
+        # artifact to a writable tier (the message body explains how).
+        raise HTTPException(422, exc.message) from exc
 
     return {
         "generated": [

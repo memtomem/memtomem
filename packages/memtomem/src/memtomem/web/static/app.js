@@ -718,6 +718,20 @@ function _indexingTryStart() {
   if (indicator) show(indicator);
   return true;
 }
+async function _indexingTryStartOrRefresh() {
+  if (!STATE.indexing) return _indexingTryStart();
+  try {
+    const r = await api('GET', '/api/indexing/active');
+    if (!r || !r.active) {
+      _indexingEnd();
+      return _indexingTryStart();
+    }
+  } catch (err) {
+    console.warn('[indexing-active preflight]', err);
+  }
+  showToast(t('toast.indexing_in_progress'), 'info');
+  return false;
+}
 function _indexingEnd() {
   STATE.indexing = false;
   const indicator = qs('indexing-indicator');
@@ -3242,9 +3256,14 @@ function _renderMemorySourceTree(sources, list) {
     const bucket = byProvider[provider];
 
     const categoriesAll = CATEGORY_ORDER.filter(c => bucket.byCategory[c]);
+    // Filter narrows indexed dirs (chunks>0) by source matches, but always
+    // keeps "Discovered" dirs (chunks=0 && files>0) regardless of filter
+    // state — without this branch, any NS/path filter ever set on the page
+    // makes all Discovered dirs vanish at once (the original ``Claude (0)``
+    // guard was scoped to indexed-empty rows, not Discovered ones).
     const visibleCatsRaw = filterActive
       ? categoriesAll
-          .map(cat => [cat, bucket.byCategory[cat].filter(d => (sourcesByDir[d] || []).length > 0)])
+          .map(cat => [cat, bucket.byCategory[cat].filter(d => (sourcesByDir[d] || []).length > 0 || isDiscovered(d))])
           .filter(([, dirs]) => dirs.length > 0)
       : categoriesAll.map(cat => [cat, bucket.byCategory[cat]]);
 
@@ -3270,12 +3289,21 @@ function _renderMemorySourceTree(sources, list) {
       (sum, [, indexed]) => sum + indexed.reduce((s, d) => s + (sourcesByDir[d] || []).length, 0),
       0,
     ) + vendorOrphans.length;
+    // Tracked separately from ``totalFiles`` so the sub-tab badge keeps its
+    // "indexed + orphans" meaning while the empty-state guard further down
+    // can still see discovered dirs (codex review on #896: a vendor with
+    // only Discovered dirs would otherwise hit the "No matches" fallback
+    // because ``totalFiles`` is zero, hiding the section the carve-out in
+    // ``visibleCatsRaw`` just preserved).
+    const discoveredCount = visibleCats.reduce(
+      (sum, [, , discovered]) => sum + discovered.length, 0,
+    );
     const visibleIndexedCats = visibleCats.filter(([, indexed]) => indexed.length);
     const isSingleLeaf = visibleIndexedCats.length === 1
       || (visibleIndexedCats.length === 0 && visibleCats.length === 1);
     vendorPlans[provider] = {
-      visibleCats, visibleIndexedCats, isEmptyVendor, totalFiles, isSingleLeaf,
-      orphans: vendorOrphans,
+      visibleCats, visibleIndexedCats, isEmptyVendor, totalFiles, discoveredCount,
+      isSingleLeaf, orphans: vendorOrphans,
     };
 
     // Update the sub-tab badge + empty class so all three vendor tabs
@@ -3483,7 +3511,10 @@ function _renderMemorySourceTree(sources, list) {
   // to look.
   if (!allDirs.size && !orphanItems.length) {
     list.innerHTML = '<div class="empty-state">' + emptyState('📁', 'No memory directories', 'Add one with the + Add path button') + '</div>';
-  } else if (filterActive && !plan.totalFiles && !plan.isEmptyVendor) {
+  } else if (filterActive && !plan.totalFiles && !plan.discoveredCount && !plan.isEmptyVendor) {
+    // ``totalFiles`` only counts indexed+orphan rows; a vendor whose
+    // ``visibleCats`` carries discovered dirs (the #896 carve-out) would
+    // otherwise be wiped here, defeating the carry-over fix.
     list.innerHTML = '<div class="empty-state">' + emptyState('🔍', 'No matches for that filter') + '</div>';
   }
 
@@ -4673,7 +4704,7 @@ async function runAutoTag() {
 async function runIndexStream() {
   const path     = qs('index-path').value.trim();
   if (!path) { setMsg(qs('index-msg'), 'Please enter a path to index.', true); return; }
-  if (!_indexingTryStart()) return;
+  if (!(await _indexingTryStartOrRefresh())) return;
   const recursive = qs('index-recursive').checked;
   const force     = qs('index-force').checked;
   const namespace = qs('index-namespace').value.trim();
