@@ -54,7 +54,9 @@ to keep one vocabulary across the codebase).
   fan-out** (§3); v1 defaults preserve current behaviour; ADR-0011
   §7 supersedes ADR-0001 §1's "canonical = project-scope only"
   default in *availability* but not in *defaults*. PR-A through PR-E
-  shipped 2026-05-09…11; PR-F (Web UI + docs) pending.
+  shipped between 2026-05-09 and 2026-05-11; the PR-F Web/docs
+  slice shipped 2026-05-11 in #929, with remaining polish tracked
+  separately.
 - **ADR-0015 (Accepted 2026-05-11)** — Web layer disambiguates
   `project_scope_id` (per-request project-root selector) from
   `target_scope` (canonical artifact tier); list / sync / overview
@@ -92,8 +94,8 @@ deferring further:
    independently reach for "tier" / "scope" / "target" in whichever
    sense its author happens to mean.
 2. **`tier` ↔ `runtime scope` decoupling is load-bearing for the
-   pending sub-issues.** Web UI tier badges (PR-F), CLI tier filters,
-   and the eventual migration tooling all need to refer to the
+   remaining sub-issues.** Web UI tier badges (shipped in #929), CLI
+   tier filters, and the eventual migration tooling all need to refer to the
    canonical-residency dimension without dragging fan-out semantics
    in. ADR-0011 §1's table covers the per-artifact mapping; what is
    missing is the cross-artifact vocabulary the sub-issues will cite.
@@ -315,8 +317,8 @@ The one user-facing affordance ADR-0016 does pin: any surface
 that renders `project_local` for agents / skills / commands
 **must** annotate "no runtime fan-out" (or equivalent) inline. The
 CLI list output already does this per ADR-0011 §"Consequences"
-(`(draft, no fan-out)`); the Web UI's PR-F badges inherit the same
-rule.
+(`(draft, no fan-out)`); the Web UI badges shipped in #929 inherit
+the same rule.
 
 ### 8. Relationship to ADR-0015 — tier and runtime scope are not 1:1
 
@@ -353,8 +355,8 @@ further by separating the two ideas ADR-0001 §1 fused:
 ADR-0001 stays in place as historical context; its body is not
 amended in this ADR. A separate ADR (call it ADR-0001 amendment
 or ADR-NEW; sub-issue filing in §"Open questions" decides) carries
-the formal §1 amendment if one is judged necessary after PR-F
-ships.
+the formal §1 amendment if one is judged necessary after the PR-F
+Web/docs slice and follow-up polish settle.
 
 ### 10. #867 — closed by ADR-0010
 
@@ -408,7 +410,8 @@ exact one ADR-0010 fixed with `target_scope: user / project_shared
   the immediate gain over reading the ADR-level vocabulary as a
   documentation layer is small, and ADR-0016's primary job is
   consolidation rather than mass rename. A follow-up ADR can carry
-  the rename if it is judged worth the churn after PR-F lands.
+  the rename if it is judged worth the churn after the PR-F follow-up
+  work settles.
 - **Introduce `tier` as a new config field separate from
   `target_scope`.** Rejected for the same reason ADR-0015 §3
   refused a separate `config.context.target_scope`: divergence risk
@@ -417,7 +420,7 @@ exact one ADR-0010 fixed with `target_scope: user / project_shared
   Rejected because amending ADR-0001 has no precedent in this repo
   (ADR-0007 / ADR-0008 / ADR-0010 / ADR-0011 all layered onto
   ADR-0001 without amending it). If a formal amendment is judged
-  necessary, it ships as a separate ADR after PR-F.
+  necessary, it ships as a separate ADR after the PR-F follow-up work.
 - **File the eleven #868 sub-issues alongside this ADR.** Rejected
   for the reason the user request that prompted this ADR
   identified: sub-issues authored before the umbrella ADR lands
@@ -435,15 +438,15 @@ exact one ADR-0010 fixed with `target_scope: user / project_shared
 These follow-ups inherit the vocabulary fixed by this ADR; they do
 not block ADR acceptance.
 
-- **Sub-issue split for #868.** Filing approach: one issue per
-  ADR-0011 PR-F deliverable (Web UI tier badges; CLI list tier
-  filter; migration tooling polish; docs rewrite), plus one
-  catch-all for the eventual `target_scope` → `target_tier`
-  decision. The exact split is the first action item after ADR-0016
-  acceptance.
+- **Sub-issue split for #868.** The PR-F Web/docs slice (Web UI tier
+  badges, `/api/add` project-tier rejection hint, and public docs) has
+  shipped in #929. Remaining sub-issues should be narrower follow-ups:
+  CLI list tier filter copy, migration tooling polish, detail/diff/
+  rendered-route alignment, tier-switching write affordances, and the
+  eventual `target_scope` → `target_tier` decision.
 - **`target_scope` → `target_tier` rename ADR.** Whether to
-  author one, and when. Default posture: wait until PR-F ships
-  and a concrete contributor signal exists ("the field name
+  author one, and when. Default posture: wait until the PR-F follow-up
+  polish settles and a concrete contributor signal exists ("the field name
   confused me when reading X"). If no signal emerges within 3
   months, file an ADR concluding the rename is not worth the
   churn and close the question.
@@ -452,26 +455,20 @@ not block ADR acceptance.
   separate amendment ADR is warranted. Default posture: skip
   unless a sub-issue author reports that ADR-0001 §1's wording
   actively misleads them after this ADR lands.
-- **Web UI tier badges and CLI tier filter copy.** ADR-0011
-  PR-F's responsibility; this ADR pins the underlying tokens but
-  not the visual copy.
+- **Web UI tier badges and CLI tier filter copy.** Web UI tier badges
+  shipped in #929 with literal `user` / `project_shared` /
+  `project_local` tokens and inline no-fan-out copy for `project_local`.
+  CLI tier filter copy remains a follow-up; this ADR pins the
+  underlying tokens but not the final visual or CLI copy.
 - **Cross-runtime fan-out** (one tier → multiple runtime scopes,
   e.g., `user`-tier canonical materializing into both
   `~/.claude/` and `~/.codex/` for cross-runtime agents). Not in
   scope here; flagged so future readers know the vocabulary
   permits it.
-- **ADR-0011 §1 settings row cleanup.** That row currently lists
-  `~/.claude/settings.json` etc. under columns labelled
-  `Canonical (user / project_shared / project_local)` while
-  asserting in its rightmost cell that "settings have no
-  canonical/runtime split — they ARE the runtime". This contradicts
-  ADR-0010 §Background's canonical/runtime table for settings
-  (`<proj>/.memtomem/settings.json` canonical, `<host>/.claude/...`
-  resolved runtime). ADR-0016 §2 / §3 work around it by promoting
-  settings to a documented special case, but a one-line docs cleanup
-  on ADR-0011 §1's settings row would make the contradiction
-  disappear. Tracked as a follow-up doc PR; can be folded into the
-  868-C public docs rewrite slice.
+- **ADR-0011 §1 settings row cleanup.** Completed in the docs rewrite:
+  ADR-0011 §1 now treats settings as the ADR-0010 / ADR-0016 special
+  case, with `<proj>/.memtomem/settings.json` as the single canonical
+  file and `target_scope` selecting the runtime fan-out target.
 
 ## References
 
@@ -486,7 +483,8 @@ not block ADR acceptance.
 - PRs #889 / #890 / #893 — agents / skills / commands canonical
   scope axis, ADR-0011 PR-E.
 - PR #914 — ADR-0015 (Web scope vocabulary).
-- ADR-0011 PR-F — pending; Web UI tier badges and public docs.
+- PR #929 — ADR-0011 PR-F Web/docs slice: Web UI tier badges,
+  `/api/add` project-tier rejection hint, and public docs.
 
 **ADRs**
 

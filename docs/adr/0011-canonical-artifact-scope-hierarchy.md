@@ -356,7 +356,7 @@ Six PRs, each independently revertable. PR-B / PR-C / PR-D were
 drafted alongside this ADR and shipped together as a single bundle
 in PR #882 (2026-05-09); PR-A landed shortly after to capture the
 RFC on `main`. PR-E shipped 2026-05-10/11 in #889 / #890 / #893;
-PR-F remains ahead of HEAD.
+the Web/docs slice of PR-F shipped 2026-05-11 in #929.
 
 | PR    | Scope                                                                                       | Ship status                                                |
 |-------|---------------------------------------------------------------------------------------------|------------------------------------------------------------|
@@ -365,7 +365,7 @@ PR-F remains ahead of HEAD.
 | PR-C  | Memory read surface — `ScopeFilter`, `scope_context_sql` always-on fragment, project-aware default merge per §6, search pipeline cache key, MCP read tools, CLI `--scope` (comma-list) on read commands. | Shipped 2026-05-09 in PR #882.                             |
 | PR-D  | Memory write surface — Gate B (explicit flag + confirm), `mm mem add` restructure (the pre-PR-D hardcoded `~/.memtomem/memories` user_base in `cli/memory.py` was incompatible with project-scope writes), `mem_batch_add` refactor through `enforce_write_guard`, `mem_edit` / `mem_delete` inferred-scope, `mem_consolidate_apply` cross-scope rejection, `mm context memory-migrate` v1 (chunk-id-stable single-DB rename). `mm mem rescan` deferred (Open Questions item 4). | Shipped 2026-05-09 in PR #882.                             |
 | PR-E  | Agents / skills / commands canonical scope axis — `context/scope_resolver.py`, each generator's `target_file` / `is_available` accepting `(scope, project_root)`, `mm context init --scope=...`, `mm context sync --scope=...` filter, `mm context migrate <kind> <name> --to <scope>` for cross-tier moves (the originally-named `promote` / `demote` verbs were consolidated into `migrate --to`), sync-time privacy scan (Gate A for non-memory). `mm context rescan` deferred per Open Questions item 4. | Shipped 2026-05-10/11 in PRs #889 (E1+E2), #890 (follow-up nits), #893 (E4 `migrate --to`). |
-| PR-F  | Web UI scope badges (memory + context) read-only, `/api/add` rejection with CLI hint plus docs link, public docs updates (user-guide / getting-started / mcp-clients per the default-change fanout convention). | Pending. Follows PR-E.                                     |
+| PR-F  | Web UI scope badges (memory + context) read-only, `/api/add` rejection with CLI hint plus docs link, public docs updates (user-guide / getting-started / mcp-clients per the default-change fanout convention). | Web/docs slice shipped 2026-05-11 in #929 (closes #924); tier-switching write affordances and detail/diff/rendered-route alignment remain follow-up polish. |
 
 **Sequencing note.** ADR-0010 was Accepted on 2026-05-09 and the
 implementation work for ADR-0011 PR-B / PR-C / PR-D landed the same
@@ -378,8 +378,8 @@ is retained in spirit as a **post-merge ratification gate** instead:
 this ADR enters at Status `Proposed`, and the flip to `Accepted`
 requires the same ≥2-week, zero P0/P1 window against ADR-0010's
 settings-migrate plumbing and #882's memory scope plumbing.
-Implementers of PR-E / PR-F should treat the Accepted flip — not the
-PR-A merge — as the unblock signal.
+Implementers of any remaining PR-F follow-up polish should treat the
+Accepted flip — not the PR-A merge — as the unblock signal.
 
 ## Consequences
 
@@ -387,8 +387,9 @@ PR-A merge — as the unblock signal.
   PR-A is this ADR markdown; PR-B (memory plumbing) / PR-C (memory
   read surface) / PR-D (memory write surface) shipped together in
   PR #882 (2026-05-09). PR-E (canonical scope axis for agents /
-  skills / commands) and PR-F (Web UI + docs) remain ahead and
-  unblock once this ADR flips to Accepted (see §9 sequencing note).
+  skills / commands) shipped in #889 / #890 / #893, and the PR-F
+  Web/docs slice shipped in #929 (2026-05-11); remaining work is
+  follow-up polish, not a wholly pending phase (see §9 sequencing note).
 - Every canonical artifact in memtomem now uses one scope vocabulary.
   The `TargetScope` literal at `config.py:721` is the single source
   of truth across settings, memory, agents, skills, and commands.
