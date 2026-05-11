@@ -115,7 +115,7 @@ The two dimensions are tracked independently from this ADR onwards:
 
 - **tier** — canonical residency. Answers: "where does the canonical
   file live? who owns it? which quota does it count against? where
-  does a write land?" Values: `user` / `project_shared` /
+  does a canonical write land?" Values: `user` / `project_shared` /
   `project_local` (mirroring ADR-0010 / ADR-0011).
 - **runtime scope** — fan-out direction per tier per artifact.
   Answers: "given a canonical at tier T, where does `mm context
@@ -127,30 +127,66 @@ The two dimensions are tracked independently from this ADR onwards:
   `RUNTIME_FANOUT_TABLE` at `context/_runtime_targets.py:71`;
   ADR-0011 §1 holds the per-artifact reading of it.
 
-The two dimensions are **not 1:1**. A future artifact type may exist
-where a single tier maps to multiple runtime scopes (e.g., a
-`user`-tier canonical that materializes into both `~/.claude/` and
-`~/.codex/` for cross-runtime agents). The vocabulary is built to
-allow that without rewording.
+The two dimensions are **not 1:1**. ADR-0011 §3 already exercises a
+zero-to-one shape (`project_local` canonical for agents / skills /
+commands has no runtime fan-out). A future artifact type may exercise
+the one-to-many case (e.g., a `user`-tier canonical that materializes
+into both `~/.claude/` and `~/.codex/` for cross-runtime agents). The
+vocabulary is built to allow that without rewording.
+
+**Settings is the artifact where the two dimensions invert.** memtomem's
+settings canonical is single — `<proj>/.memtomem/settings.json`,
+regardless of tier (per ADR-0010 §Background's canonical/runtime
+table). ADR-0010's `target_scope` axis on settings hooks selects the
+**runtime fan-out target** (`~/.claude/settings.json` /
+`<proj>/.claude/settings.json` / `<proj>/.claude/settings.local.json`),
+not the canonical residency. The vocabulary still holds — there is
+exactly one canonical tier for settings, and three runtime scopes
+selected by `target_scope` — but the reader should not infer from
+ADR-0011 §1's settings row that those `~/.claude/...` paths are
+canonical. They are resolved runtime targets, and ADR-0011 §1's row
+is internally inconsistent on this point (flagged as a one-line
+cleanup follow-up; tracked in §"Open questions").
 
 ### 3. Tier values and defaults — pinned
 
-The three tier values and their canonical paths are the union of
-ADR-0010 §Terminology and ADR-0011 §1; this ADR does not redefine
-them.
+The three tier values are inherited unchanged from ADR-0010 and
+ADR-0011; this ADR does not redefine them. What the tier *selects*,
+however, differs by artifact type — §2 names the split, this section
+shows it concretely with two tables.
 
-| `tier`            | Settings (ADR-0010)                | Memory / agents / skills / commands (ADR-0011 §1)                                                                  |
-|-------------------|------------------------------------|--------------------------------------------------------------------------------------------------------------------|
-| `user`            | `~/.claude/settings.json`          | `~/.memtomem/<artifact>/...`                                                                                       |
-| `project_shared`  | `<proj>/.claude/settings.json`     | `<proj>/.memtomem/<artifact>/...`                                                                                  |
-| `project_local`   | `<proj>/.claude/settings.local.json` | `<proj>/.memtomem/<artifact>.local/...` (no runtime fan-out for agents / skills / commands, per ADR-0011 §3) |
+**Memory / agents / skills / commands** — tier selects **canonical
+residency** (per ADR-0011 §1):
 
-v1 defaults preserved unchanged from ADR-0010 §2 (settings: `user`)
-and ADR-0011 §2 (memory: `user`; agents / skills / commands:
-`project_shared`). ADR-0016 introduces **no default flips**; ADR-0011
-§8 already commits to "no default flip, ever" for memory / agents /
-skills / commands, and ADR-0010 §5's settings-tier flip is its own
-ADR's concern.
+| `tier`            | Canonical path                                                                                                  |
+|-------------------|-----------------------------------------------------------------------------------------------------------------|
+| `user`            | `~/.memtomem/<artifact>/...`                                                                                    |
+| `project_shared`  | `<proj>/.memtomem/<artifact>/...`                                                                               |
+| `project_local`   | `<proj>/.memtomem/<artifact>.local/...` (no runtime fan-out for agents / skills / commands, per ADR-0011 §3)    |
+
+**Settings (special case per §2)** — canonical is single at
+`<proj>/.memtomem/settings.json`; tier (`config.hooks.target_scope`,
+per ADR-0010 §Terminology) selects the **runtime fan-out target**:
+
+| `tier`            | Runtime fan-out target                            |
+|-------------------|---------------------------------------------------|
+| `user`            | `~/.claude/settings.json`                         |
+| `project_shared`  | `<proj>/.claude/settings.json`                    |
+| `project_local`   | `<proj>/.claude/settings.local.json`              |
+
+Settings has exactly one canonical residency (project-shared by
+construction, regardless of the configured `target_scope`); the
+three values of `target_scope` index the runtime side. For
+memory / agents / skills / commands, the canonical and runtime
+sides are coupled via `RUNTIME_FANOUT_TABLE` per ADR-0011 §1.
+
+v1 defaults preserved unchanged from ADR-0010 §2 (settings:
+`target_scope=user` → runtime at `~/.claude/settings.json`) and
+ADR-0011 §2 (memory canonical: `user`; agents / skills / commands
+canonical: `project_shared`). ADR-0016 introduces **no default flips**;
+ADR-0011 §8 already commits to "no default flip, ever" for memory /
+agents / skills / commands, and ADR-0010 §5's settings-tier flip
+trigger is its own ADR's concern.
 
 ### 4. Read merge order (cross-tier reads)
 
@@ -425,6 +461,18 @@ not block ADR acceptance.
   `~/.claude/` and `~/.codex/` for cross-runtime agents). Not in
   scope here; flagged so future readers know the vocabulary
   permits it.
+- **ADR-0011 §1 settings row cleanup.** That row currently lists
+  `~/.claude/settings.json` etc. under columns labelled
+  `Canonical (user / project_shared / project_local)` while
+  asserting in its rightmost cell that "settings have no
+  canonical/runtime split — they ARE the runtime". This contradicts
+  ADR-0010 §Background's canonical/runtime table for settings
+  (`<proj>/.memtomem/settings.json` canonical, `<host>/.claude/...`
+  resolved runtime). ADR-0016 §2 / §3 work around it by promoting
+  settings to a documented special case, but a one-line docs cleanup
+  on ADR-0011 §1's settings row would make the contradiction
+  disappear. Tracked as a follow-up doc PR; can be folded into the
+  868-C public docs rewrite slice.
 
 ## References
 
