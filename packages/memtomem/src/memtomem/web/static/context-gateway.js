@@ -85,6 +85,23 @@ function renderImportResult(data) {
   return html;
 }
 
+async function _ctxErrorMessageFromResponse(resp, fallback) {
+  const contentType = resp.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    const err = await resp.json().catch(() => ({}));
+    const detail = err.detail;
+    if (typeof detail === 'string' && detail) return detail;
+    // Defensive fallback for structured payloads shaped like `{detail: "..."}`.
+    if (detail && typeof detail === 'object' && typeof detail.detail === 'string' && detail.detail) {
+      return detail.detail;
+    }
+  } else {
+    const text = await resp.text().catch(() => '');
+    if (text.trim()) return text;
+  }
+  return fallback;
+}
+
 // -- Overview -----------------------------------------------------------------
 
 // Sequence guard for in-flight fetch races. ``loadCtxOverview`` is called
@@ -460,7 +477,9 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
       : ['skills', 'agents'];
     for (const typ of types) {
       const resp = await fetch(`/api/context/${typ}/sync`, { method: 'POST', headers });
-      if (!resp.ok) throw new Error(`Sync ${typ} failed`);
+      if (!resp.ok) {
+        throw new Error(await _ctxErrorMessageFromResponse(resp, `Sync ${typ} failed`));
+      }
     }
     // Settings hooks sync (additive merge) — appends memtomem-owned hook
     // entries to ~/.claude/settings.json without clobbering user-authored
@@ -482,7 +501,9 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     //   needs_confirmation → info partial + Open Settings action (#774)
     //   all ok / skipped   → sync_success
     const settingsResp = await fetch('/api/context/settings/sync', { method: 'POST', headers });
-    if (!settingsResp.ok) throw new Error('Settings sync failed');
+    if (!settingsResp.ok) {
+      throw new Error(await _ctxErrorMessageFromResponse(settingsResp, 'Settings sync failed'));
+    }
     const settingsData = await settingsResp.json().catch(() => ({}));
     const settingsResults = settingsData.results || [];
     const firstWithStatus = (s) => settingsResults.find(r => r && r.status === s);

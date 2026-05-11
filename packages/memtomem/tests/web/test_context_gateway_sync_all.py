@@ -11,6 +11,8 @@ The handler's contract (``static/context-gateway.js:435-514``):
 * On confirm, fan out ``POST /api/context/{type}/sync`` for each detected
   runtime (``['skills', 'agents']`` in prod mode), then
   ``POST /api/context/settings/sync``.
+* Artifact POST non-OK responses surface the backend ``detail`` text in the
+  failure toast instead of replacing it with a generic client message.
 * The settings POST response body is parsed for severity:
   ``error`` → ``toast.sync_failed`` ``error`` /
   ``aborted`` → ``settings.ctx.mtime_conflict`` ``warning`` /
@@ -267,6 +269,96 @@ def test_sync_all_happy_path_emits_success_toast(page, mm_web_url: str) -> None:
     assert overview_state["n"] >= initial_overview_calls + 1, (
         f"Sync All must trigger a post-sync overview reload; calls before "
         f"= {initial_overview_calls}, after = {overview_state['n']}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("content_type", "body", "expected_error"),
+    [
+        (
+            "application/json",
+            json.dumps(
+                {
+                    "detail": (
+                        "Privacy scan blocked project_shared skill sync. Remove the "
+                        "secret or migrate the artifact to a writable tier."
+                    )
+                }
+            ),
+            (
+                "Privacy scan blocked project_shared skill sync. Remove the "
+                "secret or migrate the artifact to a writable tier."
+            ),
+        ),
+        (
+            "text/plain",
+            "Plain-text artifact sync failure",
+            "Plain-text artifact sync failure",
+        ),
+    ],
+    ids=["json-detail", "text-body"],
+)
+def test_sync_all_artifact_422_surfaces_backend_error(
+    page,
+    mm_web_url: str,
+    content_type: str,
+    body: str,
+    expected_error: str,
+) -> None:
+    """S1-b.1: artifact sync HTTP 422 must preserve the backend error body.
+
+    Privacy blocks include remediation guidance in ``detail``. Sync All used
+    to discard that body and throw ``Sync <type> failed``, leaving users with
+    no way to resolve the blocked fan-out from the toast. Plain-text bodies
+    cover the helper's non-JSON fallback path.
+    """
+    _install_default_stubs(page)
+    _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
+
+    sync_calls: list[str] = []
+
+    def _skills_privacy_block(route):
+        sync_calls.append(route.request.url)
+        route.fulfill(
+            status=422,
+            content_type=content_type,
+            body=body,
+        )
+
+    def _unexpected_sync(route):
+        sync_calls.append(route.request.url)
+        route.fulfill(status=200, content_type="application/json", body="{}")
+
+    page.route("**/api/context/skills/sync", _skills_privacy_block)
+    page.route("**/api/context/agents/sync", _unexpected_sync)
+    page.route("**/api/context/settings/sync", _unexpected_sync)
+
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    page.locator("#ctx-sync-all-btn").click()
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    page.locator("#confirm-ok-btn").click()
+    page.wait_for_function(
+        "() => document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+
+    page.wait_for_selector("#toast-container .toast.toast-error", timeout=4_000)
+    toast_text = (
+        page.locator("#toast-container .toast.toast-error .toast-msg").text_content() or ""
+    ).strip()
+    expected = SYNC_FAILED_TEMPLATE.format(error=expected_error)
+    assert toast_text == expected, (
+        f"Artifact privacy block toast must surface backend detail {expected!r}, got {toast_text!r}"
+    )
+
+    sync_paths = [u.split("/api/")[-1] for u in sync_calls]
+    assert sync_paths == ["context/skills/sync"], (
+        f"Sync All must stop after the blocked artifact sync, got {sync_paths!r}"
     )
 
 
