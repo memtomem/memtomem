@@ -20,10 +20,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import click
 import pytest
 
 from memtomem.context import _skip_reasons as skip_codes
+from memtomem.context.privacy_scan import PrivacyBlockedError
 from memtomem.context.agents import (
     AGENT_GENERATORS,
     diff_agents,
@@ -88,7 +88,7 @@ class TestAgentsSyncScopeMatrix:
         )
         gen = AGENT_GENERATORS["claude_agents"]
         dst = gen.target_file(tmp_path, "leak", scope="project_shared")
-        with pytest.raises(click.ClickException) as exc_info:
+        with pytest.raises(PrivacyBlockedError) as exc_info:
             generate_all_agents(tmp_path, runtimes=["claude_agents"], scope="project_shared")
         assert "Gate A" in exc_info.value.message
         assert "leak" in exc_info.value.message
@@ -145,7 +145,7 @@ class TestCommandsSyncScopeMatrix:
         )
         gen = COMMAND_GENERATORS["claude_commands"]
         dst = gen.target_file(tmp_path, "leak", scope="project_shared")
-        with pytest.raises(click.ClickException) as exc_info:
+        with pytest.raises(PrivacyBlockedError) as exc_info:
             generate_all_commands(tmp_path, runtimes=["claude_commands"], scope="project_shared")
         assert "Gate A" in exc_info.value.message
         assert dst is not None

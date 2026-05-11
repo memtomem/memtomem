@@ -64,6 +64,7 @@ from memtomem.context.generator import (
     extract_sections_from_agent_file,
 )
 from memtomem.context.parser import CONTEXT_FILENAME, parse_context, sections_to_markdown
+from memtomem.context.privacy_scan import PrivacyScanError
 from memtomem.context.settings import (
     diff_settings,
     generate_all_settings,
@@ -198,7 +199,10 @@ def _print_skills_generate(
     *,
     scope: TargetScope = "project_shared",
 ) -> None:
-    result = generate_all_skills(root, scope=scope)
+    try:
+        result = generate_all_skills(root, scope=scope)
+    except PrivacyScanError as exc:
+        raise click.ClickException(exc.message) from exc
     if result.generated:
         click.secho(f"  Skills fan-out: {len(result.generated)}", fg="green")
         for runtime, path in result.generated:
@@ -290,6 +294,8 @@ def _print_agents_generate(
     except StrictDropError as exc:
         click.secho(f"  [strict] {exc}", fg="red")
         raise click.Abort()
+    except PrivacyScanError as exc:
+        raise click.ClickException(exc.message) from exc
 
     if result.generated:
         click.secho(f"  Sub-agent fan-out: {len(result.generated)}", fg="green")
@@ -391,6 +397,8 @@ def _print_commands_generate(
     except CommandStrictDropError as exc:
         click.secho(f"  [strict] {exc}", fg="red")
         raise click.Abort() from exc
+    except PrivacyScanError as exc:
+        raise click.ClickException(exc.message) from exc
 
     if result.generated:
         click.secho(f"  Command fan-out: {len(result.generated)}", fg="green")
@@ -1831,6 +1839,8 @@ def _migrate_scope_dispatch(
         )
     except (FileNotFoundError, ValueError, InvalidNameError) as exc:
         raise click.ClickException(str(exc)) from exc
+    except PrivacyScanError as exc:
+        raise click.ClickException(exc.message) from exc
 
     _print_migrate_scope_result(result, apply_=apply_)
 

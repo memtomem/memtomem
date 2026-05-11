@@ -243,10 +243,11 @@ class TestGenerateAllSkillsStagingFlow:
         dst.mkdir(parents=True)
         sentinel_path = dst / SKILL_MANIFEST
         sentinel_path.write_text("PRE-EXISTING\n", encoding="utf-8")
-        # project_shared → ClickException raised.
-        import click
+        # project_shared → PrivacyBlockedError raised (Click-free so
+        # non-CLI surfaces can translate; #895 P2 review fold).
+        from memtomem.context.privacy_scan import PrivacyBlockedError
 
-        with pytest.raises(click.ClickException) as exc_info:
+        with pytest.raises(PrivacyBlockedError) as exc_info:
             generate_all_skills(tmp_path, runtimes=["claude_skills"], scope="project_shared")
         assert "Gate A" in exc_info.value.message
         assert "leak.sh" in exc_info.value.message

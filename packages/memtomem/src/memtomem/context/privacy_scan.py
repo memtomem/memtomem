@@ -23,11 +23,70 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal, NamedTuple
 
-import click
-
 from memtomem import privacy
 from memtomem.config import TargetScope
 from memtomem.context import _skip_reasons as skip_codes
+
+
+class PrivacyScanError(Exception):
+    """Umbrella for sync-side privacy scan failures across surfaces.
+
+    Surfaced as a plain ``Exception`` (not ``click.ClickException``)
+    so non-CLI callers — web routes, MCP context tool — can catch and
+    render in their native error shape (HTTP 422, structured tool
+    response) instead of falling through to the generic 500 handler.
+    The CLI sub-commands wrap their generator calls to translate this
+    back into ``click.ClickException``.
+
+    Concrete subclasses pin which scan stage failed; the message is
+    pre-formatted and safe to surface to the user.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+class PrivacyBlockedError(PrivacyScanError):
+    """Raised by :func:`raise_or_collect` for ``project_shared`` privacy hits.
+
+    Carries the formatted user-facing message plus the structured
+    ``FileScan`` and scope context so non-CLI surfaces can render
+    their own error shape. ADR-0011 §5: ``project_shared`` has no
+    force-bypass valve — every caller must hard-refuse.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        blocked: "FileScan",
+        scope: TargetScope,
+        kind: str,
+        artifact_name: str | None,
+    ) -> None:
+        super().__init__(message)
+        self.blocked = blocked
+        self.scope = scope
+        self.kind = kind
+        self.artifact_name = artifact_name
+
+
+class PrivacyScanReadError(PrivacyScanError):
+    """Raised when a file cannot be read during the scan walk.
+
+    Fail-closed counterpart to :class:`PrivacyBlockedError`: an
+    unreadable file cannot be inspected for secrets, so the only
+    safe move is to abort the sync. Migration callers re-rename
+    staging back to ``src``; sync callers remove staging in their
+    ``finally`` block.
+    """
+
+    def __init__(self, message: str, *, path: Path, scope: TargetScope) -> None:
+        super().__init__(message)
+        self.path = path
+        self.scope = scope
+
 
 OnBlocked = Literal["fail_fast", "skip_warn"]
 
@@ -78,7 +137,7 @@ def scan_artifact_tree(
         scope: Destination scope. Determines block-vs-skip semantics
             via the caller's policy (this function only emits
             decisions; the caller branches on
-            ``project_shared`` → :class:`click.ClickException` vs
+            ``project_shared`` → :class:`PrivacyBlockedError` vs
             ``user``/``project_local`` → skip-and-warn).
         project_root: Forwarded to :func:`enforce_write_guard` audit
             context only (privacy itself does not need it). May be
@@ -121,16 +180,18 @@ def scan_artifact_tree(
             # let an unreadable file containing a secret promote into
             # ``project_shared`` with Gate A never inspecting it.
             #
-            # Fail closed: hard-abort the scan with a scope-aware
-            # ClickException. The exception propagates through callers'
+            # Fail closed: hard-abort the scan with a
+            # :class:`PrivacyScanReadError`. The exception propagates through callers'
             # rollback paths (``migrate_scope`` re-renames staging back
             # to src; ``generate_all_skills`` removes staging in its
             # finally block) so no half-promoted state survives.
-            raise click.ClickException(
+            raise PrivacyScanReadError(
                 f"Gate A: cannot read {path} (errno={exc.errno}); refusing to "
                 f"fan-out / migrate to scope='{scope}'. An unreadable file "
                 "cannot be scanned for secrets — fix the permission or "
-                "remove the file before re-running."
+                "remove the file before re-running.",
+                path=path,
+                scope=scope,
             ) from exc
 
         guard = privacy.enforce_write_guard(
@@ -201,7 +262,7 @@ def format_scan_block_message(
     kind: str,
     artifact_name: str | None = None,
 ) -> str:
-    """User-facing :class:`click.ClickException` message for project_shared sync block.
+    """User-facing message body for project_shared sync block.
 
     Mirrors :func:`memtomem.context._gate_a.format_project_shared_block_message`
     but with sync-side wording and ``mm context migrate`` remediation hint.
@@ -218,7 +279,7 @@ def format_scan_block_message(
             falls back to a generic hint.
 
     Returns:
-        Multi-line string suitable for ``raise click.ClickException(...)``.
+        Multi-line string carried by :class:`PrivacyBlockedError`.
     """
     target_hint = (
         f"mm context migrate {kind} {artifact_name} --to project_local"
@@ -246,13 +307,22 @@ def raise_or_collect(
     """Branch on ``scope``: raise for project_shared, return skip tuple otherwise.
 
     Helper to keep the per-call-site branch concise. ``project_shared``
-    always raises :class:`click.ClickException`; ``user`` /
+    always raises :class:`PrivacyBlockedError`; ``user`` /
     ``project_local`` return ``(code, reason)`` for the caller to append
-    to its ``skipped`` list.
+    to its ``skipped`` list. Each calling surface owns the translation
+    (CLI → :class:`click.ClickException`, web → HTTP 422, MCP →
+    structured tool error) so deep generators stay surface-agnostic.
     """
     if scope == "project_shared":
-        raise click.ClickException(
-            format_scan_block_message(blocked, scope=scope, kind=kind, artifact_name=artifact_name)
+        message = format_scan_block_message(
+            blocked, scope=scope, kind=kind, artifact_name=artifact_name
+        )
+        raise PrivacyBlockedError(
+            message,
+            blocked=blocked,
+            scope=scope,
+            kind=kind,
+            artifact_name=artifact_name,
         )
     code: skip_codes.SkipCode = (
         skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED

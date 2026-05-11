@@ -12,20 +12,28 @@ the sync-side :mod:`memtomem.context.privacy_scan` module. Pins:
 * Binary asset (``UnicodeDecodeError``) → ``decision="pass"`` (no false
   positive against the regex pattern set).
 * ``raise_or_collect`` branch: ``project_shared`` raises
-  :class:`click.ClickException`, others return a typed skip tuple.
+  :class:`PrivacyBlockedError`, others return a typed skip tuple.
+* Unreadable file: ``OSError`` raises :class:`PrivacyScanReadError`
+  (umbrella :class:`PrivacyScanError`). The CLI translates these to
+  ``click.ClickException`` at the boundary; web/MCP surfaces catch
+  the umbrella class and render their native error shape — pinning
+  the domain class here keeps the deeper module Click-free (see
+  #895 P2 review).
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import click
 import pytest
 
 from memtomem import privacy
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context.privacy_scan import (
     FileScan,
+    PrivacyBlockedError,
+    PrivacyScanError,
+    PrivacyScanReadError,
     raise_or_collect,
     scan_artifact_tree,
 )
@@ -177,11 +185,13 @@ class TestUnreadableFileFailsClosed:
     can rename a ``chmod 000`` canonical file into staging without
     reading bytes, so silent-pass would have promoted unreadable
     secret-bearing content into project_shared. These pins check that
-    ``OSError`` from ``read_text`` raises a scope-aware ``ClickException``
-    rather than recording a pass.
+    ``OSError`` from ``read_text`` raises a scope-aware
+    :class:`PrivacyScanReadError` rather than recording a pass — and
+    that the umbrella :class:`PrivacyScanError` catches it for non-CLI
+    surface translation.
     """
 
-    def test_oserror_raises_click_exception_project_shared(
+    def test_oserror_raises_scan_read_error_project_shared(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         path = tmp_path / "agent.md"
@@ -196,17 +206,22 @@ class TestUnreadableFileFailsClosed:
 
         monkeypatch.setattr(Path, "read_text", explode)
 
-        with pytest.raises(click.ClickException) as exc_info:
+        with pytest.raises(PrivacyScanReadError) as exc_info:
             scan_artifact_tree(path, surface="t", scope="project_shared", project_root=tmp_path)
+        # Umbrella class must catch — non-CLI surfaces (web, MCP) rely
+        # on this for their HTTP 422 / tool-error translation.
+        assert isinstance(exc_info.value, PrivacyScanError)
         msg = exc_info.value.message
         assert "cannot read" in msg
         assert "agent.md" in msg
         assert "scope='project_shared'" in msg
+        assert exc_info.value.path == path
+        assert exc_info.value.scope == "project_shared"
         # Negative — the message must NOT echo the file's content even
         # if the file were readable mid-flight.
         assert CLEAN.strip() not in msg
 
-    def test_oserror_raises_click_exception_user_scope(
+    def test_oserror_raises_scan_read_error_user_scope(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Fail-closed posture is uniform across scopes for unreadable
@@ -224,7 +239,7 @@ class TestUnreadableFileFailsClosed:
 
         monkeypatch.setattr(Path, "read_text", explode)
 
-        with pytest.raises(click.ClickException) as exc_info:
+        with pytest.raises(PrivacyScanReadError) as exc_info:
             scan_artifact_tree(path, surface="t", scope="user", project_root=tmp_path)
         assert "scope='user'" in exc_info.value.message
 
@@ -245,7 +260,7 @@ class TestUnreadableFileFailsClosed:
 
         monkeypatch.setattr(Path, "read_text", explode)
 
-        with pytest.raises(click.ClickException) as exc_info:
+        with pytest.raises(PrivacyScanReadError) as exc_info:
             scan_artifact_tree(
                 skill_root,
                 surface="t",
@@ -258,8 +273,21 @@ class TestUnreadableFileFailsClosed:
 class TestRaiseOrCollect:
     def test_project_shared_raises(self) -> None:
         blocked = FileScan(Path("/tmp/foo/agent.md"), "blocked", 1)
-        with pytest.raises(click.ClickException) as exc_info:
+        with pytest.raises(PrivacyBlockedError) as exc_info:
             raise_or_collect(blocked, scope="project_shared", kind="agent", artifact_name="foo")
+        # Umbrella class — non-CLI surfaces catch this for translation.
+        assert isinstance(exc_info.value, PrivacyScanError)
+        # Click coupling removed: the raise must not be a ``click.ClickException``
+        # so the web/MCP generic exception handlers don't turn it into a 500.
+        import click as _click
+
+        assert not isinstance(exc_info.value, _click.ClickException)
+        # Structured fields are populated so non-CLI surfaces can build
+        # their own error shape without re-parsing the message.
+        assert exc_info.value.scope == "project_shared"
+        assert exc_info.value.kind == "agent"
+        assert exc_info.value.artifact_name == "foo"
+        assert exc_info.value.blocked == blocked
         msg = exc_info.value.message
         assert "Gate A" in msg
         assert "agent.md" in msg
