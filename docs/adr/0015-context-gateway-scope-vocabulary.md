@@ -1,4 +1,4 @@
-# ADR-0012: Context Gateway scope vocabulary (project_scope_id vs target_scope)
+# ADR-0015: Context Gateway scope vocabulary (project_scope_id vs target_scope)
 
 **Status:** Accepted
 **Date:** 2026-05-11
@@ -149,8 +149,10 @@ dimension. Affects:
   rename to `{project_scope_id}` is doc-only and deferred (§5).
 
 **2d. Mutator routes** — sync routes accept `?project_scope_id=`
-(§4d Option C); create / update / delete / import stay cwd-locked.
-Unlock applies to:
+(§4d Option C) **and `?target_scope=`** (default `project_shared`,
+matching §4b — see §4c for why sync resolves `target_scope` per-request
+rather than from config); create / update / delete / import stay
+cwd-locked. Unlock applies to:
 
 - `POST /context/skills/sync` (`context_skills.py:335`)
 - `POST /context/commands/sync` (`context_commands.py:381`)
@@ -216,9 +218,26 @@ Affects: list routes per §2a.
 #### 4c. Sync All cross-tier behaviour — Option B (current root × current tier)
 
 `POST /context/{skills, commands, agents}/sync` operates on one
-`(project_root, target_scope)` pair per invocation, where `project_root`
-is resolved from cwd or `?project_scope_id=` (per §4d) and
-`target_scope` comes from the active config / request.
+`(project_root, target_scope)` pair per invocation. `project_root` is
+resolved from cwd or `?project_scope_id=` (per §4d). `target_scope` is
+resolved from `?target_scope=` with default `project_shared` —
+**not** from `config.hooks.target_scope`.
+
+Why pinned to per-request, not config-driven: `config.hooks.target_scope`
+currently defaults to `user` (per ADR-0010 §2 v1 default), while every
+existing `generate_all_*` sync call resolves to `project_shared` because
+the core APIs default `scope="project_shared"` when the caller omits it.
+Sourcing sync's `target_scope` from `config.hooks.target_scope` would
+silently flip bare `POST /context/{...}/sync` calls from project-shared
+to user-tier writes — a behaviour change disguised as a vocabulary
+clean-up. Per-request resolution with a `project_shared` default
+preserves today's effective behaviour exactly, and mirrors §4b for
+list routes so callers reason about both dimensions identically.
+
+This is also why settings (§4e) and sync (§4c here) diverge on source:
+settings hooks deliberately live in user-tier by ADR-0010 design,
+while sync targets the artifact tier where `project_shared` has been
+the de facto default since the routes shipped.
 
 Rationale: minimal write surface, easy to explain and test, avoids
 one-click cross-project or cross-tier writes. A future UI that wants
@@ -232,8 +251,8 @@ batch.
 
 #### 4d. Mutator routes accepting `project_scope_id` — Option C (sync only)
 
-Sync routes accept `?project_scope_id=`. POST / PUT / DELETE / import
-routes stay cwd-locked.
+Sync routes accept `?project_scope_id=` (and `?target_scope=` per §4c).
+POST / PUT / DELETE / import routes stay cwd-locked.
 
 Rationale: enables the key multi-project operation (syncing a selected
 project from the Web project switcher) while keeping higher-risk
@@ -327,6 +346,14 @@ Follows §4a and §4b.
 - **A separate `config.context.target_scope` field** alongside the
   existing `config.hooks.target_scope`. Rejected per §3 — divergence
   risk with no driving user need.
+- **Sourcing sync's `target_scope` from `config.hooks.target_scope`**
+  (i.e., treating sync the same as settings under §4e). Rejected per
+  §4c — `config.hooks.target_scope` currently defaults to `user`
+  while `generate_all_*` defaults to `project_shared`, so a
+  config-driven sync default would silently flip bare
+  `POST /context/{...}/sync` from project-shared writes to user-tier
+  writes. Per-request `?target_scope=` with a `project_shared` default
+  preserves today's behaviour and mirrors §4b for list routes.
 
 ## Open questions for the implementation issues
 
