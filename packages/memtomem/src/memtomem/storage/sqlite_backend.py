@@ -1228,8 +1228,7 @@ class SqliteBackend(
         with_dense = 0
         if self._has_vec_table:
             with_dense = db.execute(
-                "SELECT COUNT(*) FROM chunks c "
-                "INNER JOIN chunks_vec v ON v.rowid = c.rowid"
+                "SELECT COUNT(*) FROM chunks c INNER JOIN chunks_vec v ON v.rowid = c.rowid"
             ).fetchone()[0]
         return {"total": total, "with_dense": with_dense}
 
