@@ -44,3 +44,27 @@ def test_is_discovered_predicate_shape() -> None:
     assert "return chunks === 0 && files > 0;" in js, (
         "isDiscovered predicate shape changed — update the filterActive pin too"
     )
+
+
+def test_empty_state_guard_respects_discovered_dirs() -> None:
+    """Codex carry-over on #896: the filterActive carve-out keeps
+    Discovered dirs in ``visibleCats``, but the later empty-state guard
+    used to wipe the whole panel when ``totalFiles == 0`` — discovered-
+    only vendors fell through to "No matches for that filter." The
+    fix counts Discovered dirs separately and lets the guard see them.
+    """
+    js = _read_app_js()
+    # Plan must carry discoveredCount alongside totalFiles so the empty-
+    # state check can distinguish "no indexed matches but Discovered dirs
+    # still to show" from "really nothing to show."
+    assert "discoveredCount" in js, (
+        "plan.discoveredCount field missing — empty-state guard cannot tell "
+        "indexed-empty from truly-empty vendors"
+    )
+    # The empty-state guard itself must consult discoveredCount, otherwise
+    # vendors with only Discovered dirs hit the "No matches" fallback that
+    # replaces the section the #896 carve-out just preserved.
+    assert "!plan.discoveredCount" in js, (
+        "empty-state guard still trips on discovered-only vendors — "
+        "discoveredCount must be part of the !totalFiles fallback condition"
+    )
