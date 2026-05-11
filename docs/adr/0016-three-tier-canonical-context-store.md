@@ -1,6 +1,6 @@
 # ADR-0016: Three-tier canonical context store (epic #868 umbrella)
 
-**Status:** Draft
+**Status:** Accepted
 **Date:** 2026-05-11
 **Context:** Epic issue #868 (`Tiered context gateway v2`) calls for a
 "uniform tiered model for the entire context gateway." Most of that
@@ -390,8 +390,7 @@ exact one ADR-0010 fixed with `target_scope: user / project_shared
   Readers of ADR-0001 §1 are pointed here for the disambiguation;
   the §1 body itself is not amended.
 - **No new defaults, no new flips, no new code.** ADR-0016 is a
-  documentation roll-up. The first PR (the file you are reading)
-  ships markdown only.
+  documentation roll-up. Acceptance ships markdown only.
 - **`target_scope` survives unchanged at the identifier level.**
   Implementers do not need to grep-rename anything to comply with
   this ADR. The qualified "tier" / "runtime scope" terms are
@@ -440,8 +439,8 @@ not block ADR acceptance.
   ADR-0011 PR-F deliverable (Web UI tier badges; CLI list tier
   filter; migration tooling polish; docs rewrite), plus one
   catch-all for the eventual `target_scope` → `target_tier`
-  decision. The exact split is the first action item once ADR-0016
-  is accepted.
+  decision. The exact split is the first action item after ADR-0016
+  acceptance.
 - **`target_scope` → `target_tier` rename ADR.** Whether to
   author one, and when. Default posture: wait until PR-F ships
   and a concrete contributor signal exists ("the field name
@@ -500,7 +499,7 @@ not block ADR acceptance.
   `target_scope`).
 
 **Source anchors** — line numbers reflect `origin/main` at
-ADR-0016 draft time; readers should grep the symbol if a number
+ADR-0016 acceptance time; readers should grep the symbol if a number
 drifts.
 
 - `packages/memtomem/src/memtomem/config.py:745` —
