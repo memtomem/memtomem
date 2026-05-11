@@ -1613,6 +1613,46 @@ class TestAddMemory:
         )
         assert resp.status_code == 422
 
+    async def test_add_memory_writes_under_configured_memory_dirs_default(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        # /api/add must honor ``config.indexing.memory_dirs[0]`` for the
+        # default-dated file, matching MCP ``mem_add``. Before the
+        # write-surface parity fix the route hardcoded
+        # ``~/.memtomem/memories`` and silently ignored configured dirs,
+        # which meant prod users (and this test suite under a real HOME)
+        # had their entries leak outside the configured corpus.
+        app.state.config.indexing.memory_dirs = [tmp_path]
+        resp = await client.post(
+            "/api/add",
+            json={"content": "Parity check."},
+        )
+        assert resp.status_code == 200, resp.text
+        path = Path(resp.json()["file"]).resolve()
+        assert tmp_path.resolve() in path.parents, (
+            f"daily file {path} did not land under configured memory_dirs[0] {tmp_path}"
+        )
+        legacy = Path("~/.memtomem/memories").expanduser().resolve()
+        assert legacy not in path.parents, (
+            f"daily file regressed to hardcoded {legacy} (write-surface divergence)"
+        )
+
+    async def test_add_memory_writes_under_configured_memory_dirs_explicit_file(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        # Explicit ``file=`` (relative) must also resolve under
+        # ``memory_dirs[0]``, not the legacy ``~/.memtomem/memories``.
+        app.state.config.indexing.memory_dirs = [tmp_path]
+        resp = await client.post(
+            "/api/add",
+            json={"content": "Parity check.", "file": "notes/topic.md"},
+        )
+        assert resp.status_code == 200, resp.text
+        path = Path(resp.json()["file"]).resolve()
+        assert tmp_path.resolve() in path.parents, (
+            f"explicit-file write {path} did not land under {tmp_path}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Redaction guard wire-in for the web write surfaces. The helper-level
@@ -1868,6 +1908,40 @@ class TestEmbeddingStatus:
         assert resp.status_code == 200
         data = resp.json()
         assert data["has_mismatch"] is False
+
+    async def test_coverage_reports_full(self, app, client: AsyncClient):
+        app.state.storage.get_dense_coverage = AsyncMock(
+            return_value={"total": 100, "with_dense": 100}
+        )
+        resp = await client.get("/api/embedding-status")
+        assert resp.status_code == 200
+        cov = resp.json()["coverage"]
+        assert cov == {"total": 100, "with_dense": 100, "percent": 100.0}
+
+    async def test_coverage_reports_bm25_only(self, app, client: AsyncClient):
+        # The motivating failure mode: chunks indexed but ``chunks_vec``
+        # never populated (embedder init crashed, NoopEmbedder fallback,
+        # etc.). The UI uses this 0% signal to flag a BM25-only run.
+        app.state.storage.get_dense_coverage = AsyncMock(
+            return_value={"total": 100, "with_dense": 0}
+        )
+        resp = await client.get("/api/embedding-status")
+        cov = resp.json()["coverage"]
+        assert cov["total"] == 100
+        assert cov["with_dense"] == 0
+        assert cov["percent"] == 0.0
+
+    async def test_coverage_partial_rounds_to_one_decimal(self, app, client: AsyncClient):
+        # 1/3 -> 33.3333… ; the schema commits to one decimal so a
+        # partial-coverage banner reads consistently.
+        app.state.storage.get_dense_coverage = AsyncMock(return_value={"total": 3, "with_dense": 1})
+        resp = await client.get("/api/embedding-status")
+        assert resp.json()["coverage"]["percent"] == 33.3
+
+    async def test_coverage_handles_empty_db(self, app, client: AsyncClient):
+        app.state.storage.get_dense_coverage = AsyncMock(return_value={"total": 0, "with_dense": 0})
+        cov = (await client.get("/api/embedding-status")).json()["coverage"]
+        assert cov == {"total": 0, "with_dense": 0, "percent": 0.0}
 
 
 # ---------------------------------------------------------------------------

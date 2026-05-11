@@ -1199,6 +1199,39 @@ class SqliteBackend(
         sources = db.execute("SELECT COUNT(DISTINCT source_file) FROM chunks").fetchone()[0]
         return {"total_chunks": total, "total_sources": sources}
 
+    async def get_dense_coverage(self) -> dict[str, int]:
+        """Return dense-vector coverage: ``{"total": N, "with_dense": M}``.
+
+        ``M < N`` when chunks were indexed before the embedder finished
+        loading (NoopEmbedder dimension==0 path, or an init-time failure
+        that fell through to BM25-only). ``M == 0`` also when
+        ``chunks_vec`` is absent — typical right after
+        ``mm embedding-reset --mode purge`` or before the first indexing
+        run creates the virtual table.
+
+        ``with_dense`` joins ``chunks`` ⋈ ``chunks_vec`` on rowid so the
+        count tracks **retrievable** chunks only. A raw
+        ``COUNT(*) FROM chunks_vec`` would over-report when an
+        interrupted upsert or concurrent writer leaves stale vec
+        sidecars behind (orphan_gc.py already treats this state as
+        possible) — the rollup would then show ``with_dense == total``
+        even with some current chunks missing a vector, hiding the
+        BM25-only condition this telemetry exists to surface.
+
+        Surface used by ``/api/embedding-status`` and ``mem_status`` so
+        operators can see at a glance whether dense retrieval is going
+        to find anything before they wonder why semantic search is
+        returning only BM25-flavored results.
+        """
+        db = self._get_read_db()
+        total = db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        with_dense = 0
+        if self._has_vec_table:
+            with_dense = db.execute(
+                "SELECT COUNT(*) FROM chunks c INNER JOIN chunks_vec v ON v.rowid = c.rowid"
+            ).fetchone()[0]
+        return {"total": total, "with_dense": with_dense}
+
     async def get_chunk_size_distribution(
         self,
         source_file: Path | None = None,

@@ -57,6 +57,7 @@ from memtomem.web.schemas.config import (
     ConfigSearchOut,
     ConfigStorageOut,
     EmbeddingConfigInfo,
+    EmbeddingCoverage,
     EmbeddingResetResponse,
     EmbeddingStatusResponse,
     ModelComponent,
@@ -768,15 +769,34 @@ async def get_embedding_status(storage=Depends(get_storage)) -> EmbeddingStatusR
         else None
     )
 
+    # Dense-vector coverage so the UI can flag "BM25-only" runs without
+    # forcing the user to peek at sqlite. ``get_dense_coverage`` falls
+    # back to ``with_dense=0`` when the vec virtual table is absent, so
+    # we always have a numeric pair to render. Storage backends that
+    # don't implement the method (e.g. mocked test doubles) leave the
+    # field at ``None`` rather than 500ing this endpoint — the warning
+    # banner the field feeds is informational, not load-bearing.
+    coverage_out: EmbeddingCoverage | None = None
+    if hasattr(storage, "get_dense_coverage"):
+        try:
+            cov = await storage.get_dense_coverage()
+            total = int(cov["total"])
+            with_dense = int(cov["with_dense"])
+            pct = round((with_dense / total) * 100, 1) if total > 0 else 0.0
+            coverage_out = EmbeddingCoverage(total=total, with_dense=with_dense, percent=pct)
+        except Exception:
+            logger.debug("dense coverage query failed", exc_info=True)
+
     mismatch = getattr(storage, "embedding_mismatch", None)
     if mismatch is None:
-        return EmbeddingStatusResponse(has_mismatch=False, stored=stored_out)
+        return EmbeddingStatusResponse(has_mismatch=False, stored=stored_out, coverage=coverage_out)
     return EmbeddingStatusResponse(
         has_mismatch=True,
         dimension_mismatch=mismatch["dimension_mismatch"],
         model_mismatch=mismatch["model_mismatch"],
         stored=EmbeddingConfigInfo(**mismatch["stored"]),
         configured=EmbeddingConfigInfo(**mismatch["configured"]),
+        coverage=coverage_out,
     )
 
 
@@ -1214,6 +1234,7 @@ async def add_memory(
     req: AddMemoryRequest,
     index_engine=Depends(get_index_engine),
     storage=Depends(get_storage),
+    config=Depends(get_config),
 ) -> AddMemoryResponse:
     from datetime import datetime, timezone
 
@@ -1239,6 +1260,16 @@ async def add_memory(
             },
         )
 
+    # Write-surface parity with MCP ``mem_add``: route the default-dated
+    # file to the configured user-tier ``memory_dirs[0]``. Before this
+    # fix the route hardcoded ``~/.memtomem/memories``, ignoring the
+    # user's configured destination and silently diverging from MCP and
+    # CLI which already honor ``memory_dirs[0]``. The historical default
+    # remains as a last-resort fallback when no dirs are configured at
+    # all (``require_configured`` already guards the common case).
+    mdirs = config.indexing.memory_dirs
+    base = Path(mdirs[0] if mdirs else "~/.memtomem/memories").expanduser().resolve()
+
     if req.file:
         raw = req.file
         if raw.startswith("/") or raw.startswith("\\") or ".." in raw:
@@ -1246,7 +1277,6 @@ async def add_memory(
                 status_code=422,
                 detail="File path must be relative and must not contain '..'",
             )
-        base = Path("~/.memtomem/memories").expanduser().resolve()
         target = (base / raw).resolve()
         if not str(target).startswith(str(base)):
             raise HTTPException(
@@ -1255,7 +1285,6 @@ async def add_memory(
             )
     else:
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        base = Path("~/.memtomem/memories").expanduser().resolve()
         target = (base / f"{date_str}.md").resolve()
 
     target.parent.mkdir(parents=True, exist_ok=True)
