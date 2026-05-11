@@ -17,6 +17,7 @@ cannot exercise the SQL contract directly. This file pins:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from uuid import uuid4
 
@@ -101,60 +102,76 @@ class TestSourceExact:
         assert [r.chunk_id for r in rows] == [lower_id]
 
 
-class TestSourcePrefixCaseSensitivity:
-    """Codex #905 P2 pin: ``--source docs`` must NOT match ``DOCS/...``.
+_FIXTURE_ROOT = f"{os.sep}__rescan_fixture__"
 
-    Uses **non-existent absolute fixture paths** so ``norm_path``'s
-    ``Path.resolve(strict=False)`` returns the input unchanged. macOS's
-    default APFS is case-insensitive — if the paths actually existed on
-    disk, the FS would fold ``docs`` and ``DOCS`` to the same canonical
-    form on resolve and the SQL-layer regression would be undetectable
-    on that platform. The contract under test lives at the SQL layer;
-    the fixture only needs the stored ``source_file`` and the filter
-    prefix to differ by case after normalisation.
+
+def _fx(*parts: str) -> str:
+    """Build a platform-native fixture path string.
+
+    Stored ``source_file`` values come from ``norm_path`` →
+    ``Path.resolve()`` which emits ``\\`` on Windows and ``/`` on POSIX.
+    The production audit anchor likewise uses ``os.sep``. Building
+    fixture paths with ``os.sep`` keeps the test contract aligned with
+    real-world storage on every platform — Windows CI on PR #905
+    surfaced what happens when the test seeded ``/``-paths but the
+    production anchor used ``\\`` (no rows matched).
+    """
+    return _FIXTURE_ROOT + os.sep + os.sep.join(parts)
+
+
+class TestSourcePrefixCaseSensitivity:
+    """Codex #905 P2-a pin: ``--source docs`` must NOT match ``DOCS/...``.
+
+    Both the seeded paths and the filter prefix bypass ``norm_path``
+    (via ``monkeypatch.setattr``) and are built with ``os.sep`` so the
+    test stays platform-independent:
+
+    - macOS's default APFS is case-insensitive, so passing real paths
+      under ``tmp_path`` through ``Path.resolve()`` would fold
+      ``docs`` and ``DOCS`` to the same canonical form and hide the
+      SQL-layer bug.
+    - On Windows, ``Path.resolve()`` rewrites ``/...`` into
+      ``<drive>:\\...``; without the monkey-patch the stored
+      POSIX-form strings never matched the Windows-form anchor that
+      production builds. Both halves go through the patch so the
+      test is portable.
     """
 
     @pytest.mark.asyncio
-    async def test_prefix_does_not_match_uppercase_sibling(self, backend):
-        lower_path = "/__rescan_fixture__/docs/inside.md"
-        upper_path = "/__rescan_fixture__/DOCS/inside.md"
-        lower_id = _seed(backend, source_file=lower_path)
-        _seed(backend, source_file=upper_path)
+    async def test_prefix_does_not_match_uppercase_sibling(self, backend, monkeypatch):
+        from memtomem.storage import sqlite_backend
 
-        rows = await _collect(
-            backend,
-            scope="user",
-            source_prefix=Path("/__rescan_fixture__/docs"),
-        )
+        prefix_value = _fx("docs")
+        monkeypatch.setattr(sqlite_backend, "norm_path", lambda p: prefix_value)
+        lower_id = _seed(backend, source_file=_fx("docs", "inside.md"))
+        _seed(backend, source_file=_fx("DOCS", "inside.md"))
+
+        rows = await _collect(backend, scope="user", source_prefix=Path("ignored"))
         assert [r.chunk_id for r in rows] == [lower_id]
 
     @pytest.mark.asyncio
-    async def test_prefix_does_not_match_sibling_with_extra_suffix(self, backend):
+    async def test_prefix_does_not_match_sibling_with_extra_suffix(self, backend, monkeypatch):
         """Component-aware: ``docs`` must not match ``docsuite``."""
-        inside = "/__rescan_fixture__/docs/a.md"
-        sibling = "/__rescan_fixture__/docsuite/b.md"
-        inside_id = _seed(backend, source_file=inside)
-        _seed(backend, source_file=sibling)
+        from memtomem.storage import sqlite_backend
 
-        rows = await _collect(
-            backend,
-            scope="user",
-            source_prefix=Path("/__rescan_fixture__/docs"),
-        )
+        prefix_value = _fx("docs")
+        monkeypatch.setattr(sqlite_backend, "norm_path", lambda p: prefix_value)
+        inside_id = _seed(backend, source_file=_fx("docs", "a.md"))
+        _seed(backend, source_file=_fx("docsuite", "b.md"))
+
+        rows = await _collect(backend, scope="user", source_prefix=Path("ignored"))
         assert [r.chunk_id for r in rows] == [inside_id]
 
     @pytest.mark.asyncio
-    async def test_prefix_matches_nested_descendants(self, backend):
-        a = "/__rescan_fixture__/docs/a.md"
-        b = "/__rescan_fixture__/docs/sub/deep/b.md"
-        a_id = _seed(backend, source_file=a)
-        b_id = _seed(backend, source_file=b)
+    async def test_prefix_matches_nested_descendants(self, backend, monkeypatch):
+        from memtomem.storage import sqlite_backend
 
-        rows = await _collect(
-            backend,
-            scope="user",
-            source_prefix=Path("/__rescan_fixture__/docs"),
-        )
+        prefix_value = _fx("docs")
+        monkeypatch.setattr(sqlite_backend, "norm_path", lambda p: prefix_value)
+        a_id = _seed(backend, source_file=_fx("docs", "a.md"))
+        b_id = _seed(backend, source_file=_fx("docs", "sub", "deep", "b.md"))
+
+        rows = await _collect(backend, scope="user", source_prefix=Path("ignored"))
         assert {r.chunk_id for r in rows} == {a_id, b_id}
 
 
