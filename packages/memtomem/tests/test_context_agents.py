@@ -277,6 +277,34 @@ class TestStrictMode:
         )
         assert len(result.generated) == 2
 
+    def test_strict_drop_preserves_earlier_writes(self, tmp_path):
+        # Pre-existing partial-write boundary documented on issue #900:
+        # Phase 2 raises StrictDropError for the first dropping canonical,
+        # but earlier canonicals in pending order have already been written.
+        # Canonicals iterate in sorted-name order (list_canonical_agents),
+        # so "alpha-minimal" is processed before "beta-full".
+        _make_canonical_agent(
+            tmp_path,
+            "alpha-minimal",
+            SAMPLE_MINIMAL_AGENT.replace("helper", "alpha-minimal"),
+        )
+        _make_canonical_agent(
+            tmp_path,
+            "beta-full",
+            SAMPLE_FULL_AGENT.replace("code-reviewer", "beta-full"),
+        )
+
+        with pytest.raises(StrictDropError):
+            generate_all_agents(tmp_path, runtimes=["claude_agents"], on_drop="error")
+
+        runtime_dir = tmp_path / ".claude" / "agents"
+        assert (runtime_dir / "alpha-minimal.md").is_file()
+        assert not (runtime_dir / "beta-full.md").exists()
+        # atomic_write_* uses tempfile.mkstemp with prefix=f".{path.name}.";
+        # since the raise fires before atomic_write_text for beta-full,
+        # no temp file should exist for it.
+        assert list(runtime_dir.glob(".beta-full.md.*.tmp")) == []
+
 
 class TestExtractAgentsToCanonical:
     def test_imports_claude_agent(self, tmp_path):
