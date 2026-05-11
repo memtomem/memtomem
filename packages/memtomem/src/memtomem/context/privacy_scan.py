@@ -26,6 +26,7 @@ from typing import Literal, NamedTuple
 from memtomem import privacy
 from memtomem.config import TargetScope
 from memtomem.context import _skip_reasons as skip_codes
+from memtomem.privacy import RedactionHit
 
 
 class PrivacyScanError(Exception):
@@ -92,11 +93,19 @@ OnBlocked = Literal["fail_fast", "skip_warn"]
 
 
 class FileScan(NamedTuple):
-    """Per-file scan result (one entry per visited file in a tree walk)."""
+    """Per-file scan result (one entry per visited file in a tree walk).
+
+    ``hits`` carries the raw :class:`RedactionHit` list when the caller
+    needs to render ``pattern_index`` / ``span`` (e.g. the rescan audit
+    output). Defaults to ``()`` so positional construction at existing
+    sync-side call sites stays source-compatible — the sync path only
+    reads ``decision`` and ``hits_count``.
+    """
 
     path: Path
     decision: str  # "pass" | "blocked" | "blocked_project_shared" | "bypassed"
     hits_count: int
+    hits: tuple[RedactionHit, ...] = ()
 
 
 class ScanResult(NamedTuple):
@@ -118,6 +127,7 @@ def scan_artifact_tree(
     scope: TargetScope,
     project_root: Path | None,
     on_blocked: OnBlocked = "fail_fast",
+    record_outcome: bool = True,
 ) -> ScanResult:
     """Walk ``src`` (file or directory) and run :func:`enforce_write_guard` per file.
 
@@ -149,6 +159,12 @@ def scan_artifact_tree(
             blocked file (subsequent files are NOT scanned — useful when
             the caller will raise). ``"skip_warn"`` continues through
             all files and collects the full block list.
+        record_outcome: Forwarded to :func:`enforce_write_guard`.
+            Default ``True`` matches the sync-side write-amplifying
+            contract (every scan is a real audit event). Read-only
+            audit callers (``mm context rescan``) pass ``False`` so the
+            re-check does not double-count outcomes or re-emit bypass
+            audit lines.
 
     Returns:
         :class:`ScanResult` with the per-file ``decisions`` list and the
@@ -205,9 +221,9 @@ def scan_artifact_tree(
             force_unsafe=False,
             scope=scope,
             audit_context=audit_context,
-            record_outcome=True,
+            record_outcome=record_outcome,
         )
-        scan = FileScan(path, guard.decision, len(guard.hits))
+        scan = FileScan(path, guard.decision, len(guard.hits), tuple(guard.hits))
         decisions.append(scan)
 
         if guard.decision in ("blocked", "blocked_project_shared") and on_blocked == "fail_fast":
@@ -257,7 +273,7 @@ def scan_text_content(
         audit_context=audit_context,
         record_outcome=True,
     )
-    return FileScan(source_path, guard.decision, len(guard.hits))
+    return FileScan(source_path, guard.decision, len(guard.hits), tuple(guard.hits))
 
 
 def format_scan_block_message(

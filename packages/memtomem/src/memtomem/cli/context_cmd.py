@@ -65,7 +65,7 @@ from memtomem.context.generator import (
     extract_sections_from_agent_file,
 )
 from memtomem.context.parser import CONTEXT_FILENAME, parse_context, sections_to_markdown
-from memtomem.context.privacy_scan import PrivacyScanError
+from memtomem.context.privacy_scan import PrivacyScanError, scan_artifact_tree
 from memtomem.context.settings import (
     diff_settings,
     generate_all_settings,
@@ -2862,3 +2862,125 @@ async def _memory_migrate_run(
             f"  ✓ moved {source.name} → {to_scope} tier; {updated} chunk row(s) updated.",
             fg="green",
         )
+
+
+# ---------------------------------------------------------------------------
+# rescan — privacy-only audit over project-root generated context files
+# ---------------------------------------------------------------------------
+#
+# ADR-0011 follow-up (issue #885). The v1 target set is exactly the set
+# returned by ``detect_agent_files`` — the project-root generated files
+# (CLAUDE.md, .cursorrules, GEMINI.md, AGENTS.md, .github/copilot-
+# instructions.md). Agents / skills / commands runtime fanout (the
+# scope-tiered ``_runtime_targets.py`` table) is intentionally out of
+# scope and tracked separately.
+
+_RESCAN_SCOPE_CHOICES = list(get_args(TargetScope))
+
+
+@context.command("rescan")
+@click.option(
+    "--scope",
+    type=click.Choice(_RESCAN_SCOPE_CHOICES),
+    required=True,
+    help=(
+        "Guard decision scope. The same artifact set is scanned regardless "
+        "of --scope; the value flows into enforce_write_guard's scope= "
+        "argument. v1 always calls with force_unsafe=False."
+    ),
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Emit a machine-readable JSON report instead of human output.",
+)
+@click.option(
+    "--quiet",
+    "-q",
+    is_flag=True,
+    default=False,
+    help="Suppress per-file lines in human output; only print the summary.",
+)
+def rescan_cmd(
+    scope: TargetScope,
+    as_json: bool,
+    quiet: bool,
+) -> None:
+    """Re-run the privacy guard over project-root generated context files.
+
+    Read-only: no file is modified. The guard is invoked with
+    ``record_outcome=False`` so the rescan does not double-count outcomes
+    or emit bypass audit lines. ``on_blocked="skip_warn"`` collects every
+    violation in the scanned set (not just the first).
+
+    Exit codes: 0 if no violations, 1 if any violation found.
+    """
+    root = _find_project_root()
+    detected = detect_agent_files(root)
+
+    scanned = 0
+    violations: list[dict] = []
+
+    for entry in detected:
+        result = scan_artifact_tree(
+            entry.path,
+            surface="cli_context_rescan",
+            scope=scope,
+            project_root=root,
+            on_blocked="skip_warn",
+            record_outcome=False,
+        )
+        for fs in result.decisions:
+            scanned += 1
+            if fs.decision == "pass":
+                continue
+            violations.append(
+                {
+                    "path": str(
+                        fs.path.relative_to(root) if fs.path.is_relative_to(root) else fs.path
+                    ),
+                    "scope": scope,
+                    "decision": fs.decision,
+                    "hits": [
+                        {
+                            "pattern_index": h.pattern_index,
+                            "span_start": h.span[0],
+                            "span_end": h.span[1],
+                        }
+                        for h in fs.hits
+                    ],
+                }
+            )
+
+    if as_json:
+        payload = {
+            "scope": scope,
+            "scanned": scanned,
+            "violations": violations,
+        }
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        if not quiet:
+            click.echo(f"scanning {scanned} context file(s) in scope={scope}...")
+            for v in violations:
+                click.echo(
+                    f"✗ {v['path']} scope={v['scope']} "
+                    f"(decision={v['decision']}, {len(v['hits'])} hit"
+                    f"{'s' if len(v['hits']) != 1 else ''})"
+                )
+                for h in v["hits"]:
+                    click.echo(
+                        f"    - pattern_index={h['pattern_index']} "
+                        f"span=[{h['span_start']},{h['span_end']}]"
+                    )
+        click.echo(
+            f"Summary: {len(violations)} violation"
+            f"{'s' if len(violations) != 1 else ''} / "
+            f"{scanned} file{'s' if scanned != 1 else ''} scanned. "
+            f"Exit {1 if violations else 0}."
+        )
+
+    if violations:
+        raise SystemExit(1)

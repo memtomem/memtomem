@@ -5,17 +5,19 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sqlite3
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Sequence
+from typing import AsyncIterator, Sequence
 from uuid import UUID
 
 import sqlite_vec
 
 from memtomem.config import StorageConfig
 from memtomem.errors import StorageError
+from memtomem.storage.base import ChunkAuditRow
 from memtomem.models import (
     Chunk,
     ChunkMetadata,
@@ -805,6 +807,103 @@ class SqliteBackend(
             (namespace,),
         ).fetchall()
         return {str(row[0] or "user") for row in rows}
+
+    async def iter_chunks_for_audit(
+        self,
+        *,
+        scope: str,
+        source_exact: Path | None = None,
+        source_prefix: Path | None = None,
+        batch_size: int = 500,
+    ) -> AsyncIterator[ChunkAuditRow]:
+        """Stream chunks in ``scope`` for a privacy audit walk.
+
+        Independent of search / recall: no embedding lookup, no tag
+        decode, no UI-side ordering. Uses ``ORDER BY id`` (PK) with a
+        keyset cursor so pagination stays stable even if rows mutate
+        between batches (the audit is read-only by contract, but cursor
+        stability is cheaper to guarantee than to debug).
+
+        ``source_exact`` and ``source_prefix`` are mutually exclusive
+        contracts owned by the caller (CLI ``--source`` resolver). Both
+        are normalised via :func:`norm_path` before the query, mirroring
+        the storage layer's existing source-path equality contract used
+        by :meth:`list_chunks_by_source` and friends.
+        """
+        if source_exact is not None and source_prefix is not None:
+            raise ValueError(
+                "iter_chunks_for_audit: source_exact and source_prefix are mutually exclusive"
+            )
+
+        where_parts = ["COALESCE(scope, 'user') = ?"]
+        params: list[object] = [scope]
+        if source_exact is not None:
+            where_parts.append("source_file = ?")
+            params.append(norm_path(source_exact))
+        elif source_prefix is not None:
+            prefix = norm_path(source_prefix)
+            # Component-aware prefix: anchor on ``<prefix><sep>`` so a request
+            # for ``docs`` does not match ``docsuite``. ``norm_path`` already
+            # resolves symlinks and NFC-normalises so the prefix and stored
+            # paths share the same canonical form.
+            #
+            # ``substr(...) = ?`` instead of ``LIKE``: SQLite's built-in LIKE
+            # is case-insensitive for ASCII by default, and COLLATE BINARY
+            # does not override LIKE — so ``LIKE 'docs/%'`` would also match
+            # ``DOCS/foo.md`` on a case-sensitive filesystem and turn an
+            # audit ``--source docs`` into a false-positive over an unrelated
+            # tree (Codex review on #905 P2-a). ``substr`` equality is a
+            # binary string compare, case-sensitive, and avoids the LIKE /
+            # GLOB metacharacter escape contract entirely.
+            #
+            # Separator is platform-native: stored paths come from
+            # ``norm_path`` → ``Path.resolve()`` which emits ``\`` on Windows
+            # and ``/`` on POSIX. Hardcoding ``/`` would build a prefix like
+            # ``C:\repo\docs/`` on Windows and silently match no rows under
+            # ``C:\repo\docs\...`` (Codex P2-b). Strip both separator forms
+            # from the input so a caller passing a POSIX-style filter on
+            # Windows (e.g. ``--source docs/sub``) still anchors correctly.
+            anchored = prefix.rstrip("/\\") + os.sep
+            where_parts.append("substr(source_file, 1, ?) = ?")
+            params.append(len(anchored))
+            params.append(anchored)
+
+        where_sql = " AND ".join(where_parts)
+        db = self._get_read_db()
+
+        last_id: str | None = None
+        while True:
+            if last_id is None:
+                query = (
+                    "SELECT id, source_file, content, COALESCE(scope, 'user'), "
+                    "project_root FROM chunks "
+                    f"WHERE {where_sql} ORDER BY id LIMIT ?"
+                )
+                batch_params = (*params, batch_size)
+            else:
+                query = (
+                    "SELECT id, source_file, content, COALESCE(scope, 'user'), "
+                    "project_root FROM chunks "
+                    f"WHERE {where_sql} AND id > ? ORDER BY id LIMIT ?"
+                )
+                batch_params = (*params, last_id, batch_size)
+
+            rows = db.execute(query, batch_params).fetchall()
+            if not rows:
+                return
+
+            for row in rows:
+                chunk_id, source_file, content, row_scope, project_root = row
+                yield ChunkAuditRow(
+                    chunk_id=str(chunk_id),
+                    source=Path(source_file),
+                    content=str(content),
+                    scope=str(row_scope),
+                    project_root=Path(project_root) if project_root else None,
+                )
+            last_id = str(rows[-1][0])
+            if len(rows) < batch_size:
+                return
 
     async def update_chunks_scope_for_source(
         self,

@@ -3,12 +3,33 @@
 from __future__ import annotations
 
 from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import AsyncIterator, Protocol, Sequence
 from uuid import UUID
 
 from memtomem.models import Chunk, ChunkLink, NamespaceFilter, ScopeFilter, SearchResult
+
+
+@dataclass(frozen=True)
+class ChunkAuditRow:
+    """Minimal chunk fields needed for a full-scope privacy audit walk.
+
+    Returned by :meth:`StorageBackend.iter_chunks_for_audit`. Holds only
+    the fields the rescan command actually reads — ``content`` for the
+    guard scan, ``chunk_id`` / ``source`` / ``scope`` / ``project_root``
+    for the violation report. Kept distinct from :class:`memtomem.models.Chunk`
+    so the audit enumerator can stream rows without paying for the full
+    ``_row_to_chunk`` decode (tags JSON, heading hierarchy, embedding
+    lookup, etc.).
+    """
+
+    chunk_id: str
+    source: Path
+    content: str
+    scope: str
+    project_root: Path | None
 
 
 class StorageBackend(Protocol):
@@ -83,6 +104,25 @@ class StorageBackend(Protocol):
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
     ) -> list[Chunk]: ...
+
+    # Audit enumeration (independent of search / recall paths)
+    #
+    # ``recall_chunks`` is the UI/CLI helper — it caps at ``limit=20`` and its
+    # ordering is tuned for "show me the most recent / relevant N". A full-
+    # scope privacy audit (``mm mem rescan``) needs every chunk in the scope
+    # streamed in a stable, paginated order with no UI-side limit. Adding a
+    # separate method keeps the audit-only contract (no embedding lookup, no
+    # tag decode, no per-row search post-processing) from drifting into the
+    # search path. Source filtering uses exact-match + descendant-prefix only;
+    # no fuzzy / substring matching.
+    def iter_chunks_for_audit(
+        self,
+        *,
+        scope: str,
+        source_exact: Path | None = None,
+        source_prefix: Path | None = None,
+        batch_size: int = 500,
+    ) -> AsyncIterator[ChunkAuditRow]: ...
 
     # Namespace
     async def list_namespaces(self) -> list[tuple[str, int]]: ...
