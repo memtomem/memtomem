@@ -219,7 +219,7 @@ project_shared, the sync write is blocked regardless of `--force-unsafe`.
 
 **Gate B (surface).** Explicit `--scope project_shared` flag plus
 confirm prompt at the CLI/MCP write surface (`mm mem add`,
-`mm context init`, `mm context promote`). The flag must be passed
+`mm context init`, `mm context migrate --to project_shared`). The flag must be passed
 explicitly — no env var or config-field default. There is
 deliberately **no** `memory.default_write_scope` config field: the
 explicit `--scope` flag (CLI) and `scope=` kwarg (MCP `mem_add`
@@ -347,7 +347,8 @@ The asymmetry with ADR-0010 §5 is documented in Consequences below.
 Six PRs, each independently revertable. PR-B / PR-C / PR-D were
 drafted alongside this ADR and shipped together as a single bundle
 in PR #882 (2026-05-09); PR-A landed shortly after to capture the
-RFC on `main`. PR-E and PR-F remain ahead of HEAD.
+RFC on `main`. PR-E shipped 2026-05-10/11 in #889 / #890 / #893;
+PR-F remains ahead of HEAD.
 
 | PR    | Scope                                                                                       | Ship status                                                |
 |-------|---------------------------------------------------------------------------------------------|------------------------------------------------------------|
@@ -355,7 +356,7 @@ RFC on `main`. PR-E and PR-F remain ahead of HEAD.
 | PR-B  | Memory schema (append-only columns), `IndexingConfig.project_memory_dirs`, scope classifier, `_resolve_scope` / `_apply_scope`, `dataclasses.replace` refactor of `_apply_namespace`, Gate A on `enforce_write_guard`. No CLI/MCP surface; defaults preserved. | Shipped 2026-05-09 in PR #882.                             |
 | PR-C  | Memory read surface — `ScopeFilter`, `scope_context_sql` always-on fragment, project-aware default merge per §6, search pipeline cache key, MCP read tools, CLI `--scope` (comma-list) on read commands. | Shipped 2026-05-09 in PR #882.                             |
 | PR-D  | Memory write surface — Gate B (explicit flag + confirm), `mm mem add` restructure (the pre-PR-D hardcoded `~/.memtomem/memories` user_base in `cli/memory.py` was incompatible with project-scope writes), `mem_batch_add` refactor through `enforce_write_guard`, `mem_edit` / `mem_delete` inferred-scope, `mem_consolidate_apply` cross-scope rejection, `mm context memory-migrate` v1 (chunk-id-stable single-DB rename). `mm mem rescan` deferred (Open Questions item 4). | Shipped 2026-05-09 in PR #882.                             |
-| PR-E  | Agents / skills / commands canonical scope axis — `context/scope_resolver.py`, each generator's `target_file` / `is_available` accepting `(scope, project_root)`, `mm context init --scope=...`, `mm context sync --scope=...` filter, `mm context promote` / `demote`, sync-time privacy scan (Gate A for non-memory). `mm context rescan` deferred per Open Questions item 4. | Pending. Unblocks once this ADR is Accepted.               |
+| PR-E  | Agents / skills / commands canonical scope axis — `context/scope_resolver.py`, each generator's `target_file` / `is_available` accepting `(scope, project_root)`, `mm context init --scope=...`, `mm context sync --scope=...` filter, `mm context migrate <kind> <name> --to <scope>` for cross-tier moves (the originally-named `promote` / `demote` verbs were consolidated into `migrate --to`), sync-time privacy scan (Gate A for non-memory). `mm context rescan` deferred per Open Questions item 4. | Shipped 2026-05-10/11 in PRs #889 (E1+E2), #890 (follow-up nits), #893 (E4 `migrate --to`). |
 | PR-F  | Web UI scope badges (memory + context) read-only, `/api/add` rejection with CLI hint plus docs link, public docs updates (user-guide / getting-started / mcp-clients per the default-change fanout convention). | Pending. Follows PR-E.                                     |
 
 **Sequencing note.** ADR-0010 was Accepted on 2026-05-09 and the
@@ -486,9 +487,11 @@ they do not block this ADR's acceptance.
 - chunk-id-stable rename mode for `mm context memory-migrate`.
   v1 reports the count of dropped chunk_links lineage rows; full
   preservation across scope moves is deferred.
-- MCP exposure for `mm context init` / `sync` / `promote` /
-  `demote`. v1 ships these as CLI / authoring tools only. MCP
-  parity is a separate ask.
+- MCP exposure for `mm context init` / `sync` / `migrate`.
+  PR-E shipped through #889 / #890 / #893, with scope-tier moves
+  consolidated into `mm context migrate <kind> <name> --to <scope>`.
+  v1 keeps these as CLI / authoring tools only. MCP parity is a
+  separate ask, tracked in #887.
 
 ## References
 
