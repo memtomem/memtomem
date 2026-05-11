@@ -68,6 +68,7 @@ from pathlib import Path
 import pytest
 
 from memtomem.context import _skip_reasons as skip_codes
+from memtomem.context._runtime_targets import RUNTIME_FANOUT_TABLE
 from memtomem.context.agents import (
     AGENT_GENERATORS,
     diff_agents,
@@ -244,10 +245,20 @@ def test_diff_runtime_table_none_emits_zero_rows(
     ``diff_*`` has no skip channel (its return type is ``list[tuple[str,
     str, str]]``), so a NO_FANOUT runtime+scope contributes zero rows.
     Other registered runtimes still appear in the result.
+
+    PR-E3 cleanup item #1 update: ``diff_*`` now queries
+    ``RUNTIME_FANOUT_TABLE`` directly (no ``__probe_891__`` proxy on
+    ``gen.target_*``). Tests monkeypatch the table itself — that is the
+    contract surface the cleanup made authoritative.
     """
+    del registry, attr  # parametrize legacy fields — pre-PR-E3 proxy targets
     seed(tmp_path, name="foo")
-    gen = registry[runtime_key]
-    monkeypatch.setattr(gen, attr, lambda *args, **kwargs: None)
+    runtime_canonical = runtime_key.split("_", 1)[0]  # "claude_agents" -> "claude"
+    monkeypatch.setitem(
+        RUNTIME_FANOUT_TABLE,
+        (kind, runtime_canonical, "project_shared"),
+        None,
+    )
 
     rows = runner(tmp_path)
 
@@ -298,23 +309,31 @@ def test_diff_runtime_no_fanout_canonical_only_emits_zero_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#891 (Codex review fold) — diff_<kind> emits zero rows when the
-    runtime side is absent and ``target_*`` returns ``None``.
+    runtime side is absent and the table returns ``None``.
 
     This is the realistic NO_FANOUT shape: when ``RUNTIME_FANOUT_TABLE``
     returns ``None`` for a runtime+scope (e.g. ``project_local``), the
     runtime side typically does NOT exist on disk. Without the upstream
-    probe, the diff loop reaches the ``"missing target"`` branch (canonical
-    in, runtime not) BEFORE the new ``target_*`` None check, so canonical
-    entries leak as ``("<runtime>", "<name>", "missing target")`` rows
-    instead of being silently skipped.
+    NO_FANOUT guard, the diff loop reaches the ``"missing target"`` branch
+    (canonical in, runtime not) BEFORE the per-name target lookup, so
+    canonical entries leak as ``("<runtime>", "<name>", "missing target")``
+    rows instead of being silently skipped.
 
-    Codex review of the initial #891 diff caught this gap. The fix probes
-    ``gen.target_*(project_root, "__probe_891__")`` at the top of each
-    per-runtime loop and ``continue`` s when ``None``.
+    Codex review of the initial #891 diff caught this gap. The original
+    fix probed ``gen.target_*(project_root, "__probe_891__")`` at the
+    top of each per-runtime loop. PR-E3 cleanup item #1 replaces that
+    name-shaped probe with a direct ``runtime_fanout_root`` query —
+    table-direct is the contract source-of-truth — so this test now
+    monkeypatches the table itself.
     """
+    del registry, attr  # parametrize legacy fields — pre-PR-E3 proxy targets
     seed(tmp_path, name="foo", with_runtime=False)
-    gen = registry[runtime_key]
-    monkeypatch.setattr(gen, attr, lambda *args, **kwargs: None)
+    runtime_canonical = runtime_key.split("_", 1)[0]
+    monkeypatch.setitem(
+        RUNTIME_FANOUT_TABLE,
+        (kind, runtime_canonical, "project_shared"),
+        None,
+    )
 
     rows = runner(tmp_path)
 

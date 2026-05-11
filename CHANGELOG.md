@@ -69,6 +69,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   serialization (#836). Inbound links from `README.md`,
   `docs/guides/getting-started.md`, and
   `docs/guides/configuration.md` (Moving `config.json` between machines).
+- **`mm context sync --scope=...` + canonical-side Gate A + skills
+  staging-dir-first scan (ADR-0011 PR-E3).** ``mm context sync`` (and
+  ``mm context generate``) thread the resolved canonical-artifact
+  scope through the three include surfaces (``--include=agents`` /
+  ``--include=skills`` / ``--include=commands``); the helpers in turn
+  call ``generate_all_*`` with the new ``scope=`` kwarg. The default
+  remains ``project_shared`` so pre-PR-E3 invocations are
+  byte-identical. ``--scope user`` reads ``~/.memtomem/{agents,
+  skills,commands}/`` and fans out to ``~/.{claude,gemini,codex}/...``;
+  ``--scope project_local`` short-circuits to
+  ``NO_PROJECT_FANOUT_FOR_RUNTIME`` skips per runtime (ADR §3 — the
+  draft tier has no runtime equivalent). New
+  ``context/privacy_scan.py`` runs ``enforce_write_guard`` per file
+  (sync direction; ``force_unsafe`` is hardcoded ``False`` per ADR §5
+  — sync has no escape valve, unlike init's
+  ``--force-unsafe-import``). ``project_shared`` hits raise
+  :class:`click.ClickException` with a remediation hint pointing at
+  ``mm context migrate`` (PR-E4); ``user`` / ``project_local`` hits
+  emit ``PRIVACY_BLOCKED`` skips. Skills fan-out now uses a
+  staging-dir-first flow (``_stage_skill`` builds at
+  ``dst.parent/.staging-…tmp`` for same-fs atomic
+  :func:`os.replace`; vendor SKILL.md override applies BEFORE the
+  scan so the scan walks the bytes that will actually be promoted;
+  ``_promote_staging`` swaps with rollback). Skill auxiliary files
+  (``scripts/``, ``references/``, ``assets/``) stay byte-equal to
+  canonical even when an override is staged for ``SKILL.md`` —
+  ``test_override_only_touches_skill_md_not_scripts`` invariant
+  preserved. Web routes pass explicit ``scope="project_shared"`` to
+  preserve current behavior; PR-F (UI badges) replaces with
+  request-driven scope.
 - **`mm context init --scope=...` + Gate A/B for canonical artifact
   seeding (ADR-0011 PR-E2).** ``mm context init`` (no flag) keeps the
   pre-PR-E2 failure-mode shape — same context.md path, no Gate B

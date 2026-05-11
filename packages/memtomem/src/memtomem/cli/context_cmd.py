@@ -49,9 +49,13 @@ from memtomem.context.install import (
     update_skill,
 )
 from memtomem.context.migrate import (
+    MigratePartialError,
     MigrateRow,
+    MigrateScopeResult,
+    SCOPE_MIGRATABLE_KINDS,
     classify_migrate,
     migrate_one,
+    migrate_scope,
 )
 from memtomem.context.projects import KnownProjectsStore
 from memtomem.context.lockfile import LockfileVersionError
@@ -61,6 +65,7 @@ from memtomem.context.generator import (
     extract_sections_from_agent_file,
 )
 from memtomem.context.parser import CONTEXT_FILENAME, parse_context, sections_to_markdown
+from memtomem.context.privacy_scan import PrivacyScanError
 from memtomem.context.settings import (
     diff_settings,
     generate_all_settings,
@@ -190,15 +195,31 @@ def _print_skills_init(
         click.secho(f"    skipped {name}: {reason}", fg=color)
 
 
-def _print_skills_generate(root: Path) -> None:
-    result = generate_all_skills(root)
+def _print_skills_generate(
+    root: Path,
+    *,
+    scope: TargetScope = "project_shared",
+) -> None:
+    try:
+        result = generate_all_skills(root, scope=scope)
+    except PrivacyScanError as exc:
+        raise click.ClickException(exc.message) from exc
     if result.generated:
         click.secho(f"  Skills fan-out: {len(result.generated)}", fg="green")
         for runtime, path in result.generated:
             rel = path.relative_to(root) if path.is_relative_to(root) else path
             click.echo(f"    {runtime:15s}  {rel}")
-    for runtime, reason, _code in result.skipped:
-        click.secho(f"  skipped {runtime}: {reason}", fg="yellow")
+    for runtime, reason, code in result.skipped:
+        color = (
+            "red"
+            if code
+            in (
+                skip_codes.PRIVACY_BLOCKED,
+                skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED,
+            )
+            else "yellow"
+        )
+        click.secho(f"  skipped {runtime}: {reason}", fg=color)
 
 
 def _print_skills_diff(root: Path) -> None:
@@ -262,12 +283,20 @@ def _print_agents_init(
         click.secho(f"    skipped {name}: {reason}", fg=color)
 
 
-def _print_agents_generate(root: Path, strict: bool, on_drop: str = "ignore") -> None:
+def _print_agents_generate(
+    root: Path,
+    strict: bool,
+    on_drop: str = "ignore",
+    *,
+    scope: TargetScope = "project_shared",
+) -> None:
     try:
-        result = generate_all_agents(root, strict=strict, on_drop=on_drop)
+        result = generate_all_agents(root, strict=strict, on_drop=on_drop, scope=scope)
     except StrictDropError as exc:
         click.secho(f"  [strict] {exc}", fg="red")
         raise click.Abort()
+    except PrivacyScanError as exc:
+        raise click.ClickException(exc.message) from exc
 
     if result.generated:
         click.secho(f"  Sub-agent fan-out: {len(result.generated)}", fg="green")
@@ -277,8 +306,17 @@ def _print_agents_generate(root: Path, strict: bool, on_drop: str = "ignore") ->
             except ValueError:
                 rel = path
             click.echo(f"    {runtime:15s}  {rel}")
-    for runtime, reason, _code in result.skipped:
-        click.secho(f"  skipped {runtime}: {reason}", fg="yellow")
+    for runtime, reason, code in result.skipped:
+        color = (
+            "red"
+            if code
+            in (
+                skip_codes.PRIVACY_BLOCKED,
+                skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED,
+            )
+            else "yellow"
+        )
+        click.secho(f"  skipped {runtime}: {reason}", fg=color)
     for runtime, agent_name, dropped in result.dropped:
         click.secho(
             f"  {runtime} dropped {dropped} from '{agent_name}'",
@@ -348,12 +386,20 @@ def _print_commands_init(
         click.secho(f"    skipped {name}: {reason}", fg=color)
 
 
-def _print_commands_generate(root: Path, strict: bool, on_drop: str = "ignore") -> None:
+def _print_commands_generate(
+    root: Path,
+    strict: bool,
+    on_drop: str = "ignore",
+    *,
+    scope: TargetScope = "project_shared",
+) -> None:
     try:
-        result = generate_all_commands(root, strict=strict, on_drop=on_drop)
+        result = generate_all_commands(root, strict=strict, on_drop=on_drop, scope=scope)
     except CommandStrictDropError as exc:
         click.secho(f"  [strict] {exc}", fg="red")
         raise click.Abort() from exc
+    except PrivacyScanError as exc:
+        raise click.ClickException(exc.message) from exc
 
     if result.generated:
         click.secho(f"  Command fan-out: {len(result.generated)}", fg="green")
@@ -363,8 +409,17 @@ def _print_commands_generate(root: Path, strict: bool, on_drop: str = "ignore") 
             except ValueError:
                 rel = path
             click.echo(f"    {runtime:17s}  {rel}")
-    for runtime, reason, _code in result.skipped:
-        click.secho(f"  skipped {runtime}: {reason}", fg="yellow")
+    for runtime, reason, code in result.skipped:
+        color = (
+            "red"
+            if code
+            in (
+                skip_codes.PRIVACY_BLOCKED,
+                skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED,
+            )
+            else "yellow"
+        )
+        click.secho(f"  skipped {runtime}: {reason}", fg=color)
     for runtime, cmd_name, dropped in result.dropped:
         click.secho(
             f"  {runtime} dropped {dropped} from '{cmd_name}'",
@@ -900,20 +955,31 @@ def generate_cmd(
     else:
         click.secho(f"  ({CONTEXT_FILENAME} missing — skipping project memory)", fg="yellow")
 
+    # ADR-0011 PR-E3: resolve the canonical-artifact scope once and thread
+    # it through the three include helpers. Defaults to ``project_shared``
+    # via ``_resolve_artifact_cli_scope`` (NOT ``_resolve_cli_scope``,
+    # which leaks ``cfg.hooks.target_scope`` into the artifact axis —
+    # ADR-0011 PR-E1 Codex review trip-wire).
+    artifact_scope = _resolve_artifact_cli_scope(scope_flag)
+
     if "skills" in inc:
         click.echo("")
-        _print_skills_generate(root)
+        _print_skills_generate(root, scope=artifact_scope)
 
     if "agents" in inc:
         click.echo("")
-        _print_agents_generate(root, strict=strict, on_drop=on_drop)
+        _print_agents_generate(root, strict=strict, on_drop=on_drop, scope=artifact_scope)
 
     if "commands" in inc:
         click.echo("")
-        _print_commands_generate(root, strict=strict, on_drop=on_drop)
+        _print_commands_generate(root, strict=strict, on_drop=on_drop, scope=artifact_scope)
 
     if "settings" in inc:
         click.echo("")
+        # Settings has its own (separate from artifact) scope axis — see
+        # ADR-0010. ``_resolve_cli_scope`` consults ``cfg.hooks.target_scope``;
+        # this is intentional for settings and intentionally NOT used for
+        # artifacts above.
         scope = _resolve_cli_scope(scope_flag)
         if _confirm_settings_host_writes(root, scope=scope, yes=yes):
             _print_settings_generate(root, scope=scope, allow_host_writes=True)
@@ -1033,20 +1099,31 @@ def sync_cmd(
     else:
         click.secho(f"  ({CONTEXT_FILENAME} missing — skipping project memory)", fg="yellow")
 
+    # ADR-0011 PR-E3: resolve the canonical-artifact scope once and thread
+    # it through the three include helpers. Defaults to ``project_shared``
+    # via ``_resolve_artifact_cli_scope`` (NOT ``_resolve_cli_scope``,
+    # which leaks ``cfg.hooks.target_scope`` into the artifact axis —
+    # ADR-0011 PR-E1 Codex review trip-wire).
+    artifact_scope = _resolve_artifact_cli_scope(scope_flag)
+
     if "skills" in inc:
         click.echo("")
-        _print_skills_generate(root)
+        _print_skills_generate(root, scope=artifact_scope)
 
     if "agents" in inc:
         click.echo("")
-        _print_agents_generate(root, strict=strict, on_drop=on_drop)
+        _print_agents_generate(root, strict=strict, on_drop=on_drop, scope=artifact_scope)
 
     if "commands" in inc:
         click.echo("")
-        _print_commands_generate(root, strict=strict, on_drop=on_drop)
+        _print_commands_generate(root, strict=strict, on_drop=on_drop, scope=artifact_scope)
 
     if "settings" in inc:
         click.echo("")
+        # Settings has its own (separate from artifact) scope axis — see
+        # ADR-0010. ``_resolve_cli_scope`` consults ``cfg.hooks.target_scope``;
+        # this is intentional for settings and intentionally NOT used for
+        # artifacts above.
         scope = _resolve_cli_scope(scope_flag)
         if _confirm_settings_host_writes(root, scope=scope, yes=yes):
             _print_settings_generate(root, scope=scope, allow_host_writes=True)
@@ -1719,6 +1796,183 @@ def _print_migrate_preview(rows: list[MigrateRow], *, skills_section: bool) -> N
         )
 
 
+def _migrate_scope_dispatch(
+    asset_type: str,
+    name: str,
+    from_scope: str | None,
+    to_scope: str,
+    apply_: bool,
+    yes: bool,
+    confirm_project_shared: bool,
+) -> None:
+    """ADR-0011 PR-E4 scope-tier move for agents / commands / skills.
+
+    Calls :func:`memtomem.context.migrate.migrate_scope` after running the
+    project_shared confirmation gate. Click prompts and stdout writes
+    live here; the pure module stays prompt-free.
+    """
+    project_root = _find_project_root()
+
+    # Pre-flight Gate B (project_shared opt-in, mirroring memory-migrate).
+    # Apply only — dry-run reads the same plan without touching disk and
+    # is the recommended way to inspect the move before opting in.
+    if to_scope == "project_shared" and apply_ and not confirm_project_shared:
+        if yes:
+            raise click.ClickException(
+                "--to project_shared requires --confirm-project-shared. "
+                "--yes alone is not sufficient: project_shared writes go "
+                "to the git-tracked tier and require explicit opt-in."
+            )
+        if not click.confirm(
+            "\nThis will move the canonical into the git-tracked project_shared tier. Continue?",
+            default=False,
+        ):
+            raise click.Abort()
+
+    try:
+        result = migrate_scope(
+            asset_type,  # type: ignore[arg-type]
+            name,
+            from_scope=from_scope,  # type: ignore[arg-type]
+            to_scope=to_scope,  # type: ignore[arg-type]
+            project_root=project_root,
+            apply_=apply_,
+        )
+    except (FileNotFoundError, ValueError, InvalidNameError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    except PrivacyScanError as exc:
+        raise click.ClickException(exc.message) from exc
+    except MigratePartialError as exc:
+        # Fan-out cleanup never ran (raise short-circuited), and the
+        # "Next: run sync ..." hint at the bottom of
+        # _print_migrate_scope_result is skipped because we exit before
+        # the result rendering — the user sees only the recovery hint
+        # embedded in exc.message.
+        raise click.ClickException(exc.message) from exc
+
+    _print_migrate_scope_result(result, apply_=apply_)
+
+    # ADR-0011 project_local contract: ``.memtomem/*.local/`` and the
+    # staging dir must be gitignored. ``mm context init --scope
+    # project_local`` already appends the marker, but a user can land
+    # on project_local for the first time via ``mm context migrate
+    # <kind> <name> --to project_local --apply`` without ever running
+    # init — without this call the new local-draft tier shows up in
+    # ``git status`` and risks being committed by accident
+    # (#895 P2 review #3 fold).
+    if apply_ and to_scope == "project_local":
+        wrote, msg = _append_gitignore_marker(project_root)
+        if wrote:
+            click.secho(
+                "  Appended .gitignore marker (.memtomem/*.local/, .memtomem/.staging/)",
+                fg="green",
+            )
+        elif msg == "no_git_repo_pyproject_only":
+            click.secho(
+                "  warning: project root resolved via pyproject.toml but `.git` "
+                "missing — .gitignore not appended. Run `git init` first to "
+                "git-protect the local tier.",
+                fg="yellow",
+            )
+        elif msg == "no_project_signal":
+            click.secho(
+                "  warning: no .git and no pyproject.toml in project root — "
+                ".gitignore append skipped.",
+                fg="yellow",
+            )
+        # ``already_present`` is silent — the marker is already there,
+        # the user does not need a redundant green tick on every migrate.
+
+
+def _print_migrate_scope_result(result: MigrateScopeResult, *, apply_: bool) -> None:
+    """User-facing summary for one scope-tier migration.
+
+    Dry-run prints the plan + a "run with --apply" hint. Apply prints a
+    green-tick line plus any cleaned runtime fan-out paths so the user
+    sees both halves of the move (canonical + stale fan-out).
+    """
+    layout_note = " (flat layout)" if result.layout == "flat" else ""
+    click.echo(f"Plan: migrate {result.kind}/{result.name}{layout_note}")
+    click.echo(f"  from {result.from_scope}: {result.src_path}")
+    click.echo(f"  to   {result.to_scope}: {result.dst_path}")
+
+    if not apply_:
+        click.echo("\nRun with --apply to execute.")
+        click.echo(
+            f"After apply, run `mm context sync --scope {result.to_scope}` "
+            f"to refresh runtime fan-out."
+        )
+        return
+
+    click.secho(
+        f"  ✓ moved {result.kind}/{result.name}: {result.from_scope} → {result.to_scope}",
+        fg="green",
+    )
+    if result.fanout_cleaned:
+        click.echo(
+            f"  cleaned {len(result.fanout_cleaned)} stale runtime fan-out "
+            f"target(s) at scope='{result.from_scope}':"
+        )
+        for path in result.fanout_cleaned:
+            click.echo(f"    - {path}")
+    click.echo(
+        f"\nNext: run `mm context sync --scope {result.to_scope}` to "
+        f"regenerate runtime fan-out at the new tier."
+    )
+
+
+def _migrate_memory_dispatch(
+    operand: str | None,
+    from_scope: str | None,
+    to_scope: str | None,
+    apply_: bool,
+    force: bool,
+    yes: bool,
+    confirm_project_shared: bool,
+) -> None:
+    """ADR-0011 PR-E4 cross-link to ``mm context memory-migrate``.
+
+    The operand is a SOURCE PATH (not a name) since memory canonical
+    files are addressed by absolute path, not by an artifact-style name.
+    Both ``--from`` and ``--to`` are required (memory has no
+    auto-detection — paths can be ambiguous between user / project_shared
+    / project_local in nested layouts). Behaviour is byte-identical to
+    ``mm context memory-migrate`` since both call the same impl.
+    """
+    if operand is None:
+        raise click.UsageError(
+            "source path argument is required for kind=memory (operand is a path, not a name)"
+        )
+    if from_scope is None or to_scope is None:
+        raise click.UsageError("--from and --to are both required for kind=memory")
+    if force:
+        raise click.UsageError(
+            "--force does not apply to memory migration (no flat/dir layouts in this kind)"
+        )
+    if from_scope == to_scope:
+        raise click.ClickException("--from and --to must differ.")
+
+    source = Path(operand).expanduser()
+    if not source.exists():
+        raise click.ClickException(f"source path does not exist: {source}")
+    if not source.is_file():
+        raise click.ClickException(f"source path must be a file, not a directory: {source}")
+    source_resolved = source.resolve()
+
+    import asyncio
+
+    asyncio.run(
+        _memory_migrate_run(
+            source_resolved,
+            from_scope,
+            to_scope,
+            apply_,
+            yes,
+            confirm_project_shared,
+        )
+    )
+
+
 def _summarize_migrate_rows(rows: list[MigrateRow]) -> str:
     """Build the post-preview summary line."""
     counts: dict[str, int] = {s: 0 for s in _MIGRATE_GLYPH}
@@ -1743,10 +1997,32 @@ def _summarize_migrate_rows(rows: list[MigrateRow]) -> str:
 @context.command("migrate")
 @click.argument(
     "asset_type",
-    type=click.Choice(["agents", "commands", "skills"]),
+    type=click.Choice(["agents", "commands", "skills", "memory"]),
     required=False,
 )
 @click.argument("name", required=False)
+@click.option(
+    "--from",
+    "from_scope",
+    type=click.Choice(list(get_args(TargetScope))),
+    default=None,
+    help=(
+        "Explicit source scope. Required for kind=memory; auto-detected "
+        "for agents/commands/skills (pass to disambiguate when the same "
+        "name lives in multiple scopes)."
+    ),
+)
+@click.option(
+    "--to",
+    "to_scope",
+    type=click.Choice(list(get_args(TargetScope))),
+    default=None,
+    help=(
+        "Target scope tier. When set, migrate moves the artifact's "
+        "canonical between ADR-0011 tiers (PR-E4). When omitted, falls "
+        "back to the PR-D flat→dir layout migration."
+    ),
+)
 @click.option(
     "--apply",
     "apply_",
@@ -1758,7 +2034,11 @@ def _summarize_migrate_rows(rows: list[MigrateRow]) -> str:
     "--force",
     is_flag=True,
     default=False,
-    help="Migrate dirty flat files; each gets a .bak sibling. Requires --apply.",
+    help=(
+        "Flat→dir mode: migrate dirty flat files; each gets a .bak sibling. "
+        "Has no effect in scope-tier mode (--to) — destinations always "
+        "refuse on conflict in PR-E4. Requires --apply."
+    ),
 )
 @click.option(
     "--yes",
@@ -1767,33 +2047,92 @@ def _summarize_migrate_rows(rows: list[MigrateRow]) -> str:
     default=False,
     help="Skip the confirmation prompt. Requires --apply.",
 )
+@click.option(
+    "--confirm-project-shared",
+    "confirm_project_shared",
+    is_flag=True,
+    default=False,
+    help=(
+        "Required (in addition to --apply) when --to=project_shared "
+        "or kind=memory --to=project_shared, mirroring "
+        "``mm context memory-migrate``. --yes alone does not satisfy "
+        "the project_shared opt-in."
+    ),
+)
 def migrate_cmd(
     asset_type: str | None,
     name: str | None,
+    from_scope: str | None,
+    to_scope: str | None,
     apply_: bool,
     force: bool,
     yes: bool,
+    confirm_project_shared: bool,
 ) -> None:
-    """Convert flat-layout context assets to canonical directory layout.
+    """Migrate canonical context artifacts.
 
-    PR-C made the directory layout canonical for agents and commands;
-    pre-PR-C installs and reverse-imports leave behind flat files
-    (``agents/<name>.md``). This command renames each such file to
-    ``agents/<name>/agent.md`` (and the equivalent for commands) atomically
-    via ``os.replace``.
+    Two modes share this verb:
 
-    Skills are always directory layout (Agent Skills spec) and are not
-    in scope. Invoking ``migrate skills`` exits 0 with an informational
-    message rather than an error.
+    * **Flat→dir layout** (PR-D, default when ``--to`` is omitted) —
+      converts pre-PR-C ``agents/<name>.md`` to ``agents/<name>/agent.md``.
+      Skills are always directory layout (Agent Skills spec) and exit 0
+      with an informational message in this mode.
+    * **Scope-tier move** (PR-E4, when ``--to`` is set) — moves the
+      canonical between ADR-0011 tiers (``user`` /
+      ``project_shared`` / ``project_local``). Supports agents,
+      commands, skills, and memory (memory delegates to
+      ``mm context memory-migrate``'s impl with parity behaviour).
 
-    Default mode is a dry-run preview; pass ``--apply`` to execute. Dirty
-    flat files (mtime > installed_at) require ``--force`` and produce a
-    ``.bak`` sibling before mutation, mirroring ``mm context update --force``.
+    Default mode is a dry-run preview; pass ``--apply`` to execute.
     """
     if (force or yes) and not apply_:
         raise click.UsageError("--force / --yes are only valid with --apply")
     if name is not None and asset_type is None:
         raise click.UsageError("name argument requires asset_type")
+
+    # ── PR-E4 scope-mode dispatch ────────────────────────────────────
+    if asset_type == "memory":
+        _migrate_memory_dispatch(
+            name,
+            from_scope,
+            to_scope,
+            apply_,
+            force,
+            yes,
+            confirm_project_shared,
+        )
+        return
+    if to_scope is not None:
+        if asset_type is None:
+            raise click.UsageError("--to requires an asset_type")
+        if asset_type not in SCOPE_MIGRATABLE_KINDS:
+            raise click.UsageError(
+                f"--to is not supported for asset_type={asset_type!r} "
+                f"(use one of {SCOPE_MIGRATABLE_KINDS} or 'memory')"
+            )
+        if name is None:
+            raise click.UsageError("name argument is required with --to")
+        if force:
+            raise click.UsageError(
+                "--force does not apply to --to scope-tier moves "
+                "(destinations always refuse on conflict in PR-E4)"
+            )
+        _migrate_scope_dispatch(
+            asset_type,
+            name,
+            from_scope,
+            to_scope,
+            apply_,
+            yes,
+            confirm_project_shared,
+        )
+        return
+
+    # ── Flat→dir mode validation gates ───────────────────────────────
+    if from_scope is not None:
+        raise click.UsageError("--from requires --to (scope-tier mode)")
+    if confirm_project_shared:
+        raise click.UsageError("--confirm-project-shared requires --to")
 
     if asset_type == "skills":
         click.secho(

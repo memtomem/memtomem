@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context.detector import SKILL_DIRS
+from memtomem.context.privacy_scan import PrivacyScanError
 from memtomem.context.skills import (
     CANONICAL_SKILL_ROOT,
     SKILL_GENERATORS,
@@ -342,6 +343,8 @@ async def sync_skills(
                 result = generate_all_skills(project_root)
     except TimeoutError:
         raise HTTPException(503, "Skills sync timed out — another sync may be in progress")
+    except PrivacyScanError as exc:
+        raise HTTPException(422, exc.message) from exc
     return {
         "generated": [
             {"runtime": rt, "path": _safe_rel(p, project_root)} for rt, p in result.generated

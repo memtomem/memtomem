@@ -24,6 +24,7 @@ from memtomem.context.commands import (
     parse_canonical_command,
 )
 from memtomem.context.detector import COMMAND_DIRS
+from memtomem.context.privacy_scan import PrivacyScanError
 from memtomem.web.deps import get_project_root
 from memtomem.web.routes.context_projects import resolve_scope_root
 from memtomem.web.routes._locks import _gateway_lock
@@ -377,6 +378,8 @@ async def sync_commands(
                 result = generate_all_commands(project_root, on_drop=on_drop)
     except TimeoutError:
         raise HTTPException(503, "Commands sync timed out — another sync may be in progress")
+    except PrivacyScanError as exc:
+        raise HTTPException(422, exc.message) from exc
     return {
         "generated": [
             {"runtime": rt, "path": _safe_rel(p, project_root)} for rt, p in result.generated
