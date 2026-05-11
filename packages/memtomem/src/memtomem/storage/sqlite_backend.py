@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sqlite3
 import threading
 from contextlib import asynccontextmanager
@@ -841,8 +842,8 @@ class SqliteBackend(
             params.append(norm_path(source_exact))
         elif source_prefix is not None:
             prefix = norm_path(source_prefix)
-            # Component-aware prefix: anchor on ``<prefix>/`` so a request for
-            # ``docs`` does not match ``docsuite``. ``norm_path`` already
+            # Component-aware prefix: anchor on ``<prefix><sep>`` so a request
+            # for ``docs`` does not match ``docsuite``. ``norm_path`` already
             # resolves symlinks and NFC-normalises so the prefix and stored
             # paths share the same canonical form.
             #
@@ -851,10 +852,18 @@ class SqliteBackend(
             # does not override LIKE — so ``LIKE 'docs/%'`` would also match
             # ``DOCS/foo.md`` on a case-sensitive filesystem and turn an
             # audit ``--source docs`` into a false-positive over an unrelated
-            # tree (Codex review on #905 P2). ``substr`` equality is a binary
-            # string compare, case-sensitive, and avoids the LIKE/GLOB
-            # metacharacter escape contract entirely.
-            anchored = prefix.rstrip("/") + "/"
+            # tree (Codex review on #905 P2-a). ``substr`` equality is a
+            # binary string compare, case-sensitive, and avoids the LIKE /
+            # GLOB metacharacter escape contract entirely.
+            #
+            # Separator is platform-native: stored paths come from
+            # ``norm_path`` → ``Path.resolve()`` which emits ``\`` on Windows
+            # and ``/`` on POSIX. Hardcoding ``/`` would build a prefix like
+            # ``C:\repo\docs/`` on Windows and silently match no rows under
+            # ``C:\repo\docs\...`` (Codex P2-b). Strip both separator forms
+            # from the input so a caller passing a POSIX-style filter on
+            # Windows (e.g. ``--source docs/sub``) still anchors correctly.
+            anchored = prefix.rstrip("/\\") + os.sep
             where_parts.append("substr(source_file, 1, ?) = ?")
             params.append(len(anchored))
             params.append(anchored)

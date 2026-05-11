@@ -158,6 +158,74 @@ class TestSourcePrefixCaseSensitivity:
         assert {r.chunk_id for r in rows} == {a_id, b_id}
 
 
+class TestSourcePrefixSeparator:
+    """Codex #905 P2-b pin: prefix anchor uses ``os.sep``.
+
+    On Windows ``norm_path`` (and the indexer that wrote the stored rows)
+    emits paths with ``\\``. The anchor that the audit enumerator builds
+    must use the same separator or ``substr`` equality matches nothing
+    and a directory-scoped audit silently reports zero scanned chunks.
+
+    The test simulates a Windows runtime by monkey-patching ``os.sep``
+    AND ``norm_path`` — ``Path.resolve()`` on the host (POSIX in CI)
+    always emits ``/`` regardless of how ``os.sep`` is patched, so the
+    helper that the production code calls must also be patched to
+    return a Windows-shape string. Both halves of the simulation are
+    required per ``feedback_pin_test_mutation_validation`` (cross-
+    platform constants need both ``monkeypatch.setattr(os, ...)`` and a
+    fake input shape).
+    """
+
+    @pytest.mark.asyncio
+    async def test_windows_shape_prefix_matches_backslash_stored(self, backend, monkeypatch):
+        import os as os_mod
+        from memtomem.storage import sqlite_backend
+
+        monkeypatch.setattr(os_mod, "sep", "\\")
+        monkeypatch.setattr(
+            sqlite_backend,
+            "norm_path",
+            lambda p: "C:\\repo\\docs",
+        )
+
+        # Stored paths use the Windows separator.
+        inside_id = _seed(backend, source_file="C:\\repo\\docs\\inside.md")
+        # Sibling tree must NOT match: ``docs2`` shares the ``docs``
+        # bytes but is a different directory. The anchor's trailing
+        # separator is what filters it out.
+        _seed(backend, source_file="C:\\repo\\docs2\\sibling.md")
+
+        # ``Path("ignored")`` flows through the monkey-patched
+        # ``norm_path``, which returns the canonical Windows-shape
+        # ``C:\repo\docs`` regardless of input.
+        rows = await _collect(backend, scope="user", source_prefix=Path("ignored"))
+        assert [r.chunk_id for r in rows] == [inside_id]
+
+    @pytest.mark.asyncio
+    async def test_mixed_separator_input_strips_both_forms(self, backend, monkeypatch):
+        """A caller on Windows may pass ``--source docs/sub`` (POSIX-style
+        slashes inside the value); the anchor still uses the platform sep
+        regardless of which trailing form the caller stripped or didn't.
+        """
+        import os as os_mod
+        from memtomem.storage import sqlite_backend
+
+        monkeypatch.setattr(os_mod, "sep", "\\")
+        # Caller's resolved prefix carries a trailing ``/`` even though
+        # stored paths use ``\``. The rstrip("/\\") + os.sep dance must
+        # collapse that into a Windows-shape anchor.
+        monkeypatch.setattr(
+            sqlite_backend,
+            "norm_path",
+            lambda p: "C:\\repo\\docs/",
+        )
+
+        inside_id = _seed(backend, source_file="C:\\repo\\docs\\inside.md")
+
+        rows = await _collect(backend, scope="user", source_prefix=Path("ignored"))
+        assert [r.chunk_id for r in rows] == [inside_id]
+
+
 class TestExclusiveContract:
     @pytest.mark.asyncio
     async def test_both_filters_at_once_raises(self, backend, tmp_path):
