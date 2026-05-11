@@ -16,6 +16,7 @@ of flake (indexing timing, embedding model presence, port collisions).
 
 from __future__ import annotations
 
+import json
 import socket
 import threading
 import time
@@ -82,3 +83,39 @@ def mm_web_url() -> Iterator[str]:
     finally:
         server.should_exit = True
         thread.join(timeout=5.0)
+
+
+def install_default_stubs(page) -> None:
+    """Stub every endpoint the SPA hits during boot so the page renders
+    cleanly without any real components wired up.
+
+    Boot fetches not stubbed individually get a generic empty-shape
+    response. The pattern is intentionally permissive — specs override
+    only the endpoints they assert on.
+
+    **Last-route-wins.** ``page.route`` resolves last-registered-wins,
+    so the catch-all goes FIRST and specific overrides go LAST. Specs
+    that need to assert on a particular endpoint register their
+    capturing handler AFTER calling this helper, and the same last-wins
+    rule gives the spec-local handler precedence over the default empty
+    response.
+
+    Extracted from 7 per-spec duplicates per #879 (PR #878 review note).
+    ``test_sources_reindex_retry.py`` uses a different stub set
+    (memory-dirs scope) and intentionally keeps its own local helper.
+    """
+
+    def _ok(route, payload):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(payload),
+        )
+
+    page.route("**/api/**", lambda r: _ok(r, {}))
+    page.route("**/api/system/ui-mode", lambda r: _ok(r, {"mode": "prod"}))
+    page.route("**/api/system/model-readiness", lambda r: _ok(r, {"ready": True}))
+    page.route("**/api/sources", lambda r: _ok(r, {"sources": []}))
+    page.route("**/api/namespaces", lambda r: _ok(r, {"namespaces": []}))
+    page.route("**/api/stats", lambda r: _ok(r, {}))
+    page.route("**/api/privacy/patterns", lambda r: _ok(r, {"patterns": []}))

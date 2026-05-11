@@ -28,35 +28,16 @@ from pathlib import Path
 
 import pytest
 
+from .conftest import install_default_stubs
+
 pytestmark = pytest.mark.browser
 
 
-def _install_default_stubs(page) -> None:
-    """Stub every endpoint the SPA hits during boot.
-
-    Mirrors the catch-all pattern in ``test_tag_filter_mutation.py``;
-    ``page.route`` resolves last-registered-wins so the catch-all goes
-    first and specific overrides go last.
-    """
-
-    def _ok(route, payload):
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(payload),
-        )
-
-    page.route("**/api/**", lambda r: _ok(r, {}))
-    page.route("**/api/system/ui-mode", lambda r: _ok(r, {"mode": "prod"}))
-    page.route("**/api/system/model-readiness", lambda r: _ok(r, {"ready": True}))
-    page.route("**/api/sources", lambda r: _ok(r, {"sources": []}))
-    page.route("**/api/namespaces", lambda r: _ok(r, {"namespaces": []}))
-    page.route("**/api/stats", lambda r: _ok(r, {}))
-    # Empty privacy patterns disables the client-side pre-check so the
-    # spec exercises only the server-driven 403 path. Without this, any
-    # ``sk-…`` content would trip the pre-check dialog *before* the
-    # request leaves the browser and the server stub would never fire.
-    page.route("**/api/privacy/patterns", lambda r: _ok(r, {"patterns": []}))
+# Empty privacy patterns (registered by ``install_default_stubs``) disables
+# the client-side pre-check so these specs exercise only the server-driven
+# 403 path. Without it, any ``sk-…`` content would trip the pre-check
+# dialog *before* the request leaves the browser and the server stub would
+# never fire.
 
 
 def test_api_add_403_triggers_confirm_and_retries_with_force_unsafe(page, mm_web_url: str) -> None:
@@ -70,7 +51,7 @@ def test_api_add_403_triggers_confirm_and_retries_with_force_unsafe(page, mm_web
     ``{"detail": "redaction_blocked"}`` would silently miss the parser
     branch in ``api()``, which is the bug this spec exists to guard.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
 
     calls: list[dict] = []
 
@@ -168,7 +149,7 @@ def test_api_upload_per_file_redaction_triggers_batch_retry_with_query_param(
     ``uploadFilesWithRedactionRetry`` correctly parses the string-shape
     error and adds the bypass via the URL query param, not the body.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
 
     calls: list[str] = []
 
@@ -264,7 +245,7 @@ def test_api_upload_mixed_batch_retries_only_blocked_file(
     clean entry stays out of the request body, so disk and index reflect
     one copy of each file regardless of mixed-batch confirms.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
 
     calls: list[tuple[str, str]] = []
 
@@ -393,7 +374,7 @@ def test_api_upload_retry_with_persistent_error_row_does_not_claim_bypassed(
     the validation, the operator sees "entry written" while the per-file
     list shows the file unwritten.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
 
     def _upload_handler(route):
         if "force_unsafe=true" in route.request.url:
@@ -502,7 +483,7 @@ def test_api_upload_retry_with_truncated_row_count_does_not_claim_bypassed(
     ``redaction_blocked`` state, so the per-file UI is honest, but the
     aggregate toast must not claim the bypass succeeded.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
 
     def _upload_handler(route):
         if "force_unsafe=true" in route.request.url:
@@ -612,7 +593,7 @@ def test_api_upload_retry_with_extra_row_count_clamps_succeeded_count(
     read "3 of 1 written" — nonsensical and worse, suggests over-success
     rather than the underlying contract violation.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
 
     def _upload_handler(route):
         if "force_unsafe=true" in route.request.url:
@@ -725,7 +706,7 @@ def test_api_add_403_cancel_does_not_retry_or_emit_bypass_toast(page, mm_web_url
     helper's ``if (!ok) return null`` branch is dropped) would still
     pass the affirmative assertion.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
 
     calls: list[dict] = []
 
@@ -791,10 +772,10 @@ def test_api_upload_mixed_batch_cancel_refreshes_stale_state(
     pre-upload state. ``page.expect_request`` deterministically waits
     for the cancel click to dispatch ``GET /api/stats`` (the unified
     refresh branch's call) — better than racing a fixed sleep against
-    arbitrary boot traffic. ``_install_default_stubs`` already fulfills
+    arbitrary boot traffic. ``install_default_stubs`` already fulfills
     ``/api/stats``, so no explicit route is needed.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
 
     def _upload_handler(route):
         # Single fulfillment — the user cancels, so no retry POST fires.
@@ -877,7 +858,7 @@ def test_api_upload_mixed_batch_cancel_prunes_landed_clean_file_from_selection(
     if the prune is removed: the post-cancel ``#upload-file-list``
     contains both basenames, not just the blocked one.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
 
     def _upload_handler(route):
         # Single fulfillment — user cancels, no retry POST.
@@ -964,7 +945,7 @@ def test_api_upload_mixed_batch_partial_bypass_prunes_landed_clean_file(
     same ``selectedFiles.filter`` logic but via different code paths,
     so each needs its own pin.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
 
     def _upload_handler(route):
         if "force_unsafe=true" in route.request.url:
