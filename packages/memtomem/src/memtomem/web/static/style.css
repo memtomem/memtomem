@@ -127,6 +127,17 @@ header h1 { font-size: 1.2rem; font-weight: 700; color: var(--accent); letter-sp
   border-radius: var(--radius); transition: color 0.15s;
 }
 .header-actions .btn-icon:hover { color: var(--text); }
+#lang-toggle {
+  min-width: 24px;
+  padding: 2px 4px;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: 0;
+  border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+  border-radius: 6px;
+}
 
 /* ── Tabs ── */
 .tab-nav {
@@ -3313,4 +3324,3 @@ body.help-hidden #help-toggle { opacity: 0.5; }
   font-size: 0.85rem;
   margin: 24px 0;
 }
-
