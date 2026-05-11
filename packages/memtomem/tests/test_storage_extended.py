@@ -304,6 +304,37 @@ class TestStorageExtended:
         cov = await storage.get_dense_coverage()
         assert cov == {"total": 2, "with_dense": 2}
 
+    async def test_dense_coverage_ignores_stale_vec_sidecar(self, components):
+        # Codex carry-over on #898: if ``chunks_vec`` keeps a row whose
+        # rowid no longer points at a ``chunks`` row (interrupted
+        # upsert, concurrent writer — orphan_gc.py treats this state
+        # as expected), the rollup must still report retrievable
+        # chunks. A raw ``COUNT(*) FROM chunks_vec`` would show 100%
+        # coverage while a real chunk is silently BM25-only, hiding
+        # the exact failure mode this telemetry exists to surface.
+        from memtomem.storage.sqlite_helpers import serialize_f32
+
+        storage = components.storage
+        chunk = make_chunk(content="real", embedding=_varied_embedding(0.1))
+        await storage.upsert_chunks([chunk])
+
+        # Inject a stale vec sidecar at a rowid that no ``chunks`` row
+        # owns (production source: a partial commit between the chunks
+        # delete and the chunks_vec delete in a delete-by-source path).
+        db = storage._get_db()
+        db.execute(
+            "INSERT INTO chunks_vec(rowid, embedding) VALUES (?, ?)",
+            (999999, serialize_f32(_varied_embedding(0.5))),
+        )
+        db.commit()
+
+        cov = await storage.get_dense_coverage()
+        assert cov["total"] == 1
+        # 1 retrievable chunk; the stale sidecar must not count toward
+        # ``with_dense`` — otherwise a real BM25-only chunk would be
+        # masked by an orphan row.
+        assert cov["with_dense"] == 1
+
     async def test_dense_coverage_zero_when_vec_table_dropped(self, components):
         # ``reset_embedding_meta`` drops and recreates ``chunks_vec`` but
         # leaves ``chunks`` intact, which is the production shape of the
