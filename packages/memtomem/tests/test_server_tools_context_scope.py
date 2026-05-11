@@ -259,12 +259,13 @@ async def test_mem_context_diff_artifact_only_skips_settings_scope_resolve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Same regression pin as ``mem_context_generate`` / ``mem_context_sync``
-    but for ``mem_context_diff``. Diff is read-only, but pre-#887 it called
+    but for ``mem_context_diff``. Pre-#887 the handler called
     ``_resolve_mcp_scope()`` eagerly with no argument inside the
     ``if "settings" in inc:`` block — which still meant that a poisoned
     settings resolver couldn't be sidestepped via artifact-only diffs.
     After the fix, omitting ``settings`` from ``include`` must never reach
-    the settings scope resolver.
+    the settings scope resolver, AND the artifact diff must compare the
+    requested ``scope`` tier (not the default ``project_shared``).
     """
     project = _make_project(tmp_path, monkeypatch)
     home = tmp_path / "home"
@@ -284,7 +285,49 @@ async def test_mem_context_diff_artifact_only_skips_settings_scope_resolve(
     monkeypatch.setattr(context_mod, "_resolve_mcp_scope", _boom)
 
     out = await mem_context_diff(include="agents", scope="user")
+    # Settings resolver never reached.
     assert "internal error" not in out.lower()
+    # And the artifact diff actually picked up the user-tier canonical
+    # rather than defaulting to project_shared (which has nothing).
+    assert "Sub-agents:" in out
+    assert "ok" in out
+
+
+@pytest.mark.anyio
+async def test_mem_context_diff_scope_user_reads_user_canonical(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``mem_context_diff(include="agents", scope="user")`` must compare the
+    USER-tier canonical against the user-tier runtime, mirroring how
+    ``mem_context_generate`` / ``mem_context_sync`` route their scope. Pre-fix
+    the diff passed no ``scope=`` argument to ``diff_agents``, so the
+    handler silently used the default ``project_shared`` tier and reported
+    "No sub-agents to compare." for user-tier installations. Codex flagged
+    this on PR #920.
+    """
+    project = _make_project(tmp_path, monkeypatch)
+    home = tmp_path / "home"
+    set_home(monkeypatch, home)
+    user_canonical = canonical_artifact_dir("agents", "user", project)
+    user_canonical.mkdir(parents=True)
+    (user_canonical / "scoped.md").write_text(_clean_agent_body("scoped"), encoding="utf-8")
+    runtime = home / ".claude" / "agents"
+    runtime.mkdir(parents=True)
+    (runtime / "scoped.md").write_text(_clean_agent_body("scoped"), encoding="utf-8")
+
+    # Default (no scope=) reads project_shared and finds nothing — pins the
+    # bug Codex caught.
+    default_out = await mem_context_diff(include="agents")
+    assert "No sub-agents to compare." in default_out
+
+    # scope="user" picks up the user-tier canonical and reports it across
+    # the registered runtimes (status — "in sync" / "out of sync" /
+    # "missing target" — depends on the runtime-side generator output,
+    # which is not the scope axis under test here).
+    scoped_out = await mem_context_diff(include="agents", scope="user")
+    assert "Sub-agents:" in scoped_out
+    assert "scoped" in scoped_out
 
 
 @pytest.mark.anyio
