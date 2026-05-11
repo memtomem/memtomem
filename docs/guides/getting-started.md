@@ -439,6 +439,16 @@ Run `mm context --help` for the full fan-out matrix across editors (Claude Code,
 
 > Cursor, OpenAI Codex, and GitHub Copilot generators concatenate the `Rules` and `Style` sections from `context.md` into a single block — `mm context generate` warns on stderr when both are populated. `context.md` remains the source of truth; edit there, not in the generated files.
 
+> **Where do canonical files live? (3-tier model)** memtomem stores
+> canonical agents / skills / commands under one of three **tiers**: `user`
+> (`~/.memtomem/<artifact>/`), `project_shared` (`<proj>/.memtomem/<artifact>/`,
+> git-tracked, the default for these artifacts), or `project_local`
+> (`<proj>/.memtomem/<artifact>.local/`, gitignored, draft tier — no runtime
+> fan-out). Pick the tier per write with `--scope=<tier>` on `mm context
+> init` / `sync` / `migrate`. Tier (canonical residency) is distinct from
+> the runtime **scope** the canonical fans out to under `.claude/` —
+> ADR-0016 documents the split; ADR-0011 §1 has the per-artifact table.
+
 ---
 
 ## Optional: STM Proxy — Proactive Memory Surfacing

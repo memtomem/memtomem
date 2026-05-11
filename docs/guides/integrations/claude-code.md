@@ -161,13 +161,15 @@ mem_index(path="~/notes", recursive=True)
 You can automate memtomem using Claude Code's hooks system.
 Add the following to `~/.claude/settings.json`:
 
-> **Scope** (ADR-0010 §3): the path memtomem writes to is controlled by
-> the `hooks.target_scope` config field (default: `user` →
-> `~/.claude/settings.json`). Set `hooks.target_scope = project_shared`
-> to land hooks at `<project>/.claude/settings.json` (committed) or
-> `project_local` for `<project>/.claude/settings.local.json`
-> (gitignored). Per-invocation override: `mm context sync
-> --include=settings --scope=project_local`.
+> **Tier** (ADR-0010 §3; ADR-0016 §2 settings special-case): for
+> settings, the `hooks.target_scope` tier selects the **runtime fan-out
+> target** under `~/.claude/` or `<project>/.claude/`, not a canonical
+> residency — settings have one canonical file at
+> `<project>/.memtomem/settings.json` regardless of tier. The three
+> values: `user` (default) → `~/.claude/settings.json`; `project_shared`
+> → `<project>/.claude/settings.json` (committed); `project_local` →
+> `<project>/.claude/settings.local.json` (gitignored). Per-invocation
+> override: `mm context sync --include=settings --scope=project_local`.
 
 ```json
 {

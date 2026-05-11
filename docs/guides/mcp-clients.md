@@ -35,6 +35,14 @@ Precedence is `local > project > user`, so a `local` entry can override
 a shared team `project` server when you need to test with personal
 credentials.
 
+> **Different axis from memtomem's canonical tier.** The `-s local /
+> -s project / -s user` flag above selects where Claude Code records
+> the MCP server entry; memtomem's own canonical artifacts (agents,
+> skills, commands, memory) carry an independent `user / project_shared
+> / project_local` **tier** (ADR-0016) chosen per write via `mm context
+> ... --scope=<tier>`. Keeping the two axes separate is intentional —
+> server registration and canonical residency are unrelated decisions.
+
 ### Add via command (`local` / `user`)
 
 ```bash
@@ -335,7 +343,7 @@ uses, so the output is identical. Useful as a sanity check between
 | **Data** | `mem_export`, `mem_import` |
 | **Config** | `mem_stats`, `mem_status`, `mem_config`\*, `mem_embedding_reset`\*, `mem_reset`\* |
 | **Evaluation** | `mem_eval` |
-| **Context** | `mem_context_detect`, `mem_context_init`, `mem_context_generate`, `mem_context_diff`, `mem_context_sync` (context tools accept `include="skills,agents,commands"` for canonical artifact workflows; `init`, `generate`, and `sync` accept `scope="project_shared\|user\|project_local"`; `generate`/`sync` also accept `strict=True` to fail on sub-agent or command field drops) |
+| **Context** | `mem_context_detect`, `mem_context_init`, `mem_context_generate`, `mem_context_diff`, `mem_context_sync` (context tools accept `include="skills,agents,commands"` for canonical artifact workflows; `init`, `generate`, and `sync` accept `scope="project_shared\|user\|project_local"` — the canonical **tier** per ADR-0016 §2; `generate`/`sync` also accept `strict=True` to fail on sub-agent or command field drops) |
 
 \* Requires `MEMTOMEM_TOOL_MODE=full`. In `core` or `standard` mode, use `mm config` (CLI) or the Web UI Settings tab instead.
 
