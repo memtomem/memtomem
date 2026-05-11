@@ -638,6 +638,20 @@ def _promote_move(staging: Path, dst: Path) -> None:
     os.replace(staging, dst)
 
 
+# Per-(kind, runtime) file suffix for non-skill fan-out cleanup. Source of
+# truth lives next to the generators (``commands._COMMAND_RUNTIME_SUFFIX``
+# / ``agents._AGENT_RUNTIME_SUFFIX``), but importing those introduces a
+# circular-import risk at module load time and would also re-couple
+# migrate.py to internal names. Mirror them verbatim here — a regression
+# guard (``test_e4_runtime_suffix_parity_with_generators``) pins the
+# two-way agreement so a future runtime addition cannot drift the cleanup
+# silently.
+_NON_SKILL_FANOUT_SUFFIX: dict[ArtifactKind, dict[str, str]] = {
+    "agents": {"claude": ".md", "gemini": ".md", "codex": ".toml"},
+    "commands": {"claude": ".md", "gemini": ".toml", "codex": ".md"},
+}
+
+
 def _remove_runtime_fanout_for(
     kind: ArtifactKind,
     name: str,
@@ -647,14 +661,21 @@ def _remove_runtime_fanout_for(
     """Remove runtime fan-out targets for one artifact at one scope.
 
     Best-effort cleanup invoked after a successful canonical move so the
-    pre-migration scope's runtime entries (``~/.claude/agents/foo.md``
-    etc.) do not linger as orphans. Returns the list of removed paths
-    for telemetry / verification.
+    pre-migration scope's runtime entries (``~/.claude/agents/foo.md``,
+    ``~/.gemini/commands/foo.toml``, ``~/.codex/agents/foo.toml`` etc.)
+    do not linger as orphans. Returns the list of removed paths for
+    telemetry / verification.
 
     Walks every known runtime (claude / gemini / codex). Tuples that
     :func:`runtime_fanout_root` reports as ``NO_FANOUT`` are skipped
     (project_local entries, codex commands at project tiers, etc.).
     KeyError surfaces a programming error in the table — fail-loud.
+
+    Per-runtime suffix: agents/codex and commands/gemini write
+    ``.toml``, the other non-skill pairs write ``.md``. The cleanup
+    must use the same suffix the generator used at sync time or the
+    stale artifact survives and the runtime can still discover and
+    invoke the moved-away command/agent (#895 P2 review #2).
     """
     removed: list[Path] = []
     for runtime in ("claude", "gemini", "codex"):
@@ -688,7 +709,8 @@ def _remove_runtime_fanout_for(
                 except OSError as exc:
                     logger.warning("fanout cleanup: failed to remove %s: %s", target, exc)
         else:
-            target = root / f"{name}.md"
+            suffix = _NON_SKILL_FANOUT_SUFFIX[kind].get(runtime, ".md")
+            target = root / f"{name}{suffix}"
             if target.is_file():
                 try:
                     target.unlink()

@@ -727,8 +727,19 @@ def test_migrate_one_keeps_unrelated_dir_contents(tmp_path: Path) -> None:
 
 _MANIFEST_NAME = {"agents": "agent.md", "commands": "command.md", "skills": "SKILL.md"}
 _RUNTIME_REL = {
-    "agents": {"claude": ".claude/agents", "gemini": ".gemini/agents"},
-    "commands": {"claude": ".claude/commands", "gemini": ".gemini/commands"},
+    "agents": {
+        "claude": ".claude/agents",
+        "gemini": ".gemini/agents",
+        "codex": ".codex/agents",
+    },
+    "commands": {
+        "claude": ".claude/commands",
+        "gemini": ".gemini/commands",
+        # Codex has no project-tier commands fan-out (RUNTIME_FANOUT_TABLE
+        # returns NO_FANOUT for project_shared/local), but the key exists
+        # so the user-tier path can still seed for the codex regression.
+        "codex": ".codex/prompts",
+    },
     "skills": {"claude": ".claude/skills", "gemini": ".gemini/skills"},
 }
 _AGENT_BODY_CLEAN = "---\nname: foo\ndescription: a clean test agent\n---\n\nhello world\n"
@@ -794,6 +805,17 @@ def _write_canonical_dir(
     return manifest
 
 
+# Per-(kind, runtime) file suffix for non-skill runtime artifacts.
+# Mirrors the production table in
+# ``memtomem.context.migrate._NON_SKILL_FANOUT_SUFFIX`` so the test
+# helpers seed the same on-disk shape the production generators write.
+# Parity is locked by ``test_e4_runtime_suffix_parity_with_generators``.
+_RUNTIME_SUFFIX: dict[str, dict[str, str]] = {
+    "agents": {"claude": ".md", "gemini": ".md", "codex": ".toml"},
+    "commands": {"claude": ".md", "gemini": ".toml", "codex": ".md"},
+}
+
+
 def _runtime_fanout_path(
     layout: dict[str, Path], kind: str, runtime: str, scope: str, name: str
 ) -> Path:
@@ -805,15 +827,24 @@ def _runtime_fanout_path(
         base = layout["project_root"] / rel
     else:
         raise ValueError(f"runtime fan-out not defined for scope={scope!r}")
-    return base / name if kind == "skills" else base / f"{name}.md"
+    if kind == "skills":
+        return base / name
+    suffix = _RUNTIME_SUFFIX[kind].get(runtime, ".md")
+    return base / f"{name}{suffix}"
 
 
 def _seed_runtime_fanout(
-    layout: dict[str, Path], kind: str, scope: str, name: str, body: str
+    layout: dict[str, Path],
+    kind: str,
+    scope: str,
+    name: str,
+    body: str,
+    *,
+    runtimes: tuple[str, ...] = ("claude", "gemini"),
 ) -> list[Path]:
     """Pre-seed runtime fan-out targets so the migrate cleanup path has something to remove."""
     seeded: list[Path] = []
-    for runtime in ("claude", "gemini"):
+    for runtime in runtimes:
         target = _runtime_fanout_path(layout, kind, runtime, scope, name)
         if kind == "skills":
             target.mkdir(parents=True, exist_ok=True)
@@ -1611,3 +1642,101 @@ def test_e4_rollback_src_reappears_preserves_staging(scope_layout, monkeypatch, 
 
     # NEGATIVE: dst never landed.
     assert not (dst_root / "leak").exists()
+
+
+# ── #895 P2 review #2: per-runtime fan-out suffix cleanup ────────────
+
+
+def test_e4_runtime_suffix_parity_with_generators():
+    """Pin: migrate's cleanup suffix table matches the generator tables.
+
+    A future runtime addition that writes a new file format must update
+    both the generator's per-runtime suffix dict AND the cleanup table
+    in :mod:`memtomem.context.migrate`. This test fails immediately if
+    they drift, preventing a repeat of the Gemini-commands ``.toml``
+    leak (#895 P2 review #2) where the cleanup hardcoded ``.md`` and
+    silently orphaned ``.gemini/commands/<name>.toml`` after a scope
+    move.
+    """
+    from memtomem.context.agents import _AGENT_RUNTIME_SUFFIX
+    from memtomem.context.commands import _COMMAND_RUNTIME_SUFFIX
+    from memtomem.context.migrate import _NON_SKILL_FANOUT_SUFFIX
+
+    assert _NON_SKILL_FANOUT_SUFFIX["agents"] == _AGENT_RUNTIME_SUFFIX
+    assert _NON_SKILL_FANOUT_SUFFIX["commands"] == _COMMAND_RUNTIME_SUFFIX
+
+
+def test_e4_gemini_commands_toml_cleanup_on_migrate(scope_layout):
+    """#895 P2 review #2: ``mm context migrate commands foo --from
+    project_shared --to user`` must remove ``.gemini/commands/foo.toml``,
+    not leave it as an orphan after the canonical move.
+
+    Pre-fix, the cleanup probed ``.gemini/commands/foo.md`` (always
+    absent because Gemini writes TOML), so the ``.toml`` survived and
+    Gemini could still discover/run the moved-away command at the old
+    scope.
+    """
+    src = _write_canonical_dir(
+        scope_layout, "commands", "project_shared", "foo", _COMMAND_BODY_CLEAN
+    )
+    # Seed both runtimes at the source scope — claude with .md (the
+    # existing test path), gemini with .toml (the regression target).
+    seeded_claude = _seed_runtime_fanout(
+        scope_layout,
+        "commands",
+        "project_shared",
+        "foo",
+        _COMMAND_BODY_CLEAN,
+        runtimes=("claude",),
+    )
+    seeded_gemini = _seed_runtime_fanout(
+        scope_layout,
+        "commands",
+        "project_shared",
+        "foo",
+        _COMMAND_BODY_CLEAN,
+        runtimes=("gemini",),
+    )
+    # Sanity: the seed actually placed a ``.toml`` for gemini.
+    assert seeded_gemini[0].suffix == ".toml", seeded_gemini
+
+    result = _invoke_migrate(
+        _migrate_args("commands", "foo", from_scope="project_shared", to_scope="user")
+    )
+    assert result.exit_code == 0, result.output
+
+    dst = _canonical_root_for(scope_layout, "commands", "user") / "foo" / "command.md"
+    assert dst.is_file()
+    assert not src.exists()
+    # POSITIVE pins: BOTH runtimes' stale fan-out cleaned, not just claude.
+    for path in seeded_claude + seeded_gemini:
+        assert not path.exists(), f"expected stale fan-out cleaned: {path}"
+
+
+def test_e4_codex_agents_toml_cleanup_on_migrate(scope_layout):
+    """Sibling regression: codex agents write ``.toml`` too. The migrate
+    cleanup must use the right suffix so a project_shared→user move
+    does not leave ``<proj>/.codex/agents/foo.toml`` behind. Adjacent
+    bug to the gemini-commands case — same fix table covers both.
+    """
+    src = _write_canonical_dir(scope_layout, "agents", "project_shared", "foo", _AGENT_BODY_CLEAN)
+    seeded_codex = _seed_runtime_fanout(
+        scope_layout,
+        "agents",
+        "project_shared",
+        "foo",
+        _AGENT_BODY_CLEAN,
+        runtimes=("codex",),
+    )
+    assert seeded_codex[0].suffix == ".toml", seeded_codex
+
+    result = _invoke_migrate(
+        _migrate_args("agents", "foo", from_scope="project_shared", to_scope="user")
+    )
+    assert result.exit_code == 0, result.output
+
+    dst = _canonical_root_for(scope_layout, "agents", "user") / "foo" / "agent.md"
+    assert dst.is_file()
+    assert not src.exists()
+    for path in seeded_codex:
+        assert not path.exists(), f"expected stale codex fan-out cleaned: {path}"
