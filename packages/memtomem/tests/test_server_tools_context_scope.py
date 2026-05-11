@@ -8,6 +8,7 @@ import pytest
 
 from memtomem.context.scope_resolver import canonical_artifact_dir
 from memtomem.server.tools.context import (
+    mem_context_diff,
     mem_context_generate,
     mem_context_init,
     mem_context_sync,
@@ -250,3 +251,76 @@ async def test_mem_context_init_project_shared_privacy_block_surfaces(
     assert "Gate A" in out
     assert "internal error" not in out.lower()
     assert not (project / ".memtomem" / "agents" / "leak.md").exists()
+
+
+@pytest.mark.anyio
+async def test_mem_context_diff_artifact_only_skips_settings_scope_resolve(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same regression pin as ``mem_context_generate`` / ``mem_context_sync``
+    but for ``mem_context_diff``. Diff is read-only, but pre-#887 it called
+    ``_resolve_mcp_scope()`` eagerly with no argument inside the
+    ``if "settings" in inc:`` block — which still meant that a poisoned
+    settings resolver couldn't be sidestepped via artifact-only diffs.
+    After the fix, omitting ``settings`` from ``include`` must never reach
+    the settings scope resolver.
+    """
+    project = _make_project(tmp_path, monkeypatch)
+    home = tmp_path / "home"
+    set_home(monkeypatch, home)
+    canonical = canonical_artifact_dir("agents", "user", project)
+    canonical.mkdir(parents=True)
+    (canonical / "ok.md").write_text(_clean_agent_body("ok"), encoding="utf-8")
+    runtime = home / ".claude" / "agents"
+    runtime.mkdir(parents=True)
+    (runtime / "ok.md").write_text(_clean_agent_body("ok"), encoding="utf-8")
+
+    from memtomem.server.tools import context as context_mod
+
+    def _boom(*_a: object, **_kw: object) -> str:
+        raise RuntimeError("settings scope resolver poisoned for test")
+
+    monkeypatch.setattr(context_mod, "_resolve_mcp_scope", _boom)
+
+    out = await mem_context_diff(include="agents", scope="user")
+    assert "internal error" not in out.lower()
+
+
+@pytest.mark.anyio
+async def test_mem_context_diff_settings_scope_passes_through_explicit_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``mem_context_diff(include="settings", scope=...)`` must thread the
+    caller's explicit scope through to ``_resolve_mcp_scope`` rather than
+    calling it with no arguments (the pre-#887 bug). Without this, MCP
+    callers cannot target the settings diff at a non-default tier — MCP
+    has no cwd to infer from, unlike the CLI.
+    """
+    _make_project(tmp_path, monkeypatch)
+    set_home(monkeypatch, tmp_path / "home")
+
+    from memtomem.server.tools import context as context_mod
+
+    captured: list[str | None] = []
+
+    def _capture(scope: str | None = None) -> str:
+        captured.append(scope)
+        return "user"
+
+    monkeypatch.setattr(context_mod, "_resolve_mcp_scope", _capture)
+
+    await mem_context_diff(include="settings", scope="user")
+    assert captured == ["user"]
+
+    captured.clear()
+    await mem_context_diff(include="settings", scope="project_shared")
+    assert captured == ["project_shared"]
+
+    # Empty / unset scope must collapse to None so the resolver applies its
+    # config/env default — matches the lazy-resolve idiom in
+    # ``mem_context_generate`` at lines 520-524.
+    captured.clear()
+    await mem_context_diff(include="settings")
+    assert captured == [None]

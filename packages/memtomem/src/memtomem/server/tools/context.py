@@ -545,12 +545,25 @@ async def mem_context_generate(
 @register("context")
 async def mem_context_diff(
     include: str = "",
+    scope: str = "",
     ctx: CtxType = None,
 ) -> str:
     """Show sync status between context.md and agent files.
 
     Pass ``include="skills,agents,commands"`` to also compare canonical
     skills, sub-agents, and slash commands against their runtime counterparts.
+
+    Args:
+        include: Comma-separated extra artifact kinds
+            (``skills``, ``agents``, ``commands``, ``settings``).
+        scope: ADR-0010 host-write target-scope override for ``settings``
+            diff (``project_shared`` default, ``user``, or ``project_local``).
+            Only affects the ``settings`` axis — skills / agents / commands
+            diff is a read-only enumeration of runtime filesystem entries
+            where scope has no effect. MCP has no cwd to infer from, so
+            callers must pass ``scope`` explicitly to target a non-default
+            settings tier (mirrors ``mem_context_generate`` /
+            ``mem_context_sync`` scope semantics).
     """
     from memtomem.context.agents import diff_agents
     from memtomem.context.commands import diff_commands
@@ -621,7 +634,13 @@ async def mem_context_diff(
     if "settings" in inc:
         from memtomem.context.settings import diff_settings as _diff_settings
 
-        settings_results = _diff_settings(root, scope=_resolve_mcp_scope())
+        # Resolve settings scope lazily: _resolve_mcp_scope builds
+        # Mem2MemConfig and applies env/file overrides, which can fail
+        # on unrelated misconfiguration. Artifact-only callers (no
+        # ``settings`` in ``include``) must not pay that cost or see
+        # that failure. Mirrors mem_context_generate's lazy resolve at
+        # lines 520-524.
+        settings_results = _diff_settings(root, scope=_resolve_mcp_scope(scope.strip() or None))
         if settings_results:
             if lines:
                 lines.append("")
