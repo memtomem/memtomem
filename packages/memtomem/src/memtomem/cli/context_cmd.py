@@ -2767,7 +2767,7 @@ async def _memory_migrate_run(
         # late-discovered fail would otherwise leave allowed-write
         # records for files we never touched.
         plan: list[dict[str, Any]] = []
-        seen_targets: set[Path] = set()
+        seen_targets: set[str] = set()
         for src in sources:
             try:
                 src.relative_to(from_dir)
@@ -2780,25 +2780,35 @@ async def _memory_migrate_run(
                 raise click.ClickException(
                     f"Target already exists: {tgt}. Move or rename it first."
                 )
-            # Codex review round 1, Blocker 1: a glob like ``**/*.md``
-            # can match two sources in different subdirectories with
-            # the same basename (e.g. ``a/rule.md`` and ``b/rule.md``).
-            # Both flatten to ``to_dir/rule.md``; the on-disk
-            # ``tgt.exists()`` check passes for both because neither
-            # destination exists yet. Without this guard the apply
-            # pass would silently overwrite the first migrated file
-            # with the second and leave both chunk rows pointing at
-            # the same path. Refuse the whole batch on collision —
-            # the user can disambiguate with a narrower glob or rename
-            # one source.
-            if tgt in seen_targets:
+            # Codex review round 1, Blocker 1 / round 2 follow-up:
+            # a glob like ``**/*.md`` can match two sources in
+            # different subdirectories with the same basename (e.g.
+            # ``a/rule.md`` and ``b/rule.md``). Both flatten to
+            # ``to_dir/rule.md``; the on-disk ``tgt.exists()`` check
+            # passes for both because neither destination exists yet.
+            # The dedup key uses ``str(...).casefold()`` so the guard
+            # also catches case-only collisions (``a/Rule.md`` +
+            # ``b/rule.md``) on case-insensitive filesystems — macOS
+            # APFS and Windows NTFS treat those as the same directory
+            # entry, so a per-Path key would let the second file's
+            # ``shutil.move`` silently overwrite the first migrated
+            # one. On case-sensitive filesystems this is conservative
+            # (refuses a legitimate ``Rule.md`` + ``rule.md`` pairing)
+            # but two basenames differing only by case in a batch
+            # migrate are nearly always unintentional, and refusing
+            # is the safer failure mode for a destructive operation.
+            # Escape hatch is the same as the cross-subdir case:
+            # narrow the glob or rename one source.
+            target_key = str(tgt).casefold()
+            if target_key in seen_targets:
                 raise click.ClickException(
                     f"Duplicate target after rename: {tgt}. Glob matched two "
-                    f"sources with the same basename ({src.name}); flat rename "
-                    "would silently overwrite. Narrow the glob or rename one "
-                    "source before migrating."
+                    f"sources whose basenames collide at the destination "
+                    f"({src.name}, case-insensitive); flat rename would "
+                    "silently overwrite on case-insensitive filesystems. "
+                    "Narrow the glob or rename one source before migrating."
                 )
-            seen_targets.add(tgt)
+            seen_targets.add(target_key)
             affected = await comp.storage.count_chunks_by_source(src)
             lineage = await comp.storage.count_chunk_links_for_source(src)
 
