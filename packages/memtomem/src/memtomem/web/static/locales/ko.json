@@ -302,6 +302,7 @@
   "settings.ctx.confirm_delete_msg": ".memtomem/ 에서 canonical 아티팩트를 제거합니다.",
   "settings.ctx.confirm_cascade_codex": "~/.codex/ (사용자 범위) 의 파일도 삭제됩니다. 계속하시겠습니까?",
   "settings.ctx.confirm_sync": "{type} 폴더를 모든 런타임으로 동기화하시겠습니까?",
+  "settings.ctx.confirm_sync_all": "모든 canonical 아티팩트를 모든 런타임으로 동기화하시겠습니까?",
   "settings.ctx.confirm_import": "런타임에서 {type} 폴더를 .memtomem/ 으로 가져오시겠습니까?",
   "settings.ctx.confirm_import_overwrite_label": "기존 canonical 파일 덮어쓰기",
   "settings.ctx.sync_success": "동기화 완료",
