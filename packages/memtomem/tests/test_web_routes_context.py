@@ -1158,9 +1158,7 @@ class TestListAgents:
         rows = r.json()["agents"]
         names = [a["name"] for a in rows]
         assert "reviewer" in names
-        assert {a["target_scope"] for a in rows if a["name"] == "reviewer"} == {
-            "project_shared"
-        }
+        assert {a["target_scope"] for a in rows if a["name"] == "reviewer"} == {"project_shared"}
 
     @pytest.mark.anyio
     async def test_project_local_visible_only_with_explicit_target_scope(
