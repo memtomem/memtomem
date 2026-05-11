@@ -127,10 +127,13 @@ def scan_artifact_tree(
     Args:
         src: Either a single file (agents/commands canonical entry) or a
             directory tree (skill staging directory). When a directory,
-            every regular file under it is scanned in sorted order; binary
-            files (``UnicodeDecodeError`` on UTF-8 decode) are recorded
-            with ``decision="pass"`` since the regex-based pattern set
-            cannot match non-text payloads.
+            every regular file under it is scanned in sorted order.
+            Bytes are decoded with ``errors="replace"`` (mirrors the
+            import side, ``_gate_a.gate_a_text_content``) so an ASCII
+            secret embedded in an otherwise-undecodable blob still
+            blocks — replacement chars (U+FFFD) cannot themselves
+            match the ASCII-only regex pattern set, so this does not
+            create false positives on benign binary assets.
         surface: Audit-log surface tag — typically ``"cli_context_sync"``.
             Used by :func:`enforce_write_guard` to attribute the outcome
             to the calling code path.
@@ -161,14 +164,16 @@ def scan_artifact_tree(
     for path in files:
         audit_context: dict[str, object] = {**audit_context_base, "path": str(path)}
         try:
-            text = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            # Binary asset (PNG, etc.): out of scope for the regex-based
-            # pattern set. Recording as ``pass`` is safe-by-default —
-            # ASCII-only character classes in the pattern set cannot
-            # match non-text payloads.
-            decisions.append(FileScan(path, "pass", 0))
-            continue
+            # Decode with ``errors="replace"`` so non-UTF8 bytes cannot
+            # mask an embedded ASCII secret. A binary blob that happens
+            # to carry ``AKIA...`` / ``sk-...`` bytes between
+            # undecodable garbage would otherwise short-circuit to
+            # ``pass`` (#895 P1 review #4); the regex pattern set is
+            # ASCII-only so individual replacement characters (U+FFFD)
+            # cannot themselves match, and ASCII byte values survive
+            # the decode unchanged. Mirrors the import-side contract
+            # documented in ``_gate_a.gate_a_text_content``.
+            text = path.read_bytes().decode("utf-8", errors="replace")
         except OSError as exc:
             # Read failure (permissions, transient I/O, missing file).
             # Pre-PR-E4 review this was conflated with UnicodeDecodeError

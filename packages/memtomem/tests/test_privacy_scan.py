@@ -9,8 +9,13 @@ the sync-side :mod:`memtomem.context.privacy_scan` module. Pins:
   — must use the real ``AKIA...`` fixture, not generic placeholders).
 * ``on_blocked="fail_fast"`` short-circuits at first hit.
 * ``on_blocked="skip_warn"`` collects every block.
-* Binary asset (``UnicodeDecodeError``) → ``decision="pass"`` (no false
-  positive against the regex pattern set).
+* Non-UTF8 file with NO embedded secret bytes → ``decision="pass"``
+  (replacement chars cannot synthesise a match the raw bytes did not
+  contain).
+* Non-UTF8 file WITH embedded ASCII secret bytes →
+  ``decision="blocked"`` (#895 P1 review #4: ``errors="replace"``
+  decode preserves ASCII byte values so a generated blob carrying
+  ``AKIA...`` between undecodable garbage cannot bypass Gate A).
 * ``raise_or_collect`` branch: ``project_shared`` raises
   :class:`PrivacyBlockedError`, others return a typed skip tuple.
 * Unreadable file: ``OSError`` raises :class:`PrivacyScanReadError`
@@ -162,21 +167,51 @@ class TestOnBlockedDispatch:
         assert len(result.decisions) == 3
 
 
-class TestBinaryAssetGracefulPass:
-    def test_png_bytes_pass_without_false_positive(self, tmp_path: Path) -> None:
-        # Embed an "AKIA..." pattern inside arbitrary binary bytes —
-        # UnicodeDecodeError on UTF-8 decode → decision="pass" path.
-        # This also pins the failure mode: if read_text were upgraded to
-        # decode with errors="replace", the secret would leak through and
-        # this test would catch it.
+class TestNonUtf8FileScan:
+    """Pre-PR-E4 review, the sync-side scan short-circuited every
+    ``UnicodeDecodeError`` to ``decision="pass"`` with the rationale
+    "ASCII-only patterns cannot match non-text payloads" — which was
+    wrong: ASCII patterns *do* match ASCII byte values embedded in a
+    non-UTF8 file, the import-side gate had already moved to
+    ``errors="replace"`` for exactly this reason, and a generated blob
+    carrying ``AKIA...`` between undecodable garbage could promote
+    into ``project_shared`` without Gate A ever inspecting it
+    (#895 P1 review #4).
+
+    These pins lock the corrected behavior: the bytes are decoded with
+    ``errors="replace"`` and run through ``enforce_write_guard``.
+    Replacement characters (U+FFFD) cannot themselves match the
+    regex pattern set (the patterns target specific ASCII shapes,
+    not arbitrary code points), so a benign binary blob still
+    passes; a blob with an embedded ASCII secret now blocks.
+    """
+
+    def test_clean_non_utf8_blob_still_passes(self, tmp_path: Path) -> None:
+        # Random binary noise with no ASCII secret bytes — must not
+        # synthesise a false positive on the embedded U+FFFD chars.
         path = tmp_path / "logo.png"
-        path.write_bytes(b"\x89PNG\r\n\x1a\n" + SECRET.encode() + b"\xff\xfe\x00")
+        path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\xff\xfe\x00" * 200)
         result = scan_artifact_tree(
             path, surface="t", scope="project_shared", project_root=tmp_path
         )
         assert len(result.decisions) == 1
         assert result.decisions[0].decision == "pass"
         assert result.blocked == []
+
+    def test_non_utf8_blob_with_ascii_secret_is_blocked(self, tmp_path: Path) -> None:
+        # AKIA bytes embedded between non-UTF8 garbage — pre-fix this
+        # produced ``pass``, letting the bytes promote into project_shared
+        # via skill staging fan-out without Gate A inspection. Post-fix:
+        # blocked.
+        path = tmp_path / "generated.bin"
+        path.write_bytes(b"\x89PNG\r\n\x1a\n" + SECRET.encode() + b"\xff\xfe\x00")
+        result = scan_artifact_tree(
+            path, surface="t", scope="project_shared", project_root=tmp_path
+        )
+        assert len(result.decisions) == 1
+        assert result.decisions[0].decision in ("blocked", "blocked_project_shared")
+        assert len(result.blocked) == 1
+        assert result.blocked[0].hits_count >= 1
 
 
 class TestUnreadableFileFailsClosed:
@@ -197,14 +232,14 @@ class TestUnreadableFileFailsClosed:
         path = tmp_path / "agent.md"
         path.write_text(CLEAN, encoding="utf-8")
 
-        real_read_text = Path.read_text
+        real_read_bytes = Path.read_bytes
 
-        def explode(self: Path, *args: object, **kwargs: object) -> str:
+        def explode(self: Path, *args: object, **kwargs: object) -> bytes:
             if self == path:
                 raise PermissionError(13, "Permission denied", str(self))
-            return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+            return real_read_bytes(self, *args, **kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(Path, "read_text", explode)
+        monkeypatch.setattr(Path, "read_bytes", explode)
 
         with pytest.raises(PrivacyScanReadError) as exc_info:
             scan_artifact_tree(path, surface="t", scope="project_shared", project_root=tmp_path)
@@ -230,14 +265,14 @@ class TestUnreadableFileFailsClosed:
         # it's an unknown.
         path = tmp_path / "agent.md"
         path.write_text(CLEAN, encoding="utf-8")
-        real_read_text = Path.read_text
+        real_read_bytes = Path.read_bytes
 
-        def explode(self: Path, *args: object, **kwargs: object) -> str:
+        def explode(self: Path, *args: object, **kwargs: object) -> bytes:
             if self == path:
                 raise OSError(5, "Input/output error", str(self))
-            return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+            return real_read_bytes(self, *args, **kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(Path, "read_text", explode)
+        monkeypatch.setattr(Path, "read_bytes", explode)
 
         with pytest.raises(PrivacyScanReadError) as exc_info:
             scan_artifact_tree(path, surface="t", scope="user", project_root=tmp_path)
@@ -251,14 +286,14 @@ class TestUnreadableFileFailsClosed:
         # is poisoned the moment any leaf cannot be inspected.
         skill_root = _seed_skill(tmp_path / "foo")
         unreadable = skill_root / "scripts" / "leak.sh"
-        real_read_text = Path.read_text
+        real_read_bytes = Path.read_bytes
 
-        def explode(self: Path, *args: object, **kwargs: object) -> str:
+        def explode(self: Path, *args: object, **kwargs: object) -> bytes:
             if self == unreadable:
                 raise PermissionError(13, "Permission denied", str(self))
-            return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+            return real_read_bytes(self, *args, **kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(Path, "read_text", explode)
+        monkeypatch.setattr(Path, "read_bytes", explode)
 
         with pytest.raises(PrivacyScanReadError) as exc_info:
             scan_artifact_tree(

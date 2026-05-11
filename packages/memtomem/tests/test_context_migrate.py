@@ -1402,17 +1402,17 @@ def test_e4_unreadable_canonical_blocks_project_shared_promotion(scope_layout, m
     """
     src = _write_canonical_dir(scope_layout, "agents", "user", "leak", _AGENT_BODY_SECRET)
 
-    real_read_text = Path.read_text
+    real_read_bytes = Path.read_bytes
 
-    def explode_on_staged_read(self: Path, *args: object, **kwargs: object) -> str:
+    def explode_on_staged_read(self: Path, *args: object, **kwargs: object) -> bytes:
         # The scan walks staging at <dst.parent>/.migrate-leak-<pid>-<rand>.tmp/.
         # Match by name + the staging suffix marker so unrelated reads
         # (CLI bootstrap, config loading) are unaffected.
         if self.name == "agent.md" and ".migrate-leak-" in str(self.parent):
             raise PermissionError(13, "Permission denied", str(self))
-        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+        return real_read_bytes(self, *args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(Path, "read_text", explode_on_staged_read)
+    monkeypatch.setattr(Path, "read_bytes", explode_on_staged_read)
 
     result = _invoke_migrate(
         _migrate_args(
