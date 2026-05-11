@@ -841,13 +841,23 @@ class SqliteBackend(
             params.append(norm_path(source_exact))
         elif source_prefix is not None:
             prefix = norm_path(source_prefix)
-            # Component-aware prefix: anchor the LIKE on ``<prefix>/`` so a
-            # request for ``docs`` does not match ``docsuite``. The
-            # storage layer's ``norm_path`` already resolves symlinks and
-            # NFC-normalises, so the prefix and stored paths share the
-            # same canonical form.
-            where_parts.append("source_file LIKE ? ESCAPE '\\'")
-            params.append(escape_like(prefix.rstrip("/")) + "/%")
+            # Component-aware prefix: anchor on ``<prefix>/`` so a request for
+            # ``docs`` does not match ``docsuite``. ``norm_path`` already
+            # resolves symlinks and NFC-normalises so the prefix and stored
+            # paths share the same canonical form.
+            #
+            # ``substr(...) = ?`` instead of ``LIKE``: SQLite's built-in LIKE
+            # is case-insensitive for ASCII by default, and COLLATE BINARY
+            # does not override LIKE — so ``LIKE 'docs/%'`` would also match
+            # ``DOCS/foo.md`` on a case-sensitive filesystem and turn an
+            # audit ``--source docs`` into a false-positive over an unrelated
+            # tree (Codex review on #905 P2). ``substr`` equality is a binary
+            # string compare, case-sensitive, and avoids the LIKE/GLOB
+            # metacharacter escape contract entirely.
+            anchored = prefix.rstrip("/") + "/"
+            where_parts.append("substr(source_file, 1, ?) = ?")
+            params.append(len(anchored))
+            params.append(anchored)
 
         where_sql = " AND ".join(where_parts)
         db = self._get_read_db()
