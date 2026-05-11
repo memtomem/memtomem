@@ -19,18 +19,30 @@ frontmatter rewriting without touching callers.
 from __future__ import annotations
 
 import logging
+import os
+import secrets
 import shutil
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import override as _override
-from memtomem.context._atomic import atomic_write_bytes, copy_tree_atomic
+from memtomem.context._atomic import (
+    _file_lock,
+    _lock_path_for,
+    atomic_write_bytes,
+    copy_tree_atomic,
+)
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, validate_name
-from memtomem.context._runtime_targets import runtime_fanout_root
+from memtomem.context._runtime_targets import runtime_artifact_names, runtime_fanout_root
+from memtomem.context.privacy_scan import (
+    raise_or_collect,
+    scan_artifact_tree,
+)
 from memtomem.context.scope_resolver import canonical_artifact_dir
 
 logger = logging.getLogger(__name__)
@@ -129,11 +141,25 @@ _register(CodexSkillsGenerator())
 # ── Canonical helpers ─────────────────────────────────────────────────
 
 
-def canonical_skills_root(project_root: Path) -> Path:
-    return project_root / CANONICAL_SKILL_ROOT
+def canonical_skills_root(
+    project_root: Path,
+    *,
+    scope: TargetScope = "project_shared",
+) -> Path:
+    """Return the canonical skills root for ``scope`` (default ``project_shared``).
+
+    Pre-PR-E3 callers (no scope kwarg) keep the old behavior of
+    ``<project_root>/.memtomem/skills`` because that's exactly
+    :func:`canonical_artifact_dir` for ``scope="project_shared"``.
+    """
+    return canonical_artifact_dir("skills", scope, project_root)
 
 
-def list_canonical_skills(project_root: Path) -> list[Path]:
+def list_canonical_skills(
+    project_root: Path,
+    *,
+    scope: TargetScope = "project_shared",
+) -> list[Path]:
     """Return canonical skill directories sorted by name.
 
     A sub-directory only counts as a skill if it contains ``SKILL.md``. This
@@ -142,8 +168,11 @@ def list_canonical_skills(project_root: Path) -> list[Path]:
 
     Skill directory names are validated; entries that fail
     :func:`memtomem.context._names.validate_name` are skipped with a warning.
+
+    ADR-0011 PR-E3: ``scope`` selects the canonical root via
+    :func:`canonical_skills_root`.
     """
-    root = canonical_skills_root(project_root)
+    root = canonical_skills_root(project_root, scope=scope)
     if not root.is_dir():
         return []
     skills: list[Path] = []
@@ -161,37 +190,92 @@ def list_canonical_skills(project_root: Path) -> list[Path]:
 # ── Copy primitive ────────────────────────────────────────────────────
 
 
-def copy_skill(src: Path, dst: Path) -> None:
-    """Mirror a skill directory from ``src`` to ``dst``.
+def _stage_skill(src: Path, dst: Path) -> Path:
+    """Mirror ``src`` into a same-fs staging directory under ``dst.parent``.
 
-    ``src`` MUST contain ``SKILL.md``. If ``dst`` already exists and looks like
-    a skill directory (has its own ``SKILL.md``) it is replaced wholesale so
-    that removed files on the source side propagate. If ``dst`` exists but
-    does NOT look like a skill directory, the copy aborts with ``IsADirectoryError``
-    to avoid clobbering something the user put there by hand.
+    Picks ``dst.parent / .staging-<dst.name>-<pid>-<rand>.tmp`` so the
+    eventual promote-step (:func:`_promote_staging`) is a same-fs atomic
+    rename via :func:`os.replace`. Caller is responsible for cleanup on
+    failure (either by promoting into ``dst`` or by ``shutil.rmtree``-ing
+    the staging path).
 
-    Individual files are written atomically via
-    :func:`memtomem.context._atomic.atomic_write_bytes` so a crash mid-copy
-    leaves each file either fully-written or absent, never truncated.
-    Directory-level atomicity (the rmtree+mkdir window) is out of scope here.
+    ``src`` MUST contain ``SKILL.md``. ``dst.parent`` is created if it
+    does not yet exist.
     """
     manifest = src / SKILL_MANIFEST
     if not manifest.is_file():
         raise FileNotFoundError(f"source skill missing {SKILL_MANIFEST}: {src}")
 
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    suffix = f"{os.getpid()}-{secrets.token_hex(3)}"
+    staging = dst.parent / f".staging-{dst.name}-{suffix}.tmp"
+    if staging.exists():
+        # Crashed prior run — collision is unlikely (pid+rand) but if it
+        # happens, the leftover tree is from us; safe to remove.
+        shutil.rmtree(staging)
+    staging.mkdir()
+    # Codex review fold: if ``copy_tree_atomic`` raises after partial
+    # copy, the caller would never see ``staging`` (no return value),
+    # leaving an unscanned partial tree under the runtime fan-out root.
+    # Clean up here before re-raising so Gate A's staging-dir-first
+    # contract holds even on copy failure.
+    try:
+        copy_tree_atomic(src, staging)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return staging
+
+
+def _promote_staging(staging: Path, dst: Path) -> None:
+    """Atomic-replace ``dst`` with ``staging`` (same-fs precondition).
+
+    Cross-platform via :func:`os.replace`. When ``dst`` already exists,
+    moves it aside first then renames staging into place; rolls back on
+    any failure during the swap window (``feedback_stage_before_mutation_revert.md``).
+    """
     if dst.exists():
         if not dst.is_dir():
             raise NotADirectoryError(f"target exists and is not a directory: {dst}")
         if not (dst / SKILL_MANIFEST).is_file() and any(dst.iterdir()):
-            # Non-empty directory that is NOT a skill — refuse to overwrite.
             raise IsADirectoryError(
                 f"refusing to overwrite non-skill directory: {dst} "
                 f"(add a SKILL.md or remove the directory first)"
             )
-        shutil.rmtree(dst)
+        # Move-aside name uses the same {pid}-{rand} discipline as staging
+        # so concurrent runs (different pids) cannot collide.
+        suffix = f"{os.getpid()}-{secrets.token_hex(3)}"
+        old = dst.parent / f".old-{dst.name}-{suffix}.tmp"
+        os.replace(dst, old)
+        try:
+            os.replace(staging, dst)
+        except BaseException:
+            # Roll back: put the original tree back.
+            os.replace(old, dst)
+            raise
+        shutil.rmtree(old, ignore_errors=True)
+    else:
+        os.replace(staging, dst)
 
-    dst.mkdir(parents=True)
-    copy_tree_atomic(src, dst)
+
+def copy_skill(src: Path, dst: Path) -> None:
+    """Mirror a skill directory from ``src`` to ``dst`` via staging-then-promote.
+
+    Thin wrapper kept for callers that don't care about the staging step
+    (no privacy scan, no override merge — pure file copy). E3
+    sync-side flow uses :func:`_stage_skill` + :func:`_promote_staging`
+    directly so it can scan + override-apply between the two halves.
+
+    Individual files are written atomically via
+    :func:`memtomem.context._atomic.atomic_write_bytes`. Directory-level
+    atomicity is now provided by the staging+promote pair.
+    """
+    staging = _stage_skill(src, dst)
+    try:
+        _promote_staging(staging, dst)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
 
 
 # ── Fan-out: canonical → runtimes ─────────────────────────────────────
@@ -216,6 +300,8 @@ class SkillSyncResult:
 def generate_all_skills(
     project_root: Path,
     runtimes: list[str] | None = None,
+    *,
+    scope: TargetScope = "project_shared",
 ) -> SkillSyncResult:
     """Fan out every canonical skill to the requested runtime targets.
 
@@ -223,11 +309,14 @@ def generate_all_skills(
         project_root: project root containing ``.memtomem/skills/``.
         runtimes: list of generator names. ``None`` means all registered
             runtimes (currently ``claude_skills`` + ``gemini_skills``).
+        scope: ADR-0011 PR-E3 — selects canonical root and runtime
+            fan-out destination. Default ``project_shared`` preserves
+            pre-PR-E3 behavior.
     """
     generated: list[tuple[str, Path]] = []
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
 
-    canonicals = list_canonical_skills(project_root)
+    canonicals = list_canonical_skills(project_root, scope=scope)
     if not canonicals:
         return SkillSyncResult(
             generated=generated,
@@ -235,18 +324,87 @@ def generate_all_skills(
         )
 
     targets = runtimes if runtimes is not None else list(SKILL_GENERATORS.keys())
+
+    # ``project_shared`` is a hard-refusal surface: if any skill or
+    # runtime override fails Gate A, no runtime fan-out should be
+    # promoted. Hold all destination locks, stage+scan every final tree,
+    # then promote only after the full batch passes.
+    if scope == "project_shared":
+        work: list[tuple[str, SkillGenerator, Path, Path]] = []
+        for target in targets:
+            gen = SKILL_GENERATORS.get(target)
+            if gen is None:
+                skipped.append((target, "unknown runtime", skip_codes.UNKNOWN_RUNTIME))
+                continue
+            for skill_dir in canonicals:
+                dst = gen.target_dir(project_root, skill_dir.name, scope=scope)
+                if dst is None:
+                    skipped.append(
+                        (
+                            skill_dir.name,
+                            f"no fan-out for runtime {target} at this scope",
+                            skip_codes.NO_PROJECT_FANOUT_FOR_RUNTIME,
+                        )
+                    )
+                    continue
+                work.append((target, gen, skill_dir, dst))
+
+        staged: list[tuple[str, Path, Path]] = []
+        try:
+            with ExitStack() as stack:
+                for lock_path in sorted({_lock_path_for(dst) for _, _, _, dst in work}, key=str):
+                    stack.enter_context(_file_lock(lock_path))
+                for target, _gen, skill_dir, dst in work:
+                    staging = _stage_skill(skill_dir, dst)
+                    staged.append((target, staging, dst))
+
+                    vendor = GENERATOR_VENDOR.get(target)
+                    if vendor is not None:
+                        override_path = _override.resolve(
+                            project_root, "skills", skill_dir.name, vendor, scope=scope
+                        )
+                        if override_path is not None:
+                            atomic_write_bytes(
+                                staging / SKILL_MANIFEST,
+                                override_path.read_bytes(),
+                            )
+
+                    scan = scan_artifact_tree(
+                        staging,
+                        surface="cli_context_sync",
+                        scope=scope,
+                        project_root=project_root,
+                        on_blocked="fail_fast",
+                    )
+                    if scan.blocked:
+                        raise_or_collect(
+                            scan.blocked[0],
+                            scope=scope,
+                            kind="skill",
+                            artifact_name=skill_dir.name,
+                        )
+
+                for target, staging, dst in staged:
+                    _promote_staging(staging, dst)
+                    generated.append((target, dst))
+        finally:
+            for _target, staging, _dst in staged:
+                if staging.exists():
+                    shutil.rmtree(staging, ignore_errors=True)
+
+        return SkillSyncResult(generated=generated, skipped=skipped)
+
     for target in targets:
         gen = SKILL_GENERATORS.get(target)
         if gen is None:
             skipped.append((target, "unknown runtime", skip_codes.UNKNOWN_RUNTIME))
             continue
         for skill_dir in canonicals:
-            dst = gen.target_dir(project_root, skill_dir.name)
+            dst = gen.target_dir(project_root, skill_dir.name, scope=scope)
             # ADR-0011 PR-E (#891): None means NO_FANOUT per
             # ``_runtime_targets.RUNTIME_FANOUT_TABLE``. Emit a typed skip
-            # so E3 scope wiring sees graceful behavior. Today's default
-            # scope=project_shared never reaches this branch for registered
-            # generators; the table is the contract source-of-truth.
+            # so E3 scope wiring sees graceful behavior. The table is the
+            # contract source-of-truth.
             if dst is None:
                 skipped.append(
                     (
@@ -256,23 +414,78 @@ def generate_all_skills(
                     )
                 )
                 continue
-            copy_skill(skill_dir, dst)
-            # ADR-0008 Invariant 4: per-vendor override replaces SKILL.md only.
-            # Auxiliary files (scripts/, references/) stay from canonical.
-            vendor = GENERATOR_VENDOR.get(target)
-            if vendor is not None:
-                # ADR-0011 PR-E: pin scope=project_shared (see agents.py for
-                # the same rationale — default sync must not see draft
-                # project_local overrides).
-                override_path = _override.resolve(
-                    project_root, "skills", skill_dir.name, vendor, scope="project_shared"
-                )
-                if override_path is not None:
-                    atomic_write_bytes(
-                        dst / SKILL_MANIFEST,
-                        override_path.read_bytes(),
+            # ADR-0011 PR-E3 staging-dir-first scan flow:
+            #   1. _stage_skill — mirror canonical bytes into a same-fs
+            #      staging dir under dst.parent.
+            #   2. Apply vendor SKILL.md override IF any (per-scope, single-
+            #      tier lookup) — read override bytes ONCE and reuse them
+            #      so the scan sees the exact bytes that get promoted.
+            #      Auxiliary files (scripts/, references/, assets/) stay
+            #      from canonical — preserves the
+            #      ``test_override_only_touches_skill_md_not_scripts``
+            #      invariant.
+            #   3. scan_artifact_tree — privacy walk against the FINAL
+            #      bytes (canonical + applied override). project_shared
+            #      block raises ClickException; user/project_local block
+            #      collects a skip.
+            #   4. On pass — _promote_staging atomic-replaces dst with
+            #      staging via os.replace (same-fs).
+            #   5. On block or any exception — finally clause removes
+            #      the staging tree without touching dst.
+            #
+            # Concurrency (PR-E3 Codex review fold): the entire
+            # stage+scan+promote sequence runs inside a sidecar flock at
+            # ``_lock_path_for(dst)`` so two parallel ``mm context sync``
+            # invocations cannot interleave their dst→old→staging→dst
+            # swaps. Without the lock, a second invocation could
+            # recreate ``dst`` between the move-aside and the rename-in,
+            # leaving the rollback path with no clean dst to restore.
+            with _file_lock(_lock_path_for(dst)):
+                staging = _stage_skill(skill_dir, dst)
+                promoted = False
+                try:
+                    # 2. Override apply (BEFORE scan — scan must see the bytes
+                    # that will be promoted).
+                    vendor = GENERATOR_VENDOR.get(target)
+                    if vendor is not None:
+                        override_path = _override.resolve(
+                            project_root, "skills", skill_dir.name, vendor, scope=scope
+                        )
+                        if override_path is not None:
+                            atomic_write_bytes(
+                                staging / SKILL_MANIFEST,
+                                override_path.read_bytes(),
+                            )
+                    # 3. Scan.
+                    scan = scan_artifact_tree(
+                        staging,
+                        surface="cli_context_sync",
+                        scope=scope,
+                        project_root=project_root,
+                        on_blocked="fail_fast",
                     )
-            generated.append((target, dst))
+                    if scan.blocked:
+                        # raise_or_collect raises ClickException for project_shared;
+                        # otherwise returns (code, reason) and falls through to
+                        # the skip append.
+                        code, reason = raise_or_collect(
+                            scan.blocked[0],
+                            scope=scope,
+                            kind="skill",
+                            artifact_name=skill_dir.name,
+                        )
+                        skipped.append((skill_dir.name, reason, code))
+                    else:
+                        # 4. Promote — atomic os.replace into dst.
+                        _promote_staging(staging, dst)
+                        promoted = True
+                        generated.append((target, dst))
+                finally:
+                    # 5. Cleanup. Promote consumes staging via rename, so we
+                    # only remove it when something else (block/exception)
+                    # left it behind.
+                    if not promoted and staging.exists():
+                        shutil.rmtree(staging, ignore_errors=True)
 
     return SkillSyncResult(generated=generated, skipped=skipped)
 
@@ -453,7 +666,11 @@ def _skill_dirs_equal(a: Path, b: Path) -> bool:
     return True
 
 
-def diff_skills(project_root: Path) -> list[tuple[str, str, str]]:
+def diff_skills(
+    project_root: Path,
+    *,
+    scope: TargetScope = "project_shared",
+) -> list[tuple[str, str, str]]:
     """Compare canonical skills against every registered runtime.
 
     Returns a sorted list of ``(runtime, skill_name, status)`` tuples where
@@ -463,25 +680,25 @@ def diff_skills(project_root: Path) -> list[tuple[str, str, str]]:
     * ``"out of sync"`` — both sides exist but differ.
     * ``"missing target"`` — canonical has it, runtime does not.
     * ``"missing canonical"`` — runtime has it, canonical does not.
+
+    ADR-0011 PR-E3: ``scope`` selects both the canonical root and the
+    runtime fan-out roots (default ``project_shared``).
     """
     results: list[tuple[str, str, str]] = []
-    canonical_root = canonical_skills_root(project_root)
-    canonical_names = {p.name for p in list_canonical_skills(project_root)}
+    canonical_root = canonical_skills_root(project_root, scope=scope)
+    canonical_names = {p.name for p in list_canonical_skills(project_root, scope=scope)}
 
     for gen_name, gen in SKILL_GENERATORS.items():
-        # ADR-0011 PR-E (#891): probe NO_FANOUT for this runtime+scope. The
-        # table lookup ignores the artifact name, so a fixed probe name is
-        # safe. When None, the runtime has no fan-out by design — skip the
-        # whole runtime so canonical-only entries don't surface as
-        # ``missing target`` (the realistic NO_FANOUT shape).
-        if gen.target_dir(project_root, "__probe_891__") is None:
+        # ADR-0011 PR-E3 cleanup item #1: query the table directly via
+        # ``runtime_fanout_root``. Earlier code probed with a fixed skill
+        # name (``__probe_891__``) which leaked the table-shape assumption
+        # into the call shape — call-shape fragility, not name-independence.
+        runtime = gen_name.split("_", 1)[0]
+        if runtime_fanout_root("skills", runtime, scope, project_root) is None:
             continue
-        runtime_root = project_root / gen.output_root
-        runtime_names: set[str] = set()
-        if runtime_root.is_dir():
-            for entry in runtime_root.iterdir():
-                if entry.is_dir() and (entry / SKILL_MANIFEST).is_file():
-                    runtime_names.add(entry.name)
+        runtime_names = runtime_artifact_names(
+            "skills", runtime, project_root, scope, dir_manifest=SKILL_MANIFEST
+        )
 
         for name in sorted(canonical_names | runtime_names):
             if name in canonical_names and name not in runtime_names:
@@ -490,14 +707,12 @@ def diff_skills(project_root: Path) -> list[tuple[str, str, str]]:
                 results.append((gen_name, name, "missing canonical"))
             else:
                 src = canonical_root / name
-                dst = gen.target_dir(project_root, name)
-                # The upstream NO_FANOUT probe already filters out runtimes
-                # whose ``RUNTIME_FANOUT_TABLE`` entry is ``None``, so this
-                # branch is only reachable if the table lookup is per-name
-                # (which today's table is not). Keep the skip as a defensive
-                # silent fallback so the contract holds regardless.
-                if dst is None:
-                    continue
+                # Cleanup item #2: the upstream ``runtime_fanout_root`` guard
+                # above guarantees this runtime+scope has a fan-out root, so
+                # ``gen.target_dir`` cannot return ``None`` for any name.
+                # Earlier defensive ``if dst is None: continue`` removed.
+                dst = gen.target_dir(project_root, name, scope=scope)
+                assert dst is not None  # narrowed by upstream NO_FANOUT guard
                 if _skill_dirs_equal(src, dst):
                     results.append((gen_name, name, "in sync"))
                 else:

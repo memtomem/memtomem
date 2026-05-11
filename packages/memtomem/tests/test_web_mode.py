@@ -468,6 +468,23 @@ def test_app_js_pins_ui_mode_default_and_toast_copy() -> None:
     assert '"toast.dev_only_section"' in ko
 
 
+def test_indexing_guard_rechecks_server_before_blocking_retry() -> None:
+    """A stale client-side indexing flag must not permanently block retry.
+
+    Source-tab SSE failures can leave users looking at a model-readiness error
+    banner while the server is already idle. The next reindex click should
+    confirm ``/api/indexing/active`` before showing "already in progress".
+    """
+    app_js = _read_static("app.js")
+    sources_js = _read_static("sources-memory-dirs.js")
+
+    assert "async function _indexingTryStartOrRefresh()" in app_js
+    assert "api('GET', '/api/indexing/active')" in app_js
+    assert "_indexingEnd();\n      return _indexingTryStart();" in app_js
+    assert "await _indexingTryStartOrRefresh()" in app_js
+    assert sources_js.count("await _indexingTryStartOrRefresh()") >= 2
+
+
 def test_html_main_tabs_all_stay_prod() -> None:
     """Main top-nav tabs (Home / Search / Sources / Index / Tags / Timeline /
     Settings) should all be prod today. Flipping a main tab to dev would be

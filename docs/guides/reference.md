@@ -1074,28 +1074,40 @@ mm context init --scope project_shared --confirm-project-shared       # Gate B: 
 mm context init --include=agents --scope user --force-unsafe-import   # bypass Gate A on existing leaks
 mm context generate --agent all        # generate all agent files
 mm context diff                        # check sync status
-mm context sync                        # sync context.md → agent files
+mm context sync                        # sync context.md → agent files (project_shared default)
+mm context sync --scope user           # fan out from ~/.memtomem/... → ~/.{claude,gemini,codex}/...
+mm context sync --include=skills --scope project_local   # NO_FANOUT skip (no runtime per ADR §3)
 mm context generate --include=settings # merge hooks → ~/.claude/settings.json
 mm context diff --include=settings     # check hook sync status
 # Note: cursor / codex / copilot fold ## Rules + ## Style into a single block;
 # `generate` warns on stderr when both sections are populated. context.md is
 # the source of truth — edit there, not in generated files.
 #
-# `--scope` semantics (ADR-0011 PR-E2):
-#   user            → seeds ~/.memtomem/{agents,skills,commands}/; imports from
-#                     ~/.claude/agents, ~/.gemini/agents, ~/.claude/skills, etc.
+# `--scope` semantics (ADR-0011 PR-E2 init / PR-E3 sync):
+#   user            → seeds ~/.memtomem/{agents,skills,commands}/; init imports from
+#                     ~/.claude/agents, ~/.gemini/agents, ~/.claude/skills, etc.;
+#                     sync fans canonical out to those same runtime roots.
 #   project_shared  → seeds <proj>/.memtomem/{agents,skills,commands}/; imports
 #                     from <proj>/.claude/agents etc.; git-tracked. Requires
-#                     --confirm-project-shared when --scope is explicit.
+#                     --confirm-project-shared when --scope is explicit on init.
 #   project_local   → seeds <proj>/.memtomem/{agents,skills,commands}.local/;
 #                     auto-appends .memtomem/*.local/ + .memtomem/.staging/ to
 #                     <proj>/.gitignore (idempotent). No runtime fan-out
-#                     by design (ADR §3) — nothing to import.
+#                     by design (ADR §3) — nothing to import or sync.
 #
-# Gate A on `--include=...` import path: every source file is re-scanned
+# Gate A on `init --include=...` import path: every source file is re-scanned
 # for secrets via enforce_write_guard. user / project_local destinations
 # can bypass with --force-unsafe-import (audit-logged); project_shared
 # destinations hard-refuse on any hit (no force bypass available).
+#
+# Gate A on `sync` write path (PR-E3): same per-file scan, but sync has NO
+# escape valve — `--force-unsafe-import` is init-only (ADR §5). user /
+# project_local destinations skip-and-warn on hits with PRIVACY_BLOCKED;
+# project_shared destinations raise ClickException with a remediation hint
+# pointing at `mm context migrate` (PR-E4) for moving the artifact to a
+# writable tier first. Skills fan-out uses staging-dir-first scan + atomic
+# os.replace promote so a blocked sync leaves the existing dst tree
+# unchanged.
 
 # Sessions & activity
 mm session start                                              # start a tracked session
