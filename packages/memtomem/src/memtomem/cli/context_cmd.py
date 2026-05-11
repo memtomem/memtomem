@@ -88,7 +88,7 @@ from memtomem.context.skills import (
 )
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.wiki.store import WikiNotFoundError, WikiStore
-from typing import get_args
+from typing import Any, get_args
 
 from memtomem.config import (
     ContextGatewayConfig,
@@ -1963,7 +1963,7 @@ def _migrate_memory_dispatch(
 
     asyncio.run(
         _memory_migrate_run(
-            source_resolved,
+            [source_resolved],
             from_scope,
             to_scope,
             apply_,
@@ -2572,10 +2572,7 @@ def _is_within(path: Path, project_root: Path) -> bool:
 
 
 @context.command("memory-migrate")
-@click.argument(
-    "source",
-    type=click.Path(exists=True, dir_okay=False, file_okay=True, path_type=Path),
-)
+@click.argument("source", type=str)
 @click.option(
     "--from",
     "from_scope",
@@ -2613,44 +2610,46 @@ def _is_within(path: Path, project_root: Path) -> bool:
     help="Confirm writing to the git-tracked project_shared memory tier.",
 )
 def memory_migrate_cmd(
-    source: Path,
+    source: str,
     from_scope: str,
     to_scope: str,
     apply_: bool,
     yes: bool,
     confirm_project_shared: bool,
 ) -> None:
-    """Move a markdown memory file between ADR-0011 scope tiers.
+    """Move markdown memory file(s) between ADR-0011 scope tiers.
 
-    v1: chunk-id-stable, single-DB rename. The source file moves on
-    disk to the target tier's canonical directory; the chunks table
-    is UPDATED in-place via ``update_chunks_scope_for_source`` so
-    chunk UUIDs and ``chunk_links`` lineage are preserved. No
-    re-index is triggered.
+    Chunk-id-stable, single-DB rename. The source file moves on disk
+    to the target tier's canonical directory; the chunks table is
+    UPDATED in-place via ``update_chunks_scope_for_source`` so chunk
+    UUIDs and the ``chunk_links`` lineage are preserved. No re-index
+    is triggered.
+
+    ``SOURCE`` is either a single existing file path (back-compat with
+    v1) or a glob pattern (quote it to prevent shell expansion). For
+    a glob, pre-flight (privacy scan + per-file lockfile probe) runs
+    over every match before any FS move; on per-file DB failure
+    mid-batch, the failing file is reverted, the remaining files are
+    left untouched, and the command exits — ADR-0011 §5 compensation
+    applies per file so the user has a deterministic resumption point.
 
     Default is dry-run; pass ``--apply`` to execute. When the target
-    is ``project_shared`` (git-tracked), the file content is re-scanned
-    by ``enforce_write_guard``; secret hits reject the migration with
-    no force bypass — git history would carry them forever (ADR-0011
-    §5).
+    is ``project_shared`` (git-tracked), file content is re-scanned by
+    ``enforce_write_guard``; secret hits reject the migration with no
+    force bypass — git history would carry them forever (ADR-0011 §5).
 
-    On apply, the filesystem move precedes the DB UPDATE. If the
-    UPDATE fails, the move is reverted (best-effort) so the source
-    path remains canonical.
-
-    Cross-DB migration, glob/multi-file inputs, and partial chunk-link
-    lineage preservation are deferred to follow-up work.
+    Cross-DB migration is deferred to a follow-up issue (see #886).
     """
     if from_scope == to_scope:
         raise click.ClickException("--from and --to must differ.")
 
-    source_resolved = source.expanduser().resolve()
+    sources = _resolve_memory_migrate_sources(source)
 
     import asyncio
 
     asyncio.run(
         _memory_migrate_run(
-            source_resolved,
+            sources,
             from_scope,
             to_scope,
             apply_,
@@ -2660,8 +2659,31 @@ def memory_migrate_cmd(
     )
 
 
+def _resolve_memory_migrate_sources(source_arg: str) -> list[Path]:
+    """Resolve the ``SOURCE`` positional to a sorted list of .md files.
+
+    Single existing file path → ``[that_path]`` (back-compat with v1).
+    Otherwise → ``glob.glob(source, recursive=True)`` filtered to .md
+    regular files. Empty match → ``ClickException`` so the caller
+    isn't silently no-op'd by a typo in the pattern.
+    """
+    import glob as _glob
+
+    expanded = Path(source_arg).expanduser()
+    if expanded.is_file():
+        return [expanded.resolve()]
+
+    matches = _glob.glob(str(expanded), recursive=True)
+    sources: list[Path] = sorted(
+        {Path(m).resolve() for m in matches if Path(m).is_file() and m.endswith(".md")}
+    )
+    if not sources:
+        raise click.ClickException(f"No .md files matched: {source_arg}")
+    return sources
+
+
 async def _memory_migrate_run(
-    source: Path,
+    sources: list[Path],
     from_scope: str,
     to_scope: str,
     apply_: bool,
@@ -2669,6 +2691,7 @@ async def _memory_migrate_run(
     confirm_project_shared: bool,
 ) -> None:
     import shutil
+    from contextlib import ExitStack
 
     from memtomem import privacy
     from memtomem.cli._bootstrap import cli_components
@@ -2682,22 +2705,18 @@ async def _memory_migrate_run(
 
     async with cli_components() as comp:
         # Project-tier resolution. For ``from`` project tiers we walk
-        # up the source path looking for the ``.memtomem`` ancestor;
-        # the project root is its parent. Pre-PR-D round 12 the inference
-        # assumed a fixed depth of three (``<root>/.memtomem/memories[.local]/<file>``)
-        # which broke nested layouts like
-        # ``<root>/.memtomem/memories/notes/foo.md`` — those left
-        # ``project_root=None`` and the user-tier fallback only fires
-        # when ``to_scope != "user"``, so migrating a nested
-        # project_shared file BACK to user scope errored out before
-        # ``resolve_memory_scope_dir`` could even run. Walking the
-        # ancestry chain handles arbitrary subdirectory depth and any
-        # ``memories`` / ``memories.local`` sibling under
-        # ``.memtomem/`` (memtomem indexes recursively under those
-        # roots, so subdirectories are first-class).
+        # up the *first* source path looking for the ``.memtomem``
+        # ancestor; the project root is its parent. Glob inputs are
+        # rooted in a single tier (we re-check per file below) so the
+        # anchor is sufficient. Walking the ancestry chain handles
+        # arbitrary subdirectory depth and any ``memories`` /
+        # ``memories.local`` sibling under ``.memtomem/`` (memtomem
+        # indexes recursively under those roots, so subdirectories
+        # are first-class).
+        anchor = sources[0]
         project_root: Path | None = None
         if from_scope != "user":
-            for ancestor in source.parents:
+            for ancestor in anchor.parents:
                 if ancestor.name == ".memtomem":
                     project_root = ancestor.parent
                     break
@@ -2724,13 +2743,6 @@ async def _memory_migrate_run(
         except MemoryScopeError as exc:
             raise click.ClickException(str(exc)) from exc
 
-        try:
-            source.relative_to(from_dir)
-        except ValueError:
-            raise click.ClickException(
-                f"Source {source} is not under --from={from_scope} directory {from_dir}."
-            )
-
         # ADR-0011: the migrated row's scope/project_root only become
         # visible to search/recall and the indexing watcher when the
         # target tier directory is registered in
@@ -2745,55 +2757,85 @@ async def _memory_migrate_run(
         ):
             raise click.ClickException(project_tier_registration_error(to_dir, to_scope))
 
-        target = (to_dir / source.name).resolve()
-        if target.exists():
-            raise click.ClickException(f"Target already exists: {target}. Move or rename it first.")
-
-        affected = await comp.storage.count_chunks_by_source(source)
-
-        # Gate A on migrate: re-scan when landing in project_shared.
-        # Force bypass intentionally not allowed (ADR-0011 §5: git is
-        # forever). ``record_outcome=False`` on dry-run so the privacy
-        # counters reflect actual writes only.
-        if to_scope == "project_shared":
-            content = source.read_text(encoding="utf-8")
-            guard = privacy.enforce_write_guard(
-                content,
-                surface="memory_migrate",
-                force_unsafe=False,
-                scope=to_scope,
-                audit_context={"source": str(source), "target": str(target)},
-                record_outcome=apply_,
-            )
-            if guard.decision in ("blocked", "blocked_project_shared"):
-                click.secho(
-                    f"  ✗ Gate A: file content matches {len(guard.hits)} privacy "
-                    "pattern(s); migration to scope='project_shared' rejected. "
-                    "git history is forever — no force bypass available.",
-                    fg="red",
-                    err=True,
+        # Pre-flight pass: build the plan over every source. We check
+        # under-from-dir + target-nonexistent + Gate A privacy here so
+        # that nothing on disk moves until the whole batch is known to
+        # be migratable. ``record_outcome=False`` on the pre-flight
+        # scan; the apply pass re-scans with ``record_outcome=apply_``
+        # so the privacy audit log only records writes that actually
+        # proceed — important for batches where a late-discovered fail
+        # would otherwise leave allowed-write records for files we
+        # never touched.
+        plan: list[dict[str, Any]] = []
+        for src in sources:
+            try:
+                src.relative_to(from_dir)
+            except ValueError:
+                raise click.ClickException(
+                    f"Source {src} is not under --from={from_scope} directory {from_dir}."
                 )
-                raise click.exceptions.Exit(1)
+            tgt = (to_dir / src.name).resolve()
+            if tgt.exists():
+                raise click.ClickException(
+                    f"Target already exists: {tgt}. Move or rename it first."
+                )
+            affected = await comp.storage.count_chunks_by_source(src)
+            lineage = await comp.storage.count_chunk_links_for_source(src)
 
-        click.echo(f"Plan: migrate {source.name}")
-        click.echo(f"  from {from_scope}: {source}")
-        click.echo(f"  to   {to_scope}: {target}")
-        click.echo(f"  chunks affected: {affected}")
-        click.echo("  chunk_links lineage: 0 dropped (chunk-id-stable single-DB rename)")
+            if to_scope == "project_shared":
+                content = src.read_text(encoding="utf-8")
+                guard = privacy.enforce_write_guard(
+                    content,
+                    surface="memory_migrate",
+                    force_unsafe=False,
+                    scope=to_scope,
+                    audit_context={"source": str(src), "target": str(tgt)},
+                    record_outcome=False,
+                )
+                if guard.decision in ("blocked", "blocked_project_shared"):
+                    click.secho(
+                        f"  ✗ Gate A: {src.name} matches {len(guard.hits)} privacy "
+                        f"pattern(s); migration to scope='{to_scope}' rejected. "
+                        "git history is forever — no force bypass available.",
+                        fg="red",
+                        err=True,
+                    )
+                    raise click.exceptions.Exit(1)
+
+            plan.append({"source": src, "target": tgt, "affected": affected, "lineage": lineage})
+
+        is_batch = len(plan) > 1
+        for entry in plan:
+            click.echo(f"Plan: migrate {entry['source'].name}")
+            click.echo(f"  from {from_scope}: {entry['source']}")
+            click.echo(f"  to   {to_scope}: {entry['target']}")
+            click.echo(f"  chunks affected: {entry['affected']}")
+            # ``N preserved, 0 dropped`` for single-DB chunk-id-stable
+            # rename: chunks.id never changes so the entire chunk_links
+            # neighborhood survives untouched. Cross-DB migration (#886
+            # follow-up) is where ``dropped`` could become non-zero.
+            click.echo(f"  chunk_links lineage: {entry['lineage']} preserved, 0 dropped")
+
+        if is_batch:
+            total_chunks = sum(int(e["affected"]) for e in plan)
+            total_lineage = sum(int(e["lineage"]) for e in plan)
+            click.echo(
+                f"\nTotal: {len(plan)} files, {total_chunks} chunks affected, "
+                f"{total_lineage} chunk_links preserved"
+            )
 
         if not apply_:
             click.echo("\nRun with --apply to execute.")
             return
 
         # ADR-0011 PR-D review round 10 (M2): require an explicit
-        # ``--confirm-project-shared`` for project_shared targets,
-        # mirroring the round-7 fix on ``mm mem add``. ``--yes`` is a
-        # generic "skip prompts" flag users alias for unrelated reasons;
-        # accepting it as Gate B satisfaction would let
-        # ``mm context memory-migrate --to project_shared --yes``
+        # ``--confirm-project-shared`` for project_shared targets.
+        # ``--yes`` is a generic "skip prompts" flag users alias for
+        # unrelated reasons; accepting it as Gate B satisfaction would
+        # let ``mm context memory-migrate --to project_shared --yes``
         # silently rewrite git-tracked memory without an explicit
-        # project-shared opt-in. Interactive prompt path remains for
-        # the no-flag case.
+        # project-shared opt-in. One prompt covers the whole batch
+        # since every file lands in the same tier.
         if to_scope == "project_shared" and not confirm_project_shared:
             if yes:
                 raise click.ClickException(
@@ -2801,13 +2843,15 @@ async def _memory_migrate_run(
                     "--yes alone is not sufficient: project_shared writes go to "
                     "the git-tracked memory tier and require explicit opt-in."
                 )
+            file_word = "files" if is_batch else "file"
+            count_str = f"{len(plan)} {file_word}" if is_batch else "this file"
             if not click.confirm(
-                f"\nThis will write to the git-tracked tier {to_dir}. Continue?",
+                f"\nThis will write {count_str} to the git-tracked tier {to_dir}. Continue?",
                 default=False,
             ):
                 raise click.Abort()
 
-        target.parent.mkdir(parents=True, exist_ok=True)
+        to_dir.mkdir(parents=True, exist_ok=True)
         # ADR-0011 PR-D review round 10 (B2): hold an exclusive sidecar
         # lock on BOTH source and target paths spanning the FS move and
         # the DB UPDATE. A concurrent ``mm web`` watcher fires
@@ -2817,51 +2861,99 @@ async def _memory_migrate_run(
         # row at ``target`` (new UUID) before our UPDATE flips the
         # original chunk's source_file. End state: two sets of chunks
         # at the destination, defeating the chunk-id-stability guarantee
-        # the migrate command promises. Lock the source first so the
-        # post-move target lock is taken before any watcher can observe
-        # the rename. Locks live on the file's parent so they survive
-        # the rename (lockfile inodes are stable; ``feedback_sidecar_
-        # lockfile_for_replaced_files.md``).
-        with _file_lock(_lock_path_for(source)), _file_lock(_lock_path_for(target)):
-            shutil.move(str(source), str(target))
-            try:
-                updated = await comp.storage.update_chunks_scope_for_source(
-                    source,
-                    target,
-                    to_scope,
-                    project_root if to_scope != "user" else None,
-                )
-            except Exception as exc:
-                # Compensation: SQLite TX cannot roll back the FS move
-                # on its own. Revert the move (best-effort) so the
-                # source path remains canonical and the next attempt
-                # sees the pre-migration state.
-                #
-                # ``shutil.move`` falls back to copy + unlink on
-                # cross-device renames; if the unlink fails we end up
-                # with both source and target present. The compensation
-                # block reaches here only when ``shutil.move(target →
-                # source)`` raises, which is rare in practice but worth
-                # the explicit message.
-                try:
-                    shutil.move(str(target), str(source))
-                except Exception:
-                    click.secho(
-                        "  ✗ DB update failed AND filesystem rollback failed; "
-                        "source/target may diverge. Inspect both paths.",
-                        fg="red",
-                        err=True,
+        # the migrate command promises. For batch mode we acquire every
+        # lock up front via ``ExitStack`` so a watcher cannot race any
+        # of the per-file pairs at any point mid-batch; reverse-order
+        # release on context exit. Locks live on the file's parent so
+        # they survive the rename (``feedback_sidecar_lockfile_for_
+        # replaced_files.md``).
+        completed: list[tuple[Path, Path, int]] = []
+        with ExitStack() as stack:
+            seen_locks: set[Path] = set()
+            for entry in plan:
+                src_lock = _lock_path_for(entry["source"])
+                tgt_lock = _lock_path_for(entry["target"])
+                for lp in (src_lock, tgt_lock):
+                    if lp not in seen_locks:
+                        stack.enter_context(_file_lock(lp))
+                        seen_locks.add(lp)
+
+            for i, entry in enumerate(plan, 1):
+                src, tgt = entry["source"], entry["target"]
+
+                # Apply-time privacy audit record (Gate A re-scan). Only
+                # records on actual writes — the pre-flight pass used
+                # ``record_outcome=False``. ``project_shared`` only;
+                # other tiers don't need the audit hit.
+                if to_scope == "project_shared":
+                    content = src.read_text(encoding="utf-8")
+                    privacy.enforce_write_guard(
+                        content,
+                        surface="memory_migrate",
+                        force_unsafe=False,
+                        scope=to_scope,
+                        audit_context={"source": str(src), "target": str(tgt)},
+                        record_outcome=True,
                     )
-                    raise
-                raise click.ClickException(
-                    f"DB update failed; filesystem move reverted: {exc}"
-                ) from exc
+
+                shutil.move(str(src), str(tgt))
+                try:
+                    updated = await comp.storage.update_chunks_scope_for_source(
+                        src,
+                        tgt,
+                        to_scope,
+                        project_root if to_scope != "user" else None,
+                    )
+                except Exception as exc:
+                    # Compensation: SQLite TX cannot roll back the FS
+                    # move on its own. Revert the move (best-effort)
+                    # so the source path remains canonical and the next
+                    # attempt sees the pre-migration state.
+                    #
+                    # ADR-0011 §5: per-file revert, leave already-
+                    # completed files migrated, abort remaining. Gives
+                    # the user a deterministic resumption point.
+                    try:
+                        shutil.move(str(tgt), str(src))
+                    except Exception:
+                        click.secho(
+                            f"  ✗ DB update failed AND filesystem rollback failed "
+                            f"for {src.name}; source/target may diverge. Inspect "
+                            "both paths.",
+                            fg="red",
+                            err=True,
+                        )
+                        raise
+                    if is_batch:
+                        n_done = len(completed)
+                        n_total = len(plan)
+                        click.secho(
+                            f"  ✗ DB update failed on file {i} of {n_total} "
+                            f"({src.name}); reverted that file. {n_done} of "
+                            f"{n_total} migrated; remaining "
+                            f"{n_total - n_done - 1} file(s) untouched.",
+                            fg="red",
+                            err=True,
+                        )
+                    raise click.ClickException(
+                        f"DB update failed; filesystem move reverted: {exc}"
+                    ) from exc
+                completed.append((src, tgt, int(updated)))
 
         comp.search_pipeline.invalidate_cache()
-        click.secho(
-            f"  ✓ moved {source.name} → {to_scope} tier; {updated} chunk row(s) updated.",
-            fg="green",
-        )
+        if is_batch:
+            total_rows = sum(c[2] for c in completed)
+            click.secho(
+                f"  ✓ moved {len(completed)} files → {to_scope} tier; "
+                f"{total_rows} chunk row(s) updated.",
+                fg="green",
+            )
+        else:
+            src, _tgt, updated = completed[0]
+            click.secho(
+                f"  ✓ moved {src.name} → {to_scope} tier; {updated} chunk row(s) updated.",
+                fg="green",
+            )
 
 
 # ---------------------------------------------------------------------------
