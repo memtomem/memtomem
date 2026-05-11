@@ -250,7 +250,7 @@ def test_context_list_card_renders_project_local_tier_badge_with_annotation(
     """Context artifact cards render the literal tier token and the
     project_local zero-runtime-fan-out annotation inline with the name.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
     _stub_projects(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
     _stub_skills(
         page,
