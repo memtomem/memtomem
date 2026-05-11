@@ -347,8 +347,8 @@ def _print_direct_stdio_help() -> None:
                 "  claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server",
                 "",
                 "For a manually started network server, use:",
-                "  memtomem-server --transport sse --host 127.0.0.1 --port 8000",
-                "  memtomem-server --transport http --host 127.0.0.1 --port 8000",
+                "  memtomem-server --transport sse --host 127.0.0.1 --port 8000 --url http://127.0.0.1:8000/sse",
+                "  memtomem-server --transport http --host 127.0.0.1 --port 8000 --url http://127.0.0.1:8000/mcp",
                 "",
                 "No MCP client is connected; exiting.",
             ]
@@ -373,7 +373,10 @@ def _parse_server_args(argv: list[str] | None = None):
     parser.add_argument(
         "--host",
         default="127.0.0.1",
-        help="Host for sse/http transports.",
+        help=(
+            "Local host/interface to listen on for sse/http transports, usually "
+            "127.0.0.1 behind nginx or 0.0.0.0 for direct network access."
+        ),
     )
     parser.add_argument(
         "--port",
@@ -382,19 +385,30 @@ def _parse_server_args(argv: list[str] | None = None):
         help="Port for sse/http transports.",
     )
     parser.add_argument(
-        "--mount-path",
+        "--url",
         default=None,
-        help="Optional mount path for SSE transport.",
+        help=(
+            "Full MCP endpoint URL clients connect to, e.g. https://example.com/mcp. "
+            "The URL path is also used as this server's endpoint path; reverse "
+            "proxies should forward that path unchanged."
+        ),
     )
     parser.add_argument(
-        "--sse-path",
-        default="/sse",
-        help="SSE endpoint path for --transport sse.",
+        "--allowed-host",
+        action="append",
+        default=[],
+        help="Advanced: extra allowed Host header for sse/http transports. Repeatable.",
     )
     parser.add_argument(
-        "--http-path",
-        default="/mcp",
-        help="Streamable HTTP endpoint path for --transport http.",
+        "--allowed-origin",
+        action="append",
+        default=[],
+        help="Advanced: extra allowed Origin header for sse/http transports. Repeatable.",
+    )
+    parser.add_argument(
+        "--disable-dns-rebinding-protection",
+        action="store_true",
+        help="Advanced: disable MCP transport DNS rebinding protection for sse/http transports.",
     )
     return parser.parse_args(argv)
 
@@ -405,27 +419,113 @@ def _normalize_transport(transport: str) -> str:
     return transport
 
 
-def _configure_network_transport(args) -> None:
+def _default_network_url(transport: str, host: str, port: int) -> str:
+    path = "/sse" if transport == "sse" else "/mcp"
+    display_host = "127.0.0.1" if host == "0.0.0.0" else host
+    return f"http://{display_host}:{port}{path}"
+
+
+def _normalize_endpoint_url(url: str) -> str:
+    from urllib.parse import urlparse
+
+    normalized = url.rstrip("/")
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise SystemExit("--url must be a full http(s) URL, e.g. https://example.com/mcp")
+    if not parsed.path or parsed.path == "/":
+        raise SystemExit("--url must include an endpoint path, e.g. https://example.com/mcp")
+    return normalized
+
+
+def _split_sse_url_path(path: str) -> tuple[str | None, str]:
+    mount, _, endpoint = path.rstrip("/").rpartition("/")
+    return (mount or None), f"/{endpoint}"
+
+
+def _origin_from_url(url: str) -> str:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _host_patterns(host: str | None) -> list[str]:
+    if not host or host in {"0.0.0.0", "::"}:
+        return []
+    if ":" in host and not host.startswith("["):
+        return [f"[{host}]", f"[{host}]:*"]
+    return [host, f"{host}:*"]
+
+
+def _configure_network_transport(args, transport: str) -> tuple[str, str | None]:
+    from urllib.parse import urlparse
+
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    public_url = _normalize_endpoint_url(
+        args.url or _default_network_url(transport, args.host, args.port)
+    )
+    parsed = urlparse(public_url)
+
     mcp.settings.host = args.host
     mcp.settings.port = args.port
-    mcp.settings.sse_path = args.sse_path
-    mcp.settings.streamable_http_path = args.http_path
-
-
-def _print_network_server_info(transport: str, args) -> None:
     if transport == "sse":
-        path = args.sse_path
-        if args.mount_path:
-            mount = args.mount_path.rstrip("/")
-            path = f"{mount}{path}"
+        mount_path, endpoint_path = _split_sse_url_path(parsed.path)
+        mcp.settings.sse_path = endpoint_path
     else:
-        path = args.http_path
+        mount_path = None
+        endpoint_path = parsed.path
+        mcp.settings.streamable_http_path = endpoint_path
+
+    if args.disable_dns_rebinding_protection:
+        mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=False
+        )
+        return public_url, mount_path
+
+    allowed_hosts = [
+        "127.0.0.1",
+        "127.0.0.1:*",
+        "localhost",
+        "localhost:*",
+        "[::1]",
+        "[::1]:*",
+        *(_host_patterns(parsed.hostname)),
+        *(_host_patterns(args.host)),
+        *args.allowed_host,
+    ]
+    allowed_origins = [_origin_from_url(public_url), *args.allowed_origin]
+    mcp.settings.transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=list(dict.fromkeys(allowed_hosts)),
+        allowed_origins=list(dict.fromkeys(allowed_origins)),
+    )
+    return public_url, mount_path
+
+
+def _internal_network_url(args, transport: str, mount_path: str | None) -> str:
+    if transport == "sse":
+        path = f"{mount_path or ''}{mcp.settings.sse_path}"
+    else:
+        path = mcp.settings.streamable_http_path
+    return f"http://{args.host}:{args.port}{path}"
+
+
+def _print_network_server_info(
+    transport: str, args, public_url: str, mount_path: str | None
+) -> None:
+    transport_label = "http (streamable-http)" if args.transport == "http" else transport
+    internal_url = _internal_network_url(args, transport, mount_path)
     print(
         "\n".join(
             [
                 "memtomem-server",
-                f"Transport: {transport}",
-                f"Listening: http://{args.host}:{args.port}{path}",
+                f"Transport: {transport_label}",
+                f"Internal URL: {internal_url}",
+                f"Public URL:   {public_url}",
+                "",
+                "Reverse proxy note:",
+                "  Forward the public URL path unchanged to the internal URL path.",
                 "",
                 "Press Ctrl+C to stop.",
             ]
@@ -447,8 +547,10 @@ def main(argv: list[str] | None = None) -> None:
         _print_direct_stdio_help()
         raise SystemExit(2)
     if transport != "stdio":
-        _configure_network_transport(args)
-        _print_network_server_info(transport, args)
+        public_url, mount_path = _configure_network_transport(args, transport)
+        _print_network_server_info(transport, args, public_url, mount_path)
+    else:
+        mount_path = None
 
     # B1: bidirectional mutual exclusion during the transition window.
     # Hold the legacy flock for the process lifetime so an old (pre-#412)
@@ -569,6 +671,6 @@ def main(argv: list[str] | None = None) -> None:
     if transport == "stdio":
         mcp.run()
     elif transport == "sse":
-        mcp.run(transport="sse", mount_path=args.mount_path)
+        mcp.run(transport="sse", mount_path=mount_path)
     else:
         mcp.run(transport="streamable-http")

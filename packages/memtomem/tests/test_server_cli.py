@@ -53,6 +53,7 @@ def test_stdio_direct_terminal_prints_help_and_exits(
     out = capsys.readouterr().out
     assert "memtomem-server is an MCP stdio server." in out
     assert "No MCP client is connected; exiting." in out
+    assert "--url http://127.0.0.1:8000/mcp" in out
     assert "mm status" not in out
 
 
@@ -100,8 +101,8 @@ def test_http_transport_alias_runs_streamable_http(
                 "127.0.0.1",
                 "--port",
                 "8765",
-                "--http-path",
-                "/custom-mcp",
+                "--url",
+                "https://mcp.example.test/custom-mcp",
             ]
         )
     finally:
@@ -110,6 +111,8 @@ def test_http_transport_alias_runs_streamable_http(
     assert server_mod.mcp.settings.host == "127.0.0.1"
     assert server_mod.mcp.settings.port == 8765
     assert server_mod.mcp.settings.streamable_http_path == "/custom-mcp"
+    assert "mcp.example.test" in server_mod.mcp.settings.transport_security.allowed_hosts
+    assert "https://mcp.example.test" in server_mod.mcp.settings.transport_security.allowed_origins
     assert calls == [((), {"transport": "streamable-http"})]
 
 
@@ -134,10 +137,8 @@ def test_sse_transport_passes_mount_path(
                 "0.0.0.0",
                 "--port",
                 "8766",
-                "--mount-path",
-                "/memtomem",
-                "--sse-path",
-                "/events",
+                "--url",
+                "https://mcp.example.test/memtomem/events",
             ]
         )
     finally:
@@ -147,3 +148,44 @@ def test_sse_transport_passes_mount_path(
     assert server_mod.mcp.settings.port == 8766
     assert server_mod.mcp.settings.sse_path == "/events"
     assert calls == [((), {"transport": "sse", "mount_path": "/memtomem"})]
+
+
+def test_network_url_trailing_slash_is_normalized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from memtomem import server as server_mod
+
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    callbacks = _isolate_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr(server_mod, "_try_hold_legacy_flock", lambda _path: None)
+    monkeypatch.setattr(server_mod, "_install_sigterm_handler", lambda *_paths: None)
+    monkeypatch.setattr(server_mod.mcp, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    try:
+        server_mod.main(
+            [
+                "--transport",
+                "http",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8767",
+                "--url",
+                "https://mcp.example.test/mcp/",
+            ]
+        )
+    finally:
+        _run_callbacks(callbacks)
+
+    assert server_mod.mcp.settings.streamable_http_path == "/mcp"
+    assert calls == [((), {"transport": "streamable-http"})]
+
+
+def test_network_url_requires_endpoint_path() -> None:
+    from memtomem import server as server_mod
+
+    with pytest.raises(SystemExit) as exc:
+        server_mod.main(["--transport", "http", "--url", "https://mcp.example.test/"])
+
+    assert "must include an endpoint path" in str(exc.value)
