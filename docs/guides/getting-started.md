@@ -445,9 +445,13 @@ Run `mm context --help` for the full fan-out matrix across editors (Claude Code,
 > git-tracked, the default for these artifacts), or `project_local`
 > (`<proj>/.memtomem/<artifact>.local/`, gitignored, draft tier — no runtime
 > fan-out). Pick the tier per write with `--scope=<tier>` on `mm context
-> init` / `sync` / `migrate`. Tier (canonical residency) is distinct from
-> the runtime **scope** the canonical fans out to under `.claude/` —
-> ADR-0016 documents the split; ADR-0011 §1 has the per-artifact table.
+> init` / `sync` / `generate`. To move an existing canonical between tiers,
+> `mm context migrate <kind> <name> --from <tier> --to <tier> --apply`
+> uses the explicit `--from` / `--to` pair instead of `--scope` (the verb
+> has two endpoints, not one). Tier (canonical residency) is distinct
+> from the runtime **scope** the canonical fans out to under `.claude/`
+> — ADR-0016 documents the split; ADR-0011 §1 has the per-artifact
+> table.
 
 ---
 
