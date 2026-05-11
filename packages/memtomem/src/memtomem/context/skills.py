@@ -22,6 +22,7 @@ import logging
 import os
 import secrets
 import shutil
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -323,6 +324,76 @@ def generate_all_skills(
         )
 
     targets = runtimes if runtimes is not None else list(SKILL_GENERATORS.keys())
+
+    # ``project_shared`` is a hard-refusal surface: if any skill or
+    # runtime override fails Gate A, no runtime fan-out should be
+    # promoted. Hold all destination locks, stage+scan every final tree,
+    # then promote only after the full batch passes.
+    if scope == "project_shared":
+        work: list[tuple[str, SkillGenerator, Path, Path]] = []
+        for target in targets:
+            gen = SKILL_GENERATORS.get(target)
+            if gen is None:
+                skipped.append((target, "unknown runtime", skip_codes.UNKNOWN_RUNTIME))
+                continue
+            for skill_dir in canonicals:
+                dst = gen.target_dir(project_root, skill_dir.name, scope=scope)
+                if dst is None:
+                    skipped.append(
+                        (
+                            skill_dir.name,
+                            f"no fan-out for runtime {target} at this scope",
+                            skip_codes.NO_PROJECT_FANOUT_FOR_RUNTIME,
+                        )
+                    )
+                    continue
+                work.append((target, gen, skill_dir, dst))
+
+        staged: list[tuple[str, Path, Path]] = []
+        try:
+            with ExitStack() as stack:
+                for lock_path in sorted({_lock_path_for(dst) for _, _, _, dst in work}, key=str):
+                    stack.enter_context(_file_lock(lock_path))
+                for target, _gen, skill_dir, dst in work:
+                    staging = _stage_skill(skill_dir, dst)
+                    staged.append((target, staging, dst))
+
+                    vendor = GENERATOR_VENDOR.get(target)
+                    if vendor is not None:
+                        override_path = _override.resolve(
+                            project_root, "skills", skill_dir.name, vendor, scope=scope
+                        )
+                        if override_path is not None:
+                            atomic_write_bytes(
+                                staging / SKILL_MANIFEST,
+                                override_path.read_bytes(),
+                            )
+
+                    scan = scan_artifact_tree(
+                        staging,
+                        surface="cli_context_sync",
+                        scope=scope,
+                        project_root=project_root,
+                        on_blocked="fail_fast",
+                    )
+                    if scan.blocked:
+                        raise_or_collect(
+                            scan.blocked[0],
+                            scope=scope,
+                            kind="skill",
+                            artifact_name=skill_dir.name,
+                        )
+
+                for target, staging, dst in staged:
+                    _promote_staging(staging, dst)
+                    generated.append((target, dst))
+        finally:
+            for _target, staging, _dst in staged:
+                if staging.exists():
+                    shutil.rmtree(staging, ignore_errors=True)
+
+        return SkillSyncResult(generated=generated, skipped=skipped)
+
     for target in targets:
         gen = SKILL_GENERATORS.get(target)
         if gen is None:

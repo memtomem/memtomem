@@ -259,6 +259,35 @@ class TestGenerateAllSkillsStagingFlow:
         ]
         assert leftovers == []
 
+    def test_project_shared_block_later_skill_leaves_no_partial_fanout(
+        self, tmp_path: Path
+    ) -> None:
+        # #895 follow-up: project_shared is an all-or-nothing privacy
+        # surface. A clean earlier skill must not be promoted before a
+        # later skill fails Gate A.
+        _seed_canonical_skill(tmp_path, name="clean")
+        _seed_canonical_skill(
+            tmp_path,
+            name="leak",
+            extras={"scripts/leak.sh": f"#!/bin/bash\necho {SECRET}\n"},
+        )
+        gen = SKILL_GENERATORS["claude_skills"]
+        clean_dst = gen.target_dir(tmp_path, "clean")
+        leak_dst = gen.target_dir(tmp_path, "leak")
+        assert clean_dst is not None
+        assert leak_dst is not None
+
+        from memtomem.context.privacy_scan import PrivacyBlockedError
+
+        with pytest.raises(PrivacyBlockedError):
+            generate_all_skills(tmp_path, runtimes=["claude_skills"], scope="project_shared")
+
+        assert not clean_dst.exists()
+        assert not leak_dst.exists()
+        assert not [
+            p.name for p in clean_dst.parent.iterdir() if p.name.startswith((".staging-", ".old-"))
+        ]
+
 
 class TestOverridePreservation:
     def test_override_only_touches_skill_md_through_staging(self, tmp_path: Path) -> None:
