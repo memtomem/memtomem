@@ -174,9 +174,12 @@ def sync_atomic_artifact(
         ``skipped`` tuples.
 
     Raises:
-        click.ClickException: Phase 1 Gate A block under ``scope=project_shared``
-            — surfaced via :func:`raise_or_collect`. No filesystem mutation
-            has happened at this point (all-or-nothing atomicity).
+        PrivacyBlockedError: Phase 1 Gate A block under ``scope=project_shared``
+            — raised by :func:`raise_or_collect`. No filesystem mutation
+            has happened at this point (all-or-nothing atomicity). Surfaces
+            translate at the boundary (CLI → ``click.ClickException``,
+            MCP → tool error, web → HTTP 422); the engine itself does not
+            import ``click``.
         StrictDropError: Phase 2, when ``on_drop="error"`` (or legacy
             ``strict=True``) and a render would drop fields. Earlier writes
             in pending order have already landed on disk — this is the

@@ -190,9 +190,7 @@ class TestUnreadableSource:
     def test_emits_parse_error_skip(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """OSError on canonical read → PARSE_ERROR skip with ``unreadable:`` reason."""
         _seed_canonical(tmp_path, "alpha", "clean\n", scope="project_local")
-        unreadable = _seed_canonical(
-            tmp_path, "beta", "would be clean\n", scope="project_local"
-        )
+        unreadable = _seed_canonical(tmp_path, "beta", "would be clean\n", scope="project_local")
 
         original_read_bytes = Path.read_bytes
 
@@ -400,3 +398,21 @@ def test_empty_canonical_root_returns_no_canonical_skip(tmp_path: Path) -> None:
     assert name == "<all>"
     assert code == skip_codes.NO_CANONICAL_ROOT
     assert "no canonical agents" in reason
+
+
+def test_strict_drop_errors_are_sister_subclasses() -> None:
+    """``agents.StrictDropError`` and ``commands.StrictDropError`` must stay distinct.
+
+    The engine raises through ``adapter.strict_drop_error_type``; each module's
+    wrapper binds its own subclass. If someone "simplifies" the adapter back to
+    an engine-default base, ``except agents.StrictDropError`` would accidentally
+    catch a commands raise (and vice versa) — existing tests pinning
+    ``pytest.raises(<module>.StrictDropError)`` would still pass because they
+    each import their own catch class. This guards that adapter regression.
+    """
+    from memtomem.context.agents import StrictDropError as AgentsStrictDrop
+    from memtomem.context.commands import StrictDropError as CommandsStrictDrop
+
+    assert AgentsStrictDrop is not CommandsStrictDrop
+    assert not issubclass(AgentsStrictDrop, CommandsStrictDrop)
+    assert not issubclass(CommandsStrictDrop, AgentsStrictDrop)
