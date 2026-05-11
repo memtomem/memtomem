@@ -568,6 +568,7 @@ class IndexEngine:
             skipped_chunks=result["skipped"],
             deleted_chunks=result["deleted"],
             duration_ms=duration,
+            errors=tuple(result.get("errors", ())),
             new_chunk_ids=tuple(result.get("new_chunk_ids", ())),
         )
 
@@ -844,7 +845,32 @@ class IndexEngine:
             )
 
         # Embed BEFORE any deletion — if embedding fails, DB stays untouched.
-        # Skip embedding entirely when using the noop provider (BM25-only mode).
+        # Refuse to silently produce BM25-only chunks when the configured
+        # embedder reports dimension=0. NoopEmbedder ("none" provider) is
+        # the explicit BM25-only opt-in and bypasses this guard;
+        # anything else with dim=0 is a misconfigured embedder (init
+        # failed, fastembed download timed out, etc.) and was previously
+        # papered over by the silent skip — chunks landed in ``chunks`` +
+        # ``chunks_fts`` while ``chunks_vec`` stayed empty, leaving
+        # semantic search returning nothing with no audit trail.
+        if diff_result.to_upsert and self._embedder.dimension == 0:
+            model = getattr(self._embedder, "model_name", "?")
+            if model != "none":
+                msg = (
+                    f"Embedder reports dimension=0 but model={model!r} — "
+                    "configured provider failed to initialize. Refusing "
+                    "to index BM25-only chunks; fix the embedder config "
+                    'or set embedding.provider="none" for intentional '
+                    "BM25-only mode."
+                )
+                logger.error("%s file=%s chunks=%d", msg, file_path, len(diff_result.to_upsert))
+                return {
+                    "total": len(new_chunks),
+                    "indexed": 0,
+                    "skipped": len(new_chunks),
+                    "deleted": 0,
+                    "errors": [msg],
+                }
         if diff_result.to_upsert and self._embedder.dimension > 0:
             texts = [c.retrieval_content for c in diff_result.to_upsert]
             # Threshold gate lives here, not inside the embedder, so callers
