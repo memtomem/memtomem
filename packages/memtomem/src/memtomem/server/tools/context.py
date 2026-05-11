@@ -422,7 +422,6 @@ async def mem_context_generate(
     inc = _parse_include(include)
     root = _find_project_root()
     artifact_scope = _resolve_artifact_mcp_scope(scope)
-    settings_scope = _resolve_mcp_scope(scope.strip() or None)
     ctx_path = root / CONTEXT_FILENAME
 
     results: list[str] = []
@@ -507,6 +506,11 @@ async def mem_context_generate(
     if "settings" in inc:
         from memtomem.context.settings import generate_all_settings
 
+        # Resolve settings scope lazily: _resolve_mcp_scope builds
+        # Mem2MemConfig and applies env/file overrides, which can fail
+        # on unrelated misconfiguration. Artifact-only callers must not
+        # pay that cost or see that failure.
+        settings_scope = _resolve_mcp_scope(scope.strip() or None)
         settings_results = generate_all_settings(
             root, scope=settings_scope, allow_host_writes=allow_host_writes
         )
@@ -667,7 +671,6 @@ async def mem_context_sync(
     inc = _parse_include(include)
     root = _find_project_root()
     artifact_scope = _resolve_artifact_mcp_scope(scope)
-    settings_scope = _resolve_mcp_scope(scope.strip() or None)
     ctx_path = root / CONTEXT_FILENAME
 
     results: list[str] = []
@@ -758,6 +761,11 @@ async def mem_context_sync(
     if "settings" in inc:
         from memtomem.context.settings import generate_all_settings
 
+        # Resolve settings scope lazily (see mem_context_generate note):
+        # _resolve_mcp_scope builds Mem2MemConfig and applies env/file
+        # overrides — artifact-only callers must not pay that cost or
+        # see that failure.
+        settings_scope = _resolve_mcp_scope(scope.strip() or None)
         settings_results = generate_all_settings(
             root, scope=settings_scope, allow_host_writes=allow_host_writes
         )

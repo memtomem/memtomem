@@ -134,6 +134,63 @@ async def test_mem_context_generate_scope_user_reads_user_canonical(
 
 
 @pytest.mark.anyio
+async def test_mem_context_generate_artifact_only_skips_settings_scope_resolve(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Artifact-only generate must not eagerly resolve the settings scope.
+
+    ``_resolve_mcp_scope`` builds ``Mem2MemConfig`` and applies env/file
+    overrides — if an unrelated override is broken, the whole call would
+    fail before touching artifacts. Pin: monkeypatch the helper to raise,
+    then call generate with ``include="agents"``; the artifact path must
+    still complete.
+    """
+    project = _make_project(tmp_path, monkeypatch)
+    home = tmp_path / "home"
+    set_home(monkeypatch, home)
+    canonical = canonical_artifact_dir("agents", "user", project)
+    canonical.mkdir(parents=True)
+    (canonical / "ok.md").write_text(_clean_agent_body("ok"), encoding="utf-8")
+
+    from memtomem.server.tools import context as context_mod
+
+    def _boom(*_a: object, **_kw: object) -> str:
+        raise RuntimeError("settings scope resolver poisoned for test")
+
+    monkeypatch.setattr(context_mod, "_resolve_mcp_scope", _boom)
+
+    out = await mem_context_generate(include="agents", scope="user")
+    assert "Sub-agent fan-out:" in out
+    assert (home / ".claude" / "agents" / "ok.md").is_file()
+
+
+@pytest.mark.anyio
+async def test_mem_context_sync_artifact_only_skips_settings_scope_resolve(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same regression pin as ``mem_context_generate`` but for ``mem_context_sync``."""
+    project = _make_project(tmp_path, monkeypatch)
+    home = tmp_path / "home"
+    set_home(monkeypatch, home)
+    canonical = canonical_artifact_dir("agents", "user", project)
+    canonical.mkdir(parents=True)
+    (canonical / "ok.md").write_text(_clean_agent_body("ok"), encoding="utf-8")
+
+    from memtomem.server.tools import context as context_mod
+
+    def _boom(*_a: object, **_kw: object) -> str:
+        raise RuntimeError("settings scope resolver poisoned for test")
+
+    monkeypatch.setattr(context_mod, "_resolve_mcp_scope", _boom)
+
+    out = await mem_context_sync(include="agents", scope="user")
+    assert "Sub-agent fan-out:" in out
+    assert (home / ".claude" / "agents" / "ok.md").is_file()
+
+
+@pytest.mark.anyio
 async def test_mem_context_init_project_shared_privacy_block_surfaces(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
