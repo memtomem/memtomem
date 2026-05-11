@@ -73,6 +73,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "ASSET_DIR_FILENAMES",
     "MIGRATABLE_ASSET_TYPES",
+    "MigratePartialError",
     "SCOPE_MIGRATABLE_KINDS",
     "MigrateResult",
     "MigrateRow",
@@ -82,6 +83,30 @@ __all__ = [
     "migrate_one",
     "migrate_scope",
 ]
+
+
+class MigratePartialError(Exception):
+    """Raised when a scope-tier migrate cannot be cleanly completed.
+
+    Specifically raised by the EXDEV-fallback path when the canonical
+    has been copied to ``dst`` but the original ``src`` cannot be
+    removed (permissions, open file handle, etc.). Both canonicals
+    are now on disk; the next ``mm context sync`` at the source
+    scope would recreate runtime fan-out at the old tier from the
+    stale ``src``, producing duplicate-scope ambiguity that
+    ``_detect_source_scope`` cannot resolve (#895 P2 review #5).
+
+    The error carries both paths so the caller (CLI / web / MCP)
+    can surface a remediation hint pointing at the file the user
+    needs to remove manually. Translation to surface-native errors
+    follows the same pattern as :class:`PrivacyScanError`.
+    """
+
+    def __init__(self, message: str, *, src_path: Path, dst_path: Path) -> None:
+        super().__init__(message)
+        self.message = message
+        self.src_path = src_path
+        self.dst_path = dst_path
 
 
 MigrateState = Literal[
@@ -973,16 +998,31 @@ def migrate_scope(
                 else:
                     src_path.unlink()
             except OSError as exc:
-                # Canonical is migrated; src cleanup failed. Surface but
-                # don't roll back the canonical move (would re-create
-                # the duplicate state we just resolved). User can re-run
-                # — _detect_source_scope will then see only src and
-                # treat it as the source for a re-migrate.
-                logger.warning(
+                # Canonical is at dst but src cleanup failed — both
+                # canonicals are on disk. Rolling back dst would just
+                # restore the duplicate state we just resolved (and the
+                # bytes at src are presumably the same — copy succeeded).
+                # Instead, surface as a hard error so the caller does
+                # NOT report "moved" and does NOT proceed to fan-out
+                # cleanup. Without this fail-loud, the next
+                # ``mm context sync`` at src_scope would recreate runtime
+                # fan-out from the stale src (#895 P2 review #5).
+                logger.error(
                     "EXDEV cleanup: failed to remove stale src %s: %s",
                     src_path,
                     exc,
                 )
+                raise MigratePartialError(
+                    f"Migrate {kind}/{name}: canonical copied to {dst_path} but "
+                    f"failed to remove stale source at {src_path} (errno={exc.errno}). "
+                    f"Both canonicals now exist on disk. Remove {src_path} manually, "
+                    f"then run `mm context sync --scope {to_scope}` to refresh "
+                    f"runtime fan-out at the new tier. Until then, do NOT run "
+                    f"`mm context sync --scope {src_scope}` — it would recreate "
+                    f"runtime fan-out from the stale source.",
+                    src_path=src_path,
+                    dst_path=dst_path,
+                ) from exc
 
     # Lock released. Cleanup stale src runtime fan-out (best-effort).
     fanout_cleaned = _remove_runtime_fanout_for(kind, name, src_scope, project_root)

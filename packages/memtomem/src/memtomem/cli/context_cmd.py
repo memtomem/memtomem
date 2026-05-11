@@ -49,6 +49,7 @@ from memtomem.context.install import (
     update_skill,
 )
 from memtomem.context.migrate import (
+    MigratePartialError,
     MigrateRow,
     MigrateScopeResult,
     SCOPE_MIGRATABLE_KINDS,
@@ -1840,6 +1841,13 @@ def _migrate_scope_dispatch(
     except (FileNotFoundError, ValueError, InvalidNameError) as exc:
         raise click.ClickException(str(exc)) from exc
     except PrivacyScanError as exc:
+        raise click.ClickException(exc.message) from exc
+    except MigratePartialError as exc:
+        # Fan-out cleanup never ran (raise short-circuited), and the
+        # "Next: run sync ..." hint at the bottom of
+        # _print_migrate_scope_result is skipped because we exit before
+        # the result rendering — the user sees only the recovery hint
+        # embedded in exc.message.
         raise click.ClickException(exc.message) from exc
 
     _print_migrate_scope_result(result, apply_=apply_)

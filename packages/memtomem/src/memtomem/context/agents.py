@@ -622,6 +622,21 @@ def generate_all_agents(
         )
 
     targets = runtimes if runtimes is not None else list(AGENT_GENERATORS.keys())
+
+    # ── Phase 1: parse + scan every (target, agent) pair — pure read pass. ──
+    # No filesystem mutation happens here. For ``scope='project_shared'``
+    # the first Gate A hit raises immediately via :func:`raise_or_collect`,
+    # so Phase 2 never starts and no partial runtime fan-out can land on
+    # disk (#895 P2 review #5). For user / project_local scopes, blocks
+    # collect into ``skipped`` as before.
+    #
+    # ``pending`` is a list of write descriptors: one per (target, agent)
+    # pair that passed every gate. Each entry carries the immutable
+    # snapshot Phase 2 needs (parsed agent + override bytes that already
+    # passed Gate A) so the write loop never re-reads canonical from
+    # disk and the scan→write TOCTOU window stays closed.
+    pending: list[tuple[str, str, AgentGenerator, SubAgent, Path, bytes | None]] = []
+
     for target in targets:
         gen = AGENT_GENERATORS.get(target)
         if gen is None:
@@ -662,7 +677,7 @@ def generate_all_agents(
                 continue
             # ADR-0011 PR-E3 Gate A — scan the IN-MEMORY canonical bytes
             # (same buffer the parse used). project_shared block raises
-            # ClickException; user/project_local block emits
+            # PrivacyBlockedError; user/project_local block emits
             # PRIVACY_BLOCKED skip and continues to next runtime.
             file_scan = scan_text_content(
                 agent_text,
@@ -681,7 +696,7 @@ def generate_all_agents(
                 skipped.append((agent.name, reason, code))
                 continue
             # Resolve per-vendor override and scan its bytes — read once,
-            # scan once, write the same buffer. Same TOCTOU close as
+            # scan once, hand the bytes to Phase 2. Same TOCTOU close as
             # canonical above.
             vendor = GENERATOR_VENDOR.get(target)
             override_bytes: bytes | None = None
@@ -717,23 +732,32 @@ def generate_all_agents(
                         )
                         skipped.append((agent.name, reason, code))
                         continue
-            content, dropped_fields = gen.render(agent)
-            if dropped_fields:
-                if effective_drop == "error":
-                    raise StrictDropError(
-                        f"strict mode: {target} would drop {dropped_fields} from '{agent.name}'"
-                    )
-                if effective_drop == "warn":
-                    logger.warning("%s dropped %s from '%s'", target, dropped_fields, agent.name)
-            atomic_write_text(out_path, content)
-            # ADR-0008 Invariant 4: per-vendor override replaces the runtime file.
-            # Use the SAME captured buffer that passed Gate A — never
-            # re-read from disk (would re-open the TOCTOU window).
-            if override_bytes is not None:
-                atomic_write_bytes(out_path, override_bytes)
-            generated.append((target, out_path))
-            if dropped_fields:
-                dropped.append((target, agent.name, dropped_fields))
+            pending.append((target, agent.name, gen, agent, out_path, override_bytes))
+
+    # ── Phase 2: render + atomic write every pending pair. ──
+    # By construction Phase 1 raised on any project_shared privacy block,
+    # so reaching this loop means every queued write is clean. The only
+    # remaining mid-loop raise is StrictDropError, which is opt-in
+    # (``on_drop="error"`` or legacy ``strict=True``) and is an unrelated
+    # atomicity boundary — pre-existing behavior.
+    for target, _name, gen, agent, out_path, override_bytes in pending:
+        content, dropped_fields = gen.render(agent)
+        if dropped_fields:
+            if effective_drop == "error":
+                raise StrictDropError(
+                    f"strict mode: {target} would drop {dropped_fields} from '{agent.name}'"
+                )
+            if effective_drop == "warn":
+                logger.warning("%s dropped %s from '%s'", target, dropped_fields, agent.name)
+        atomic_write_text(out_path, content)
+        # ADR-0008 Invariant 4: per-vendor override replaces the runtime file.
+        # Use the SAME captured buffer that passed Gate A — never
+        # re-read from disk (would re-open the TOCTOU window).
+        if override_bytes is not None:
+            atomic_write_bytes(out_path, override_bytes)
+        generated.append((target, out_path))
+        if dropped_fields:
+            dropped.append((target, agent.name, dropped_fields))
 
     return AgentSyncResult(generated=generated, dropped=dropped, skipped=skipped)
 

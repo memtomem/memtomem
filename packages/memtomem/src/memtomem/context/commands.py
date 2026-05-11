@@ -420,6 +420,14 @@ def generate_all_commands(
         )
 
     targets = runtimes if runtimes is not None else list(COMMAND_GENERATORS.keys())
+
+    # ── Phase 1: parse + scan every (target, command) pair — pure read pass. ──
+    # See agents.py for the rationale (project_shared atomicity, ADR §5).
+    # The first project_shared Gate A hit raises immediately via
+    # :func:`raise_or_collect`, so no partial runtime fan-out can land
+    # on disk (#895 P2 review #5).
+    pending: list[tuple[str, CommandGenerator, SlashCommand, Path, bytes | None]] = []
+
     for target in targets:
         gen = COMMAND_GENERATORS.get(target)
         if gen is None:
@@ -475,7 +483,7 @@ def generate_all_commands(
                 skipped.append((cmd.name, reason, code))
                 continue
             # Resolve per-vendor override and scan its bytes — read once,
-            # scan once, write the same buffer.
+            # scan once, hand the bytes to Phase 2.
             vendor = GENERATOR_VENDOR.get(target)
             override_bytes: bytes | None = None
             if vendor is not None:
@@ -507,21 +515,27 @@ def generate_all_commands(
                         )
                         skipped.append((cmd.name, reason, code))
                         continue
-            content, dropped_fields = gen.render(cmd)
-            if dropped_fields:
-                if effective_drop == "error":
-                    raise StrictDropError(
-                        f"strict mode: {target} would drop {dropped_fields} from '{cmd.name}'"
-                    )
-                if effective_drop == "warn":
-                    logger.warning("%s dropped %s from '%s'", target, dropped_fields, cmd.name)
-            atomic_write_text(out_path, content)
-            # Use the SAME captured override buffer that passed Gate A.
-            if override_bytes is not None:
-                atomic_write_bytes(out_path, override_bytes)
-            generated.append((target, out_path))
-            if dropped_fields:
-                dropped.append((target, cmd.name, dropped_fields))
+            pending.append((target, gen, cmd, out_path, override_bytes))
+
+    # ── Phase 2: render + atomic write every pending pair. ──
+    # By construction Phase 1 raised on any project_shared block, so
+    # every queued write here is clean.
+    for target, gen, cmd, out_path, override_bytes in pending:
+        content, dropped_fields = gen.render(cmd)
+        if dropped_fields:
+            if effective_drop == "error":
+                raise StrictDropError(
+                    f"strict mode: {target} would drop {dropped_fields} from '{cmd.name}'"
+                )
+            if effective_drop == "warn":
+                logger.warning("%s dropped %s from '%s'", target, dropped_fields, cmd.name)
+        atomic_write_text(out_path, content)
+        # Use the SAME captured override buffer that passed Gate A.
+        if override_bytes is not None:
+            atomic_write_bytes(out_path, override_bytes)
+        generated.append((target, out_path))
+        if dropped_fields:
+            dropped.append((target, cmd.name, dropped_fields))
 
     return CommandSyncResult(generated=generated, dropped=dropped, skipped=skipped)
 

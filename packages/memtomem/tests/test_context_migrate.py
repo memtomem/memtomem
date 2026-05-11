@@ -1839,3 +1839,143 @@ def test_e4_codex_agents_toml_cleanup_on_migrate(scope_layout):
     assert not src.exists()
     for path in seeded_codex:
         assert not path.exists(), f"expected stale codex fan-out cleaned: {path}"
+
+
+# ── #895 P2 review #5: EXDEV cleanup failure must not report success ─
+
+
+def test_e4_exdev_src_cleanup_failure_raises_partial_error(scope_layout, monkeypatch):
+    """#895 P2 review #5: when the EXDEV fallback successfully copies
+    src→dst but fails to remove src (e.g. ``shutil.rmtree`` raises
+    OSError on the src cleanup), the migrate MUST raise
+    ``MigratePartialError`` rather than logging a warning and
+    returning ``moved=True``.
+
+    Pre-fix end state on failure: both src and dst canonicals on disk,
+    src_scope's runtime fan-out cleaned (it thought the move succeeded),
+    so the next ``mm context sync --scope <src_scope>`` recreates fan-out
+    at the OLD tier from the stale src. The autodetect sees two
+    canonicals and the user has no remediation hint.
+    """
+    import errno as _errno
+    import os as os_mod
+    import shutil as shutil_mod
+
+    src = _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN)
+    real_rename = os_mod.rename
+    rename_state: dict[str, int] = {"calls": 0}
+
+    def fake_rename(a, b):
+        # EXDEV on the FIRST os.rename (the src→staging step). The
+        # second os.rename (staging→dst) is allowed through so the
+        # copy lands at dst.
+        rename_state["calls"] += 1
+        if rename_state["calls"] == 1:
+            raise OSError(_errno.EXDEV, "Cross-device link", str(a))
+        return real_rename(a, b)
+
+    real_rmtree = shutil_mod.rmtree
+
+    def fake_rmtree(path, *args, **kwargs):
+        # Refuse to remove the EXDEV-leftover src dir. Everything else
+        # (staging cleanup paths, runtime fan-out cleanup) still works.
+        if str(path) == str(src.parent):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr("memtomem.context.migrate.os.rename", fake_rename)
+    monkeypatch.setattr("memtomem.context.migrate.shutil.rmtree", fake_rmtree)
+
+    result = _invoke_migrate(
+        _migrate_args(
+            "agents",
+            "foo",
+            from_scope="user",
+            to_scope="project_shared",
+            confirm_project_shared=True,
+        )
+    )
+
+    # POSITIVE: exit non-zero with a clear partial-failure message.
+    assert result.exit_code != 0, result.output
+    assert "canonical copied to" in result.output
+    assert "failed to remove stale source" in result.output
+    assert "Remove" in result.output and "manually" in result.output
+    # Recovery hint must steer the user away from the dangerous
+    # ``mm context sync --scope <src_scope>`` re-run.
+    assert "do NOT run" in result.output
+
+    # POSITIVE: both src and dst exist (the documented bad state).
+    # The error is the loud signal — the user must clean src manually.
+    assert src.is_file()
+    dst = _canonical_root_for(scope_layout, "agents", "project_shared") / "foo" / "agent.md"
+    assert dst.is_file()
+
+
+# ── #895 P2 review #5: project_shared atomicity — no partial fan-out ─
+
+
+def test_e4_project_shared_blocked_override_leaves_no_partial_fanout_agents(scope_layout):
+    """#895 P2 review #5: when ``scope='project_shared'`` and a later
+    runtime's vendor override contains a privacy hit, the earlier
+    runtimes' writes must NOT have already landed on disk.
+
+    Pre-fix the outer loop wrote claude/foo.md, then gemini's override
+    scan raised, leaving partial fan-out. Post-fix the scan runs in
+    Phase 1 over every (target, agent) pair before any write, so the
+    first block raises with disk untouched.
+    """
+    # Clean canonical at project_shared.
+    _write_canonical_dir(scope_layout, "agents", "project_shared", "foo", _AGENT_BODY_CLEAN)
+    # Override for the SECOND runtime in AGENT_GENERATORS iteration order
+    # (gemini) carries the secret. Layout per ADR-0008 + override.py:
+    # ``.memtomem/agents/foo/overrides/gemini.md``.
+    overrides_dir = scope_layout["project_root"] / ".memtomem" / "agents" / "foo" / "overrides"
+    overrides_dir.mkdir(parents=True, exist_ok=True)
+    (overrides_dir / "gemini.md").write_text(_AGENT_BODY_SECRET, encoding="utf-8")
+
+    # Drive the same sync the CLI invokes. CliRunner indirection isn't
+    # required — generate_all_agents is the boundary where the bug lives.
+    from memtomem.context.agents import generate_all_agents
+    from memtomem.context.privacy_scan import PrivacyBlockedError
+
+    with pytest.raises(PrivacyBlockedError):
+        generate_all_agents(scope_layout["project_root"], scope="project_shared")
+
+    # POSITIVE pins: NEITHER runtime's fan-out target exists on disk.
+    # Pre-fix, claude/foo.md (first runtime) would be present.
+    claude_fanout = scope_layout["project_root"] / ".claude" / "agents" / "foo.md"
+    gemini_fanout = scope_layout["project_root"] / ".gemini" / "agents" / "foo.md"
+    assert not claude_fanout.exists(), (
+        "Phase 1 must catch the blocked override before Phase 2 writes "
+        "claude_agents — partial fan-out violates ADR §5 atomicity."
+    )
+    assert not gemini_fanout.exists()
+
+
+def test_e4_project_shared_blocked_override_leaves_no_partial_fanout_commands(scope_layout):
+    """Sibling of the agents test — same atomicity contract for commands.
+    Gemini commands ship as TOML so the override file uses ``.toml``
+    (see ``OVERRIDE_FORMATS[("commands", "gemini")]``).
+    """
+    _write_canonical_dir(scope_layout, "commands", "project_shared", "foo", _COMMAND_BODY_CLEAN)
+    overrides_dir = scope_layout["project_root"] / ".memtomem" / "commands" / "foo" / "overrides"
+    overrides_dir.mkdir(parents=True, exist_ok=True)
+    (overrides_dir / "gemini.toml").write_text(
+        f'prompt = "leaks {_SECRET_LITERAL}"\ndescription = "leak"\n',
+        encoding="utf-8",
+    )
+
+    from memtomem.context.commands import generate_all_commands
+    from memtomem.context.privacy_scan import PrivacyBlockedError
+
+    with pytest.raises(PrivacyBlockedError):
+        generate_all_commands(scope_layout["project_root"], scope="project_shared")
+
+    claude_fanout = scope_layout["project_root"] / ".claude" / "commands" / "foo.md"
+    gemini_fanout = scope_layout["project_root"] / ".gemini" / "commands" / "foo.toml"
+    assert not claude_fanout.exists(), (
+        "Phase 1 must catch the blocked override before Phase 2 writes "
+        "claude_commands — partial fan-out violates ADR §5 atomicity."
+    )
+    assert not gemini_fanout.exists()
