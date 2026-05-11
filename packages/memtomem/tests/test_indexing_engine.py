@@ -2011,6 +2011,66 @@ class TestIndexFile:
             f"got {stats.deleted_chunks}"
         )
 
+    async def test_dim_zero_with_real_model_aborts(self, components, memory_dir):
+        """Misconfigured embedder (dim=0, non-noop model) must abort instead
+        of silently producing BM25-only chunks.
+
+        Production scenario: ONNX/Ollama provider's init throws on the
+        first call but downstream code never propagates the exception,
+        so the engine sees an embedder reporting ``dimension == 0`` even
+        though config asked for a real model. Without this guard the
+        chunks land in ``chunks`` + ``chunks_fts`` while ``chunks_vec``
+        stays empty, and the user gets BM25-only retrieval with no log
+        line explaining why.
+        """
+        md_path = memory_dir / "abort.md"
+        md_path.write_text(
+            "# Abort\n\nShould not be indexed under misconfigured embedder.\n",
+            encoding="utf-8",
+        )
+
+        misconfigured = AsyncMock()
+        misconfigured.dimension = 0
+        misconfigured.model_name = "bge-m3"  # not the "none" opt-in
+        components.index_engine._embedder = misconfigured
+
+        stats = await components.index_engine.index_file(md_path)
+
+        # IndexingStats normalises per-file dicts; the engine reports
+        # zero indexed and surfaces the abort message in errors.
+        assert stats.indexed_chunks == 0
+        assert stats.skipped_chunks > 0
+        assert stats.errors, "abort must populate IndexingStats.errors"
+        joined = " ".join(stats.errors)
+        assert "dimension=0" in joined
+        assert "bge-m3" in joined
+        assert "BM25-only" in joined
+
+        # And nothing should have actually landed in storage — the abort
+        # is upstream of the transaction so chunks + chunks_vec stay
+        # consistent (both empty for this file).
+        chunks_after = await components.storage.list_chunks_by_source(md_path)
+        assert chunks_after == []
+
+    async def test_dim_zero_with_noop_provider_indexes_silently(self, components, memory_dir):
+        """``embedding.provider == "none"`` is the explicit BM25-only path
+        and must continue to index normally — the abort only fires for
+        unintended dim=0 from a real-model embedder.
+        """
+        md_path = memory_dir / "noop.md"
+        md_path.write_text("# Noop\n\nIntentional BM25-only.\n", encoding="utf-8")
+
+        from memtomem.embedding.noop import NoopEmbedder
+
+        components.index_engine._embedder = NoopEmbedder()
+
+        stats = await components.index_engine.index_file(md_path)
+
+        assert stats.indexed_chunks > 0, stats.errors
+        assert not stats.errors
+        chunks_after = await components.storage.list_chunks_by_source(md_path)
+        assert len(chunks_after) >= 1
+
 
 # ===========================================================================
 # 8. index_path — directory indexing
