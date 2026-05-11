@@ -574,6 +574,52 @@ def test_cli_status_no_annotation_on_project_shared_rows(
     assert "(draft, no fan-out)" not in result.output
 
 
+# ── mm context diff --scope tests (#936) ────────────────────────────────
+
+
+def test_cli_diff_default_scope_emits_project_shared_suffix(tmp_path: Path, monkeypatch) -> None:
+    """`mm context diff` defaults to project_shared and threads it to helpers.
+
+    Empty-state messages from ``_print_{skills,agents,commands}_diff`` echo
+    the active scope, so an unseeded project surfaces the default scope on
+    every kind. Pins the CLI-level default.
+    """
+    (tmp_path / ".git").mkdir()
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(context_group, ["diff", "--include", "skills,agents,commands"])
+
+    assert result.exit_code == 0, result.output
+    assert "(no skills to compare in project_shared)" in result.output
+    assert "(no sub-agents to compare in project_shared)" in result.output
+    assert "(no commands to compare in project_shared)" in result.output
+
+
+def test_cli_diff_scope_project_local_threads_to_helpers(tmp_path: Path, monkeypatch) -> None:
+    """`mm context diff --scope=project_local` plumbs the flag into diff_*.
+
+    project_local has no runtime fan-out (ADR-0011 PR-E3) so diff lists are
+    empty even with a seeded draft — what we assert here is the suffix change
+    from the default test, which proves the CLI flag reaches the diff_*
+    callsites (not just the empty-message format string).
+    """
+    (tmp_path / ".git").mkdir()
+    _seed_local_draft(tmp_path, "skills", "draft-skill", "SKILL.md")
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        context_group,
+        ["diff", "--scope", "project_local", "--include", "skills,agents,commands"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "(no skills to compare in project_local)" in result.output
+    assert "(no sub-agents to compare in project_local)" in result.output
+    assert "(no commands to compare in project_local)" in result.output
+
+
 # ── unused-fixture helpers (silence ruff F401) ───────────────────────────
 
 _ = pytest  # keep pytest import alive if no test uses it directly

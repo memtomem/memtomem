@@ -140,6 +140,47 @@ async def test_get_projects_after_add(client, tmp_path: Path) -> None:
     assert labels[1] == "inflearn"
 
 
+# ── ?target_scope= on /context/projects (#936) ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_projects_default_target_scope_is_project_shared(client) -> None:
+    """Default response echoes ``target_scope = project_shared`` (ADR-0016)."""
+    resp = await client.get("/api/context/projects")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["target_scope"] == "project_shared"
+
+
+@pytest.mark.asyncio
+async def test_get_projects_project_local_counts_only_with_explicit_target_scope(
+    client, cwd_root: Path
+) -> None:
+    """project_local drafts contribute counts only when explicitly requested.
+
+    Seeds a project_local skill draft and asserts:
+      * default response counts it as 0 (project_shared view),
+      * ``?target_scope=project_local`` counts it as 1 and echoes the scope.
+    """
+    local_dir = cwd_root / ".memtomem" / "skills.local" / "draft"
+    local_dir.mkdir(parents=True)
+    (local_dir / "SKILL.md").write_text("# draft\n", encoding="utf-8")
+
+    default = await client.get("/api/context/projects")
+    assert default.status_code == 200
+    assert default.json()["target_scope"] == "project_shared"
+    assert default.json()["scopes"][0]["counts"]["skills"] == 0
+
+    explicit = await client.get(
+        "/api/context/projects",
+        params={"target_scope": "project_local"},
+    )
+    assert explicit.status_code == 200
+    data = explicit.json()
+    assert data["target_scope"] == "project_local"
+    assert data["scopes"][0]["counts"]["skills"] == 1
+
+
 # ── ?scope_id= on /context/skills ───────────────────────────────────────
 
 

@@ -204,9 +204,15 @@ function _renderCtxOverview(data) {
       // backend then only returned ``{status}``; with the count fields now
       // present settings participates in the same empty/issue/synced ladder.
       const isEmpty = total === 0 && !d.error && !hasIssue;
+      // localDraft only flips to gray when nothing else is wrong — real
+      // issues (parse_error / out_of_sync / missing_*) must still surface
+      // as warning. project_local has no runtime fan-out today so issues
+      // won't co-occur with drafts, but the gate stays robust if that changes.
       const badgeCls = d.error
         ? 'badge-danger'
-        : (isEmpty || localDraft > 0 ? 'badge-gray' : (hasIssue ? 'badge-warning' : 'badge-success'));
+        : (isEmpty || (localDraft > 0 && !hasIssue)
+            ? 'badge-gray'
+            : (hasIssue ? 'badge-warning' : 'badge-success'));
 
       // Pick the most actionable status to surface in the badge. Order
       // matters: ``error`` and the empty-tile case both pre-empt the count
