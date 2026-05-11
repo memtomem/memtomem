@@ -31,6 +31,8 @@ import json
 
 import pytest
 
+from .conftest import install_default_stubs
+
 pytestmark = pytest.mark.browser
 
 
@@ -60,29 +62,6 @@ _HEALTHY_OVERVIEW = {
         "status": "in_sync",
     },
 }
-
-
-def _install_default_stubs(page) -> None:
-    """Mirrors ``test_context_gateway_overview._install_default_stubs``.
-
-    Last-route-wins: the catch-all goes first; specific overrides go last
-    in each spec body.
-    """
-
-    def _ok(route, payload):
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(payload),
-        )
-
-    page.route("**/api/**", lambda r: _ok(r, {}))
-    page.route("**/api/system/ui-mode", lambda r: _ok(r, {"mode": "prod"}))
-    page.route("**/api/system/model-readiness", lambda r: _ok(r, {"ready": True}))
-    page.route("**/api/sources", lambda r: _ok(r, {"sources": []}))
-    page.route("**/api/namespaces", lambda r: _ok(r, {"namespaces": []}))
-    page.route("**/api/stats", lambda r: _ok(r, {}))
-    page.route("**/api/privacy/patterns", lambda r: _ok(r, {"patterns": []}))
 
 
 def _open_context_gateway(page) -> None:
@@ -141,7 +120,7 @@ def test_sync_all_cancel_fires_no_post(page, mm_web_url: str) -> None:
     are ``test_sync_all_happy_path_emits_success_toast`` and
     ``test_sync_all_settings_aborted_emits_mtime_conflict_warning``.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
     _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
 
     sync_calls: list[str] = []
@@ -189,7 +168,7 @@ def test_sync_all_happy_path_emits_success_toast(page, mm_web_url: str) -> None:
     canonical ``{results: [{status: 'ok'}]}`` shape so the parser cannot
     fall through to ``error``/``aborted``/``needs_confirmation``.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
     overview_state = _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
 
     sync_calls: list[str] = []
@@ -312,7 +291,7 @@ def test_sync_all_artifact_422_surfaces_backend_error(
     no way to resolve the blocked fan-out from the toast. Plain-text bodies
     cover the helper's non-JSON fallback path.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
     _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
 
     sync_calls: list[str] = []
@@ -378,7 +357,7 @@ def test_sync_all_settings_aborted_emits_mtime_conflict_warning(page, mm_web_url
     positive on the warning toast text, negative on the success toast not
     appearing — both must hold or the spec gives a false PASS.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
     _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
 
     page.route(
@@ -454,7 +433,7 @@ def test_sync_all_settings_error_emits_failure_toast(page, mm_web_url: str) -> N
     ``context-gateway.js`` so a regression cannot treat a per-result error
     as a full Sync All success just because the HTTP response itself is OK.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
     _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
 
     page.route(
@@ -525,7 +504,7 @@ def test_sync_all_settings_needs_confirmation_opens_hooks_sync(page, mm_web_url:
     the user should see a non-success severity and get a direct action to
     the section that can resolve the pending hooks.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
     _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
 
     page.route(

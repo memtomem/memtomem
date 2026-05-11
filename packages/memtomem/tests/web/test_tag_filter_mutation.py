@@ -33,44 +33,26 @@ import json
 
 import pytest
 
+from .conftest import install_default_stubs
+
 pytestmark = pytest.mark.browser
 
 
 def _install_default_stubs(page) -> None:
-    """Stub every endpoint the SPA hits during boot so the page renders
-    cleanly without any real components wired up.
-
-    Boot fetches not stubbed individually get a generic empty-shape
-    response. The pattern is intentionally permissive — specs override
-    only the endpoints they assert on.
+    """Thin wrapper over the shared ``install_default_stubs`` plus the
+    spec-family default empty search response. The search route is local
+    here because only the tag-filter cluster needs it; specs that assert
+    on the search request shape override it with a capturing handler
+    registered AFTER this helper returns (last-route-wins).
     """
-
-    def _ok(route, payload):
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(payload),
-        )
-
-    # Order matters: ``page.route`` resolves last-registered-wins, so the
-    # catch-all has to go FIRST and the specific routes LAST. Inverting
-    # the order would silently shadow the specifics with the empty-{}
-    # default — harmless today (the SPA's boot fetches all use ``catch``
-    # blocks around ``api()``) but a foothold for confusing failures
-    # when a future spec adds a boot-time assertion.
-    page.route("**/api/**", lambda r: _ok(r, {}))
-    page.route("**/api/system/ui-mode", lambda r: _ok(r, {"mode": "prod"}))
-    page.route("**/api/system/model-readiness", lambda r: _ok(r, {"ready": True}))
-    page.route("**/api/sources", lambda r: _ok(r, {"sources": []}))
-    page.route("**/api/namespaces", lambda r: _ok(r, {"namespaces": []}))
-    page.route("**/api/stats", lambda r: _ok(r, {}))
-    # Default empty search response — specs that assert on the request
-    # shape override this with a capturing handler registered AFTER
-    # ``_install_default_stubs`` returns, so the same last-wins rule
-    # gives the spec-local handler precedence.
+    install_default_stubs(page)
     page.route(
         "**/api/search?**",
-        lambda r: _ok(r, {"results": [], "total": 0, "retrieval_stats": {}}),
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"results": [], "total": 0, "retrieval_stats": {}}),
+        ),
     )
 
 

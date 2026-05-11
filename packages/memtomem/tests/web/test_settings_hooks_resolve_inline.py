@@ -27,6 +27,8 @@ import json
 
 import pytest
 
+from .conftest import install_default_stubs
+
 pytestmark = pytest.mark.browser
 
 
@@ -74,25 +76,6 @@ _AFTER_RESOLVE_GET = {
         ],
     },
 }
-
-
-def _install_default_stubs(page) -> None:
-    """Mirrors ``test_redaction_blocked_retry._install_default_stubs``."""
-
-    def _ok(route, payload):
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(payload),
-        )
-
-    page.route("**/api/**", lambda r: _ok(r, {}))
-    page.route("**/api/system/ui-mode", lambda r: _ok(r, {"mode": "prod"}))
-    page.route("**/api/system/model-readiness", lambda r: _ok(r, {"ready": True}))
-    page.route("**/api/sources", lambda r: _ok(r, {"sources": []}))
-    page.route("**/api/namespaces", lambda r: _ok(r, {"namespaces": []}))
-    page.route("**/api/stats", lambda r: _ok(r, {}))
-    page.route("**/api/privacy/patterns", lambda r: _ok(r, {"patterns": []}))
 
 
 def _open_hooks_sync(page) -> None:
@@ -155,7 +138,7 @@ def test_resolve_ok_removes_conflict_card(page, mm_web_url: str) -> None:
     ``loadHooksSync()`` call would leave the conflict card on screen
     even though the underlying state changed.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
     get_state = _stub_settings_sync_get(page, _CONFLICTS_GET, after_resolve=_AFTER_RESOLVE_GET)
 
     resolve_calls: list[dict] = []
@@ -265,7 +248,7 @@ def test_resolve_aborted_envelope_keeps_card_and_emits_error_toast(page, mm_web_
     conflict card not vanishing AND on the GET count not incrementing
     after the POST.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
     # Aborted path never flips to the after-resolve payload; pass only
     # ``before_resolve`` so cold-mount duplicates are harmless.
     get_state = _stub_settings_sync_get(page, _CONFLICTS_GET)
@@ -354,7 +337,7 @@ def test_resolve_http_error_keeps_card_and_emits_error_toast(page, mm_web_url: s
     transport-level failures should be visible to the user while leaving the
     unresolved conflict card in place.
     """
-    _install_default_stubs(page)
+    install_default_stubs(page)
     get_state = _stub_settings_sync_get(page, _CONFLICTS_GET)
 
     detail = "Resolve write failed"

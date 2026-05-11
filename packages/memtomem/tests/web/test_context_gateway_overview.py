@@ -27,30 +27,9 @@ import json
 
 import pytest
 
+from .conftest import install_default_stubs
+
 pytestmark = pytest.mark.browser
-
-
-def _install_default_stubs(page) -> None:
-    """Mirrors ``test_redaction_blocked_retry._install_default_stubs``.
-
-    Last-route-wins: the catch-all goes first; specific overrides go last
-    in each spec body.
-    """
-
-    def _ok(route, payload):
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(payload),
-        )
-
-    page.route("**/api/**", lambda r: _ok(r, {}))
-    page.route("**/api/system/ui-mode", lambda r: _ok(r, {"mode": "prod"}))
-    page.route("**/api/system/model-readiness", lambda r: _ok(r, {"ready": True}))
-    page.route("**/api/sources", lambda r: _ok(r, {"sources": []}))
-    page.route("**/api/namespaces", lambda r: _ok(r, {"namespaces": []}))
-    page.route("**/api/stats", lambda r: _ok(r, {}))
-    page.route("**/api/privacy/patterns", lambda r: _ok(r, {"patterns": []}))
 
 
 def _open_context_gateway(page) -> None:
@@ -134,7 +113,7 @@ def test_zero_total_renders_empty_badge_not_green_synced(page, mm_web_url: str) 
     settings tile, which also participates in the empty branch after
     Visual-1 (the ``typ.key !== 'settings'`` gate was lifted once the
     backend started sending real ``total`` for settings)."""
-    _install_default_stubs(page)
+    install_default_stubs(page)
     page.route(
         "**/api/context/overview",
         lambda r: r.fulfill(
@@ -178,7 +157,7 @@ def test_langchange_rerenders_card_label_text(page, mm_web_url: str) -> None:
     refetch on toggle — the assertion captures the call count before
     and after to catch a regression that re-introduced the
     fetch-on-langchange behavior."""
-    _install_default_stubs(page)
+    install_default_stubs(page)
 
     overview_calls: list[str] = []
 
@@ -258,7 +237,7 @@ def test_langchange_uses_cache_no_spinner_flash(page, mm_web_url: str) -> None:
     Three sequential toggles (EN→KO→EN→KO) stress the cache-hit path
     repeatedly so a one-shot cache-fill that then falls back to fetch
     would still surface as ``overview_calls > initial_calls``."""
-    _install_default_stubs(page)
+    install_default_stubs(page)
 
     overview_calls: list[str] = []
 
@@ -354,7 +333,7 @@ def test_langchange_after_tab_switch_does_not_refetch_overview(page, mm_web_url:
     Mutation check: dropping the ``#tab-settings`` gate (section gate
     alone) makes this spec fail with one extra ``/api/context/overview``
     call per ``setLang`` invocation."""
-    _install_default_stubs(page)
+    install_default_stubs(page)
 
     overview_calls: list[str] = []
 
@@ -423,7 +402,7 @@ def test_langchange_off_overview_does_not_refetch_overview(page, mm_web_url: str
     the listener must gate on ``classList.contains('active')`` rather
     than on element existence; without the gate, every toggle from
     Search/Index/etc. issues an unnecessary backend round-trip."""
-    _install_default_stubs(page)
+    install_default_stubs(page)
 
     overview_calls: list[str] = []
 
@@ -469,7 +448,7 @@ def test_q_pr3_settings_tile_renders_count_not_glyph(page, mm_web_url: str) -> N
     in ``test_i18n.py`` catches a source revert; this spec catches a
     rendering regression that compiles/parses but emits the wrong DOM
     (e.g., a CSS or template change that revives the per-tile branch)."""
-    _install_default_stubs(page)
+    install_default_stubs(page)
     page.route(
         "**/api/context/overview",
         lambda r: r.fulfill(
@@ -513,7 +492,7 @@ def test_q_pr3_settings_zero_total_renders_empty(page, mm_web_url: str) -> None:
     Bug-2 pattern from Q-PR1). This pin catches a regression in either
     half: missing ``total`` on the response or a re-introduction of
     the ``typ.key !== 'settings'`` gate."""
-    _install_default_stubs(page)
+    install_default_stubs(page)
     page.route(
         "**/api/context/overview",
         lambda r: r.fulfill(
