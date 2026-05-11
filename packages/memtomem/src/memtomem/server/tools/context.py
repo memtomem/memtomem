@@ -1,10 +1,11 @@
-"""Tools: context_detect, context_generate, context_sync, context_diff."""
+"""Tools: context_detect, context_init, context_generate, context_sync, context_diff."""
 
 from __future__ import annotations
 
 import asyncio
 from pathlib import Path
 
+from memtomem.config import TargetScope
 from memtomem.server import mcp
 from memtomem.server.context import CtxType
 from memtomem.server.error_handler import tool_handler
@@ -12,6 +13,7 @@ from memtomem.server.tool_registry import register
 
 # Known --include values (mirrors cli.context_cmd._KNOWN_INCLUDES).
 _KNOWN_INCLUDES: frozenset[str] = frozenset({"skills", "agents", "commands", "settings"})
+_KNOWN_ARTIFACT_SCOPES: frozenset[str] = frozenset({"user", "project_shared", "project_local"})
 
 
 def _find_project_root() -> Path:
@@ -24,21 +26,39 @@ def _find_project_root() -> Path:
     return Path.cwd()
 
 
-def _resolve_mcp_scope() -> str:
+def _resolve_mcp_scope(override: str | None = None) -> str:
     """Return the resolved ``hooks.target_scope`` for an MCP tool call.
 
-    Builds a fresh ``Mem2MemConfig`` and applies user-level overrides
-    with ``migrate=False`` — scope resolution is read-only, and the
-    same MCP tool dispatcher is shared by read-only entry points
-    (mem_context_detect, mem_context_diff) where a disk-write side
-    effect would be wrong (see ``feedback_doctor_no_migration_loader``).
+    A per-call override wins. Otherwise this builds a fresh config and
+    applies user-level overrides with ``migrate=False``. Scope
+    resolution is read-only, and the same MCP tool dispatcher is shared
+    by read-only entry points (mem_context_detect, mem_context_diff)
+    where a disk-write side effect would be wrong.
     """
     from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
 
+    if override is not None:
+        if override not in _KNOWN_ARTIFACT_SCOPES:
+            raise ValueError(
+                f"Unknown scope value '{override}'. Supported: {sorted(_KNOWN_ARTIFACT_SCOPES)}"
+            )
+        return override
     cfg = Mem2MemConfig()
     load_config_d(cfg, quiet=True)
     load_config_overrides(cfg, migrate=False)
     return cfg.hooks.target_scope
+
+
+def _resolve_artifact_mcp_scope(scope: str | None) -> TargetScope:
+    """Resolve the ADR-0011 artifact scope axis for MCP context tools."""
+    if scope is None or not scope.strip():
+        return "project_shared"
+    scope = scope.strip()
+    if scope not in _KNOWN_ARTIFACT_SCOPES:
+        raise ValueError(
+            f"Unknown scope value '{scope}'. Supported: {sorted(_KNOWN_ARTIFACT_SCOPES)}"
+        )
+    return scope  # type: ignore[return-value]
 
 
 def _parse_include(include: str) -> set[str]:
@@ -54,6 +74,206 @@ def _parse_include(include: str) -> set[str]:
             )
         values.add(token)
     return values
+
+
+@mcp.tool()
+@tool_handler
+@register("context")
+async def mem_context_init(
+    include: str = "",
+    overwrite: bool = False,
+    scope: str = "",
+    confirm_project_shared: bool = False,
+    force_unsafe_import: bool = False,
+    ctx: CtxType = None,
+) -> str:
+    """Seed canonical context artifact directories.
+
+    Args:
+        include: Comma-separated runtime artifact kinds to import into
+            canonical storage (``skills``, ``agents``, ``commands``).
+            ``settings`` is accepted for parity with other context tools
+            but has no init-time import action.
+        overwrite: Overwrite existing canonical entries during runtime
+            import.
+        scope: Artifact storage scope: ``project_shared`` (default),
+            ``user``, or ``project_local``.
+        confirm_project_shared: Required when ``scope="project_shared"``
+            is explicitly supplied; MCP cannot prompt interactively, so a
+            missing confirmation returns a ``needs confirmation`` message.
+        force_unsafe_import: Bypass Gate A on existing runtime files for
+            ``user`` / ``project_local`` imports. ``project_shared`` still
+            hard-refuses unsafe imports.
+    """
+    from memtomem.context import _skip_reasons as skip_codes
+    from memtomem.context.agents import (
+        canonical_agent_name,
+        extract_agents_to_canonical,
+    )
+    from memtomem.context.commands import extract_commands_to_canonical
+    from memtomem.context.detector import detect_agent_files
+    from memtomem.context.generator import extract_sections_from_agent_file
+    from memtomem.context.parser import CONTEXT_FILENAME, sections_to_markdown
+    from memtomem.context.privacy_scan import PrivacyScanError
+    from memtomem.context.scope_resolver import canonical_artifact_dir
+    from memtomem.context.skills import extract_skills_to_canonical
+
+    # Reuse the CLI helper so the marker text and idempotency stay pinned
+    # to one implementation.
+    from memtomem.cli.context_cmd import _append_gitignore_marker
+
+    inc = _parse_include(include)
+    root = _find_project_root()
+    scope_explicit = bool(scope.strip())
+    artifact_scope = _resolve_artifact_mcp_scope(scope)
+    has_project_signal = (root / ".git").exists() or (root / "pyproject.toml").exists()
+
+    if artifact_scope != "user" and not has_project_signal:
+        return (
+            f"--scope={artifact_scope} requires a project root "
+            "(with .git or pyproject.toml). Use scope='user' from outside a project."
+        )
+
+    if scope_explicit and artifact_scope == "project_shared" and not confirm_project_shared:
+        return (
+            "needs confirmation: scope='project_shared' writes to git-tracked "
+            f"{root / '.memtomem'}. Re-call with confirm_project_shared=True to proceed."
+        )
+
+    results: list[str] = []
+
+    if not scope_explicit and not has_project_signal:
+        results.append(
+            f"warning: no .git or pyproject.toml in {root} — creating .memtomem/ here. "
+            "Use scope='user' for cross-project artifacts."
+        )
+
+    artifact_only_scope = scope_explicit and artifact_scope in ("user", "project_local")
+    write_context_md = has_project_signal and not artifact_only_scope
+    ctx_path = root / CONTEXT_FILENAME
+
+    if write_context_md and ctx_path.exists() and not overwrite:
+        results.append(f"skipped {CONTEXT_FILENAME} rewrite (already exists)")
+        write_context_md = False
+
+    if write_context_md:
+        files = detect_agent_files(root)
+        if not files:
+            results.append("No agent files found. Creating empty context template.")
+            sections: dict[str, str] = {
+                "Project": "- Name: \n- Language: \n- Package manager: ",
+                "Commands": "- Build: \n- Test: \n- Lint: ",
+                "Architecture": "",
+                "Rules": "",
+                "Style": "",
+            }
+        else:
+            best = max(files, key=lambda f: f.size)
+            results.append(f"Extracting from {best.agent}: {best.path.name} ({best.size} bytes)")
+            content = await asyncio.to_thread(best.path.read_text, encoding="utf-8")
+            sections = extract_sections_from_agent_file(content)
+            for f in files:
+                if f.path == best.path:
+                    continue
+                other_content = await asyncio.to_thread(f.path.read_text, encoding="utf-8")
+                other_sections = extract_sections_from_agent_file(other_content)
+                for key, val in other_sections.items():
+                    if key not in sections and val.strip():
+                        sections[key] = val
+
+        ctx_path.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(
+            ctx_path.write_text,
+            sections_to_markdown(sections),
+            encoding="utf-8",
+        )
+        results.append(f"Created {CONTEXT_FILENAME}")
+        results.append(f"  Sections: {', '.join(sections.keys())}")
+
+    for kind in ("agents", "skills", "commands"):
+        d = canonical_artifact_dir(kind, artifact_scope, root)
+        d.mkdir(parents=True, exist_ok=True)
+        results.append(f"Created {d}")
+
+    if artifact_scope == "project_local":
+        wrote, msg = _append_gitignore_marker(root)
+        if wrote:
+            results.append("Appended .gitignore marker for project_local artifacts")
+        elif msg == "already_present":
+            results.append(".gitignore marker already present")
+        elif msg == "no_git_repo_pyproject_only":
+            results.append(
+                "warning: project root resolved via pyproject.toml but .git is missing; "
+                ".gitignore not appended"
+            )
+        elif msg == "no_project_signal":
+            results.append("warning: no project signal; .gitignore append skipped")
+
+    def _skip_line(name: str, reason: str, code: str | None) -> str:
+        prefix = (
+            "blocked"
+            if code
+            in (
+                skip_codes.PRIVACY_BLOCKED,
+                skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED,
+            )
+            else "skipped"
+        )
+        return f"  {prefix} {name}: {reason}"
+
+    if "skills" in inc:
+        try:
+            skill_result = extract_skills_to_canonical(
+                root,
+                overwrite=overwrite,
+                scope=artifact_scope,
+                force_unsafe_import=force_unsafe_import,
+            )
+        except PrivacyScanError as exc:
+            return f"privacy block: {exc.message}"
+        results.append(f"Imported skills: {len(skill_result.imported)}")
+        for path in skill_result.imported:
+            results.append(f"  {path.name}")
+        for name, reason, code in skill_result.skipped:
+            results.append(_skip_line(name, reason, code))
+
+    if "agents" in inc:
+        try:
+            agent_result = extract_agents_to_canonical(
+                root,
+                overwrite=overwrite,
+                scope=artifact_scope,
+                force_unsafe_import=force_unsafe_import,
+            )
+        except PrivacyScanError as exc:
+            return f"privacy block: {exc.message}"
+        results.append(f"Imported sub-agents: {len(agent_result.imported)}")
+        for path, layout in agent_result.imported:
+            results.append(f"  {canonical_agent_name(path, layout)}")
+        for name, reason, code in agent_result.skipped:
+            results.append(_skip_line(name, reason, code))
+
+    if "commands" in inc:
+        try:
+            command_result = extract_commands_to_canonical(
+                root,
+                overwrite=overwrite,
+                scope=artifact_scope,
+                force_unsafe_import=force_unsafe_import,
+            )
+        except PrivacyScanError as exc:
+            return f"privacy block: {exc.message}"
+        results.append(f"Imported commands: {len(command_result.imported)}")
+        for path, layout in command_result.imported:
+            display = path.parent.name if layout == "dir" else path.stem
+            results.append(f"  {display}")
+        for name, reason, code in command_result.skipped:
+            results.append(_skip_line(name, reason, code))
+
+    if "settings" in inc:
+        results.append("settings: no init-time import action")
+
+    return "Initialized:\n" + "\n".join(results)
 
 
 @mcp.tool()
@@ -387,6 +607,7 @@ async def mem_context_diff(
 async def mem_context_sync(
     include: str = "",
     strict: bool = False,
+    scope: str = "",
     allow_host_writes: bool = False,
     ctx: CtxType = None,
 ) -> str:
@@ -397,6 +618,11 @@ async def mem_context_sync(
     and ``.memtomem/settings.json`` to their runtime targets (Claude Code,
     Gemini CLI, Codex CLI).  ``strict=True`` turns dropped sub-agent /
     command fields into errors.
+
+    ``scope`` selects the ADR-0011 canonical artifact tier for
+    ``skills``, ``agents``, and ``commands``: ``project_shared``
+    (default), ``user``, or ``project_local``. For ``settings`` the same
+    value is treated as the ADR-0010 host-write target-scope override.
 
     ``allow_host_writes`` defaults to ``False``: when ``include="settings"``
     would write to a file outside the project root (today only
@@ -417,6 +643,8 @@ async def mem_context_sync(
 
     inc = _parse_include(include)
     root = _find_project_root()
+    artifact_scope = _resolve_artifact_mcp_scope(scope)
+    settings_scope = _resolve_mcp_scope(scope.strip() or None)
     ctx_path = root / CONTEXT_FILENAME
 
     results: list[str] = []
@@ -447,7 +675,7 @@ async def mem_context_sync(
 
     if "skills" in inc:
         try:
-            skill_result = generate_all_skills(root)
+            skill_result = generate_all_skills(root, scope=artifact_scope)
         except PrivacyScanError as exc:
             return f"privacy block: {exc.message}"
         if skill_result.generated:
@@ -462,7 +690,7 @@ async def mem_context_sync(
 
     if "agents" in inc:
         try:
-            agent_result = generate_all_agents(root, strict=strict)
+            agent_result = generate_all_agents(root, strict=strict, scope=artifact_scope)
         except StrictDropError as exc:
             return f"strict error: {exc}"
         except PrivacyScanError as exc:
@@ -484,7 +712,7 @@ async def mem_context_sync(
 
     if "commands" in inc:
         try:
-            command_result = generate_all_commands(root, strict=strict)
+            command_result = generate_all_commands(root, strict=strict, scope=artifact_scope)
         except CommandStrictDropError as exc:
             return f"strict error: {exc}"
         except PrivacyScanError as exc:
@@ -508,7 +736,7 @@ async def mem_context_sync(
         from memtomem.context.settings import generate_all_settings
 
         settings_results = generate_all_settings(
-            root, scope=_resolve_mcp_scope(), allow_host_writes=allow_host_writes
+            root, scope=settings_scope, allow_host_writes=allow_host_writes
         )
         for sname, sr in settings_results.items():
             if sr.status == "ok":
