@@ -9,13 +9,14 @@ import sqlite3
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Sequence
+from typing import AsyncIterator, Sequence
 from uuid import UUID
 
 import sqlite_vec
 
 from memtomem.config import StorageConfig
 from memtomem.errors import StorageError
+from memtomem.storage.base import ChunkAuditRow
 from memtomem.models import (
     Chunk,
     ChunkMetadata,
@@ -805,6 +806,85 @@ class SqliteBackend(
             (namespace,),
         ).fetchall()
         return {str(row[0] or "user") for row in rows}
+
+    async def iter_chunks_for_audit(
+        self,
+        *,
+        scope: str,
+        source_exact: Path | None = None,
+        source_prefix: Path | None = None,
+        batch_size: int = 500,
+    ) -> AsyncIterator[ChunkAuditRow]:
+        """Stream chunks in ``scope`` for a privacy audit walk.
+
+        Independent of search / recall: no embedding lookup, no tag
+        decode, no UI-side ordering. Uses ``ORDER BY id`` (PK) with a
+        keyset cursor so pagination stays stable even if rows mutate
+        between batches (the audit is read-only by contract, but cursor
+        stability is cheaper to guarantee than to debug).
+
+        ``source_exact`` and ``source_prefix`` are mutually exclusive
+        contracts owned by the caller (CLI ``--source`` resolver). Both
+        are normalised via :func:`norm_path` before the query, mirroring
+        the storage layer's existing source-path equality contract used
+        by :meth:`list_chunks_by_source` and friends.
+        """
+        if source_exact is not None and source_prefix is not None:
+            raise ValueError(
+                "iter_chunks_for_audit: source_exact and source_prefix are mutually exclusive"
+            )
+
+        where_parts = ["COALESCE(scope, 'user') = ?"]
+        params: list[object] = [scope]
+        if source_exact is not None:
+            where_parts.append("source_file = ?")
+            params.append(norm_path(source_exact))
+        elif source_prefix is not None:
+            prefix = norm_path(source_prefix)
+            # Component-aware prefix: anchor the LIKE on ``<prefix>/`` so a
+            # request for ``docs`` does not match ``docsuite``. The
+            # storage layer's ``norm_path`` already resolves symlinks and
+            # NFC-normalises, so the prefix and stored paths share the
+            # same canonical form.
+            where_parts.append("source_file LIKE ? ESCAPE '\\'")
+            params.append(escape_like(prefix.rstrip("/")) + "/%")
+
+        where_sql = " AND ".join(where_parts)
+        db = self._get_read_db()
+
+        last_id: str | None = None
+        while True:
+            if last_id is None:
+                query = (
+                    "SELECT id, source_file, content, COALESCE(scope, 'user'), "
+                    "project_root FROM chunks "
+                    f"WHERE {where_sql} ORDER BY id LIMIT ?"
+                )
+                batch_params = (*params, batch_size)
+            else:
+                query = (
+                    "SELECT id, source_file, content, COALESCE(scope, 'user'), "
+                    "project_root FROM chunks "
+                    f"WHERE {where_sql} AND id > ? ORDER BY id LIMIT ?"
+                )
+                batch_params = (*params, last_id, batch_size)
+
+            rows = db.execute(query, batch_params).fetchall()
+            if not rows:
+                return
+
+            for row in rows:
+                chunk_id, source_file, content, row_scope, project_root = row
+                yield ChunkAuditRow(
+                    chunk_id=str(chunk_id),
+                    source=Path(source_file),
+                    content=str(content),
+                    scope=str(row_scope),
+                    project_root=Path(project_root) if project_root else None,
+                )
+            last_id = str(rows[-1][0])
+            if len(rows) < batch_size:
+                return
 
     async def update_chunks_scope_for_source(
         self,

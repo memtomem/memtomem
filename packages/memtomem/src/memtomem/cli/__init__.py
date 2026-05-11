@@ -48,6 +48,7 @@ def _register() -> None:
     from memtomem.cli.gc_cmd import gc
     from memtomem.cli.indexing import index
     from memtomem.cli.ingest_cmd import ingest
+    from memtomem.cli.mem_cmd import mem
     from memtomem.cli.memory import add, recall
     from memtomem.cli.purge_cmd import purge
     from memtomem.cli.reset_cmd import reset
@@ -68,6 +69,7 @@ def _register() -> None:
     cli.add_command(search)
     cli.add_command(add)
     cli.add_command(recall)
+    cli.add_command(mem)
     cli.add_command(index)
     cli.add_command(ingest)
     cli.add_command(config)
