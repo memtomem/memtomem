@@ -401,7 +401,17 @@ async function loadCtxOverview() {
 window.addEventListener('langchange', () => {
   const btn = document.getElementById('ctx-sync-all-btn');
   if (btn && btn.dataset.runtimeOnly === 'true') {
-    btn.title = t('settings.ctx.sync_all_disabled_tooltip');
+    // The Sync All button is also disabled in non-shared tiers (the
+    // ``_ctxBlockedByTier`` click guard catches the press itself, but
+    // the hover tooltip is set here at langchange time too). Mirror the
+    // tier-aware tooltip path that ``_renderCtxOverview`` writes on
+    // initial render — otherwise an EN→KO→EN flip in a non-shared tier
+    // reverts the hover text to the generic "all items runtime-only"
+    // copy, which misreads for project_local drafts (canonical local
+    // items, not runtime-only) and for user-tier items.
+    btn.title = _ctxIsReadonlyTier()
+      ? t('settings.ctx.readonly_tier_tooltip')
+      : t('settings.ctx.sync_all_disabled_tooltip');
   }
   const settingsTab = document.getElementById('tab-settings');
   if (!settingsTab || !settingsTab.classList.contains('active')) return;
