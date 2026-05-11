@@ -2638,7 +2638,7 @@ def memory_migrate_cmd(
     ``enforce_write_guard``; secret hits reject the migration with no
     force bypass — git history would carry them forever (ADR-0011 §5).
 
-    Cross-DB migration is deferred to a follow-up issue (see #886).
+    Cross-DB migration is deferred; see ADR-0012 / #911.
     """
     if from_scope == to_scope:
         raise click.ClickException("--from and --to must differ.")
@@ -2842,8 +2842,8 @@ async def _memory_migrate_run(
             click.echo(f"  chunks affected: {entry['affected']}")
             # ``N preserved, 0 dropped`` for single-DB chunk-id-stable
             # rename: chunks.id never changes so the entire chunk_links
-            # neighborhood survives untouched. Cross-DB migration (#886
-            # follow-up) is where ``dropped`` could become non-zero.
+            # neighborhood survives untouched. Cross-DB migration (#911,
+            # deferred per ADR-0012) is where ``dropped`` could become non-zero.
             click.echo(f"  chunk_links lineage: {entry['lineage']} preserved, 0 dropped")
 
         if is_batch:
