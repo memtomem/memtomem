@@ -137,6 +137,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **(CLI) ``mm context memory-migrate`` accepts glob input** (e.g.
+  ``mm context memory-migrate 'memories/*.md' --from user --to project_local``).
+  Quote the pattern to prevent shell expansion. Glob runs an
+  all-or-nothing pre-flight (privacy scan + per-file lockfile
+  acquisition) before any FS move; on mid-batch DB failure, the
+  failing file is reverted (ADR-0011 §5), already-completed files
+  stay migrated, and remaining files are left untouched so the user
+  has a deterministic resumption point. Single-file input behaviour
+  is unchanged. (#886)
+- **(CLI) ``mm context memory-migrate`` plan output reports actual
+  ``chunk_links`` neighborhood size.** Previously hard-coded
+  ``chunk_links lineage: 0 dropped (chunk-id-stable single-DB
+  rename)``; now ``chunk_links lineage: N preserved, 0 dropped``
+  where N is the count of links touching the moving source's chunks.
+  Backed by a new ``count_chunk_links_for_source`` storage helper
+  and a regression test pinning lineage preservation across rename.
+  (#886)
 - **In-project default search merge — behaviour change (ADR-0011 PR-C).**
   ``mem_search`` / ``mem_recall`` running with an MCP server cwd inside
   a registered project (``project_memory_dirs`` covers the cwd) now
