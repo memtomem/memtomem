@@ -975,3 +975,241 @@ def test_memory_migrate_glob_apply_aborts_on_mid_batch_db_failure(monkeypatch, f
     # update_chunks_scope_for_source was called twice (file 1 succeeded,
     # file 2 raised); file 3 was never attempted.
     assert comp.storage.update_chunks_scope_for_source.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# 7) Issue #886 — Codex review round 1 follow-ups (PR #912)
+# ---------------------------------------------------------------------------
+
+
+def test_memory_migrate_glob_rejects_duplicate_target_basenames(monkeypatch, fake_project_layout):
+    """Codex Blocker 1: a recursive glob can match two sources in
+    different subdirectories with the same basename. The flat rename
+    ``to_dir / src.name`` would land both at the same destination —
+    the second ``shutil.move`` silently overwriting the first migrated
+    file. Pre-flight must reject the whole batch on collision so the
+    user can disambiguate before any FS move happens.
+    """
+    from memtomem.cli.context_cmd import memory_migrate_cmd
+
+    layout = fake_project_layout
+    user_tier = layout["user_tier"]
+
+    sub_a = user_tier / "a"
+    sub_b = user_tier / "b"
+    sub_a.mkdir()
+    sub_b.mkdir()
+    (sub_a / "rule.md").write_text("## A\n\nbody.\n", encoding="utf-8")
+    (sub_b / "rule.md").write_text("## B\n\nbody.\n", encoding="utf-8")
+    # The fixture's top-level rule.md isn't matched by the recursive
+    # glob below (it lives at user_tier/rule.md, the glob targets
+    # subdirs) — keep it as a sentinel for "nothing else moved".
+
+    comp = AsyncMock()
+    comp.config.indexing.memory_dirs = [user_tier]
+    comp.config.indexing.project_memory_dirs = [layout["proj_local"]]
+    comp.storage = AsyncMock()
+    comp.storage.count_chunks_by_source = AsyncMock(return_value=1)
+    comp.storage.count_chunk_links_for_source = AsyncMock(return_value=0)
+    comp.storage.update_chunks_scope_for_source = AsyncMock()
+    comp.search_pipeline = AsyncMock()
+    _patch_cli_components(monkeypatch, comp)
+    monkeypatch.chdir(layout["project_root"])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        memory_migrate_cmd,
+        [
+            str(user_tier / "**" / "rule.md"),
+            "--from",
+            "user",
+            "--to",
+            "project_local",
+            "--apply",
+            "--yes",
+        ],
+    )
+    assert result.exit_code != 0
+    out = result.output + str(result.exception or "")
+    assert "Duplicate target after rename" in out
+    assert "rule.md" in out
+    # Both subdir sources still in place; no FS moves anywhere.
+    assert (sub_a / "rule.md").exists()
+    assert (sub_b / "rule.md").exists()
+    assert not (layout["proj_local"] / "rule.md").exists()
+    comp.storage.update_chunks_scope_for_source.assert_not_called()
+
+
+def test_memory_migrate_apply_pass_aborts_on_post_preflight_secret(
+    monkeypatch, fake_project_layout
+):
+    """Codex Blocker 2: pre-flight scans with ``record_outcome=False``;
+    the apply pass re-scans with ``record_outcome=True``. The apply-pass
+    guard's decision must be honored — if a secret was added to the
+    source between pre-flight and apply (e.g. during the
+    ``--confirm-project-shared`` prompt pause), the migration must abort
+    before ``shutil.move`` lands the file in the git-tracked tier.
+
+    Simulated by patching ``privacy.enforce_write_guard`` with a
+    side-effect that returns ``pass`` on call #1 (pre-flight) and
+    ``blocked_project_shared`` on call #2 (apply re-scan).
+    """
+    from memtomem.cli.context_cmd import memory_migrate_cmd
+    from memtomem.privacy import RedactionHit, WriteGuardResult
+
+    layout = fake_project_layout
+    src = layout["src"]
+    # Clean content at the time of pre-flight; the mock's call-count
+    # gate is what changes the decision, not the file contents.
+    src.write_text("## Clean\n\nharmless body.\n", encoding="utf-8")
+
+    comp = AsyncMock()
+    comp.config.indexing.memory_dirs = [layout["user_tier"]]
+    comp.config.indexing.project_memory_dirs = [layout["proj_shared"]]
+    comp.storage = AsyncMock()
+    comp.storage.count_chunks_by_source = AsyncMock(return_value=1)
+    comp.storage.count_chunk_links_for_source = AsyncMock(return_value=0)
+    comp.storage.update_chunks_scope_for_source = AsyncMock()
+    comp.search_pipeline = AsyncMock()
+    _patch_cli_components(monkeypatch, comp)
+    monkeypatch.chdir(layout["project_root"])
+
+    call_count = {"n": 0}
+
+    def _guard_changes_between_passes(*args, **kwargs):
+        call_count["n"] += 1
+        # Pre-flight: clean. Apply: blocked (simulated edit during the
+        # prompt pause). Pre-flight uses ``record_outcome=False`` and
+        # apply uses ``record_outcome=True`` — assert that ordering as
+        # extra coverage of the contract.
+        if call_count["n"] == 1:
+            assert kwargs.get("record_outcome") is False
+            return WriteGuardResult("pass", [])
+        assert kwargs.get("record_outcome") is True
+        return WriteGuardResult(
+            "blocked_project_shared",
+            [RedactionHit(pattern_index=0, span=(0, 8))],
+        )
+
+    monkeypatch.setattr("memtomem.privacy.enforce_write_guard", _guard_changes_between_passes)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        memory_migrate_cmd,
+        [
+            str(src),
+            "--from",
+            "user",
+            "--to",
+            "project_shared",
+            "--apply",
+            "--confirm-project-shared",
+        ],
+    )
+    assert result.exit_code != 0
+    out = result.output + str(result.exception or "")
+    assert "Gate A" in out
+    assert "content changed since pre-flight" in out
+    # Both guard calls happened (pre-flight + apply re-scan).
+    assert call_count["n"] == 2
+    # Source still at original path; no FS move and no DB UPDATE.
+    assert src.exists()
+    assert not (layout["proj_shared"] / src.name).exists()
+    comp.storage.update_chunks_scope_for_source.assert_not_called()
+
+
+def test_memory_migrate_double_failure_surfaces_batch_state(monkeypatch, fake_project_layout):
+    """Codex Major 2: when DB update fails AND the filesystem rollback
+    *also* fails (the highest-risk failure mode), the user must still
+    learn the batch state — how many earlier files are already migrated.
+    Pre-fix the inner branch was silent about K-of-N, so the user
+    inspecting the divergent source/target pair didn't know whether
+    other files needed inspection too.
+
+    Two-file batch: file 1 succeeds; file 2's DB update raises AND its
+    FS rollback raises. The inner branch must emit "Batch state: 1 of
+    2 migrated" alongside the divergence warning.
+    """
+    import shutil as _shutil
+
+    from memtomem.cli.context_cmd import memory_migrate_cmd
+
+    layout = fake_project_layout
+    user_tier = layout["user_tier"]
+    proj_local = layout["proj_local"]
+
+    f1 = user_tier / "rule_one.md"
+    f2 = user_tier / "rule_two.md"
+    f1.write_text("## One\n\nclean.\n", encoding="utf-8")
+    f2.write_text("## Two\n\nclean.\n", encoding="utf-8")
+    layout["src"].unlink()
+
+    comp = AsyncMock()
+    comp.config.indexing.memory_dirs = [user_tier]
+    comp.config.indexing.project_memory_dirs = [proj_local]
+    comp.storage = AsyncMock()
+    comp.storage.count_chunks_by_source = AsyncMock(return_value=1)
+    comp.storage.count_chunk_links_for_source = AsyncMock(return_value=0)
+
+    db_calls = {"n": 0}
+
+    async def _fail_on_second_db(*args, **kwargs):
+        db_calls["n"] += 1
+        if db_calls["n"] == 2:
+            raise RuntimeError("simulated DB failure on file 2")
+        return 1
+
+    comp.storage.update_chunks_scope_for_source = AsyncMock(side_effect=_fail_on_second_db)
+    comp.search_pipeline = AsyncMock()
+
+    # Wrap shutil.move so it succeeds on outbound moves but raises on
+    # the rollback attempt for file 2. The rollback is identified by
+    # its argument pattern: forward = (user_tier_file → proj_local),
+    # rollback = (proj_local → user_tier_file). We trip the second
+    # case only when the source is f2's target.
+    real_move = _shutil.move
+
+    def _fake_move(src_path, dst_path):
+        if str(src_path) == str(proj_local / "rule_two.md") and str(dst_path) == str(f2):
+            raise OSError("simulated rollback failure for file 2")
+        return real_move(src_path, dst_path)
+
+    # ``shutil`` is imported locally inside ``_memory_migrate_run`` so
+    # patching ``memtomem.cli.context_cmd.shutil.move`` doesn't resolve.
+    # The shutil module object is a singleton per process — patching its
+    # ``move`` attribute is observed by every importer.
+    monkeypatch.setattr("shutil.move", _fake_move)
+    _patch_cli_components(monkeypatch, comp)
+    monkeypatch.chdir(layout["project_root"])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        memory_migrate_cmd,
+        [
+            str(user_tier / "rule_*.md"),
+            "--from",
+            "user",
+            "--to",
+            "project_local",
+            "--apply",
+            "--yes",
+        ],
+    )
+    assert result.exit_code != 0
+    out = result.output + str(result.exception or "")
+    # Inner-branch divergence warning is present.
+    assert "filesystem rollback failed" in out
+    assert "rule_two.md" in out
+    # Codex Major 2 fix: batch state surfaces even in the double-failure
+    # branch.
+    assert "Batch state: 1 of 2 migrated" in out
+    # Both root causes preserved in the final exception message.
+    assert "db_error" in out and "rollback_error" in out
+
+    # FS pin: file 1 made it to the target tier; file 2 left divergent
+    # (target side has the content because forward-move succeeded but
+    # rollback failed). File 3 was never present.
+    assert not f1.exists()
+    assert (proj_local / "rule_one.md").exists()
+    assert (proj_local / "rule_two.md").exists()
+    assert not f2.exists()

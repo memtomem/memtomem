@@ -2758,15 +2758,16 @@ async def _memory_migrate_run(
             raise click.ClickException(project_tier_registration_error(to_dir, to_scope))
 
         # Pre-flight pass: build the plan over every source. We check
-        # under-from-dir + target-nonexistent + Gate A privacy here so
-        # that nothing on disk moves until the whole batch is known to
-        # be migratable. ``record_outcome=False`` on the pre-flight
-        # scan; the apply pass re-scans with ``record_outcome=apply_``
-        # so the privacy audit log only records writes that actually
-        # proceed — important for batches where a late-discovered fail
-        # would otherwise leave allowed-write records for files we
-        # never touched.
+        # under-from-dir + target-nonexistent + target-uniqueness + Gate
+        # A privacy here so that nothing on disk moves until the whole
+        # batch is known to be migratable. ``record_outcome=False`` on
+        # the pre-flight scan; the apply pass re-scans with
+        # ``record_outcome=True`` so the privacy audit log only records
+        # writes that actually proceed — important for batches where a
+        # late-discovered fail would otherwise leave allowed-write
+        # records for files we never touched.
         plan: list[dict[str, Any]] = []
+        seen_targets: set[Path] = set()
         for src in sources:
             try:
                 src.relative_to(from_dir)
@@ -2779,6 +2780,25 @@ async def _memory_migrate_run(
                 raise click.ClickException(
                     f"Target already exists: {tgt}. Move or rename it first."
                 )
+            # Codex review round 1, Blocker 1: a glob like ``**/*.md``
+            # can match two sources in different subdirectories with
+            # the same basename (e.g. ``a/rule.md`` and ``b/rule.md``).
+            # Both flatten to ``to_dir/rule.md``; the on-disk
+            # ``tgt.exists()`` check passes for both because neither
+            # destination exists yet. Without this guard the apply
+            # pass would silently overwrite the first migrated file
+            # with the second and leave both chunk rows pointing at
+            # the same path. Refuse the whole batch on collision —
+            # the user can disambiguate with a narrower glob or rename
+            # one source.
+            if tgt in seen_targets:
+                raise click.ClickException(
+                    f"Duplicate target after rename: {tgt}. Glob matched two "
+                    f"sources with the same basename ({src.name}); flat rename "
+                    "would silently overwrite. Narrow the glob or rename one "
+                    "source before migrating."
+                )
+            seen_targets.add(tgt)
             affected = await comp.storage.count_chunks_by_source(src)
             lineage = await comp.storage.count_chunk_links_for_source(src)
 
@@ -2868,26 +2888,43 @@ async def _memory_migrate_run(
         # they survive the rename (``feedback_sidecar_lockfile_for_
         # replaced_files.md``).
         completed: list[tuple[Path, Path, int]] = []
+        # Codex review round 1, Major 1: acquire locks in a globally
+        # stable order (sorted by string path) rather than plan order.
+        # ``_file_lock`` uses blocking ``portalocker.LOCK_EX`` with no
+        # timeout (see ``context/_atomic.py``), so two concurrent batch
+        # migrations that share files in opposite orders would deadlock
+        # indefinitely. ``context/migrate.py`` sorts lock paths for the
+        # same reason. The unique set is built first so plan-order
+        # duplicates (same source dir matched twice) don't try to
+        # re-acquire the same lock on this thread.
+        all_lock_paths: set[Path] = set()
+        for entry in plan:
+            all_lock_paths.add(_lock_path_for(entry["source"]))
+            all_lock_paths.add(_lock_path_for(entry["target"]))
         with ExitStack() as stack:
-            seen_locks: set[Path] = set()
-            for entry in plan:
-                src_lock = _lock_path_for(entry["source"])
-                tgt_lock = _lock_path_for(entry["target"])
-                for lp in (src_lock, tgt_lock):
-                    if lp not in seen_locks:
-                        stack.enter_context(_file_lock(lp))
-                        seen_locks.add(lp)
+            for lp in sorted(all_lock_paths, key=str):
+                stack.enter_context(_file_lock(lp))
 
             for i, entry in enumerate(plan, 1):
                 src, tgt = entry["source"], entry["target"]
 
-                # Apply-time privacy audit record (Gate A re-scan). Only
-                # records on actual writes — the pre-flight pass used
-                # ``record_outcome=False``. ``project_shared`` only;
-                # other tiers don't need the audit hit.
+                # Apply-time privacy audit record (Gate A re-scan).
+                # Two reasons to re-scan here, not just to log an audit
+                # hit:
+                # 1. ``record_outcome=True`` only fires for writes that
+                #    actually proceed (the pre-flight pass used
+                #    ``record_outcome=False`` to avoid recording allowed
+                #    writes for files a later batch failure would skip).
+                # 2. Codex review round 1, Blocker 2: the file can
+                #    change between pre-flight and apply, especially
+                #    during the ``--confirm-project-shared`` prompt
+                #    pause. If a secret was added in that window the
+                #    pre-flight result is stale — we must honour the
+                #    apply-time decision and abort before ``shutil.move``
+                #    lands the content in the git-tracked tier.
                 if to_scope == "project_shared":
                     content = src.read_text(encoding="utf-8")
-                    privacy.enforce_write_guard(
+                    guard = privacy.enforce_write_guard(
                         content,
                         surface="memory_migrate",
                         force_unsafe=False,
@@ -2895,6 +2932,27 @@ async def _memory_migrate_run(
                         audit_context={"source": str(src), "target": str(tgt)},
                         record_outcome=True,
                     )
+                    if guard.decision in ("blocked", "blocked_project_shared"):
+                        n_done = len(completed)
+                        n_total = len(plan)
+                        click.secho(
+                            f"  ✗ Gate A: {src.name} matches {len(guard.hits)} "
+                            f"privacy pattern(s) at apply time (content changed "
+                            "since pre-flight); migration to "
+                            f"scope='{to_scope}' rejected. git history is "
+                            "forever — no force bypass available.",
+                            fg="red",
+                            err=True,
+                        )
+                        if is_batch:
+                            click.secho(
+                                f"  {n_done} of {n_total} migrated before this "
+                                f"file; remaining {n_total - n_done - 1} "
+                                "file(s) untouched.",
+                                fg="red",
+                                err=True,
+                            )
+                        raise click.exceptions.Exit(1)
 
                 shutil.move(str(src), str(tgt))
                 try:
@@ -2913,20 +2971,39 @@ async def _memory_migrate_run(
                     # ADR-0011 §5: per-file revert, leave already-
                     # completed files migrated, abort remaining. Gives
                     # the user a deterministic resumption point.
+                    n_done = len(completed)
+                    n_total = len(plan)
                     try:
                         shutil.move(str(tgt), str(src))
-                    except Exception:
+                    except Exception as revert_exc:
+                        # Codex review round 1, Major 2: the double-
+                        # failure branch is the highest-risk failure
+                        # mode and was previously silent about the
+                        # batch state. Emit the same K-of-N context as
+                        # the happy-revert branch so the user knows
+                        # how many earlier files are already migrated
+                        # before they go inspect the divergent
+                        # source/target pair.
                         click.secho(
-                            f"  ✗ DB update failed AND filesystem rollback failed "
-                            f"for {src.name}; source/target may diverge. Inspect "
-                            "both paths.",
+                            f"  ✗ DB update failed AND filesystem rollback "
+                            f"failed for {src.name}; source/target may diverge. "
+                            "Inspect both paths.",
                             fg="red",
                             err=True,
                         )
-                        raise
+                        if is_batch:
+                            click.secho(
+                                f"  Batch state: {n_done} of {n_total} migrated "
+                                f"before file {i}; remaining "
+                                f"{n_total - n_done - 1} file(s) untouched.",
+                                fg="red",
+                                err=True,
+                            )
+                        raise click.ClickException(
+                            f"DB update failed AND filesystem rollback failed: "
+                            f"db_error={exc!r}; rollback_error={revert_exc!r}"
+                        ) from exc
                     if is_batch:
-                        n_done = len(completed)
-                        n_total = len(plan)
                         click.secho(
                             f"  ✗ DB update failed on file {i} of {n_total} "
                             f"({src.name}); reverted that file. {n_done} of "
