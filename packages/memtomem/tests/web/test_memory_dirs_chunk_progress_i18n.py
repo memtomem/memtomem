@@ -75,10 +75,26 @@ def test_locale_toggle_mid_stream_flips_chunk_progress_template(page, mm_web_url
     result = page.evaluate(
         """
         async () => {
+          // ``I18N.init()`` (kicked off from app.js's DOMContentLoaded
+          // handler) finishes asynchronously with a tail
+          // ``_lang = _detect()`` + ``langchange`` dispatch. Calling
+          // ``setLang`` while init is mid-flight lets init's tail
+          // overwrite our ``_lang`` during the ``_load`` await window
+          // — visible on CI runners where ``navigator.language``
+          // defaults to en-US (init resolves to 'en' and clobbers
+          // our 'ko'). Local Macs with ko-KR happen to converge on
+          // the same value, hiding the race. Block on either
+          // ``documentElement.lang`` already being set (init done) or
+          // the first ``langchange`` event (init's tail dispatch).
+          await new Promise((resolve) => {
+            if (document.documentElement.lang) { resolve(); return; }
+            window.addEventListener('langchange', resolve, { once: true });
+          });
+
           // Force a known start locale so the test does not depend on
-          // the browser's navigator.language fallback (which varies
-          // across CI runners + local dev). I18N.setLang is async —
-          // await so the locale cache is populated before we proceed.
+          // the runner's ``navigator.language`` / ``localStorage``
+          // state. ``setLang`` is async — await so the locale cache
+          // is populated before we proceed.
           await I18N.setLang('ko');
 
           let esInstance = null;
