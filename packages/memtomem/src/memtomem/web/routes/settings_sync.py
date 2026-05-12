@@ -187,6 +187,11 @@ async def get_settings_sync(
     canonical_path = project_root / CANONICAL_SETTINGS_FILE
     target_path = _claude_target(project_root, scope)
     payload = _compare_hooks(canonical_path, target_path)
+    # Surface the active scope so the Web UI can render a scope-accurate
+    # target label (issue #962). Without this the panel falls back to a
+    # hardcoded "User-scope target:" that lies when the scope is
+    # project_shared or project_local.
+    payload["target_scope"] = scope
     payload["duplicate_tier_warnings"] = _serialize_duplicate_tiers(
         detect_duplicate_tiers(project_root, active_scope=scope)
     )

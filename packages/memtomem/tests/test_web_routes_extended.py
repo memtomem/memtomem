@@ -621,7 +621,43 @@ class TestSettingsSync:
         app.state.project_root = tmp_path
         resp = await client.get("/api/settings-sync")
         assert resp.status_code == 200
-        assert resp.json()["status"] == "no_source"
+        data = resp.json()
+        assert data["status"] == "no_source"
+        # Issue #962: response must surface ``target_scope`` so the Web
+        # UI can render a scope-accurate target label. Defaults to "user"
+        # per ADR-0010 §2.
+        assert data["target_scope"] == "user"
+
+    async def test_target_scope_surfaces_project_shared(self, app, client: AsyncClient, tmp_path):
+        """Issue #962: when the active scope is ``project_shared``, the
+        GET response surfaces that value so the Web UI does not lie
+        with a hardcoded ``User-scope target:`` label.
+        """
+        from memtomem.web.deps import get_hooks_target_scope
+
+        app.state.project_root = tmp_path
+        app.dependency_overrides[get_hooks_target_scope] = lambda: "project_shared"
+        try:
+            resp = await client.get("/api/settings-sync")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["target_scope"] == "project_shared"
+        finally:
+            app.dependency_overrides.pop(get_hooks_target_scope, None)
+
+    async def test_target_scope_surfaces_project_local(self, app, client: AsyncClient, tmp_path):
+        """Issue #962 sibling: ``project_local`` scope round-trips too."""
+        from memtomem.web.deps import get_hooks_target_scope
+
+        app.state.project_root = tmp_path
+        app.dependency_overrides[get_hooks_target_scope] = lambda: "project_local"
+        try:
+            resp = await client.get("/api/settings-sync")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["target_scope"] == "project_local"
+        finally:
+            app.dependency_overrides.pop(get_hooks_target_scope, None)
 
     async def test_in_sync(self, app, client: AsyncClient, tmp_path):
         """When hooks are identical in both files, status is in_sync."""

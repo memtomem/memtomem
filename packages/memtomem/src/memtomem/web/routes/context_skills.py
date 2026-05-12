@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shutil
 from pathlib import Path
 
@@ -148,6 +149,38 @@ async def list_skills(
 # ── Read ─────────────────────────────────────────────────────────────────
 
 
+_SKILL_FRONT_MATTER_RE = re.compile(r"^---\n(.*?)\n---\n?", re.DOTALL)
+_SKILL_KEY_VALUE_RE = re.compile(r"^([A-Za-z_][\w-]*)\s*:\s*(.*)$")
+
+
+def _parse_skill_description(content: str) -> str:
+    """Pull ``description:`` out of SKILL.md frontmatter.
+
+    Skills don't have a structured parser (unlike agents/commands) — they
+    are intentionally opaque to the canonical layer. For the detail
+    panel header (#962) we just need the description string for display,
+    so a flat-YAML scrape mirrors the same shape ``context/agents.py``
+    uses. Falls back to the first non-blank body line so the UI never
+    renders a blank meta header for a description-less skill.
+    """
+    m = _SKILL_FRONT_MATTER_RE.match(content)
+    if m:
+        for line in m.group(1).splitlines():
+            kv = _SKILL_KEY_VALUE_RE.match(line)
+            if kv and kv.group(1).lower() == "description":
+                value = kv.group(2).strip().strip("\"'")
+                if value:
+                    return value
+        body = content[m.end() :]
+    else:
+        body = content
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            return stripped
+    return ""
+
+
 @router.get("/context/skills/{name}")
 async def read_skill(
     name: str,
@@ -179,7 +212,22 @@ async def read_skill(
                 }
             )
 
-    return {"name": name, "content": content, "mtime_ns": str(mtime_ns), "files": files}
+    # Issue #962 detail meta header — surface fields the JS used to either
+    # ignore (target_scope) or have to re-derive (layout, description).
+    # ``layout`` is always ``"dir"`` for canonical skills since they live
+    # under ``<name>/SKILL.md``; commit the field on the response anyway
+    # so the JS meta-header renderer stays type-agnostic across skills /
+    # agents / commands.
+    fields = {"description": _parse_skill_description(content)}
+    return {
+        "name": name,
+        "content": content,
+        "mtime_ns": str(mtime_ns),
+        "files": files,
+        "target_scope": target_scope,
+        "layout": "dir",
+        "fields": fields,
+    }
 
 
 # ── Create ───────────────────────────────────────────────────────────────

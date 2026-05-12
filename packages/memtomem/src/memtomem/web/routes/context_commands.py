@@ -178,7 +178,17 @@ async def read_command(
     except CommandParseError:
         pass
 
-    return {"name": name, "content": content, "mtime_ns": str(mtime_ns), "fields": fields}
+    # Issue #962 detail meta header — echo back ``target_scope`` and
+    # the resolved ``layout`` so the JS meta-header renderer stays
+    # type-agnostic across the three artifact types.
+    return {
+        "name": name,
+        "content": content,
+        "mtime_ns": str(mtime_ns),
+        "fields": fields,
+        "target_scope": target_scope,
+        "layout": layout,
+    }
 
 
 # ── Rendered (per-runtime output with dropped fields + field map) ────────

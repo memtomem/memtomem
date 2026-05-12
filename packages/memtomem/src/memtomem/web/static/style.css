@@ -867,6 +867,7 @@ button:active { opacity: 0.7; }
 .badge { display: inline-block; border-radius: 4px; padding: 2px 8px; font-size: 0.72rem; font-weight: 600; }
 .badge-blue   { background: rgba(var(--accent-rgb),0.15); color: var(--accent); }
 .badge-gray   { background: rgba(123, 127, 150, 0.15); color: var(--muted); }
+.badge-yellow { background: rgba(243, 156, 18, 0.15); color: var(--yellow); }
 .badge-source { background: rgba(76, 175, 125, 0.15); color: var(--green); font-family: var(--mono); font-weight: 400; }
 .badge-validity { background: rgba(108, 92, 231, 0.10); color: var(--muted); font-family: var(--mono); font-weight: 400; }
 .badge-validity--expired { opacity: 0.55; text-decoration: line-through; }
@@ -2227,9 +2228,45 @@ select:focus-visible {
 .diff-eq  { color: var(--muted); }
 
 /* ── Hooks Sync ── */
+/* Header lays out the title + Sync Now button. flex-wrap + gap keep
+ * the button on its own row on narrow widths instead of letting it
+ * overflow the settings panel (issue #962). */
+.hooks-sync-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
 #hooks-sync-status { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
-.hooks-status-target { font-size: 0.78rem; color: var(--muted); }
-.hooks-status-target code { font-family: var(--mono); font-size: 0.78rem; }
+.hooks-status-target { font-size: 0.78rem; color: var(--muted); max-width: 100%; }
+/* ``overflow-wrap: anywhere`` lets long absolute paths break at any
+ * character so the target span never pushes the Sync Now button or
+ * the panel edge off-screen (issue #962). */
+.hooks-status-target code {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+.hooks-sync-needs-confirmation {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--warning, #b58900);
+  border-radius: var(--radius);
+  background: rgba(181, 137, 0, 0.08);
+  font-size: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.hooks-sync-needs-confirmation-body {
+  font-size: 0.78rem;
+  color: var(--muted);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
 .hooks-sync-card {
   border: 1px solid var(--border); border-radius: var(--radius);
   padding: 12px; margin-bottom: 12px; background: var(--surface);
@@ -2244,6 +2281,50 @@ select:focus-visible {
   background: var(--bg); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 8px; margin: 0;
   overflow: auto; max-height: 200px;
+}
+/* Per-rule detail panel — #962. Clickable rule rows surface the full
+ * rule body in a shared panel below the lists. Conflict cards keep
+ * their own diff view as the effective detail. */
+.hooks-rule-row { cursor: pointer; }
+.hooks-rule-row:hover { background: var(--bg); }
+.hooks-rule-row--synced { padding: 0.25rem 0.5rem; border-radius: var(--radius); }
+.hooks-rule-detail {
+  margin-top: 1rem;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+.hooks-rule-detail-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin: 4px 0;
+  font-size: 0.82rem;
+}
+.hooks-rule-detail-label {
+  color: var(--muted);
+  font-weight: 600;
+  min-width: 90px;
+  flex-shrink: 0;
+}
+.hooks-rule-detail-value {
+  color: var(--text);
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+.hooks-rule-detail-json {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+  margin: 0;
+  overflow: auto;
+  max-height: 200px;
+  width: 100%;
 }
 
 /* ── Sprint 4: Home Tab ── */
@@ -3336,6 +3417,58 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 
 .ctx-detail { padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); margin-top: 12px; background: var(--surface); }
 .ctx-detail-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+/* Detail meta header — #962. Renders the artifact's description / scope /
+ * layout / mtime in a label-value grid above the Canonical|Diff tabs so
+ * the user can identify the artifact without scanning raw frontmatter. */
+.ctx-detail-meta {
+  margin: 0 0 12px 0;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.82rem;
+}
+.ctx-detail-meta-row {
+  display: flex;
+  gap: 8px;
+  margin: 2px 0;
+  align-items: baseline;
+  overflow-wrap: anywhere;
+}
+.ctx-detail-meta-label {
+  color: var(--muted);
+  font-weight: 600;
+  flex-shrink: 0;
+  min-width: 110px;
+}
+.ctx-detail-meta-value {
+  color: var(--text);
+  word-break: break-word;
+}
+.ctx-detail-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.ctx-detail-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  font-size: 0.75rem;
+}
+.ctx-detail-chip-key {
+  color: var(--muted);
+  font-weight: 600;
+}
+.ctx-detail-chip-value {
+  color: var(--text);
+  font-family: var(--mono);
+}
 .ctx-detail-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
 .ctx-detail-tab { padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; color: var(--muted); font-size: 0.85rem; transition: color 0.15s; }
 .ctx-detail-tab:hover { color: var(--text); }

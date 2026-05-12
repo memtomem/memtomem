@@ -284,11 +284,20 @@ def delete_stale_missing_comments(repo: str, pr_number: int, token: str) -> None
             )
 
 
+def warn_comment_failure(action: str, exc: GitHubApiError) -> None:
+    print(
+        f"Warning: unable to {action}: {' '.join(exc.command)}",
+        file=sys.stderr,
+    )
+    print(exc.stderr, file=sys.stderr)
+
+
 def main() -> int:
     event = load_event()
     repo = env_required("GITHUB_REPOSITORY")
     github_token = env_required("GITHUB_TOKEN")
     write_token = os.environ.get("PERSONAL_ACCESS_TOKEN") or github_token
+    comment_token = write_token
     signatures_branch = os.environ.get("SIGNATURES_BRANCH", "cla-signatures")
     signatures_path = os.environ.get("SIGNATURES_PATH", "signatures/v1/cla.json")
     signature_text = os.environ.get(
@@ -341,31 +350,37 @@ def main() -> int:
 
     if missing:
         names = ", ".join(f"`{name}`" for name in missing)
-        post_comment_once(
-            repo,
-            pr_number,
-            github_token,
-            (
-                f"Thank you for your contribution! Before we can merge, please sign "
-                f"the [Contributor License Agreement]({document_url}).\n\n"
-                f"Missing signature(s): {names}\n\n"
-                f"To sign, comment on this pull request with the statement below. "
-                f"You only need to sign once per GitHub account.\n\n"
-                f"> {signature_text}"
-            ),
-            MISSING_MARKER,
-        )
+        try:
+            post_comment_once(
+                repo,
+                pr_number,
+                comment_token,
+                (
+                    f"Thank you for your contribution! Before we can merge, please sign "
+                    f"the [Contributor License Agreement]({document_url}).\n\n"
+                    f"Missing signature(s): {names}\n\n"
+                    f"To sign, comment on this pull request with the statement below. "
+                    f"You only need to sign once per GitHub account.\n\n"
+                    f"> {signature_text}"
+                ),
+                MISSING_MARKER,
+            )
+        except GitHubApiError as exc:
+            warn_comment_failure("post missing-signature CLA comment", exc)
         print(f"Missing CLA signature(s): {', '.join(missing)}")
         return 1
 
-    delete_stale_missing_comments(repo, pr_number, github_token)
-    post_comment_once(
-        repo,
-        pr_number,
-        github_token,
-        SIGNED_MARKER,
-        SIGNED_MARKER,
-    )
+    try:
+        delete_stale_missing_comments(repo, pr_number, comment_token)
+        post_comment_once(
+            repo,
+            pr_number,
+            comment_token,
+            SIGNED_MARKER,
+            SIGNED_MARKER,
+        )
+    except GitHubApiError as exc:
+        warn_comment_failure("update CLA status comments", exc)
     print(SIGNED_MARKER)
     return 0
 

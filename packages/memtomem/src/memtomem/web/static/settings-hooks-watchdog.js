@@ -18,6 +18,61 @@ function _wdLabel(status) {
 }
 
 // ── Hooks Sync ──
+
+// Flat registry of hook rules — entries are indexed by their position
+// in the combined synced + pending lists rather than by
+// ``event:matcher``. Claude Code allows multiple rules to share the
+// same ``(event, matcher)`` pair (see ``settings_sync.py:128`` PR #844
+// fix — the server preserves multiplicity), so an
+// ``event:matcher``-keyed dict would silently collapse duplicates and
+// both rows would resolve to the last rule's detail. The index-keyed
+// shape is stable across re-renders within a single ``loadHooksSync``
+// call and is the source of truth that the row's ``data-hook-key``
+// references.
+let _hooksRuleRegistry = [];
+
+function _renderHookRuleDetail(key, contentEl) {
+  const idx = Number(key);
+  const entry = Number.isInteger(idx) ? _hooksRuleRegistry[idx] : undefined;
+  const panel = contentEl.querySelector('#hooks-rule-detail');
+  if (!panel || !entry) return;
+
+  const rule = entry.rule || {};
+  // Claude Code's rule format: top-level ``matcher`` + ``hooks`` array
+  // of command entries, each with ``type`` / ``command`` / optional
+  // ``timeout`` / etc. Render the union so the user can see exactly
+  // what the hook will execute.
+  const hooks = Array.isArray(rule.hooks) ? rule.hooks : [];
+
+  function _row(label, value) {
+    if (value === undefined || value === null || value === '') return '';
+    return `<div class="hooks-rule-detail-row">`
+      + `<span class="hooks-rule-detail-label">${escapeHtml(label)}</span>`
+      + `<span class="hooks-rule-detail-value">${escapeHtml(String(value))}</span>`
+      + `</div>`;
+  }
+
+  let html = `<div class="hooks-rule-detail-inner">`;
+  html += _row(t('settings.hooks.detail.event'), entry.event);
+  html += _row(t('settings.hooks.detail.matcher'), entry.matcher);
+  for (const h of hooks) {
+    html += _row(t('settings.hooks.detail.type'), h.type);
+    html += _row(t('settings.hooks.detail.command'), h.command);
+    if (h.timeout !== undefined && h.timeout !== null && h.timeout !== '') {
+      html += _row(t('settings.hooks.detail.timeout'), h.timeout);
+    }
+  }
+  html += `<div class="hooks-rule-detail-row">`;
+  html += `<span class="hooks-rule-detail-label">${escapeHtml(t('settings.hooks.detail.rule_json'))}</span>`;
+  html += `<pre class="hooks-rule-detail-json">${escapeHtml(JSON.stringify(rule, null, 2))}</pre>`;
+  html += `</div>`;
+  html += `</div>`;
+
+  panel.innerHTML = html;
+  panel.hidden = false;
+  panel.setAttribute('data-hook-key', key);
+}
+
 async function loadHooksSync() {
   const statusEl = qs('hooks-sync-status');
   const contentEl = qs('hooks-sync-content');
@@ -41,10 +96,21 @@ async function loadHooksSync() {
       error: { cls: 'badge-danger', text: data.error || 'Error' },
     };
     const badge = badges[data.status] || badges.error;
+    // Scope-aware target label (issue #962). Old payloads (or any future
+    // scope name without a specific key) fall back to the generic
+    // ``target_label``. ``t()`` echoes the key when no translation is
+    // registered, so detect that and fall back rather than rendering the
+    // raw key text.
+    const scope = data.target_scope;
+    const scopeKey = scope ? `settings.hooks.target_label_${scope}` : null;
+    const translated = scopeKey ? t(scopeKey) : null;
+    const targetLabel = translated && translated !== scopeKey
+      ? translated
+      : t('settings.hooks.target_label');
     statusEl.innerHTML =
       `<span class="badge ${badge.cls}">${escapeHtml(badge.text)}</span>`
       + (data.target_path
-        ? `<div class="hooks-status-target">${escapeHtml(t('settings.hooks.target_label'))} <code>${escapeHtml(data.target_path)}</code></div>`
+        ? `<div class="hooks-status-target" data-target-scope="${escapeHtml(scope || '')}">${escapeHtml(targetLabel)} <code>${escapeHtml(data.target_path)}</code></div>`
         : '');
 
     if (data.status === 'no_source' || data.status === 'error') {
@@ -63,6 +129,24 @@ async function loadHooksSync() {
 
     function _ruleLabel(item) {
       return item.matcher ? `${item.event}:${item.matcher}` : item.event;
+    }
+
+    // Build a flat registry of every clickable rule. Index-based keys
+    // preserve duplicates (Claude Code allows multiple rules to share
+    // the same ``event:matcher`` pair — see ``settings_sync.py:128``).
+    // Each row caches its index in ``data-hook-key``; the click
+    // handler reads the index, not the label, so two rows that share a
+    // label still surface the right entry.
+    _hooksRuleRegistry = [];
+    const _pendingKeys = [];
+    const _syncedKeys = [];
+    for (const p of data.hooks.pending) {
+      _pendingKeys.push(String(_hooksRuleRegistry.length));
+      _hooksRuleRegistry.push({ ...p, _bucket: 'pending' });
+    }
+    for (const s of data.hooks.synced) {
+      _syncedKeys.push(String(_hooksRuleRegistry.length));
+      _hooksRuleRegistry.push({ ...s, _bucket: 'synced' });
     }
 
     // Conflicts
@@ -84,27 +168,44 @@ async function loadHooksSync() {
       }
     }
 
-    // Pending
+    // Pending — rows are clickable so the per-rule detail panel reveals
+    // the full rule body (event / matcher / command / type / timeout /
+    // raw JSON). The pre-rendered ``hooks-sync-preview`` block is gone —
+    // power users get the same info via Click → Rule JSON.
     if (data.hooks.pending.length) {
       html += '<h3 style="margin:1rem 0 0.5rem">Pending</h3>';
-      for (const p of data.hooks.pending) {
+      data.hooks.pending.forEach((p, i) => {
         const label = _ruleLabel(p);
-        html += `<div class="hooks-sync-card">
+        const key = _pendingKeys[i];
+        html += `<div class="hooks-sync-card hooks-rule-row" data-hook-key="${escapeHtml(key)}" tabindex="0" role="button">
           <div class="hooks-sync-card-header"><strong>${escapeHtml(label)}</strong>
             <span class="badge badge-warning">will be added</span></div>
-          <pre class="hooks-sync-preview">${escapeHtml(JSON.stringify(p.rule, null, 2))}</pre>
         </div>`;
-      }
+      });
     }
 
-    // Synced
+    // Synced — rows are clickable so the per-rule detail panel reveals
+    // the full rule body (PR #968). The section ``<h3>`` is dropped when
+    // the entire panel is in_sync (PR #966) because the badge above
+    // already says "All hooks are in sync"; keep the heading when mixed
+    // state (conflicts/pending alongside synced) makes the section
+    // separator load-bearing.
     if (data.hooks.synced.length) {
-      html += '<h3 style="margin:1rem 0 0.5rem">' + t('settings.hooks.synced') + '</h3>';
-      html += '<div class="text-muted">';
-      for (const s of data.hooks.synced) {
-        html += `<div style="padding:0.25rem 0">${escapeHtml(_ruleLabel(s))}</div>`;
+      if (data.status !== 'in_sync') {
+        html += '<h3 style="margin:1rem 0 0.5rem">' + t('settings.hooks.synced') + '</h3>';
       }
+      html += '<div class="hooks-synced-list text-muted">';
+      data.hooks.synced.forEach((s, i) => {
+        const label = _ruleLabel(s);
+        const key = _syncedKeys[i];
+        html += `<div class="hooks-rule-row hooks-rule-row--synced" data-hook-key="${escapeHtml(key)}" tabindex="0" role="button">${escapeHtml(label)}</div>`;
+      });
       html += '</div>';
+    }
+
+    // Shared per-rule detail panel — empty until a row is clicked.
+    if (data.hooks.synced.length || data.hooks.pending.length) {
+      html += `<div id="hooks-rule-detail" class="hooks-rule-detail" hidden></div>`;
     }
 
     if (!html) {
@@ -112,6 +213,20 @@ async function loadHooksSync() {
     }
 
     contentEl.innerHTML = html;
+
+    // Per-rule detail click handler (#962). Synced + pending rows surface
+    // the full rule body inline; conflict cards already render their own
+    // diff view as the effective detail and are intentionally skipped here.
+    contentEl.querySelectorAll('.hooks-rule-row').forEach(row => {
+      const handler = () => _renderHookRuleDetail(row.dataset.hookKey, contentEl);
+      row.addEventListener('click', handler);
+      row.addEventListener('keydown', evt => {
+        if (evt.key === 'Enter' || evt.key === ' ') {
+          evt.preventDefault();
+          handler();
+        }
+      });
+    });
 
     // Resolve buttons
     contentEl.querySelectorAll('.hooks-resolve-btn').forEach(btn => {
@@ -128,9 +243,13 @@ async function loadHooksSync() {
         if (!ok) return;
         btnLoading(btn, true);
         try {
+          const csrf = await ensureCsrfToken();
+          const headers = csrf
+            ? {'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf}
+            : {'Content-Type': 'application/json'};
           const r = await fetch('/api/context/settings/resolve', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
+            headers,
             body: JSON.stringify({event, matcher, action: 'use_proposed'}),
           });
           if (!r.ok) {
@@ -169,13 +288,53 @@ document.getElementById('hooks-sync-btn')?.addEventListener('click', async () =>
     const headers = csrf
       ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
       : { 'Content-Type': 'application/json' };
-    const res = await fetch('/api/settings-sync', {method: 'POST', headers});
+    // The confirm modal IS the host-write trust gate (issue #962). Send
+    // ``allow_host_writes: true`` so the server doesn't re-prompt with
+    // ``needs_confirmation`` for the user-scope ``~/.claude/settings.json``
+    // path — the same gate the CLI confirms interactively
+    // (``cli/context_cmd.py:_confirm_settings_host_writes``).
+    const res = await fetch('/api/settings-sync', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ allow_host_writes: true }),
+    });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || `Request failed: ${res.status}`);
     }
     const data = await res.json();
-    const warnings = data.results?.flatMap(r => r.warnings || []) || [];
+    const results = Array.isArray(data.results) ? data.results : [];
+    const needsConfirmation = results.filter(r => r.status === 'needs_confirmation');
+    if (needsConfirmation.length) {
+      // Defensive branch: the first POST already carried
+      // ``allow_host_writes: true``. If the server still returns
+      // ``needs_confirmation`` a deeper trust-gate kicked in (e.g.
+      // unexpected scope resolution); surface the targets so the user
+      // can investigate via the CLI rather than silently retrying
+      // with the same flag (would loop).
+      const targets = needsConfirmation.map(r => r.target).filter(Boolean);
+      const body = t('settings.hooks.needs_confirmation_body', {
+        targets: targets.join('\n'),
+      });
+      const statusEl = qs('hooks-sync-status');
+      if (statusEl) {
+        const banner = document.createElement('div');
+        banner.className = 'hooks-sync-needs-confirmation';
+        banner.setAttribute('role', 'alert');
+        const title = document.createElement('strong');
+        title.textContent = t('settings.hooks.needs_confirmation_title');
+        const detail = document.createElement('div');
+        detail.className = 'hooks-sync-needs-confirmation-body';
+        detail.textContent = body;
+        banner.appendChild(title);
+        banner.appendChild(detail);
+        statusEl.appendChild(banner);
+      }
+      showToast(t('settings.hooks.needs_confirmation_title'), 'warning');
+      // Do NOT show sync_success on this branch — silent failure 금지.
+      return;
+    }
+    const warnings = results.flatMap(r => r.warnings || []);
     if (warnings.length) {
       showToast(t('toast.hooks_warnings', { count: warnings.length }), 'warning');
     } else {
