@@ -45,9 +45,11 @@ When a deferred question expects qualitative contributor signal (vs. a
 crisp event trigger), maintainers can:
 
 - Comment on the tracking issue with a quote + source link + date.
-- Apply the `adr-feedback` label to any PR / issue / discussion where
-  the confusion surfaces, then copy the relevant quote to the tracking
-  issue so signals don't get lost in closed-PR review threads.
+- Apply the `adr-feedback` label to any **non-tracker** PR / issue /
+  discussion where the confusion surfaces, then copy the relevant quote
+  to the tracking issue so signals don't get lost in closed-PR review
+  threads. The tracker issue itself is the aggregation point, not a
+  signal source — do not label it.
 
 The tracking issue's body should enumerate which signal sources count
 and what the adjudication rule is (see #922 for the canonical example).
