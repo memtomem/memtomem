@@ -1173,3 +1173,147 @@ def test_deep_link_banner_reset_restores_full_list(page, mm_web_url: str) -> Non
     href = page.evaluate("() => window.location.href")
     assert "artifact=" not in href, f"reset must strip artifact param: {href}"
     assert "filter=" not in href, f"reset must strip filter param: {href}"
+
+
+# Empty-list skills payload used by the #956 tier-aware empty-hint tests.
+# ``scanned_dirs`` is present so the project-tier branch's ``{scan_dirs}``
+# token interpolates with a real value (the user-tier branch ignores it).
+_CWD_SKILLS_EMPTY = {
+    "skills": [],
+    "scanned_dirs": ["/srv/cwd/.claude/skills/"],
+}
+
+
+def _stub_projects_wide(page, payload):
+    """Register a wider catch-all for ``/api/context/projects`` that also
+    matches ``?target_scope=...``. ``loadCtxList`` builds the projects URL
+    via ``_ctxWithTargetScope`` which appends the tier query string on
+    non-shared tiers, so the narrow ``**/api/context/projects`` pattern
+    misses the refetch after a tier swap and the catch-all empty body
+    leaves the list panel in the "No project scopes" branch.
+    """
+    page.route(
+        "**/api/context/projects**",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(payload),
+        ),
+    )
+
+
+def _stub_skills_wide(page, payload):
+    """Register a wider catch-all for ``/api/context/skills`` that also
+    matches ``?target_scope=...``. Mirrors the inline pattern used by
+    ``test_context_list_non_shared_tier_click_threads_target_scope``.
+    """
+    page.route(
+        "**/api/context/skills**",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(payload),
+        ),
+    )
+
+
+def test_q956_empty_hint_user_tier_paths_to_user_canonical(page, mm_web_url: str) -> None:
+    """``_ctxRenderItemsHtml`` empty-state branches on ``_ctxTargetScope``
+    (#956). On the user tier the canonical lives at ``~/.memtomem/<type>``
+    and is shared across all projects, so the project-tier copy ("within
+    this project" / import-from-scan-dirs) is wrong.
+
+    Click the user tier button to trigger the refetch + re-render, then
+    pin the user-tier empty-hint copy and the negative on the project
+    framing.
+    """
+    install_default_stubs(page)
+    _stub_projects_wide(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
+    _stub_skills_wide(page, _CWD_SKILLS_EMPTY)
+    page.goto(mm_web_url)
+    _open_skills_list(page)
+
+    page.locator("#ctx-skills-list .ctx-tier-filter button[data-scope='user']").click()
+    page.wait_for_function(
+        "() => {"
+        "  const b = document.querySelector("
+        "    '#ctx-skills-list .ctx-tier-filter button[data-scope=\"user\"]');"
+        "  return b && b.classList.contains('active');"
+        "}",
+        timeout=3_000,
+    )
+    page.wait_for_selector("#ctx-skills-list .empty-state", timeout=5_000)
+    hint = (
+        page.locator("#ctx-skills-list .empty-state .empty-state-hint").text_content() or ""
+    )
+    assert "~/.memtomem/skills" in hint, (
+        f"user-tier empty hint should reference ~/.memtomem/skills: {hint!r}"
+    )
+    assert "within this project" not in hint, (
+        f"user-tier empty hint must not say 'within this project': {hint!r}"
+    )
+
+
+def test_q956_empty_hint_project_tier_preserves_existing_copy(page, mm_web_url: str) -> None:
+    """Regression pin for the project-tier (default ``project_shared``)
+    empty hint: the ``.memtomem/<type>`` canonical token and "within this
+    project" phrase must remain (#956 issue body: preserve project-tier
+    wording).
+    """
+    install_default_stubs(page)
+    _stub_projects_wide(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
+    _stub_skills_wide(page, _CWD_SKILLS_EMPTY)
+    page.goto(mm_web_url)
+    _open_skills_list(page)
+
+    page.wait_for_selector("#ctx-skills-list .empty-state", timeout=5_000)
+    hint = (
+        page.locator("#ctx-skills-list .empty-state .empty-state-hint").text_content() or ""
+    )
+    assert ".memtomem/skills" in hint, (
+        f"project-tier empty hint should reference .memtomem/skills: {hint!r}"
+    )
+    assert "within this project" in hint, (
+        f"project-tier empty hint should retain 'within this project': {hint!r}"
+    )
+
+
+def test_q956_empty_hint_user_tier_ko_locale(page, mm_web_url: str) -> None:
+    """Korean copy for the user-tier empty hint (#956): contains the
+    ``사용자 canonical`` phrase (the technical-term carve-out keeps
+    ``canonical`` un-Koreanized, matching CLI/ADR vocabulary) and drops
+    the ``이 프로젝트의`` project framing.
+    """
+    install_default_stubs(page)
+    _stub_projects_wide(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
+    _stub_skills_wide(page, _CWD_SKILLS_EMPTY)
+    page.goto(mm_web_url)
+    _open_skills_list(page)
+
+    page.locator("#ctx-skills-list .ctx-tier-filter button[data-scope='user']").click()
+    page.wait_for_function(
+        "() => {"
+        "  const b = document.querySelector("
+        "    '#ctx-skills-list .ctx-tier-filter button[data-scope=\"user\"]');"
+        "  return b && b.classList.contains('active');"
+        "}",
+        timeout=3_000,
+    )
+    page.evaluate("async () => { await I18N.setLang('ko'); }")
+    page.wait_for_function(
+        "() => {"
+        "  const el = document.querySelector("
+        "    '#ctx-skills-list .empty-state .empty-state-hint');"
+        "  return el && el.textContent.includes('사용자 canonical');"
+        "}",
+        timeout=3_000,
+    )
+    hint = (
+        page.locator("#ctx-skills-list .empty-state .empty-state-hint").text_content() or ""
+    )
+    assert "사용자 canonical" in hint, (
+        f"KO user-tier empty hint should contain '사용자 canonical': {hint!r}"
+    )
+    assert "이 프로젝트의" not in hint, (
+        f"KO user-tier empty hint must not say '이 프로젝트의': {hint!r}"
+    )

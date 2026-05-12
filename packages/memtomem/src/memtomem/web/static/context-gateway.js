@@ -1121,14 +1121,26 @@ function _ctxScopeCount(scope, type) {
 
 function _ctxRenderItemsHtml(items, type, projectRoot, scannedDirs, { clickable }) {
   if (!items.length) {
-    const canonical = `.memtomem/${type}`;
-    // Same fallback as the runtime-only banner (line 732) so the hint stays
-    // grammatical when no scan dirs are reported (fresh project / no runtimes).
-    const scanList = (scannedDirs || []).join(', ') || `.${type}/`;
-    const hint = t('settings.ctx.empty_hint')
+    // Branch the hint on the active tier (#956): user canonical lives at
+    // ``~/.memtomem/<type>`` and is shared across all projects, so the
+    // project-tier copy ("within this project", import-from-scan-dirs)
+    // is wrong on ``?target_scope=user``. ``_ctxTargetScope`` is the
+    // canonical client-side read — same source used by sibling tier-aware
+    // code (``_ctxRefreshSectionState``, ``langchange`` listener).
+    // ``project_local`` stays on the project-tier key by design: issue
+    // #956 explicitly scopes "preserve current project-tier wording".
+    const isUser = _ctxTargetScope === 'user';
+    const canonical = isUser ? `~/.memtomem/${type}` : `.memtomem/${type}`;
+    const hintKey = isUser ? 'settings.ctx.empty_hint_user' : 'settings.ctx.empty_hint';
+    let hint = t(hintKey)
       .replace(/\{type\}/g, type)
-      .replace('{canonical}', canonical)
-      .replace('{scan_dirs}', scanList);
+      .replace('{canonical}', canonical);
+    if (!isUser) {
+      // Same fallback as the runtime-only banner so the hint stays
+      // grammatical when no scan dirs are reported (fresh project / no runtimes).
+      const scanList = (scannedDirs || []).join(', ') || `.${type}/`;
+      hint = hint.replace('{scan_dirs}', scanList);
+    }
     return emptyState(
       '',
       t('settings.ctx.no_artifacts').replace('{type}', type),
