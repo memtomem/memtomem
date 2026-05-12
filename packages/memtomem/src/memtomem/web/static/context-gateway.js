@@ -395,10 +395,58 @@ function _renderCtxOverview(data) {
         badgeText = `${inSync}/${total} ${t('settings.ctx.badge_synced')}`;
       }
 
+      // ADR-0009 §2 sync-direction pointers — surface remediation intent
+      // without expanding the dashboard's mutation surface. Order is fixed:
+      // missing_target (push unambiguous) → out_of_sync (direction-neutral,
+      // resolve on leaf) → missing_canonical (pull unambiguous, leaf-only
+      // import). ``parse_error`` and ``d.error`` are intentionally NOT
+      // surfaced as pointers — both are direction-neutral diagnostics
+      // already conveyed by the badge; the leaf is the right place to
+      // diagnose them. Settings tile cannot produce ``missing_canonical``
+      // by design (ADR-0009 §2 last paragraph, ADR-0001 §5).
+      const pointers = [];
+      if (!d.error && parseError === 0) {
+        if (missingTarget > 0) {
+          pointers.push({
+            action: 'sync-all',
+            text: t('settings.ctx.pointer_missing_target', { count: missingTarget }),
+          });
+        }
+        if (outOfSync > 0) {
+          pointers.push({
+            action: 'leaf',
+            text: t('settings.ctx.pointer_out_of_sync', {
+              count: outOfSync,
+              leaf: typ.label,
+            }),
+          });
+        }
+        if (missingCanonical > 0 && typ.key !== 'settings') {
+          pointers.push({
+            action: 'leaf',
+            text: t('settings.ctx.pointer_missing_canonical', {
+              count: missingCanonical,
+              leaf: typ.label,
+            }),
+          });
+        }
+      }
+      let pointersHtml = '';
+      if (pointers.length > 0) {
+        pointersHtml = '<div class="ctx-overview-pointers">'
+          + pointers.map(p =>
+              `<button type="button" class="ctx-overview-pointer"`
+              + ` data-action="${p.action}" data-section="${typ.section}">`
+              + `${escapeHtml(p.text)}</button>`,
+            ).join('')
+          + '</div>';
+      }
+
       html += `<div class="ctx-overview-stat" data-section="${typ.section}">
         <div class="ctx-overview-count">${total}</div>
         <div class="ctx-overview-label">${escapeHtml(typ.label)}</div>
         <div class="ctx-overview-badge"><span class="badge ${badgeCls}">${escapeHtml(badgeText)}</span></div>
+        ${pointersHtml}
       </div>`;
     }
     html += '</div>';
@@ -466,12 +514,36 @@ function _renderCtxOverview(data) {
     card.addEventListener('click', () => switchSettingsSection(card.dataset.section));
   });
 
-  // Tier-aware write-block sweep — folds in the user-tier Sync All gate
-  // alongside the existing data-runtime-only paths above. Idempotent
+  // ADR-0009 §2: pointer-line click handlers. ``stopPropagation`` is
+  // load-bearing: without it, clicking a ``data-action="sync-all"``
+  // pointer would (1) trigger Sync All AND (2) the outer tile handler
+  // would then call ``switchSettingsSection`` and pull the user off the
+  // dashboard mid-fan-out. For ``data-action="leaf"`` pointers, both
+  // handlers navigate to the same section, so propagation would be
+  // idempotent — stopping it still keeps the call count at 1 for
+  // testability and matches the sync-all handler's contract.
+  el.querySelectorAll('.ctx-overview-pointer').forEach(btn => {
+    btn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      if (btn.dataset.action === 'sync-all') {
+        const syncAllBtn = document.getElementById('ctx-sync-all-btn');
+        if (syncAllBtn && syncAllBtn.getAttribute('aria-disabled') !== 'true') {
+          syncAllBtn.click();
+        }
+      } else if (btn.dataset.action === 'leaf') {
+        switchSettingsSection(btn.dataset.section);
+      }
+    });
+  });
+
+  // Tier-aware write-block sweep (#945) — folds in the user-tier Sync All
+  // gate alongside the existing data-runtime-only paths above. Idempotent
   // re-render after the runtime-only branches so the dim + ARIA states
   // settle on the final value (avoids the user-tier case being
   // clobbered by the project_shared else-branch that re-enables the
-  // button).
+  // button). Placed AFTER the pointer click-handler wireup so any
+  // future write-block sweep that wants to dim/disable a pointer can
+  // see the buttons in their final wired state.
   _ctxRefreshWriteBlockedState();
 }
 

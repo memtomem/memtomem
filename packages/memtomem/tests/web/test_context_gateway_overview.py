@@ -655,3 +655,358 @@ def test_q_pr3_settings_zero_total_renders_empty(page, mm_web_url: str) -> None:
         "settings tile big-number slot must show the count even at zero "
         "(Visual-1 glyph→count alignment)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #833 — ADR-0009 §2 sync-direction pointers.
+# ---------------------------------------------------------------------------
+#
+# ADR-0009 §2 keeps the dashboard's mutation surface push-only but adds
+# inline pointers per tile so the dashboard can tell the user *which* action
+# resolves a partial-sync state. The pointer block is derived from existing
+# ``/api/context/overview`` per-status counts — no new wire fields. Three
+# pointer phrasings, fixed priority order:
+#
+#   1. ``missing_target > 0``  → "Run Sync All to push N missing entries."
+#                                 (data-action=sync-all)
+#   2. ``out_of_sync > 0``     → "Open <leaf> to resolve N differences."
+#                                 (data-action=leaf, direction-neutral)
+#   3. ``missing_canonical > 0`` → "N runtime entries are not in canonical
+#                                 — open <leaf> to import."
+#                                 (data-action=leaf; settings tile NEVER
+#                                 emits this one, ADR-0009 §2 last paragraph)
+#
+# Pointer click handlers ``stopPropagation`` so the outer ``.ctx-overview-stat``
+# navigate-to-leaf handler doesn't double-fire. For ``data-action=sync-all``
+# this is load-bearing: without it the user would (1) start a Sync All AND
+# (2) get pulled off the dashboard mid-fan-out.
+
+_POINTER_SKILLS_MISSING_TARGET = {
+    "skills": {"total": 3, "in_sync": 0, "missing_target": 3},
+    "commands": {"total": 0, "in_sync": 0},
+    "agents": {"total": 0, "in_sync": 0},
+    "settings": {
+        "total": 2,
+        "in_sync": 2,
+        "out_of_sync": 0,
+        "missing_target": 0,
+        "error": 0,
+        "status": "in_sync",
+    },
+}
+
+
+_POINTER_SKILLS_OUT_OF_SYNC = {
+    "skills": {"total": 2, "in_sync": 0, "out_of_sync": 2},
+    "commands": {"total": 0, "in_sync": 0},
+    "agents": {"total": 0, "in_sync": 0},
+    "settings": {
+        "total": 2,
+        "in_sync": 2,
+        "out_of_sync": 0,
+        "missing_target": 0,
+        "error": 0,
+        "status": "in_sync",
+    },
+}
+
+
+_POINTER_SKILLS_ALL_THREE = {
+    # Two runtimes: one with three drafts that need to be pushed
+    # (missing_target=3), the same three drafted but with differences
+    # (out_of_sync=2), plus two runtime-only artifacts not yet in canonical
+    # (missing_canonical=2). The per-status counts can sum above ``total``
+    # in multi-runtime payloads — see _renderCtxOverview's existing comment
+    # block on (runtime, name) triples. ``total`` here is the count of
+    # distinct names, not the sum of the per-status counts.
+    "skills": {
+        "total": 5,
+        "in_sync": 0,
+        "missing_target": 3,
+        "out_of_sync": 2,
+        "missing_canonical": 2,
+    },
+    "commands": {"total": 0, "in_sync": 0},
+    "agents": {"total": 0, "in_sync": 0},
+    "settings": {
+        "total": 2,
+        "in_sync": 2,
+        "out_of_sync": 0,
+        "missing_target": 0,
+        "error": 0,
+        "status": "in_sync",
+    },
+}
+
+
+_POINTER_SETTINGS_WITH_MISSING_CANONICAL = {
+    "skills": {"total": 0, "in_sync": 0},
+    "commands": {"total": 0, "in_sync": 0},
+    "agents": {"total": 0, "in_sync": 0},
+    # Settings cannot legitimately produce ``missing_canonical`` — the
+    # additive merge that owns settings sync cannot distinguish canonical-
+    # authored from user-authored entries (ADR-0001 §5). The defense-in-
+    # depth pin still stubs it: even if a future backend bug surfaced a
+    # non-zero ``missing_canonical`` for settings, the frontend must
+    # suppress the pointer rather than render an unreachable
+    # "open Hooks to import" hyperlink.
+    "settings": {
+        "total": 2,
+        "in_sync": 1,
+        "out_of_sync": 1,
+        "missing_target": 0,
+        "missing_canonical": 5,
+        "error": 0,
+        "status": "out_of_sync",
+    },
+}
+
+
+def test_pointer_missing_target_renders_and_triggers_sync_all(page, mm_web_url: str) -> None:
+    """ADR-0009 §2 pin: ``missing_target > 0`` surfaces the push-intent
+    pointer text AND, when clicked, programmatically clicks the Sync All
+    button. ``stopPropagation`` on the pointer's click handler is what
+    keeps the outer ``.ctx-overview-stat`` navigate-to-leaf handler from
+    pulling the user off the dashboard mid-fan-out.
+
+    The spy is a passive ``addEventListener`` on the Sync All button —
+    it does not block the existing handler, so the in-app
+    ``showConfirm`` dialog will surface as a side effect. That's fine
+    for the assertion (the listener fires synchronously when
+    ``btn.click()`` runs, before the confirm dialog even renders); the
+    dialog itself stays unattached at teardown because we never resolve
+    it, and the test exits before any async user-confirm gating fires.
+    """
+    install_default_stubs(page)
+    page.route(
+        "**/api/context/overview",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_POINTER_SKILLS_MISSING_TARGET),
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    skills_tile = page.locator(
+        "#ctx-overview-content .ctx-overview-stat[data-section='ctx-skills']"
+    )
+    pointer = skills_tile.locator(".ctx-overview-pointer[data-action='sync-all']")
+    pointer_text = (pointer.text_content() or "").strip()
+    assert "3" in pointer_text and "Sync All" in pointer_text, (
+        f"missing_target pointer must surface the count and 'Sync All'; got: {pointer_text!r}"
+    )
+
+    # Spy on Sync All clicks. The pointer's click handler calls
+    # ``syncAllBtn.click()`` synchronously; ``addEventListener`` listeners
+    # fire on dispatch, so our counter increments before the existing
+    # async confirm-dialog chain even resolves.
+    page.evaluate(
+        """() => {
+            window._syncAllClickSpy = 0;
+            document.getElementById('ctx-sync-all-btn')
+              .addEventListener('click', () => { window._syncAllClickSpy++; });
+        }"""
+    )
+    pointer.click()
+    spy = page.evaluate("() => window._syncAllClickSpy")
+    assert spy == 1, (
+        f"missing_target pointer click must trigger exactly one Sync All "
+        f"click via programmatic dispatch; got {spy}"
+    )
+
+    # Negative half (stopPropagation pin): the outer tile handler must
+    # NOT have fired — if it did, switchSettingsSection would have moved
+    # the active settings section away from the overview, hiding the
+    # dashboard mid-fan-out. The ``#settings-ctx-overview`` section's
+    # ``.active`` class is the observable signal.
+    section_active = page.evaluate(
+        "() => document.getElementById('settings-ctx-overview')"
+        "        .classList.contains('active')"
+    )
+    assert section_active is True, (
+        "stopPropagation regression — the outer tile handler fired after "
+        "the pointer click, navigating away from the overview while a "
+        "Sync All was in flight (ADR-0009 §2 mutation-surface invariant)"
+    )
+
+
+def test_pointer_out_of_sync_renders_and_navigates_to_leaf(page, mm_web_url: str) -> None:
+    """ADR-0009 §2 pin: ``out_of_sync > 0`` surfaces the leaf-navigation
+    pointer and clicking it navigates to the leaf section. The pointer
+    text includes the leaf label (``Skills`` here, the tile's ``typ.label``)
+    so the user reads which leaf they're heading to before the click.
+    """
+    install_default_stubs(page)
+    page.route(
+        "**/api/context/overview",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_POINTER_SKILLS_OUT_OF_SYNC),
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    skills_tile = page.locator(
+        "#ctx-overview-content .ctx-overview-stat[data-section='ctx-skills']"
+    )
+    pointer = skills_tile.locator(".ctx-overview-pointer[data-action='leaf']")
+    pointer_text = (pointer.text_content() or "").strip()
+    assert "2" in pointer_text and "Skills" in pointer_text, (
+        f"out_of_sync pointer must mention the count and the leaf label; got: {pointer_text!r}"
+    )
+
+    pointer.click()
+    # Navigation succeeded when the per-type list section toggles to .active
+    # and the overview section toggles off — switchSettingsSection's
+    # observable effect.
+    page.wait_for_function(
+        "() => {"
+        "  const skills = document.getElementById('settings-ctx-skills');"
+        "  return skills && skills.classList.contains('active');"
+        "}",
+        timeout=3_000,
+    )
+    overview_active = page.evaluate(
+        "() => document.getElementById('settings-ctx-overview')"
+        "        .classList.contains('active')"
+    )
+    assert overview_active is False, (
+        "pointer click must navigate away from the overview into the "
+        "skills leaf (ADR-0009 §2 — 'open <leaf>' is a leaf-bound action)"
+    )
+
+
+def test_pointer_priority_order_with_all_three_counts(page, mm_web_url: str) -> None:
+    """ADR-0009 §2 priority order pin: when a tile reports non-zero
+    counts for all three direction-bearing states, the pointer lines
+    render in fixed order — ``missing_target`` first (push unambiguous),
+    then ``out_of_sync`` (direction-neutral resolve), then
+    ``missing_canonical`` (pull unambiguous). The order encodes the
+    least-ambiguous-action-first heuristic; flipping it would surface
+    the leaf-import line above the dashboard-Sync-All line and re-
+    introduce the "which action do I take" ambiguity ADR-0009 was
+    written to remove.
+    """
+    install_default_stubs(page)
+    page.route(
+        "**/api/context/overview",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_POINTER_SKILLS_ALL_THREE),
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    skills_tile = page.locator(
+        "#ctx-overview-content .ctx-overview-stat[data-section='ctx-skills']"
+    )
+    pointers = skills_tile.locator(".ctx-overview-pointer")
+    assert pointers.count() == 3, (
+        f"all three direction states must each surface their pointer; "
+        f"got {pointers.count()} pointer(s)"
+    )
+
+    # data-action signals the kind of action each pointer takes. The
+    # priority order is missing_target (sync-all) → out_of_sync (leaf) →
+    # missing_canonical (leaf). The two ``leaf`` actions need their text
+    # to disambiguate, which the count-string assertion below covers.
+    actions = [pointers.nth(i).get_attribute("data-action") for i in range(3)]
+    assert actions == ["sync-all", "leaf", "leaf"], (
+        f"pointer data-action sequence must encode the ADR-0009 §2 priority; got {actions!r}"
+    )
+
+    texts = [(pointers.nth(i).text_content() or "").strip() for i in range(3)]
+    # missing_target = 3 → "Run Sync All to push 3 missing entries."
+    assert "3" in texts[0] and "Sync All" in texts[0], (
+        f"first pointer must be missing_target (count=3, Sync All); got: {texts[0]!r}"
+    )
+    # out_of_sync = 2 → "Open Skills to resolve 2 differences."
+    assert "2" in texts[1] and "Skills" in texts[1] and "differences" in texts[1], (
+        f"second pointer must be out_of_sync (count=2, Skills, differences); got: {texts[1]!r}"
+    )
+    # missing_canonical = 2 → "2 runtime entries are not in canonical — open Skills to import."
+    assert "2" in texts[2] and "Skills" in texts[2] and "import" in texts[2].lower(), (
+        f"third pointer must be missing_canonical (count=2, Skills, import); got: {texts[2]!r}"
+    )
+
+
+def test_pointer_missing_canonical_omitted_on_settings_tile(page, mm_web_url: str) -> None:
+    """ADR-0009 §2 last paragraph + ADR-0001 §5 pin: even when the
+    response stubs ``missing_canonical > 0`` on the settings tile (which
+    the backend cannot legitimately produce — additive merge has no way
+    to extract canonical settings from a runtime-merged file), the
+    frontend MUST NOT render the ``missing_canonical`` pointer for that
+    tile. ``out_of_sync`` still renders since it's direction-neutral.
+    """
+    install_default_stubs(page)
+    page.route(
+        "**/api/context/overview",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_POINTER_SETTINGS_WITH_MISSING_CANONICAL),
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    settings_tile = page.locator(
+        "#ctx-overview-content .ctx-overview-stat[data-section='hooks-sync']"
+    )
+    pointers = settings_tile.locator(".ctx-overview-pointer")
+    # Exactly one pointer (out_of_sync) should render — the missing_canonical
+    # gate keeps the unreachable "import" pointer off the settings tile.
+    assert pointers.count() == 1, (
+        f"settings tile must render only the out_of_sync pointer; got {pointers.count()} pointer(s)"
+    )
+    pointer_text = (pointers.nth(0).text_content() or "").strip()
+    assert "1" in pointer_text and "differences" in pointer_text, (
+        f"sole settings pointer must be out_of_sync (count=1); got: {pointer_text!r}"
+    )
+    # Negative half: the missing_canonical phrasing must be absent from
+    # the entire tile, even though the count was non-zero in the response.
+    tile_text = (settings_tile.text_content() or "").lower()
+    assert "import" not in tile_text, (
+        f"settings tile must not surface an import pointer (ADR-0001 §5 "
+        f"unidirectional readiness contract); tile text: {tile_text!r}"
+    )
+
+
+def test_pointer_absent_on_in_sync_tile(page, mm_web_url: str) -> None:
+    """Negative-pin (``feedback_pin_invert_symmetric_assertion.md``):
+    a healthy tile with only ``in_sync`` counts must render no pointer
+    block. The dashboard's "glance" property depends on the pointer
+    surface being silent when there's nothing actionable to surface —
+    a regression that always renders an empty ``.ctx-overview-pointers``
+    div would still satisfy ``pointers.count() == 0``, so this pin also
+    asserts the wrapper element itself is absent.
+    """
+    install_default_stubs(page)
+    page.route(
+        "**/api/context/overview",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_HEALTHY_OVERVIEW),
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    skills_tile = page.locator(
+        "#ctx-overview-content .ctx-overview-stat[data-section='ctx-skills']"
+    )
+    assert skills_tile.locator(".ctx-overview-pointer").count() == 0, (
+        "healthy in_sync tile must render no pointer lines"
+    )
+    assert skills_tile.locator(".ctx-overview-pointers").count() == 0, (
+        "healthy in_sync tile must not render the empty pointer-wrapper "
+        "either — the dashboard 'glance' property requires the block to "
+        "be entirely absent, not just empty"
+    )

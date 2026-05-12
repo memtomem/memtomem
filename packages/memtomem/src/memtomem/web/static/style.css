@@ -3148,6 +3148,10 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 .ctx-overview-count { font-size: 2rem; font-weight: 700; color: var(--accent); }
 .ctx-overview-label { font-size: 0.85rem; color: var(--muted); margin-top: 4px; }
 .ctx-overview-badge { font-size: 0.72rem; margin-top: 8px; }
+.ctx-overview-pointers { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; text-align: left; }
+.ctx-overview-pointer { background: transparent; border: 1px solid transparent; padding: 4px 6px; color: var(--muted); font: inherit; font-size: 0.72rem; text-align: left; cursor: pointer; border-radius: 4px; line-height: 1.35; }
+.ctx-overview-pointer:hover { background: rgba(108, 143, 255, 0.08); color: var(--text); border-color: var(--border); }
+.ctx-overview-pointer:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 .ctx-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 8px; background: var(--surface); cursor: pointer; transition: border-color 0.15s; }
 .ctx-card:hover { border-color: var(--accent); }
