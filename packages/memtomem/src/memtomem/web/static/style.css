@@ -2228,9 +2228,45 @@ select:focus-visible {
 .diff-eq  { color: var(--muted); }
 
 /* ── Hooks Sync ── */
+/* Header lays out the title + Sync Now button. flex-wrap + gap keep
+ * the button on its own row on narrow widths instead of letting it
+ * overflow the settings panel (issue #962). */
+.hooks-sync-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
 #hooks-sync-status { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
-.hooks-status-target { font-size: 0.78rem; color: var(--muted); }
-.hooks-status-target code { font-family: var(--mono); font-size: 0.78rem; }
+.hooks-status-target { font-size: 0.78rem; color: var(--muted); max-width: 100%; }
+/* ``overflow-wrap: anywhere`` lets long absolute paths break at any
+ * character so the target span never pushes the Sync Now button or
+ * the panel edge off-screen (issue #962). */
+.hooks-status-target code {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+.hooks-sync-needs-confirmation {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--warning, #b58900);
+  border-radius: var(--radius);
+  background: rgba(181, 137, 0, 0.08);
+  font-size: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.hooks-sync-needs-confirmation-body {
+  font-size: 0.78rem;
+  color: var(--muted);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
 .hooks-sync-card {
   border: 1px solid var(--border); border-radius: var(--radius);
   padding: 12px; margin-bottom: 12px; background: var(--surface);

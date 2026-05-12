@@ -43,6 +43,7 @@ HOOKS_IN_SYNC_BADGE = "All hooks are in sync"  # settings.hooks.in_sync
 _OUT_OF_SYNC_GET = {
     "status": "out_of_sync",
     "target_path": "/fake/.claude/settings.json",
+    "target_scope": "user",
     "hooks": {
         "pending": [
             {
@@ -59,6 +60,7 @@ _OUT_OF_SYNC_GET = {
 _IN_SYNC_GET = {
     "status": "in_sync",
     "target_path": "/fake/.claude/settings.json",
+    "target_scope": "user",
     "hooks": {
         "pending": [],
         "conflicts": [],
@@ -307,3 +309,172 @@ def test_hooks_sync_confirm_transitions_badge_to_in_sync(page, mm_web_url: str) 
         f"Confirm must trigger a post-sync GET reload; before = "
         f"{initial_get_count}, after = {get_state['get_count']}"
     )
+
+
+def test_hooks_sync_post_body_carries_allow_host_writes(page, mm_web_url: str) -> None:
+    """Issue #962: the Sync Now confirm modal IS the host-write trust
+    gate, so the resulting POST must carry ``{"allow_host_writes": true}``
+    rather than an empty body. Without it the server returns
+    ``needs_confirmation`` for the user-scope ``~/.claude/settings.json``
+    write and the UI silently shows ``sync_success`` — the exact silent
+    failure #962 calls out.
+    """
+    install_default_stubs(page)
+
+    post_bodies: list[str] = []
+
+    def _post(route):
+        post_bodies.append(route.request.post_data or "")
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "results": [
+                        {
+                            "name": "claude_settings",
+                            "status": "ok",
+                            "reason": None,
+                            "warnings": [],
+                            "target": "/fake/.claude/settings.json",
+                        }
+                    ],
+                    "duplicate_tier_warnings": [],
+                }
+            ),
+        )
+
+    _stub_settings_sync(page, _OUT_OF_SYNC_GET, after_post=_IN_SYNC_GET, post_handler=_post)
+
+    page.goto(mm_web_url)
+    _open_hooks_sync(page)
+
+    page.locator("#hooks-sync-btn").click()
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    page.locator("#confirm-ok-btn").click()
+    # Wait for the badge to transition to in_sync — this happens after
+    # the POST + post-sync GET reload, so by then the route handler has
+    # finished capturing the body. (``expect_request`` only resolves
+    # on dispatch, not on handler completion.)
+    page.wait_for_function(
+        "() => {"
+        "  const badge = document.querySelector('#hooks-sync-status .badge');"
+        "  return badge && (badge.textContent || '').includes('All hooks are in sync');"
+        "}",
+        timeout=5_000,
+    )
+
+    assert post_bodies, "POST must have fired after confirm"
+    body = json.loads(post_bodies[0])
+    assert body == {"allow_host_writes": True}, (
+        f"Sync Now POST body must be {{'allow_host_writes': true}}, got {body!r}"
+    )
+
+
+def test_hooks_sync_target_label_reflects_project_shared_scope(page, mm_web_url: str) -> None:
+    """Issue #962: when ``target_scope: 'project_shared'`` is in the GET
+    payload, the target label must use the project-shared variant
+    (``Project (shared) target:``) — not the hardcoded
+    ``User-scope target:`` that the pre-fix code rendered for every
+    scope.
+    """
+    install_default_stubs(page)
+
+    in_sync_project_shared = {
+        **_IN_SYNC_GET,
+        "target_scope": "project_shared",
+        "target_path": "/fake/proj/.claude/settings.json",
+    }
+    _stub_settings_sync(page, in_sync_project_shared)
+
+    page.goto(mm_web_url)
+    _open_hooks_sync(page)
+
+    label_el = page.locator("#hooks-sync-status .hooks-status-target")
+    label_el.wait_for(state="attached", timeout=4_000)
+    label_text = (label_el.text_content() or "").strip()
+
+    assert "Project (shared) target:" in label_text, (
+        f"project_shared scope must render its scope-specific label, got {label_text!r}"
+    )
+    assert "User-scope target:" not in label_text, (
+        f"project_shared scope must NOT render the User-scope label, got {label_text!r}"
+    )
+    scope_attr = label_el.get_attribute("data-target-scope")
+    assert scope_attr == "project_shared", (
+        f"data-target-scope pin must echo the active scope, got {scope_attr!r}"
+    )
+
+
+def test_hooks_sync_needs_confirmation_surfaces_banner(page, mm_web_url: str) -> None:
+    """Issue #962: if the POST response carries
+    ``results[].status === 'needs_confirmation'`` (server-side trust
+    gate triggered despite ``allow_host_writes: true``), the panel must
+    render a warning banner naming the target path and must NOT show
+    the success toast. Silent failure on this branch is what #962
+    explicitly calls out.
+    """
+    install_default_stubs(page)
+
+    def _post(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "results": [
+                        {
+                            "name": "claude_settings",
+                            "status": "needs_confirmation",
+                            "reason": "Refusing host write outside the project root",
+                            "warnings": [],
+                            "target": "/fake/.claude/settings.json",
+                        }
+                    ],
+                    "duplicate_tier_warnings": [],
+                }
+            ),
+        )
+
+    _stub_settings_sync(page, _OUT_OF_SYNC_GET, post_handler=_post)
+
+    page.goto(mm_web_url)
+    _open_hooks_sync(page)
+
+    page.locator("#hooks-sync-btn").click()
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    with page.expect_request(
+        lambda req: "/api/settings-sync" in req.url and req.method == "POST",
+        timeout=4_000,
+    ):
+        page.locator("#confirm-ok-btn").click()
+
+    # Banner must appear inside #hooks-sync-status with the title text.
+    banner = page.locator("#hooks-sync-status .hooks-sync-needs-confirmation")
+    banner.wait_for(state="attached", timeout=4_000)
+    banner_text = banner.text_content() or ""
+    assert "Host write requires confirmation" in banner_text, (
+        f"needs_confirmation banner must surface the title key, got {banner_text!r}"
+    )
+    assert "/fake/.claude/settings.json" in banner_text, (
+        f"needs_confirmation banner must list the refused target, got {banner_text!r}"
+    )
+
+    # The success toast must NOT have fired — silent failure 금지 (#962).
+    # Toasts live under ``#toast-container`` with ``.toast-msg`` children
+    # (app.js:987). A regression that drops the needs_confirmation branch
+    # would fall through to ``showToast(t('settings.hooks.sync_success'))``.
+    success_toasts = page.locator("#toast-container .toast-success .toast-msg")
+    count = success_toasts.count()
+    for i in range(count):
+        msg = (success_toasts.nth(i).text_content() or "").strip()
+        assert msg != "Sync completed", (
+            f"needs_confirmation branch must NOT show the sync_success toast, "
+            f"got toast text = {msg!r}"
+        )
