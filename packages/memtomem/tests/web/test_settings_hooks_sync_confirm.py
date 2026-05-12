@@ -344,9 +344,7 @@ def test_hooks_sync_post_body_carries_allow_host_writes(page, mm_web_url: str) -
             ),
         )
 
-    _stub_settings_sync(
-        page, _OUT_OF_SYNC_GET, after_post=_IN_SYNC_GET, post_handler=_post
-    )
+    _stub_settings_sync(page, _OUT_OF_SYNC_GET, after_post=_IN_SYNC_GET, post_handler=_post)
 
     page.goto(mm_web_url)
     _open_hooks_sync(page)
@@ -372,14 +370,11 @@ def test_hooks_sync_post_body_carries_allow_host_writes(page, mm_web_url: str) -
     assert post_bodies, "POST must have fired after confirm"
     body = json.loads(post_bodies[0])
     assert body == {"allow_host_writes": True}, (
-        f"Sync Now POST body must be {{'allow_host_writes': true}}, "
-        f"got {body!r}"
+        f"Sync Now POST body must be {{'allow_host_writes': true}}, got {body!r}"
     )
 
 
-def test_hooks_sync_target_label_reflects_project_shared_scope(
-    page, mm_web_url: str
-) -> None:
+def test_hooks_sync_target_label_reflects_project_shared_scope(page, mm_web_url: str) -> None:
     """Issue #962: when ``target_scope: 'project_shared'`` is in the GET
     payload, the target label must use the project-shared variant
     (``Project (shared) target:``) — not the hardcoded
@@ -403,12 +398,10 @@ def test_hooks_sync_target_label_reflects_project_shared_scope(
     label_text = (label_el.text_content() or "").strip()
 
     assert "Project (shared) target:" in label_text, (
-        f"project_shared scope must render its scope-specific label, "
-        f"got {label_text!r}"
+        f"project_shared scope must render its scope-specific label, got {label_text!r}"
     )
     assert "User-scope target:" not in label_text, (
-        f"project_shared scope must NOT render the User-scope label, "
-        f"got {label_text!r}"
+        f"project_shared scope must NOT render the User-scope label, got {label_text!r}"
     )
     scope_attr = label_el.get_attribute("data-target-scope")
     assert scope_attr == "project_shared", (
@@ -416,9 +409,7 @@ def test_hooks_sync_target_label_reflects_project_shared_scope(
     )
 
 
-def test_hooks_sync_needs_confirmation_surfaces_banner(
-    page, mm_web_url: str
-) -> None:
+def test_hooks_sync_needs_confirmation_surfaces_banner(page, mm_web_url: str) -> None:
     """Issue #962: if the POST response carries
     ``results[].status === 'needs_confirmation'`` (server-side trust
     gate triggered despite ``allow_host_writes: true``), the panel must
@@ -467,7 +458,7 @@ def test_hooks_sync_needs_confirmation_surfaces_banner(
     # Banner must appear inside #hooks-sync-status with the title text.
     banner = page.locator("#hooks-sync-status .hooks-sync-needs-confirmation")
     banner.wait_for(state="attached", timeout=4_000)
-    banner_text = (banner.text_content() or "")
+    banner_text = banner.text_content() or ""
     assert "Host write requires confirmation" in banner_text, (
         f"needs_confirmation banner must surface the title key, got {banner_text!r}"
     )

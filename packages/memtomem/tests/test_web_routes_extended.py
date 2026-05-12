@@ -628,9 +628,7 @@ class TestSettingsSync:
         # per ADR-0010 §2.
         assert data["target_scope"] == "user"
 
-    async def test_target_scope_surfaces_project_shared(
-        self, app, client: AsyncClient, tmp_path
-    ):
+    async def test_target_scope_surfaces_project_shared(self, app, client: AsyncClient, tmp_path):
         """Issue #962: when the active scope is ``project_shared``, the
         GET response surfaces that value so the Web UI does not lie
         with a hardcoded ``User-scope target:`` label.
@@ -647,9 +645,7 @@ class TestSettingsSync:
         finally:
             app.dependency_overrides.pop(get_hooks_target_scope, None)
 
-    async def test_target_scope_surfaces_project_local(
-        self, app, client: AsyncClient, tmp_path
-    ):
+    async def test_target_scope_surfaces_project_local(self, app, client: AsyncClient, tmp_path):
         """Issue #962 sibling: ``project_local`` scope round-trips too."""
         from memtomem.web.deps import get_hooks_target_scope
 
