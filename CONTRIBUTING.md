@@ -41,6 +41,19 @@ The STM proxy gateway lives in a separate repository: [memtomem/memtomem-stm](ht
 6. Write a clear commit message describing the "why"
 7. Sign the CLA on your first pull request (see below)
 
+## Deferred ADRs
+
+When you author or merge an ADR with `Status: Proposed (deferred pending
+trigger)`, append a row to [`docs/adr/TRACKER.md`](docs/adr/TRACKER.md)
+in the same PR. The tracker is the single place a maintainer scans to
+see which open questions are due for review.
+
+If you hit confusion or a use case that matches a deferred ADR's open
+question, comment on the tracking issue with a quote + context, or
+apply the `adr-feedback` label to your PR / issue. Signals collected
+during a deferral window are what trigger (or close) the follow-up
+decision ADR.
+
 ## Maintainer response expectations
 
 memtomem is maintained by a small team. We aim for the following

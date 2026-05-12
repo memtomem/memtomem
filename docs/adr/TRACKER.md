@@ -1,0 +1,53 @@
+# Deferred ADR Tracker
+
+Index of ADRs that carry an open question deferred to a later trigger or
+date. A row here is **not** a summary of the ADR — it is a single-line
+pointer so a maintainer can scan due dates without opening each ADR.
+
+## Authoring rules
+
+- Add a row when you author or merge an ADR with
+  `Status: Proposed (deferred pending trigger)` (or an equivalent status
+  with an explicit Open question that defers a decision).
+- Keep one row per deferred question. If a single ADR defers multiple
+  independent questions (e.g. Shape A vs. Shape B in ADR-0012), add one
+  row per shape.
+- The "Trigger / deadline" column is a one-line summary plus a pointer
+  to the ADR section that carries the formal criteria. **Do not duplicate
+  ADR body content here** — readers should be sent to the ADR for detail.
+- When the tracking issue closes (decision recorded in a new ADR), strike
+  the row out or remove it; the closing ADR's References section is the
+  permanent record.
+
+## Open deferred decisions
+
+| ADR | Deferred question | Trigger / deadline | Tracking issue | Next review |
+|-----|-------------------|--------------------|----------------|-------------|
+| 0016 §"Open questions" §2 | `target_scope` → `target_tier` identifier rename | "the field name confused me when reading X" non-author signal ≥1 / **2026-08-11** (3-month window from ADR merge) | [#922](https://github.com/memtomem/memtomem/issues/922) | 2026-08-11 |
+| 0012 §"Shape A" | Cross-DB memory migration — team onboarding export | Onboarding flow blocked on `scope`/`project_root` serialization OR gate plumbing on import (full criteria in ADR §"Shape A — Trigger criteria") | [#911](https://github.com/memtomem/memtomem/issues/911) | (event-driven) |
+| 0012 §"Shape B" | Cross-DB memory migration — project archive | User reports `~/.memtomem/memtomem.db` size pain that existing compaction / orphan-GC remedies do not solve (full criteria in ADR §"Shape B — Trigger criteria") | [#911](https://github.com/memtomem/memtomem/issues/911) | (event-driven) |
+| 0007 §"Trigger criteria" | PR-C: Namespace rename / bulk delete prod exposure (PR-A/B already shipped) | "≥ 2 prod user reports" along the rename/bulk-delete axis OR namespace rules surfacing in the onboarding flow | (none — tracked in ADR) | (event-driven) |
+
+## Adding a row
+
+1. In the same PR that merges the deferred ADR, append a row here.
+2. The Trigger column's "/ deadline" half is required if the ADR sets
+   a calendar date; otherwise write "(event-driven)" in the Next review
+   column.
+3. If a tracking issue exists, link it. If not, the ADR section pointer
+   in the Deferred question column is sufficient — but consider opening
+   a tracking issue if the decision needs aggregated contributor signal
+   (rather than a single trigger event).
+
+## Signal collection
+
+When a deferred question expects qualitative contributor signal (vs. a
+crisp event trigger), maintainers can:
+
+- Comment on the tracking issue with a quote + source link + date.
+- Apply the `adr-feedback` label to any PR / issue / discussion where
+  the confusion surfaces, then copy the relevant quote to the tracking
+  issue so signals don't get lost in closed-PR review threads.
+
+The tracking issue's body should enumerate which signal sources count
+and what the adjudication rule is (see #922 for the canonical example).
