@@ -3112,6 +3112,30 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 
 .ctx-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; gap: 8px; }
 .ctx-header div { display: flex; gap: 6px; }
+.ctx-tier-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  margin: 0 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+.ctx-tier-filter button {
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.ctx-tier-filter button.active {
+  background: var(--accent);
+  color: white;
+}
 
 .ctx-overview-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
 .ctx-overview-stat { text-align: center; padding: 20px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); cursor: pointer; transition: border-color 0.15s; }

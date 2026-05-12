@@ -222,14 +222,14 @@ def _print_skills_generate(
         click.secho(f"  skipped {runtime}: {reason}", fg=color)
 
 
-def _print_skills_diff(root: Path) -> None:
-    rows = diff_skills(root)
+def _print_skills_diff(root: Path, *, scope: TargetScope = "project_shared") -> None:
+    rows = diff_skills(root, scope=scope)
     if not rows:
-        click.echo("  (no skills to compare)")
+        click.echo(f"  (no skills to compare in {scope})")
         return
     for runtime, name, status in rows:
         color = "green" if status == "in sync" else "yellow"
-        click.secho(f"  {runtime:15s}  {name}  [{status}]", fg=color)
+        click.secho(f"  {runtime:15s}  {name}  [{status}]  scope={scope}", fg=color)
 
 
 # ── Sub-agent sub-handlers (Phase 2) ─────────────────────────────────
@@ -324,14 +324,14 @@ def _print_agents_generate(
         )
 
 
-def _print_agents_diff(root: Path) -> None:
-    rows = diff_agents(root)
+def _print_agents_diff(root: Path, *, scope: TargetScope = "project_shared") -> None:
+    rows = diff_agents(root, scope=scope)
     if not rows:
-        click.echo("  (no sub-agents to compare)")
+        click.echo(f"  (no sub-agents to compare in {scope})")
         return
     for runtime, name, status in rows:
         color = "green" if status == "in sync" else "yellow"
-        click.secho(f"  {runtime:15s}  {name}  [{status}]", fg=color)
+        click.secho(f"  {runtime:15s}  {name}  [{status}]  scope={scope}", fg=color)
 
 
 # ── Slash-command sub-handlers (Phase 3) ─────────────────────────────
@@ -427,14 +427,14 @@ def _print_commands_generate(
         )
 
 
-def _print_commands_diff(root: Path) -> None:
-    rows = diff_commands(root)
+def _print_commands_diff(root: Path, *, scope: TargetScope = "project_shared") -> None:
+    rows = diff_commands(root, scope=scope)
     if not rows:
-        click.echo("  (no commands to compare)")
+        click.echo(f"  (no commands to compare in {scope})")
         return
     for runtime, name, status in rows:
         color = "green" if status == "in sync" else "yellow"
-        click.secho(f"  {runtime:17s}  {name}  [{status}]", fg=color)
+        click.secho(f"  {runtime:17s}  {name}  [{status}]  scope={scope}", fg=color)
 
 
 # ── Settings sub-handlers (Phase D) ─────────────────────────────────
@@ -991,7 +991,18 @@ def generate_cmd(
 
 @context.command("diff")
 @_INCLUDE_OPTION
-def diff_cmd(include: tuple[str, ...]) -> None:
+@click.option(
+    "--scope",
+    "scope_flag",
+    type=click.Choice(get_args(TargetScope)),
+    default="project_shared",
+    show_default=True,
+    help=(
+        "Canonical artifact tier for skills/agents/commands. "
+        "Use project_local to inspect local drafts with no runtime fan-out."
+    ),
+)
+def diff_cmd(include: tuple[str, ...], scope_flag: TargetScope) -> None:
     """Show differences between context.md and agent files."""
     inc = _parse_include(include)
     root = _find_project_root()
@@ -1024,15 +1035,15 @@ def diff_cmd(include: tuple[str, ...]) -> None:
 
     if "skills" in inc:
         click.echo("")
-        _print_skills_diff(root)
+        _print_skills_diff(root, scope=scope_flag)
 
     if "agents" in inc:
         click.echo("")
-        _print_agents_diff(root)
+        _print_agents_diff(root, scope=scope_flag)
 
     if "commands" in inc:
         click.echo("")
-        _print_commands_diff(root)
+        _print_commands_diff(root, scope=scope_flag)
 
     if "settings" in inc:
         click.echo("")
@@ -1513,7 +1524,17 @@ _PROJECT_LOCAL_ANNOTATION = "(draft, no fan-out)"
 
 
 @context.command("status")
-def status_cmd() -> None:
+@click.option(
+    "--scope",
+    "scope_flag",
+    type=click.Choice(get_args(TargetScope)),
+    default="project_shared",
+    show_default=True,
+    help=(
+        "Canonical artifact tier to show. project_local rows are drafts with no runtime fan-out."
+    ),
+)
+def status_cmd(scope_flag: TargetScope) -> None:
     """Show installed wiki assets and their drift state.
 
     Read-only. Walks ``<project>/.memtomem/lock.json`` and classifies
@@ -1530,6 +1551,7 @@ def status_cmd() -> None:
 
     wiki = WikiStore.at_default()
     wiki_head, rows = classify_status(root, wiki=wiki)
+    rows = [row for row in rows if row.tier == scope_flag]
 
     if lockfile_error is not None:
         click.secho(f"  ✗ lock.json: {lockfile_error}", fg="red", err=True)
@@ -1543,20 +1565,24 @@ def status_cmd() -> None:
     draft_suffix = (
         f" (+ {draft_count} local draft{'s' if draft_count != 1 else ''})" if draft_count else ""
     )
+    scope_suffix = f" — scope {scope_flag}"
     if wiki_head is None:
         wiki_root = wiki.root
         click.echo(
             f".memtomem/ — {installed_count} asset(s) installed{draft_suffix} — "
-            f"wiki not present at {wiki_root}; pin reachability not checked"
+            f"wiki not present at {wiki_root}; pin reachability not checked{scope_suffix}"
         )
     else:
         click.echo(
             f".memtomem/ — {installed_count} asset(s) installed{draft_suffix} — "
-            f"wiki HEAD {wiki_head[:12]}"
+            f"wiki HEAD {wiki_head[:12]}{scope_suffix}"
         )
 
     if not rows and lockfile_error is None:
-        click.echo("\nNo wiki assets installed in this project.")
+        if scope_flag == "project_local":
+            click.echo("\nNo project_local draft assets in this project.")
+        else:
+            click.echo(f"\nNo wiki assets installed in this project for scope {scope_flag}.")
         return
 
     # Sectioned by asset type, preserving classify_status() order

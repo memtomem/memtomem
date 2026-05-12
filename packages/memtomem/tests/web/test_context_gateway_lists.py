@@ -276,6 +276,101 @@ def test_context_list_card_renders_project_local_tier_badge_with_annotation(
     assert card_name.locator(".badge-tier--project_local").count() == 1
 
 
+def test_context_list_non_shared_tier_click_threads_target_scope(page, mm_web_url: str) -> None:
+    """Card click on a non-shared tier hits ``?target_scope=...`` (P1 #940 r3).
+
+    Item-level routes now accept ``target_scope`` (skills/agents/commands
+    read/diff/rendered honor every tier; create/update/delete/sync/import
+    reject non-shared with HTTP 400 via ``_reject_non_shared_write``). This
+    pins the round-trip: a click on a project_local card MUST fire
+    ``GET /api/context/skills/draft-skill?target_scope=project_local`` so the
+    backend opens the project_local canonical (not the same-name shared one).
+    """
+    install_default_stubs(page)
+    # The shared ``_stub_*`` helpers register patterns without trailing ``**``
+    # so they miss URLs that carry ``?target_scope=...``. This test triggers
+    # a tier switch which adds that query string, so register wider patterns
+    # locally; last-route-wins puts these ahead of the catch-all.
+    _skills_payload = {
+        "skills": [
+            {
+                "name": "draft-skill",
+                "canonical_path": ".memtomem/skills.local/draft-skill",
+                "target_scope": "project_local",
+                "runtimes": [],
+            }
+        ],
+        "scanned_dirs": [],
+    }
+    page.route(
+        "**/api/context/projects**",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_CWD_PROJECTS_WITH_NON_CWD_MISSING),
+        ),
+    )
+    page.route(
+        "**/api/context/skills**",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_skills_payload),
+        ),
+    )
+
+    detail_calls: list[str] = []
+
+    def _on_detail(route):
+        detail_calls.append(route.request.url)
+        # Return a minimal valid detail payload so loadCtxDetail doesn't error.
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {"name": "draft-skill", "content": "# draft\n", "mtime_ns": "0", "files": []}
+            ),
+        )
+
+    page.route("**/api/context/skills/draft-skill**", _on_detail)
+
+    page.goto(mm_web_url)
+    _open_skills_list(page)
+
+    page.locator("#ctx-skills-list .ctx-tier-filter button[data-scope='project_local']").click()
+    page.wait_for_function(
+        "() => {"
+        "  const b = document.querySelector("
+        "    '#ctx-skills-list .ctx-tier-filter button[data-scope=\"project_local\"]');"
+        "  return b && b.classList.contains('active');"
+        "}",
+        timeout=3_000,
+    )
+    page.wait_for_selector(
+        "#ctx-skills-list details[data-scope-id='cwd-scope'] .ctx-card",
+        timeout=5_000,
+    )
+
+    card = page.locator("#ctx-skills-list details[data-scope-id='cwd-scope'] .ctx-card").first
+    card.click()
+
+    page.wait_for_function(
+        "() => window.__lastDetailUrl !== undefined || true",
+        timeout=500,
+    )
+    # The card MUST be clickable on non-shared tiers — readonly-card workaround
+    # is gone now that routes honor target_scope.
+    card_classes = card.get_attribute("class") or ""
+    assert "ctx-card--readonly" not in card_classes, (
+        f"non-shared-tier card should be clickable now (#940 r3), got class={card_classes!r}"
+    )
+    # The detail fetch fires with the tier appended.
+    assert len(detail_calls) == 1, f"expected 1 detail call, got {detail_calls}"
+    assert "target_scope=project_local" in detail_calls[0], (
+        f"detail URL should carry target_scope=project_local, got {detail_calls[0]}"
+    )
+
+
 def test_q_pr4_langchange_rerenders_runtime_only_banner(page, mm_web_url: str) -> None:
     """``_ctxRefreshSectionState`` writes the runtime-only banner via
     ``textContent`` (not innerHTML), but the staleness mechanism is the

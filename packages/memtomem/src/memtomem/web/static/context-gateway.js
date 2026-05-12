@@ -121,6 +121,42 @@ let _ctxOverviewSeq = 0;
 // review P2 / #825). Cleared on fetch errors so the next call falls
 // back to a fresh fetch path.
 let _ctxOverviewCache = null;
+let _ctxTargetScope = 'project_shared';
+
+function _ctxTargetScopeParam() {
+  if (_ctxTargetScope === 'project_shared') return '';
+  return `target_scope=${encodeURIComponent(_ctxTargetScope)}`;
+}
+
+function _ctxWithTargetScope(url) {
+  const param = _ctxTargetScopeParam();
+  if (!param) return url;
+  return `${url}${url.includes('?') ? '&' : '?'}${param}`;
+}
+
+function _ctxTierControls(type) {
+  return `<div class="ctx-tier-filter" data-type="${escapeHtml(type)}" role="group" aria-label="${escapeHtml(t('settings.ctx.tier_filter'))}">
+    <button type="button" data-scope="user" class="${_ctxTargetScope === 'user' ? 'active' : ''}">user</button>
+    <button type="button" data-scope="project_shared" class="${_ctxTargetScope === 'project_shared' ? 'active' : ''}">project_shared</button>
+    <button type="button" data-scope="project_local" class="${_ctxTargetScope === 'project_local' ? 'active' : ''}">project_local</button>
+  </div>`;
+}
+
+function _ctxWireTierControls() {
+  document.querySelectorAll('.ctx-tier-filter button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const next = btn.dataset.scope;
+      if (!next || next === _ctxTargetScope) return;
+      _ctxTargetScope = next;
+      const type = btn.closest('.ctx-tier-filter')?.dataset.type || '';
+      if (type === 'overview') {
+        loadCtxOverview();
+      } else if (type) {
+        loadCtxList(type);
+      }
+    });
+  });
+}
 
 function _renderCtxOverview(data) {
   const el = qs('ctx-overview-content');
@@ -137,7 +173,8 @@ function _renderCtxOverview(data) {
     { key: 'settings', label: t('settings.hooks.title'),        section: 'hooks-sync' },
   ];
 
-  let html = '<div class="ctx-overview-grid">';
+  let html = _ctxTierControls('overview');
+  html += '<div class="ctx-overview-grid">';
   for (const typ of types) {
       if (typ.devOnly && STATE.uiMode !== 'dev') continue;
       const d = data[typ.key] || {};
@@ -156,6 +193,7 @@ function _renderCtxOverview(data) {
       const missingCanonical = d.missing_canonical || 0;
       const outOfSync = d.out_of_sync || 0;
       const parseError = d.parse_error || 0;
+      const localDraft = d.local_draft || 0;
       const issueCount = missingTarget + missingCanonical + outOfSync + parseError;
       const hasIssue = d.error || issueCount > 0
         || d.status === 'out_of_sync' || d.status === 'error';
@@ -166,9 +204,15 @@ function _renderCtxOverview(data) {
       // backend then only returned ``{status}``; with the count fields now
       // present settings participates in the same empty/issue/synced ladder.
       const isEmpty = total === 0 && !d.error && !hasIssue;
+      // localDraft only flips to gray when nothing else is wrong — real
+      // issues (parse_error / out_of_sync / missing_*) must still surface
+      // as warning. project_local has no runtime fan-out today so issues
+      // won't co-occur with drafts, but the gate stays robust if that changes.
       const badgeCls = d.error
         ? 'badge-danger'
-        : (isEmpty ? 'badge-gray' : (hasIssue ? 'badge-warning' : 'badge-success'));
+        : (isEmpty || (localDraft > 0 && !hasIssue)
+            ? 'badge-gray'
+            : (hasIssue ? 'badge-warning' : 'badge-success'));
 
       // Pick the most actionable status to surface in the badge. Order
       // matters: ``error`` and the empty-tile case both pre-empt the count
@@ -202,6 +246,8 @@ function _renderCtxOverview(data) {
         badgeText = `${missingCanonical} ${t('settings.ctx.badge_missing_canonical')}`;
       } else if (outOfSync > 0) {
         badgeText = `${outOfSync} ${t('settings.ctx.badge_out_of_sync')}`;
+      } else if (localDraft > 0) {
+        badgeText = `${localDraft} ${t('settings.ctx.badge_local_draft')}`;
       } else {
         badgeText = `${inSync}/${total} ${t('settings.ctx.badge_synced')}`;
       }
@@ -214,6 +260,7 @@ function _renderCtxOverview(data) {
     }
     html += '</div>';
     el.innerHTML = html;
+    _ctxWireTierControls();
 
   // Gate the Sync All button: when every artifact type's items are
   // entirely runtime-only (no canonicals to fan out), Sync All resolves
@@ -224,35 +271,49 @@ function _renderCtxOverview(data) {
   // stays as a fallback for users who don't hover (mobile, keyboard).
   const syncAllBtn = document.getElementById('ctx-sync-all-btn');
   if (syncAllBtn) {
-    // Mirror the overview-tile gate: in prod the Custom Commands
-    // surface is hidden, so its missing_canonical count must not
-    // gate the Sync All button (otherwise prod users would see Sync
-    // All disabled because of an artifact set they can't even see).
-    const syncKinds = STATE.uiMode === 'dev'
-      ? ['skills', 'commands', 'agents']
-      : ['skills', 'agents'];
-    const totals = syncKinds.reduce((acc, k) => {
-      const d = data[k] || {};
-      acc.total += d.total || 0;
-      acc.runtimeOnly += d.missing_canonical || 0;
-      return acc;
-    }, { total: 0, runtimeOnly: 0 });
-    if (totals.total > 0 && totals.runtimeOnly === totals.total) {
+    if (_ctxTargetScope === 'project_local') {
+      // project_local has no runtime fan-out (ADR-0011 §3 / ADR-0016 §7),
+      // so the Sync All button is disabled in this tier. We deliberately
+      // do NOT ``return`` here — falling through lets the overview-card
+      // click-to-navigate handler below still wire up, so the user can
+      // drill into project_local lists from the overview tiles. Review
+      // P2 (PR #940): the early return was making every overview tile
+      // inert in this tier, leaving the count badges with no way to
+      // navigate to the corresponding list.
       syncAllBtn.dataset.runtimeOnly = 'true';
-      syncAllBtn.title = t('settings.ctx.sync_all_disabled_tooltip');
+      syncAllBtn.title = t('settings.ctx.project_local_no_fanout_tooltip');
       syncAllBtn.setAttribute('aria-disabled', 'true');
     } else {
-      delete syncAllBtn.dataset.runtimeOnly;
-      syncAllBtn.removeAttribute('aria-disabled');
-      // The button has a default ``data-i18n-title`` (sync_all_tooltip);
-      // wiping the attribute outright would clobber the locale-driven
-      // hover tooltip that ``I18N.applyDOM`` set on page load.
-      // Restore it from the dataset key instead.
-      const titleKey = syncAllBtn.dataset.i18nTitle;
-      if (titleKey) {
-        syncAllBtn.title = t(titleKey);
+      // Mirror the overview-tile gate: in prod the Custom Commands
+      // surface is hidden, so its missing_canonical count must not
+      // gate the Sync All button (otherwise prod users would see Sync
+      // All disabled because of an artifact set they can't even see).
+      const syncKinds = STATE.uiMode === 'dev'
+        ? ['skills', 'commands', 'agents']
+        : ['skills', 'agents'];
+      const totals = syncKinds.reduce((acc, k) => {
+        const d = data[k] || {};
+        acc.total += d.total || 0;
+        acc.runtimeOnly += d.missing_canonical || 0;
+        return acc;
+      }, { total: 0, runtimeOnly: 0 });
+      if (totals.total > 0 && totals.runtimeOnly === totals.total) {
+        syncAllBtn.dataset.runtimeOnly = 'true';
+        syncAllBtn.title = t('settings.ctx.sync_all_disabled_tooltip');
+        syncAllBtn.setAttribute('aria-disabled', 'true');
       } else {
-        syncAllBtn.removeAttribute('title');
+        delete syncAllBtn.dataset.runtimeOnly;
+        syncAllBtn.removeAttribute('aria-disabled');
+        // The button has a default ``data-i18n-title`` (sync_all_tooltip);
+        // wiping the attribute outright would clobber the locale-driven
+        // hover tooltip that ``I18N.applyDOM`` set on page load.
+        // Restore it from the dataset key instead.
+        const titleKey = syncAllBtn.dataset.i18nTitle;
+        if (titleKey) {
+          syncAllBtn.title = t(titleKey);
+        } else {
+          syncAllBtn.removeAttribute('title');
+        }
       }
     }
   }
@@ -268,7 +329,7 @@ async function loadCtxOverview() {
   const el = qs('ctx-overview-content');
   panelLoading(el);
   try {
-    const res = await fetch('/api/context/overview');
+    const res = await fetch(_ctxWithTargetScope('/api/context/overview'));
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Failed to load overview');
     const data = await res.json();
     if (seq !== _ctxOverviewSeq) return;
@@ -324,7 +385,16 @@ async function loadCtxOverview() {
 window.addEventListener('langchange', () => {
   const btn = document.getElementById('ctx-sync-all-btn');
   if (btn && btn.dataset.runtimeOnly === 'true') {
-    btn.title = t('settings.ctx.sync_all_disabled_tooltip');
+    // ``_renderCtxOverview`` sets ``dataset.runtimeOnly='true'`` in two
+    // cases: (1) project_local tier (canonical drafts have no fan-out)
+    // and (2) all-canonicals-empty for any tier. Mirror its tier-aware
+    // tooltip choice here so an EN→KO→EN locale flip doesn't revert the
+    // hover text to the wrong copy for project_local. User-tier writes
+    // hit the server's HTTP 400 reject path (#940 r3), so they don't
+    // need a special tooltip — the click toast covers that case.
+    btn.title = _ctxTargetScope === 'project_local'
+      ? t('settings.ctx.project_local_no_fanout_tooltip')
+      : t('settings.ctx.sync_all_disabled_tooltip');
   }
   const settingsTab = document.getElementById('tab-settings');
   if (!settingsTab || !settingsTab.classList.contains('active')) return;
@@ -476,7 +546,10 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
       ? ['skills', 'commands', 'agents']
       : ['skills', 'agents'];
     for (const typ of types) {
-      const resp = await fetch(`/api/context/${typ}/sync`, { method: 'POST', headers });
+      const resp = await fetch(
+        _ctxWithTargetScope(`/api/context/${typ}/sync`),
+        { method: 'POST', headers },
+      );
       if (!resp.ok) {
         throw new Error(await _ctxErrorMessageFromResponse(resp, `Sync ${typ} failed`));
       }
@@ -689,8 +762,11 @@ function _ctxRenderItemsHtml(items, type, projectRoot, scannedDirs, { clickable 
 async function _loadScopeGroupItems(type, scope, container, seq) {
   panelLoading(container);
   try {
-    const params = _ctxScopeIsServerCwd(scope) ? '' : `?scope_id=${encodeURIComponent(scope.scope_id)}`;
-    const res = await fetch(`/api/context/${type}${params}`);
+    const params = new URLSearchParams();
+    if (_ctxTargetScope !== 'project_shared') params.set('target_scope', _ctxTargetScope);
+    if (!_ctxScopeIsServerCwd(scope)) params.set('scope_id', scope.scope_id);
+    const query = params.toString();
+    const res = await fetch(`/api/context/${type}${query ? `?${query}` : ''}`);
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Failed to load ${type}`);
     const data = await res.json();
     // Bail if a newer ``loadCtxList`` invocation has superseded this one
@@ -701,12 +777,20 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
     // re-insert the runtime-only banner above the fresh list.
     if (seq !== _ctxListSeq[type]) return;
     const items = data[type] || [];
+    // Cards on the cwd scope are clickable across all tiers — the detail /
+    // rendered / diff / edit / delete endpoints now accept ``target_scope=``
+    // (#940 r3), so a click on a project_local draft opens the project_local
+    // canonical, not a same-named project_shared one. Writes on non-shared
+    // tiers are rejected at the server with HTTP 400 (the route's
+    // ``_reject_non_shared_write`` helper); the JS surfaces those as
+    // toasts via the existing ``err.detail`` path.
+    const clickable = _ctxScopeIsServerCwd(scope);
     container.innerHTML = _ctxRenderItemsHtml(
       items,
       type,
       scope.root,
       data.scanned_dirs || [],
-      { clickable: _ctxScopeIsServerCwd(scope) },
+      { clickable },
     );
 
     if (_ctxScopeIsServerCwd(scope)) {
@@ -716,24 +800,26 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
       // classList toggle that risks drift across re-renders.
       _ctxRefreshSectionState(type, items, data.scanned_dirs || []);
 
-      const listEl = qs(`ctx-${type}-list`);
-      container.querySelectorAll('.ctx-card').forEach(card => {
-        card.addEventListener('click', () => {
-          listEl.querySelectorAll('.ctx-card').forEach(c => c.classList.remove('active'));
-          card.classList.add('active');
-          // Runtime-only items have no canonical file; calling the GET detail
-          // endpoint returns 404. Branch into the diff-backed renderer so the
-          // user sees the actual runtime contents instead of a "not found".
-          if (card.dataset.canonicalPath) {
-            loadCtxDetail(type, card.dataset.name, {
-              autoOpenDiff: card.dataset.outOfSync === 'true',
-            });
-          } else {
-            const detailEl = qs(`ctx-${type}-detail`);
-            _ctxLoadRuntimeOnlyDetail(type, card.dataset.name, detailEl);
-          }
+      if (clickable) {
+        const listEl = qs(`ctx-${type}-list`);
+        container.querySelectorAll('.ctx-card').forEach(card => {
+          card.addEventListener('click', () => {
+            listEl.querySelectorAll('.ctx-card').forEach(c => c.classList.remove('active'));
+            card.classList.add('active');
+            // Runtime-only items have no canonical file; calling the GET detail
+            // endpoint returns 404. Branch into the diff-backed renderer so the
+            // user sees the actual runtime contents instead of a "not found".
+            if (card.dataset.canonicalPath) {
+              loadCtxDetail(type, card.dataset.name, {
+                autoOpenDiff: card.dataset.outOfSync === 'true',
+              });
+            } else {
+              const detailEl = qs(`ctx-${type}-detail`);
+              _ctxLoadRuntimeOnlyDetail(type, card.dataset.name, detailEl);
+            }
+          });
         });
-      });
+      }
     }
   } catch (err) {
     // Late-failing fetch from a previous invocation must not paint
@@ -751,7 +837,16 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
 function _ctxRefreshSectionState(type, cwdItems, scannedDirs) {
   const canonicalCount = cwdItems.filter(i => i.canonical_path).length;
   const sectionEl = document.getElementById(`settings-ctx-${type}`);
-  if (sectionEl) sectionEl.dataset.canonicalCount = String(canonicalCount);
+  if (sectionEl) {
+    sectionEl.dataset.canonicalCount = String(
+      _ctxTargetScope === 'project_local' ? 0 : canonicalCount,
+    );
+    if (_ctxTargetScope === 'project_local') {
+      sectionEl.dataset.noFanout = 'true';
+    } else {
+      delete sectionEl.dataset.noFanout;
+    }
+  }
 
   const listEl = qs(`ctx-${type}-list`);
   if (!listEl) return;
@@ -783,10 +878,13 @@ async function loadCtxList(type) {
   // pinned to a previous canonical-count state. _ctxRefreshSectionState resets
   // it when the cwd group resolves successfully.
   const sectionEl = document.getElementById(`settings-ctx-${type}`);
-  if (sectionEl) delete sectionEl.dataset.canonicalCount;
+  if (sectionEl) {
+    delete sectionEl.dataset.canonicalCount;
+    delete sectionEl.dataset.noFanout;
+  }
 
   try {
-    const res = await fetch('/api/context/projects');
+    const res = await fetch(_ctxWithTargetScope('/api/context/projects'));
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Failed to load projects');
     const data = await res.json();
     if (seq !== _ctxListSeq[type]) return;
@@ -798,7 +896,7 @@ async function loadCtxList(type) {
       return;
     }
 
-    let html = '';
+    let html = _ctxTierControls(type);
     for (const scope of scopes) {
       const isCwd = _ctxScopeIsServerCwd(scope);
       const count = _ctxScopeCount(scope, type);
@@ -822,6 +920,7 @@ async function loadCtxList(type) {
       </details>`;
     }
     listEl.innerHTML = html;
+    _ctxWireTierControls();
 
     // Wire up: lazy fetch on toggle, immediate fetch for the open cwd group,
     // and the per-scope remove (×) button. ``seq`` is threaded into the
@@ -909,7 +1008,9 @@ async function _ctxFetchFresh(type, name) {
   // Returns ``{content, mtime_ns}`` from the canonical detail GET, or null
   // on transport / decode failure (toast already shown).
   try {
-    const res = await fetch(`/api/context/${type}/${encodeURIComponent(name)}`);
+    const res = await fetch(
+      _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}`),
+    );
     if (!res.ok) {
       showToast(t('toast.request_failed'), 'error');
       return null;
@@ -1004,11 +1105,14 @@ async function _ctxHandleConflict(type, name, userBuffer, staleMtimeNs, detailEl
   }
   if (choice === 'force') {
     try {
-      const r2 = await fetch(`/api/context/${type}/${encodeURIComponent(name)}`, {
-        method: 'PUT',
-        headers,
-        body: JSON.stringify({ content: userBuffer, mtime_ns: staleMtimeNs, force: true }),
-      });
+      const r2 = await fetch(
+        _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}`),
+        {
+          method: 'PUT',
+          headers,
+          body: JSON.stringify({ content: userBuffer, mtime_ns: staleMtimeNs, force: true }),
+        },
+      );
       if (!r2.ok) {
         const err = await r2.json().catch(() => ({}));
         showToast(err.detail || t('toast.request_failed'), 'error');
@@ -1058,7 +1162,9 @@ async function loadCtxDetail(type, name, opts = {}) {
   panelLoading(detailEl);
 
   try {
-    const res = await fetch(`/api/context/${type}/${encodeURIComponent(name)}`);
+    const res = await fetch(
+      _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}`),
+    );
     if (res.status === 404) {
       if (seq !== _ctxDetailSeq[type]) return;
       detailEl.innerHTML = emptyState('', `"${name}" not found`, t('settings.ctx.no_artifacts_hint'));
@@ -1193,11 +1299,14 @@ async function loadCtxDetail(type, name, opts = {}) {
         const headers = csrf
           ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
           : { 'Content-Type': 'application/json' };
-        const r = await fetch(`/api/context/${type}/${encodeURIComponent(name)}`, {
-          method: 'PUT',
-          headers,
-          body: JSON.stringify({ content, mtime_ns }),
-        });
+        const r = await fetch(
+          _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}`),
+          {
+            method: 'PUT',
+            headers,
+            body: JSON.stringify({ content, mtime_ns }),
+          },
+        );
         if (r.status === 409) {
           await _ctxHandleConflict(type, name, content, mtime_ns, detailEl, headers);
           return;
@@ -1248,7 +1357,9 @@ async function loadCtxDetail(type, name, opts = {}) {
       try {
         const csrf = await ensureCsrfToken();
         const r = await fetch(
-          `/api/context/${type}/${encodeURIComponent(name)}?cascade=${cascade}`,
+          _ctxWithTargetScope(
+            `/api/context/${type}/${encodeURIComponent(name)}?cascade=${cascade}`,
+          ),
           { method: 'DELETE', headers: csrf ? { 'X-Memtomem-CSRF': csrf } : {} },
         );
         if (!r.ok) {
@@ -1311,7 +1422,9 @@ async function _ctxFetchFieldMap(type, name) {
   // diff pane. The diff fetch is the user-facing source of truth here;
   // the field map is supplementary.
   try {
-    const res = await fetch(`/api/context/${type}/${encodeURIComponent(name)}/rendered`);
+    const res = await fetch(
+      _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}/rendered`),
+    );
     if (!res.ok) return null;
     const data = await res.json();
     if (!data || !data.field_map) return null;
@@ -1330,7 +1443,9 @@ async function _ctxLoadDiff(type, name, detailEl) {
     // Diff is required, field map is optional + parallel-fetched. ``Promise.all``
     // would fail the whole pane on a /rendered hiccup; the explicit
     // fail-soft inside ``_ctxFetchFieldMap`` is what we want here.
-    const diffPromise = fetch(`/api/context/${type}/${encodeURIComponent(name)}/diff`);
+    const diffPromise = fetch(
+      _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}/diff`),
+    );
     const fieldMapPromise = _CTX_FIELD_MAP_TYPES.has(type)
       ? _ctxFetchFieldMap(type, name)
       : Promise.resolve(null);
@@ -1393,7 +1508,9 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
   panelLoading(detailEl);
 
   try {
-    const res = await fetch(`/api/context/${type}/${encodeURIComponent(name)}/diff`);
+    const res = await fetch(
+      _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}/diff`),
+    );
     if (!res.ok) {
       throw new Error((await res.json().catch(() => ({}))).detail || `Failed to load ${name}`);
     }
@@ -1437,11 +1554,14 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
       const btn = detailEl.querySelector('.ctx-runtime-only-import');
       btnLoading(btn, true);
       try {
-        const r = await fetch(`/api/context/${type}/${encodeURIComponent(name)}/import`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({}),
-        });
+        const r = await fetch(
+          _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}/import`),
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+          },
+        );
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
           showToast(err.detail || t('toast.request_failed'), 'error');
@@ -1481,8 +1601,10 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
     // shape of feedback for "this button does nothing right now."
     const section = btn.closest('.settings-section');
     if (section?.dataset.canonicalCount === '0') {
-      showToast(t('settings.ctx.sync_disabled_tooltip').replace('{type}', type),
-        'info');
+      const message = section?.dataset.noFanout === 'true'
+        ? t('settings.ctx.project_local_no_fanout_tooltip')
+        : t('settings.ctx.sync_disabled_tooltip').replace('{type}', type);
+      showToast(message, 'info');
       return;
     }
     const ok = await showConfirm({
@@ -1497,7 +1619,10 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
       const headers = csrf
         ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
         : { 'Content-Type': 'application/json' };
-      const r = await fetch(`/api/context/${type}/sync`, { method: 'POST', headers });
+      const r = await fetch(
+        _ctxWithTargetScope(`/api/context/${type}/sync`),
+        { method: 'POST', headers },
+      );
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
         showToast(err.detail || t('toast.request_failed'), 'error');
@@ -1552,7 +1677,7 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
     const overwrite = !!(result.extras && result.extras.overwrite);
     btnLoading(btn, true);
     try {
-      const r = await fetch(`/api/context/${type}/import`, {
+      const r = await fetch(_ctxWithTargetScope(`/api/context/${type}/import`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ overwrite }),
@@ -1621,7 +1746,7 @@ document.querySelectorAll('.ctx-create-btn').forEach(btn => {
       const submitBtn = form.querySelector('.ctx-create-submit');
       btnLoading(submitBtn, true);
       try {
-        const r = await fetch(`/api/context/${type}`, {
+        const r = await fetch(_ctxWithTargetScope(`/api/context/${type}`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name: nameInput, content }),
