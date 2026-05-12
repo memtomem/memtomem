@@ -49,6 +49,17 @@ function _ctxBadge(status) {
   return `<span class="ctx-runtime-badge ${cls}">${escapeHtml(_ctxStatusText(status))}</span>`;
 }
 
+// ADR-0009 §1 / #831: the overview dashboard is single-current-project.
+// The full absolute path stays in ``title`` while CSS clips long visible text.
+function renderOverviewProjectRoot(projectRoot) {
+  if (!projectRoot) return '';
+  const label = t('settings.ctx.project_root_label');
+  return `<div class="ctx-project-root" aria-label="${escapeHtml(`${label}: ${projectRoot}`)}">
+    <span class="ctx-project-root-label">${escapeHtml(label)}</span>
+    <span class="ctx-project-root-path" title="${escapeHtml(projectRoot)}">${escapeHtml(projectRoot)}</span>
+  </div>`;
+}
+
 function renderRuntimeBadges(runtimes) {
   if (!runtimes || !runtimes.length) return '';
   return '<div class="ctx-runtime-badges">' +
@@ -158,6 +169,15 @@ function _ctxWireTierControls() {
   });
 }
 
+function _ctxOverviewEmptyHint(typ, data) {
+  if (!data.project_root) {
+    return t('settings.ctx.empty_tile_hint_no_project');
+  }
+  return t('settings.ctx.empty_tile_hint_project', {
+    type: typ.label.toLocaleLowerCase(),
+  });
+}
+
 function _renderCtxOverview(data) {
   const el = qs('ctx-overview-content');
   if (!el) return;
@@ -174,6 +194,7 @@ function _renderCtxOverview(data) {
   ];
 
   let html = _ctxTierControls('overview');
+  html += renderOverviewProjectRoot(data.project_root);
   html += '<div class="ctx-overview-grid">';
   for (const typ of types) {
       if (typ.devOnly && STATE.uiMode !== 'dev') continue;
@@ -256,6 +277,7 @@ function _renderCtxOverview(data) {
         <div class="ctx-overview-count">${total}</div>
         <div class="ctx-overview-label">${escapeHtml(typ.label)}</div>
         <div class="ctx-overview-badge"><span class="badge ${badgeCls}">${escapeHtml(badgeText)}</span></div>
+        ${isEmpty ? `<div class="ctx-overview-empty-hint">${escapeHtml(_ctxOverviewEmptyHint(typ, data))}</div>` : ''}
       </div>`;
     }
     html += '</div>';

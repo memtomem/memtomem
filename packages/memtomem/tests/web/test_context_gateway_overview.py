@@ -31,6 +31,8 @@ from .conftest import install_default_stubs
 
 pytestmark = pytest.mark.browser
 
+_PROJECT_ROOT = "/Users/test/work/project-alpha"
+
 
 def _open_context_gateway(page) -> None:
     """Navigate to ``settings-ctx-overview`` so ``loadCtxOverview`` runs.
@@ -66,6 +68,7 @@ def _open_context_gateway(page) -> None:
 
 
 _ZERO_OVERVIEW = {
+    "project_root": _PROJECT_ROOT,
     "skills": {"total": 0, "in_sync": 0},
     "commands": {"total": 0, "in_sync": 0},
     "agents": {"total": 0, "in_sync": 0},
@@ -87,6 +90,7 @@ _ZERO_OVERVIEW = {
 # the cards have real text to compare across locales (the empty-state pin
 # covers the all-zero shape separately).
 _HEALTHY_OVERVIEW = {
+    "project_root": _PROJECT_ROOT,
     "skills": {"total": 3, "in_sync": 3},
     "commands": {"total": 1, "in_sync": 1},
     "agents": {"total": 2, "in_sync": 2},
@@ -99,6 +103,49 @@ _HEALTHY_OVERVIEW = {
         "status": "in_sync",
     },
 }
+
+
+def test_project_root_indicator_renders_full_path_tooltip(page, mm_web_url: str) -> None:
+    """#831 / ADR-0009 Info-2: the dashboard identifies the single current
+    project it is summarizing, with the full absolute path available in the
+    tooltip even when CSS clips the visible row."""
+    install_default_stubs(page)
+    page.route(
+        "**/api/context/overview",
+        lambda r: r.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_HEALTHY_OVERVIEW)
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    root_row = page.locator("#ctx-overview-content .ctx-project-root")
+    root_path = root_row.locator(".ctx-project-root-path")
+    assert (root_row.locator(".ctx-project-root-label").text_content() or "").strip() == (
+        "Project root"
+    )
+    assert (root_path.text_content() or "").strip() == _PROJECT_ROOT
+    assert root_path.get_attribute("title") == _PROJECT_ROOT
+
+
+def test_zero_total_empty_hint_is_project_scoped(page, mm_web_url: str) -> None:
+    """#831: a zero tile says the current project has no artifacts instead of
+    leaving ``0 skills`` ambiguous between no project and an empty project."""
+    install_default_stubs(page)
+    page.route(
+        "**/api/context/overview",
+        lambda r: r.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_ZERO_OVERVIEW)
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    skills_tile = page.locator(
+        "#ctx-overview-content .ctx-overview-stat[data-section='ctx-skills']"
+    )
+    hint = (skills_tile.locator(".ctx-overview-empty-hint").text_content() or "").strip()
+    assert hint == "No skills registered for this project."
 
 
 def test_zero_total_renders_empty_badge_not_green_synced(page, mm_web_url: str) -> None:

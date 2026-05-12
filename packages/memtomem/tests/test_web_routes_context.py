@@ -72,10 +72,11 @@ def _make_runtime_skill(
 
 class TestOverview:
     @pytest.mark.anyio
-    async def test_empty_project(self, client: AsyncClient):
+    async def test_empty_project(self, client: AsyncClient, ctx_app):
         r = await client.get("/api/context/overview")
         assert r.status_code == 200
         data = r.json()
+        assert data["project_root"] == str(ctx_app.state.project_root)
         assert data["skills"]["total"] == 0
         # commands/agents may pick up user-scope Codex files from ~/.codex/
         assert "total" in data["commands"]
@@ -87,6 +88,7 @@ class TestOverview:
         r = await client.get("/api/context/overview")
         data = r.json()
         assert data["target_scope"] == "project_shared"
+        assert data["project_root"] == str(tmp_path)
         assert data["skills"]["total"] >= 1
 
     @pytest.mark.anyio

@@ -232,4 +232,4 @@ async def context_overview(
         logger.exception("diff_settings failed")
         result["settings"] = _error_payload(exc, shape="status")
 
-    return {"target_scope": target_scope, **result}
+    return {"target_scope": target_scope, "project_root": str(project_root), **result}

@@ -3143,6 +3143,7 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 .ctx-overview-count { font-size: 2rem; font-weight: 700; color: var(--accent); }
 .ctx-overview-label { font-size: 0.85rem; color: var(--muted); margin-top: 4px; }
 .ctx-overview-badge { font-size: 0.72rem; margin-top: 8px; }
+.ctx-overview-empty-hint { margin-top: 8px; color: var(--muted); font-size: 0.76rem; line-height: 1.35; }
 
 .ctx-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 8px; background: var(--surface); cursor: pointer; transition: border-color 0.15s; }
 .ctx-card:hover { border-color: var(--accent); }
@@ -3218,6 +3219,18 @@ body.help-hidden #help-toggle { opacity: 0.5; }
   padding: 1px 6px;
 }
 .ctx-runtime-badge--error { background: rgba(224, 90, 90, 0.15); color: var(--danger); }
+.ctx-project-root { display: flex; align-items: center; min-width: 0; gap: 10px; margin: 6px 0 10px; color: var(--muted); }
+.ctx-project-root-label { flex: 0 0 auto; font-size: 0.72rem; text-transform: uppercase; }
+.ctx-project-root-path {
+  min-width: 0;
+  max-width: min(100%, 620px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  color: var(--text);
+}
 
 /* Import-first state: when the cwd's canonical count is zero, demote the
    Sync button (no-op until canonicals exist) and promote Import to the

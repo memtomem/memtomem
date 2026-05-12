@@ -607,6 +607,19 @@ class TestNoHardcodedStrings:
         assert not missing_en, f"Q-PR1 keys missing from en.json: {sorted(missing_en)}"
         assert not missing_ko, f"Q-PR1 keys missing from ko.json: {sorted(missing_ko)}"
 
+    def test_issue_831_project_root_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
+        """#831 / ADR-0009 Info-2: JS-built dashboard project identity and
+        empty hints need locale coverage in both supported languages."""
+        required = {
+            "settings.ctx.project_root_label",
+            "settings.ctx.empty_tile_hint_project",
+            "settings.ctx.empty_tile_hint_no_project",
+        }
+        missing_en = required - set(en)
+        missing_ko = required - set(ko)
+        assert not missing_en, f"#831 keys missing from en.json: {sorted(missing_en)}"
+        assert not missing_ko, f"#831 keys missing from ko.json: {sorted(missing_ko)}"
+
     def test_q_pr1_no_legacy_detect_keys(self, en: dict[str, str], ko: dict[str, str]) -> None:
         """The ``detect`` naming was an alias for what the handler always
         did — refresh the overview. Rename was a verbatim move (values
