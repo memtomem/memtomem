@@ -291,3 +291,41 @@ def test_env_override_unknown_values_keep_enforce(
     Only the explicit disable tokens turn it off."""
     monkeypatch.setenv("MEMTOMEM_WEB__CSRF_ENFORCE", on_value)
     assert resolve_csrf_enforce_from_env() is True
+
+
+# ---------------------------------------------------------------------------
+# Production-posture end-to-end pin
+# ---------------------------------------------------------------------------
+#
+# The autouse fixture in ``conftest.py`` defaults the rest of the suite to
+# observe-only so route-unit tests don't have to thread a token. That
+# fixture hides exactly the regression class flagged in PR #958 code
+# review — an SPA mutator bypassing ``ensureCsrfToken()`` would still go
+# green. This test bypasses the fixture by clearing the env explicitly,
+# builds the *real* app via ``create_app``, and asserts the middleware
+# returns 403 for an unsafe ``/api/...`` request without a token. It is
+# the canonical "does the production wiring actually enforce" pin.
+
+
+def test_production_create_app_enforces_csrf_without_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``create_app`` wires the middleware in enforce mode by default;
+    an unsafe ``/api/...`` request without the token returns 403."""
+    from memtomem.web.app import create_app
+
+    monkeypatch.delenv("MEMTOMEM_WEB__CSRF_ENFORCE", raising=False)
+    app = create_app(lifespan=None, mode="prod")
+    assert app.state.csrf_enforce is True, (
+        "create_app must default to enforce mode when MEMTOMEM_WEB__CSRF_ENFORCE is unset"
+    )
+
+    client = TestClient(app)
+    # Any unsafe /api path triggers the middleware before route lookup;
+    # a non-existent /api path is fine — the gate runs first.
+    res = client.post("/api/csrf-production-pin")
+    assert res.status_code == 403, (
+        "Production-posture create_app should 403 unsafe /api requests "
+        "without a CSRF token. The autouse conftest fixture must not be "
+        "leaking into this test."
+    )
