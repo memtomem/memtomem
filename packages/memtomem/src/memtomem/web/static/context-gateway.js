@@ -148,6 +148,11 @@ function _ctxWireTierControls() {
       const next = btn.dataset.scope;
       if (!next || next === _ctxTargetScope) return;
       _ctxTargetScope = next;
+      // Update write-blocked affordances synchronously so the user sees
+      // the dim/banner change immediately, before the async list refetch
+      // settles. ``loadCtxList`` / ``loadCtxOverview`` re-apply on success
+      // (their callees call ``_ctxRefreshWriteBlockedState`` post-render).
+      _ctxRefreshWriteBlockedState();
       const type = btn.closest('.ctx-tier-filter')?.dataset.type || '';
       if (type === 'overview') {
         loadCtxOverview();
@@ -157,6 +162,113 @@ function _ctxWireTierControls() {
     });
   });
 }
+
+// -- Tier-aware write-block gate (issue #943) ---------------------------------
+//
+// ADR-0011 / #940 wired ``target_scope`` through every artifact route, with
+// ``_reject_non_shared_write`` 400-rejecting create/update/delete/sync/import
+// on user and project_local tiers. Without a matching UI affordance, users
+// who switch the tier filter to ``user`` or ``project_local`` see the same
+// write buttons as on ``project_shared`` and only learn the operation is
+// blocked when the route surfaces a generic toast. #943 closes that UX
+// gap by tagging every web-write affordance with
+// ``data-write-blocked="<tier>"`` so:
+//
+//   (1) CSS dims the button (``[data-write-blocked]`` selector in style.css),
+//   (2) ``aria-disabled="true"`` announces the state to screen readers,
+//   (3) the native ``title`` carries the tier-aware explanation, and
+//   (4) a document-level capture-phase click handler intercepts the click
+//       and fires a toast — the per-button handler never sees the event,
+//       so no POST is ever issued.
+//
+// Per-section buttons (.ctx-create-btn / .ctx-import-btn / .ctx-sync-btn)
+// live in the static HTML so the refresh applies on every render that
+// touches the tier filter; per-item buttons (.ctx-detail-edit-btn /
+// .ctx-detail-delete-btn) are minted by ``loadCtxDetail`` so its callers
+// reapply the refresh after the detail innerHTML lands.
+//
+// The Sync All button stays governed by its existing
+// ``data-runtime-only`` channel for the project_local-no-fanout and
+// all-canonicals-empty cases; the user-tier case folds in here so a
+// single tier-flip wires all five write affordances at once.
+
+const _CTX_WRITE_BUTTON_SELECTOR = (
+  '.ctx-create-btn, .ctx-import-btn, .ctx-sync-btn, '
+  + '.ctx-detail-edit-btn, .ctx-detail-delete-btn, '
+  // The single-item runtime-only import route (#940 import_<type>)
+  // also flows through ``_reject_non_shared_write``, so the per-detail
+  // "Import this <type>" button minted by ``_ctxLoadRuntimeOnlyDetail``
+  // belongs in the same write-blocked sweep.
+  + '.ctx-runtime-only-import'
+);
+
+function _ctxRefreshWriteBlockedState() {
+  const blocked = _ctxTargetScope !== 'project_shared';
+  const tooltipKey = _ctxTargetScope === 'project_local'
+    ? 'settings.ctx.write_blocked_project_local_tooltip'
+    : 'settings.ctx.write_blocked_user_tooltip';
+  document.querySelectorAll(_CTX_WRITE_BUTTON_SELECTOR).forEach(btn => {
+    if (blocked) {
+      btn.dataset.writeBlocked = _ctxTargetScope;
+      btn.setAttribute('aria-disabled', 'true');
+      btn.title = t(tooltipKey);
+    } else {
+      delete btn.dataset.writeBlocked;
+      btn.removeAttribute('aria-disabled');
+      const titleKey = btn.dataset.i18nTitle;
+      if (titleKey) {
+        btn.title = t(titleKey);
+      } else {
+        btn.removeAttribute('title');
+      }
+    }
+  });
+
+  // Sync All: user-tier writes hit the server's 400 reject path; gate
+  // them here so the dashboard surfaces the decision pre-click instead
+  // of relying on the post-click toast. project_local already carries
+  // ``data-runtime-only`` from ``_renderCtxOverview`` (no-fanout copy
+  // is the more specific signal there) — leave that channel alone.
+  const syncAll = document.getElementById('ctx-sync-all-btn');
+  if (syncAll) {
+    if (_ctxTargetScope === 'user') {
+      syncAll.dataset.writeBlocked = 'user';
+      syncAll.setAttribute('aria-disabled', 'true');
+      syncAll.title = t('settings.ctx.write_blocked_user_tooltip');
+    } else if (syncAll.dataset.writeBlocked === 'user') {
+      // Only clear when WE set it — don't clobber project_local's
+      // ``data-runtime-only`` ARIA / title state.
+      delete syncAll.dataset.writeBlocked;
+      if (!syncAll.dataset.runtimeOnly) {
+        syncAll.removeAttribute('aria-disabled');
+        const titleKey = syncAll.dataset.i18nTitle;
+        if (titleKey) {
+          syncAll.title = t(titleKey);
+        } else {
+          syncAll.removeAttribute('title');
+        }
+      }
+    }
+  }
+}
+
+// Document-level capture-phase intercept. Capture phase fires before
+// the per-button click handlers registered at module-init, so a blocked
+// click never reaches the route fetch. Lives at document scope so it
+// covers both the static section buttons and the dynamically-minted
+// per-item Edit/Delete buttons inside ``loadCtxDetail``'s innerHTML.
+document.addEventListener('click', (e) => {
+  const target = e.target.closest('[data-write-blocked]');
+  if (!target) return;
+  e.preventDefault();
+  e.stopPropagation();
+  e.stopImmediatePropagation();
+  const tier = target.dataset.writeBlocked;
+  const key = tier === 'project_local'
+    ? 'settings.ctx.write_blocked_project_local_tooltip'
+    : 'settings.ctx.write_blocked_user_tooltip';
+  showToast(t(key), 'info');
+}, true);
 
 function _renderCtxOverview(data) {
   const el = qs('ctx-overview-content');
@@ -353,6 +465,14 @@ function _renderCtxOverview(data) {
   el.querySelectorAll('.ctx-overview-stat').forEach(card => {
     card.addEventListener('click', () => switchSettingsSection(card.dataset.section));
   });
+
+  // Tier-aware write-block sweep — folds in the user-tier Sync All gate
+  // alongside the existing data-runtime-only paths above. Idempotent
+  // re-render after the runtime-only branches so the dim + ARIA states
+  // settle on the final value (avoids the user-tier case being
+  // clobbered by the project_shared else-branch that re-enables the
+  // button).
+  _ctxRefreshWriteBlockedState();
 }
 
 async function loadCtxOverview() {
@@ -421,12 +541,18 @@ window.addEventListener('langchange', () => {
     // and (2) all-canonicals-empty for any tier. Mirror its tier-aware
     // tooltip choice here so an EN→KO→EN locale flip doesn't revert the
     // hover text to the wrong copy for project_local. User-tier writes
-    // hit the server's HTTP 400 reject path (#940 r3), so they don't
-    // need a special tooltip — the click toast covers that case.
+    // are gated by ``_ctxRefreshWriteBlockedState`` below — that path
+    // owns the user-tier tooltip refresh now (#943).
     btn.title = _ctxTargetScope === 'project_local'
       ? t('settings.ctx.project_local_no_fanout_tooltip')
       : t('settings.ctx.sync_all_disabled_tooltip');
   }
+  // Re-translate write-blocked button tooltips on every locale flip so
+  // the dim button's hover copy stays consistent with the active
+  // locale. The banner text (set via ``textContent`` inside
+  // ``loadCtxList``) is re-rendered by the ``loadCtxList`` re-issue
+  // below — no separate handling needed.
+  _ctxRefreshWriteBlockedState();
   const settingsTab = document.getElementById('tab-settings');
   if (!settingsTab || !settingsTab.classList.contains('active')) return;
 
@@ -953,6 +1079,28 @@ async function loadCtxList(type) {
     listEl.innerHTML = html;
     _ctxWireTierControls();
 
+    // Tier-aware read-only banner (issue #943): inserted at the top of
+    // the list whenever the canonical-tier filter is set to a
+    // non-shared tier. Sits ABOVE the runtime-only banner that
+    // ``_ctxRefreshSectionState`` may insert later — the write-block
+    // state is the more important framing (it's why the user can't
+    // press the section's write buttons), so it should read first.
+    if (_ctxTargetScope !== 'project_shared') {
+      const bannerKey = _ctxTargetScope === 'project_local'
+        ? 'settings.ctx.write_blocked_project_local_banner'
+        : 'settings.ctx.write_blocked_user_banner';
+      const banner = document.createElement('div');
+      banner.className = 'ctx-write-blocked-banner';
+      banner.dataset.tier = _ctxTargetScope;
+      banner.textContent = t(bannerKey);
+      listEl.insertBefore(banner, listEl.firstChild);
+    }
+    // Refresh write-blocked state on every list render so the section's
+    // header buttons reflect the current tier filter; per-item Edit /
+    // Delete buttons mounted later by ``loadCtxDetail`` re-trigger this
+    // helper from their own mount path.
+    _ctxRefreshWriteBlockedState();
+
     // Wire up: lazy fetch on toggle, immediate fetch for the open cwd group,
     // and the per-scope remove (×) button. ``seq`` is threaded into the
     // group fetch so a late group response from a stale ``loadCtxList``
@@ -1409,6 +1557,11 @@ async function loadCtxDetail(type, name, opts = {}) {
       }
     });
 
+    // Per-item Edit / Delete buttons just landed in ``detailEl``; mirror
+    // the section-level gate so they pick up the tier filter without
+    // requiring a list re-render (#943).
+    _ctxRefreshWriteBlockedState();
+
   } catch (err) {
     if (seq !== _ctxDetailSeq[type]) return;
     detailEl.innerHTML = emptyState('', 'Failed to load detail', err.message);
@@ -1615,6 +1768,10 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
         btnLoading(btn, false);
       }
     });
+    // The ``ctx-runtime-only-import`` button also flows through the
+    // single-item import route, which 400s on non-shared tiers; sweep
+    // it now that it's in the DOM (#943).
+    _ctxRefreshWriteBlockedState();
   } catch (err) {
     if (seq !== _ctxDetailSeq[type]) return;
     detailEl.innerHTML = emptyState('', 'Failed to load detail', err.message);

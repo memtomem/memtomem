@@ -3243,6 +3243,35 @@ body.help-hidden #help-toggle { opacity: 0.5; }
   cursor: not-allowed;
 }
 
+/* Tier-aware write-block gate (#943 / ADR-0011 §5 / ADR-0016 §7). When
+   the canonical-tier filter is set to `user` or `project_local`, every
+   write affordance carries ``data-write-blocked="<tier>"`` so the
+   button is visually dimmed and clicks are intercepted at the document
+   level (capture-phase listener in context-gateway.js) before they
+   reach the per-button handler. Mirrors the #ctx-sync-all-btn
+   data-runtime-only pattern — clicks still fire a toast so the user
+   understands why the affordance is dim, rather than getting a
+   generic 400 from the route's _reject_non_shared_write guard. */
+[data-write-blocked] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Inline banner above the per-section list when the tier filter is
+   set to a non-shared tier. Same shape as .ctx-runtime-only-banner
+   but uses a muted accent (the state is informational, not
+   actionable) so it doesn't visually compete with the runtime-only
+   banner when both are present on a project_local section. */
+.ctx-write-blocked-banner {
+  margin: 0 0 8px 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--muted);
+  background: rgba(127, 127, 127, 0.08);
+  font-size: 0.85rem;
+  color: var(--text);
+  border-radius: 2px;
+}
+
 /* Inline call-out above the scope groups when the cwd has runtime-only
    artifacts and nothing canonical yet — points the user at Import as the
    next step. Left-border accent matches other callout patterns in the UI. */
