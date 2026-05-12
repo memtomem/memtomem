@@ -8,6 +8,7 @@ Python ``_PROD_ROUTERS`` / ``_DEV_ONLY_ROUTERS`` lists.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -411,6 +412,49 @@ def test_gateway_main_tab_button_exists() -> None:
     assert sources_idx < gateway_idx < index_idx, (
         "Gateway tab button must sit between Sources and Index in the main nav"
     )
+
+
+def test_shortcut_switch_tabs_copy_matches_tab_count() -> None:
+    """#962 review P3 fold: the keyboard-shortcuts help row claims
+    digits 1-N map to the main tabs. The Gateway tab promotion
+    bumped N from 7 to 8 (Home/Search/Sources/Gateway/Index/Tags/
+    Timeline/More). Pin both the digit range row and the per-locale
+    ``shortcut.switch_tabs`` copy so a future tab add/remove can't
+    silently leave a stale digit there.
+    """
+    html = _read_static("index.html")
+    en = json.loads(_read_static("locales/en.json"))
+    ko = json.loads(_read_static("locales/ko.json"))
+
+    # Count the main-nav tab buttons. The shortcut row's digit range
+    # must match the visible tab count so users never see a
+    # number that doesn't actually activate anything.
+    main_tab_buttons = re.findall(
+        r'<button[^>]*class="tab-btn[^"]*"[^>]*data-tab="([^"]+)"',
+        html,
+    )
+    assert len(main_tab_buttons) == 8, (
+        f"Expected 8 top-level tabs after #962 Gateway promotion; got "
+        f"{len(main_tab_buttons)}: {main_tab_buttons}"
+    )
+
+    # Help row literal (rendered fallback before i18n applies).
+    row = re.search(
+        r"<kbd>1</kbd>[^<]*<kbd>([0-9]+)</kbd>",
+        html,
+    )
+    assert row is not None, "shortcut help row missing in markup"
+    assert row.group(1) == "8", (
+        f"Help row digit range must end at 8 (one per top-level tab); "
+        f"got: <kbd>1</kbd>-<kbd>{row.group(1)}</kbd>"
+    )
+
+    for locale_name, locale in (("en", en), ("ko", ko)):
+        copy = locale.get("shortcut.switch_tabs", "")
+        assert "8" in copy and "7" not in copy, (
+            f"{locale_name}.json shortcut.switch_tabs must mention the new "
+            f"tab count of 8 (and not retain the stale 7); got: {copy!r}"
+        )
 
 
 def test_gateway_appears_in_default_tab_selector() -> None:

@@ -603,7 +603,7 @@
   "shortcut.copy": "Copy selected chunk content",
   "shortcut.open_detail": "Open selected result detail",
   "shortcut.back": "Back to results list from detail",
-  "shortcut.switch_tabs": "Switch tabs (Home=1 … More=7)",
+  "shortcut.switch_tabs": "Switch tabs (Home=1 … More=8)",
   "shortcut.cmd_palette": "Command palette",
   "shortcut.go_sources": "Go to Sources",
   "shortcut.close": "Close panel, dropdown, or modal",
