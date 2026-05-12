@@ -1010,3 +1010,106 @@ def test_pointer_absent_on_in_sync_tile(page, mm_web_url: str) -> None:
         "either — the dashboard 'glance' property requires the block to "
         "be entirely absent, not just empty"
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #832 — ADR-0009 §1.c last-sync freshness indicator.
+# ---------------------------------------------------------------------------
+#
+# The dashboard header surfaces "Last sync: <relative>" with the full ISO
+# timestamp on hover. Source: canonical-source mtime (ADR §1.c). Null on
+# empty project — the line is suppressed so the user doesn't see
+# "Last sync: 56 years ago" on a fresh install (epoch-zero fallthrough).
+
+
+def _build_iso(seconds_ago: int) -> str:
+    """Return an ISO8601 UTC string ``seconds_ago`` ago. Uses ``Z`` trailer
+    to match the backend (avoiding the ``+00:00`` ambiguity that some
+    browsers parse inconsistently).
+    """
+    import datetime as _dt
+
+    return (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=seconds_ago)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def test_overview_last_sync_renders_relative_text_and_iso_tooltip(page, mm_web_url: str) -> None:
+    """ADR-0009 §1.c pin: header surfaces ``last_synced_at`` as a relative
+    string ("5m ago") with the full ISO timestamp exposed via ``title=`` on
+    the row container. The raw ISO is also reflected on the value span's
+    ``data-iso`` attribute so screen-reader / scraping consumers don't have
+    to parse the localized relative form.
+    """
+    install_default_stubs(page)
+    iso = _build_iso(seconds_ago=300)  # ~5 minutes ago
+    payload = {
+        **_OVERVIEW_WITH_HEADER,
+        "last_synced_at": iso,
+    }
+    page.route(
+        "**/api/context/overview",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(payload),
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    row = page.locator("#ctx-overview-content .ctx-overview-last-sync")
+    assert row.count() == 1, (
+        f"freshness row must render when last_synced_at is set; got {row.count()}"
+    )
+    # ``title`` carries the unredacted ISO for the diagnose case.
+    assert row.get_attribute("title") == iso, (
+        f"freshness row title= must carry the raw ISO; got {row.get_attribute('title')!r}"
+    )
+    value = row.locator(".ctx-overview-last-sync-value")
+    assert value.get_attribute("data-iso") == iso, (
+        f"value span must mirror the raw ISO on data-iso for non-tooltip "
+        f"consumers; got {value.get_attribute('data-iso')!r}"
+    )
+    # Relative formatter routes through ``t('time.relative.*')``; for ~5
+    # minutes ago we expect the minutes-ago branch in EN ("5m ago").
+    text = (value.text_content() or "").strip()
+    assert text.endswith("m ago"), (
+        f"~300s ago must render via the minutes_ago branch of relativeTime(); got {text!r}"
+    )
+
+
+def test_overview_last_sync_absent_when_null(page, mm_web_url: str) -> None:
+    """Negative pin (``feedback_pin_invert_symmetric_assertion.md``
+    symmetric): a fresh project returns ``last_synced_at: null`` and the
+    dashboard must suppress the row entirely — both the wrapper and any
+    inner element. Rendering "Last sync: never" or an epoch-zero relative
+    ("56 years ago") would mislead the user about empty-project state.
+    """
+    install_default_stubs(page)
+    payload = {
+        **_OVERVIEW_WITH_HEADER,
+        "last_synced_at": None,
+    }
+    page.route(
+        "**/api/context/overview",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(payload),
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    assert page.locator("#ctx-overview-content .ctx-overview-last-sync").count() == 0, (
+        "null last_synced_at must suppress the entire row wrapper"
+    )
+    # The label key must NOT bleed into the header via some other path
+    # (e.g. a label rendered without a value). Cross-locale-safe: search
+    # by the data-i18n attribute name in case the locale flips around test
+    # execution.
+    header_text = page.locator("#ctx-overview-content .ctx-overview-header").text_content() or ""
+    assert "Last sync" not in header_text, (
+        f"label must not leak into header when value is null; got: {header_text!r}"
+    )

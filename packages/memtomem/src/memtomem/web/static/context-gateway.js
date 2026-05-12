@@ -415,6 +415,27 @@ function _renderCtxOverview(data) {
     return `<span class="${cls}"${title} data-runtime="${name}">${name}</span>`;
   }).join('');
 
+  // Issue #832 / ADR-0009 §1.c: surface "Last sync: 5 min ago" sourced from
+  // canonical-source mtime. Suppress the line when the backend returns null
+  // (fresh / empty project — no canonical files yet); rendering "Last sync:
+  // never" or epoch-zero would be more confusing than silent absence. The
+  // raw ISO timestamp is exposed via ``title=`` on the row for the
+  // copy/diagnose case (mtime drift, timezone weirdness) — the relative
+  // form alone hides the absolute value that's sometimes what the user
+  // actually needs.
+  const lastSyncedAt = typeof data.last_synced_at === 'string' && data.last_synced_at
+    ? data.last_synced_at
+    : '';
+  let lastSyncHtml = '';
+  if (lastSyncedAt) {
+    const rel = escapeHtml(relativeTime(lastSyncedAt));
+    const iso = escapeHtml(lastSyncedAt);
+    lastSyncHtml = `<div class="ctx-overview-last-sync" title="${iso}">
+        <span class="ctx-overview-last-sync-label">${escapeHtml(t('settings.ctx.last_synced_label'))}</span>
+        <span class="ctx-overview-last-sync-value" data-iso="${iso}">${rel}</span>
+      </div>`;
+  }
+
   // Inline ``t()`` text rather than ``data-i18n`` attrs: the langchange
   // listener applies ``I18N.applyDOM`` first and then re-renders this
   // panel, so any ``data-i18n`` attr written *during* the re-render would
@@ -430,6 +451,7 @@ function _renderCtxOverview(data) {
         <span class="ctx-overview-runtimes-label">${escapeHtml(t('settings.ctx.runtimes_label'))}</span>
         ${chips}
       </div>
+      ${lastSyncHtml}
     </div>`;
   html += _ctxTierControls('overview');
   html += '<div class="ctx-overview-grid">';

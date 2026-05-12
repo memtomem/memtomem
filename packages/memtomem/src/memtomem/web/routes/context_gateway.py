@@ -112,6 +112,78 @@ def _redact_message(message: str) -> str:
     return redacted
 
 
+def _compute_last_synced_at(project_root: Path, target_scope: TargetScope) -> str | None:
+    """Return ISO8601 UTC timestamp of the most recently touched canonical artifact.
+
+    ADR-0009 §1.c: the dashboard freshness indicator is sourced from
+    **canonical-source mtime** rather than a persisted sync-event log —
+    cheapest option, matches Health Report semantics, avoids a new
+    write path. The cost is that the timestamp doesn't disambiguate
+    "edits" from "explicit syncs"; the ADR accepts this for the v1
+    "5 min ago" surface.
+
+    Aggregates across skills + commands + agents canonical files for the
+    requested ``target_scope`` (so a tier switch on the dashboard refreshes
+    the freshness signal alongside the per-tile counts). Settings is
+    intentionally excluded — its additive merge has no canonical-residency
+    that maps to "what would Sync All push," so its mtime would muddle the
+    freshness reading rather than sharpen it.
+
+    Returns ``None`` when no canonical files exist in the requested scope —
+    a fresh / empty project legitimately has no last-sync, and the
+    dashboard suppresses the line in that case (clearer than rendering
+    epoch-zero or "never").
+    """
+    from memtomem.context.agents import list_canonical_agents
+    from memtomem.context.commands import list_canonical_commands
+    from memtomem.context.skills import SKILL_MANIFEST, list_canonical_skills
+
+    latest: float | None = None
+
+    def _bump(path: Path) -> None:
+        nonlocal latest
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            return
+        if latest is None or mtime > latest:
+            latest = mtime
+
+    try:
+        for skill_dir in list_canonical_skills(project_root, scope=target_scope):
+            # ``list_canonical_skills`` returns the skill directory; the
+            # mtime that tracks "last sync" is the manifest file written by
+            # ``sync_skills`` / extract. The directory's own mtime advances
+            # on any auxiliary-file write too, which would over-trigger.
+            _bump(skill_dir / SKILL_MANIFEST)
+    except Exception:
+        logger.exception("list_canonical_skills failed during last_synced_at")
+
+    try:
+        for path, _layout in list_canonical_commands(project_root, scope=target_scope):
+            # ``list_canonical_commands`` returns the manifest file path
+            # directly (flat: ``<name>.md``; dir: ``<name>/command.md``).
+            _bump(path)
+    except Exception:
+        logger.exception("list_canonical_commands failed during last_synced_at")
+
+    try:
+        for path, _layout in list_canonical_agents(project_root, scope=target_scope):
+            _bump(path)
+    except Exception:
+        logger.exception("list_canonical_agents failed during last_synced_at")
+
+    if latest is None:
+        return None
+
+    # ISO8601 UTC with a trailing ``Z`` — matches the audit-catalog freshness
+    # surface and avoids the ``+00:00`` representation that confuses naive
+    # JS ``new Date(...)`` parsing across older browsers.
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(latest, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _compute_detected_runtimes(project_root: Path) -> list[dict[str, object]]:
     """Probe each known runtime for any on-disk fan-out surface.
 
@@ -279,9 +351,16 @@ async def context_overview(
         logger.exception("_compute_detected_runtimes failed")
         detected_runtimes = []
 
+    try:
+        last_synced_at = _compute_last_synced_at(project_root, target_scope)
+    except Exception:
+        logger.exception("_compute_last_synced_at failed")
+        last_synced_at = None
+
     return {
         "target_scope": target_scope,
         "project_root": str(project_root),
         "detected_runtimes": detected_runtimes,
+        "last_synced_at": last_synced_at,
         **result,
     }

@@ -145,6 +145,82 @@ class TestOverview:
         assert data["skills"]["total"] == 1
         assert data["skills"]["local_draft"] == 1
 
+    # ----- Issue #832 / ADR-0009 §1.c — last-sync freshness -----
+
+    @pytest.mark.anyio
+    async def test_overview_last_synced_at_null_on_empty_project(self, client: AsyncClient):
+        """A fresh / empty project has no canonical artifacts, so
+        ``last_synced_at`` must be JSON-null rather than an epoch-zero
+        string or a present-time fallback. The frontend uses null to
+        suppress the "Last sync" header line entirely (clearer than
+        rendering "Last sync: 56 years ago").
+        """
+        r = await client.get("/api/context/overview")
+        data = r.json()
+        # Key must be PRESENT in the response shape (even when null) so
+        # older clients don't have to feature-detect — the dashboard
+        # always reads ``data.last_synced_at`` with a string-type guard.
+        assert "last_synced_at" in data
+        assert data["last_synced_at"] is None
+
+    @pytest.mark.anyio
+    async def test_overview_last_synced_at_reflects_canonical_mtime(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        """ADR-0009 §1.c: ``last_synced_at`` is derived from the canonical
+        SKILL.md / command / agent file mtime — not a persisted log. A
+        single skill drop yields its manifest mtime, formatted as
+        ISO8601 UTC with a trailing ``Z`` (no ``+00:00`` ambiguity).
+        """
+        import re
+
+        skill_dir = _make_skill(tmp_path, "code-review")
+        manifest = skill_dir / SKILL_MANIFEST
+        # Pin mtime explicitly so the assertion isn't time-of-test fragile.
+        target_epoch = 1715000000.0  # 2024-05-06T12:53:20Z UTC
+        os.utime(manifest, (target_epoch, target_epoch))
+
+        r = await client.get("/api/context/overview")
+        data = r.json()
+        ts = data["last_synced_at"]
+        assert isinstance(ts, str)
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", ts), (
+            f"last_synced_at must be ISO8601 UTC with trailing Z; got {ts!r}"
+        )
+        # The exact pinned timestamp — confirms the helper read the
+        # manifest mtime rather than directory mtime or current time.
+        assert ts == "2024-05-06T12:53:20Z", (
+            f"last_synced_at must equal the pinned SKILL.md mtime; got {ts!r}"
+        )
+
+    @pytest.mark.anyio
+    async def test_overview_last_synced_at_returns_max_across_surfaces(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        """When canonical artifacts exist across multiple surfaces
+        (skills + agents), the freshness indicator must reflect the
+        most-recent mtime — the user reads "Last sync: 5 min ago"
+        as "something in the dashboard scope was synced 5 min ago,"
+        not "the oldest of all the things."
+        """
+        older_skill = _make_skill(tmp_path, "older")
+        os.utime(older_skill / SKILL_MANIFEST, (1700000000.0, 1700000000.0))
+
+        # Drop a canonical agent file via the flat layout so the helper's
+        # list_canonical_agents branch is exercised end-to-end.
+        agents_dir = tmp_path / ".memtomem" / "agents"
+        agents_dir.mkdir(parents=True)
+        newer_agent = agents_dir / "fresh.md"
+        newer_agent.write_text("---\nname: fresh\ndescription: x\n---\n# fresh\n", encoding="utf-8")
+        newer_epoch = 1720000000.0  # 2024-07-03T09:46:40Z UTC
+        os.utime(newer_agent, (newer_epoch, newer_epoch))
+
+        r = await client.get("/api/context/overview")
+        ts = r.json()["last_synced_at"]
+        assert ts == "2024-07-03T09:46:40Z", (
+            f"last_synced_at must be max(skill_mtime, agent_mtime); got {ts!r}"
+        )
+
 
 class TestSettingsCountShape:
     """Q-PR3 Visual-1 pins for the new ``settings`` count envelope.
