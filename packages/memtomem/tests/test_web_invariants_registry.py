@@ -348,39 +348,60 @@ def test_redaction_classification_covers_every_unsafe_route() -> None:
 # unsafe-method ``fetch(...)`` in the SPA must thread the CSRF token, so
 # the gate doesn't 403 a legitimate user-initiated write.
 #
-# Regression history: PR1 (#793) and the first PR2 commit each shipped
-# with a handful of mutators that bypassed ``ensureCsrfToken()`` — code
-# review caught them, but a code-side guard prevents recurrence.
+# Regression history: PR1 (#793), the first PR2 commit, and the first
+# PR2 review-fold each leaked sites that bypassed ``ensureCsrfToken()``.
+# This guard prevents recurrence. Each unsafe ``fetch(...)`` must be
+# classifiable into one of three safe shapes:
 #
-# The check targets the exact bug shape: an unsafe ``fetch(...)`` whose
-# ``headers:`` value is an inline ``{...}`` object literal lacking
-# ``X-Memtomem-CSRF``. Threaded callsites use ``headers`` as a bare
-# identifier (the convention here is ``const csrf = await
-# ensureCsrfToken(); const headers = csrf ? { ..., 'X-Memtomem-CSRF':
-# csrf } : { ... }; fetch(URL, { method, headers })``); those pass
-# because we trust the convention. Calls without any ``headers:`` key
-# (e.g. ``FormData`` POSTs where the browser sets the boundary
-# automatically) are out of scope — they should still thread the token
-# via a one-off explicit headers map, and a follow-up assertion below
-# pins ``ensureCsrfToken()`` proximity for those.
+# A. **Inline literal with token** — ``headers: { ..., 'X-Memtomem-CSRF':
+#    csrf }`` directly in the fetch options.
+# B. **Variable threading** — ``headers`` as a bare identifier, with a
+#    ``const headers = csrf ? {..., 'X-Memtomem-CSRF': csrf} : {...}``
+#    binding from an ``ensureCsrfToken()`` call in the same function (we
+#    check a 4000-char lookback, which covers every handler in the
+#    codebase).
+# C. **Param threading** — the enclosing function takes ``headers`` as a
+#    parameter and the caller threads it. These are listed explicitly in
+#    ``_CSRF_FETCH_EXEMPT`` with the caller cited, since the regex can't
+#    chase across functions.
+#
+# Anything else fails:
+# * Inline literal *without* the token.
+# * No ``headers`` key on an unsafe ``fetch(...)`` whose method isn't
+#   ``GET``/``HEAD``/``OPTIONS``.
+# * ``headers`` identifier with no ``ensureCsrfToken()`` in lookback and
+#   no entry in the exempt list.
 
 _FETCH_LINE_RE = re.compile(r"\bfetch\(")
 _UNSAFE_METHOD_RE = re.compile(r"method:\s*['\"](POST|PUT|PATCH|DELETE)['\"]")
 _INLINE_HEADERS_LITERAL_RE = re.compile(r"headers:\s*\{([^}]*)\}", re.DOTALL)
+_HEADERS_KEY_RE = re.compile(r"\bheaders\b\s*[:,}]")
 _CSRF_HEADER_RE = re.compile(r"X-Memtomem-CSRF", re.IGNORECASE)
+_ENSURE_CSRF_RE = re.compile(r"\bensureCsrfToken\s*\(")
 
 # Vendored libraries (Swagger UI, etc.) don't observe our CSRF contract
 # and don't reach our routes via unsafe methods at runtime — skip them.
 _STATIC_SKIP_DIRS = frozenset({"vendor"})
 
+# Sites whose threading is via function parameter, so the regex's
+# 4000-char lookback can't see ``ensureCsrfToken()`` (it's in the caller).
+# Each entry MUST cite the caller line where the token *is* threaded.
+_CSRF_FETCH_EXEMPT: dict[tuple[str, int], str] = {
+    ("context-gateway.js", 1705): (
+        "headers threaded via _ctxHandleConflict's function parameter; "
+        "caller at context-gateway.js:1908 calls ensureCsrfToken() and "
+        "passes the resulting headers map into the conflict-resolution flow"
+    ),
+}
 
-def _iter_unsafe_fetch_sites() -> list[tuple[Path, int, str]]:
-    """Return ``(file, line, window)`` for every unsafe-method ``fetch(``.
 
-    The window extends 800 chars forward from ``fetch(``, wide enough to
-    cover the multi-line option-object shape used in the codebase.
+def _iter_unsafe_fetch_sites() -> list[tuple[Path, int, str, int]]:
+    """Return ``(file, line, window, start_offset)`` for each unsafe ``fetch(``.
+
+    The window extends 800 chars forward from the ``fetch(`` token; the
+    start offset is preserved so the caller can do a lookback scan.
     """
-    sites: list[tuple[Path, int, str]] = []
+    sites: list[tuple[Path, int, str, int]] = []
     for path in sorted(STATIC_DIR.rglob("*.js")):
         if any(part in _STATIC_SKIP_DIRS for part in path.parts):
             continue
@@ -391,43 +412,92 @@ def _iter_unsafe_fetch_sites() -> list[tuple[Path, int, str]]:
             if not _UNSAFE_METHOD_RE.search(window):
                 continue
             line_no = text.count("\n", 0, start) + 1
-            sites.append((path, line_no, window))
+            sites.append((path, line_no, window, start))
     return sites
 
 
-def test_spa_unsafe_fetch_inline_headers_thread_csrf_token() -> None:
-    """Unsafe ``fetch(...)`` calls with an inline ``headers: {...}`` literal
-    must include ``X-Memtomem-CSRF``.
+def _classify_site(path: Path, window: str, start: int) -> tuple[str, str | None]:
+    """Return ``(verdict, reason)`` where verdict is one of ``"pass"`` or
+    a failure shorthand. Used by the test below to produce specific
+    error messages instead of a single "missing token" blob.
+    """
+    # Shape A: inline literal with X-Memtomem-CSRF.
+    inline = _INLINE_HEADERS_LITERAL_RE.search(window)
+    if inline:
+        if _CSRF_HEADER_RE.search(inline.group(1)):
+            return ("pass", None)
+        return ("inline-literal-missing-csrf", "headers: {...} without X-Memtomem-CSRF")
 
-    This catches the regression shape Codex flagged on PR #958: a copied
-    ``headers: { 'Content-Type': 'application/json' }`` literal without
-    the token. Callsites that pass headers via a bare identifier (the
-    threaded-variable convention) are not constrained here — see the
-    convention notes above the test.
+    # Shape B/C require headers to be referenced at all. If the unsafe
+    # fetch options omit the ``headers`` key entirely (e.g. a copied
+    # ``fetch(url, { method: 'POST', body })`` shape), the gate will
+    # 403 the request in production.
+    if not _HEADERS_KEY_RE.search(window):
+        return (
+            "no-headers-on-unsafe-fetch",
+            "unsafe fetch options omit the `headers` key entirely",
+        )
+
+    # Shape A also covers ``X-Memtomem-CSRF`` appearing outside the
+    # `headers: {...}` literal — e.g. inlined into a ternary expression
+    # that the literal regex didn't match.
+    if _CSRF_HEADER_RE.search(window):
+        return ("pass", None)
+
+    # Shape B: bare identifier `headers` — needs ensureCsrfToken() in scope.
+    text = path.read_text(encoding="utf-8")
+    lookback = text[max(0, start - 4000) : start]
+    if _ENSURE_CSRF_RE.search(lookback):
+        return ("pass", None)
+
+    return (
+        "headers-var-without-ensure-csrf",
+        "`headers` identifier passed to unsafe fetch, but no "
+        "`ensureCsrfToken()` call in the preceding ~100 lines",
+    )
+
+
+def test_spa_unsafe_fetch_threads_csrf_token() -> None:
+    """Every unsafe-method ``fetch(...)`` in the SPA threads the CSRF
+    token via one of the three safe shapes. Failures cite the specific
+    shape so the developer knows what to change.
     """
     sites = _iter_unsafe_fetch_sites()
     assert sites, "static/*.js sweep found no unsafe-method fetch sites"
 
-    missing: list[str] = []
-    for path, line_no, window in sites:
-        m = _INLINE_HEADERS_LITERAL_RE.search(window)
-        if not m:
-            continue  # headers passed as identifier or via FormData
-        headers_body = m.group(1)
-        if _CSRF_HEADER_RE.search(headers_body):
+    failures: list[str] = []
+    for path, line_no, window, start in sites:
+        if (path.name, line_no) in _CSRF_FETCH_EXEMPT:
+            continue
+        verdict, reason = _classify_site(path, window, start)
+        if verdict == "pass":
             continue
         rel = path.relative_to(STATIC_DIR.parent.parent.parent.parent)
-        missing.append(f"{rel}:{line_no}")
+        failures.append(f"{rel}:{line_no} — {verdict}: {reason}")
 
-    if missing:
+    if failures:
         pytest.fail(
-            "Unsafe-method fetch() calls with inline ``headers: {...}`` "
-            "literal missing ``X-Memtomem-CSRF``. Replace the inline "
-            "literal with the threaded pattern:\n"
-            "    const csrf = await ensureCsrfToken();\n"
-            "    const headers = csrf\n"
-            "      ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }\n"
-            "      : { 'Content-Type': 'application/json' };\n"
-            "    fetch(URL, { method, headers, body });\n\nOffending sites:\n  - "
-            + "\n  - ".join(missing)
+            "Unsafe-method fetch() sites without CSRF threading.\n\n"
+            "Safe shapes (one must apply):\n"
+            "  A. Inline literal: `headers: { ..., 'X-Memtomem-CSRF': csrf }`.\n"
+            "  B. Variable threading: `const csrf = await ensureCsrfToken();\n"
+            "     const headers = csrf ? { ..., 'X-Memtomem-CSRF': csrf } : {...};\n"
+            "     fetch(URL, { method, headers })`.\n"
+            "  C. Param threading: enclosing function takes `headers` as a parameter;\n"
+            "     add the site to `_CSRF_FETCH_EXEMPT` citing the caller.\n\n"
+            "Offending sites:\n  - " + "\n  - ".join(failures)
+        )
+
+
+def test_spa_csrf_fetch_exempt_entries_are_live() -> None:
+    """Each `_CSRF_FETCH_EXEMPT` entry references an actual unsafe fetch
+    site. Catches drift if a site is renamed/removed but the exemption
+    is left behind."""
+    live = {(p.name, line) for p, line, _, _ in _iter_unsafe_fetch_sites()}
+    stale = sorted(set(_CSRF_FETCH_EXEMPT) - live)
+    if stale:
+        pytest.fail(
+            "Stale entries in _CSRF_FETCH_EXEMPT (file no longer has an "
+            "unsafe fetch at that line):\n  - "
+            + "\n  - ".join(f"{name}:{lineno}" for name, lineno in stale)
         )

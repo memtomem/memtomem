@@ -308,10 +308,13 @@ def test_env_override_unknown_values_keep_enforce(
 
 
 def test_production_create_app_enforces_csrf_without_token(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog_csrf
 ) -> None:
     """``create_app`` wires the middleware in enforce mode by default;
-    an unsafe ``/api/...`` request without the token returns 403."""
+    an unsafe ``/api/...`` request without the token returns 403, and
+    the observe log proves the 403 came from the **token** check (not
+    a host/origin fallback that would also 403 the same request).
+    """
     from memtomem.web.app import create_app
 
     monkeypatch.delenv("MEMTOMEM_WEB__CSRF_ENFORCE", raising=False)
@@ -321,11 +324,23 @@ def test_production_create_app_enforces_csrf_without_token(
     )
 
     client = TestClient(app)
-    # Any unsafe /api path triggers the middleware before route lookup;
-    # a non-existent /api path is fine — the gate runs first.
-    res = client.post("/api/csrf-production-pin")
+    # Send loopback Host + Origin so the host/origin checks pass — this
+    # isolates the 403 to the token check. Otherwise TestClient's default
+    # ``Host: testserver`` would 403 the request via ``host_ok=False`` even
+    # if token validation were silently bypassed.
+    res = client.post(
+        "/api/csrf-production-pin",
+        headers={"Host": "127.0.0.1:8080", "Origin": "http://127.0.0.1:8080"},
+    )
     assert res.status_code == 403, (
         "Production-posture create_app should 403 unsafe /api requests "
         "without a CSRF token. The autouse conftest fixture must not be "
         "leaking into this test."
     )
+    events = _parse_observe(caplog_csrf.records)
+    assert len(events) == 1, f"expected one observe event, got {events}"
+    ev = events[0]
+    assert ev["token_ok"] == "False", "403 must be attributable to the token check"
+    assert ev["host_ok"] == "True", "loopback host must pass the host check"
+    assert ev["origin_ok"] == "True", "loopback origin must pass the origin check"
+    assert ev["would_block"] == "True"
