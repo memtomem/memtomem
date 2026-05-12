@@ -101,6 +101,87 @@ _HEALTHY_OVERVIEW = {
 }
 
 
+_OVERVIEW_WITH_RUNTIMES = {
+    **_HEALTHY_OVERVIEW,
+    # Mixed detection state: claude on, gemini off, codex on. The chip
+    # strip must render one chip per runtime with the right class.
+    "detected_runtimes": [
+        {"name": "claude", "available": True},
+        {"name": "codex", "available": True},
+        {"name": "gemini", "available": False},
+    ],
+}
+
+
+def test_detected_runtimes_chip_strip_renders_per_runtime(page, mm_web_url: str) -> None:
+    """ADR-0009 §1 / #830 — the dashboard renders a chip strip above the
+    4-tile grid. One chip per declared runtime; ``available=true`` chips
+    use ``ctx-runtime-badge--sync``, ``available=false`` chips use
+    ``ctx-runtime-badge--missing`` with an opacity fade. Negative-pin the
+    inverse class assignment so a class-swap regression surfaces."""
+    install_default_stubs(page)
+    page.route(
+        "**/api/context/overview",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_OVERVIEW_WITH_RUNTIMES),
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    strip = page.locator("#ctx-overview-content .ctx-detected-runtimes")
+    strip.wait_for(state="attached", timeout=3_000)
+    label = (strip.locator(".ctx-detected-runtimes-label").text_content() or "").strip()
+    assert label == "Detected runtimes", f"label mismatch: {label!r}"
+
+    chips = strip.locator(".ctx-runtime-badge")
+    assert chips.count() == 3, f"expected 3 chips, got {chips.count()}"
+
+    def _chip_info(name: str) -> tuple[str, str]:
+        chip = strip.locator(f".ctx-runtime-badge:has-text('{name}')")
+        return (
+            (chip.get_attribute("class") or ""),
+            (chip.get_attribute("data-available") or ""),
+        )
+
+    claude_cls, claude_avail = _chip_info("claude")
+    codex_cls, codex_avail = _chip_info("codex")
+    gemini_cls, gemini_avail = _chip_info("gemini")
+
+    assert "ctx-runtime-badge--sync" in claude_cls, claude_cls
+    assert claude_avail == "true", claude_avail
+    assert "ctx-runtime-badge--sync" in codex_cls, codex_cls
+    assert codex_avail == "true", codex_avail
+    assert "ctx-runtime-badge--missing" in gemini_cls, gemini_cls
+    assert gemini_avail == "false", gemini_avail
+
+    # Negative pin: an available chip must not carry the missing class
+    # (and vice versa) — catches a swap that would tint claude grey.
+    assert "ctx-runtime-badge--missing" not in claude_cls, claude_cls
+    assert "ctx-runtime-badge--sync" not in gemini_cls, gemini_cls
+
+
+def test_detected_runtimes_strip_absent_when_field_missing(page, mm_web_url: str) -> None:
+    """Backwards-compat pin: an older response shape with no
+    ``detected_runtimes`` field must not crash the render — the strip is
+    simply not emitted. Catches a regression where the chip block became
+    mandatory and forced ``undefined.length`` on legacy payloads."""
+    install_default_stubs(page)
+    page.route(
+        "**/api/context/overview",
+        lambda r: r.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_HEALTHY_OVERVIEW)
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    strip = page.locator("#ctx-overview-content .ctx-detected-runtimes")
+    assert strip.count() == 0, "chip strip must not render when field is missing"
+
+
 def test_zero_total_renders_empty_badge_not_green_synced(page, mm_web_url: str) -> None:
     """Bug-2 pin: ``total === 0`` on a count tile must render the ``Empty``
     badge (``settings.ctx.badge_empty``) with ``badge-gray``, never the

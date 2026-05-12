@@ -1492,3 +1492,127 @@ class TestCommandTargetScopePlumbing:
             json={"content": "# x\n", "mtime_ns": "0"},
         )
         assert r.status_code == 400
+
+
+class TestDetectedRuntimes:
+    """ADR-0009 §1 / #830 — chip strip on the dashboard header.
+
+    ``/api/context/overview`` now carries ``detected_runtimes`` — an
+    OR-aggregate per declared runtime root across four detection surfaces
+    (skills / sub-agents / commands / settings). The runtime universe is
+    the union of suffix-stripped keys from ``SKILL_DIRS`` / ``AGENT_DIRS``
+    / ``COMMAND_DIRS`` / ``SETTINGS_GENERATORS``.
+
+    Tests pin HOME *and* USERPROFILE to a clean temp dir so the runner's
+    own ``~/.claude/`` doesn't leak into the assertions — POSIX reads
+    HOME, Windows reads USERPROFILE for ``Path.home()`` /
+    ``Path.expanduser()`` (see ``feedback_windows_expanduser``).
+    """
+
+    @pytest.fixture
+    def clean_home(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        return home
+
+    @pytest.mark.anyio
+    async def test_field_present_and_universe_covered(self, client: AsyncClient, clean_home: Path):
+        """Universe pin: detected_runtimes lists every declared runtime
+        root from the four surfaces, sorted, with ``available`` flag."""
+        r = await client.get("/api/context/overview")
+        data = r.json()
+        assert "detected_runtimes" in data
+        names = [e["name"] for e in data["detected_runtimes"]]
+        assert names == sorted(names), f"must be sorted; got {names}"
+        # All known runtime roots must appear (claude/gemini/codex are
+        # declared across at least one of the four surfaces today).
+        assert {"claude", "gemini", "codex"} <= set(names), (
+            f"declared runtime universe regressed; got {names}"
+        )
+        # Every entry has the documented shape.
+        for entry in data["detected_runtimes"]:
+            assert set(entry.keys()) == {"name", "available"}, entry
+            assert isinstance(entry["available"], bool), entry
+
+    @pytest.mark.anyio
+    async def test_empty_project_all_unavailable(self, client: AsyncClient, clean_home: Path):
+        """Negative pin: a fresh project with a clean ``$HOME`` has no
+        runtimes detected. Catches a regression where availability
+        latches True without any on-disk evidence."""
+        r = await client.get("/api/context/overview")
+        for entry in r.json()["detected_runtimes"]:
+            assert entry["available"] is False, (
+                f"empty project must not flag {entry['name']} available; got {entry}"
+            )
+
+    @pytest.mark.anyio
+    async def test_skill_surface_alone_flips_available(
+        self, client: AsyncClient, tmp_path: Path, clean_home: Path
+    ):
+        """A single ``.claude/skills/<name>/SKILL.md`` is enough to flip
+        claude → available, even with no settings dir and no command /
+        sub-agent dirs. Pins the OR-of-surfaces semantics."""
+        skill = tmp_path / ".claude" / "skills" / "code-review"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("# x\n", encoding="utf-8")
+
+        r = await client.get("/api/context/overview")
+        flags = {e["name"]: e["available"] for e in r.json()["detected_runtimes"]}
+        assert flags["claude"] is True, flags
+        # Sibling runtimes stay False — no overlap with claude's skills dir.
+        assert flags["gemini"] is False, flags
+        assert flags["codex"] is False, flags
+
+    @pytest.mark.anyio
+    async def test_settings_is_available_alone_flips_claude(
+        self, client: AsyncClient, clean_home: Path
+    ):
+        """Per ADR-0009 §1, settings detection routes through the
+        generator's ``is_available()`` — not a directory probe. A bare
+        ``~/.claude/`` directory (no settings file) is enough for the
+        ``ClaudeSettingsGenerator`` to report available, which OR-folds
+        into ``claude: True``."""
+        (clean_home / ".claude").mkdir()
+
+        r = await client.get("/api/context/overview")
+        flags = {e["name"]: e["available"] for e in r.json()["detected_runtimes"]}
+        assert flags["claude"] is True, flags
+
+    @pytest.mark.anyio
+    async def test_empty_skill_root_does_not_flip(
+        self, client: AsyncClient, tmp_path: Path, clean_home: Path
+    ):
+        """Directory-probe surfaces require an actual artifact, not just
+        an empty parent dir. Use ``gemini`` — it has skill / agent /
+        command surfaces but no registered settings generator, so the
+        bare ``.gemini/skills/`` cannot mask the directory-probe gate
+        by routing through ``is_available()`` (which is what happens
+        with claude — its settings generator flips True on a bare
+        ``<project>/.claude/`` directory, by design)."""
+        (tmp_path / ".gemini" / "skills").mkdir(parents=True)
+        r = await client.get("/api/context/overview")
+        flags = {e["name"]: e["available"] for e in r.json()["detected_runtimes"]}
+        assert flags["gemini"] is False, flags
+
+    @pytest.mark.anyio
+    async def test_field_survives_detection_failure(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch, clean_home: Path
+    ):
+        """A detector raising must not collapse the rest of the overview
+        envelope. The endpoint returns ``detected_runtimes: []`` and the
+        four tile envelopes stay intact (errors there are surface-scoped,
+        not whole-response-scoped)."""
+
+        def _boom(*_a, **_kw):
+            raise PermissionError("denied")
+
+        monkeypatch.setattr("memtomem.context.detector.detect_skill_dirs", _boom)
+        r = await client.get("/api/context/overview")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["detected_runtimes"] == []
+        # Tile envelopes still computed.
+        assert "skills" in data and "commands" in data
+        assert "agents" in data and "settings" in data

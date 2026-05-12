@@ -49,6 +49,26 @@ function _ctxBadge(status) {
   return `<span class="ctx-runtime-badge ${cls}">${escapeHtml(_ctxStatusText(status))}</span>`;
 }
 
+// Dashboard chip strip (ADR-0009 §1 / #830). Distinct from
+// ``renderRuntimeBadges`` below — that one is per-(runtime, status) for the
+// leaf list pages; this one is per-runtime (aggregate availability) for the
+// dashboard header. The two share the ``.ctx-runtime-badge`` palette but
+// not the data shape: ``runtimes`` here is ``[{name, available}]`` from
+// ``/api/context/overview``'s ``detected_runtimes`` field (ADR-0009 §5).
+function renderDetectedRuntimes(runtimes) {
+  if (!runtimes || !runtimes.length) return '';
+  const chips = runtimes.map(r => {
+    const cls = r.available
+      ? 'ctx-runtime-badge--sync'
+      : 'ctx-runtime-badge--missing';
+    return `<span class="ctx-runtime-badge ${cls}" data-available="${r.available ? 'true' : 'false'}">${escapeHtml(r.name)}</span>`;
+  }).join('');
+  return `<div class="ctx-detected-runtimes" role="group" aria-label="${escapeHtml(t('settings.ctx.detected_runtimes_label'))}">
+    <span class="ctx-detected-runtimes-label">${escapeHtml(t('settings.ctx.detected_runtimes_label'))}</span>
+    <div class="ctx-runtime-badges">${chips}</div>
+  </div>`;
+}
+
 function renderRuntimeBadges(runtimes) {
   if (!runtimes || !runtimes.length) return '';
   return '<div class="ctx-runtime-badges">' +
@@ -174,6 +194,11 @@ function _renderCtxOverview(data) {
   ];
 
   let html = _ctxTierControls('overview');
+  // ADR-0009 §1 / #830 — chip strip above the 4-tile grid. ``data`` is the
+  // cached ``/api/context/overview`` payload (langchange re-render path
+  // reuses ``_ctxOverviewCache``), so the strip rebuilds from the same
+  // shape on every render — locale changes flow through ``t()`` naturally.
+  html += renderDetectedRuntimes(data.detected_runtimes);
   html += '<div class="ctx-overview-grid">';
   for (const typ of types) {
       if (typ.devOnly && STATE.uiMode !== 'dev') continue;

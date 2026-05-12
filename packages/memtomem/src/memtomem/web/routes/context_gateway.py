@@ -112,6 +112,47 @@ def _redact_message(message: str) -> str:
     return redacted
 
 
+def _detected_runtimes(project_root: Path, scope: str) -> list[dict]:
+    """OR-aggregate runtime availability across the four declared surfaces.
+
+    Per ADR-0009 §1 the dashboard chip strip emits one entry per declared
+    runtime root with an aggregate ``available`` flag that is ``True`` when
+    *any* surface (skills / sub-agents / commands / settings) resolves a
+    target on disk. The universe of declared runtimes is the union of
+    suffix-stripped keys across ``detector.SKILL_DIRS`` / ``AGENT_DIRS`` /
+    ``COMMAND_DIRS`` and ``SETTINGS_GENERATORS``. Skill / agent / command
+    availability is directory-probe based (the registry protocols expose
+    only ``target_dir()`` / ``target_file()``); settings availability uses
+    the generator's ``is_available()`` (the protocol exposes that one
+    method because user-scope ``~/.claude/`` cannot be discovered by a
+    project-root walk).
+    """
+    from memtomem.context import detector
+    from memtomem.context.settings import SETTINGS_GENERATORS
+
+    universe: set[str] = set()
+    for key in detector.SKILL_DIRS:
+        universe.add(key.removesuffix("_skills"))
+    for key in detector.AGENT_DIRS:
+        universe.add(key.removesuffix("_agents"))
+    for key in detector.COMMAND_DIRS:
+        universe.add(key.removesuffix("_commands"))
+    for name in SETTINGS_GENERATORS:
+        universe.add(name.removesuffix("_settings"))
+
+    detected: set[str] = set()
+    for d in detector.detect_skill_dirs(project_root):
+        detected.add(d.agent.removesuffix("_skills"))
+    for d in detector.detect_agent_dirs(project_root):
+        detected.add(d.agent.removesuffix("_agents"))
+    for d in detector.detect_command_dirs(project_root):
+        detected.add(d.agent.removesuffix("_commands"))
+    for d in detector.detect_settings_files(project_root, scope):
+        detected.add(d.agent.removesuffix("_settings"))
+
+    return [{"name": name, "available": name in detected} for name in sorted(universe)]
+
+
 def _error_payload(exc: BaseException, *, shape: str = "total") -> dict:
     """Build the per-surface error envelope.
 
@@ -232,4 +273,15 @@ async def context_overview(
         logger.exception("diff_settings failed")
         result["settings"] = _error_payload(exc, shape="status")
 
-    return {"target_scope": target_scope, **result}
+    # detected_runtimes is independent of ``target_scope`` (its surfaces are
+    # detected per ADR-0009 §1) but uses the resolved hooks scope for the
+    # settings probe so ``detect_settings_files`` walks the same tier that
+    # ``diff_settings`` did above. Failures here must not collapse the four
+    # tile envelopes — a permission glitch on one detector path would leave
+    # the chip strip empty, but the rest of the dashboard stays usable.
+    try:
+        runtimes = _detected_runtimes(project_root, scope)
+    except Exception:
+        logger.exception("detect_runtimes failed")
+        runtimes = []
+    return {"target_scope": target_scope, **result, "detected_runtimes": runtimes}

@@ -3219,6 +3219,24 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 }
 .ctx-runtime-badge--error { background: rgba(224, 90, 90, 0.15); color: var(--danger); }
 
+/* Dashboard detected-runtimes chip strip (ADR-0009 §1 / #830). Sits above
+   the 4-tile overview grid. Reuses the ``.ctx-runtime-badge`` palette
+   (sync for available, missing for declared-but-undetected). */
+.ctx-detected-runtimes {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 6px 0 10px;
+}
+.ctx-detected-runtimes-label {
+  font-size: 0.72rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.ctx-runtime-badge[data-available="false"] { opacity: 0.6; }
+
 /* Import-first state: when the cwd's canonical count is zero, demote the
    Sync button (no-op until canonicals exist) and promote Import to the
    primary affordance. The data attribute is wired by _ctxRefreshSectionState
