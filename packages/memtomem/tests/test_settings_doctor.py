@@ -396,8 +396,9 @@ class TestWebDuplicateTierWarnings:
     def app(self, project_root, fake_home, monkeypatch):
         from memtomem.config import Mem2MemConfig
 
-        # Active scope = project_local so user-tier hooks count as
-        # duplicates.
+        # Web settings routes are request-scoped. Keep the env override in
+        # place as a regression guard: the route must follow
+        # ?target_scope=..., not config.hooks.target_scope.
         monkeypatch.setenv("MEMTOMEM_HOOKS__TARGET_SCOPE", "project_local")
         application = create_app(lifespan=None, mode="dev")
         application.state.project_root = project_root
@@ -419,7 +420,7 @@ class TestWebDuplicateTierWarnings:
     async def test_get_includes_empty_warnings_when_clean(self, client, project_root):
         _write_canonical(project_root, _bundled_hook())
         # No other tiers populated → empty list.
-        response = await client.get("/api/settings-sync")
+        response = await client.get("/api/settings-sync?target_scope=project_local")
         assert response.status_code == 200
         data = response.json()
         assert data["duplicate_tier_warnings"] == []
@@ -427,7 +428,7 @@ class TestWebDuplicateTierWarnings:
     async def test_get_includes_warnings_when_duplicates(self, client, project_root, fake_home):
         _write_canonical(project_root, _bundled_hook())
         _write_settings(fake_home / ".claude" / "settings.json", _bundled_hook())
-        response = await client.get("/api/settings-sync")
+        response = await client.get("/api/settings-sync?target_scope=project_local")
         assert response.status_code == 200
         data = response.json()
         warnings = data["duplicate_tier_warnings"]
@@ -439,7 +440,7 @@ class TestWebDuplicateTierWarnings:
         _write_canonical(project_root, _bundled_hook())
         _write_settings(fake_home / ".claude" / "settings.json", _bundled_hook())
         response = await client.post(
-            "/api/settings-sync",
+            "/api/settings-sync?target_scope=project_local",
             json={"allow_host_writes": False},
         )
         assert response.status_code == 200

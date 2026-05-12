@@ -128,8 +128,9 @@ vocabulary remediates the silent-ignore-`?scope_id=` bug in
 Background; the actual route changes ship as their own follow-up
 issue (see §"Open questions").
 
-**2b. Settings routes** — stay config-driven for `target_scope` (sourced
-from `config.hooks.target_scope`; no per-request override, per §4e).
+**2b. Settings routes** — originally config-driven for `target_scope`;
+superseded by the parity change in §4e. Current Web settings routes
+accept per-request `?target_scope=` with default `project_shared`.
 Affects:
 
 - `GET /context/settings` (alias `/settings-sync`,
@@ -172,11 +173,11 @@ Stays cwd-only:
 
 ### 3. Settings vs artifact `target_scope` relationship
 
-A single tier value sourced from `config.hooks.target_scope`. This ADR
-does **not** introduce a separate artifact-side `config.context.target_scope`
-field. Splitting today would risk divergence with no driving user need;
-the artifact-tier filter on list routes (per §2a) is per-request and
-does not need a config field of its own.
+The artifact-tier filter on Web routes is per-request and does not need
+a config field of its own. `config.hooks.target_scope` remains the CLI /
+config default for settings hooks, while Web settings routes now accept
+the same `?target_scope=` query parameter as the other Context Gateway
+surfaces.
 
 ### 4. Product-semantics decisions
 
@@ -263,16 +264,18 @@ revisit the locked routes.
 
 Affects: routes listed in §2d.
 
-#### 4e. Settings per-request `target_scope` override — Option A (no override)
+#### 4e. Settings per-request `target_scope` override — superseded by parity change
 
-Settings routes derive `target_scope` from `config.hooks.target_scope`
-only. They do not accept a `?target_scope=` query parameter.
+Original decision: settings routes derived `target_scope` from
+`config.hooks.target_scope` only and did not accept a `?target_scope=`
+query parameter.
 
-Rationale: settings writes touch user / project settings files that
-may sit outside the visible artifact-tier selection; mixing per-request
-and config sources would make it hard to predict which file a settings
-write lands on. Config-only keeps the existing live-config dependency
-intact.
+Superseding implementation note: the Web Context Gateway now treats
+settings like skills / commands / agents for request routing. Settings
+GET / sync / resolve routes accept `?target_scope=` with default
+`project_shared`, and the Hooks panel sends the currently selected tier.
+This keeps Overview, Sync All, and the dedicated Hooks panel pointed at
+the same tier.
 
 Affects: settings routes per §2b.
 
@@ -399,8 +402,8 @@ at ADR-draft time; grep by symbol if they drift.
   `resolve_scope_root` (project-root resolver).
 - `packages/memtomem/src/memtomem/config.py:745` — `TargetScope`
   literal.
-- `packages/memtomem/src/memtomem/web/deps.py:57` —
-  `get_hooks_target_scope` (settings-tier dependency).
+- `packages/memtomem/src/memtomem/web/routes/settings_sync.py` —
+  settings GET / sync / resolve `target_scope` query handling.
 - `packages/memtomem/src/memtomem/web/routes/context_skills.py:61` /
   `:112` / `:283` — skills list / detail / diff routes.
 - `packages/memtomem/src/memtomem/web/routes/context_commands.py:71` /

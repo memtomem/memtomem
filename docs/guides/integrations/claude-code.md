@@ -168,8 +168,11 @@ Add the following to `~/.claude/settings.json`:
 > `<project>/.memtomem/settings.json` regardless of tier. The three
 > values: `user` (default) → `~/.claude/settings.json`; `project_shared`
 > → `<project>/.claude/settings.json` (committed); `project_local` →
-> `<project>/.claude/settings.local.json` (gitignored). Per-invocation
-> override: `mm context sync --include=settings --scope=project_local`.
+> `<project>/.claude/settings.local.json` (gitignored). CLI
+> per-invocation override: `mm context sync --include=settings
+> --scope=project_local`. In the Web Context Gateway, the Hooks panel
+> follows the selected tier (`target_scope`) just like Skills and
+> Subagents.
 
 ```json
 {

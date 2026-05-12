@@ -624,40 +624,29 @@ class TestSettingsSync:
         data = resp.json()
         assert data["status"] == "no_source"
         # Issue #962: response must surface ``target_scope`` so the Web
-        # UI can render a scope-accurate target label. Defaults to "user"
-        # per ADR-0010 §2.
-        assert data["target_scope"] == "user"
+        # UI can render a scope-accurate target label. Web routes default
+        # to the same project_shared tier as the other Context Gateway
+        # surfaces.
+        assert data["target_scope"] == "project_shared"
 
     async def test_target_scope_surfaces_project_shared(self, app, client: AsyncClient, tmp_path):
         """Issue #962: when the active scope is ``project_shared``, the
         GET response surfaces that value so the Web UI does not lie
         with a hardcoded ``User-scope target:`` label.
         """
-        from memtomem.web.deps import get_hooks_target_scope
-
         app.state.project_root = tmp_path
-        app.dependency_overrides[get_hooks_target_scope] = lambda: "project_shared"
-        try:
-            resp = await client.get("/api/settings-sync")
-            assert resp.status_code == 200
-            data = resp.json()
-            assert data["target_scope"] == "project_shared"
-        finally:
-            app.dependency_overrides.pop(get_hooks_target_scope, None)
+        resp = await client.get("/api/settings-sync?target_scope=project_shared")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["target_scope"] == "project_shared"
 
     async def test_target_scope_surfaces_project_local(self, app, client: AsyncClient, tmp_path):
         """Issue #962 sibling: ``project_local`` scope round-trips too."""
-        from memtomem.web.deps import get_hooks_target_scope
-
         app.state.project_root = tmp_path
-        app.dependency_overrides[get_hooks_target_scope] = lambda: "project_local"
-        try:
-            resp = await client.get("/api/settings-sync")
-            assert resp.status_code == 200
-            data = resp.json()
-            assert data["target_scope"] == "project_local"
-        finally:
-            app.dependency_overrides.pop(get_hooks_target_scope, None)
+        resp = await client.get("/api/settings-sync?target_scope=project_local")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["target_scope"] == "project_local"
 
     async def test_in_sync(self, app, client: AsyncClient, tmp_path):
         """When hooks are identical in both files, status is in_sync."""
@@ -675,7 +664,7 @@ class TestSettingsSync:
             target.write_text(json.dumps(hooks), encoding="utf-8")
             app.state.project_root = tmp_path
 
-            resp = await client.get("/api/settings-sync")
+            resp = await client.get("/api/settings-sync?target_scope=user")
             data = resp.json()
             assert data["status"] == "in_sync"
             assert len(data["hooks"]["synced"]) == 1
@@ -706,7 +695,7 @@ class TestSettingsSync:
             )
             app.state.project_root = tmp_path
 
-            resp = await client.get("/api/settings-sync")
+            resp = await client.get("/api/settings-sync?target_scope=user")
             data = resp.json()
             assert data["status"] == "conflicts"
             assert len(data["hooks"]["conflicts"]) == 1
@@ -735,7 +724,7 @@ class TestSettingsSync:
             target.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
             app.state.project_root = tmp_path
 
-            resp = await client.get("/api/settings-sync")
+            resp = await client.get("/api/settings-sync?target_scope=user")
             data = resp.json()
             assert data["status"] == "out_of_sync"
             assert len(data["hooks"]["pending"]) == 1
@@ -776,7 +765,7 @@ class TestSettingsSync:
             )
             app.state.project_root = tmp_path
 
-            resp = await client.get("/api/settings-sync")
+            resp = await client.get("/api/settings-sync?target_scope=user")
             data = resp.json()
 
             assert data["status"] == "in_sync"  # was "conflicts" before the fix
@@ -809,7 +798,7 @@ class TestSettingsSync:
             app.state.project_root = tmp_path
 
             resp = await client.post(
-                "/api/settings-sync/resolve",
+                "/api/settings-sync/resolve?target_scope=user",
                 json={"event": "PostToolUse", "matcher": "Write", "action": "use_proposed"},
             )
             data = resp.json()
@@ -828,7 +817,7 @@ class TestSettingsSync:
         # No .memtomem/settings.json created in tmp_path
         app.state.project_root = tmp_path
         resp = await client.post(
-            "/api/settings-sync/resolve",
+            "/api/settings-sync/resolve?target_scope=user",
             json={"event": "PostToolUse", "matcher": "Write", "action": "use_proposed"},
         )
         assert resp.status_code == 404
@@ -838,7 +827,7 @@ class TestSettingsSync:
         """POST /resolve with invalid action returns HTTP 400."""
         app.state.project_root = tmp_path
         resp = await client.post(
-            "/api/settings-sync/resolve",
+            "/api/settings-sync/resolve?target_scope=user",
             json={"event": "PostToolUse", "matcher": "Write", "action": "bad_action"},
         )
         assert resp.status_code == 400
@@ -858,7 +847,7 @@ class TestSettingsSync:
             app.state.project_root = tmp_path
 
             resp = await client.post(
-                "/api/settings-sync/resolve",
+                "/api/settings-sync/resolve?target_scope=user",
                 json={"event": "PostToolUse", "matcher": "Write", "action": "use_proposed"},
             )
             assert resp.status_code == 404
@@ -913,7 +902,7 @@ class TestSettingsSync:
         app.state.project_root = project
 
         resp = await client.post(
-            "/api/settings-sync",
+            "/api/settings-sync?target_scope=user",
             headers={"Content-Type": "application/json"},
         )
         assert resp.status_code == 200
@@ -942,7 +931,7 @@ class TestSettingsSync:
         app.state.project_root = project
 
         resp = await client.post(
-            "/api/settings-sync",
+            "/api/settings-sync?target_scope=user",
             json={"allow_host_writes": True},
         )
         assert resp.status_code == 200
@@ -971,7 +960,7 @@ class TestSettingsSync:
             app.state.project_root = tmp_path
 
             resp = await client.post(
-                "/api/context/settings/resolve",
+                "/api/context/settings/resolve?target_scope=user",
                 json={"event": "PostToolUse", "matcher": "Edit", "action": "use_proposed"},
             )
             data = resp.json()

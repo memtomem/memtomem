@@ -144,6 +144,8 @@ function _ctxTierControls(type) {
 
 function _ctxWireTierControls() {
   document.querySelectorAll('.ctx-tier-filter button').forEach(btn => {
+    if (btn.dataset.tierWired === 'true') return;
+    btn.dataset.tierWired = 'true';
     btn.addEventListener('click', () => {
       const next = btn.dataset.scope;
       if (!next || next === _ctxTargetScope) return;
@@ -156,6 +158,8 @@ function _ctxWireTierControls() {
       const type = btn.closest('.ctx-tier-filter')?.dataset.type || '';
       if (type === 'overview') {
         loadCtxOverview();
+      } else if (type === 'hooks-sync') {
+        loadHooksSync();
       } else if (type) {
         // Tier swap is a fresh navigation intent; the prior deep-link's
         // filter/artifact target lived on the old tier and would render
@@ -989,7 +993,10 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     //   aborted            → mtime_conflict warning    (#799)
     //   needs_confirmation → info partial + Open Settings action (#774)
     //   all ok / skipped   → sync_success
-    const settingsResp = await fetch('/api/context/settings/sync', { method: 'POST', headers });
+    const settingsResp = await fetch(
+      _ctxWithTargetScope('/api/context/settings/sync'),
+      { method: 'POST', headers },
+    );
     if (!settingsResp.ok) {
       throw new Error(await _ctxErrorMessageFromResponse(settingsResp, 'Settings sync failed'));
     }

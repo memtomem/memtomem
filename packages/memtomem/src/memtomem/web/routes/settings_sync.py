@@ -6,9 +6,10 @@ import asyncio
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from memtomem.config import TargetScope
 from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
     resolve_scope_path,
@@ -20,7 +21,7 @@ from memtomem.context.settings_doctor import (
     DuplicateTier,
     detect_duplicate_tiers,
 )
-from memtomem.web.deps import get_hooks_target_scope, get_project_root
+from memtomem.web.deps import get_project_root
 from memtomem.web.routes._locks import _gateway_lock
 
 logger = logging.getLogger(__name__)
@@ -181,19 +182,22 @@ def _compare_hooks(
 @router.get("/context/settings")
 async def get_settings_sync(
     project_root: Path = Depends(get_project_root),
-    scope: str = Depends(get_hooks_target_scope),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description="Claude Code settings tier to compare against.",
+    ),
 ) -> dict:
     """Return structured settings sync status with conflict details."""
     canonical_path = project_root / CANONICAL_SETTINGS_FILE
-    target_path = _claude_target(project_root, scope)
+    target_path = _claude_target(project_root, target_scope)
     payload = _compare_hooks(canonical_path, target_path)
     # Surface the active scope so the Web UI can render a scope-accurate
     # target label (issue #962). Without this the panel falls back to a
     # hardcoded "User-scope target:" that lies when the scope is
     # project_shared or project_local.
-    payload["target_scope"] = scope
+    payload["target_scope"] = target_scope
     payload["duplicate_tier_warnings"] = _serialize_duplicate_tiers(
-        detect_duplicate_tiers(project_root, active_scope=scope)
+        detect_duplicate_tiers(project_root, active_scope=target_scope)
     )
     return payload
 
@@ -216,7 +220,10 @@ class ApplySettingsSyncRequest(BaseModel):
 async def apply_settings_sync(
     body: ApplySettingsSyncRequest | None = None,
     project_root: Path = Depends(get_project_root),
-    scope: str = Depends(get_hooks_target_scope),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description="Claude Code settings tier to write.",
+    ),
 ) -> dict:
     """Run the full settings merge (generate_all_settings).
 
@@ -229,13 +236,13 @@ async def apply_settings_sync(
     # Detect duplicate-tier hooks BEFORE the merge so the warning
     # reflects pre-write state (ADR-0010 §4: the warning fires in the
     # user's actual workflow, not behind a separate command).
-    duplicates = detect_duplicate_tiers(project_root, active_scope=scope)
+    duplicates = detect_duplicate_tiers(project_root, active_scope=target_scope)
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
                 results = generate_all_settings(
                     project_root,
-                    scope=scope,
+                    scope=target_scope,
                     allow_host_writes=allow_host_writes,
                 )
     except TimeoutError:
@@ -268,7 +275,10 @@ class ResolveRequest(BaseModel):
 async def resolve_conflict(
     body: ResolveRequest,
     project_root: Path = Depends(get_project_root),
-    scope: str = Depends(get_hooks_target_scope),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description="Claude Code settings tier to update.",
+    ),
 ) -> dict:
     """Resolve a single hook conflict by replacing the target's rule."""
     if body.action != "use_proposed":
@@ -277,7 +287,7 @@ async def resolve_conflict(
     label = _rule_label(body.event, body.matcher)
 
     canonical_path = project_root / CANONICAL_SETTINGS_FILE
-    target_path = _claude_target(project_root, scope)
+    target_path = _claude_target(project_root, target_scope)
 
     try:
         async with asyncio.timeout(60):
