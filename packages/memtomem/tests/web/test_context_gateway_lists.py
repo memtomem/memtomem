@@ -995,3 +995,181 @@ def test_q_pr4_langchange_off_section_does_not_call_loadCtxList(page, mm_web_url
 # the integration level for the overview path. Mutating any of the four
 # guards out of the source makes the static test fail; the runtime
 # behavior is identical to the (already-tested) overview equivalent.
+
+
+# -- Deep-link carrier (ADR-0009 §3, issue #834) -----------------------------
+#
+# Three skills payload: one out-of-sync, one in-sync, one runtime-only. Used
+# by both the artifact-mode (negative pin) and filter-mode specs so the same
+# stub serves both — the URL params drive divergent leaf renders without a
+# different backend response.
+_CWD_SKILLS_THREE = {
+    "skills": [
+        {
+            "name": "alpha-skill",
+            "canonical_path": "/srv/cwd/.memtomem/skills/alpha-skill.md",
+            "runtimes": [{"runtime": "claude_skills", "status": "out of sync"}],
+        },
+        {
+            "name": "beta-skill",
+            "canonical_path": "/srv/cwd/.memtomem/skills/beta-skill.md",
+            "runtimes": [{"runtime": "claude_skills", "status": "in sync"}],
+        },
+        {
+            "name": "gamma-skill",
+            "canonical_path": "",
+            "runtimes": [
+                {
+                    "runtime": "claude_skills",
+                    "status": "missing canonical",
+                    "runtime_path": "/srv/cwd/.claude/skills/gamma-skill.md",
+                }
+            ],
+        },
+    ],
+    "scanned_dirs": ["/srv/cwd/.claude/skills/"],
+}
+
+
+def _open_skills_with_query(page, mm_web_url: str, query: str) -> None:
+    """Navigate to the SPA with a ``?section=ctx-skills&...`` query and
+    wait for the cwd-scope cards (or the deep-link banner if no card
+    matches) to settle.
+
+    The deep-link applier runs *after* ``_loadScopeGroupItems`` populates
+    the cwd container, so we wait on the banner element rather than the
+    cards — both modes paint the banner, and a missing-link case has no
+    cards at all to wait on.
+    """
+    page.goto(f"{mm_web_url}/{query}")
+    page.evaluate("() => activateTab('settings')")
+    page.evaluate("() => switchSettingsSection('ctx-skills')")
+    page.wait_for_function(
+        "() => document.querySelector(  '#ctx-skills-list .ctx-deep-link-banner') !== null",
+        timeout=5_000,
+    )
+
+
+def test_deep_link_artifact_mode_renders_only_named_card(page, mm_web_url: str) -> None:
+    """ADR-0009 §3 negative pin: when the deep-link carrier requests a
+    single artifact, the leaf does NOT render the full list.
+
+    ``feedback_pin_invert_symmetric_assertion.md`` calls for both halves:
+    positive on the named card existing, negative on the legacy "all
+    cards visible" shape — a regression where the filter is silently
+    ignored and the full list re-appears would fail the second assert.
+    The cards aren't merely hidden either: the applier removes them
+    from the DOM so the count assertion is unambiguous (a CSS-driven
+    ``display:none`` could pass a "1 visible" check while still leaking
+    the rest into the live DOM and the tab order).
+    """
+    install_default_stubs(page)
+    _stub_projects(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
+    _stub_skills(page, _CWD_SKILLS_THREE)
+    _open_skills_with_query(page, mm_web_url, "?section=ctx-skills&artifact=beta-skill")
+
+    cwd_cards = page.locator("#ctx-skills-list details[data-scope-id='cwd-scope'] .ctx-card")
+    # Positive: the named card is present.
+    assert cwd_cards.count() == 1, (
+        f"artifact-mode deep-link must render only 1 card, got {cwd_cards.count()}"
+    )
+    name = (cwd_cards.first.locator(".ctx-card-name").text_content() or "").strip()
+    assert "beta-skill" in name, f"only-rendered card must be the named artifact, got {name!r}"
+    # Negative: the unrelated cards are not in the DOM.
+    other_names = page.locator(
+        "#ctx-skills-list details[data-scope-id='cwd-scope'] "
+        ".ctx-card[data-name='alpha-skill'], "
+        "#ctx-skills-list details[data-scope-id='cwd-scope'] "
+        ".ctx-card[data-name='gamma-skill']"
+    )
+    assert other_names.count() == 0, (
+        "deep-link must remove non-matching cards (negative pin), "
+        f"saw {other_names.count()} unrelated card(s) still in DOM"
+    )
+    # Banner is present and offers a reset.
+    banner = page.locator("#ctx-skills-list .ctx-deep-link-banner")
+    assert banner.count() == 1
+    reset = banner.locator(".ctx-deep-link-banner-reset")
+    assert reset.count() == 1
+
+
+def test_deep_link_filter_mode_hides_non_matching_cards(page, mm_web_url: str) -> None:
+    """``?filter=out_of_sync`` hides cards whose ``data-statuses`` doesn't
+    include the bucket; matching cards stay visible.
+
+    Filter mode uses ``hidden`` (not removal) so the banner reset can flip
+    the cards back without re-fetching. Asserting on
+    ``.is_visible()`` per Playwright covers the ``hidden`` attribute.
+    """
+    install_default_stubs(page)
+    _stub_projects(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
+    _stub_skills(page, _CWD_SKILLS_THREE)
+    _open_skills_with_query(page, mm_web_url, "?section=ctx-skills&filter=out_of_sync")
+
+    alpha = page.locator(
+        "#ctx-skills-list details[data-scope-id='cwd-scope'] .ctx-card[data-name='alpha-skill']"
+    )
+    beta = page.locator(
+        "#ctx-skills-list details[data-scope-id='cwd-scope'] .ctx-card[data-name='beta-skill']"
+    )
+    gamma = page.locator(
+        "#ctx-skills-list details[data-scope-id='cwd-scope'] .ctx-card[data-name='gamma-skill']"
+    )
+
+    # ``alpha-skill`` is the only out-of-sync entry.
+    assert alpha.is_visible(), "alpha-skill (out_of_sync) must remain visible"
+    assert not beta.is_visible(), "beta-skill (in_sync) must be hidden by the filter"
+    assert not gamma.is_visible(), (
+        "gamma-skill (missing_canonical) must be hidden by the out_of_sync filter"
+    )
+
+
+def test_deep_link_unknown_filter_is_treated_as_no_filter(page, mm_web_url: str) -> None:
+    """Unknown ``?filter=`` values fall through to no-filter — keeps the
+    URL parser permissive against accidental typos in shared links and
+    forward-compatible with future filter buckets that haven't shipped
+    yet. The leaf renders the full list and no banner appears.
+    """
+    install_default_stubs(page)
+    _stub_projects(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
+    _stub_skills(page, _CWD_SKILLS_THREE)
+    page.goto(f"{mm_web_url}/?section=ctx-skills&filter=bogus_value")
+    page.evaluate("() => activateTab('settings')")
+    page.evaluate("() => switchSettingsSection('ctx-skills')")
+    # Wait on the cards rather than the banner (the bogus filter is
+    # rejected so no banner is rendered).
+    page.wait_for_function(
+        "() => document.querySelectorAll("
+        '  \'#ctx-skills-list details[data-scope-id="cwd-scope"] '
+        ".ctx-card').length === 3",
+        timeout=5_000,
+    )
+    banner = page.locator("#ctx-skills-list .ctx-deep-link-banner")
+    assert banner.count() == 0, "unknown filter must not render a deep-link banner — saw one anyway"
+
+
+def test_deep_link_banner_reset_restores_full_list(page, mm_web_url: str) -> None:
+    """Clicking ``Show all`` clears the URL params and reloads the list
+    unfiltered. Pins the round-trip (clear → reload → all 3 cards back).
+    """
+    install_default_stubs(page)
+    _stub_projects(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
+    _stub_skills(page, _CWD_SKILLS_THREE)
+    _open_skills_with_query(page, mm_web_url, "?section=ctx-skills&artifact=beta-skill")
+
+    page.locator("#ctx-skills-list .ctx-deep-link-banner .ctx-deep-link-banner-reset").click()
+
+    # After reset, all three cards render again and the banner is gone.
+    page.wait_for_function(
+        "() => document.querySelectorAll("
+        '  \'#ctx-skills-list details[data-scope-id="cwd-scope"] '
+        ".ctx-card').length === 3",
+        timeout=5_000,
+    )
+    assert page.locator("#ctx-skills-list .ctx-deep-link-banner").count() == 0, (
+        "deep-link banner must be removed after reset"
+    )
+    # And the URL params are stripped.
+    href = page.evaluate("() => window.location.href")
+    assert "artifact=" not in href, f"reset must strip artifact param: {href}"
+    assert "filter=" not in href, f"reset must strip filter param: {href}"

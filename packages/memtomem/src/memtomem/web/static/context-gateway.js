@@ -157,6 +157,12 @@ function _ctxWireTierControls() {
       if (type === 'overview') {
         loadCtxOverview();
       } else if (type) {
+        // Tier swap is a fresh navigation intent; the prior deep-link's
+        // filter/artifact target lived on the old tier and would render
+        // an empty list (artifact missing) or a confusing partial filter
+        // on the new one. Drop it so the user sees the new tier's full
+        // list, not a silently-filtered subset.
+        _ctxClearDeepLink();
         loadCtxList(type);
       }
     });
@@ -269,6 +275,115 @@ document.addEventListener('click', (e) => {
     : 'settings.ctx.write_blocked_user_tooltip';
   showToast(t(key), 'info');
 }, true);
+
+// -- Deep-link carrier (ADR-0009 §3) ----------------------------------------
+//
+// Dashboard issue cards push ``?section=<type>&filter=<status>&artifact=<name>``
+// onto the URL when the user clicks them, then call ``switchSettingsSection``
+// to navigate to the leaf. ``loadCtxList`` reads the carrier on mount and
+// applies the filter to the cwd-scope items, hiding non-matching cards
+// (filter mode) or rendering only the named artifact (artifact mode), then
+// scrolls to and pulses the first match.
+//
+// Why query string over app-state object or hash anchor: bookmarkable + back-
+// button-friendly + shareable across users; no coupling between markup IDs
+// and URL fragments. Decided in ADR-0009 §3.
+//
+// Filter values mirror the dashboard's ``count`` field names exactly
+// (``out_of_sync`` / ``missing_target`` / ``missing_canonical`` /
+// ``parse_error``). ``local_draft`` and ``error`` are tile-level rollups
+// without a per-artifact analogue and are not exposed as filter values —
+// the URL parser silently treats unknown filter values as no-filter.
+const _CTX_DEEP_LINK_FILTERS = new Set([
+  'out_of_sync',
+  'missing_target',
+  'missing_canonical',
+  'parse_error',
+]);
+
+// ``card.dataset.statuses`` is a space-separated list of these tokens; the
+// per-runtime wire status (``"out of sync"``) maps to the filter token
+// (``"out_of_sync"``) by replacing spaces with underscores. Centralized
+// because both the renderer (writes the dataset) and the filter applier
+// (reads it) need the same mapping; drift would silently break filtering.
+function _ctxStatusBucket(runtimeStatus) {
+  if (!runtimeStatus) return '';
+  return String(runtimeStatus).replace(/ /g, '_');
+}
+
+// Walk a section ID (``ctx-skills``) back to the artifact type
+// (``skills``). Used by the deep-link reader on mount to decide whether
+// the URL's ``section`` matches the type currently being rendered.
+function _ctxSectionToType(section) {
+  if (!section || !section.startsWith('ctx-')) return '';
+  return section.slice(4);
+}
+
+function _ctxParseDeepLink() {
+  // ``URLSearchParams`` rather than a hand-rolled split so multi-encoded
+  // artifact names ("foo bar.md") round-trip safely. Returns null when no
+  // deep-link is present so callers can early-exit without a truthiness
+  // dance over each individual field.
+  let params;
+  try {
+    params = new URLSearchParams(window.location.search);
+  } catch {
+    return null;
+  }
+  const section = params.get('section') || '';
+  const filter = params.get('filter') || '';
+  const artifact = params.get('artifact') || '';
+  if (!section && !filter && !artifact) return null;
+  return {
+    section,
+    filter: _CTX_DEEP_LINK_FILTERS.has(filter) ? filter : '',
+    artifact,
+  };
+}
+
+function _ctxBuildDeepLinkUrl({ section, filter, artifact }) {
+  // Build the URL by mutating the *current* URL's search params rather
+  // than constructing a fresh string — preserves any unrelated query
+  // params the SPA might be using (or future feature might add) and
+  // keeps the path/hash intact.
+  const url = new URL(window.location.href);
+  url.searchParams.delete('section');
+  url.searchParams.delete('filter');
+  url.searchParams.delete('artifact');
+  if (section) url.searchParams.set('section', section);
+  if (filter) url.searchParams.set('filter', filter);
+  if (artifact) url.searchParams.set('artifact', artifact);
+  return url.pathname + (url.search || '') + (url.hash || '');
+}
+
+function _ctxSetDeepLink(state) {
+  // ``replaceState`` rather than ``pushState`` so back-button navigates
+  // out of the SPA (or to wherever the user came from) instead of
+  // walking through a stack of intra-dashboard tile clicks. The URL is
+  // a carrier for the leaf's filter state, not a navigation event.
+  try {
+    const next = _ctxBuildDeepLinkUrl(state);
+    window.history.replaceState(window.history.state, '', next);
+  } catch {
+    /* opaque URL / sandboxed iframe; the in-DOM filter still applies */
+  }
+}
+
+function _ctxClearDeepLink() {
+  _ctxSetDeepLink({ section: '', filter: '', artifact: '' });
+}
+
+// Map the dashboard tile's dominant issue (the same ladder the badge
+// text uses) to a filter token. ``null`` for clean / empty / error tiles
+// — the click navigates to the section but does not filter the leaf.
+function _ctxTileDominantFilter(d) {
+  if (!d || d.error) return null;
+  if ((d.parse_error || 0) > 0) return 'parse_error';
+  if ((d.missing_target || 0) > 0) return 'missing_target';
+  if ((d.missing_canonical || 0) > 0) return 'missing_canonical';
+  if ((d.out_of_sync || 0) > 0) return 'out_of_sync';
+  return null;
+}
 
 function _renderCtxOverview(data) {
   const el = qs('ctx-overview-content');
@@ -442,7 +557,14 @@ function _renderCtxOverview(data) {
           + '</div>';
       }
 
-      html += `<div class="ctx-overview-stat" data-section="${typ.section}">
+      // ``data-tile-key`` carries the overview-payload key (``skills`` /
+      // ``commands`` / ``agents`` / ``settings``) so the click handler can
+      // re-derive the dominant filter from the raw counts without re-
+      // running the badge-text ladder. Settings is intentionally tagged
+      // too — the tile routes to ``hooks-sync`` (not a context list), so
+      // the filter is a no-op there, but keeping the attribute uniform
+      // avoids a dataset-shape branch in the click loop.
+      html += `<div class="ctx-overview-stat" data-section="${typ.section}" data-tile-key="${typ.key}">
         <div class="ctx-overview-count">${total}</div>
         <div class="ctx-overview-label">${escapeHtml(typ.label)}</div>
         <div class="ctx-overview-badge"><span class="badge ${badgeCls}">${escapeHtml(badgeText)}</span></div>
@@ -509,9 +631,31 @@ function _renderCtxOverview(data) {
     }
   }
 
-  // Click to navigate
+  // Click to navigate. When the tile carries an actionable issue,
+  // encode the dominant status into the URL so the leaf can filter and
+  // highlight on mount (ADR-0009 §3 / issue #834). Tiles without an
+  // issue (empty / synced / hard error) navigate without a filter,
+  // *and* explicitly clear any prior deep-link so a stale ``?filter=``
+  // from a previous click can't haunt the freshly-loaded leaf.
+  //
+  // The tile only knows the dominant *status* (the count rollup); it
+  // does not know any specific artifact name, so ``artifact`` is left
+  // empty. The artifact slot exists for shareable URLs (a teammate
+  // pasting "open this URL to see the artifact I'm asking about") and
+  // for future per-artifact issue panels.
   el.querySelectorAll('.ctx-overview-stat').forEach(card => {
-    card.addEventListener('click', () => switchSettingsSection(card.dataset.section));
+    const tileKey = card.dataset.tileKey;
+    const tileData = tileKey ? (data[tileKey] || {}) : null;
+    const filter = tileData ? _ctxTileDominantFilter(tileData) : null;
+    const section = card.dataset.section;
+    card.addEventListener('click', () => {
+      if (filter) {
+        _ctxSetDeepLink({ section, filter, artifact: '' });
+      } else {
+        _ctxClearDeepLink();
+      }
+      switchSettingsSection(section);
+    });
   });
 
   // ADR-0009 §2: pointer-line click handlers. ``stopPropagation`` is
@@ -974,8 +1118,26 @@ function _ctxRenderItemsHtml(items, type, projectRoot, scannedDirs, { clickable 
     // because the list response carries the per-runtime statuses;
     // ``loadCtxDetail`` would otherwise need a second fetch.
     const outOfSync = (item.runtimes || []).some(r => r.status === 'out of sync');
+    // ``data-statuses`` is a deduped, space-separated bucket list used
+    // by the deep-link filter applier (ADR-0009 §3) to decide whether a
+    // card matches ``?filter=<status>``. Tokens mirror the dashboard's
+    // count-field names (``out_of_sync`` / ``missing_target`` /
+    // ``missing_canonical`` / ``parse_error`` / ``in_sync``); the
+    // mapping lives in ``_ctxStatusBucket`` so renderer and filter
+    // applier can't drift. Runtime-only items also include
+    // ``missing_canonical`` since their ``canonical_path`` is empty —
+    // the per-runtime status string already says so, but pinning it
+    // explicitly makes the no-runtime edge case (some future server
+    // payload with an empty ``runtimes`` list) still filterable.
+    const buckets = new Set();
+    for (const r of (item.runtimes || [])) {
+      const b = _ctxStatusBucket(r.status);
+      if (b) buckets.add(b);
+    }
+    if (!item.canonical_path) buckets.add('missing_canonical');
+    const statusesAttr = ` data-statuses="${escapeHtml(Array.from(buckets).join(' '))}"`;
     const tierBadge = _tierBadgeHtml(item.target_scope, { isContextRow: true });
-    html += `<div class="${cardClass}" data-name="${escapeHtml(item.name)}"${canonAttr} data-out-of-sync="${outOfSync}">
+    html += `<div class="${cardClass}" data-name="${escapeHtml(item.name)}"${canonAttr} data-out-of-sync="${outOfSync}"${statusesAttr}>
       <div class="ctx-card-header">
         <div>
           <div class="ctx-card-name">${escapeHtml(item.name)}${tierBadge}</div>
@@ -1049,6 +1211,13 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
           });
         });
       }
+
+      // ADR-0009 §3 deep-link applier. Runs only on the cwd group — the
+      // dashboard's tile counts roll up the cwd canonical/runtime split,
+      // so a deep-link landing on a non-cwd scope's container would point
+      // at a list the user did not click into. Non-cwd groups stay
+      // unfiltered and lazy-loaded as today.
+      _ctxApplyDeepLinkToContainer(type, container);
     }
   } catch (err) {
     // Late-failing fetch from a previous invocation must not paint
@@ -1099,6 +1268,128 @@ function _ctxRefreshSectionState(type, cwdItems, scannedDirs) {
     const writeBlocked = listEl.querySelector('.ctx-write-blocked-banner');
     const anchor = writeBlocked ? writeBlocked.nextSibling : listEl.firstChild;
     listEl.insertBefore(banner, anchor);
+  }
+}
+
+// ADR-0009 §3 — apply a ``?section=&filter=&artifact=`` deep-link to the
+// freshly-rendered cwd container.
+//
+// * ``?artifact=<name>``: render-only mode. Cards whose ``data-name``
+//   doesn't match are *removed from the DOM* (not just visually hidden)
+//   so the negative pin test (the leaf does NOT render its full list)
+//   is enforced by ``querySelectorAll('.ctx-card').length === 1``, not
+//   by a CSS-visibility heuristic. Removal also keeps tab-order /
+//   keyboard navigation consistent with the visible state.
+// * ``?filter=<status>``: cards whose ``data-statuses`` doesn't include
+//   the bucket get ``hidden`` set (display:none via the HTML attribute)
+//   so a "Show all" reset can flip them back without re-fetching.
+// * Either mode also scrolls to and pulses the first matching card so
+//   the user sees the target without scanning.
+//
+// A small banner is inserted above the list explaining what's filtered
+// and offering a clear-link. If no card matches the link target (deep
+// link from a stale share-URL after the artifact was deleted), the
+// banner says so and offers the same clear-link.
+function _ctxApplyDeepLinkToContainer(type, container) {
+  const link = _ctxParseDeepLink();
+  if (!link) return;
+  if (_ctxSectionToType(link.section) !== type) return;
+  if (!link.filter && !link.artifact) return;
+
+  const cards = Array.from(container.querySelectorAll('.ctx-card'));
+  let matched = [];
+  if (link.artifact) {
+    matched = cards.filter(c => c.dataset.name === link.artifact);
+    // Render-only: drop the non-matches outright. Negative pin (ADR-0009 §3)
+    // — the test asserts the leaf doesn't merely *hide* the rest.
+    for (const c of cards) if (c.dataset.name !== link.artifact) c.remove();
+  } else if (link.filter) {
+    matched = cards.filter(c => {
+      const buckets = (c.dataset.statuses || '').split(/\s+/);
+      return buckets.includes(link.filter);
+    });
+    // Hide (don't remove) so the "Show all" reset can re-reveal without
+    // refetching. ``hidden`` attribute rather than a class so we don't
+    // need a matching CSS rule.
+    for (const c of cards) {
+      if (matched.includes(c)) c.hidden = false;
+      else c.hidden = true;
+    }
+  }
+
+  _ctxRenderDeepLinkBanner(type, link, matched.length);
+
+  if (matched.length > 0) {
+    const target = matched[0];
+    target.classList.add('ctx-card--highlight');
+    // Scroll AFTER the highlight class is added so the smooth-scroll
+    // animation lands on a card that visually stands out — flipping the
+    // class first avoids a flash of plain card → highlighted card on
+    // arrival. ``scrollIntoView`` with ``block: 'center'`` works in all
+    // modern browsers; older fallback would be ``true``/``false``.
+    try {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } catch {
+      target.scrollIntoView();
+    }
+    // 2-second pulse, then remove. ADR-0009 §3 cites "~2 seconds" as
+    // the highlight window; the CSS animation is keyframed so the
+    // class-removal here just stops further pulsing rather than
+    // interrupting a frame mid-flight.
+    setTimeout(() => target.classList.remove('ctx-card--highlight'), 2000);
+  }
+}
+
+function _ctxRenderDeepLinkBanner(type, link, matchCount) {
+  const listEl = qs(`ctx-${type}-list`);
+  if (!listEl) return;
+  // Remove any prior banner first — re-renders (lang toggle, tier swap,
+  // refresh) would otherwise stack banners.
+  const existing = listEl.querySelector('.ctx-deep-link-banner');
+  if (existing) existing.remove();
+
+  let label = '';
+  if (link.artifact) {
+    label = matchCount > 0
+      ? t('settings.ctx.deep_link_artifact').replace('{name}', link.artifact)
+      : t('settings.ctx.deep_link_artifact_missing').replace('{name}', link.artifact);
+  } else if (link.filter) {
+    const filterLabel = t('settings.ctx.badge_' + link.filter);
+    label = t('settings.ctx.deep_link_filter')
+      .replace('{filter}', filterLabel)
+      .replace('{count}', String(matchCount));
+  } else {
+    return;
+  }
+
+  const banner = document.createElement('div');
+  banner.className = 'ctx-deep-link-banner';
+  // ``textContent`` for the label so escaped artifact names (e.g. with
+  // ``&`` / ``<``) round-trip cleanly without an explicit escapeHtml
+  // call. The reset link is a separate element so it can be a button.
+  const labelEl = document.createElement('span');
+  labelEl.className = 'ctx-deep-link-banner-label';
+  labelEl.textContent = label;
+  const resetBtn = document.createElement('button');
+  resetBtn.type = 'button';
+  resetBtn.className = 'ctx-deep-link-banner-reset';
+  resetBtn.textContent = t('settings.ctx.deep_link_reset');
+  resetBtn.addEventListener('click', () => {
+    _ctxClearDeepLink();
+    loadCtxList(type);
+  });
+  banner.appendChild(labelEl);
+  banner.appendChild(resetBtn);
+  // Insert above the per-scope groups but below any tier-filter row so
+  // the banner reads as a list-level state, not a per-scope label.
+  // ``.ctx-runtime-only-banner`` is a sibling concern (no canonicals);
+  // both banners can co-exist when a project has runtime-only items
+  // *and* the user deep-linked into the type.
+  const tierRow = listEl.querySelector('.ctx-tier-filter');
+  if (tierRow && tierRow.nextSibling) {
+    listEl.insertBefore(banner, tierRow.nextSibling);
+  } else {
+    listEl.insertBefore(banner, listEl.firstChild);
   }
 }
 

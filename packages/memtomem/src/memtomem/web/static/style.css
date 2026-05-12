@@ -3289,6 +3289,50 @@ body.help-hidden #help-toggle { opacity: 0.5; }
   border-radius: 2px;
 }
 
+/* ADR-0009 §3 deep-link state. Banner sits above the scope groups when
+   a ``?filter=`` or ``?artifact=`` query param has narrowed the visible
+   list; the reset button restores the full list without a refetch. */
+.ctx-deep-link-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 8px 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  background: rgba(var(--accent-rgb), 0.06);
+  font-size: 0.85rem;
+  color: var(--text);
+  border-radius: 2px;
+}
+.ctx-deep-link-banner-reset {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 8px;
+  font-size: 0.78rem;
+  color: var(--accent);
+  cursor: pointer;
+}
+.ctx-deep-link-banner-reset:hover {
+  border-color: var(--accent);
+}
+
+/* ~2-second pulse on the deep-link target card. Two cycles of background
+   warm-and-fade keeps the eye on the card without becoming a distracting
+   strobe. ``ctx-card--highlight`` is added by ``_ctxApplyDeepLinkToContainer``
+   and removed via ``setTimeout`` after 2s; the keyframes carry the
+   actual visual. */
+@keyframes ctx-card-deep-link-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0.55); background: rgba(var(--accent-rgb), 0.10); }
+  50%  { box-shadow: 0 0 0 6px rgba(var(--accent-rgb), 0.00); background: rgba(var(--accent-rgb), 0.04); }
+  100% { box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0.00); background: rgba(var(--accent-rgb), 0.10); }
+}
+.ctx-card--highlight {
+  animation: ctx-card-deep-link-pulse 1s ease-in-out 2;
+  border-color: var(--accent);
+}
+
 .ctx-detail { padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); margin-top: 12px; background: var(--surface); }
 .ctx-detail-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .ctx-detail-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
