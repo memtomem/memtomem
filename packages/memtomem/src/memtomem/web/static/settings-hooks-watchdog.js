@@ -243,9 +243,13 @@ async function loadHooksSync() {
         if (!ok) return;
         btnLoading(btn, true);
         try {
+          const csrf = await ensureCsrfToken();
+          const headers = csrf
+            ? {'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf}
+            : {'Content-Type': 'application/json'};
           const r = await fetch('/api/context/settings/resolve', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
+            headers,
             body: JSON.stringify({event, matcher, action: 'use_proposed'}),
           });
           if (!r.ok) {

@@ -291,3 +291,56 @@ def test_env_override_unknown_values_keep_enforce(
     Only the explicit disable tokens turn it off."""
     monkeypatch.setenv("MEMTOMEM_WEB__CSRF_ENFORCE", on_value)
     assert resolve_csrf_enforce_from_env() is True
+
+
+# ---------------------------------------------------------------------------
+# Production-posture end-to-end pin
+# ---------------------------------------------------------------------------
+#
+# The autouse fixture in ``conftest.py`` defaults the rest of the suite to
+# observe-only so route-unit tests don't have to thread a token. That
+# fixture hides exactly the regression class flagged in PR #958 code
+# review — an SPA mutator bypassing ``ensureCsrfToken()`` would still go
+# green. This test bypasses the fixture by clearing the env explicitly,
+# builds the *real* app via ``create_app``, and asserts the middleware
+# returns 403 for an unsafe ``/api/...`` request without a token. It is
+# the canonical "does the production wiring actually enforce" pin.
+
+
+def test_production_create_app_enforces_csrf_without_token(
+    monkeypatch: pytest.MonkeyPatch, caplog_csrf
+) -> None:
+    """``create_app`` wires the middleware in enforce mode by default;
+    an unsafe ``/api/...`` request without the token returns 403, and
+    the observe log proves the 403 came from the **token** check (not
+    a host/origin fallback that would also 403 the same request).
+    """
+    from memtomem.web.app import create_app
+
+    monkeypatch.delenv("MEMTOMEM_WEB__CSRF_ENFORCE", raising=False)
+    app = create_app(lifespan=None, mode="prod")
+    assert app.state.csrf_enforce is True, (
+        "create_app must default to enforce mode when MEMTOMEM_WEB__CSRF_ENFORCE is unset"
+    )
+
+    client = TestClient(app)
+    # Send loopback Host + Origin so the host/origin checks pass — this
+    # isolates the 403 to the token check. Otherwise TestClient's default
+    # ``Host: testserver`` would 403 the request via ``host_ok=False`` even
+    # if token validation were silently bypassed.
+    res = client.post(
+        "/api/csrf-production-pin",
+        headers={"Host": "127.0.0.1:8080", "Origin": "http://127.0.0.1:8080"},
+    )
+    assert res.status_code == 403, (
+        "Production-posture create_app should 403 unsafe /api requests "
+        "without a CSRF token. The autouse conftest fixture must not be "
+        "leaking into this test."
+    )
+    events = _parse_observe(caplog_csrf.records)
+    assert len(events) == 1, f"expected one observe event, got {events}"
+    ev = events[0]
+    assert ev["token_ok"] == "False", "403 must be attributable to the token check"
+    assert ev["host_ok"] == "True", "loopback host must pass the host check"
+    assert ev["origin_ok"] == "True", "loopback origin must pass the origin check"
+    assert ev["would_block"] == "True"

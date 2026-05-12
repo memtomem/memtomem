@@ -31,8 +31,9 @@ every unsafe-method request to `/api/**` (POST / PUT / PATCH / DELETE) is
 gated by a single middleware that checks three things at once:
 
 1. **CSRF token** — `X-Memtomem-CSRF` must match the per-process token in
-   `app.state.csrf_token`. The SPA fetches it via `GET /api/session` on
-   load; the token rotates on every restart and is never persisted.
+   `app.state.csrf_token`. The SPA fetches it via `GET /api/session`
+   lazily on the first unsafe-method request (cached for the page
+   lifetime); the token rotates on every restart and is never persisted.
 2. **Origin / Referer** — when present, must resolve to a loopback host
    or an operator-supplied `--trusted-origin` entry. Defends drive-by
    tabs whose Origin reveals the attacker domain.
