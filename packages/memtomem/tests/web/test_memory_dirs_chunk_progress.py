@@ -69,6 +69,22 @@ def _install_default_stubs(page) -> None:
     )
 
 
+def _goto_after_i18n_ready(page, mm_web_url: str) -> None:
+    """Navigate once the locale cache can render chunk progress labels."""
+    page.goto(mm_web_url)
+    page.wait_for_function(
+        """
+        () => typeof t === 'function'
+          && t('common.file_chunk_progress', {
+            file: 'probe.md',
+            done: 1,
+            total: 2,
+          }).includes('probe.md')
+        """,
+        timeout=5000,
+    )
+
+
 def _driver(event_script_body: str) -> str:
     """Build a ``page.evaluate`` script that sets up a fake EventSource,
     drives ``mdReindexOne`` against a synthetic ``.source-group`` row,
@@ -141,7 +157,7 @@ def test_chunk_progress_updates_meta_badge_and_resets_on_file_boundary(
     ``progress`` resets it. Would have failed CI on PR #658.
     """
     _install_default_stubs(page)
-    page.goto(mm_web_url)
+    _goto_after_i18n_ready(page, mm_web_url)
 
     result = page.evaluate(
         _driver(
@@ -184,7 +200,7 @@ def test_threshold_below_run_leaves_meta_badge_at_original(page, mm_web_url: str
     pins the server-side ``progress_threshold`` gate's UI invariant.
     """
     _install_default_stubs(page)
-    page.goto(mm_web_url)
+    _goto_after_i18n_ready(page, mm_web_url)
 
     result = page.evaluate(
         _driver(
