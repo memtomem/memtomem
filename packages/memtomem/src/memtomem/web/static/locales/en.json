@@ -192,7 +192,6 @@
   "index.browse_btn": "📁 Browse",
   "index.browse_aria": "Open folder picker",
   "index.progress_label": "0 / 0 files",
-  "index.file_chunk_progress": "{file} — {done}/{total} chunks",
   "index.indicator": "⏳ Indexing…",
   "index.result.files": "Files scanned",
   "index.result.chunks": "Total chunks",
@@ -616,6 +615,7 @@
   "common.merge": "Merge",
   "common.expire": "Expire",
   "common.sync": "Sync",
+  "common.file_chunk_progress": "{file} — {done}/{total} chunks",
 
   "time.relative.just_now": "just now",
   "time.relative.minutes_ago": "{m}m ago",

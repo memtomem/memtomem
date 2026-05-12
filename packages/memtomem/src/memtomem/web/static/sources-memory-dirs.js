@@ -1114,10 +1114,13 @@ async function mdReindexOne(path, btn) {
   const _item = btn ? btn.closest('.source-group') : null;
   const metaEl = _item ? _item.querySelector('.source-group-stats') : null;
   const _origMeta = metaEl ? metaEl.textContent : '';
-  // Throttle state — function-local so two concurrent reindex clicks
-  // (one per dir) don't share each other's clocks. Mirrors the
+  // Function-local renderer so two concurrent reindex clicks (one per
+  // dir) don't share each other's throttle clocks. Mirrors the
   // ``runIndexStream`` closure scope in ``app.js``.
-  let _lastChunkRender = 0;
+  const _chunkProgress = makeChunkProgressRenderer({
+    targetEl: metaEl,
+    formatKey: 'common.file_chunk_progress',
+  });
   let _metaIsChunkLabel = false;
   showToast(t('toast.memory_dir.reindex_started', { path }), 'info');
 
@@ -1172,7 +1175,7 @@ async function mdReindexOne(path, btn) {
       // meta row stuck on "CHANGELOG.md — 250/250" through the rest
       // of the run. The flag avoids a sub-100ms flash on big→big
       // transitions because the next ``chunk_progress`` overwrites.
-      _lastChunkRender = 0;
+      _chunkProgress.onProgressBoundary();
       if (metaEl && _metaIsChunkLabel) {
         metaEl.textContent = _origMeta;
         _metaIsChunkLabel = false;
@@ -1181,23 +1184,9 @@ async function mdReindexOne(path, btn) {
         btn.textContent = `${event.files_done}/${event.files_total}`;
       }
     } else if (event.type === 'chunk_progress') {
-      // Mirrors ``app.js:runIndexStream`` — 100ms throttle on
-      // intermediate ticks, final tick (done >= total) bypasses so
-      // ``(N/N)`` lands before the next file boundary. ``isConnected``
-      // guards against late events arriving after ``loadSources()``
-      // detached the row (silent no-op today, but cheap insurance).
-      if (!metaEl || !metaEl.isConnected) return;
-      const now = (typeof performance !== 'undefined' && performance.now)
-        ? performance.now() : Date.now();
-      const isFinal = event.chunks_done >= event.chunks_total;
-      if (!isFinal && now - _lastChunkRender < 100) return;
-      _lastChunkRender = now;
-      metaEl.textContent = t('index.file_chunk_progress', {
-        file: basename(event.file),
-        done: event.chunks_done,
-        total: event.chunks_total,
-      });
-      _metaIsChunkLabel = true;
+      if (_chunkProgress.onChunk(event)) {
+        _metaIsChunkLabel = true;
+      }
     } else if (event.type === 'complete') {
       _completed = true;
       es.close();

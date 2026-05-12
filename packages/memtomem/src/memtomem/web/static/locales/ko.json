@@ -192,7 +192,6 @@
   "index.browse_btn": "📁 둘러보기",
   "index.browse_aria": "폴더 선택 창 열기",
   "index.progress_label": "0 / 0 파일",
-  "index.file_chunk_progress": "{file} — {done}/{total} 청크",
   "index.indicator": "⏳ 인덱싱 중…",
   "index.result.files": "스캔된 파일",
   "index.result.chunks": "전체 청크",
@@ -616,6 +615,7 @@
   "common.merge": "병합",
   "common.expire": "만료",
   "common.sync": "동기화",
+  "common.file_chunk_progress": "{file} — {done}/{total} 청크",
 
   "time.relative.just_now": "방금",
   "time.relative.minutes_ago": "{m}분 전",
