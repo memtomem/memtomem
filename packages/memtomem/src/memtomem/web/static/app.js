@@ -39,9 +39,10 @@ const STATE = {
   // rendering the chunk list. Set by ``_navigateToSource`` when the
   // caller knows the specific chunk (e.g. Timeline → Source jump);
   // empty string means "source-level only, no chunk highlight".
-  // Cleared on consume in ``browseSource`` so a later same-source
-  // browse (e.g. Load All) doesn't re-flash an old target.
+  // Preserved across a same-source miss so a larger follow-up fetch
+  // (e.g. Load All / future pagination) can retry the highlight.
   pendingActivateChunkId: '',
+  pendingActivateChunkSourcePath: '',
   // Active Sources vendor sub-tab (one of ``user`` / ``claude`` /
   // ``openai``). Lazily populated from localStorage on first render so
   // the value survives reloads. Keeping it on STATE means re-renders
@@ -1894,6 +1895,7 @@ function _navigateToSource(path, chunkId = '') {
   //      the exact chunk), ``browseSource`` scrolls + expands + flashes
   //      that card after the source's chunk list renders.
   STATE.pendingActivateChunkId = chunkId || '';
+  STATE.pendingActivateChunkSourcePath = chunkId ? path : '';
   const src = (STATE.allSources || []).find(s => s.path === path);
   const status = src && src.memory_dir
     ? (STATE.memoryStatusByPath || {})[src.memory_dir]
@@ -3863,6 +3865,7 @@ function _renderMemorySourceItem(s, maxChunks) {
     // UUIDs), but it would silently no-op the next ``browseSource`` flash
     // path until something else clears it. PR #676 review follow-up.
     STATE.pendingActivateChunkId = '';
+    STATE.pendingActivateChunkSourcePath = '';
     document.querySelectorAll('.source-item').forEach(el => el.classList.remove('active'));
     item.classList.add('active');
     browseSource(s.path);
@@ -4053,15 +4056,14 @@ async function browseSource(path, limit = 100) {
 
     // Consume ``pendingActivateChunkId`` (set by ``_navigateToSource``
     // when the caller — e.g. Timeline — knows the specific chunk).
-    // Done after appendChild so the card is in the DOM. Cleared
-    // unconditionally so a later same-source browse (Load All, manual
-    // re-click) doesn't re-flash an old target. The accordion-expand
-    // listener attaches in the next rAF, so we run inside one too — but
-    // we don't depend on the listener: we set the ``expanded`` class
-    // directly when the card is collapsible.
-    if (STATE.pendingActivateChunkId) {
+    // Done after appendChild so the card is in the DOM. On a miss, keep
+    // the target for this same source so a larger follow-up fetch can
+    // retry. The accordion-expand listener attaches in the next rAF, so
+    // we run inside one too — but we don't depend on the listener: we set
+    // the ``expanded`` class directly when the card is collapsible.
+    const pendingChunkPath = STATE.pendingActivateChunkSourcePath || path;
+    if (STATE.pendingActivateChunkId && pendingChunkPath === path) {
       const targetId = STATE.pendingActivateChunkId;
-      STATE.pendingActivateChunkId = '';
       requestAnimationFrame(() => {
         const card = content.querySelector(
           `.chunk-card[data-chunk-id="${CSS.escape(String(targetId))}"]`,
@@ -4078,6 +4080,8 @@ async function browseSource(path, limit = 100) {
           }
           return;
         }
+        STATE.pendingActivateChunkId = '';
+        STATE.pendingActivateChunkSourcePath = '';
         card.scrollIntoView({ behavior: 'smooth', block: 'center' });
         const contentDiv = card.querySelector('.chunk-card-content');
         if (contentDiv && card.classList.contains('chunk-card-collapsible')) {
