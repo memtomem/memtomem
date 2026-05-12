@@ -249,11 +249,11 @@ def detect_settings_files(project_root: Path, scope: str) -> list[DetectedFile]:
 def detect_all(project_root: Path, scope: str = "user") -> list[DetectedFile]:
     """Return project-memory files, skill dirs, sub-agents, commands, and settings.
 
-    *scope* is the resolved ``hooks.target_scope`` (ADR-0010 §3); see
+    *scope* is the resolved ``hooks.target_tier`` (ADR-0010 §3); see
     :func:`detect_settings_files` for why it's relevant. Defaults to
     ``"user"`` so external consumers of this public function don't see
     a breaking signature change in v1 — the value matches the default
-    of ``hooks.target_scope`` (ADR-0010 §2).
+    of ``hooks.target_tier`` (ADR-0010 §2).
     """
     return (
         detect_agent_files(project_root)

@@ -7,11 +7,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`target_tier` canonical identifier (ADR-0017).** Context Gateway and
+  Sources Web routes now accept `?target_tier=` and include `target_tier`
+  response fields. `hooks.target_tier` is the canonical config field; legacy
+  `hooks.target_scope`, `?target_scope=`, response `target_scope`, and the
+  `TargetScope` import remain compatibility aliases.
 - **Web tier badges + `/api/add` project-tier rejection hint (ADR-0011
   PR-F Web/docs slice, #929).** Memory sources/chunks and context
   Skills/Commands/Subagents list rows now carry literal tier badges
   (`user`, `project_shared`, `project_local`) per ADR-0016. Web list
-  routes accept `?target_scope=` for canonical tier selection and keep
+  routes accept `?target_tier=` for canonical tier selection and keep
   `project_local` hidden by default unless explicitly requested; context
   rows in `project_local` annotate the draft/no-runtime-fan-out behavior
   inline. `POST /api/add` now rejects unconfirmed

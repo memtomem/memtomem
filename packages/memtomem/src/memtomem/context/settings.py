@@ -53,7 +53,7 @@ _MALFORMED = object()
 
 
 def resolve_scope_path(project_root: Path, scope: str) -> Path:
-    """Resolve ``hooks.target_scope`` to the runtime settings file path.
+    """Resolve ``hooks.target_tier`` to the runtime settings file path.
 
     Single source of truth for the ADR-0010 §3 path math; shared by
     :class:`ClaudeSettingsGenerator`, the Web ``_claude_target`` helper,
@@ -67,7 +67,7 @@ def resolve_scope_path(project_root: Path, scope: str) -> Path:
         return project_root / ".claude" / "settings.json"
     if scope == "project_local":
         return project_root / ".claude" / "settings.local.json"
-    raise ValueError(f"Unknown target_scope: {scope!r}")
+    raise ValueError(f"Unknown target_tier: {scope!r}")
 
 
 # ── Protocol + Result ───────────────────────────────────────────────
@@ -240,7 +240,7 @@ def host_write_targets(project_root: Path, *, scope: str) -> list[Path]:
     ``mm context sync --include=settings`` from a worktree must not silently
     edit the real home directory.
 
-    *scope* is the resolved ``hooks.target_scope`` (per ADR-0010 §3); it
+    *scope* is the resolved ``hooks.target_tier`` (per ADR-0010 §3); it
     determines which tier each generator's ``target_file`` resolves to.
     Project-tier scopes (``project_shared`` / ``project_local``) yield an
     empty list because writes stay inside the project root.
@@ -301,7 +301,7 @@ def generate_all_settings(
 ) -> dict[str, SettingsSyncResult]:
     """Fan out ``.memtomem/settings.json`` to registered runtimes.
 
-    *scope* is the resolved ``hooks.target_scope`` (per ADR-0010 §3) and
+    *scope* is the resolved ``hooks.target_tier`` (per ADR-0010 §3) and
     is required keyword-only — every caller (CLI, MCP, Web) is expected
     to resolve it from its own config layer rather than have this
     function lazy-load ``Mem2MemConfig`` (which would trigger the
@@ -402,7 +402,7 @@ def diff_settings(
 ) -> dict[str, SettingsSyncResult]:
     """Dry-run: compute what :func:`generate_all_settings` would do.
 
-    *scope* is the resolved ``hooks.target_scope`` (ADR-0010 §3); see
+    *scope* is the resolved ``hooks.target_tier`` (ADR-0010 §3); see
     :func:`generate_all_settings` for the rationale on why callers pass
     this in rather than having it lazy-loaded here.
     """

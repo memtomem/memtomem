@@ -29,7 +29,7 @@ def _find_project_root() -> Path:
 
 
 def _resolve_mcp_scope(override: str | None = None) -> str:
-    """Return the resolved ``hooks.target_scope`` for an MCP tool call.
+    """Return the resolved ``hooks.target_tier`` for an MCP tool call.
 
     A per-call override wins. Otherwise this builds a fresh config and
     applies user-level overrides with ``migrate=False``. Scope
@@ -48,7 +48,7 @@ def _resolve_mcp_scope(override: str | None = None) -> str:
     cfg = Mem2MemConfig()
     load_config_d(cfg, quiet=True)
     load_config_overrides(cfg, migrate=False)
-    return cfg.hooks.target_scope
+    return cfg.hooks.target_tier
 
 
 def _resolve_artifact_mcp_scope(scope: str | None) -> TargetScope:

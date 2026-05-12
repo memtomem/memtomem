@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal, cast, get_args
 
-from pydantic import Field, ValidationInfo, field_validator, model_validator
+from pydantic import AliasChoices, Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from memtomem.constants import default_system_prefixes
@@ -742,20 +742,35 @@ class SessionSummaryConfig(BaseSettings):
         return v
 
 
-TargetScope = Literal["user", "project_shared", "project_local"]
+TargetTier = Literal["user", "project_shared", "project_local"]
+# Back-compat alias: older code and third-party callers may still import
+# TargetScope while the public vocabulary moves to target_tier.
+TargetScope = TargetTier
 
 
 class HooksConfig(BaseSettings):
-    """Settings-hooks fan-out scope (ADR-0010 §3).
+    """Settings-hooks fan-out tier (ADR-0010 §3).
 
-    ``target_scope`` selects where memtomem-managed Claude Code hooks land:
+    ``target_tier`` selects where memtomem-managed Claude Code hooks land:
     user-tier (``~/.claude/settings.json``), project-shared
     (``<project>/.claude/settings.json``), or project-local
     (``<project>/.claude/settings.local.json``). v1 default is ``user`` for
     zero behavior change; the default-flip trigger lives in ADR-0010 §5.
     """
 
-    target_scope: TargetScope = "user"
+    target_tier: TargetTier = Field(
+        "user",
+        validation_alias=AliasChoices("target_tier", "target_scope"),
+    )
+
+    @property
+    def target_scope(self) -> TargetTier:
+        """Deprecated alias for config files and callers not yet renamed."""
+        return self.target_tier
+
+    @target_scope.setter
+    def target_scope(self, value: TargetTier) -> None:
+        self.target_tier = value
 
 
 class ContextGatewayConfig(BaseSettings):
@@ -880,7 +895,7 @@ MUTABLE_FIELDS: dict[str, set[str]] = {
     # instance is cached on startup), so only the pool-sizing knobs are
     # runtime-mutable.
     "rerank": {"enabled", "oversample", "min_pool", "max_pool"},
-    "hooks": {"target_scope"},
+    "hooks": {"target_tier"},
 }
 
 FIELD_CONSTRAINTS: dict[str, dict] = {
@@ -920,7 +935,10 @@ FIELD_CONSTRAINTS: dict[str, dict] = {
     "rerank.oversample": {"type": float, "min": 0.1, "max": 10.0},
     "rerank.min_pool": {"type": int, "min": 1, "max": 1000},
     "rerank.max_pool": {"type": int, "min": 1, "max": 1000},
-    "hooks.target_scope": {"type": str, "allowed": set(get_args(TargetScope))},
+    "hooks.target_tier": {"type": str, "allowed": set(get_args(TargetTier))},
+    # Deprecated read path for config.json/config.d fragments written before
+    # the target_scope -> target_tier rename.
+    "hooks.target_scope": {"type": str, "allowed": set(get_args(TargetTier))},
 }
 
 
@@ -1052,6 +1070,47 @@ def _override_path() -> Path:
     return _CONFIG_OVERRIDE_PATH.expanduser()
 
 
+# ADR-0017: legacy `target_scope` field renamed to `target_tier`. Both env var
+# names map to the same value via `AliasChoices` on construct, so the
+# persisted-config loaders must treat either env name as a precedence signal —
+# otherwise a user who sets `MEMTOMEM_HOOKS__TARGET_TIER` on a not-yet-migrated
+# `config.json`/`config.d` install would silently see the persisted legacy
+# value clobber their env-selected tier.
+#
+# Both directions are listed deliberately:
+#
+# - ``("hooks", "target_tier"): ("target_scope",)`` — covers a config that
+#   has been migrated to ``target_tier`` (loader iterates ``key="target_tier"``
+#   and must also notice the legacy env name).
+# - ``("hooks", "target_scope"): ("target_tier",)`` — covers a config that
+#   still persists the legacy ``target_scope`` key. The loader iterates
+#   ``key="target_scope"``, so symmetric lookup is needed for the canonical
+#   env name to also pre-empt the legacy persisted value. Without this entry
+#   a user who set ``MEMTOMEM_HOOKS__TARGET_TIER`` and still has a legacy
+#   ``config.json`` would see the file's ``target_scope`` clobber the env.
+#
+# One alias pair today; the helper scales when future field renames need the
+# same treatment.
+_LEGACY_FIELD_ALIASES: dict[tuple[str, str], tuple[str, ...]] = {
+    ("hooks", "target_tier"): ("target_scope",),
+    ("hooks", "target_scope"): ("target_tier",),
+}
+
+
+def _env_aliases_for_field(section_name: str, field: str) -> list[str]:
+    """All `MEMTOMEM_<SECTION>__<FIELD>` env names that bind to (section, field).
+
+    Returned list always starts with the literal `MEMTOMEM_<SECTION>__<FIELD>`
+    derived from the caller's argument names, followed by legacy aliases (if
+    any). Loaders check membership in `os.environ` against the full list and
+    skip the persisted entry if any alias is set — matching the precedence
+    behaviour of `AliasChoices` at construct time.
+    """
+    base = f"MEMTOMEM_{section_name.upper()}__{field.upper()}"
+    aliases = _LEGACY_FIELD_ALIASES.get((section_name, field), ())
+    return [base, *(f"MEMTOMEM_{section_name.upper()}__{a.upper()}" for a in aliases)]
+
+
 def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> None:
     """Apply persisted overrides from ~/.memtomem/config.json (if exists).
 
@@ -1086,14 +1145,15 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
             continue
         for key, value in updates.items():
             if hasattr(section_obj, key):
-                env_var = f"MEMTOMEM_{section_name.upper()}__{key.upper()}"
-                if env_var in os.environ:
+                env_vars = _env_aliases_for_field(section_name, key)
+                env_hits = [v for v in env_vars if v in os.environ]
+                if env_hits:
                     _log.debug(
                         "Skipping %s.%s from %s: %s is set in environment (env wins)",
                         section_name,
                         key,
                         path,
-                        env_var,
+                        ", ".join(env_hits),
                     )
                     continue
                 full_key = f"{section_name}.{key}"
@@ -1250,14 +1310,15 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False) -> None:
             for key, value in updates.items():
                 if not hasattr(section_obj, key):
                     continue
-                env_var = f"MEMTOMEM_{section_name.upper()}__{key.upper()}"
-                if env_var in os.environ:
+                env_vars = _env_aliases_for_field(section_name, key)
+                env_hits = [v for v in env_vars if v in os.environ]
+                if env_hits:
                     _log.debug(
                         "Skipping %s.%s from %s: %s is set (env wins)",
                         section_name,
                         key,
                         path,
-                        env_var,
+                        ", ".join(env_hits),
                     )
                     continue
                 strategy = _merge_strategy_for(section_cls, key)
@@ -1935,6 +1996,8 @@ def save_config_overrides(
         section_data: dict[str, object] = existing.get(section_name, {})
         if not isinstance(section_data, dict):
             section_data = {}
+        if section_name == "hooks":
+            section_data.pop("target_scope", None)
 
         for key in keys:
             live_val = getattr(live_section, key, None)

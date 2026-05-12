@@ -24,6 +24,13 @@ def config() -> None:
     """View or modify memtomem configuration."""
 
 
+def _canonical_config_key(key: str) -> str:
+    """Map deprecated config keys to their canonical spelling."""
+    if key == "hooks.target_scope":
+        return "hooks.target_tier"
+    return key
+
+
 @config.command("show")
 @click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
 @click.option("--json", "as_json", is_flag=True, help="Shortcut for --format json.")
@@ -65,6 +72,8 @@ def config_set(key: str, value: str) -> None:
     """Set a config field (e.g., 'search.default_top_k 20'). Persists to ~/.memtomem/config.json."""
     from memtomem.config import Mem2MemConfig, load_config_overrides, save_config_overrides
 
+    requested_key = key
+    key = _canonical_config_key(key)
     parts = key.split(".", 1)
     if len(parts) != 2:
         click.echo(click.style("Key must be section.field (e.g., search.default_top_k)", fg="red"))
@@ -91,7 +100,8 @@ def config_set(key: str, value: str) -> None:
     setattr(section_obj, field_name, coerced)
 
     save_config_overrides(cfg)
-    click.echo(f"{key}: {old_val} -> {coerced}")
+    label = key if requested_key == key else f"{requested_key} ({key})"
+    click.echo(f"{label}: {old_val} -> {coerced}")
 
     # Rebuild FTS index when tokenizer changes (matches Web UI / MCP behaviour)
     if key == "search.tokenizer":
@@ -118,6 +128,7 @@ def _canonical_unset_keys() -> set[str]:
     """
     canonical = {f"{sec}.{f}" for sec, fs in MUTABLE_FIELDS.items() for f in fs}
     canonical |= {f"{sec}.{f}" for sec, fs in _EXTRA_MUTATION_FIELDS.items() for f in fs}
+    canonical.add("hooks.target_scope")
     return canonical
 
 
@@ -178,31 +189,44 @@ def config_unset(keys: tuple[str, ...]) -> None:
     any_skip = False
 
     for key in keys:
-        if key not in canonical:
+        requested_key = key
+        key = _canonical_config_key(key)
+        if requested_key not in canonical and key not in canonical:
             any_skip = True
-            suggestion = _suggest_key(key, canonical)
+            suggestion = _suggest_key(requested_key, canonical)
             if suggestion is not None:
                 lines.append(
                     click.style(
-                        f"Skipped {key}: not set (did you mean '{suggestion}'?)",
+                        f"Skipped {requested_key}: not set (did you mean '{suggestion}'?)",
                         fg="yellow",
                     )
                 )
             else:
-                lines.append(click.style(f"Skipped {key}: not set", fg="yellow"))
+                lines.append(click.style(f"Skipped {requested_key}: not set", fg="yellow"))
             continue
 
         section, field = key.split(".", 1)
         section_data = existing.get(section)
-        if isinstance(section_data, dict) and field in section_data:
-            section_data.pop(field)
+        legacy_field = "target_scope" if key == "hooks.target_tier" else field
+        if isinstance(section_data, dict) and (
+            field in section_data or legacy_field in section_data
+        ):
+            # ADR-0017: a legacy-only config.json (only ``target_scope`` present,
+            # ``target_tier`` absent) enters this branch via ``legacy_field in
+            # section_data``. The canonical pop must tolerate a missing field
+            # so unset works on un-migrated installs instead of raising
+            # KeyError.
+            section_data.pop(field, None)
+            section_data.pop(legacy_field, None)
             if not section_data:
                 existing.pop(section, None)
-            lines.append(f"Removed: {key}")
+            label = key if requested_key == key else f"{requested_key} ({key})"
+            lines.append(f"Removed: {label}")
             if field in _EXTRA_MUTATION_FIELDS.get(section, set()):
                 removed_extra_mutation = True
         else:
-            lines.append(f"Unset: {key} (already at default)")
+            label = key if requested_key == key else f"{requested_key} ({key})"
+            lines.append(f"Unset: {label} (already at default)")
 
     if existing:
         _relativize_config_paths_in_place(existing)

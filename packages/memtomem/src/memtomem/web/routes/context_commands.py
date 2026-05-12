@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from memtomem.config import TargetScope
+from memtomem.config import TargetTier
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context.commands import (
@@ -27,7 +27,7 @@ from memtomem.context.commands import (
 )
 from memtomem.context.detector import COMMAND_DIRS
 from memtomem.context.privacy_scan import PrivacyScanError
-from memtomem.web.deps import get_project_root
+from memtomem.web.deps import get_project_root, get_query_target_tier
 from memtomem.web.routes.context_projects import resolve_scope_root
 from memtomem.web.routes._locks import _gateway_lock
 
@@ -44,14 +44,14 @@ router = APIRouter(tags=["context-commands"])
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
-def _commands_root(project_root: Path, *, scope: TargetScope = "project_shared") -> Path:
+def _commands_root(project_root: Path, *, scope: TargetTier = "project_shared") -> Path:
     from memtomem.context.scope_resolver import canonical_artifact_dir
 
     return canonical_artifact_dir("commands", scope, project_root)
 
 
 def _canonical_command_path(
-    project_root: Path, raw_name: str, *, scope: TargetScope = "project_shared"
+    project_root: Path, raw_name: str, *, scope: TargetTier = "project_shared"
 ) -> Path:
     """Validate the name via core and return the canonical command path.
 
@@ -62,24 +62,24 @@ def _canonical_command_path(
 
 
 def _resolve_existing_command(
-    project_root: Path, raw_name: str, *, scope: TargetScope = "project_shared"
+    project_root: Path, raw_name: str, *, scope: TargetTier = "project_shared"
 ):
     name = validate_name(raw_name, kind="command")
     return name, resolve_canonical_command(project_root, name, scope=scope)
 
 
-def _reject_non_shared_write(target_scope: TargetScope, action: str) -> None:
+def _reject_non_shared_write(target_tier: TargetTier, action: str) -> None:
     """Reject writes on non-``project_shared`` tiers with HTTP 400.
 
     See context_skills.py:_reject_non_shared_write for the rationale.
     Mirrored here so each route file stays self-contained.
     """
-    if target_scope != "project_shared":
+    if target_tier != "project_shared":
         raise HTTPException(
             status_code=400,
             detail=(
                 f"{action} is supported only on project_shared in this release; "
-                f"got target_scope={target_scope!r}."
+                f"got target_tier={target_tier!r}."
             ),
         )
 
@@ -97,17 +97,11 @@ def _safe_rel(p: Path, project_root: Path) -> str:
 @router.get("/context/commands")
 async def list_commands(
     project_root: Path = Depends(resolve_scope_root),
-    target_scope: TargetScope = Query(
-        "project_shared",
-        description=(
-            "Canonical-residency tier to list. project_local is shown only "
-            "when explicitly requested."
-        ),
-    ),
+    target_tier: TargetTier = Depends(get_query_target_tier),
 ) -> dict:
     """List canonical commands. Accepts ``?scope_id=`` like list_skills."""
-    canonicals = list_canonical_commands(project_root, scope=target_scope)
-    diffs = diff_commands(project_root, scope=target_scope)
+    canonicals = list_canonical_commands(project_root, scope=target_tier)
+    diffs = diff_commands(project_root, scope=target_tier)
 
     by_name: dict[str, list[dict]] = {}
     for runtime, cmd_name, status in diffs:
@@ -122,7 +116,8 @@ async def list_commands(
             {
                 "name": name,
                 "canonical_path": _safe_rel(cmd_path, project_root),
-                "target_scope": target_scope,
+                "target_tier": target_tier,
+                "target_scope": target_tier,
                 "runtimes": by_name.get(name, []),
             }
         )
@@ -133,7 +128,8 @@ async def list_commands(
                 {
                     "name": cmd_name,
                     "canonical_path": None,
-                    "target_scope": target_scope,
+                    "target_tier": target_tier,
+                    "target_scope": target_tier,
                     "runtimes": runtimes,
                 }
             )
@@ -152,12 +148,9 @@ async def list_commands(
 async def read_command(
     name: str,
     project_root: Path = Depends(get_project_root),
-    target_scope: TargetScope = Query(
-        "project_shared",
-        description="Canonical-residency tier to read from (ADR-0016).",
-    ),
+    target_tier: TargetTier = Depends(get_query_target_tier),
 ) -> dict:
-    name, resolved = _resolve_existing_command(project_root, name, scope=target_scope)
+    name, resolved = _resolve_existing_command(project_root, name, scope=target_tier)
     if resolved is None:
         raise KeyError(name)
     cmd_path, layout = resolved
@@ -194,12 +187,9 @@ _ALL_OPTIONAL_FIELDS = ("argument-hint", "allowed-tools", "model")
 async def rendered_command(
     name: str,
     project_root: Path = Depends(get_project_root),
-    target_scope: TargetScope = Query(
-        "project_shared",
-        description="Canonical-residency tier to render (ADR-0016).",
-    ),
+    target_tier: TargetTier = Depends(get_query_target_tier),
 ) -> JSONResponse:
-    name, resolved = _resolve_existing_command(project_root, name, scope=target_scope)
+    name, resolved = _resolve_existing_command(project_root, name, scope=target_tier)
     if resolved is None:
         raise KeyError(name)
     cmd_path, layout = resolved
@@ -211,7 +201,7 @@ async def rendered_command(
         return JSONResponse(status_code=422, content={"detail": f"Parse error: {exc}"})
 
     runtimes = []
-    diffs = diff_commands(project_root, scope=target_scope)
+    diffs = diff_commands(project_root, scope=target_tier)
     status_map: dict[tuple[str, str], str] = {(rt, n): s for rt, n, s in diffs}
     # ``field_map[field][runtime] = bool`` — True when the runtime keeps the
     # field, False when it drops it. Mirrors ``context_agents.rendered_agent``
@@ -255,20 +245,17 @@ class CommandCreateRequest(BaseModel):
 async def create_command(
     body: CommandCreateRequest,
     project_root: Path = Depends(get_project_root),
-    target_scope: TargetScope = Query(
-        "project_shared",
-        description="Canonical-residency tier to create in. Non-shared rejected (#940).",
-    ),
+    target_tier: TargetTier = Depends(get_query_target_tier),
 ) -> dict:
-    _reject_non_shared_write(target_scope, "Create command")
+    _reject_non_shared_write(target_tier, "Create command")
     name = validate_name(body.name, kind="command")
 
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                if resolve_canonical_command(project_root, name, scope=target_scope) is not None:
+                if resolve_canonical_command(project_root, name, scope=target_tier) is not None:
                     raise HTTPException(409, detail=f"Command '{name}' already exists")
-                cmd_path = _canonical_command_path(project_root, name, scope=target_scope)
+                cmd_path = _canonical_command_path(project_root, name, scope=target_tier)
                 atomic_write_text(cmd_path, body.content)
     except TimeoutError:
         raise HTTPException(503, "Command create timed out — another sync may be in progress")
@@ -294,13 +281,10 @@ async def update_command(
     name: str,
     body: CommandUpdateRequest,
     project_root: Path = Depends(get_project_root),
-    target_scope: TargetScope = Query(
-        "project_shared",
-        description="Canonical-residency tier to update. Non-shared rejected (#940).",
-    ),
+    target_tier: TargetTier = Depends(get_query_target_tier),
 ) -> JSONResponse:
-    _reject_non_shared_write(target_scope, "Update command")
-    name, resolved = _resolve_existing_command(project_root, name, scope=target_scope)
+    _reject_non_shared_write(target_tier, "Update command")
+    name, resolved = _resolve_existing_command(project_root, name, scope=target_tier)
     if resolved is None:
         raise KeyError(name)
     cmd_path, _layout = resolved
@@ -348,13 +332,10 @@ async def delete_command(
     name: str,
     cascade: bool = Query(False),
     project_root: Path = Depends(get_project_root),
-    target_scope: TargetScope = Query(
-        "project_shared",
-        description="Canonical-residency tier to delete from. Non-shared rejected (#940).",
-    ),
+    target_tier: TargetTier = Depends(get_query_target_tier),
 ) -> dict:
-    _reject_non_shared_write(target_scope, "Delete command")
-    name, resolved = _resolve_existing_command(project_root, name, scope=target_scope)
+    _reject_non_shared_write(target_tier, "Delete command")
+    name, resolved = _resolve_existing_command(project_root, name, scope=target_tier)
 
     try:
         async with asyncio.timeout(60):
@@ -397,12 +378,9 @@ async def delete_command(
 async def diff_command(
     name: str,
     project_root: Path = Depends(get_project_root),
-    target_scope: TargetScope = Query(
-        "project_shared",
-        description="Canonical-residency tier to diff against runtime fan-out (ADR-0016).",
-    ),
+    target_tier: TargetTier = Depends(get_query_target_tier),
 ) -> dict:
-    name, resolved = _resolve_existing_command(project_root, name, scope=target_scope)
+    name, resolved = _resolve_existing_command(project_root, name, scope=target_tier)
 
     canonical_content = None
     if resolved is not None:
@@ -450,12 +428,9 @@ class SyncRequest(BaseModel):
 async def sync_commands(
     body: SyncRequest | None = None,
     project_root: Path = Depends(get_project_root),
-    target_scope: TargetScope = Query(
-        "project_shared",
-        description="Canonical-residency tier to fan out. Non-shared rejected (#940).",
-    ),
+    target_tier: TargetTier = Depends(get_query_target_tier),
 ) -> dict:
-    _reject_non_shared_write(target_scope, "Sync commands")
+    _reject_non_shared_write(target_tier, "Sync commands")
     on_drop = body.on_drop if body else "warn"
     try:
         async with asyncio.timeout(60):
@@ -491,12 +466,9 @@ class ImportRequest(BaseModel):
 async def import_commands(
     body: ImportRequest | None = None,
     project_root: Path = Depends(get_project_root),
-    target_scope: TargetScope = Query(
-        "project_shared",
-        description="Canonical-residency tier to import into. Non-shared rejected (#940).",
-    ),
+    target_tier: TargetTier = Depends(get_query_target_tier),
 ) -> dict:
-    _reject_non_shared_write(target_scope, "Import commands")
+    _reject_non_shared_write(target_tier, "Import commands")
     overwrite = body.overwrite if body else False
     try:
         async with asyncio.timeout(60):
@@ -526,10 +498,7 @@ async def import_command(
     name: str,
     body: ImportRequest | None = None,
     project_root: Path = Depends(get_project_root),
-    target_scope: TargetScope = Query(
-        "project_shared",
-        description="Canonical-residency tier to import into. Non-shared rejected (#940).",
-    ),
+    target_tier: TargetTier = Depends(get_query_target_tier),
 ) -> dict:
     """Import a single runtime command into ``.memtomem/commands/``.
 
@@ -538,7 +507,7 @@ async def import_command(
     import would silently report 0 imported, which is the wrong shape of
     feedback for "you clicked a specific item that doesn't exist").
     """
-    _reject_non_shared_write(target_scope, "Import command")
+    _reject_non_shared_write(target_tier, "Import command")
     try:
         validate_name(name, kind="command name")
     except InvalidNameError as exc:

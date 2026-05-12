@@ -441,7 +441,7 @@ def _print_commands_diff(root: Path, *, scope: TargetScope = "project_shared") -
 
 
 def _resolve_cli_scope(override: str | None) -> str:
-    """Return the resolved ``hooks.target_scope`` for a CLI invocation.
+    """Return the resolved ``hooks.target_tier`` for a CLI invocation.
 
     Per-invocation ``--scope`` flag wins; otherwise build a fresh
     ``Mem2MemConfig`` and apply the user-level config + env overrides.
@@ -455,17 +455,17 @@ def _resolve_cli_scope(override: str | None) -> str:
     cfg = Mem2MemConfig()
     load_config_d(cfg, quiet=True)
     load_config_overrides(cfg, migrate=False)
-    return cfg.hooks.target_scope
+    return cfg.hooks.target_tier
 
 
 def _resolve_artifact_cli_scope(scope_flag: str | None) -> TargetScope:
     """Resolve ``--scope`` for non-memory artifact CLI commands (ADR-0011 PR-E2).
 
     Unlike :func:`_resolve_cli_scope` this does NOT consult
-    ``cfg.hooks.target_scope``: artifact storage location is a different
+    ``cfg.hooks.target_tier``: artifact storage location is a different
     feature axis from settings host placement. Leaning on the hooks
     default would silently flip the artifact target whenever a user
-    pinned ``hooks.target_scope = "user"`` for unrelated reasons (e.g.
+    pinned ``hooks.target_tier = "user"`` for unrelated reasons (e.g.
     Cursor-style settings layout), which Codex flagged as a
     ``_resolve_cli_scope`` default-leak risk in PR-E1 review. The
     artifact-side default is fixed at ``"project_shared"`` to match the
@@ -612,7 +612,7 @@ _SCOPE_OPTION = click.option(
     type=click.Choice(list(get_args(TargetScope))),
     default=None,
     help=(
-        "Override hooks.target_scope for this invocation only "
+        "Override hooks.target_tier for this invocation only "
         "(user / project_shared / project_local). "
         "Host-write confirmation is computed against the resolved scope, "
         "so --scope=project_local skips the prompt (writes stay in-project)."
@@ -958,7 +958,7 @@ def generate_cmd(
     # ADR-0011 PR-E3: resolve the canonical-artifact scope once and thread
     # it through the three include helpers. Defaults to ``project_shared``
     # via ``_resolve_artifact_cli_scope`` (NOT ``_resolve_cli_scope``,
-    # which leaks ``cfg.hooks.target_scope`` into the artifact axis —
+    # which leaks ``cfg.hooks.target_tier`` into the artifact axis —
     # ADR-0011 PR-E1 Codex review trip-wire).
     artifact_scope = _resolve_artifact_cli_scope(scope_flag)
 
@@ -977,7 +977,7 @@ def generate_cmd(
     if "settings" in inc:
         click.echo("")
         # Settings has its own (separate from artifact) scope axis — see
-        # ADR-0010. ``_resolve_cli_scope`` consults ``cfg.hooks.target_scope``;
+        # ADR-0010. ``_resolve_cli_scope`` consults ``cfg.hooks.target_tier``;
         # this is intentional for settings and intentionally NOT used for
         # artifacts above.
         scope = _resolve_cli_scope(scope_flag)
@@ -1113,7 +1113,7 @@ def sync_cmd(
     # ADR-0011 PR-E3: resolve the canonical-artifact scope once and thread
     # it through the three include helpers. Defaults to ``project_shared``
     # via ``_resolve_artifact_cli_scope`` (NOT ``_resolve_cli_scope``,
-    # which leaks ``cfg.hooks.target_scope`` into the artifact axis —
+    # which leaks ``cfg.hooks.target_tier`` into the artifact axis —
     # ADR-0011 PR-E1 Codex review trip-wire).
     artifact_scope = _resolve_artifact_cli_scope(scope_flag)
 
@@ -1132,7 +1132,7 @@ def sync_cmd(
     if "settings" in inc:
         click.echo("")
         # Settings has its own (separate from artifact) scope axis — see
-        # ADR-0010. ``_resolve_cli_scope`` consults ``cfg.hooks.target_scope``;
+        # ADR-0010. ``_resolve_cli_scope`` consults ``cfg.hooks.target_tier``;
         # this is intentional for settings and intentionally NOT used for
         # artifacts above.
         scope = _resolve_cli_scope(scope_flag)

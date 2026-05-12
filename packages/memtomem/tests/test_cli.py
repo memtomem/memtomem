@@ -1001,6 +1001,71 @@ class TestConfigUnset:
         load_config_overrides(fresh)
         assert fresh.mmr.enabled is True
 
+    def test_unset_hooks_target_scope_with_only_legacy_persisted(
+        self, isolated, runner: CliRunner
+    ) -> None:
+        """ADR-0017 legacy unset: a config.json that still carries only the
+        legacy ``hooks.target_scope`` (no canonical ``target_tier`` yet) must
+        unset cleanly. Pre-fix the canonical pop raised ``KeyError`` because
+        the branch entered via ``legacy_field in section_data`` but then
+        called ``section_data.pop(field)`` for the missing canonical field.
+
+        Covers both legacy and canonical request spellings — both routes go
+        through ``_canonical_config_key`` and the same pop branch.
+        """
+        import json as _json
+
+        for request_key in ("hooks.target_scope", "hooks.target_tier"):
+            isolated["config_file"].write_text(
+                _json.dumps({"hooks": {"target_scope": "project_local"}}),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(cli, ["config", "unset", request_key])
+            assert result.exit_code == 0, (
+                f"unset({request_key!r}) on legacy-only config must succeed; "
+                f"got exit={result.exit_code}, output={result.output!r}"
+            )
+            assert "Removed" in result.output, (
+                f"unset({request_key!r}) must report removal; output={result.output!r}"
+            )
+            # Both forms wipe the legacy entry; the section is dropped when
+            # empty, matching the existing ``test_unset_removes_empty_section``
+            # behaviour.
+            assert not isolated["config_file"].exists() or "hooks" not in _json.loads(
+                isolated["config_file"].read_text(encoding="utf-8")
+            ), "legacy hooks.target_scope must be removed from config.json"
+
+    def test_set_hooks_target_scope_legacy_spelling_persists_as_target_tier(
+        self, isolated, runner: CliRunner
+    ) -> None:
+        """ADR-0017 legacy set: ``mm config set hooks.target_scope <v>`` is
+        equivalent to ``mm config set hooks.target_tier <v>`` and persists
+        under the canonical key. Sister test to the legacy-unset case above —
+        pins the full set-then-load round-trip end-to-end so the
+        ``_canonical_config_key`` mapping + property setter chain stay wired.
+        """
+        import json as _json
+
+        result = runner.invoke(cli, ["config", "set", "hooks.target_scope", "project_local"])
+        assert result.exit_code == 0, (
+            f"legacy set must succeed; got exit={result.exit_code}, output={result.output!r}"
+        )
+        # Echo line shows the requested key with the canonical spelling in
+        # parentheses so the operator sees the rename in passing.
+        assert "hooks.target_scope" in result.output
+        assert "hooks.target_tier" in result.output
+
+        persisted = _json.loads(isolated["config_file"].read_text(encoding="utf-8"))
+        assert persisted["hooks"] == {"target_tier": "project_local"}, (
+            f"legacy set must persist under the canonical target_tier key, got {persisted!r}"
+        )
+
+        fresh = Mem2MemConfig()
+        load_config_overrides(fresh)
+        assert fresh.hooks.target_tier == "project_local"
+        assert fresh.hooks.target_scope == "project_local"
+
     def test_atomic_write_preserves_original_on_failure(self, tmp_path, monkeypatch):
         import os as _os
 
