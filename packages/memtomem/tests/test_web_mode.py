@@ -328,7 +328,13 @@ def test_html_settings_nav_btns_all_carry_ui_tier_attr() -> None:
 def test_ctx_overview_has_landing_modifier_for_group_dashboard() -> None:
     """ctx-overview is the Agent Integrations group's dashboard card and must
     carry the ``settings-nav-btn--landing`` modifier so CSS gives it visual
-    hierarchy distinct from the leaf rows."""
+    hierarchy distinct from the leaf rows.
+
+    Post-#962 the Agent Integrations sidebar lives under the top-level
+    ``#tab-context-gateway`` panel rather than nested in Settings. The
+    landing-modifier contract moves with the button — assert both the
+    class and the new tab ancestry.
+    """
     html = _read_static("index.html")
     overview_btn = re.search(r'<button[^>]*data-section="ctx-overview"[^>]*>', html)
     assert overview_btn is not None, "ctx-overview button not found in markup"
@@ -337,13 +343,31 @@ def test_ctx_overview_has_landing_modifier_for_group_dashboard() -> None:
         "(group dashboard, not a leaf); "
         f"got: {overview_btn.group(0)[:200]}"
     )
+    # Anchor the button inside the new Gateway tab. ``#tab-context-gateway``
+    # comes BEFORE the ctx-overview match site if the move was applied
+    # correctly; a regression that re-nests the Gateway under Settings
+    # would put ``#tab-settings`` between them.
+    head = html[: overview_btn.start()]
+    gateway_idx = head.rfind('id="tab-context-gateway"')
+    settings_idx = head.rfind('id="tab-settings"')
+    assert gateway_idx >= 0, (
+        "ctx-overview button is not under #tab-context-gateway — promotion regressed (#962)."
+    )
+    assert gateway_idx > settings_idx, (
+        "ctx-overview must live under #tab-context-gateway, but its closest"
+        " ancestor tab id is #tab-settings — restructure regressed (#962)."
+    )
 
 
 def test_other_integration_leaves_lack_landing_modifier() -> None:
     """Symmetric negative pin: only ctx-overview is the landing card. The
     other Agent Integrations leaves (Skills / Custom Commands / Subagents /
     Hooks) must not carry the ``--landing`` modifier, otherwise the visual
-    hierarchy collapses again."""
+    hierarchy collapses again.
+
+    Also pins that each leaf lives under ``#tab-context-gateway`` so a
+    partial revert doesn't silently leave the section back under Settings.
+    """
     html = _read_static("index.html")
     for section in ("ctx-skills", "ctx-commands", "ctx-agents", "hooks-sync"):
         tag = re.search(rf'<button[^>]*data-section="{section}"[^>]*>', html)
@@ -352,6 +376,64 @@ def test_other_integration_leaves_lack_landing_modifier() -> None:
             f"{section} must NOT carry --landing modifier "
             "(reserved for ctx-overview only); "
             f"got: {tag.group(0)[:200]}"
+        )
+        head = html[: tag.start()]
+        gateway_idx = head.rfind('id="tab-context-gateway"')
+        settings_idx = head.rfind('id="tab-settings"')
+        assert gateway_idx > settings_idx, (
+            f"{section} must live under #tab-context-gateway post-#962, not #tab-settings."
+        )
+
+
+def test_gateway_main_tab_button_exists() -> None:
+    """#962: Context Gateway is promoted to a top-level tab. The button
+    sits between Sources and Index in the main nav and uses the
+    ``data-tab="context-gateway"`` hash-driven activation contract.
+    """
+    html = _read_static("index.html")
+    btn = re.search(
+        r'<button[^>]*id="tabbtn-context-gateway"[^>]*>',
+        html,
+    )
+    assert btn is not None, "tabbtn-context-gateway button missing"
+    tag = btn.group(0)
+    assert 'data-tab="context-gateway"' in tag, (
+        f"tabbtn-context-gateway must use data-tab='context-gateway', got: {tag}"
+    )
+    assert 'data-i18n="nav.context_gateway"' in tag, (
+        f"tabbtn-context-gateway must use nav.context_gateway i18n key, got: {tag}"
+    )
+    # Positional check — the button must be after Sources and before Index
+    # so it sits visually next to the related Sources/Index lane.
+    sources_idx = html.find('id="tabbtn-sources"')
+    gateway_idx = html.find('id="tabbtn-context-gateway"')
+    index_idx = html.find('id="tabbtn-index"')
+    assert sources_idx < gateway_idx < index_idx, (
+        "Gateway tab button must sit between Sources and Index in the main nav"
+    )
+
+
+def test_settings_sidebar_no_longer_holds_gateway_buttons() -> None:
+    """#962 negative pin: after the promotion, none of the Gateway
+    sections may still be reachable from the Settings sidebar. A
+    regression that left a stale settings-nav-btn under ``#tab-settings``
+    would re-create the duplicate-entry confusion the move was meant to
+    eliminate.
+    """
+    html = _read_static("index.html")
+    settings_open = html.find('id="tab-settings"')
+    settings_close = html.find('id="tab-context-gateway"')
+    # Settings tab ends before Gateway tab begins (Settings is below in
+    # the file — this guards against the layout being flipped). Use
+    # rfind to locate the actual Settings panel close instead.
+    if settings_close < settings_open:
+        # Layout where Gateway sits above Settings — fall back to a
+        # bounded slice around Settings only.
+        settings_close = len(html)
+    settings_slice = html[settings_open:settings_close]
+    for section in ("ctx-overview", "ctx-skills", "ctx-commands", "ctx-agents", "hooks-sync"):
+        assert f'data-section="{section}"' not in settings_slice, (
+            f"Settings sidebar must not retain {section} button after #962 Gateway promotion."
         )
 
 
