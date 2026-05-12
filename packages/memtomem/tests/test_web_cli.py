@@ -314,3 +314,53 @@ def test_web_cli_flag_overrides_env(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert exit_code == 0, output
     assert mode == "prod"
+
+
+# ---------------------------------------------------------------------------
+# --host non-loopback refusal (RFC #787 stage 2)
+# ---------------------------------------------------------------------------
+
+
+def test_web_non_loopback_host_without_acknowledgement_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`mm web --host 0.0.0.0` without `--allow-remote-ui` must refuse to
+    start. The Web UI is unauthenticated; binding off-loopback by accident
+    silently exposes it to the local network."""
+    monkeypatch.delenv("MEMTOMEM_WEB__MODE", raising=False)
+    runner = CliRunner()
+    with patch("memtomem.cli.web._missing_web_deps", return_value=None):
+        result = runner.invoke(web, ["--host", "0.0.0.0", "--port", "9999"])
+    assert result.exit_code != 0
+    assert "--allow-remote-ui" in result.output
+    # Refusal must happen before the "Starting..." banner — otherwise an
+    # operator might think the server came up.
+    assert "Starting memtomem Web UI" not in result.output
+
+
+def test_web_loopback_host_does_not_require_acknowledgement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default loopback bind needs no acknowledgement flag — the whole
+    point of the gate is that off-loopback is the exceptional case."""
+    monkeypatch.delenv("MEMTOMEM_WEB__MODE", raising=False)
+    exit_code, output, _mode = _run_web_capturing_mode(
+        ["--host", "127.0.0.1", "--port", "9999"], monkeypatch=monkeypatch
+    )
+    assert exit_code == 0, output
+    assert "--allow-remote-ui" not in output
+
+
+def test_web_non_loopback_host_with_acknowledgement_proceeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--allow-remote-ui` unblocks the off-loopback bind. The CSRF
+    allow-list stays empty unless paired with `--trusted-*` flags, so the
+    middleware will still refuse cross-origin writes — that's the point."""
+    monkeypatch.delenv("MEMTOMEM_WEB__MODE", raising=False)
+    exit_code, output, _mode = _run_web_capturing_mode(
+        ["--host", "0.0.0.0", "--port", "9999", "--allow-remote-ui"],
+        monkeypatch=monkeypatch,
+    )
+    assert exit_code == 0, output
+    assert "Starting memtomem Web UI" in output

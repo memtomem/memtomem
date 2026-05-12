@@ -80,6 +80,10 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 @pytest.fixture
 def app(home: Path):
     application = create_app(lifespan=None, mode="dev")
+    # `home` clears all MEMTOMEM_* env vars for pydantic-settings hermeticity,
+    # which also wipes the conftest's autouse `MEMTOMEM_WEB__CSRF_ENFORCE=0`.
+    # Hot-reload tests don't thread CSRF tokens, so set the flag directly.
+    application.state.csrf_enforce = False
 
     # Minimal component mocks — hot-reload path doesn't touch storage/embedder
     # in the read-through case, but some write handlers pass them through.

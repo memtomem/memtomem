@@ -131,6 +131,24 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_browser)
 
 
+@pytest.fixture(autouse=True)
+def _csrf_observe_only_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default CSRF enforcement to OFF for the test suite.
+
+    Production defaults to enforce. Most route tests build TestClients
+    via ``create_app`` and exercise route logic, not the middleware —
+    threading the per-process token + a loopback Host/Origin into every
+    request would be churn for zero security value. The middleware is
+    exhaustively tested in ``tests/test_web_csrf_middleware.py``.
+
+    Tests that need to exercise the production posture either build their
+    own FastAPI app and flip ``app.state.csrf_enforce = True``, or use
+    ``monkeypatch.setenv("MEMTOMEM_WEB__CSRF_ENFORCE", ...)`` directly —
+    both override this autouse default cleanly.
+    """
+    monkeypatch.setenv("MEMTOMEM_WEB__CSRF_ENFORCE", "0")
+
+
 @pytest.fixture
 async def components(tmp_path):
     """Create components with a temporary DB for isolated testing."""

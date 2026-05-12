@@ -61,11 +61,10 @@ _LOOPBACK_BINDS = {"127.0.0.1", "::1", "localhost"}
 @click.option(
     "--allow-remote-ui",
     is_flag=True,
-    help="Acknowledge that --host is exposing the Web UI off-loopback. RFC #787 "
-    "stage 1 (this release) only logs the observation; stage 2 will refuse to "
-    "start without this flag when --host is non-loopback. Pair with "
-    "--trusted-origin / --trusted-host so the eventual enforcement layer has "
-    "an explicit allow-list to read.",
+    help="Acknowledge that --host is exposing the Web UI off-loopback. "
+    "Required when --host is non-loopback (RFC #787) — startup refuses "
+    "otherwise. Pair with --trusted-origin / --trusted-host so the CSRF / "
+    "Origin / Host allow-list has explicit entries for the remote shape.",
 )
 @click.option(
     "--trusted-origin",
@@ -134,21 +133,21 @@ def web(
 
     import asyncio
 
-    click.echo(f"Starting memtomem Web UI at http://{host}:{port} (mode={resolved_mode})")
-
     bind_is_loopback = host in _LOOPBACK_BINDS
     if not bind_is_loopback and not allow_remote_ui:
-        # PR1 (log-only) doesn't refuse to start — that's PR2's flip per
-        # RFC #787 stage 2. But emit a loud warning so an operator who
-        # ran `--host 0.0.0.0` for a screen-share knows the upcoming
-        # release will gate it on `--allow-remote-ui`.
-        click.secho(
-            f"Warning: --host {host} exposes the Web UI off-loopback. RFC #787 "
-            "stage 2 will require --allow-remote-ui (with --trusted-origin / "
-            "--trusted-host) for non-loopback binds. See "
-            "https://github.com/memtomem/memtomem/issues/787 .",
-            fg="yellow",
+        # Refuse to start: a non-loopback bind exposes the unauthenticated
+        # Web UI to anyone who can reach the host on this port. RFC #787
+        # requires explicit acknowledgement via --allow-remote-ui, paired
+        # with --trusted-origin / --trusted-host so the CSRF allow-list
+        # has the remote shape's entries.
+        raise click.UsageError(
+            f"--host {host} exposes the Web UI off-loopback. Pass "
+            "--allow-remote-ui to acknowledge, paired with --trusted-origin "
+            "and --trusted-host so the CSRF/Origin/Host allow-list covers "
+            "the remote shape. See https://github.com/memtomem/memtomem/issues/787 ."
         )
+
+    click.echo(f"Starting memtomem Web UI at http://{host}:{port} (mode={resolved_mode})")
 
     async def after_started(server: uvicorn.Server, timeout: float) -> None:
         if not open_browser:

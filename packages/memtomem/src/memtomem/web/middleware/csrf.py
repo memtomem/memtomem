@@ -1,8 +1,8 @@
 """CSRF / Origin / Host guard middleware for the local Web UI.
 
-Implements the log-only first stage of RFC #787. Three concerns gated at
-one place so the AST registry test in
-``tests/test_web_invariants_registry.py`` sees a single seam:
+Implements RFC #787. Three concerns gated at one place so the AST
+registry test in ``tests/test_web_invariants_registry.py`` sees a single
+seam:
 
 1. ``X-Memtomem-CSRF`` header must match the per-process token in
    ``app.state.csrf_token``. The SPA fetches the token from
@@ -14,12 +14,14 @@ one place so the AST registry test in
    — defends DNS rebinding, where the socket peer is ``127.0.0.1`` but
    the browser's URL bar (and the ``Host:`` header) is attacker-controlled.
 
-Stage 1 (this PR) only **observes** — every check emits a structured
-``web.csrf.observe`` log record carrying the four decision flags
-(``token_ok``, ``origin_ok``, ``host_ok``, ``would_block``) and the
-request shape (method, path) so an operator can grep production logs
-before flipping to enforcement. Stage 2 (RFC PR2) flips ``would_block``
-to a real 403 plus a ``MEMTOMEM_WEB__CSRF_ENFORCE`` env rollback toggle.
+Every gated request also emits a structured ``web.csrf.observe`` log
+record carrying the four decision flags (``token_ok``, ``origin_ok``,
+``host_ok``, ``would_block``) and the request shape (method, path), so
+an operator can audit refusals after the fact. Enforcement is governed
+by ``app.state.csrf_enforce`` (default ``True`` in production via
+``resolve_csrf_enforce_from_env``); setting
+``MEMTOMEM_WEB__CSRF_ENFORCE`` to one of ``0`` / ``false`` / ``no`` /
+``off`` falls back to observe-only for emergency rollback.
 
 Invariants:
 
@@ -100,8 +102,9 @@ class CSRFGuardMiddleware(BaseHTTPMiddleware):
       operator opted in via ``--trusted-host``. May be empty.
     * ``app.state.csrf_trusted_origins`` — set of extra hostnames the
       operator opted in via ``--trusted-origin``. May be empty.
-    * ``app.state.csrf_enforce`` — bool. PR1 leaves this ``False`` so the
-      middleware only observes; PR2 will flip it via env toggle.
+    * ``app.state.csrf_enforce`` — bool. Defaults to ``True`` in production;
+      set ``MEMTOMEM_WEB__CSRF_ENFORCE=0`` for emergency rollback to
+      observe-only.
     """
 
     async def dispatch(self, request: Request, call_next) -> Response:
