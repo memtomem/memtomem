@@ -1733,6 +1733,115 @@ async function _ctxHandleConflict(type, name, userBuffer, staleMtimeNs, detailEl
 
 // -- Detail -------------------------------------------------------------------
 
+// Detail meta header — issue #962. Renders description / scope / layout /
+// mtime above the Canonical|Diff tab strip. Agents and commands also get
+// a parsed-field chip row; skills are intentionally meta-only because the
+// SKILL.md frontmatter has no analogous field set (and skill aux files
+// already surface separately inside the canonical pane).
+function _ctxRenderDetailMetaHeader(type, data) {
+  const fields = data.fields || {};
+  const scope = data.target_scope || '';
+  const layout = data.layout || '';
+  const fileCount = Array.isArray(data.files) ? data.files.length : 0;
+
+  const rows = [];
+  if (fields.description) {
+    rows.push({
+      label: t('settings.ctx.detail.meta_description'),
+      value: fields.description,
+    });
+  }
+  if (scope) {
+    rows.push({
+      label: t('settings.ctx.detail.meta_scope'),
+      value: t(`settings.hooks.target_label_${scope}`) !== `settings.hooks.target_label_${scope}`
+        ? t(`settings.hooks.target_label_${scope}`).replace(/:\s*$/, '')
+        : scope,
+    });
+  }
+  if (layout) {
+    const layoutLabel = layout === 'flat'
+      ? t('settings.ctx.detail.meta_layout_flat')
+      : t('settings.ctx.detail.meta_layout_dir');
+    let value = layoutLabel;
+    if (layout === 'dir' && fileCount > 0) {
+      value += ' · ' + t('settings.ctx.detail.meta_file_count', { count: fileCount });
+    }
+    rows.push({
+      label: t('settings.ctx.detail.meta_layout'),
+      value,
+    });
+  }
+  if (data.mtime_ns) {
+    // Convert BigInt-safe nanosecond epoch string to a millisecond Date.
+    // ``Number(mtime_ns) / 1e6`` is safe — we only need timestamp precision
+    // for human display, not equality.
+    const ts = Number(data.mtime_ns) / 1e6;
+    if (Number.isFinite(ts)) {
+      rows.push({
+        label: t('settings.ctx.detail.meta_last_synced'),
+        value: new Date(ts).toLocaleString(),
+      });
+    }
+  }
+
+  let chipsHtml = '';
+  if (type === 'agents') {
+    const chips = [
+      ['agent_role', fields.role],
+      ['agent_isolation', fields.isolation],
+      ['agent_kind', fields.kind],
+      ['agent_temperature', fields.temperature],
+    ];
+    chipsHtml = _ctxRenderDetailChipsHtml(chips);
+  } else if (type === 'commands') {
+    const tools = Array.isArray(fields.allowed_tools)
+      ? fields.allowed_tools.join(', ')
+      : fields.allowed_tools;
+    const chips = [
+      ['command_argument_hint', fields.argument_hint],
+      ['command_allowed_tools', tools],
+      ['command_model', fields.model],
+    ];
+    chipsHtml = _ctxRenderDetailChipsHtml(chips);
+  }
+
+  if (!rows.length && !chipsHtml) return '';
+
+  let html = '<div class="ctx-detail-meta">';
+  for (const row of rows) {
+    html += '<div class="ctx-detail-meta-row">';
+    html += `<span class="ctx-detail-meta-label">${escapeHtml(row.label)}</span>`;
+    html += `<span class="ctx-detail-meta-value">${escapeHtml(String(row.value))}</span>`;
+    html += '</div>';
+  }
+  if (chipsHtml) {
+    html += chipsHtml;
+  }
+  html += '</div>';
+  return html;
+}
+
+
+function _ctxRenderDetailChipsHtml(specs) {
+  // ``specs`` is an array of ``[i18n_suffix, value]`` pairs. Empty /
+  // missing values are skipped so the chip row stays clean for
+  // partially-populated frontmatter (e.g. an agent without an explicit
+  // temperature setting must not render an empty "Temperature:" chip).
+  const items = specs
+    .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    .map(([key, value]) => {
+      const label = t(`settings.ctx.detail.${key}`);
+      return `<span class="ctx-detail-chip">`
+        + `<span class="ctx-detail-chip-key">${escapeHtml(label)}</span>`
+        + `<span class="ctx-detail-chip-value">${escapeHtml(String(value))}</span>`
+        + `</span>`;
+    });
+  if (!items.length) return '';
+  return `<div class="ctx-detail-chips">${items.join('')}</div>`;
+}
+
+
 async function loadCtxDetail(type, name, opts = {}) {
   // ``opts.autoOpenDiff`` (default false): when the list-click handler
   // sees an "out of sync" runtime on the card, it passes ``true`` here
@@ -1786,6 +1895,13 @@ async function loadCtxDetail(type, name, opts = {}) {
         <button class="btn-ghost btn-danger ctx-detail-delete-btn" data-i18n="settings.ctx.delete">${t('settings.ctx.delete')}</button>
       </div>
     </div>`;
+
+    // Detail meta header (#962). Surfaces fields the backend already
+    // exposes but the canonical pane buried inside the raw file content:
+    // description (from frontmatter), scope tier, layout (flat/dir),
+    // file count (dir layout), and parsed-field chips for agents and
+    // commands. Skills get the meta only — no chip row.
+    html += _ctxRenderDetailMetaHeader(type, data);
 
     html += '<div class="ctx-detail-tabs">';
     html += `<div class="ctx-detail-tab active" data-pane="canonical">${t('settings.ctx.canonical_source')}</div>`;

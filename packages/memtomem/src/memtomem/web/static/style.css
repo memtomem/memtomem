@@ -2282,6 +2282,50 @@ select:focus-visible {
   border-radius: var(--radius); padding: 8px; margin: 0;
   overflow: auto; max-height: 200px;
 }
+/* Per-rule detail panel — #962. Clickable rule rows surface the full
+ * rule body in a shared panel below the lists. Conflict cards keep
+ * their own diff view as the effective detail. */
+.hooks-rule-row { cursor: pointer; }
+.hooks-rule-row:hover { background: var(--bg); }
+.hooks-rule-row--synced { padding: 0.25rem 0.5rem; border-radius: var(--radius); }
+.hooks-rule-detail {
+  margin-top: 1rem;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+.hooks-rule-detail-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin: 4px 0;
+  font-size: 0.82rem;
+}
+.hooks-rule-detail-label {
+  color: var(--muted);
+  font-weight: 600;
+  min-width: 90px;
+  flex-shrink: 0;
+}
+.hooks-rule-detail-value {
+  color: var(--text);
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+.hooks-rule-detail-json {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+  margin: 0;
+  overflow: auto;
+  max-height: 200px;
+  width: 100%;
+}
 
 /* ── Sprint 4: Home Tab ── */
 .home-layout { display: flex; flex-direction: column; gap: 16px; padding: 20px; overflow-y: auto; }
@@ -3373,6 +3417,58 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 
 .ctx-detail { padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); margin-top: 12px; background: var(--surface); }
 .ctx-detail-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+/* Detail meta header — #962. Renders the artifact's description / scope /
+ * layout / mtime in a label-value grid above the Canonical|Diff tabs so
+ * the user can identify the artifact without scanning raw frontmatter. */
+.ctx-detail-meta {
+  margin: 0 0 12px 0;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.82rem;
+}
+.ctx-detail-meta-row {
+  display: flex;
+  gap: 8px;
+  margin: 2px 0;
+  align-items: baseline;
+  overflow-wrap: anywhere;
+}
+.ctx-detail-meta-label {
+  color: var(--muted);
+  font-weight: 600;
+  flex-shrink: 0;
+  min-width: 110px;
+}
+.ctx-detail-meta-value {
+  color: var(--text);
+  word-break: break-word;
+}
+.ctx-detail-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.ctx-detail-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  font-size: 0.75rem;
+}
+.ctx-detail-chip-key {
+  color: var(--muted);
+  font-weight: 600;
+}
+.ctx-detail-chip-value {
+  color: var(--text);
+  font-family: var(--mono);
+}
 .ctx-detail-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
 .ctx-detail-tab { padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; color: var(--muted); font-size: 0.85rem; transition: color 0.15s; }
 .ctx-detail-tab:hover { color: var(--text); }

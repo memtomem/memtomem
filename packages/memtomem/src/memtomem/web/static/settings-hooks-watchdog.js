@@ -18,6 +18,53 @@ function _wdLabel(status) {
 }
 
 // ── Hooks Sync ──
+
+// Registry of hook rules keyed by ``event:matcher`` (or just ``event``
+// when no matcher). Populated on each ``loadHooksSync`` call (#962) so
+// the per-rule detail panel can render without an extra fetch.
+let _hooksRuleRegistry = {};
+
+function _renderHookRuleDetail(key, contentEl) {
+  const entry = _hooksRuleRegistry[key];
+  const panel = contentEl.querySelector('#hooks-rule-detail');
+  if (!panel || !entry) return;
+
+  const rule = entry.rule || {};
+  // Claude Code's rule format: top-level ``matcher`` + ``hooks`` array
+  // of command entries, each with ``type`` / ``command`` / optional
+  // ``timeout`` / etc. Render the union so the user can see exactly
+  // what the hook will execute.
+  const hooks = Array.isArray(rule.hooks) ? rule.hooks : [];
+
+  function _row(label, value) {
+    if (value === undefined || value === null || value === '') return '';
+    return `<div class="hooks-rule-detail-row">`
+      + `<span class="hooks-rule-detail-label">${escapeHtml(label)}</span>`
+      + `<span class="hooks-rule-detail-value">${escapeHtml(String(value))}</span>`
+      + `</div>`;
+  }
+
+  let html = `<div class="hooks-rule-detail-inner">`;
+  html += _row(t('settings.hooks.detail.event'), entry.event);
+  html += _row(t('settings.hooks.detail.matcher'), entry.matcher);
+  for (const h of hooks) {
+    html += _row(t('settings.hooks.detail.type'), h.type);
+    html += _row(t('settings.hooks.detail.command'), h.command);
+    if (h.timeout !== undefined && h.timeout !== null && h.timeout !== '') {
+      html += _row(t('settings.hooks.detail.timeout'), h.timeout);
+    }
+  }
+  html += `<div class="hooks-rule-detail-row">`;
+  html += `<span class="hooks-rule-detail-label">${escapeHtml(t('settings.hooks.detail.rule_json'))}</span>`;
+  html += `<pre class="hooks-rule-detail-json">${escapeHtml(JSON.stringify(rule, null, 2))}</pre>`;
+  html += `</div>`;
+  html += `</div>`;
+
+  panel.innerHTML = html;
+  panel.hidden = false;
+  panel.setAttribute('data-hook-key', key);
+}
+
 async function loadHooksSync() {
   const statusEl = qs('hooks-sync-status');
   const contentEl = qs('hooks-sync-content');
@@ -76,6 +123,18 @@ async function loadHooksSync() {
       return item.matcher ? `${item.event}:${item.matcher}` : item.event;
     }
 
+    // Build a registry of full rule objects keyed by ``event:matcher``.
+    // The per-rule click handler (#962) reads from this registry rather
+    // than a re-fetch — the GET payload already carries the full rule
+    // body for synced + pending entries.
+    _hooksRuleRegistry = {};
+    for (const s of data.hooks.synced) {
+      _hooksRuleRegistry[_ruleLabel(s)] = { ...s, _bucket: 'synced' };
+    }
+    for (const p of data.hooks.pending) {
+      _hooksRuleRegistry[_ruleLabel(p)] = { ...p, _bucket: 'pending' };
+    }
+
     // Conflicts
     if (data.hooks.conflicts.length) {
       html += '<h3 style="margin:1rem 0 0.5rem">Conflicts</h3>';
@@ -95,33 +154,42 @@ async function loadHooksSync() {
       }
     }
 
-    // Pending
+    // Pending — rows are clickable so the per-rule detail panel reveals
+    // the full rule body (event / matcher / command / type / timeout /
+    // raw JSON). The pre-rendered ``hooks-sync-preview`` block is gone —
+    // power users get the same info via Click → Rule JSON.
     if (data.hooks.pending.length) {
       html += '<h3 style="margin:1rem 0 0.5rem">Pending</h3>';
       for (const p of data.hooks.pending) {
         const label = _ruleLabel(p);
-        html += `<div class="hooks-sync-card">
+        html += `<div class="hooks-sync-card hooks-rule-row" data-hook-key="${escapeHtml(label)}" tabindex="0" role="button">
           <div class="hooks-sync-card-header"><strong>${escapeHtml(label)}</strong>
             <span class="badge badge-warning">will be added</span></div>
-          <pre class="hooks-sync-preview">${escapeHtml(JSON.stringify(p.rule, null, 2))}</pre>
         </div>`;
       }
     }
 
-    // Synced. When the entire panel is in_sync the badge above already
-    // says "All hooks are in sync"; repeating "In sync" as a section
-    // heading is redundant copy (#962). Keep the heading only when
-    // mixed state (conflicts/pending alongside synced) makes the
-    // section separator load-bearing.
+    // Synced — rows are clickable so the per-rule detail panel reveals
+    // the full rule body (PR #968). The section ``<h3>`` is dropped when
+    // the entire panel is in_sync (PR #966) because the badge above
+    // already says "All hooks are in sync"; keep the heading when mixed
+    // state (conflicts/pending alongside synced) makes the section
+    // separator load-bearing.
     if (data.hooks.synced.length) {
       if (data.status !== 'in_sync') {
         html += '<h3 style="margin:1rem 0 0.5rem">' + t('settings.hooks.synced') + '</h3>';
       }
-      html += '<div class="text-muted">';
+      html += '<div class="hooks-synced-list text-muted">';
       for (const s of data.hooks.synced) {
-        html += `<div style="padding:0.25rem 0">${escapeHtml(_ruleLabel(s))}</div>`;
+        const label = _ruleLabel(s);
+        html += `<div class="hooks-rule-row hooks-rule-row--synced" data-hook-key="${escapeHtml(label)}" tabindex="0" role="button">${escapeHtml(label)}</div>`;
       }
       html += '</div>';
+    }
+
+    // Shared per-rule detail panel — empty until a row is clicked.
+    if (data.hooks.synced.length || data.hooks.pending.length) {
+      html += `<div id="hooks-rule-detail" class="hooks-rule-detail" hidden></div>`;
     }
 
     if (!html) {
@@ -129,6 +197,20 @@ async function loadHooksSync() {
     }
 
     contentEl.innerHTML = html;
+
+    // Per-rule detail click handler (#962). Synced + pending rows surface
+    // the full rule body inline; conflict cards already render their own
+    // diff view as the effective detail and are intentionally skipped here.
+    contentEl.querySelectorAll('.hooks-rule-row').forEach(row => {
+      const handler = () => _renderHookRuleDetail(row.dataset.hookKey, contentEl);
+      row.addEventListener('click', handler);
+      row.addEventListener('keydown', evt => {
+        if (evt.key === 'Enter' || evt.key === ' ') {
+          evt.preventDefault();
+          handler();
+        }
+      });
+    });
 
     // Resolve buttons
     contentEl.querySelectorAll('.hooks-resolve-btn').forEach(btn => {
