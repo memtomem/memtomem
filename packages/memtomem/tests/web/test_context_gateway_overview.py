@@ -218,6 +218,132 @@ def test_langchange_rerenders_card_label_text(page, mm_web_url: str) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Header (issues #830 / #831): project_root path + detected_runtimes chip strip.
+# ---------------------------------------------------------------------------
+
+_OVERVIEW_WITH_HEADER = {
+    **_HEALTHY_OVERVIEW,
+    "project_root": "/tmp/example-project",
+    "detected_runtimes": [
+        {"name": "claude", "available": True},
+        {"name": "gemini", "available": False},
+        {"name": "codex", "available": False},
+    ],
+}
+
+
+def test_overview_header_renders_project_root_and_runtime_chips(page, mm_web_url: str) -> None:
+    """#830/#831 pin: the overview panel header surfaces the registered
+    project root path and a per-runtime chip strip, with detected runtimes
+    rendered as ``badge-success`` and undetected as ``badge-gray``.
+
+    Undetected chips also carry the
+    ``settings.ctx.runtime_undetected_tooltip`` ``title`` attribute so the
+    "why is this greyed out" question is one hover away on desktop and
+    discoverable via screen reader on assistive tech.
+    """
+    install_default_stubs(page)
+    page.route(
+        "**/api/context/overview",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_OVERVIEW_WITH_HEADER),
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    root_text = (
+        page.locator("#ctx-overview-content .ctx-overview-root-path").text_content() or ""
+    ).strip()
+    assert root_text == "/tmp/example-project", (
+        f"header must render the stubbed project_root; got {root_text!r}"
+    )
+
+    chips = page.locator("#ctx-overview-content .ctx-overview-runtimes [data-runtime]")
+    assert chips.count() == 3, (
+        f"chip strip must include all KNOWN_RUNTIMES (greyed when undetected); got {chips.count()}"
+    )
+
+    claude_chip = page.locator(
+        "#ctx-overview-content .ctx-overview-runtimes [data-runtime='claude']"
+    )
+    claude_classes = (claude_chip.get_attribute("class") or "").split()
+    assert "badge-success" in claude_classes, (
+        f"detected runtime chip must be badge-success; got {claude_classes!r}"
+    )
+
+    gemini_chip = page.locator(
+        "#ctx-overview-content .ctx-overview-runtimes [data-runtime='gemini']"
+    )
+    gemini_classes = (gemini_chip.get_attribute("class") or "").split()
+    assert "badge-gray" in gemini_classes, (
+        f"undetected runtime chip must be badge-gray; got {gemini_classes!r}"
+    )
+    # Tooltip pin: undetected chip exposes a ``title`` attribute so hover
+    # reveals why it's greyed; the i18n key path is what makes this
+    # translatable (EN/KO parity is enforced by ``test_i18n.py``).
+    assert gemini_chip.get_attribute("title"), (
+        "undetected chip must carry a title attribute (runtime_undetected_tooltip)"
+    )
+
+
+def test_overview_header_labels_translate_on_langchange(page, mm_web_url: str) -> None:
+    """The header labels use ``data-i18n`` attrs so ``I18N.applyDOM`` (which
+    only walks data-attributes) handles the EN→KO swap without needing the
+    inline-text re-render path. Cross-pinned with #825: no refetch on toggle.
+
+    The chip names themselves are proper nouns (claude/gemini/codex) and
+    must NOT translate — pinning their text after the toggle guards against
+    a future "translate runtime names too" footgun.
+    """
+    install_default_stubs(page)
+    page.route(
+        "**/api/context/overview",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_OVERVIEW_WITH_HEADER),
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    root_label = page.locator("#ctx-overview-content .ctx-overview-root-label")
+    pre = (root_label.text_content() or "").strip()
+    assert pre == "Project", f"default (EN) header label should be 'Project'; got {pre!r}"
+
+    page.evaluate("async () => { await I18N.setLang('ko'); }")
+    page.wait_for_function(
+        "() => {"
+        "  const el = document.querySelector("
+        "    '#ctx-overview-content .ctx-overview-root-label');"
+        "  return el && el.textContent.trim() === '프로젝트';"
+        "}",
+        timeout=3_000,
+    )
+
+    runtimes_label = (
+        page.locator("#ctx-overview-content .ctx-overview-runtimes-label").text_content() or ""
+    ).strip()
+    assert runtimes_label == "런타임", (
+        f"runtimes label must translate to KO; got {runtimes_label!r}"
+    )
+
+    # Chip names stay as raw runtime identifiers — proper nouns, not labels.
+    claude_text = (
+        page.locator(
+            "#ctx-overview-content .ctx-overview-runtimes [data-runtime='claude']"
+        ).text_content()
+        or ""
+    ).strip()
+    assert claude_text == "claude", (
+        f"runtime chip text must stay as the raw identifier on lang toggle; got {claude_text!r}"
+    )
+
+
 def test_langchange_uses_cache_no_spinner_flash(page, mm_web_url: str) -> None:
     """#825 pin: lang toggle on a healthy mounted dashboard must re-render
     from ``_ctxOverviewCache`` directly — no refetch and, crucially, no

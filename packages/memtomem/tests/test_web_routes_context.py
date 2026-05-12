@@ -90,6 +90,40 @@ class TestOverview:
         assert data["skills"]["total"] >= 1
 
     @pytest.mark.anyio
+    async def test_overview_exposes_project_root(self, client: AsyncClient, tmp_path: Path):
+        r = await client.get("/api/context/overview")
+        data = r.json()
+        assert data["project_root"] == str(tmp_path)
+
+    @pytest.mark.anyio
+    async def test_overview_detected_runtimes_shape(self, client: AsyncClient):
+        r = await client.get("/api/context/overview")
+        data = r.json()
+        runtimes = data["detected_runtimes"]
+        assert isinstance(runtimes, list)
+        # One entry per ``KNOWN_RUNTIMES``; greyed chips for absent runtimes
+        # are part of the contract — the frontend renders them as undetected.
+        names = [r["name"] for r in runtimes]
+        assert names == ["claude", "gemini", "codex"]
+        for entry in runtimes:
+            assert isinstance(entry["available"], bool)
+
+    @pytest.mark.anyio
+    async def test_overview_detected_runtimes_flags_present_surfaces(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        # CLAUDE.md (top-level agent file) → claude detected
+        (tmp_path / "CLAUDE.md").write_text("# x\n", encoding="utf-8")
+        # .gemini/skills/foo/SKILL.md → gemini detected via skill dir
+        gem_skill = tmp_path / ".gemini" / "skills" / "foo"
+        gem_skill.mkdir(parents=True)
+        (gem_skill / SKILL_MANIFEST).write_text("# g\n", encoding="utf-8")
+
+        r = await client.get("/api/context/overview")
+        runtimes = {r["name"]: r["available"] for r in r.json()["detected_runtimes"]}
+        assert runtimes == {"claude": True, "gemini": True, "codex": False}
+
+    @pytest.mark.anyio
     async def test_project_local_overview_visible_only_with_explicit_target_scope(
         self, client: AsyncClient, tmp_path: Path
     ):

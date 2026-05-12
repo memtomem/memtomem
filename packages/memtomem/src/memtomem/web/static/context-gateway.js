@@ -173,7 +173,38 @@ function _renderCtxOverview(data) {
     { key: 'settings', label: t('settings.hooks.title'),        section: 'hooks-sync' },
   ];
 
-  let html = _ctxTierControls('overview');
+  // Issues #830/#831: surface project root and detected runtimes so a "0 skills"
+  // tile isn't ambiguous between "empty project" and "wrong root". Defensive
+  // readers — older _ctxOverviewCache payloads (pre-add) replay through this
+  // path on langchange and would otherwise blow up.
+  const runtimes = Array.isArray(data.detected_runtimes) ? data.detected_runtimes : [];
+  const projectRoot = typeof data.project_root === 'string' ? data.project_root : '';
+  const undetectedTitle = escapeHtml(t('settings.ctx.runtime_undetected_tooltip'));
+  const chips = runtimes.map(rt => {
+    const available = !!rt.available;
+    const cls = available ? 'badge badge-success' : 'badge badge-gray';
+    const title = available ? '' : ` title="${undetectedTitle}"`;
+    const name = escapeHtml(rt.name || '');
+    return `<span class="${cls}"${title} data-runtime="${name}">${name}</span>`;
+  }).join('');
+
+  // Inline ``t()`` text rather than ``data-i18n`` attrs: the langchange
+  // listener applies ``I18N.applyDOM`` first and then re-renders this
+  // panel, so any ``data-i18n`` attr written *during* the re-render would
+  // miss the translation pass and stay on its EN fallback. Tile labels in
+  // this same render path use the same inline-``t()`` convention for the
+  // same ordering reason.
+  let html = `<div class="ctx-overview-header">
+      <div class="ctx-overview-root">
+        <span class="ctx-overview-root-label">${escapeHtml(t('settings.ctx.project_root_label'))}</span>
+        <code class="ctx-overview-root-path">${escapeHtml(projectRoot)}</code>
+      </div>
+      <div class="ctx-overview-runtimes">
+        <span class="ctx-overview-runtimes-label">${escapeHtml(t('settings.ctx.runtimes_label'))}</span>
+        ${chips}
+      </div>
+    </div>`;
+  html += _ctxTierControls('overview');
   html += '<div class="ctx-overview-grid">';
   for (const typ of types) {
       if (typ.devOnly && STATE.uiMode !== 'dev') continue;

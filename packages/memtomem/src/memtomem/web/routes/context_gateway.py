@@ -112,6 +112,47 @@ def _redact_message(message: str) -> str:
     return redacted
 
 
+def _compute_detected_runtimes(project_root: Path) -> list[dict[str, object]]:
+    """Probe each known runtime for any on-disk fan-out surface.
+
+    Returns one entry per runtime in :data:`KNOWN_RUNTIMES` with an
+    ``available`` flag that is the OR across:
+      * top-level agent file (``CLAUDE.md`` / ``GEMINI.md`` / ``AGENTS.md``),
+      * project-scope skill dir (``.claude/skills`` etc.),
+      * project-scope sub-agent dir (``.claude/agents`` etc.),
+      * project-scope command dir (``.claude/commands`` etc., Codex omitted).
+
+    The aggregate "any surface" semantics matches the dashboard chip strip
+    described in #830 — undetected-but-known runtimes still appear so the
+    user can see they exist on the runway, just greyed out.
+
+    Aggregate ``registered_roots`` shape is deferred until ADR-0009 (#829);
+    this endpoint stays single-project until that policy lands.
+    """
+    from memtomem.context._runtime_targets import KNOWN_RUNTIMES
+    from memtomem.context.detector import (
+        AGENT_DIRS,
+        AGENT_FILES,
+        COMMAND_DIRS,
+        SKILL_DIRS,
+    )
+
+    out: list[dict[str, object]] = []
+    for rt in KNOWN_RUNTIMES:
+        probes: list[bool] = []
+        for rel in AGENT_FILES.get(rt, []):
+            probes.append((project_root / rel).exists())
+        for rel in SKILL_DIRS.get(f"{rt}_skills", []):
+            probes.append((project_root / rel).is_dir())
+        for rel in AGENT_DIRS.get(f"{rt}_agents", []):
+            probes.append((project_root / rel).is_dir())
+        cmd = COMMAND_DIRS.get(f"{rt}_commands")
+        if cmd is not None:
+            probes.append((project_root / cmd[0]).is_dir())
+        out.append({"name": rt, "available": any(probes)})
+    return out
+
+
 def _error_payload(exc: BaseException, *, shape: str = "total") -> dict:
     """Build the per-surface error envelope.
 
@@ -232,4 +273,15 @@ async def context_overview(
         logger.exception("diff_settings failed")
         result["settings"] = _error_payload(exc, shape="status")
 
-    return {"target_scope": target_scope, **result}
+    try:
+        detected_runtimes = _compute_detected_runtimes(project_root)
+    except Exception:
+        logger.exception("_compute_detected_runtimes failed")
+        detected_runtimes = []
+
+    return {
+        "target_scope": target_scope,
+        "project_root": str(project_root),
+        "detected_runtimes": detected_runtimes,
+        **result,
+    }
