@@ -347,6 +347,68 @@ def test_user_tier_gates_per_item_edit_and_delete_buttons(page, mm_web_url: str)
         )
 
 
+def test_write_blocked_banner_sits_above_runtime_only_banner(page, mm_web_url: str) -> None:
+    """Ordering invariant when a non-shared tier list contains only
+    runtime-only items: the read-only banner (``.ctx-write-blocked-banner``)
+    must sit ABOVE the runtime-only "Click Import to canonicalize"
+    banner (``.ctx-runtime-only-banner``). Both inserters use
+    ``listEl.insertBefore(_, listEl.firstChild)`` by default — without
+    the explicit anchor in ``_ctxRefreshSectionState``, the
+    later-firing runtime-only banner wins position 0 and tells the
+    user to click an Import button that the write-block gate has
+    already disabled. PR #945 review (P3).
+    """
+    install_default_stubs(page)
+    # Cwd scope with one runtime-only item (canonical_path="") triggers
+    # the runtime-only banner via ``_ctxRefreshSectionState``.
+    runtime_only_skills = {
+        "skills": [
+            {
+                "name": "drift-skill",
+                "canonical_path": "",
+                "runtimes": [
+                    {
+                        "runtime": "claude_skills",
+                        "status": "missing canonical",
+                        "runtime_path": "/srv/cwd/.claude/skills/drift-skill.md",
+                        "runtime_content": "# Drift skill\n",
+                    }
+                ],
+            }
+        ],
+        "scanned_dirs": ["/srv/cwd/.claude/skills/"],
+    }
+    _stub_projects_and_skills(page, skills_payload=runtime_only_skills)
+    page.goto(mm_web_url)
+    _open_skills(page)
+    _switch_tier(page, "user")
+
+    # Wait for both banners to be in the DOM. ``_ctxRefreshSectionState``
+    # runs inside ``_loadScopeGroupItems`` after the cwd scope's items
+    # fetch resolves, so the runtime-only banner is the lagging signal.
+    page.wait_for_selector("#ctx-skills-list .ctx-runtime-only-banner", timeout=5_000)
+    page.wait_for_selector("#ctx-skills-list .ctx-write-blocked-banner", timeout=2_000)
+
+    # Compare DOM positions. ``compareDocumentPosition`` returns 4
+    # (DOCUMENT_POSITION_FOLLOWING) when the right argument follows the
+    # left in tree order. We assert the write-blocked banner precedes
+    # the runtime-only banner.
+    relation = page.evaluate(
+        """() => {
+            const wb = document.querySelector('#ctx-skills-list .ctx-write-blocked-banner');
+            const ro = document.querySelector('#ctx-skills-list .ctx-runtime-only-banner');
+            if (!wb || !ro) return 'missing';
+            // Node.DOCUMENT_POSITION_FOLLOWING === 4
+            return (wb.compareDocumentPosition(ro) & 4) ? 'wb_first' : 'ro_first';
+        }"""
+    )
+    assert relation == "wb_first", (
+        f"write-blocked banner must precede runtime-only banner; got relation={relation!r}. "
+        f"A runtime-only 'Click Import' banner above the read-only banner would tell "
+        f"users to press a button the gate has disabled."
+    )
+
+
 def test_langchange_re_translates_write_blocked_tooltips(page, mm_web_url: str) -> None:
     """The ``title`` attribute on dim write buttons is set via inline
     ``t()`` (not ``data-i18n-title``), so ``I18N.applyDOM`` does not

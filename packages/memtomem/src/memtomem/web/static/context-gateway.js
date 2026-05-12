@@ -1018,7 +1018,15 @@ function _ctxRefreshSectionState(type, cwdItems, scannedDirs) {
     const banner = document.createElement('div');
     banner.className = 'ctx-runtime-only-banner';
     banner.textContent = msg;
-    listEl.insertBefore(banner, listEl.firstChild);
+    // Keep the tier-aware read-only banner (#943) at the very top of
+    // the list — its copy explains *why* the Import button below is
+    // dim, so a runtime-only "Click Import to canonicalize" prompt
+    // landing above it would contradict the gate. Insert this banner
+    // immediately AFTER the write-blocked banner when present;
+    // otherwise fall back to the legacy first-child position.
+    const writeBlocked = listEl.querySelector('.ctx-write-blocked-banner');
+    const anchor = writeBlocked ? writeBlocked.nextSibling : listEl.firstChild;
+    listEl.insertBefore(banner, anchor);
   }
 }
 
