@@ -1185,7 +1185,20 @@ function activateTab(tabName, opts = {}) {
     if (!start) {
       try { start = localStorage.getItem(LAST_SECTION_KEY); } catch {}
     }
+    // Gateway-tab sections live under ``#tab-context-gateway`` now; if the
+    // last-section memory points at one of them, fall back to a settings-tab
+    // section so activating Settings does not silently re-route the user
+    // back to Gateway via the redirect below.
+    if (GATEWAY_SECTIONS.has(start)) start = 'config';
     switchSettingsSection(start || 'config');
+  }
+  if (tabName === 'context-gateway') {
+    let start = opts.sectionOverride || STATE.lastSettingsSection;
+    if (!start) {
+      try { start = localStorage.getItem(LAST_SECTION_KEY); } catch {}
+    }
+    if (!GATEWAY_SECTIONS.has(start)) start = 'ctx-overview';
+    switchSettingsSection(start);
   }
   if (['search', 'timeline'].includes(tabName)) loadNamespaceDropdowns();
 }
@@ -1197,6 +1210,14 @@ const LAST_SECTION_KEY = 'memtomem_last_settings';
 const DEFAULT_NAV_COLLAPSED = { general: false, integrations: false, runtime: true, data: true };
 // Deep-link redirects for renamed/removed sections.
 const LEGACY_SECTION_MAP = { 'harness-watchdog': 'harness-health' };
+// Sections that now live under the top-level Context Gateway tab (#962).
+// ``switchSettingsSection`` routes these to ``#tab-context-gateway`` so
+// every legacy caller — overview tile clicks, Sync All "open settings"
+// CTA, settings-namespaces.js Quick Links — auto-redirects without
+// per-call-site updates.
+const GATEWAY_SECTIONS = new Set([
+  'ctx-overview', 'ctx-skills', 'ctx-commands', 'ctx-agents', 'hooks-sync',
+]);
 
 function loadNavCollapseState() {
   try {
@@ -1250,6 +1271,18 @@ function ensureActiveGroupExpanded(section) {
 
 function switchSettingsSection(sectionName) {
   sectionName = LEGACY_SECTION_MAP[sectionName] || sectionName;
+  // Gateway-tab sections live under ``#tab-context-gateway`` (#962). If
+  // the user is currently on a different main tab, hop into the Gateway
+  // tab first; activateTab will re-enter this function via the
+  // ``sectionOverride`` argument. Guard prevents the infinite recursion
+  // that would otherwise fire when called from activateTab itself.
+  if (GATEWAY_SECTIONS.has(sectionName)) {
+    const currentMainTab = document.querySelector('.tab-btn.active');
+    if (!currentMainTab || currentMainTab.dataset.tab !== 'context-gateway') {
+      activateTab('context-gateway', { sectionOverride: sectionName });
+      return;
+    }
+  }
   // In prod mode, redirect dev-only sections to the first visible one.
   const targetBtn = document.querySelector(
     `.settings-nav-btn[data-section="${sectionName}"]`,

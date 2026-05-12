@@ -804,8 +804,16 @@ window.addEventListener('langchange', () => {
   // ``loadCtxList``) is re-rendered by the ``loadCtxList`` re-issue
   // below — no separate handling needed.
   _ctxRefreshWriteBlockedState();
+  // Gateway sections now live under ``#tab-context-gateway`` (#962). Keep
+  // the legacy ``#tab-settings`` check as a fallback so a partial revert
+  // doesn't silently disable the langchange re-render — drop it once the
+  // sections live only under the Gateway tab.
+  const gatewayTab = document.getElementById('tab-context-gateway');
   const settingsTab = document.getElementById('tab-settings');
-  if (!settingsTab || !settingsTab.classList.contains('active')) return;
+  const hostActive =
+    (gatewayTab && gatewayTab.classList.contains('active'))
+    || (settingsTab && settingsTab.classList.contains('active'));
+  if (!hostActive) return;
 
   const overviewSection = document.getElementById('settings-ctx-overview');
   if (overviewSection && overviewSection.classList.contains('active')) {

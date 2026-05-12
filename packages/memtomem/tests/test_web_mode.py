@@ -8,6 +8,7 @@ Python ``_PROD_ROUTERS`` / ``_DEV_ONLY_ROUTERS`` lists.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -328,7 +329,13 @@ def test_html_settings_nav_btns_all_carry_ui_tier_attr() -> None:
 def test_ctx_overview_has_landing_modifier_for_group_dashboard() -> None:
     """ctx-overview is the Agent Integrations group's dashboard card and must
     carry the ``settings-nav-btn--landing`` modifier so CSS gives it visual
-    hierarchy distinct from the leaf rows."""
+    hierarchy distinct from the leaf rows.
+
+    Post-#962 the Agent Integrations sidebar lives under the top-level
+    ``#tab-context-gateway`` panel rather than nested in Settings. The
+    landing-modifier contract moves with the button — assert both the
+    class and the new tab ancestry.
+    """
     html = _read_static("index.html")
     overview_btn = re.search(r'<button[^>]*data-section="ctx-overview"[^>]*>', html)
     assert overview_btn is not None, "ctx-overview button not found in markup"
@@ -337,13 +344,31 @@ def test_ctx_overview_has_landing_modifier_for_group_dashboard() -> None:
         "(group dashboard, not a leaf); "
         f"got: {overview_btn.group(0)[:200]}"
     )
+    # Anchor the button inside the new Gateway tab. ``#tab-context-gateway``
+    # comes BEFORE the ctx-overview match site if the move was applied
+    # correctly; a regression that re-nests the Gateway under Settings
+    # would put ``#tab-settings`` between them.
+    head = html[: overview_btn.start()]
+    gateway_idx = head.rfind('id="tab-context-gateway"')
+    settings_idx = head.rfind('id="tab-settings"')
+    assert gateway_idx >= 0, (
+        "ctx-overview button is not under #tab-context-gateway — promotion regressed (#962)."
+    )
+    assert gateway_idx > settings_idx, (
+        "ctx-overview must live under #tab-context-gateway, but its closest"
+        " ancestor tab id is #tab-settings — restructure regressed (#962)."
+    )
 
 
 def test_other_integration_leaves_lack_landing_modifier() -> None:
     """Symmetric negative pin: only ctx-overview is the landing card. The
     other Agent Integrations leaves (Skills / Custom Commands / Subagents /
     Hooks) must not carry the ``--landing`` modifier, otherwise the visual
-    hierarchy collapses again."""
+    hierarchy collapses again.
+
+    Also pins that each leaf lives under ``#tab-context-gateway`` so a
+    partial revert doesn't silently leave the section back under Settings.
+    """
     html = _read_static("index.html")
     for section in ("ctx-skills", "ctx-commands", "ctx-agents", "hooks-sync"):
         tag = re.search(rf'<button[^>]*data-section="{section}"[^>]*>', html)
@@ -352,6 +377,127 @@ def test_other_integration_leaves_lack_landing_modifier() -> None:
             f"{section} must NOT carry --landing modifier "
             "(reserved for ctx-overview only); "
             f"got: {tag.group(0)[:200]}"
+        )
+        head = html[: tag.start()]
+        gateway_idx = head.rfind('id="tab-context-gateway"')
+        settings_idx = head.rfind('id="tab-settings"')
+        assert gateway_idx > settings_idx, (
+            f"{section} must live under #tab-context-gateway post-#962, not #tab-settings."
+        )
+
+
+def test_gateway_main_tab_button_exists() -> None:
+    """#962: Context Gateway is promoted to a top-level tab. The button
+    sits between Sources and Index in the main nav and uses the
+    ``data-tab="context-gateway"`` hash-driven activation contract.
+    """
+    html = _read_static("index.html")
+    btn = re.search(
+        r'<button[^>]*id="tabbtn-context-gateway"[^>]*>',
+        html,
+    )
+    assert btn is not None, "tabbtn-context-gateway button missing"
+    tag = btn.group(0)
+    assert 'data-tab="context-gateway"' in tag, (
+        f"tabbtn-context-gateway must use data-tab='context-gateway', got: {tag}"
+    )
+    assert 'data-i18n="nav.context_gateway"' in tag, (
+        f"tabbtn-context-gateway must use nav.context_gateway i18n key, got: {tag}"
+    )
+    # Positional check — the button must be after Sources and before Index
+    # so it sits visually next to the related Sources/Index lane.
+    sources_idx = html.find('id="tabbtn-sources"')
+    gateway_idx = html.find('id="tabbtn-context-gateway"')
+    index_idx = html.find('id="tabbtn-index"')
+    assert sources_idx < gateway_idx < index_idx, (
+        "Gateway tab button must sit between Sources and Index in the main nav"
+    )
+
+
+def test_shortcut_switch_tabs_copy_matches_tab_count() -> None:
+    """#962 review P3 fold: the keyboard-shortcuts help row claims
+    digits 1-N map to the main tabs. The Gateway tab promotion
+    bumped N from 7 to 8 (Home/Search/Sources/Gateway/Index/Tags/
+    Timeline/More). Pin both the digit range row and the per-locale
+    ``shortcut.switch_tabs`` copy so a future tab add/remove can't
+    silently leave a stale digit there.
+    """
+    html = _read_static("index.html")
+    en = json.loads(_read_static("locales/en.json"))
+    ko = json.loads(_read_static("locales/ko.json"))
+
+    # Count the main-nav tab buttons. The shortcut row's digit range
+    # must match the visible tab count so users never see a
+    # number that doesn't actually activate anything.
+    main_tab_buttons = re.findall(
+        r'<button[^>]*class="tab-btn[^"]*"[^>]*data-tab="([^"]+)"',
+        html,
+    )
+    assert len(main_tab_buttons) == 8, (
+        f"Expected 8 top-level tabs after #962 Gateway promotion; got "
+        f"{len(main_tab_buttons)}: {main_tab_buttons}"
+    )
+
+    # Help row literal (rendered fallback before i18n applies).
+    row = re.search(
+        r"<kbd>1</kbd>[^<]*<kbd>([0-9]+)</kbd>",
+        html,
+    )
+    assert row is not None, "shortcut help row missing in markup"
+    assert row.group(1) == "8", (
+        f"Help row digit range must end at 8 (one per top-level tab); "
+        f"got: <kbd>1</kbd>-<kbd>{row.group(1)}</kbd>"
+    )
+
+    for locale_name, locale in (("en", en), ("ko", ko)):
+        copy = locale.get("shortcut.switch_tabs", "")
+        assert "8" in copy and "7" not in copy, (
+            f"{locale_name}.json shortcut.switch_tabs must mention the new "
+            f"tab count of 8 (and not retain the stale 7); got: {copy!r}"
+        )
+
+
+def test_gateway_appears_in_default_tab_selector() -> None:
+    """#962 review P3 fold: the Settings modal's ``#settings-default-tab``
+    dropdown must include the new Gateway tab so users can pick it as
+    their landing tab. Without this entry the Gateway is a top-level
+    tab the user can navigate to but never default to.
+    """
+    html = _read_static("index.html")
+    select_match = re.search(
+        r'<select[^>]*id="settings-default-tab"[^>]*>(.*?)</select>',
+        html,
+        re.DOTALL,
+    )
+    assert select_match is not None, "#settings-default-tab select missing"
+    select_body = select_match.group(1)
+    assert 'value="context-gateway"' in select_body, (
+        "#settings-default-tab must offer context-gateway as a selectable "
+        f"default; got: {select_body!r}"
+    )
+
+
+def test_settings_sidebar_no_longer_holds_gateway_buttons() -> None:
+    """#962 negative pin: after the promotion, none of the Gateway
+    sections may still be reachable from the Settings sidebar. A
+    regression that left a stale settings-nav-btn under ``#tab-settings``
+    would re-create the duplicate-entry confusion the move was meant to
+    eliminate.
+    """
+    html = _read_static("index.html")
+    settings_open = html.find('id="tab-settings"')
+    settings_close = html.find('id="tab-context-gateway"')
+    # Settings tab ends before Gateway tab begins (Settings is below in
+    # the file — this guards against the layout being flipped). Use
+    # rfind to locate the actual Settings panel close instead.
+    if settings_close < settings_open:
+        # Layout where Gateway sits above Settings — fall back to a
+        # bounded slice around Settings only.
+        settings_close = len(html)
+    settings_slice = html[settings_open:settings_close]
+    for section in ("ctx-overview", "ctx-skills", "ctx-commands", "ctx-agents", "hooks-sync"):
+        assert f'data-section="{section}"' not in settings_slice, (
+            f"Settings sidebar must not retain {section} button after #962 Gateway promotion."
         )
 
 
