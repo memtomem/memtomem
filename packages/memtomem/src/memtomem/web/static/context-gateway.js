@@ -406,6 +406,19 @@ function _renderCtxOverview(data) {
   // path on langchange and would otherwise blow up.
   const runtimes = Array.isArray(data.detected_runtimes) ? data.detected_runtimes : [];
   const projectRoot = typeof data.project_root === 'string' ? data.project_root : '';
+  // #952: ``Project: <root>`` is misleading on ``user`` tier — user-scope
+  // canonicals live under ``~/.memtomem/`` (host-global), not the cwd.
+  // Branch the header label + path on ``target_scope`` so the heading
+  // matches the tier the counts are computed against. Defensive default
+  // ``project_shared`` matches the route's query-param default.
+  const targetScope = typeof data.target_scope === 'string' ? data.target_scope : 'project_shared';
+  const isUserTier = targetScope === 'user';
+  const rootLabel = isUserTier
+    ? t('settings.ctx.user_canonical_label')
+    : t('settings.ctx.project_root_label');
+  const rootPath = isUserTier
+    ? t('settings.ctx.user_canonical_path')
+    : projectRoot;
   const undetectedTitle = escapeHtml(t('settings.ctx.runtime_undetected_tooltip'));
   const chips = runtimes.map(rt => {
     const available = !!rt.available;
@@ -443,9 +456,9 @@ function _renderCtxOverview(data) {
   // this same render path use the same inline-``t()`` convention for the
   // same ordering reason.
   let html = `<div class="ctx-overview-header">
-      <div class="ctx-overview-root">
-        <span class="ctx-overview-root-label">${escapeHtml(t('settings.ctx.project_root_label'))}</span>
-        <code class="ctx-overview-root-path">${escapeHtml(projectRoot)}</code>
+      <div class="ctx-overview-root" data-target-scope="${escapeHtml(targetScope)}">
+        <span class="ctx-overview-root-label">${escapeHtml(rootLabel)}</span>
+        <code class="ctx-overview-root-path">${escapeHtml(rootPath)}</code>
       </div>
       <div class="ctx-overview-runtimes">
         <span class="ctx-overview-runtimes-label">${escapeHtml(t('settings.ctx.runtimes_label'))}</span>

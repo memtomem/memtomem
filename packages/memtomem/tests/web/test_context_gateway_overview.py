@@ -344,6 +344,80 @@ def test_overview_header_labels_translate_on_langchange(page, mm_web_url: str) -
     )
 
 
+# ---------------------------------------------------------------------------
+# Tier-aware header (#952): user-tier swap from "Project: <root>" to
+# "User canonical: ~/.memtomem/" — project_root would mislead on user tier
+# since user-scope canonicals are host-global, not cwd-scoped.
+# ---------------------------------------------------------------------------
+
+_OVERVIEW_USER_TIER = {
+    **_HEALTHY_OVERVIEW,
+    "target_scope": "user",
+    "project_root": "/tmp/example-project",
+    "detected_runtimes": [
+        {"name": "claude", "available": True},
+    ],
+}
+
+
+def test_overview_header_user_tier_shows_user_canonical_label(page, mm_web_url: str) -> None:
+    """#952 pin: when ``target_scope=user`` the header must swap from
+    ``Project: <root>`` to ``User canonical: ~/.memtomem/``. User-scope
+    canonicals live under ``~/.memtomem/`` (host-global), so the
+    ``Project:`` framing was misleading on this tier.
+
+    Four pins:
+
+    * positive — label text matches the new ``user_canonical_label`` key
+    * positive — path text matches the new ``user_canonical_path`` key
+    * tier attr — ``data-target-scope="user"`` on ``.ctx-overview-root``
+      so CSS / selector-based tests can pin tier state without parsing
+      visible text (mirrors PR #945's ``data-write-blocked`` shape)
+    * negative — ``project_root`` from the payload must NOT render
+      (defense against a future regression that drops the tier branch
+      but keeps the payload field around).
+    """
+    install_default_stubs(page)
+    page.route(
+        "**/api/context/overview",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_OVERVIEW_USER_TIER),
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    root_label = (
+        page.locator("#ctx-overview-content .ctx-overview-root-label").text_content() or ""
+    ).strip()
+    assert root_label == "User canonical", (
+        f"user-tier header label must read 'User canonical'; got {root_label!r}"
+    )
+
+    root_path = (
+        page.locator("#ctx-overview-content .ctx-overview-root-path").text_content() or ""
+    ).strip()
+    assert root_path == "~/.memtomem/", (
+        f"user-tier header path must read '~/.memtomem/'; got {root_path!r}"
+    )
+
+    root_block = page.locator("#ctx-overview-content .ctx-overview-root")
+    assert root_block.get_attribute("data-target-scope") == "user", (
+        "user-tier header must mark .ctx-overview-root with data-target-scope=user "
+        "(mirrors data-write-blocked from PR #945)"
+    )
+
+    # Negative: project_root from the payload must not leak into the rendered
+    # path. The field is still in the response (route doesn't strip it on
+    # user tier), but the renderer must ignore it on this tier.
+    full_header = page.locator("#ctx-overview-content .ctx-overview-header").text_content() or ""
+    assert "/tmp/example-project" not in full_header, (
+        f"user-tier header must not leak project_root path; got {full_header!r}"
+    )
+
+
 def test_langchange_uses_cache_no_spinner_flash(page, mm_web_url: str) -> None:
     """#825 pin: lang toggle on a healthy mounted dashboard must re-render
     from ``_ctxOverviewCache`` directly — no refetch and, crucially, no
