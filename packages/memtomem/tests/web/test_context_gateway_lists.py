@@ -1243,9 +1243,7 @@ def test_q956_empty_hint_user_tier_paths_to_user_canonical(page, mm_web_url: str
         timeout=3_000,
     )
     page.wait_for_selector("#ctx-skills-list .empty-state", timeout=5_000)
-    hint = (
-        page.locator("#ctx-skills-list .empty-state .empty-state-hint").text_content() or ""
-    )
+    hint = page.locator("#ctx-skills-list .empty-state .empty-state-hint").text_content() or ""
     assert "~/.memtomem/skills" in hint, (
         f"user-tier empty hint should reference ~/.memtomem/skills: {hint!r}"
     )
@@ -1267,9 +1265,7 @@ def test_q956_empty_hint_project_tier_preserves_existing_copy(page, mm_web_url: 
     _open_skills_list(page)
 
     page.wait_for_selector("#ctx-skills-list .empty-state", timeout=5_000)
-    hint = (
-        page.locator("#ctx-skills-list .empty-state .empty-state-hint").text_content() or ""
-    )
+    hint = page.locator("#ctx-skills-list .empty-state .empty-state-hint").text_content() or ""
     assert ".memtomem/skills" in hint, (
         f"project-tier empty hint should reference .memtomem/skills: {hint!r}"
     )
@@ -1308,9 +1304,7 @@ def test_q956_empty_hint_user_tier_ko_locale(page, mm_web_url: str) -> None:
         "}",
         timeout=3_000,
     )
-    hint = (
-        page.locator("#ctx-skills-list .empty-state .empty-state-hint").text_content() or ""
-    )
+    hint = page.locator("#ctx-skills-list .empty-state .empty-state-hint").text_content() or ""
     assert "사용자 canonical" in hint, (
         f"KO user-tier empty hint should contain '사용자 canonical': {hint!r}"
     )
