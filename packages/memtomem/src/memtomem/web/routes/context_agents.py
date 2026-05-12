@@ -48,23 +48,47 @@ _ALL_OPTIONAL_FIELDS = ("tools", "model", "skills", "isolation", "kind", "temper
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
-def _agents_root(project_root: Path) -> Path:
-    return project_root / CANONICAL_AGENT_ROOT
+def _agents_root(project_root: Path, *, scope: TargetScope = "project_shared") -> Path:
+    from memtomem.context.scope_resolver import canonical_artifact_dir
+
+    return canonical_artifact_dir("agents", scope, project_root)
 
 
-def _canonical_agent_path(project_root: Path, raw_name: str) -> Path:
+def _canonical_agent_path(
+    project_root: Path, raw_name: str, *, scope: TargetScope = "project_shared"
+) -> Path:
     """Validate the name via core and return the canonical agent path.
 
     Raises ``InvalidNameError`` (subclass of ``ValueError`` → 400) when the
     name fails the same checks applied in CLI/MCP write paths.
+
+    ``scope`` selects the canonical residency tier (ADR-0016).
     """
     name = validate_name(raw_name, kind="agent")
-    return _agents_root(project_root) / f"{name}.md"
+    return _agents_root(project_root, scope=scope) / f"{name}.md"
 
 
-def _resolve_existing_agent(project_root: Path, raw_name: str):
+def _resolve_existing_agent(
+    project_root: Path, raw_name: str, *, scope: TargetScope = "project_shared"
+):
     name = validate_name(raw_name, kind="agent")
-    return name, resolve_canonical_agent(project_root, name)
+    return name, resolve_canonical_agent(project_root, name, scope=scope)
+
+
+def _reject_non_shared_write(target_scope: TargetScope, action: str) -> None:
+    """Reject writes on non-``project_shared`` tiers with HTTP 400.
+
+    See context_skills.py:_reject_non_shared_write for the rationale.
+    Mirrored here so each route file stays self-contained.
+    """
+    if target_scope != "project_shared":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{action} is supported only on project_shared in this release; "
+                f"got target_scope={target_scope!r}."
+            ),
+        )
 
 
 def _agent_to_dict(agent: SubAgent) -> dict:
@@ -141,8 +165,12 @@ async def list_agents(
 async def read_agent(
     name: str,
     project_root: Path = Depends(get_project_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description="Canonical-residency tier to read from (ADR-0016).",
+    ),
 ) -> dict:
-    name, resolved = _resolve_existing_agent(project_root, name)
+    name, resolved = _resolve_existing_agent(project_root, name, scope=target_scope)
     if resolved is None:
         raise KeyError(name)
     agent_path, layout = resolved
@@ -169,8 +197,12 @@ async def read_agent(
 async def rendered_agent(
     name: str,
     project_root: Path = Depends(get_project_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description="Canonical-residency tier to render (ADR-0016).",
+    ),
 ) -> JSONResponse:
-    name, resolved = _resolve_existing_agent(project_root, name)
+    name, resolved = _resolve_existing_agent(project_root, name, scope=target_scope)
     if resolved is None:
         raise KeyError(name)
     agent_path, layout = resolved
@@ -181,7 +213,7 @@ async def rendered_agent(
     except AgentParseError as exc:
         return JSONResponse(status_code=422, content={"detail": f"Parse error: {exc}"})
 
-    diffs = diff_agents(project_root)
+    diffs = diff_agents(project_root, scope=target_scope)
     status_map: dict[tuple[str, str], str] = {(rt, n): s for rt, n, s in diffs}
 
     runtimes = []
@@ -226,15 +258,20 @@ class AgentCreateRequest(BaseModel):
 async def create_agent(
     body: AgentCreateRequest,
     project_root: Path = Depends(get_project_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description="Canonical-residency tier to create in. Non-shared rejected (#940).",
+    ),
 ) -> dict:
+    _reject_non_shared_write(target_scope, "Create agent")
     name = validate_name(body.name, kind="agent")
 
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                if resolve_canonical_agent(project_root, name) is not None:
+                if resolve_canonical_agent(project_root, name, scope=target_scope) is not None:
                     raise HTTPException(409, detail=f"Agent '{name}' already exists")
-                agent_path = _canonical_agent_path(project_root, name)
+                agent_path = _canonical_agent_path(project_root, name, scope=target_scope)
                 atomic_write_text(agent_path, body.content)
     except TimeoutError:
         raise HTTPException(503, "Agent create timed out — another sync may be in progress")
@@ -260,8 +297,13 @@ async def update_agent(
     name: str,
     body: AgentUpdateRequest,
     project_root: Path = Depends(get_project_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description="Canonical-residency tier to update. Non-shared rejected (#940).",
+    ),
 ) -> JSONResponse:
-    name, resolved = _resolve_existing_agent(project_root, name)
+    _reject_non_shared_write(target_scope, "Update agent")
+    name, resolved = _resolve_existing_agent(project_root, name, scope=target_scope)
     if resolved is None:
         raise KeyError(name)
     agent_path, _layout = resolved
@@ -316,8 +358,13 @@ async def delete_agent(
     name: str,
     cascade: bool = Query(False),
     project_root: Path = Depends(get_project_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description="Canonical-residency tier to delete from. Non-shared rejected (#940).",
+    ),
 ) -> dict:
-    name, resolved = _resolve_existing_agent(project_root, name)
+    _reject_non_shared_write(target_scope, "Delete agent")
+    name, resolved = _resolve_existing_agent(project_root, name, scope=target_scope)
 
     try:
         async with asyncio.timeout(60):
@@ -360,8 +407,12 @@ async def delete_agent(
 async def diff_agent(
     name: str,
     project_root: Path = Depends(get_project_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description="Canonical-residency tier to diff against runtime fan-out (ADR-0016).",
+    ),
 ) -> dict:
-    name, resolved = _resolve_existing_agent(project_root, name)
+    name, resolved = _resolve_existing_agent(project_root, name, scope=target_scope)
 
     canonical_content = None
     if resolved is not None:
@@ -407,7 +458,12 @@ class SyncRequest(BaseModel):
 async def sync_agents(
     body: SyncRequest | None = None,
     project_root: Path = Depends(get_project_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description="Canonical-residency tier to fan out. Non-shared rejected (#940).",
+    ),
 ) -> dict:
+    _reject_non_shared_write(target_scope, "Sync agents")
     on_drop = body.on_drop if body else "warn"
     try:
         async with asyncio.timeout(60):
@@ -448,7 +504,12 @@ class ImportRequest(BaseModel):
 async def import_agents(
     body: ImportRequest | None = None,
     project_root: Path = Depends(get_project_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description="Canonical-residency tier to import into. Non-shared rejected (#940).",
+    ),
 ) -> dict:
+    _reject_non_shared_write(target_scope, "Import agents")
     overwrite = body.overwrite if body else False
     try:
         async with asyncio.timeout(60):
@@ -478,6 +539,10 @@ async def import_agent(
     name: str,
     body: ImportRequest | None = None,
     project_root: Path = Depends(get_project_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description="Canonical-residency tier to import into. Non-shared rejected (#940).",
+    ),
 ) -> dict:
     """Import a single runtime agent into ``.memtomem/agents/``.
 
@@ -486,6 +551,7 @@ async def import_agent(
     import would silently report 0 imported, which is the wrong shape of
     feedback for "you clicked a specific item that doesn't exist").
     """
+    _reject_non_shared_write(target_scope, "Import agent")
     try:
         validate_name(name, kind="agent name")
     except InvalidNameError as exc:

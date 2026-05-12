@@ -277,16 +277,19 @@ def _resolve_agent_under_root(canonical_root: Path, agent_name: str) -> tuple[Pa
     return None
 
 
-def resolve_canonical_agent(project_root: Path, name: str) -> tuple[Path, Layout] | None:
+def resolve_canonical_agent(
+    project_root: Path, name: str, *, scope: TargetScope = "project_shared"
+) -> tuple[Path, Layout] | None:
     """Return the canonical ``(path, layout)`` for ``name`` if it exists.
 
     Directory layout wins when both the legacy flat file and ADR-0008
     directory layout are present. Name validation is intentionally left to
     callers so existing 400 behavior remains at the route/CLI boundary.
+
+    ``scope`` selects the canonical residency tier (ADR-0016). Default
+    ``project_shared`` preserves pre-#940 behavior.
     """
-    return _resolve_agent_under_root(
-        canonical_artifact_dir("agents", "project_shared", project_root), name
-    )
+    return _resolve_agent_under_root(canonical_artifact_dir("agents", scope, project_root), name)
 
 
 def list_canonical_agents(

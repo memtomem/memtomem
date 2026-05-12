@@ -134,22 +134,6 @@ function _ctxWithTargetScope(url) {
   return `${url}${url.includes('?') ? '&' : '?'}${param}`;
 }
 
-// Item-level routes (read/edit/delete/diff/sync/import) currently hardcode
-// the project_shared canonical resolver — see context_skills.py
-// _canonical_skill_dir and siblings in context_agents/commands. Until those
-// routes accept target_scope, gate the surface that would cross tiers and
-// either 404 or mutate a same-named project_shared artifact (review P1 on
-// #940). Reads-only tier filter for now; widen when backend lands scope.
-function _ctxIsReadonlyTier() {
-  return _ctxTargetScope !== 'project_shared';
-}
-
-function _ctxBlockedByTier() {
-  if (!_ctxIsReadonlyTier()) return false;
-  showToast(t('settings.ctx.readonly_tier_tooltip'), 'info');
-  return true;
-}
-
 function _ctxTierControls(type) {
   return `<div class="ctx-tier-filter" data-type="${escapeHtml(type)}" role="group" aria-label="${escapeHtml(t('settings.ctx.tier_filter'))}">
     <button type="button" data-scope="user" class="${_ctxTargetScope === 'user' ? 'active' : ''}">user</button>
@@ -401,16 +385,15 @@ async function loadCtxOverview() {
 window.addEventListener('langchange', () => {
   const btn = document.getElementById('ctx-sync-all-btn');
   if (btn && btn.dataset.runtimeOnly === 'true') {
-    // The Sync All button is also disabled in non-shared tiers (the
-    // ``_ctxBlockedByTier`` click guard catches the press itself, but
-    // the hover tooltip is set here at langchange time too). Mirror the
-    // tier-aware tooltip path that ``_renderCtxOverview`` writes on
-    // initial render — otherwise an EN→KO→EN flip in a non-shared tier
-    // reverts the hover text to the generic "all items runtime-only"
-    // copy, which misreads for project_local drafts (canonical local
-    // items, not runtime-only) and for user-tier items.
-    btn.title = _ctxIsReadonlyTier()
-      ? t('settings.ctx.readonly_tier_tooltip')
+    // ``_renderCtxOverview`` sets ``dataset.runtimeOnly='true'`` in two
+    // cases: (1) project_local tier (canonical drafts have no fan-out)
+    // and (2) all-canonicals-empty for any tier. Mirror its tier-aware
+    // tooltip choice here so an EN→KO→EN locale flip doesn't revert the
+    // hover text to the wrong copy for project_local. User-tier writes
+    // hit the server's HTTP 400 reject path (#940 r3), so they don't
+    // need a special tooltip — the click toast covers that case.
+    btn.title = _ctxTargetScope === 'project_local'
+      ? t('settings.ctx.project_local_no_fanout_tooltip')
       : t('settings.ctx.sync_all_disabled_tooltip');
   }
   const settingsTab = document.getElementById('tab-settings');
@@ -538,12 +521,6 @@ window.addEventListener('langchange', () => {
 // Sync All button
 document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () => {
   const btn = document.getElementById('ctx-sync-all-btn');
-  // Sync routes hardcode the project_shared canonical resolver. On non-shared
-  // tiers the call would fan out the wrong (same-name) project_shared
-  // artifacts. Block before issuing any POST. The project_local-specific
-  // tooltip path below stays for the existing "drafts have no fan-out" UX;
-  // this catch precedes it so user-tier also surfaces the right message.
-  if (_ctxBlockedByTier()) return;
   if (btn.dataset.runtimeOnly === 'true') {
     showToast(t('settings.ctx.sync_all_disabled_tooltip'),
       'info');
@@ -569,7 +546,10 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
       ? ['skills', 'commands', 'agents']
       : ['skills', 'agents'];
     for (const typ of types) {
-      const resp = await fetch(`/api/context/${typ}/sync`, { method: 'POST', headers });
+      const resp = await fetch(
+        _ctxWithTargetScope(`/api/context/${typ}/sync`),
+        { method: 'POST', headers },
+      );
       if (!resp.ok) {
         throw new Error(await _ctxErrorMessageFromResponse(resp, `Sync ${typ} failed`));
       }
@@ -797,19 +777,14 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
     // re-insert the runtime-only banner above the fresh list.
     if (seq !== _ctxListSeq[type]) return;
     const items = data[type] || [];
-    // project_local AND user lists return items, but the detail / rendered
-    // / diff / edit / delete endpoints downstream of loadCtxDetail today
-    // resolve only project_shared canonicals — a click on a draft would
-    // 404 or, worse, open a same-named shared artifact (review P1/P2 on
-    // PR #940). Render those cards as read-only until the detail surface
-    // is tier-aware so the broken affordance is removed at the source.
-    // TODO(#940-followup): thread target_scope through read/rendered/
-    // diff/put/delete and re-enable click navigation for the non-shared
-    // tiers. The same gate widening — user AND project_local both block
-    // — is mirrored on Sync All / Sync / Import / Create via
-    // ``_ctxBlockedByTier`` so write-side affordances stay consistent
-    // with the read-side readonly card.
-    const clickable = _ctxScopeIsServerCwd(scope) && !_ctxIsReadonlyTier();
+    // Cards on the cwd scope are clickable across all tiers — the detail /
+    // rendered / diff / edit / delete endpoints now accept ``target_scope=``
+    // (#940 r3), so a click on a project_local draft opens the project_local
+    // canonical, not a same-named project_shared one. Writes on non-shared
+    // tiers are rejected at the server with HTTP 400 (the route's
+    // ``_reject_non_shared_write`` helper); the JS surfaces those as
+    // toasts via the existing ``err.detail`` path.
+    const clickable = _ctxScopeIsServerCwd(scope);
     container.innerHTML = _ctxRenderItemsHtml(
       items,
       type,
@@ -1033,7 +1008,9 @@ async function _ctxFetchFresh(type, name) {
   // Returns ``{content, mtime_ns}`` from the canonical detail GET, or null
   // on transport / decode failure (toast already shown).
   try {
-    const res = await fetch(`/api/context/${type}/${encodeURIComponent(name)}`);
+    const res = await fetch(
+      _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}`),
+    );
     if (!res.ok) {
       showToast(t('toast.request_failed'), 'error');
       return null;
@@ -1128,11 +1105,14 @@ async function _ctxHandleConflict(type, name, userBuffer, staleMtimeNs, detailEl
   }
   if (choice === 'force') {
     try {
-      const r2 = await fetch(`/api/context/${type}/${encodeURIComponent(name)}`, {
-        method: 'PUT',
-        headers,
-        body: JSON.stringify({ content: userBuffer, mtime_ns: staleMtimeNs, force: true }),
-      });
+      const r2 = await fetch(
+        _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}`),
+        {
+          method: 'PUT',
+          headers,
+          body: JSON.stringify({ content: userBuffer, mtime_ns: staleMtimeNs, force: true }),
+        },
+      );
       if (!r2.ok) {
         const err = await r2.json().catch(() => ({}));
         showToast(err.detail || t('toast.request_failed'), 'error');
@@ -1182,7 +1162,9 @@ async function loadCtxDetail(type, name, opts = {}) {
   panelLoading(detailEl);
 
   try {
-    const res = await fetch(`/api/context/${type}/${encodeURIComponent(name)}`);
+    const res = await fetch(
+      _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}`),
+    );
     if (res.status === 404) {
       if (seq !== _ctxDetailSeq[type]) return;
       detailEl.innerHTML = emptyState('', `"${name}" not found`, t('settings.ctx.no_artifacts_hint'));
@@ -1317,11 +1299,14 @@ async function loadCtxDetail(type, name, opts = {}) {
         const headers = csrf
           ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
           : { 'Content-Type': 'application/json' };
-        const r = await fetch(`/api/context/${type}/${encodeURIComponent(name)}`, {
-          method: 'PUT',
-          headers,
-          body: JSON.stringify({ content, mtime_ns }),
-        });
+        const r = await fetch(
+          _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}`),
+          {
+            method: 'PUT',
+            headers,
+            body: JSON.stringify({ content, mtime_ns }),
+          },
+        );
         if (r.status === 409) {
           await _ctxHandleConflict(type, name, content, mtime_ns, detailEl, headers);
           return;
@@ -1372,7 +1357,9 @@ async function loadCtxDetail(type, name, opts = {}) {
       try {
         const csrf = await ensureCsrfToken();
         const r = await fetch(
-          `/api/context/${type}/${encodeURIComponent(name)}?cascade=${cascade}`,
+          _ctxWithTargetScope(
+            `/api/context/${type}/${encodeURIComponent(name)}?cascade=${cascade}`,
+          ),
           { method: 'DELETE', headers: csrf ? { 'X-Memtomem-CSRF': csrf } : {} },
         );
         if (!r.ok) {
@@ -1435,7 +1422,9 @@ async function _ctxFetchFieldMap(type, name) {
   // diff pane. The diff fetch is the user-facing source of truth here;
   // the field map is supplementary.
   try {
-    const res = await fetch(`/api/context/${type}/${encodeURIComponent(name)}/rendered`);
+    const res = await fetch(
+      _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}/rendered`),
+    );
     if (!res.ok) return null;
     const data = await res.json();
     if (!data || !data.field_map) return null;
@@ -1454,7 +1443,9 @@ async function _ctxLoadDiff(type, name, detailEl) {
     // Diff is required, field map is optional + parallel-fetched. ``Promise.all``
     // would fail the whole pane on a /rendered hiccup; the explicit
     // fail-soft inside ``_ctxFetchFieldMap`` is what we want here.
-    const diffPromise = fetch(`/api/context/${type}/${encodeURIComponent(name)}/diff`);
+    const diffPromise = fetch(
+      _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}/diff`),
+    );
     const fieldMapPromise = _CTX_FIELD_MAP_TYPES.has(type)
       ? _ctxFetchFieldMap(type, name)
       : Promise.resolve(null);
@@ -1517,7 +1508,9 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
   panelLoading(detailEl);
 
   try {
-    const res = await fetch(`/api/context/${type}/${encodeURIComponent(name)}/diff`);
+    const res = await fetch(
+      _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}/diff`),
+    );
     if (!res.ok) {
       throw new Error((await res.json().catch(() => ({}))).detail || `Failed to load ${name}`);
     }
@@ -1561,11 +1554,14 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
       const btn = detailEl.querySelector('.ctx-runtime-only-import');
       btnLoading(btn, true);
       try {
-        const r = await fetch(`/api/context/${type}/${encodeURIComponent(name)}/import`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({}),
-        });
+        const r = await fetch(
+          _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}/import`),
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+          },
+        );
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
           showToast(err.detail || t('toast.request_failed'), 'error');
@@ -1598,10 +1594,6 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
 
 document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
   btn.addEventListener('click', async () => {
-    // Sync route hardcodes the project_shared canonical resolver — see
-    // review P1 on #940. Block before the confirm dialog so non-shared
-    // tiers don't fan out a same-named project_shared artifact by mistake.
-    if (_ctxBlockedByTier()) return;
     const type = btn.dataset.type;
     // Guard against pressing Sync when the cwd has no canonical artifacts —
     // the request would resolve to a `no_canonical_root` skip with an info
@@ -1627,7 +1619,10 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
       const headers = csrf
         ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
         : { 'Content-Type': 'application/json' };
-      const r = await fetch(`/api/context/${type}/sync`, { method: 'POST', headers });
+      const r = await fetch(
+        _ctxWithTargetScope(`/api/context/${type}/sync`),
+        { method: 'POST', headers },
+      );
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
         showToast(err.detail || t('toast.request_failed'), 'error');
@@ -1661,7 +1656,6 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
 
 document.querySelectorAll('.ctx-import-btn').forEach(btn => {
   btn.addEventListener('click', async () => {
-    if (_ctxBlockedByTier()) return;
     const type = btn.dataset.type;
     // Overwrite is opt-in: the default skip-when-canonical-exists rule
     // protects user-maintained canonicals from a stray Import wiping
@@ -1683,7 +1677,7 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
     const overwrite = !!(result.extras && result.extras.overwrite);
     btnLoading(btn, true);
     try {
-      const r = await fetch(`/api/context/${type}/import`, {
+      const r = await fetch(_ctxWithTargetScope(`/api/context/${type}/import`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ overwrite }),
@@ -1728,7 +1722,6 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
 
 document.querySelectorAll('.ctx-create-btn').forEach(btn => {
   btn.addEventListener('click', () => {
-    if (_ctxBlockedByTier()) return;
     const type = btn.dataset.type;
     const listEl = qs(`ctx-${type}-list`);
     if (listEl.querySelector('.ctx-create-form')) return;
@@ -1753,7 +1746,7 @@ document.querySelectorAll('.ctx-create-btn').forEach(btn => {
       const submitBtn = form.querySelector('.ctx-create-submit');
       btnLoading(submitBtn, true);
       try {
-        const r = await fetch(`/api/context/${type}`, {
+        const r = await fetch(_ctxWithTargetScope(`/api/context/${type}`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name: nameInput, content }),

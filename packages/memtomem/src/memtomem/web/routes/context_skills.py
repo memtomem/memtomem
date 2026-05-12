@@ -43,10 +43,39 @@ router = APIRouter(tags=["context-skills"])
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
-def _canonical_skill_dir(project_root: Path, raw_name: str) -> Path:
-    """Validate the name via core and return the canonical skill directory."""
+def _canonical_skill_dir(
+    project_root: Path, raw_name: str, *, scope: TargetScope = "project_shared"
+) -> Path:
+    """Validate the name via core and return the canonical skill directory.
+
+    ``scope`` selects the canonical residency tier (ADR-0011 PR-E3 / ADR-0016).
+    Default ``project_shared`` preserves pre-#940 behavior.
+    """
     name = validate_name(raw_name, kind="skill")
-    return canonical_skills_root(project_root) / name
+    return canonical_skills_root(project_root, scope=scope) / name
+
+
+def _reject_non_shared_write(target_scope: TargetScope, action: str) -> None:
+    """Reject writes on non-``project_shared`` tiers with HTTP 400.
+
+    Reads honor every tier (the canonical content differs per scope), but
+    write/sync/import endpoints stay on ``project_shared`` for v1 — the
+    multi-scope write contract is intentionally deferred to a follow-up so
+    each tier's authoring policy (draft vs runtime fan-out vs user-share)
+    can be designed deliberately. Passing the param explicitly + rejecting
+    here is preferred over silently overriding the client's selection,
+    because silent override is exactly the cross-tier crossover #940 P1
+    flagged ("mutates a same-named project_shared artifact while the UI is
+    showing a user/local row").
+    """
+    if target_scope != "project_shared":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{action} is supported only on project_shared in this release; "
+                f"got target_scope={target_scope!r}."
+            ),
+        )
 
 
 def _safe_rel(p: Path, project_root: Path) -> str:
@@ -123,9 +152,13 @@ async def list_skills(
 async def read_skill(
     name: str,
     project_root: Path = Depends(get_project_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description="Canonical-residency tier to read from (ADR-0016).",
+    ),
 ) -> dict:
     """Read a canonical skill's SKILL.md content and list auxiliary files."""
-    skill_dir = _canonical_skill_dir(project_root, name)
+    skill_dir = _canonical_skill_dir(project_root, name, scope=target_scope)
 
     manifest = skill_dir / SKILL_MANIFEST
     if not manifest.is_file():
@@ -161,9 +194,14 @@ class SkillCreateRequest(BaseModel):
 async def create_skill(
     body: SkillCreateRequest,
     project_root: Path = Depends(get_project_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description="Canonical-residency tier to create in. Non-shared rejected (#940).",
+    ),
 ) -> dict:
     """Create a new canonical skill."""
-    skill_dir = _canonical_skill_dir(project_root, body.name)
+    _reject_non_shared_write(target_scope, "Create skill")
+    skill_dir = _canonical_skill_dir(project_root, body.name, scope=target_scope)
 
     try:
         async with asyncio.timeout(60):
@@ -197,9 +235,14 @@ async def update_skill(
     name: str,
     body: SkillUpdateRequest,
     project_root: Path = Depends(get_project_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description="Canonical-residency tier to update. Non-shared rejected (#940).",
+    ),
 ) -> JSONResponse:
     """Update a canonical skill's SKILL.md (mtime-guarded, atomic, locked)."""
-    skill_dir = _canonical_skill_dir(project_root, name)
+    _reject_non_shared_write(target_scope, "Update skill")
+    skill_dir = _canonical_skill_dir(project_root, name, scope=target_scope)
     manifest = skill_dir / SKILL_MANIFEST
     if not manifest.is_file():
         raise KeyError(name)
@@ -247,12 +290,17 @@ async def delete_skill(
     name: str,
     cascade: bool = Query(False),
     project_root: Path = Depends(get_project_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description="Canonical-residency tier to delete from. Non-shared rejected (#940).",
+    ),
 ) -> dict:
     """Delete a canonical skill, optionally cascading to runtime copies.
 
     Idempotent: missing canonical directory returns ``deleted: []``.
     """
-    skill_dir = _canonical_skill_dir(project_root, name)
+    _reject_non_shared_write(target_scope, "Delete skill")
+    skill_dir = _canonical_skill_dir(project_root, name, scope=target_scope)
 
     try:
         async with asyncio.timeout(60):
@@ -294,9 +342,13 @@ async def delete_skill(
 async def diff_skill(
     name: str,
     project_root: Path = Depends(get_project_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description="Canonical-residency tier to diff against runtime fan-out (ADR-0016).",
+    ),
 ) -> dict:
     """Per-runtime diff for a single skill (returns text content if out of sync)."""
-    skill_dir = _canonical_skill_dir(project_root, name)
+    skill_dir = _canonical_skill_dir(project_root, name, scope=target_scope)
 
     canonical_manifest = skill_dir / SKILL_MANIFEST
     canonical_content = None
@@ -345,8 +397,17 @@ async def diff_skill(
 @router.post("/context/skills/sync")
 async def sync_skills(
     project_root: Path = Depends(get_project_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description=(
+            "Canonical-residency tier to fan out. Non-shared rejected — "
+            "project_local has no runtime fan-out per ADR-0011 §3, and user-tier "
+            "sync is deferred to a follow-up (#940)."
+        ),
+    ),
 ) -> dict:
     """Fan out canonical skills to all runtimes."""
+    _reject_non_shared_write(target_scope, "Sync skills")
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
@@ -378,8 +439,13 @@ class ImportRequest(BaseModel):
 async def import_skills(
     body: ImportRequest | None = None,
     project_root: Path = Depends(get_project_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description="Canonical-residency tier to import into. Non-shared rejected (#940).",
+    ),
 ) -> dict:
     """Import runtime skills into canonical .memtomem/skills/."""
+    _reject_non_shared_write(target_scope, "Import skills")
     overwrite = body.overwrite if body else False
     try:
         async with asyncio.timeout(60):
@@ -406,6 +472,10 @@ async def import_skill(
     name: str,
     body: ImportRequest | None = None,
     project_root: Path = Depends(get_project_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description="Canonical-residency tier to import into. Non-shared rejected (#940).",
+    ),
 ) -> dict:
     """Import a single runtime skill into ``.memtomem/skills/``.
 
@@ -414,6 +484,7 @@ async def import_skill(
     section import would silently report 0 imported, which is the wrong
     shape of feedback for "you clicked a specific item that doesn't exist").
     """
+    _reject_non_shared_write(target_scope, "Import skill")
     try:
         validate_name(name, kind="skill name")
     except InvalidNameError as exc:

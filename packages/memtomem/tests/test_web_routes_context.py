@@ -1364,3 +1364,131 @@ class TestImportOneAgent:
     async def test_400_on_invalid_name(self, client: AsyncClient):
         r = await client.post("/api/context/agents/-bad/import", json={})
         assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# target_scope plumbing through item routes (#940 r3)
+#
+# Reads honor every tier; writes (create/update/delete/sync/import) accept
+# the param but reject anything other than ``project_shared`` with HTTP 400
+# via ``_reject_non_shared_write``. Pins the contract from both sides so a
+# regression on either gate shows up immediately.
+# ---------------------------------------------------------------------------
+
+
+def _make_local_skill(tmp_path: Path, name: str, content: str = "# Local\n") -> Path:
+    skill_dir = tmp_path / ".memtomem" / "skills.local" / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / SKILL_MANIFEST).write_text(content, encoding="utf-8")
+    return skill_dir
+
+
+def _make_local_agent(tmp_path: Path, name: str, content: str = _AGENT_CONTENT) -> Path:
+    agent_dir = tmp_path / ".memtomem" / "agents.local"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    agent_file = agent_dir / f"{name}.md"
+    agent_file.write_text(content, encoding="utf-8")
+    return agent_file
+
+
+def _make_local_command(tmp_path: Path, name: str, content: str = _CMD_CONTENT) -> Path:
+    cmd_dir = tmp_path / ".memtomem" / "commands.local"
+    cmd_dir.mkdir(parents=True, exist_ok=True)
+    cmd_file = cmd_dir / f"{name}.md"
+    cmd_file.write_text(content, encoding="utf-8")
+    return cmd_file
+
+
+class TestSkillTargetScopePlumbing:
+    @pytest.mark.anyio
+    async def test_read_project_local_returns_local_canonical(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        _make_skill(tmp_path, "twin", content="# shared\n")
+        _make_local_skill(tmp_path, "twin", content="# local draft\n")
+
+        shared = await client.get("/api/context/skills/twin")
+        assert shared.status_code == 200
+        assert "# shared" in shared.json()["content"]
+
+        local = await client.get(
+            "/api/context/skills/twin", params={"target_scope": "project_local"}
+        )
+        assert local.status_code == 200
+        assert "# local draft" in local.json()["content"]
+
+    @pytest.mark.anyio
+    async def test_create_rejects_non_shared(self, client: AsyncClient):
+        r = await client.post(
+            "/api/context/skills",
+            params={"target_scope": "project_local"},
+            json={"name": "draft", "content": "# x\n"},
+        )
+        assert r.status_code == 400
+        assert "project_shared" in r.json()["detail"]
+
+    @pytest.mark.anyio
+    async def test_sync_rejects_non_shared(self, client: AsyncClient):
+        r = await client.post("/api/context/skills/sync", params={"target_scope": "user"})
+        assert r.status_code == 400
+
+
+class TestAgentTargetScopePlumbing:
+    @pytest.mark.anyio
+    async def test_read_project_local_returns_local_canonical(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        _make_agent(tmp_path, "twin", _AGENT_CONTENT.replace("Code review agent", "shared agent"))
+        _make_local_agent(
+            tmp_path, "twin", _AGENT_CONTENT.replace("Code review agent", "local draft agent")
+        )
+
+        shared = await client.get("/api/context/agents/twin")
+        assert shared.status_code == 200
+        assert "shared agent" in shared.json()["content"]
+
+        local = await client.get(
+            "/api/context/agents/twin", params={"target_scope": "project_local"}
+        )
+        assert local.status_code == 200
+        assert "local draft agent" in local.json()["content"]
+
+    @pytest.mark.anyio
+    async def test_delete_rejects_non_shared(self, client: AsyncClient, tmp_path: Path):
+        _make_local_agent(tmp_path, "draft")
+        r = await client.delete(
+            "/api/context/agents/draft", params={"target_scope": "project_local"}
+        )
+        assert r.status_code == 400
+
+
+class TestCommandTargetScopePlumbing:
+    @pytest.mark.anyio
+    async def test_read_project_local_returns_local_canonical(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        _make_command(tmp_path, "twin", _CMD_CONTENT.replace("Review code", "shared cmd"))
+        _make_local_command(
+            tmp_path, "twin", _CMD_CONTENT.replace("Review code", "local draft cmd")
+        )
+
+        shared = await client.get("/api/context/commands/twin")
+        assert shared.status_code == 200
+        assert "shared cmd" in shared.json()["content"]
+
+        local = await client.get(
+            "/api/context/commands/twin", params={"target_scope": "project_local"}
+        )
+        assert local.status_code == 200
+        assert "local draft cmd" in local.json()["content"]
+
+    @pytest.mark.anyio
+    async def test_update_rejects_non_shared(self, client: AsyncClient, tmp_path: Path):
+        _make_local_command(tmp_path, "draft")
+        # Need an mtime_ns; doesn't matter — the gate fires before mtime check.
+        r = await client.put(
+            "/api/context/commands/draft",
+            params={"target_scope": "user"},
+            json={"content": "# x\n", "mtime_ns": "0"},
+        )
+        assert r.status_code == 400

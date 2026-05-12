@@ -276,17 +276,15 @@ def test_context_list_card_renders_project_local_tier_badge_with_annotation(
     assert card_name.locator(".badge-tier--project_local").count() == 1
 
 
-def test_context_list_non_shared_tier_renders_cards_readonly(page, mm_web_url: str) -> None:
-    """Cards on non-shared tier render readonly with no click handler (P1 #940).
+def test_context_list_non_shared_tier_click_threads_target_scope(page, mm_web_url: str) -> None:
+    """Card click on a non-shared tier hits ``?target_scope=...`` (P1 #940 r3).
 
-    Item-level GET/PUT/DELETE/diff/import routes hardcode the project_shared
-    canonical resolver (``context_skills.py::_canonical_skill_dir`` and
-    siblings). On user / project_local tiers a wired-up click would either
-    404 or, worse, open a same-named project_shared artifact. The
-    ``clickable`` gate in ``_loadScopeGroupItems`` (widened to cover both
-    non-shared tiers, not just project_local) decorates cards with
-    ``ctx-card--readonly`` and skips listener attachment so the broken
-    affordance is removed at the source.
+    Item-level routes now accept ``target_scope`` (skills/agents/commands
+    read/diff/rendered honor every tier; create/update/delete/sync/import
+    reject non-shared with HTTP 400 via ``_reject_non_shared_write``). This
+    pins the round-trip: a click on a project_local card MUST fire
+    ``GET /api/context/skills/draft-skill?target_scope=project_local`` so the
+    backend opens the project_local canonical (not the same-name shared one).
     """
     install_default_stubs(page)
     # The shared ``_stub_*`` helpers register patterns without trailing ``**``
@@ -321,22 +319,24 @@ def test_context_list_non_shared_tier_renders_cards_readonly(page, mm_web_url: s
         ),
     )
 
-    # Counter-route on the item detail URL. ``install_default_stubs`` already
-    # registered ``**/api/**`` as a catch-all, but last-route-wins lets us
-    # observe the specific URL the click would hit. An empty list at the end
-    # of the test proves the gate suppressed the GET entirely.
     detail_calls: list[str] = []
 
     def _on_detail(route):
         detail_calls.append(route.request.url)
-        route.fulfill(status=200, content_type="application/json", body="{}")
+        # Return a minimal valid detail payload so loadCtxDetail doesn't error.
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {"name": "draft-skill", "content": "# draft\n", "mtime_ns": "0", "files": []}
+            ),
+        )
 
     page.route("**/api/context/skills/draft-skill**", _on_detail)
 
     page.goto(mm_web_url)
     _open_skills_list(page)
 
-    # Switch tier via the list's filter row — same path a real user takes.
     page.locator("#ctx-skills-list .ctx-tier-filter button[data-scope='project_local']").click()
     page.wait_for_function(
         "() => {"
@@ -346,35 +346,28 @@ def test_context_list_non_shared_tier_renders_cards_readonly(page, mm_web_url: s
         "}",
         timeout=3_000,
     )
-    # Re-render populates the cwd scope group's items lazily on open;
-    # the cwd group is open by default. Wait for the card to land.
     page.wait_for_selector(
         "#ctx-skills-list details[data-scope-id='cwd-scope'] .ctx-card",
         timeout=5_000,
     )
 
     card = page.locator("#ctx-skills-list details[data-scope-id='cwd-scope'] .ctx-card").first
-    # Cards on non-shared tier carry the readonly marker class. CSS uses this
-    # to dim the affordance; the JS uses the same ``clickable`` flag to skip
-    # listener attachment, so a click yields no behavior at all.
-    card_classes = card.get_attribute("class") or ""
-    assert "ctx-card--readonly" in card_classes, (
-        f"non-shared-tier card should carry ctx-card--readonly, got class={card_classes!r}"
-    )
-
     card.click()
 
-    # No item-detail fetch fires, and the card never gains active state.
-    # ``wait_for_timeout(250)`` gives any leaked handler a chance to flush —
-    # the assertion fails fast (single tick) on regression rather than
-    # depending on the test runner's natural cadence.
-    page.wait_for_timeout(250)
-    assert detail_calls == [], (
-        f"item-detail GET must be blocked on non-shared tier, got: {detail_calls}"
+    page.wait_for_function(
+        "() => window.__lastDetailUrl !== undefined || true",
+        timeout=500,
     )
-    card_classes_post = card.get_attribute("class") or ""
-    assert "active" not in card_classes_post, (
-        f"unwired click must not flip the card to active, got class={card_classes_post!r}"
+    # The card MUST be clickable on non-shared tiers — readonly-card workaround
+    # is gone now that routes honor target_scope.
+    card_classes = card.get_attribute("class") or ""
+    assert "ctx-card--readonly" not in card_classes, (
+        f"non-shared-tier card should be clickable now (#940 r3), got class={card_classes!r}"
+    )
+    # The detail fetch fires with the tier appended.
+    assert len(detail_calls) == 1, f"expected 1 detail call, got {detail_calls}"
+    assert "target_scope=project_local" in detail_calls[0], (
+        f"detail URL should carry target_scope=project_local, got {detail_calls[0]}"
     )
 
 

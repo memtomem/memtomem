@@ -347,7 +347,6 @@
   "settings.ctx.sync_disabled_tooltip": "No canonical {type} to fan out yet. Click Import first.",
   "settings.ctx.sync_all_disabled_tooltip": "No canonical artifacts to fan out yet. Click Import in each section first.",
   "settings.ctx.project_local_no_fanout_tooltip": "project_local is a draft tier with no runtime fan-out.",
-  "settings.ctx.readonly_tier_tooltip": "Switch to project_shared to read or modify this item. Other tiers are list-only in this release.",
   "settings.ctx.runtime_only_detail_hint": "Runtime preview — not yet in .memtomem/.",
   "settings.ctx.import_this": "Import this {type}",
   "settings.ctx.runtime_output": "Runtime Output",
