@@ -973,10 +973,14 @@ function panelLoading(container) {
 
 // ── A5: Empty State ──
 // Owns its `.empty-state` wrapper — callers must NOT add their own.
-function emptyState(icon, message, hint) {
+// cta is structured as { href, label } for safe escaping.
+function emptyState(icon, message, hint, cta) {
   const i = icon ? `<span class="empty-state-icon">${icon}</span>` : '';
   const h = hint ? `<span class="empty-state-hint">${escapeHtml(hint)}</span>` : '';
-  return `<div class="empty-state">${i}<span>${escapeHtml(message)}</span>${h}</div>`;
+  const c = cta
+    ? `<a class="empty-state-cta" href="${escapeHtml(cta.href)}" target="_blank" rel="noopener">${escapeHtml(cta.label)} →</a>`
+    : '';
+  return `<div class="empty-state">${i}<span>${escapeHtml(message)}</span>${h}${c}</div>`;
 }
 
 // ── A1: Toast Notifications ──
@@ -1764,7 +1768,7 @@ function _renderNsChart(namespaces) {
 function _renderHomeRecent(allSources) {
   const recentList = qs('home-recent-list');
   if (!allSources.length) {
-    recentList.innerHTML = '<div class="empty-state">' + emptyState('📁', 'No sources indexed yet', 'Add files from the Index tab') + '</div>';
+    recentList.innerHTML = emptyState('📁', 'No sources indexed yet', 'Add files from the Index tab');
     return;
   }
 
@@ -3197,7 +3201,7 @@ function _renderSourcesStats(activeVendor) {
 function hideBrowser() {
   hide(qs('chunks-browser-content'));
   const browser = qs('chunks-browser');
-  browser.innerHTML = '<div class="empty-state">' + emptyState('📄', 'Select a source to browse its chunks') + '</div>';
+  browser.innerHTML = emptyState('📄', 'Select a source to browse its chunks');
 }
 
 // ── Memory-mode source tree ─────────────────────────────────────────

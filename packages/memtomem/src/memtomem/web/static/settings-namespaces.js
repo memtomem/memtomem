@@ -189,8 +189,10 @@ async function loadNamespacesTab() {
     const data = await api('GET', '/api/namespaces');
     const namespaces = data.namespaces || [];
     if (!namespaces.length) {
-      const cta = `<a class="empty-state-cta" href="https://github.com/memtomem/memtomem/blob/main/docs/guides/configuration.md#namespace" target="_blank" rel="noopener">${escapeHtml(t('settings.ns.empty.cta'))} →</a>`;
-      list.innerHTML = `<div class="empty-state">${emptyState('🗂', t('settings.ns.empty.title'), t('settings.ns.empty.body'))}${cta}</div>`;
+      list.innerHTML = emptyState('🗂', t('settings.ns.empty.title'), t('settings.ns.empty.body'), {
+        href: 'https://github.com/memtomem/memtomem/blob/main/docs/guides/configuration.md#namespace',
+        label: t('settings.ns.empty.cta'),
+      });
       return;
     }
     list.innerHTML = '';
