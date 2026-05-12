@@ -76,8 +76,8 @@ Labels that affect triage:
 
 - `do-not-stale`, `pinned`, `release`, `security`, `needs-maintainer-decision`
   — exempt from the stale sweep.
-- `needs-cla` — CLA Assistant has not yet recorded a signature; merge is
-  blocked until the bot re-checks (see CLA section below).
+- `needs-cla` — the CLA workflow has not yet recorded a signature; merge is
+  blocked until the workflow re-checks (see CLA section below).
 - `good-first-issue` — scoped to ≤3 files and no public API changes; check
   the comments for an existing claim before starting work.
 
@@ -173,7 +173,7 @@ the flag never breaks an existing text-path caller.
 ## Contributor License Agreement (CLA)
 
 Before we can merge your first pull request, you need to sign the
-[Contributor License Agreement](CLA.md). The CLA Assistant bot will
+[Contributor License Agreement](CLA.md). The CLA workflow will
 automatically comment on your PR with instructions — you sign by replying
 with:
 

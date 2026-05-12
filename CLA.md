@@ -123,7 +123,7 @@ respect.
 
 ## How to sign
 
-When you open a pull request, the CLA Assistant bot will comment with
+When you open a pull request, the CLA workflow will comment with
 instructions. To sign the CLA, reply on your pull request with:
 
 > I have read the CLA Document and I hereby sign the CLA

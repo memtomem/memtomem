@@ -4,22 +4,36 @@ on:
   issue_comment:
     types: [created]
   pull_request_target:
-    types: [opened, closed, synchronize]
+    types: [opened, reopened, synchronize]
 
 # Explicit permissions — repository default may be read-only.
 permissions:
-  actions: write
   contents: write
-  pull-requests: write
-  statuses: write
+  issues: write
+  pull-requests: read
 
 jobs:
   CLAAssistant:
     runs-on: ubuntu-latest
     steps:
-      - name: "CLA Assistant"
-        if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
-        uses: contributor-assistant/github-action@v2.6.1
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Check CLA signatures
+        if: >-
+          ${{
+            github.event_name == 'pull_request_target' ||
+            (
+              github.event.issue.pull_request &&
+              (
+                github.event.comment.body == 'recheck' ||
+                github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'
+              )
+            )
+          }}
+        run: python3 .github/cla-check.py
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # PAT used to push the signature JSON. The target branch
@@ -27,14 +41,8 @@ jobs:
           # permission is required — a plain repo-scoped token works.
           # See #87 for the prior history when signatures lived on `main`.
           PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-        with:
-          path-to-signatures: 'signatures/v1/cla.json'
-          path-to-document: 'https://github.com/memtomem/memtomem/blob/main/CLA.md'
-          branch: 'cla-signatures'
-          allowlist: dependabot[bot],memtomem
-          custom-pr-sign-comment: 'I have read the CLA Document and I hereby sign the CLA'
-          custom-notsigned-prcomment: |
-            Thank you for your contribution! Before we can merge, please sign the [Contributor License Agreement](https://github.com/memtomem/memtomem/blob/main/CLA.md).
-
-            To sign, comment on this pull request with the statement below. You only need to sign once per GitHub account.
-          custom-allsigned-prcomment: 'All contributors have signed the CLA. ✍️ ✅'
+          SIGNATURES_PATH: signatures/v1/cla.json
+          SIGNATURES_BRANCH: cla-signatures
+          CLA_DOCUMENT_URL: https://github.com/memtomem/memtomem/blob/main/CLA.md
+          CLA_ALLOWLIST: dependabot[bot],memtomem
+          CLA_SIGNATURE_TEXT: I have read the CLA Document and I hereby sign the CLA
