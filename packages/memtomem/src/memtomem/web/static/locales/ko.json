@@ -286,6 +286,7 @@
   "settings.ctx.overview_title": "컨텍스트 게이트웨이",
   "settings.ctx.project_root_label": "프로젝트",
   "settings.ctx.runtimes_label": "런타임",
+  "settings.ctx.last_synced_label": "마지막 동기화",
   "settings.ctx.runtime_undetected_tooltip": "이 프로젝트에서 감지되지 않음",
   "settings.ctx.refresh": "새로고침",
   "settings.ctx.sync_all": "전체 동기화",

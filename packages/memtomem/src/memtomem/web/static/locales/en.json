@@ -286,6 +286,7 @@
   "settings.ctx.overview_title": "Context Gateway",
   "settings.ctx.project_root_label": "Project",
   "settings.ctx.runtimes_label": "Runtimes",
+  "settings.ctx.last_synced_label": "Last sync",
   "settings.ctx.runtime_undetected_tooltip": "Not detected in this project",
   "settings.ctx.refresh": "Refresh",
   "settings.ctx.sync_all": "Sync All",
