@@ -1,23 +1,18 @@
-"""TestClient pins for ``CSRFGuardMiddleware`` (RFC #787 stage 1).
+"""TestClient pins for ``CSRFGuardMiddleware`` (RFC #787).
 
-Stage 1 is observe-only: the middleware emits a structured log line for
-every gated request but never returns 403. The test suite locks both
-sides of that contract — pass-through behavior AND the observe events —
-so:
+The middleware always emits a structured ``web.csrf.observe`` log line
+per gated request. Whether a would-block decision becomes a real 403 is
+governed by ``app.state.csrf_enforce``:
 
-* PR2's flip to enforcement is a one-line change in
-  ``app.state.csrf_enforce`` plus a copy-paste of the negative cases
-  here with the assertion direction inverted.
-* A regression that *adds* a 403 in stage 1 fails immediately (would
-  break a non-CSRF caller, e.g. an MCP-only smoke that happens to ride
-  the FastAPI app).
-
-The tests build their own minimal FastAPI app rather than importing
-``create_app`` because the production factory pulls in storage /
-embedder / file-watcher dependencies — none of which the middleware
-itself touches. Mirroring the shape of the real wiring (token in
-``app.state.csrf_token``, etc.) keeps the tests honest without paying
-the boot cost.
+* In production (``create_app`` default), this is ``True`` — the gate
+  enforces. ``MEMTOMEM_WEB__CSRF_ENFORCE`` ∈ {0, false, no, off} falls
+  back to observe-only for emergency rollback.
+* These tests build their own minimal FastAPI app rather than importing
+  ``create_app`` because the production factory pulls in storage /
+  embedder / file-watcher dependencies — none of which the middleware
+  itself touches. Mirroring the shape of the real wiring (token in
+  ``app.state.csrf_token``, etc.) keeps the tests honest without paying
+  the boot cost.
 """
 
 from __future__ import annotations
@@ -29,6 +24,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from memtomem.web.app import resolve_csrf_enforce_from_env
 from memtomem.web.middleware.csrf import CSRFGuardMiddleware
 
 _OBSERVE_RE = re.compile(
@@ -38,12 +34,17 @@ _OBSERVE_RE = re.compile(
 )
 
 
-def _build_app() -> FastAPI:
+def _build_app(*, enforce: bool = True) -> FastAPI:
+    """Build a minimal FastAPI app wired with the CSRF middleware.
+
+    ``enforce`` defaults to ``True`` to mirror the production default.
+    Pass ``enforce=False`` to exercise the observe-only rollback path.
+    """
     app = FastAPI()
     app.state.csrf_token = "test-token-abc"
     app.state.csrf_trusted_hosts = frozenset()
     app.state.csrf_trusted_origins = frozenset()
-    app.state.csrf_enforce = False
+    app.state.csrf_enforce = enforce
     app.add_middleware(CSRFGuardMiddleware)
 
     @app.get("/api/ping")
@@ -95,12 +96,13 @@ def test_get_does_not_emit_observe_event(caplog_csrf) -> None:
     assert _parse_observe(caplog_csrf.records) == []
 
 
-def test_post_without_token_emits_would_block(caplog_csrf) -> None:
-    """No CSRF header → ``token_ok=False, would_block=True``,
-    but request still succeeds in observe-only mode."""
+def test_post_without_token_returns_403(caplog_csrf) -> None:
+    """No CSRF header → ``token_ok=False``; enforce mode returns 403."""
     client = TestClient(_build_app())
     res = client.post("/api/echo")
-    assert res.status_code == 200, "stage 1 must not block"
+    assert res.status_code == 403
+    body = res.json()
+    assert "CSRF" in body["detail"] or "csrf" in body["detail"].lower()
     events = _parse_observe(caplog_csrf.records)
     assert len(events) == 1
     ev = events[0]
@@ -110,26 +112,26 @@ def test_post_without_token_emits_would_block(caplog_csrf) -> None:
     assert ev["would_block"] == "True"
 
 
-def test_post_with_wrong_token_emits_would_block(caplog_csrf) -> None:
+def test_post_with_wrong_token_returns_403(caplog_csrf) -> None:
     client = TestClient(_build_app())
     res = client.post("/api/echo", headers={"X-Memtomem-CSRF": "wrong"})
-    assert res.status_code == 200
+    assert res.status_code == 403
     events = _parse_observe(caplog_csrf.records)
     assert len(events) == 1
     assert events[0]["token_ok"] == "False"
     assert events[0]["would_block"] == "True"
 
 
-def test_post_with_right_token_passes_token_check(caplog_csrf) -> None:
+def test_post_with_right_token_but_non_loopback_host_returns_403(caplog_csrf) -> None:
+    """Default TestClient sends ``Host: testserver`` — non-loopback. A
+    valid token isn't enough; the Host check still has to pass."""
     client = TestClient(_build_app())
     res = client.post("/api/echo", headers={"X-Memtomem-CSRF": "test-token-abc"})
-    assert res.status_code == 200
+    assert res.status_code == 403
     events = _parse_observe(caplog_csrf.records)
     assert len(events) == 1
     ev = events[0]
     assert ev["token_ok"] == "True"
-    # Default TestClient sends Host: testserver — non-loopback. So
-    # host_ok=False and would_block=True even with a valid token.
     assert ev["host_ok"] == "False"
     assert ev["would_block"] == "True"
 
@@ -154,7 +156,7 @@ def test_post_with_right_token_and_loopback_host_passes_all(caplog_csrf) -> None
     assert ev["would_block"] == "False"
 
 
-def test_post_with_right_token_but_attacker_origin_emits_would_block(caplog_csrf) -> None:
+def test_post_with_right_token_but_attacker_origin_returns_403(caplog_csrf) -> None:
     client = TestClient(_build_app())
     res = client.post(
         "/api/echo",
@@ -164,7 +166,7 @@ def test_post_with_right_token_but_attacker_origin_emits_would_block(caplog_csrf
             "Origin": "https://evil.example.com",
         },
     )
-    assert res.status_code == 200
+    assert res.status_code == 403
     events = _parse_observe(caplog_csrf.records)
     assert len(events) == 1
     ev = events[0]
@@ -172,12 +174,12 @@ def test_post_with_right_token_but_attacker_origin_emits_would_block(caplog_csrf
     assert ev["would_block"] == "True"
 
 
-def test_delete_without_token_emits_would_block(caplog_csrf) -> None:
+def test_delete_without_token_returns_403(caplog_csrf) -> None:
     """DELETE — the ``<form>``-impossible method that ``fetch`` can
     still issue — is gated identically to POST."""
     client = TestClient(_build_app())
     res = client.delete("/api/thing/42")
-    assert res.status_code == 200
+    assert res.status_code == 403
     events = _parse_observe(caplog_csrf.records)
     assert len(events) == 1
     assert events[0]["method"] == "DELETE"
@@ -200,26 +202,27 @@ def test_session_bootstrap_post_is_token_exempt(caplog_csrf) -> None:
         "/api/session/echo",
         headers={"Host": "127.0.0.1:8080", "Origin": "http://127.0.0.1:8080"},
     )
-    assert res.status_code == 200
+    # /api/session/echo is *not* the bootstrap path, so token is still
+    # required — and missing — so enforce mode 403s.
+    assert res.status_code == 403
     events = _parse_observe(caplog_csrf.records)
     assert len(events) == 1
-    # ``/api/session/echo`` is *not* the bootstrap path, so token still
-    # required — and missing — would_block stays True.
     assert events[0]["token_ok"] == "False"
     assert events[0]["would_block"] == "True"
 
 
-def test_enforce_mode_returns_403(caplog_csrf) -> None:
-    """When ``app.state.csrf_enforce`` is True, the gate returns 403.
-    PR1 leaves the default at False; this test pins the wiring so PR2's
-    flip is a default-only change."""
-    app = _build_app()
-    app.state.csrf_enforce = True
-    client = TestClient(app)
+def test_observe_mode_passes_through_with_log_line(caplog_csrf) -> None:
+    """Emergency rollback path: ``csrf_enforce=False`` makes the gate
+    observe-only — would-block decisions reach the handler with a
+    structured log line for an operator to grep."""
+    client = TestClient(_build_app(enforce=False))
     res = client.post("/api/echo")
-    assert res.status_code == 403
-    body = res.json()
-    assert "CSRF" in body["detail"] or "csrf" in body["detail"].lower()
+    assert res.status_code == 200, "observe mode must not block"
+    events = _parse_observe(caplog_csrf.records)
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["token_ok"] == "False"
+    assert ev["would_block"] == "True"
 
 
 def test_trusted_host_allow_list_unblocks_host_check(caplog_csrf) -> None:
@@ -248,7 +251,7 @@ def test_non_api_paths_pass_through_without_observe(caplog_csrf) -> None:
     app.state.csrf_token = "t"
     app.state.csrf_trusted_hosts = frozenset()
     app.state.csrf_trusted_origins = frozenset()
-    app.state.csrf_enforce = False
+    app.state.csrf_enforce = True
     app.add_middleware(CSRFGuardMiddleware)
 
     @app.post("/some/other/path")
@@ -259,3 +262,32 @@ def test_non_api_paths_pass_through_without_observe(caplog_csrf) -> None:
     res = client.post("/some/other/path")
     assert res.status_code == 200
     assert _parse_observe(caplog_csrf.records) == []
+
+
+# ---------------------------------------------------------------------------
+# MEMTOMEM_WEB__CSRF_ENFORCE env override
+# ---------------------------------------------------------------------------
+
+
+def test_env_override_default_is_enforce(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing env var → enforce-on. Default-safe."""
+    monkeypatch.delenv("MEMTOMEM_WEB__CSRF_ENFORCE", raising=False)
+    assert resolve_csrf_enforce_from_env() is True
+
+
+@pytest.mark.parametrize("disable_value", ["0", "false", "FALSE", "no", "off", " False "])
+def test_env_override_disable_tokens(monkeypatch: pytest.MonkeyPatch, disable_value: str) -> None:
+    """Explicit disable tokens fall back to observe-only. Whitespace and
+    case variants normalize."""
+    monkeypatch.setenv("MEMTOMEM_WEB__CSRF_ENFORCE", disable_value)
+    assert resolve_csrf_enforce_from_env() is False
+
+
+@pytest.mark.parametrize("on_value", ["1", "true", "yes", "on", "ture", "anything-else"])
+def test_env_override_unknown_values_keep_enforce(
+    monkeypatch: pytest.MonkeyPatch, on_value: str
+) -> None:
+    """A typo'd or unrecognized value fails safe: enforce stays on.
+    Only the explicit disable tokens turn it off."""
+    monkeypatch.setenv("MEMTOMEM_WEB__CSRF_ENFORCE", on_value)
+    assert resolve_csrf_enforce_from_env() is True
