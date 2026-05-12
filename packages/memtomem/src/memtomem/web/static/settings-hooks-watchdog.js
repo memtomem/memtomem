@@ -41,10 +41,21 @@ async function loadHooksSync() {
       error: { cls: 'badge-danger', text: data.error || 'Error' },
     };
     const badge = badges[data.status] || badges.error;
+    // Scope-aware target label (issue #962). Old payloads (or any future
+    // scope name without a specific key) fall back to the generic
+    // ``target_label``. ``t()`` echoes the key when no translation is
+    // registered, so detect that and fall back rather than rendering the
+    // raw key text.
+    const scope = data.target_scope;
+    const scopeKey = scope ? `settings.hooks.target_label_${scope}` : null;
+    const translated = scopeKey ? t(scopeKey) : null;
+    const targetLabel = translated && translated !== scopeKey
+      ? translated
+      : t('settings.hooks.target_label');
     statusEl.innerHTML =
       `<span class="badge ${badge.cls}">${escapeHtml(badge.text)}</span>`
       + (data.target_path
-        ? `<div class="hooks-status-target">${escapeHtml(t('settings.hooks.target_label'))} <code>${escapeHtml(data.target_path)}</code></div>`
+        ? `<div class="hooks-status-target" data-target-scope="${escapeHtml(scope || '')}">${escapeHtml(targetLabel)} <code>${escapeHtml(data.target_path)}</code></div>`
         : '');
 
     if (data.status === 'no_source' || data.status === 'error') {
@@ -97,9 +108,15 @@ async function loadHooksSync() {
       }
     }
 
-    // Synced
+    // Synced. When the entire panel is in_sync the badge above already
+    // says "All hooks are in sync"; repeating "In sync" as a section
+    // heading is redundant copy (#962). Keep the heading only when
+    // mixed state (conflicts/pending alongside synced) makes the
+    // section separator load-bearing.
     if (data.hooks.synced.length) {
-      html += '<h3 style="margin:1rem 0 0.5rem">' + t('settings.hooks.synced') + '</h3>';
+      if (data.status !== 'in_sync') {
+        html += '<h3 style="margin:1rem 0 0.5rem">' + t('settings.hooks.synced') + '</h3>';
+      }
       html += '<div class="text-muted">';
       for (const s of data.hooks.synced) {
         html += `<div style="padding:0.25rem 0">${escapeHtml(_ruleLabel(s))}</div>`;
@@ -169,13 +186,53 @@ document.getElementById('hooks-sync-btn')?.addEventListener('click', async () =>
     const headers = csrf
       ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
       : { 'Content-Type': 'application/json' };
-    const res = await fetch('/api/settings-sync', {method: 'POST', headers});
+    // The confirm modal IS the host-write trust gate (issue #962). Send
+    // ``allow_host_writes: true`` so the server doesn't re-prompt with
+    // ``needs_confirmation`` for the user-scope ``~/.claude/settings.json``
+    // path — the same gate the CLI confirms interactively
+    // (``cli/context_cmd.py:_confirm_settings_host_writes``).
+    const res = await fetch('/api/settings-sync', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ allow_host_writes: true }),
+    });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || `Request failed: ${res.status}`);
     }
     const data = await res.json();
-    const warnings = data.results?.flatMap(r => r.warnings || []) || [];
+    const results = Array.isArray(data.results) ? data.results : [];
+    const needsConfirmation = results.filter(r => r.status === 'needs_confirmation');
+    if (needsConfirmation.length) {
+      // Defensive branch: the first POST already carried
+      // ``allow_host_writes: true``. If the server still returns
+      // ``needs_confirmation`` a deeper trust-gate kicked in (e.g.
+      // unexpected scope resolution); surface the targets so the user
+      // can investigate via the CLI rather than silently retrying
+      // with the same flag (would loop).
+      const targets = needsConfirmation.map(r => r.target).filter(Boolean);
+      const body = t('settings.hooks.needs_confirmation_body', {
+        targets: targets.join('\n'),
+      });
+      const statusEl = qs('hooks-sync-status');
+      if (statusEl) {
+        const banner = document.createElement('div');
+        banner.className = 'hooks-sync-needs-confirmation';
+        banner.setAttribute('role', 'alert');
+        const title = document.createElement('strong');
+        title.textContent = t('settings.hooks.needs_confirmation_title');
+        const detail = document.createElement('div');
+        detail.className = 'hooks-sync-needs-confirmation-body';
+        detail.textContent = body;
+        banner.appendChild(title);
+        banner.appendChild(detail);
+        statusEl.appendChild(banner);
+      }
+      showToast(t('settings.hooks.needs_confirmation_title'), 'warning');
+      // Do NOT show sync_success on this branch — silent failure 금지.
+      return;
+    }
+    const warnings = results.flatMap(r => r.warnings || []);
     if (warnings.length) {
       showToast(t('toast.hooks_warnings', { count: warnings.length }), 'warning');
     } else {
