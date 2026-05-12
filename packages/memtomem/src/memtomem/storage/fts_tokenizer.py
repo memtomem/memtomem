@@ -14,8 +14,10 @@ import re
 
 _log = logging.getLogger(__name__)
 
-# FTS5 special characters that must not appear in prefix-match tokens
-_FTS5_SPECIAL_RE = re.compile(r'[*"()\-+^:]')
+# FTS5 barewords are intentionally narrow. Quote any query token containing
+# punctuation so paths, URLs, YAML, code spans, and future FTS5 operators stay
+# literal instead of being parsed as query syntax.
+_FTS5_SPECIAL_RE = re.compile(r"[^\w]", re.UNICODE)
 
 # Active tokenizer backend: "unicode61" or "kiwipiepy"
 _active_tokenizer: str = "unicode61"
@@ -98,7 +100,7 @@ def tokenize_for_fts(
     if _active_tokenizer == "kiwipiepy":
         tokens = _kiwi_tokenize(text)
         if for_query:
-            parts = [t + "*" for t in tokens if not _FTS5_SPECIAL_RE.search(t)]
+            parts = [_format_query_token(t) for t in tokens]
             joiner = " OR " if use_or else " "
             return joiner.join(parts)
         return " ".join(tokens)
@@ -117,12 +119,14 @@ def _apply_prefix_wildcard(text: str, *, use_or: bool = False) -> str:
     """
     parts: list[str] = []
     for word in text.split():
-        if _FTS5_SPECIAL_RE.search(word):
-            # Quote the word so FTS5 treats it as a literal phrase
-            safe = word.replace('"', '""')
-            if safe:
-                parts.append(f'"{safe}"')
-        else:
-            parts.append(word + "*")
+        parts.append(_format_query_token(word))
     joiner = " OR " if use_or else " "
     return joiner.join(parts)
+
+
+def _format_query_token(word: str) -> str:
+    """Return one FTS5-safe query token."""
+    if _FTS5_SPECIAL_RE.search(word):
+        safe = word.replace('"', '""')
+        return f'"{safe}"'
+    return word + "*"
