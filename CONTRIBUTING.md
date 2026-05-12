@@ -41,6 +41,94 @@ The STM proxy gateway lives in a separate repository: [memtomem/memtomem-stm](ht
 6. Write a clear commit message describing the "why"
 7. Sign the CLA on your first pull request (see below)
 
+## Browser tests for the web UI
+
+Web UI changes that touch JS interaction (event handlers, i18n, SSE
+consumers, DOM mutators) get a Playwright-driven browser test under
+`packages/memtomem/tests/web/`. The harness is wired so adding a test is
+the path of least resistance — see existing files like
+`test_memory_dirs_chunk_progress.py` and `test_settings_hooks_*.py` for
+ready-made templates (issue #660).
+
+### Running
+
+```bash
+# One-time setup — Chromium download is ~150 MB and opt-in, so it's not
+# part of the default ``uv sync``.
+uv run playwright install chromium
+
+# Run the browser suite.
+uv run pytest packages/memtomem/tests/web/
+
+# Run everything; tests carrying ``@pytest.mark.browser`` auto-skip when
+# pytest-playwright or Chromium aren't available, so the full suite
+# stays green on contributor laptops that haven't run the install
+# above (see ``packages/memtomem/tests/conftest.py:108``).
+uv run pytest -m "not ollama"
+```
+
+### Harness shape
+
+* **Test marker:** every browser test sets ``pytestmark =
+  pytest.mark.browser`` so the auto-skip in
+  ``packages/memtomem/tests/conftest.py`` engages cleanly when the
+  Chromium binary isn't installed.
+* **Server fixture:** ``packages/memtomem/tests/web/conftest.py`` spins
+  a real ``uvicorn`` server in a background thread against
+  ``create_app(lifespan=None, mode="prod")``. ``lifespan=None`` is
+  load-bearing — without it the storage / privacy-scan startup tasks
+  fire and the suite needs a real DB.
+* **Network stubs:** ``install_default_stubs(page)`` (same conftest)
+  registers a permissive catch-all on every ``/api/**`` endpoint that
+  returns ``{}``. Each test overrides only the endpoints it asserts
+  on; ``page.route`` resolves **last-registered-first-matched**, so the
+  catch-all goes first and specific overrides go last.
+* **Sync over async:** the harness uses Playwright's *sync* API so
+  individual tests stay readable; the uvicorn server runs in a
+  separate thread.
+
+### Common patterns
+
+* Activate a top-level tab + sub-section by JS rather than chasing
+  click coordinates — the sidebar layout has been refactored more
+  than once and selector-based clicks keep re-breaking:
+
+  ```python
+  page.evaluate("() => activateTab('context-gateway')")
+  page.evaluate("() => switchSettingsSection('ctx-skills')")
+  ```
+
+  Then wait on the actual mounted DOM via
+  ``page.wait_for_function`` rather than ``wait_for_selector``; the
+  populated-text check is more robust than visibility when multiple
+  sections live in the DOM at once.
+
+* For request-payload assertions, anchor on
+  ``page.expect_request(lambda req: ..., timeout=4_000)`` rather than
+  Python-side post-hoc lists. ``expect_request`` is the documented
+  synchronization point; the route stub's Python-side capture list is
+  a defence-in-depth check on slow CI runners.
+
+* SSE / streamed responses: ``page.route`` with ``route.fulfill(body=)``
+  works for one-shot replies. For chunked streams, see
+  ``test_memory_dirs_chunk_progress.py`` for the ``add_init_script``
+  + langchange-flag pattern that blocks on i18n init before firing
+  ``setLang('ko')``.
+
+### What goes here vs. in a Python-only test
+
+* **Python unit / route tests** (``tests/test_web_routes_*.py``):
+  endpoint contracts, JSON shapes, status codes, mtime guards.
+* **Browser tests** (``tests/web/``): anything the *user-visible DOM*
+  depends on — event handler wiring, i18n re-render on
+  ``langchange``, ``data-i18n`` application, deep-link carriers, SSE
+  consumers writing into the DOM, button-disable gates.
+
+A bug that only surfaces when JS runs (the i18n init-order race in
+PR #587, the ``data-i18n`` nested-children clobber in PR #595, the
+duplicate ``event:matcher`` rule registry in PR #968) belongs in
+``tests/web/``.
+
 ## Deferred ADRs
 
 When you author or merge an ADR with `Status: Proposed (deferred pending
