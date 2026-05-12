@@ -413,6 +413,26 @@ def test_gateway_main_tab_button_exists() -> None:
     )
 
 
+def test_gateway_appears_in_default_tab_selector() -> None:
+    """#962 review P3 fold: the Settings modal's ``#settings-default-tab``
+    dropdown must include the new Gateway tab so users can pick it as
+    their landing tab. Without this entry the Gateway is a top-level
+    tab the user can navigate to but never default to.
+    """
+    html = _read_static("index.html")
+    select_match = re.search(
+        r'<select[^>]*id="settings-default-tab"[^>]*>(.*?)</select>',
+        html,
+        re.DOTALL,
+    )
+    assert select_match is not None, "#settings-default-tab select missing"
+    select_body = select_match.group(1)
+    assert 'value="context-gateway"' in select_body, (
+        "#settings-default-tab must offer context-gateway as a selectable "
+        f"default; got: {select_body!r}"
+    )
+
+
 def test_settings_sidebar_no_longer_holds_gateway_buttons() -> None:
     """#962 negative pin: after the promotion, none of the Gateway
     sections may still be reachable from the Settings sidebar. A
