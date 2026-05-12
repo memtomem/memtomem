@@ -8,11 +8,16 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from memtomem.config import MemoryDirKind, TargetScope, classify_scope, memory_dir_kind
+from memtomem.config import MemoryDirKind, TargetTier, classify_scope, memory_dir_kind
 from memtomem.indexing.engine import norm_dir_prefix
 from memtomem.indexing.summarizer import regenerate_for_paths
 from memtomem.storage.sqlite_helpers import norm_path
-from memtomem.web.deps import get_config, get_storage, require_indexed_source
+from memtomem.web.deps import (
+    get_config,
+    get_optional_query_target_tier,
+    get_storage,
+    require_indexed_source,
+)
 from memtomem.web.schemas.core import DeleteResponse
 from memtomem.web.schemas.sources import (
     ChunkSizeBucket,
@@ -76,18 +81,7 @@ async def list_sources(
             "registered (so they don't disappear from the UI)."
         ),
     ),
-    target_scope: TargetScope | None = Query(
-        None,
-        description=(
-            "ADR-0016 §7 canonical-residency tier filter. Default (omit) "
-            "shows ``user`` + ``project_shared`` only; ``project_local`` "
-            "is hidden until explicitly requested (ADR-0015 §4a — keeps "
-            "the draft tier out of overview unless the operator opts in). "
-            "Passing one of the three literal tokens narrows the list "
-            "to that tier; passing ``project_local`` is the only way to "
-            "surface those sources."
-        ),
-    ),
+    target_tier: TargetTier | None = Depends(get_optional_query_target_tier),
     storage=Depends(get_storage),
     config=Depends(get_config),
 ) -> SourcesResponse:
@@ -194,15 +188,16 @@ async def list_sources(
         source_scope, _src_project_root = classify_scope(p, pmdirs)
 
         # ADR-0015 §4a project_local default-hidden rule. When the
-        # caller passes ``?target_scope=`` we narrow to exactly that
+        # caller passes ``?target_tier=`` (or deprecated ``?target_scope=``)
+        # we narrow to exactly that
         # tier (the only way to surface ``project_local`` sources).
         # When omitted, ``project_local`` rows fall out — keeps the
         # draft tier out of overview / list views unless the operator
         # explicitly asks for it.
-        if target_scope is None:
+        if target_tier is None:
             if source_scope == "project_local":
                 continue
-        elif source_scope != target_scope:
+        elif source_scope != target_tier:
             continue
 
         path_str = str(p)
@@ -225,6 +220,7 @@ async def list_sources(
                 max_tokens=max_tok,
                 memory_dir=memory_dir_str,
                 kind=source_kind,
+                target_tier=source_scope,
                 target_scope=source_scope,
                 title=title,
                 excerpt=excerpt,

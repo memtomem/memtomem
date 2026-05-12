@@ -33,8 +33,12 @@ class SourceOut(BaseModel):
     # path-classified via :func:`memtomem.config.classify_scope`. Always
     # one of ``user`` / ``project_shared`` / ``project_local``. The
     # SPA renders this verbatim as a per-row tier badge; the route also
-    # supports ``?target_scope=`` filtering (project_local hidden by
+    # supports ``?target_tier=`` filtering (deprecated ``?target_scope=``
+    # remains accepted; project_local hidden by
     # default per ADR-0015 §4a).
+    target_tier: str = "user"
+    # Deprecated response alias kept for existing clients during the
+    # target_scope -> target_tier rename.
     target_scope: str = "user"
     # Heuristic preview derived at read-time from the first indexed chunk:
     # ``title`` is the file's first heading (``#`` markers stripped) and

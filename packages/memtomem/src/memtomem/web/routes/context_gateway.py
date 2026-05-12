@@ -6,11 +6,11 @@ import json
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends
 
 from memtomem.privacy import scan as _privacy_scan
-from memtomem.config import TargetScope
-from memtomem.web.deps import get_hooks_target_scope, get_project_root
+from memtomem.config import TargetTier
+from memtomem.web.deps import get_hooks_target_tier, get_project_root, get_query_target_tier
 
 try:
     import tomllib
@@ -130,14 +130,8 @@ def _error_payload(exc: BaseException, *, shape: str = "total") -> dict:
 @router.get("/context/overview")
 async def context_overview(
     project_root: Path = Depends(get_project_root),
-    scope: str = Depends(get_hooks_target_scope),
-    target_scope: TargetScope = Query(
-        "project_shared",
-        description=(
-            "Canonical-residency tier to summarize. project_local is shown only "
-            "when explicitly requested."
-        ),
-    ),
+    scope: str = Depends(get_hooks_target_tier),
+    target_tier: TargetTier = Depends(get_query_target_tier),
 ) -> dict:
     """Aggregate sync status across skills, commands, agents, and settings."""
     from memtomem.context.agents import canonical_agent_name, diff_agents, list_canonical_agents
@@ -153,8 +147,8 @@ async def context_overview(
 
     try:
         result["skills"] = _count_context_statuses(
-            diff_skills(project_root, scope=target_scope),
-            {p.name for p in list_canonical_skills(project_root, scope=target_scope)},
+            diff_skills(project_root, scope=target_tier),
+            {p.name for p in list_canonical_skills(project_root, scope=target_tier)},
         )
     except Exception as exc:
         logger.exception("diff_skills failed")
@@ -162,10 +156,10 @@ async def context_overview(
 
     try:
         result["commands"] = _count_context_statuses(
-            diff_commands(project_root, scope=target_scope),
+            diff_commands(project_root, scope=target_tier),
             {
                 canonical_command_name(p, layout)
-                for p, layout in list_canonical_commands(project_root, scope=target_scope)
+                for p, layout in list_canonical_commands(project_root, scope=target_tier)
             },
         )
     except Exception as exc:
@@ -174,10 +168,10 @@ async def context_overview(
 
     try:
         result["agents"] = _count_context_statuses(
-            diff_agents(project_root, scope=target_scope),
+            diff_agents(project_root, scope=target_tier),
             {
                 canonical_agent_name(p, layout)
-                for p, layout in list_canonical_agents(project_root, scope=target_scope)
+                for p, layout in list_canonical_agents(project_root, scope=target_tier)
             },
         )
     except Exception as exc:
@@ -232,4 +226,9 @@ async def context_overview(
         logger.exception("diff_settings failed")
         result["settings"] = _error_payload(exc, shape="status")
 
-    return {"target_scope": target_scope, "project_root": str(project_root), **result}
+    return {
+        "target_tier": target_tier,
+        "target_scope": target_tier,
+        "project_root": str(project_root),
+        **result,
+    }

@@ -629,12 +629,12 @@ function _formatValidityDate(unix) {
 // project_local context artifacts (agents / skills / commands) per
 // ADR-0011 §3 — memory rows skip the annotation because project_local
 // memory still fans out via memory's own contract.
-function _tierBadgeHtml(targetScope, { isContextRow = false } = {}) {
-  if (!targetScope || targetScope === 'user') return '';
-  if (targetScope !== 'project_shared' && targetScope !== 'project_local') return '';
-  const cls = `badge badge-tier badge-tier--${targetScope}`;
-  const badge = ` <span class="${cls}" data-tier="${targetScope}">${targetScope}</span>`;
-  if (isContextRow && targetScope === 'project_local') {
+function _tierBadgeHtml(targetTier, { isContextRow = false } = {}) {
+  if (!targetTier || targetTier === 'user') return '';
+  if (targetTier !== 'project_shared' && targetTier !== 'project_local') return '';
+  const cls = `badge badge-tier badge-tier--${targetTier}`;
+  const badge = ` <span class="${cls}" data-tier="${targetTier}">${targetTier}</span>`;
+  if (isContextRow && targetTier === 'project_local') {
     return `${badge}<span class="tier-fanout-annotation">(no runtime fan-out)</span>`;
   }
   return badge;
@@ -2120,7 +2120,7 @@ function _buildResultItem(r) {
   // non-default tiers (project_shared / project_local) earn pixels.
   // The token is rendered verbatim per the PR-F display-alias-free
   // contract pinned in the Tiered Context Gateway v2 memory.
-  const tierBadge = _tierBadgeHtml(r.chunk.target_scope);
+  const tierBadge = _tierBadgeHtml(r.chunk.target_tier || r.chunk.target_scope);
   const validityBadge = _validityBadgeHtml(r.chunk.valid_from_unix, r.chunk.valid_to_unix);
   const scorePct = STATE.maxResultScore > 0 ? Math.round((r.score / STATE.maxResultScore) * 100) : 0;
   const barColor = scorePct > 70 ? 'var(--green)' : scorePct > 40 ? 'var(--accent)' : 'var(--muted)';
@@ -3917,7 +3917,7 @@ async function browseSource(path, limit = 100) {
           <div class="chunk-card-meta">
             <span class="badge badge-gray">${c.chunk_type.replace('_',' ')}</span>
             <span class="chunk-card-lines">lines ${c.start_line}–${c.end_line}</span>
-            ${_tierBadgeHtml(c.target_scope)}
+            ${_tierBadgeHtml(c.target_tier || c.target_scope)}
             ${c.heading_hierarchy.length ? `<span class="hierarchy-trail">${escapeHtml(c.heading_hierarchy.join(' › '))}</span>` : ''}
             <div class="chunk-card-actions">
               <button class="btn-ghost btn-xs card-copy-btn" title="Copy content">Copy</button>

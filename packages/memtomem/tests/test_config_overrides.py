@@ -15,7 +15,12 @@ from pathlib import Path
 import pytest
 
 from memtomem import config as _cfg
-from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
+from memtomem.config import (
+    Mem2MemConfig,
+    load_config_d,
+    load_config_overrides,
+    save_config_overrides,
+)
 
 from .helpers import set_home
 
@@ -121,6 +126,103 @@ def test_env_and_config_coexist_on_different_fields(
     load_config_overrides(cfg)
     assert Path(cfg.storage.sqlite_path).as_posix() == "/from/env.db"
     assert cfg.embedding.model == "from-config"
+
+
+def test_hooks_target_scope_legacy_key_loads_and_saves_as_target_tier(
+    override_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_all_memtomem_env(monkeypatch)
+    override_path.write_text(
+        json.dumps({"hooks": {"target_scope": "project_local"}}), encoding="utf-8"
+    )
+
+    cfg = Mem2MemConfig()
+    load_config_overrides(cfg)
+    assert cfg.hooks.target_tier == "project_local"
+    assert cfg.hooks.target_scope == "project_local"
+
+    save_config_overrides(cfg)
+    persisted = json.loads(override_path.read_text(encoding="utf-8"))
+    assert persisted["hooks"] == {"target_tier": "project_local"}
+
+
+def test_hooks_target_tier_env_wins_over_legacy_config_json(
+    override_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_all_memtomem_env(monkeypatch)
+    monkeypatch.setenv("MEMTOMEM_HOOKS__TARGET_TIER", "project_shared")
+    override_path.write_text(
+        json.dumps({"hooks": {"target_scope": "project_local"}}), encoding="utf-8"
+    )
+
+    cfg = Mem2MemConfig()
+    load_config_overrides(cfg)
+    assert cfg.hooks.target_tier == "project_shared"
+
+
+def test_hooks_target_tier_env_wins_over_legacy_config_d(
+    config_d_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_all_memtomem_env(monkeypatch)
+    monkeypatch.setenv("MEMTOMEM_HOOKS__TARGET_TIER", "project_shared")
+    (config_d_dir / "hooks.json").write_text(
+        json.dumps({"hooks": {"target_scope": "project_local"}}), encoding="utf-8"
+    )
+
+    cfg = Mem2MemConfig()
+    load_config_d(cfg)
+    assert cfg.hooks.target_tier == "project_shared"
+
+
+def test_legacy_env_target_scope_wins_over_canonical_persisted_target_tier(
+    override_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0017 symmetric env precedence: a user who pinned the legacy
+    ``MEMTOMEM_HOOKS__TARGET_SCOPE`` env var must keep it even after their
+    ``config.json`` has been migrated to the canonical ``target_tier`` key.
+
+    Pre-fix, the loader derived ``env_var = "MEMTOMEM_HOOKS__TARGET_TIER"``
+    from the canonical persisted key only; a user still pinning the legacy
+    env name went undetected and the persisted target_tier value clobbered
+    the env-bound choice via direct ``setattr``. The fix enumerates both
+    env aliases per field.
+    """
+    _clear_all_memtomem_env(monkeypatch)
+    monkeypatch.setenv("MEMTOMEM_HOOKS__TARGET_SCOPE", "user")
+    override_path.write_text(
+        json.dumps({"hooks": {"target_tier": "project_shared"}}), encoding="utf-8"
+    )
+
+    cfg = Mem2MemConfig()
+    assert cfg.hooks.target_tier == "user", (
+        "AliasChoices should populate target_tier from the legacy env name on construct"
+    )
+    load_config_overrides(cfg)
+    assert cfg.hooks.target_tier == "user", (
+        "Legacy MEMTOMEM_HOOKS__TARGET_SCOPE must continue to pre-empt a "
+        "canonical target_tier in config.json (env-wins precedence symmetric "
+        "with the canonical env name)"
+    )
+
+
+def test_legacy_env_target_scope_wins_over_canonical_config_d_target_tier(
+    config_d_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """config.d half of the symmetric env-precedence pin (see the override_path
+    sibling above). Fragment-loader path goes through the same
+    ``_env_aliases_for_field`` helper so the fix lands once and covers both."""
+    _clear_all_memtomem_env(monkeypatch)
+    monkeypatch.setenv("MEMTOMEM_HOOKS__TARGET_SCOPE", "user")
+    (config_d_dir / "hooks.json").write_text(
+        json.dumps({"hooks": {"target_tier": "project_shared"}}), encoding="utf-8"
+    )
+
+    cfg = Mem2MemConfig()
+    load_config_d(cfg)
+    assert cfg.hooks.target_tier == "user", (
+        "Legacy MEMTOMEM_HOOKS__TARGET_SCOPE must pre-empt a canonical "
+        "target_tier coming from a config.d fragment too"
+    )
 
 
 def test_regression_pr247_mcp_json_env_block(

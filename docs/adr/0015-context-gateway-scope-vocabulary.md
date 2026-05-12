@@ -2,6 +2,10 @@
 
 **Status:** Accepted
 **Date:** 2026-05-11
+**Superseded in part:** ADR-0017 (Accepted 2026-05-12) renames the
+canonical tier identifier from `target_scope` to `target_tier` while keeping
+`target_scope` as a compatibility alias. This ADR remains the historical
+record for the `project_scope_id` vs canonical-tier split.
 **Context:** Issue #901 surfaced that the Context Gateway Web layer uses
 "scope" for two unrelated dimensions — a per-request project-root selector
 (`?scope_id=`) and the canonical artifact tier

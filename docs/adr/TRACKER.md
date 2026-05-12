@@ -23,7 +23,7 @@ pointer so a maintainer can scan due dates without opening each ADR.
 
 | ADR | Deferred question | Trigger / deadline | Tracking issue | Next review |
 |-----|-------------------|--------------------|----------------|-------------|
-| 0016 §"Open questions" §2 | `target_scope` → `target_tier` identifier rename | "the field name confused me when reading X" non-author signal ≥1 / **2026-08-11** (3-month window from ADR merge) | [#922](https://github.com/memtomem/memtomem/issues/922) | 2026-08-11 |
+| 0017 §"Compatibility" | Remove `target_scope` compatibility aliases (`hooks.target_scope` env/persisted key, `?target_scope=` query param, response `target_scope` field, `TargetScope` import) | No external clients still send `?target_scope=` for two consecutive minor releases (audit via access logs / contributor reports) OR a v1 breaking-release window opens | (none — tracked in ADR) | 2026-08-12 |
 | 0012 §"Shape A" | Cross-DB memory migration — team onboarding export | Onboarding flow blocked on `scope`/`project_root` serialization OR gate plumbing on import (full criteria in ADR §"Shape A — Trigger criteria") | [#911](https://github.com/memtomem/memtomem/issues/911) | (event-driven) |
 | 0012 §"Shape B" | Cross-DB memory migration — project archive | User reports `~/.memtomem/memtomem.db` size pain that existing compaction / orphan-GC remedies do not solve (full criteria in ADR §"Shape B — Trigger criteria") | [#911](https://github.com/memtomem/memtomem/issues/911) | (event-driven) |
 | 0007 §"Trigger criteria" | PR-C: Namespace rename / bulk delete prod exposure (PR-A/B already shipped) | "≥ 2 prod user reports" along the rename/bulk-delete axis OR namespace rules surfacing in the onboarding flow | (none — tracked in ADR) | (event-driven) |

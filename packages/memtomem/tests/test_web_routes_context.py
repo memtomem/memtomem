@@ -113,6 +113,48 @@ class TestOverview:
         assert data["skills"]["total"] == 1
         assert data["skills"]["local_draft"] == 1
 
+    @pytest.mark.anyio
+    async def test_project_local_overview_accepts_target_tier_alias(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        local = tmp_path / ".memtomem" / "skills.local" / "draft"
+        local.mkdir(parents=True)
+        (local / SKILL_MANIFEST).write_text("# Draft\n", encoding="utf-8")
+
+        r = await client.get("/api/context/overview", params={"target_tier": "project_local"})
+        data = r.json()
+        assert r.status_code == 200
+        assert data["target_tier"] == "project_local"
+        assert data["target_scope"] == "project_local"
+        assert data["skills"]["total"] == 1
+
+    @pytest.mark.anyio
+    async def test_target_tier_wins_when_both_query_params_sent(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        """ADR-0017 precedence: when a client sends BOTH ``?target_tier=`` and
+        the deprecated ``?target_scope=``, the canonical name wins. The legacy
+        alias is the fallback for un-renamed callers; letting it pre-empt the
+        canonical query would invert the rename. Pinned here against the
+        overview endpoint — the same dep (``get_query_target_tier``) covers
+        every Web context route.
+        """
+        local = tmp_path / ".memtomem" / "skills.local" / "draft"
+        local.mkdir(parents=True)
+        (local / SKILL_MANIFEST).write_text("# Draft\n", encoding="utf-8")
+
+        # target_tier=project_local + (deprecated) target_scope=project_shared
+        # → canonical wins → response reflects project_local + skill counted.
+        r = await client.get(
+            "/api/context/overview",
+            params={"target_tier": "project_local", "target_scope": "project_shared"},
+        )
+        data = r.json()
+        assert r.status_code == 200
+        assert data["target_tier"] == "project_local"
+        assert data["target_scope"] == "project_local"
+        assert data["skills"]["total"] == 1
+
 
 class TestSettingsCountShape:
     """Q-PR3 Visual-1 pins for the new ``settings`` count envelope.

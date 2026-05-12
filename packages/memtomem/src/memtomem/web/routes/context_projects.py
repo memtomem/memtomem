@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from memtomem.context.agents import canonical_agent_name, diff_agents, list_canonical_agents
@@ -37,7 +37,8 @@ from memtomem.context.projects import (
     has_runtime_marker,
 )
 from memtomem.context.skills import diff_skills, list_canonical_skills
-from memtomem.config import TargetScope
+from memtomem.config import TargetTier
+from memtomem.web.deps import get_query_target_tier
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +99,7 @@ def resolve_scope_root(
 # ── GET /context/projects ────────────────────────────────────────────────
 
 
-def _counts_for(root: Path, *, target_scope: TargetScope) -> dict[str, int]:
+def _counts_for(root: Path, *, target_tier: TargetTier) -> dict[str, int]:
     """Per-type unique-name counts for a project root.
 
     Mirrors the union the existing ``list_*`` routes render: canonical files
@@ -113,22 +114,22 @@ def _counts_for(root: Path, *, target_scope: TargetScope) -> dict[str, int]:
     """
     counts: dict[str, int] = {}
     try:
-        names = {name for _runtime, name, _status in diff_skills(root, scope=target_scope)}
-        names.update(p.name for p in list_canonical_skills(root, scope=target_scope))
+        names = {name for _runtime, name, _status in diff_skills(root, scope=target_tier)}
+        names.update(p.name for p in list_canonical_skills(root, scope=target_tier))
         counts["skills"] = len(names)
     except Exception:
         logger.warning("counts: skills failed for %s", root, exc_info=True)
         counts["skills"] = 0
 
     try:
-        names = {name for _runtime, name, _status in diff_commands(root, scope=target_scope)}
+        names = {name for _runtime, name, _status in diff_commands(root, scope=target_tier)}
         # ``list_canonical_commands`` returns ``list[tuple[Path, Layout]]``
         # since ADR-0008 PR-C (#624) added directory layout. Name extraction
         # MUST be layout-aware: under directory layout the manifest is
         # ``<name>/command.md`` so ``p.stem == "command"`` collapses every
         # draft to a single ``"command"`` row, undercounting the actual
         # inventory and polluting the union with a phantom name. Especially
-        # acute for ``target_scope=project_local`` where ``diff_commands``
+        # acute for ``target_tier=project_local`` where ``diff_commands``
         # returns nothing (no runtime fan-out — ADR-0011 §3 / ADR-0016 §7)
         # so the canonical count is the only contributor (review P2 on
         # PR #940). Use ``canonical_command_name`` — the single source of
@@ -136,7 +137,7 @@ def _counts_for(root: Path, *, target_scope: TargetScope) -> dict[str, int]:
         # ``canonical_agent_name`` below.
         names.update(
             canonical_command_name(p, layout)
-            for p, layout in list_canonical_commands(root, scope=target_scope)
+            for p, layout in list_canonical_commands(root, scope=target_tier)
         )
         counts["commands"] = len(names)
     except Exception:
@@ -144,14 +145,14 @@ def _counts_for(root: Path, *, target_scope: TargetScope) -> dict[str, int]:
         counts["commands"] = 0
 
     try:
-        names = {name for _runtime, name, _status in diff_agents(root, scope=target_scope)}
+        names = {name for _runtime, name, _status in diff_agents(root, scope=target_tier)}
         # Same layout-aware extraction as commands above — directory-layout
         # agents at ``<name>/agent.md`` collapse to a phantom ``"agent"``
         # name under ``p.stem``. ``canonical_agent_name`` is the agent-side
         # mirror of ``canonical_command_name``.
         names.update(
             canonical_agent_name(p, layout)
-            for p, layout in list_canonical_agents(root, scope=target_scope)
+            for p, layout in list_canonical_agents(root, scope=target_tier)
         )
         counts["agents"] = len(names)
     except Exception:
@@ -161,7 +162,7 @@ def _counts_for(root: Path, *, target_scope: TargetScope) -> dict[str, int]:
     return counts
 
 
-def _scope_to_dict(scope: ProjectScope, *, with_counts: bool, target_scope: TargetScope) -> dict:
+def _scope_to_dict(scope: ProjectScope, *, with_counts: bool, target_tier: TargetTier) -> dict:
     return {
         "scope_id": scope.scope_id,
         "label": scope.label,
@@ -171,7 +172,7 @@ def _scope_to_dict(scope: ProjectScope, *, with_counts: bool, target_scope: Targ
         "missing": scope.missing,
         "experimental": scope.experimental,
         "counts": (
-            _counts_for(scope.root, target_scope=target_scope)
+            _counts_for(scope.root, target_tier=target_tier)
             if (with_counts and scope.root is not None and not scope.missing)
             else {"skills": 0, "commands": 0, "agents": 0}
         ),
@@ -181,13 +182,7 @@ def _scope_to_dict(scope: ProjectScope, *, with_counts: bool, target_scope: Targ
 @router.get("/context/projects")
 async def list_projects(
     request: Request,
-    target_scope: TargetScope = Query(
-        "project_shared",
-        description=(
-            "Canonical-residency tier for per-project counts. project_local "
-            "is counted only when explicitly requested."
-        ),
-    ),
+    target_tier: TargetTier = Depends(get_query_target_tier),
 ) -> dict:
     """Enumerate discovered project scopes with per-type item counts.
 
@@ -198,8 +193,9 @@ async def list_projects(
     """
     scopes = _discover_for(request)
     return {
-        "target_scope": target_scope,
-        "scopes": [_scope_to_dict(s, with_counts=True, target_scope=target_scope) for s in scopes],
+        "target_tier": target_tier,
+        "target_scope": target_tier,
+        "scopes": [_scope_to_dict(s, with_counts=True, target_tier=target_tier) for s in scopes],
     }
 
 

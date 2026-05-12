@@ -2,6 +2,9 @@
 
 **Status:** Accepted
 **Date:** 2026-05-11
+**Superseded in part:** ADR-0017 (Accepted 2026-05-12) resolves the deferred
+identifier question by making `target_tier` canonical and keeping
+`target_scope` as a compatibility alias.
 **Context:** Epic issue #868 (`Tiered context gateway v2`) calls for a
 "uniform tiered model for the entire context gateway." Most of that
 model already exists in tree as three separate ADRs that landed on
@@ -444,12 +447,9 @@ not block ADR acceptance.
   CLI list tier filter copy, migration tooling polish, detail/diff/
   rendered-route alignment, tier-switching write affordances, and the
   eventual `target_scope` → `target_tier` decision.
-- **`target_scope` → `target_tier` rename ADR.** Whether to
-  author one, and when. Default posture: wait until the PR-F follow-up
-  polish settles and a concrete contributor signal exists ("the field name
-  confused me when reading X"). If no signal emerges within 3
-  months, file an ADR concluding the rename is not worth the
-  churn and close the question.
+- **`target_scope` → `target_tier` rename ADR.** Resolved by ADR-0017
+  (Accepted 2026-05-12): `target_tier` is canonical, and
+  `target_scope` remains a compatibility alias.
 - **ADR-0001 §1 formal amendment.** Whether the cross-references
   in ADR-0011 §7 and ADR-0016 §9 are sufficient, or whether a
   separate amendment ADR is warranted. Default posture: skip

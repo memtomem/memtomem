@@ -30,6 +30,9 @@ class ChunkOut(BaseModel):
     # PR-F badge contract). Mirrors ``ChunkMetadata.scope`` in
     # ``memtomem/models.py``; missing on legacy chunks defaults to
     # ``user`` via ``chunk_to_out``.
+    target_tier: str = "user"
+    # Deprecated response alias kept for existing clients during the
+    # target_scope -> target_tier rename.
     target_scope: str = "user"
 
 
@@ -79,6 +82,7 @@ def chunk_to_out(chunk) -> ChunkOut:
         updated_at=chunk.updated_at,
         valid_from_unix=meta.valid_from_unix,
         valid_to_unix=meta.valid_to_unix,
+        target_tier=meta.scope or "user",
         target_scope=meta.scope or "user",
     )
 

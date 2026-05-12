@@ -1030,6 +1030,14 @@ class TestSources:
         assert len(rows_shared) == 1
         assert rows_shared[0]["target_scope"] == "project_shared"
 
+        resp_shared_tier = await client.get(
+            "/api/sources", params={"target_tier": "project_shared"}
+        )
+        rows_shared_tier = resp_shared_tier.json()["sources"]
+        assert len(rows_shared_tier) == 1
+        assert rows_shared_tier[0]["target_tier"] == "project_shared"
+        assert rows_shared_tier[0]["target_scope"] == "project_shared"
+
     async def test_invalid_target_scope_returns_422(self, client: AsyncClient):
         """Literal validation refuses unknown tier tokens at the query
         layer too — same guardrail as ``/api/add``."""

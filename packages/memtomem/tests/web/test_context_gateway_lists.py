@@ -259,7 +259,7 @@ def test_context_list_card_renders_project_local_tier_badge_with_annotation(
                 {
                     "name": "draft-skill",
                     "canonical_path": ".memtomem/skills.local/draft-skill",
-                    "target_scope": "project_local",
+                    "target_tier": "project_local",
                     "runtimes": [],
                 }
             ],
@@ -276,19 +276,19 @@ def test_context_list_card_renders_project_local_tier_badge_with_annotation(
     assert card_name.locator(".badge-tier--project_local").count() == 1
 
 
-def test_context_list_non_shared_tier_click_threads_target_scope(page, mm_web_url: str) -> None:
-    """Card click on a non-shared tier hits ``?target_scope=...`` (P1 #940 r3).
+def test_context_list_non_shared_tier_click_threads_target_tier(page, mm_web_url: str) -> None:
+    """Card click on a non-shared tier hits ``?target_tier=...`` (P1 #940 r3).
 
-    Item-level routes now accept ``target_scope`` (skills/agents/commands
+    Item-level routes now accept ``target_tier`` (skills/agents/commands
     read/diff/rendered honor every tier; create/update/delete/sync/import
     reject non-shared with HTTP 400 via ``_reject_non_shared_write``). This
     pins the round-trip: a click on a project_local card MUST fire
-    ``GET /api/context/skills/draft-skill?target_scope=project_local`` so the
+    ``GET /api/context/skills/draft-skill?target_tier=project_local`` so the
     backend opens the project_local canonical (not the same-name shared one).
     """
     install_default_stubs(page)
     # The shared ``_stub_*`` helpers register patterns without trailing ``**``
-    # so they miss URLs that carry ``?target_scope=...``. This test triggers
+    # so they miss URLs that carry ``?target_tier=...``. This test triggers
     # a tier switch which adds that query string, so register wider patterns
     # locally; last-route-wins puts these ahead of the catch-all.
     _skills_payload = {
@@ -296,7 +296,7 @@ def test_context_list_non_shared_tier_click_threads_target_scope(page, mm_web_ur
             {
                 "name": "draft-skill",
                 "canonical_path": ".memtomem/skills.local/draft-skill",
-                "target_scope": "project_local",
+                "target_tier": "project_local",
                 "runtimes": [],
             }
         ],
@@ -359,15 +359,15 @@ def test_context_list_non_shared_tier_click_threads_target_scope(page, mm_web_ur
         timeout=500,
     )
     # The card MUST be clickable on non-shared tiers — readonly-card workaround
-    # is gone now that routes honor target_scope.
+    # is gone now that routes honor target_tier.
     card_classes = card.get_attribute("class") or ""
     assert "ctx-card--readonly" not in card_classes, (
         f"non-shared-tier card should be clickable now (#940 r3), got class={card_classes!r}"
     )
     # The detail fetch fires with the tier appended.
     assert len(detail_calls) == 1, f"expected 1 detail call, got {detail_calls}"
-    assert "target_scope=project_local" in detail_calls[0], (
-        f"detail URL should carry target_scope=project_local, got {detail_calls[0]}"
+    assert "target_tier=project_local" in detail_calls[0], (
+        f"detail URL should carry target_tier=project_local, got {detail_calls[0]}"
     )
 
 

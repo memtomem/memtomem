@@ -162,7 +162,7 @@ You can automate memtomem using Claude Code's hooks system.
 Add the following to `~/.claude/settings.json`:
 
 > **Tier** (ADR-0010 §3; ADR-0016 §2 settings special-case): for
-> settings, the `hooks.target_scope` tier selects the **runtime fan-out
+> settings, the `hooks.target_tier` tier selects the **runtime fan-out
 > target** under `~/.claude/` or `<project>/.claude/`, not a canonical
 > residency — settings have one canonical file at
 > `<project>/.memtomem/settings.json` regardless of tier. The three
