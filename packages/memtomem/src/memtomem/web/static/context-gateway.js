@@ -1673,7 +1673,7 @@ function _ctxRenderConflictBanner(detailEl, userBuffer, freshContent) {
   banner.hidden = false;
 }
 
-async function _ctxHandleConflict(type, name, userBuffer, staleMtimeNs, detailEl, headers) {
+async function _ctxHandleConflict(type, name, userBuffer, staleMtimeNs, detailEl) {
   // ``staleMtimeNs`` is the mtime_ns the user's first Save was already
   // racing against — i.e. what they thought disk was. We thread it
   // through to the force PUT body so the server-side WARNING log
@@ -1702,6 +1702,10 @@ async function _ctxHandleConflict(type, name, userBuffer, staleMtimeNs, detailEl
   }
   if (choice === 'force') {
     try {
+      const csrf = await ensureCsrfToken();
+      const headers = csrf
+        ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
+        : { 'Content-Type': 'application/json' };
       const r2 = await fetch(
         _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}`),
         {
@@ -1905,7 +1909,7 @@ async function loadCtxDetail(type, name, opts = {}) {
           },
         );
         if (r.status === 409) {
-          await _ctxHandleConflict(type, name, content, mtime_ns, detailEl, headers);
+          await _ctxHandleConflict(type, name, content, mtime_ns, detailEl);
           return;
         }
         if (!r.ok) {

@@ -345,62 +345,245 @@ def test_redaction_classification_covers_every_unsafe_route() -> None:
 #
 # Backend coverage above guarantees every unsafe handler is *gated* by the
 # middleware. This complementary test pins the opposite direction: every
-# unsafe-method ``fetch(...)`` in the SPA must thread the CSRF token, so
+# ``/api/...`` ``fetch(...)`` in the SPA must thread the CSRF token, so
 # the gate doesn't 403 a legitimate user-initiated write.
 #
-# Regression history: PR1 (#793), the first PR2 commit, and the first
-# PR2 review-fold each leaked sites that bypassed ``ensureCsrfToken()``.
-# This guard prevents recurrence. Each unsafe ``fetch(...)`` must be
-# classifiable into one of three safe shapes:
+# Regression history: PR1 (#793), PR #958, and two review-folds of #961
+# each leaked sites that bypassed the token. This guard is the
+# "stop-the-bleeding" check.
 #
-# A. **Inline literal with token** — ``headers: { ..., 'X-Memtomem-CSRF':
-#    csrf }`` directly in the fetch options.
-# B. **Variable threading** — ``headers`` as a bare identifier, with a
-#    ``const headers = csrf ? {..., 'X-Memtomem-CSRF': csrf} : {...}``
-#    binding from an ``ensureCsrfToken()`` call in the same function (we
-#    check a 4000-char lookback, which covers every handler in the
-#    codebase).
-# C. **Param threading** — the enclosing function takes ``headers`` as a
-#    parameter and the caller threads it. These are listed explicitly in
-#    ``_CSRF_FETCH_EXEMPT`` with the caller cited, since the regex can't
-#    chase across functions.
+# Design notes (informed by Codex review of `c5897b5`):
 #
-# Anything else fails:
-# * Inline literal *without* the token.
-# * No ``headers`` key on an unsafe ``fetch(...)`` whose method isn't
-#   ``GET``/``HEAD``/``OPTIONS``.
-# * ``headers`` identifier with no ``ensureCsrfToken()`` in lookback and
-#   no entry in the exempt list.
+# 1. **Statically-classify every /api fetch.** We list each fetch as
+#    "safe method" (GET/HEAD/OPTIONS), "unsafe method with literal", or
+#    "method not statically inferable". The third class fails — a
+#    ``fetch(url, opts)`` or ``fetch(url, { method })`` shape would hide
+#    an unsafe write from the test otherwise. The codebase's convention
+#    is inline literal methods; the test enforces it.
+#
+# 2. **Token must live INSIDE the headers value.** A comment, debug
+#    string, or unrelated literal that contains the substring
+#    ``X-Memtomem-CSRF`` anywhere in the 800-char fetch window must not
+#    cause a pass. Two valid shapes:
+#
+#    * **Inline-literal** — ``headers: { ..., 'X-Memtomem-CSRF': csrf }``.
+#    * **Variable threading** — ``headers`` as a bare identifier passed
+#      to fetch, *backed by a local* ``const headers = ... 'X-Memtomem-CSRF'
+#      ...`` binding in the preceding ~100 lines.
+#
+# 3. **No free-form exempt list.** The "function-parameter threading"
+#    shape (used by ``_ctxHandleConflict`` in earlier revisions) was
+#    refactored to self-thread (call ``ensureCsrfToken()`` inside its
+#    own scope) so this test never has to chase across functions —
+#    keeping the regex contract tight.
 
 _FETCH_LINE_RE = re.compile(r"\bfetch\(")
-_UNSAFE_METHOD_RE = re.compile(r"method:\s*['\"](POST|PUT|PATCH|DELETE)['\"]")
-_INLINE_HEADERS_LITERAL_RE = re.compile(r"headers:\s*\{([^}]*)\}", re.DOTALL)
-_HEADERS_KEY_RE = re.compile(r"\bheaders\b\s*[:,}]")
+_METHOD_LITERAL_RE = re.compile(r"method:\s*['\"](GET|HEAD|OPTIONS|POST|PUT|PATCH|DELETE)['\"]")
+_HEADERS_KEY_RE = re.compile(r"\bheaders\s*:")
+_HEADERS_SHORTHAND_RE = re.compile(r"[\{,]\s*headers\s*[,}\n]")
+_IDENT_ONLY_RE = re.compile(r"^[A-Za-z_$][\w$]*$")
 _CSRF_HEADER_RE = re.compile(r"X-Memtomem-CSRF", re.IGNORECASE)
-_ENSURE_CSRF_RE = re.compile(r"\bensureCsrfToken\s*\(")
 
-# Vendored libraries (Swagger UI, etc.) don't observe our CSRF contract
-# and don't reach our routes via unsafe methods at runtime — skip them.
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+# Vendored libraries (Swagger UI, etc.) don't observe our CSRF contract.
 _STATIC_SKIP_DIRS = frozenset({"vendor"})
 
-# Sites whose threading is via function parameter, so the regex's
-# 4000-char lookback can't see ``ensureCsrfToken()`` (it's in the caller).
-# Each entry MUST cite the caller line where the token *is* threaded.
-_CSRF_FETCH_EXEMPT: dict[tuple[str, int], str] = {
-    ("context-gateway.js", 1705): (
-        "headers threaded via _ctxHandleConflict's function parameter; "
-        "caller at context-gateway.js:1908 calls ensureCsrfToken() and "
-        "passes the resulting headers map into the conflict-resolution flow"
-    ),
-}
 
+def _scan_fetch_args(window: str) -> tuple[str, str]:
+    """Return ``(first_arg_text, second_arg_shape)`` by scanning the
+    fetch call's argument list with awareness of strings, template
+    literals, and nested braces/parens.
 
-def _iter_unsafe_fetch_sites() -> list[tuple[Path, int, str, int]]:
-    """Return ``(file, line, window, start_offset)`` for each unsafe ``fetch(``.
-
-    The window extends 800 chars forward from the ``fetch(`` token; the
-    start offset is preserved so the caller can do a lookback scan.
+    ``second_arg_shape`` is one of:
+    * ``"none"`` — no second argument; JS fetch defaults to GET.
+    * ``"inline"`` — second argument starts with ``{`` (inline options
+      literal); ``method`` is statically discoverable if present.
+    * ``"identifier"`` — second argument starts with an identifier or
+      anything that isn't ``{``; the method can't be statically
+      determined and the site fails open.
     """
+    # The window starts at ``f`` of ``fetch(``. Move past the open paren.
+    if not window.startswith("fetch("):
+        return ("", "none")
+    i = len("fetch(")
+    depth_paren = 1
+    depth_brace = 0
+    depth_bracket = 0
+    in_string: str | None = None
+    in_template = False
+    in_template_expr = 0  # nested ${} inside a template literal
+    first_arg_start = i
+    while i < len(window):
+        c = window[i]
+        if in_string is not None:
+            if c == "\\":
+                i += 2
+                continue
+            if c == in_string:
+                in_string = None
+            i += 1
+            continue
+        if in_template:
+            if c == "\\":
+                i += 2
+                continue
+            if c == "`" and in_template_expr == 0:
+                in_template = False
+            elif c == "$" and i + 1 < len(window) and window[i + 1] == "{":
+                in_template_expr += 1
+                i += 2
+                continue
+            elif c == "}" and in_template_expr > 0:
+                in_template_expr -= 1
+            i += 1
+            continue
+        if c == "'" or c == '"':
+            in_string = c
+        elif c == "`":
+            in_template = True
+        elif c == "(":
+            depth_paren += 1
+        elif c == ")":
+            depth_paren -= 1
+            if depth_paren == 0:
+                return (window[first_arg_start:i], "none")
+        elif c == "{":
+            depth_brace += 1
+        elif c == "}":
+            depth_brace -= 1
+        elif c == "[":
+            depth_bracket += 1
+        elif c == "]":
+            depth_bracket -= 1
+        elif c == "," and depth_paren == 1 and depth_brace == 0 and depth_bracket == 0:
+            first_arg = window[first_arg_start:i]
+            j = i + 1
+            while j < len(window) and window[j].isspace():
+                j += 1
+            if j >= len(window) or window[j] == ")":
+                return (first_arg, "none")
+            return (first_arg, "inline" if window[j] == "{" else "identifier")
+        i += 1
+    # Unterminated — treat as unknown so the test fails loudly.
+    return (window[first_arg_start:], "identifier")
+
+
+def _is_api_fetch(window: str) -> bool:
+    """Does this fetch call target ``/api/...``?"""
+    first_arg, _ = _scan_fetch_args(window)
+    return "/api/" in first_arg
+
+
+def _extract_methods(window: str) -> list[str]:
+    """All HTTP methods statically inferable from inline ``method: '...'``
+    literals inside the fetch window."""
+    return [m.group(1).upper() for m in _METHOD_LITERAL_RE.finditer(window)]
+
+
+def _extract_headers_value(window: str) -> str | None:
+    """Find ``headers:`` in the fetch options literal and return the
+    value expression as raw text, scanning at brace/paren/bracket depth
+    0 until the next ``,`` or ``}`` outside strings/templates. Returns
+    None if no ``headers:`` key is present.
+
+    The shorthand ``{ method, headers }`` (i.e. ``headers`` without an
+    explicit ``:`` value) returns the identifier ``"headers"`` so the
+    caller can route it through the local-binding check.
+    """
+    m = _HEADERS_KEY_RE.search(window)
+    if m is None:
+        sh = _HEADERS_SHORTHAND_RE.search(window)
+        if sh is not None:
+            return "headers"
+        return None
+    i = m.end()
+    while i < len(window) and window[i].isspace():
+        i += 1
+    start = i
+    depth_paren = depth_brace = depth_bracket = 0
+    in_string: str | None = None
+    in_template = False
+    in_template_expr = 0
+    while i < len(window):
+        c = window[i]
+        if in_string is not None:
+            if c == "\\":
+                i += 2
+                continue
+            if c == in_string:
+                in_string = None
+            i += 1
+            continue
+        if in_template:
+            if c == "\\":
+                i += 2
+                continue
+            if c == "`" and in_template_expr == 0:
+                in_template = False
+            elif c == "$" and i + 1 < len(window) and window[i + 1] == "{":
+                in_template_expr += 1
+                i += 2
+                continue
+            elif c == "}" and in_template_expr > 0:
+                in_template_expr -= 1
+            i += 1
+            continue
+        if c == "'" or c == '"':
+            in_string = c
+        elif c == "`":
+            in_template = True
+        elif c == "(":
+            depth_paren += 1
+        elif c == ")":
+            depth_paren -= 1
+            if depth_paren < 0:
+                # Fell out of the fetch options object.
+                return window[start:i].strip()
+        elif c == "{":
+            depth_brace += 1
+        elif c == "}":
+            if depth_brace == 0:
+                return window[start:i].strip()
+            depth_brace -= 1
+        elif c == "[":
+            depth_bracket += 1
+        elif c == "]":
+            depth_bracket -= 1
+        elif c == "," and depth_paren == 0 and depth_brace == 0 and depth_bracket == 0:
+            return window[start:i].strip()
+        i += 1
+    return window[start:].strip()
+
+
+def _has_local_binding_with_csrf(text: str, fetch_start: int, ident: str) -> bool:
+    """True iff a ``const|let|var <ident> = <RHS containing X-Memtomem-CSRF>``
+    binding appears in the ~100-line lookback.
+
+    The check is tied to the **exact identifier** passed to fetch — so a
+    fetch shaped ``headers: _hdr4`` only passes when there's a local
+    ``const _hdr4 = ...'X-Memtomem-CSRF'...`` binding, not when some
+    unrelated ``const headers = ...`` happens to live nearby. This is
+    the binding-tracing pin Codex requested in round 3.
+    """
+    if not _IDENT_ONLY_RE.match(ident):
+        return False
+    lookback = text[max(0, fetch_start - 4000) : fetch_start]
+    binding_re = re.compile(
+        r"\b(?:const|let|var)\s+" + re.escape(ident) + r"\s*=\s*(.+?)(?:;|\n\n)",
+        re.DOTALL,
+    )
+    for m in binding_re.finditer(lookback):
+        rhs = m.group(1)
+        if _CSRF_HEADER_RE.search(rhs):
+            return True
+    return False
+
+
+def _iter_api_fetch_sites() -> list[tuple[Path, int, str, int]]:
+    """Return ``(file, line, window, start_offset)`` for each ``/api/...``
+    fetch call (safe or unsafe)."""
     sites: list[tuple[Path, int, str, int]] = []
     for path in sorted(STATIC_DIR.rglob("*.js")):
         if any(part in _STATIC_SKIP_DIRS for part in path.parts):
@@ -409,7 +592,7 @@ def _iter_unsafe_fetch_sites() -> list[tuple[Path, int, str, int]]:
         for line_match in _FETCH_LINE_RE.finditer(text):
             start = line_match.start()
             window = text[start : start + 800]
-            if not _UNSAFE_METHOD_RE.search(window):
+            if not _is_api_fetch(window):
                 continue
             line_no = text.count("\n", 0, start) + 1
             sites.append((path, line_no, window, start))
@@ -418,57 +601,77 @@ def _iter_unsafe_fetch_sites() -> list[tuple[Path, int, str, int]]:
 
 def _classify_site(path: Path, window: str, start: int) -> tuple[str, str | None]:
     """Return ``(verdict, reason)`` where verdict is one of ``"pass"`` or
-    a failure shorthand. Used by the test below to produce specific
-    error messages instead of a single "missing token" blob.
+    a failure shorthand naming the specific bug shape.
     """
-    # Shape A: inline literal with X-Memtomem-CSRF.
-    inline = _INLINE_HEADERS_LITERAL_RE.search(window)
-    if inline:
-        if _CSRF_HEADER_RE.search(inline.group(1)):
-            return ("pass", None)
-        return ("inline-literal-missing-csrf", "headers: {...} without X-Memtomem-CSRF")
+    _first_arg, second_arg_shape = _scan_fetch_args(window)
+    if second_arg_shape == "identifier":
+        return (
+            "method-not-inferable",
+            "fetch's second argument is an identifier — the method can't "
+            "be classified statically. Inline the options literal at the "
+            "callsite so the CSRF guard test can see the method.",
+        )
 
-    # Shape B/C require headers to be referenced at all. If the unsafe
-    # fetch options omit the ``headers`` key entirely (e.g. a copied
-    # ``fetch(url, { method: 'POST', body })`` shape), the gate will
-    # 403 the request in production.
-    if not _HEADERS_KEY_RE.search(window):
+    methods = _extract_methods(window)
+    if not methods:
+        # No inline ``method:`` AND options is either absent or an inline
+        # literal — JS fetch defaults to GET, which is safe.
+        return ("pass", None)
+    unsafe = [m for m in methods if m in _UNSAFE_METHODS]
+    if not unsafe:
+        return ("pass", None)  # safe-method fetch
+
+    headers_value = _extract_headers_value(window)
+    if headers_value is None:
         return (
             "no-headers-on-unsafe-fetch",
             "unsafe fetch options omit the `headers` key entirely",
         )
 
-    # Shape A also covers ``X-Memtomem-CSRF`` appearing outside the
-    # `headers: {...}` literal — e.g. inlined into a ternary expression
-    # that the literal regex didn't match.
-    if _CSRF_HEADER_RE.search(window):
+    # Shape A: the headers value text contains 'X-Memtomem-CSRF' — either
+    # an inline literal, a ternary like ``csrf ? {...CSRF...} : {...}``,
+    # or any expression that includes the header name. Covers the
+    # canonical inline-literal case and the conditional-headers shape.
+    if _CSRF_HEADER_RE.search(headers_value):
         return ("pass", None)
 
-    # Shape B: bare identifier `headers` — needs ensureCsrfToken() in scope.
-    text = path.read_text(encoding="utf-8")
-    lookback = text[max(0, start - 4000) : start]
-    if _ENSURE_CSRF_RE.search(lookback):
-        return ("pass", None)
+    # Shape B: the headers value is a bare identifier — must be backed
+    # by a local ``const|let|var <that-identifier> = ... 'X-Memtomem-CSRF'
+    # ...`` binding. The binding name is matched against the literal
+    # identifier passed to fetch, so an unrelated ``const headers = ...``
+    # binding elsewhere doesn't accidentally rescue a fetch shaped
+    # ``headers: someOtherVar``.
+    if _IDENT_ONLY_RE.match(headers_value):
+        text = path.read_text(encoding="utf-8")
+        if _has_local_binding_with_csrf(text, start, headers_value):
+            return ("pass", None)
+        return (
+            "headers-var-without-csrf-binding",
+            f"`headers: {headers_value}` passed to unsafe fetch, but no "
+            f"local `const {headers_value} = ...'X-Memtomem-CSRF'...` "
+            "binding in the preceding ~100 lines",
+        )
 
     return (
-        "headers-var-without-ensure-csrf",
-        "`headers` identifier passed to unsafe fetch, but no "
-        "`ensureCsrfToken()` call in the preceding ~100 lines",
+        "headers-expression-missing-csrf",
+        f"`headers:` value (`{headers_value[:80]}`) is not a bare "
+        "identifier and does not contain 'X-Memtomem-CSRF'",
     )
 
 
-def test_spa_unsafe_fetch_threads_csrf_token() -> None:
-    """Every unsafe-method ``fetch(...)`` in the SPA threads the CSRF
-    token via one of the three safe shapes. Failures cite the specific
-    shape so the developer knows what to change.
+def test_spa_api_fetch_threads_csrf_token() -> None:
+    """Every SPA ``/api/...`` fetch is either a safe-method read or
+    threads the CSRF token via the local-binding convention.
+
+    Shape-specific failure verdicts make it obvious what to change:
+    ``method-not-inferable``, ``inline-literal-missing-csrf``,
+    ``no-headers-on-unsafe-fetch``, ``headers-var-without-csrf-binding``.
     """
-    sites = _iter_unsafe_fetch_sites()
-    assert sites, "static/*.js sweep found no unsafe-method fetch sites"
+    sites = _iter_api_fetch_sites()
+    assert sites, "static/*.js sweep found no /api/... fetch sites"
 
     failures: list[str] = []
     for path, line_no, window, start in sites:
-        if (path.name, line_no) in _CSRF_FETCH_EXEMPT:
-            continue
         verdict, reason = _classify_site(path, window, start)
         if verdict == "pass":
             continue
@@ -477,27 +680,15 @@ def test_spa_unsafe_fetch_threads_csrf_token() -> None:
 
     if failures:
         pytest.fail(
-            "Unsafe-method fetch() sites without CSRF threading.\n\n"
+            "Unsafe /api fetch() sites without CSRF threading.\n\n"
             "Safe shapes (one must apply):\n"
             "  A. Inline literal: `headers: { ..., 'X-Memtomem-CSRF': csrf }`.\n"
-            "  B. Variable threading: `const csrf = await ensureCsrfToken();\n"
-            "     const headers = csrf ? { ..., 'X-Memtomem-CSRF': csrf } : {...};\n"
-            "     fetch(URL, { method, headers })`.\n"
-            "  C. Param threading: enclosing function takes `headers` as a parameter;\n"
-            "     add the site to `_CSRF_FETCH_EXEMPT` citing the caller.\n\n"
+            "  B. Variable threading with a local binding:\n"
+            "       const csrf = await ensureCsrfToken();\n"
+            "       const headers = csrf\n"
+            "         ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }\n"
+            "         : { 'Content-Type': 'application/json' };\n"
+            "       fetch(URL, { method: 'POST', headers });\n"
+            "  C. Safe-method (GET/HEAD/OPTIONS) — no threading required.\n\n"
             "Offending sites:\n  - " + "\n  - ".join(failures)
-        )
-
-
-def test_spa_csrf_fetch_exempt_entries_are_live() -> None:
-    """Each `_CSRF_FETCH_EXEMPT` entry references an actual unsafe fetch
-    site. Catches drift if a site is renamed/removed but the exemption
-    is left behind."""
-    live = {(p.name, line) for p, line, _, _ in _iter_unsafe_fetch_sites()}
-    stale = sorted(set(_CSRF_FETCH_EXEMPT) - live)
-    if stale:
-        pytest.fail(
-            "Stale entries in _CSRF_FETCH_EXEMPT (file no longer has an "
-            "unsafe fetch at that line):\n  - "
-            + "\n  - ".join(f"{name}:{lineno}" for name, lineno in stale)
         )
