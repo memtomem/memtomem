@@ -30,6 +30,30 @@ function _wdLabel(status) {
 // call and is the source of truth that the row's ``data-hook-key``
 // references.
 let _hooksRuleRegistry = [];
+let _hooksSyncSeq = 0;
+
+function _hooksCurrentTargetScope() {
+  if (typeof _ctxTargetScope === 'string') return _ctxTargetScope;
+  return 'project_shared';
+}
+
+function _hooksScopedUrl(path) {
+  if (typeof _ctxWithTargetScope === 'function') {
+    return _ctxWithTargetScope(path);
+  }
+  return path;
+}
+
+function _hooksTierControlsHtml() {
+  if (typeof _ctxTierControls !== 'function') return '';
+  return _ctxTierControls('hooks-sync');
+}
+
+function _hooksWireTierControls() {
+  if (typeof _ctxWireTierControls === 'function') {
+    _ctxWireTierControls();
+  }
+}
 
 function _renderHookRuleDetail(key, contentEl) {
   const idx = Number(key);
@@ -38,6 +62,7 @@ function _renderHookRuleDetail(key, contentEl) {
   if (!panel || !entry) return;
 
   const rule = entry.rule || {};
+  const label = entry.matcher ? `${entry.event}:${entry.matcher}` : entry.event;
   // Claude Code's rule format: top-level ``matcher`` + ``hooks`` array
   // of command entries, each with ``type`` / ``command`` / optional
   // ``timeout`` / etc. Render the union so the user can see exactly
@@ -52,7 +77,11 @@ function _renderHookRuleDetail(key, contentEl) {
       + `</div>`;
   }
 
-  let html = `<div class="hooks-rule-detail-inner">`;
+  let html = `<div class="hooks-rule-detail-header">`;
+  html += `<strong>${escapeHtml(label)}</strong>`;
+  html += `<span class="badge ${entry._bucket === 'pending' ? 'badge-warning' : 'badge-success'}">${escapeHtml(entry._bucket || '')}</span>`;
+  html += `</div>`;
+  html += `<div class="hooks-rule-detail-inner">`;
   html += _row(t('settings.hooks.detail.event'), entry.event);
   html += _row(t('settings.hooks.detail.matcher'), entry.matcher);
   for (const h of hooks) {
@@ -74,18 +103,23 @@ function _renderHookRuleDetail(key, contentEl) {
 }
 
 async function loadHooksSync() {
+  const seq = ++_hooksSyncSeq;
+  const requestedScope = _hooksCurrentTargetScope();
   const statusEl = qs('hooks-sync-status');
   const contentEl = qs('hooks-sync-content');
   panelLoading(contentEl);
-  statusEl.innerHTML = '';
+  statusEl.innerHTML = _hooksTierControlsHtml();
+  _hooksWireTierControls();
 
   try {
-    const res = await fetch('/api/settings-sync');
+    const res = await fetch(_hooksScopedUrl('/api/settings-sync'));
+    if (seq !== _hooksSyncSeq || requestedScope !== _hooksCurrentTargetScope()) return;
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || `Request failed: ${res.status}`);
     }
     const data = await res.json();
+    if (seq !== _hooksSyncSeq || requestedScope !== _hooksCurrentTargetScope()) return;
 
     // Status badge
     const badges = {
@@ -115,10 +149,12 @@ async function loadHooksSync() {
     // target path is often what the user needs to inspect.
     const showTarget = !!data.target_path && data.status !== 'no_source';
     statusEl.innerHTML =
-      `<span class="badge ${badge.cls}">${escapeHtml(badge.text)}</span>`
+      _hooksTierControlsHtml()
+      + `<span class="badge ${badge.cls}">${escapeHtml(badge.text)}</span>`
       + (showTarget
         ? `<div class="hooks-status-target" data-target-scope="${escapeHtml(scope || '')}">${escapeHtml(targetLabel)} <code>${escapeHtml(data.target_path)}</code></div>`
         : '');
+    _hooksWireTierControls();
 
     // Sync Now is only meaningful when a canonical source exists. Disable
     // the button in ``no_source`` so clicking it doesn't fire a POST that
@@ -271,7 +307,7 @@ async function loadHooksSync() {
           const headers = csrf
             ? {'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf}
             : {'Content-Type': 'application/json'};
-          const r = await fetch('/api/context/settings/resolve', {
+          const r = await fetch(_hooksScopedUrl('/api/context/settings/resolve'), {
             method: 'POST',
             headers,
             body: JSON.stringify({event, matcher, action: 'use_proposed'}),
@@ -293,6 +329,7 @@ async function loadHooksSync() {
     });
 
   } catch (err) {
+    if (seq !== _hooksSyncSeq || requestedScope !== _hooksCurrentTargetScope()) return;
     contentEl.innerHTML = emptyState('', t('settings.hooks.load_failed'), err.message);
   }
 }
@@ -317,7 +354,7 @@ document.getElementById('hooks-sync-btn')?.addEventListener('click', async () =>
     // ``needs_confirmation`` for the user-scope ``~/.claude/settings.json``
     // path — the same gate the CLI confirms interactively
     // (``cli/context_cmd.py:_confirm_settings_host_writes``).
-    const res = await fetch('/api/settings-sync', {
+    const res = await fetch(_hooksScopedUrl('/api/settings-sync'), {
       method: 'POST',
       headers,
       body: JSON.stringify({ allow_host_writes: true }),
@@ -449,4 +486,3 @@ async function runWatchdogNow() {
 
 qs('health-watchdog-refresh-btn')?.addEventListener('click', loadWatchdogStatus);
 qs('health-watchdog-run-btn')?.addEventListener('click', runWatchdogNow);
-

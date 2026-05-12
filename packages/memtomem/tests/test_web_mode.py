@@ -606,6 +606,37 @@ def test_app_js_pins_ui_mode_default_and_toast_copy() -> None:
         "Sync All would still POST /api/context/commands/sync in prod "
         "even though the surface is dev-only."
     )
+    assert "const chips = runtimes.map" in cg_js, (
+        "Context Gateway runtime tags must render from detected_runtimes."
+    )
+    assert "ctx-overview-runtimes" in cg_js, (
+        "Context Gateway runtime tags disappeared from the prod overview header."
+    )
+    runtime_block = cg_js[
+        cg_js.find("const runtimes = Array.isArray(data.detected_runtimes)") : cg_js.find(
+            "html += _ctxTierControls('overview')"
+        )
+    ]
+    assert "STATE.uiMode" not in runtime_block, (
+        "Context Gateway runtime tags must not be dev-mode gated; prod users "
+        "need the claude/gemini/codex detection chips too."
+    )
+    hooks_js = _read_static("settings-hooks-watchdog.js")
+    assert "_hooksScopedUrl('/api/settings-sync')" in hooks_js
+    assert "_hooksScopedUrl('/api/context/settings/resolve')" in hooks_js
+    assert "_ctxTierControls('hooks-sync')" in hooks_js
+    assert "let _hooksSyncSeq = 0;" in hooks_js
+    assert "const requestedScope = _hooksCurrentTargetScope();" in hooks_js
+    assert "seq !== _hooksSyncSeq || requestedScope !== _hooksCurrentTargetScope()" in hooks_js
+    css = _read_static("style.css")
+    assert (
+        ".badge-success" in css
+        and "background:" in css.split(".badge-success", 1)[1].split("}", 1)[0]
+    ), "Runtime tags use badge-success for detected runtimes; it must define a background."
+    assert ".badge-warning" in css and ".badge-muted" in css
+    assert ".hooks-rule-detail-header" in css and ".hooks-rule-detail-inner" in css, (
+        "Hooks per-rule detail should render as a card with a header and framed body."
+    )
     # And the locale entries themselves are pinned so a rename doesn't go
     # unnoticed by the i18n completeness check.
     en = _read_static("locales/en.json")

@@ -145,12 +145,12 @@ defers. The picker is gated on the future project-config ADR. This
 keeps the Web UI consistent with the CLI surface, which has only the
 per-invocation `--scope=…` flag and no persistent per-project setting.
 
-**Per-sync override from the Web UI is intentionally absent in v1.**
-Users who want a one-shot override drop to the CLI: `mm context sync
---include=settings --scope=project_local`. Adding a per-sync scope
-selector to the Web UI would require either the deferred picker (with
-its persistence implications) or a transient form state, both of which
-expand the v1 surface beyond what this ADR proposes.
+**Superseded Web note.** This ADR originally kept per-sync override out
+of the Web UI. The later Context Gateway parity change made settings
+routes accept `?target_scope=` with default `project_shared`, matching
+skills / commands / agents Web routes. CLI users still use
+`mm context sync --include=settings --scope=project_local` for a
+one-shot override.
 
 ### 4. Migration
 

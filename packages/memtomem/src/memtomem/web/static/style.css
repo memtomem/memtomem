@@ -868,6 +868,9 @@ button:active { opacity: 0.7; }
 .badge-blue   { background: rgba(var(--accent-rgb),0.15); color: var(--accent); }
 .badge-gray   { background: rgba(123, 127, 150, 0.15); color: var(--muted); }
 .badge-yellow { background: rgba(243, 156, 18, 0.15); color: var(--yellow); }
+.badge-success { background: rgba(76, 175, 125, 0.15); color: var(--green); }
+.badge-warning { background: rgba(243, 156, 18, 0.15); color: var(--yellow); }
+.badge-muted { background: rgba(123, 127, 150, 0.15); color: var(--muted); }
 .badge-source { background: rgba(76, 175, 125, 0.15); color: var(--green); font-family: var(--mono); font-weight: 400; }
 .badge-validity { background: rgba(108, 92, 231, 0.10); color: var(--muted); font-family: var(--mono); font-weight: 400; }
 .badge-validity--expired { opacity: 0.55; text-decoration: line-through; }
@@ -2289,24 +2292,41 @@ select:focus-visible {
 .hooks-rule-row:hover { background: var(--bg); }
 .hooks-rule-row--synced { padding: 0.25rem 0.5rem; border-radius: var(--radius); }
 .hooks-rule-detail {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
   margin-top: 1rem;
-  padding: 12px;
+  padding: 18px 20px;
+  min-height: 360px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.hooks-rule-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.hooks-rule-detail-inner {
+  min-height: 280px;
+  padding: 12px 14px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg);
 }
 .hooks-rule-detail-row {
-  display: flex;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: minmax(140px, 0.22fr) minmax(0, 1fr);
+  gap: 14px;
   align-items: baseline;
-  margin: 4px 0;
-  font-size: 0.82rem;
+  margin: 8px 0;
+  font-size: 0.86rem;
 }
 .hooks-rule-detail-label {
   color: var(--muted);
   font-weight: 600;
-  min-width: 90px;
-  flex-shrink: 0;
 }
 .hooks-rule-detail-value {
   color: var(--text);
@@ -2314,8 +2334,12 @@ select:focus-visible {
   overflow-wrap: anywhere;
 }
 .hooks-rule-detail-json {
+  width: 100%;
+  min-height: 170px;
+  box-sizing: border-box;
+  min-width: 0;
   font-family: var(--mono);
-  font-size: 0.75rem;
+  font-size: 0.78rem;
   line-height: 1.5;
   background: var(--surface);
   border: 1px solid var(--border);

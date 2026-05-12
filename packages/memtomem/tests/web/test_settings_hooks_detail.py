@@ -89,6 +89,8 @@ def test_clicking_synced_rule_opens_detail_panel(page, mm_web_url: str) -> None:
 
     detail = page.locator("#hooks-rule-detail")
     detail.wait_for(state="visible", timeout=4_000)
+    assert detail.locator(".hooks-rule-detail-header").count() == 1
+    assert detail.locator(".hooks-rule-detail-inner").count() == 1
     text = detail.text_content() or ""
     assert "PostToolUse" in text, f"event missing from detail panel, got {text!r}"
     assert "Edit" in text, f"matcher missing from detail panel, got {text!r}"

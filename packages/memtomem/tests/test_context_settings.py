@@ -981,7 +981,7 @@ class TestSettingsHttpLayer:
         target.write_text(json.dumps(user_authored, indent=2) + "\n", encoding="utf-8")
 
         resp = await client.post(
-            "/api/context/settings/sync",
+            "/api/context/settings/sync?target_scope=user",
             json={"allow_host_writes": True},
         )
         assert resp.status_code == 200
@@ -989,7 +989,7 @@ class TestSettingsHttpLayer:
         claude_result = next(r for r in results if r["name"] == "claude_settings")
         assert claude_result["status"] == "ok"
 
-        diff = await client.get("/api/context/settings")
+        diff = await client.get("/api/context/settings?target_scope=user")
         assert diff.status_code == 200
         diff_body = diff.json()
         assert diff_body["status"] == "in_sync"
@@ -1057,7 +1057,7 @@ class TestSettingsHttpLayer:
         monkeypatch.setattr(routes_sync_mod, "_safe_load_json", bumping_load)
 
         resp = await client.post(
-            "/api/context/settings/resolve",
+            "/api/context/settings/resolve?target_scope=user",
             json={
                 "event": "PostToolUse",
                 "matcher": "Write",
@@ -1081,8 +1081,8 @@ class TestSettingsHttpLayer:
 
     async def test_resolve_respects_target_scope(self, app, client, claude_home, tmp_path):
         """Codex blocker #2 regression pin: ``POST /settings-sync/resolve``
-        must use ``hooks.target_scope`` from ``app.state.config``, not
-        the hardcoded user-tier path. With ``target_scope="project_local"``
+        must use the request ``target_scope`` query param, not the hardcoded
+        user-tier path. With ``target_scope="project_local"``
         a resolve must mutate ``<project>/.claude/settings.local.json``
         and leave ``~/.claude/settings.json`` untouched.
 
@@ -1091,8 +1091,9 @@ class TestSettingsHttpLayer:
         and the resolve handler would have written there regardless of
         the configured scope.
         """
-        # Configure project_local scope on the live app state.
-        app.state.config.hooks.target_scope = "project_local"
+        # Configure the opposite scope on live app state as a regression
+        # guard: Web settings routes must follow the request query param.
+        app.state.config.hooks.target_scope = "user"
 
         # Seed canonical with a hook differing from the user-authored rule
         # so the route surfaces a conflict.
@@ -1126,7 +1127,7 @@ class TestSettingsHttpLayer:
         user_target.write_text(user_authored, encoding="utf-8")
 
         resp = await client.post(
-            "/api/context/settings/resolve",
+            "/api/context/settings/resolve?target_scope=project_local",
             json={"event": "PostToolUse", "matcher": "Write", "action": "use_proposed"},
         )
         assert resp.status_code == 200, resp.text
