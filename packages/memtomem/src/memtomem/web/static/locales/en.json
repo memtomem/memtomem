@@ -439,6 +439,7 @@
   "settings.hooks.title": "Hooks",
   "settings.hooks.sync_now": "Sync Now",
   "settings.hooks.sync_now_tooltip": "Apply .memtomem/settings.json hook config to the active runtime",
+  "settings.hooks.sync_now_disabled_no_source": "No .memtomem/settings.json to sync — create it first via `mm init`.",
   "settings.hooks.sync_now_aria": "Sync hooks to active runtime",
   "settings.hooks.in_sync": "All hooks are in sync",
   "settings.hooks.conflicts": "conflicts found",

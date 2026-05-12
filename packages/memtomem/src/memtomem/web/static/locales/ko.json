@@ -439,6 +439,7 @@
   "settings.hooks.title": "훅",
   "settings.hooks.sync_now": "지금 동기화",
   "settings.hooks.sync_now_tooltip": ".memtomem/settings.json 의 훅 설정을 활성 런타임에 적용합니다",
+  "settings.hooks.sync_now_disabled_no_source": "동기화할 .memtomem/settings.json 이 없습니다 — `mm init` 으로 먼저 생성하세요.",
   "settings.hooks.sync_now_aria": "활성 런타임으로 훅 동기화",
   "settings.hooks.in_sync": "모든 훅이 동기화됨",
   "settings.hooks.conflicts": "개 충돌 발견",

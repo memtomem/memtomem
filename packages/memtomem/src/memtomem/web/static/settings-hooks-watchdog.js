@@ -107,11 +107,35 @@ async function loadHooksSync() {
     const targetLabel = translated && translated !== scopeKey
       ? translated
       : t('settings.hooks.target_label');
+    // In ``no_source`` state the canonical file does not exist, so the
+    // target path is irrelevant — the badge already names the condition
+    // ("No .memtomem/settings.json found"). Suppress the target line so
+    // the empty-state hint doesn't compete with a leftover scope label
+    // (PR D follow-up). ``error`` state still shows it because the
+    // target path is often what the user needs to inspect.
+    const showTarget = !!data.target_path && data.status !== 'no_source';
     statusEl.innerHTML =
       `<span class="badge ${badge.cls}">${escapeHtml(badge.text)}</span>`
-      + (data.target_path
+      + (showTarget
         ? `<div class="hooks-status-target" data-target-scope="${escapeHtml(scope || '')}">${escapeHtml(targetLabel)} <code>${escapeHtml(data.target_path)}</code></div>`
         : '');
+
+    // Sync Now is only meaningful when a canonical source exists. Disable
+    // the button in ``no_source`` so clicking it doesn't fire a POST that
+    // can never succeed; restore the enabled state on the other branches
+    // since every ``loadHooksSync`` call ends here.
+    const syncBtn = document.getElementById('hooks-sync-btn');
+    if (syncBtn) {
+      const isNoSource = data.status === 'no_source';
+      syncBtn.disabled = isNoSource;
+      if (isNoSource) {
+        syncBtn.setAttribute('data-no-source', 'true');
+        syncBtn.title = t('settings.hooks.sync_now_disabled_no_source');
+      } else {
+        syncBtn.removeAttribute('data-no-source');
+        syncBtn.title = t('settings.hooks.sync_now_tooltip');
+      }
+    }
 
     if (data.status === 'no_source' || data.status === 'error') {
       // Status badge above already names the condition — keep the body to
