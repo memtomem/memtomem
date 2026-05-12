@@ -19,13 +19,21 @@ function _wdLabel(status) {
 
 // ── Hooks Sync ──
 
-// Registry of hook rules keyed by ``event:matcher`` (or just ``event``
-// when no matcher). Populated on each ``loadHooksSync`` call (#962) so
-// the per-rule detail panel can render without an extra fetch.
-let _hooksRuleRegistry = {};
+// Flat registry of hook rules — entries are indexed by their position
+// in the combined synced + pending lists rather than by
+// ``event:matcher``. Claude Code allows multiple rules to share the
+// same ``(event, matcher)`` pair (see ``settings_sync.py:128`` PR #844
+// fix — the server preserves multiplicity), so an
+// ``event:matcher``-keyed dict would silently collapse duplicates and
+// both rows would resolve to the last rule's detail. The index-keyed
+// shape is stable across re-renders within a single ``loadHooksSync``
+// call and is the source of truth that the row's ``data-hook-key``
+// references.
+let _hooksRuleRegistry = [];
 
 function _renderHookRuleDetail(key, contentEl) {
-  const entry = _hooksRuleRegistry[key];
+  const idx = Number(key);
+  const entry = Number.isInteger(idx) ? _hooksRuleRegistry[idx] : undefined;
   const panel = contentEl.querySelector('#hooks-rule-detail');
   if (!panel || !entry) return;
 
@@ -123,16 +131,22 @@ async function loadHooksSync() {
       return item.matcher ? `${item.event}:${item.matcher}` : item.event;
     }
 
-    // Build a registry of full rule objects keyed by ``event:matcher``.
-    // The per-rule click handler (#962) reads from this registry rather
-    // than a re-fetch — the GET payload already carries the full rule
-    // body for synced + pending entries.
-    _hooksRuleRegistry = {};
-    for (const s of data.hooks.synced) {
-      _hooksRuleRegistry[_ruleLabel(s)] = { ...s, _bucket: 'synced' };
-    }
+    // Build a flat registry of every clickable rule. Index-based keys
+    // preserve duplicates (Claude Code allows multiple rules to share
+    // the same ``event:matcher`` pair — see ``settings_sync.py:128``).
+    // Each row caches its index in ``data-hook-key``; the click
+    // handler reads the index, not the label, so two rows that share a
+    // label still surface the right entry.
+    _hooksRuleRegistry = [];
+    const _pendingKeys = [];
+    const _syncedKeys = [];
     for (const p of data.hooks.pending) {
-      _hooksRuleRegistry[_ruleLabel(p)] = { ...p, _bucket: 'pending' };
+      _pendingKeys.push(String(_hooksRuleRegistry.length));
+      _hooksRuleRegistry.push({ ...p, _bucket: 'pending' });
+    }
+    for (const s of data.hooks.synced) {
+      _syncedKeys.push(String(_hooksRuleRegistry.length));
+      _hooksRuleRegistry.push({ ...s, _bucket: 'synced' });
     }
 
     // Conflicts
@@ -160,13 +174,14 @@ async function loadHooksSync() {
     // power users get the same info via Click → Rule JSON.
     if (data.hooks.pending.length) {
       html += '<h3 style="margin:1rem 0 0.5rem">Pending</h3>';
-      for (const p of data.hooks.pending) {
+      data.hooks.pending.forEach((p, i) => {
         const label = _ruleLabel(p);
-        html += `<div class="hooks-sync-card hooks-rule-row" data-hook-key="${escapeHtml(label)}" tabindex="0" role="button">
+        const key = _pendingKeys[i];
+        html += `<div class="hooks-sync-card hooks-rule-row" data-hook-key="${escapeHtml(key)}" tabindex="0" role="button">
           <div class="hooks-sync-card-header"><strong>${escapeHtml(label)}</strong>
             <span class="badge badge-warning">will be added</span></div>
         </div>`;
-      }
+      });
     }
 
     // Synced — rows are clickable so the per-rule detail panel reveals
@@ -180,10 +195,11 @@ async function loadHooksSync() {
         html += '<h3 style="margin:1rem 0 0.5rem">' + t('settings.hooks.synced') + '</h3>';
       }
       html += '<div class="hooks-synced-list text-muted">';
-      for (const s of data.hooks.synced) {
+      data.hooks.synced.forEach((s, i) => {
         const label = _ruleLabel(s);
-        html += `<div class="hooks-rule-row hooks-rule-row--synced" data-hook-key="${escapeHtml(label)}" tabindex="0" role="button">${escapeHtml(label)}</div>`;
-      }
+        const key = _syncedKeys[i];
+        html += `<div class="hooks-rule-row hooks-rule-row--synced" data-hook-key="${escapeHtml(key)}" tabindex="0" role="button">${escapeHtml(label)}</div>`;
+      });
       html += '</div>';
     }
 

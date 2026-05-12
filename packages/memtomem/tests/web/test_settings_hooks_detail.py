@@ -82,7 +82,10 @@ def test_clicking_synced_rule_opens_detail_panel(page, mm_web_url: str) -> None:
     page.goto(mm_web_url)
     _open_hooks_sync(page)
 
-    page.locator('.hooks-rule-row[data-hook-key="PostToolUse:Edit"]').click()
+    # The visible label is ``PostToolUse:Edit`` but ``data-hook-key`` is
+    # now an index (#962 review fold — duplicate (event, matcher) rules
+    # would collapse on label keys). Locate by the synced bucket class.
+    page.locator(".hooks-rule-row.hooks-rule-row--synced").first.click()
 
     detail = page.locator("#hooks-rule-detail")
     detail.wait_for(state="visible", timeout=4_000)
@@ -109,7 +112,8 @@ def test_clicking_pending_rule_opens_same_detail_panel(page, mm_web_url: str) ->
     page.goto(mm_web_url)
     _open_hooks_sync(page)
 
-    page.locator('.hooks-rule-row[data-hook-key="PreToolUse:Bash"]').click()
+    # Pending row sits in the Pending section above the Synced bucket.
+    page.locator(".hooks-rule-row:not(.hooks-rule-row--synced)").first.click()
 
     detail = page.locator("#hooks-rule-detail")
     detail.wait_for(state="visible", timeout=4_000)
@@ -132,7 +136,7 @@ def test_detail_panel_swaps_content_on_second_click(page, mm_web_url: str) -> No
     page.goto(mm_web_url)
     _open_hooks_sync(page)
 
-    page.locator('.hooks-rule-row[data-hook-key="PostToolUse:Edit"]').click()
+    page.locator(".hooks-rule-row.hooks-rule-row--synced").first.click()
     page.wait_for_function(
         "() => {"
         "  const d = document.getElementById('hooks-rule-detail');"
@@ -141,7 +145,7 @@ def test_detail_panel_swaps_content_on_second_click(page, mm_web_url: str) -> No
         timeout=4_000,
     )
 
-    page.locator('.hooks-rule-row[data-hook-key="PreToolUse:Bash"]').click()
+    page.locator(".hooks-rule-row:not(.hooks-rule-row--synced)").first.click()
     page.wait_for_function(
         "() => {"
         "  const d = document.getElementById('hooks-rule-detail');"
@@ -160,4 +164,90 @@ def test_detail_panel_swaps_content_on_second_click(page, mm_web_url: str) -> No
     )
     assert "echo post-edit" not in detail_text, (
         f"detail panel kept stale content from the previous rule, got {detail_text!r}"
+    )
+
+
+def test_duplicate_event_matcher_rules_keep_distinct_detail(page, mm_web_url: str) -> None:
+    """Regression pin: Claude Code allows two rules to share the same
+    ``(event, matcher)`` pair, and the server preserves multiplicity
+    (``settings_sync.py:128`` PR #844 fix). The per-rule detail panel
+    must therefore key on a stable per-row id, not on ``event:matcher``
+    — otherwise both rows resolve to the last rule's detail and the
+    first rule's command body is silently lost. Pre-fix, both rows
+    shared ``data-hook-key="PreToolUse:Bash"`` and clicking either
+    showed only ``echo dup-second``.
+    """
+    install_default_stubs(page)
+
+    payload = {
+        "status": "in_sync",
+        "target_path": "/fake/.claude/settings.json",
+        "target_scope": "user",
+        "hooks": {
+            "pending": [],
+            "conflicts": [],
+            "synced": [
+                {
+                    "event": "PreToolUse",
+                    "matcher": "Bash",
+                    "rule": {
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": "echo dup-first"}],
+                    },
+                },
+                {
+                    "event": "PreToolUse",
+                    "matcher": "Bash",
+                    "rule": {
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": "echo dup-second"}],
+                    },
+                },
+            ],
+        },
+    }
+    _stub_settings_sync(page, payload)
+
+    page.goto(mm_web_url)
+    _open_hooks_sync(page)
+
+    rows = page.locator(".hooks-rule-row[data-hook-key]")
+    assert rows.count() == 2, (
+        f"Two duplicate-matcher rows must render distinct elements, got count = {rows.count()}"
+    )
+    keys = [rows.nth(i).get_attribute("data-hook-key") or "" for i in range(rows.count())]
+    assert len(set(keys)) == 2, (
+        f"Duplicate-matcher rows must carry distinct data-hook-key values, got {keys!r}"
+    )
+
+    # Click the FIRST row → detail must show the first rule's command body,
+    # not the second's. Without the fix the registry would have overwritten
+    # the first entry and both clicks would render ``echo dup-second``.
+    rows.nth(0).click()
+    detail = page.locator("#hooks-rule-detail")
+    detail.wait_for(state="visible", timeout=4_000)
+    first_text = detail.text_content() or ""
+    assert "echo dup-first" in first_text, (
+        f"First duplicate-matcher row must render its own command body, got {first_text!r}"
+    )
+    assert "echo dup-second" not in first_text, (
+        f"First row must NOT bleed the second row's command body into its detail, "
+        f"got {first_text!r}"
+    )
+
+    # Symmetric: click the SECOND row → distinct content.
+    rows.nth(1).click()
+    page.wait_for_function(
+        "() => {"
+        "  const d = document.getElementById('hooks-rule-detail');"
+        "  return d && (d.textContent || '').includes('dup-second');"
+        "}",
+        timeout=4_000,
+    )
+    second_text = detail.text_content() or ""
+    assert "echo dup-second" in second_text, (
+        f"Second duplicate-matcher row must render its own command body, got {second_text!r}"
+    )
+    assert "echo dup-first" not in second_text, (
+        f"Second row must NOT leak the first row's command body, got {second_text!r}"
     )
