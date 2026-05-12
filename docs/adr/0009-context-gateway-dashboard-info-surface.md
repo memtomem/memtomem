@@ -1,6 +1,6 @@
 # ADR-0009: Context Gateway dashboard — info surface & sync direction policy
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-05-08
 **Context:** Q-PR1..3 (#824/#827/#828) shipped i18n, copy, and visual parity
 on the Context Gateway dashboard. Five information-density / direction-
@@ -259,12 +259,13 @@ tile is the only envelope that omits `missing_canonical` by design
 
 ## RFC
 
-This ADR is **Proposed**, not Accepted. The five proposed directions are
-deliberately conservative — they preserve ADR-0001's invariants and the
-current dashboard's "glance" property. Reviewers are encouraged to push
-back on any of the five if a different direction better serves real
-workflows. The discussion period is **≥ 1 week** before promotion to
-Accepted.
+RFC opened 2026-05-08 via PR #835 (Proposed) with a ≥1-week discussion
+period announced in tracker #829. The ADR was promoted to Accepted on
+2026-05-12 by maintainer decision after no blocking feedback materialized;
+the original ≥1-week target was shortened on that rationale. The five
+directions remain deliberately conservative — preserving ADR-0001's
+invariants and the dashboard's "glance" property — and any later contention
+can be revisited in a follow-up ADR.
 
 ## References
 
