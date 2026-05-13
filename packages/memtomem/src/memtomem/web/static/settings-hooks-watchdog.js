@@ -124,11 +124,12 @@ async function loadHooksSync() {
   const contentEl = qs('hooks-sync-content');
   panelLoading(contentEl);
   const requestedScope = _hooksCurrentTargetScope();
-  const requestedProjectScope = _hooksCurrentProjectScope();
+  let requestedProjectScope = _hooksCurrentProjectScope();
   if (typeof _ctxFetchProjects === 'function') {
     try {
       await _ctxFetchProjects();
     } catch (err) {
+      requestedProjectScope = _hooksCurrentProjectScope();
       if (
         seq !== _hooksSyncSeq
         || requestedScope !== _hooksCurrentTargetScope()
@@ -138,6 +139,7 @@ async function loadHooksSync() {
       return;
     }
   }
+  requestedProjectScope = _hooksCurrentProjectScope();
   statusEl.innerHTML = _hooksProjectControlsHtml() + _hooksTierControlsHtml();
   _hooksWireProjectControls();
   _hooksWireTierControls();
