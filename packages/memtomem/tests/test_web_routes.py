@@ -354,7 +354,10 @@ class TestStats:
         assert isinstance(data["home_sources"], list)
         assert len(data["home_sources"]) == 2
         assert isinstance(data["home_file_type_distribution"], list)
-        assert set(item["file_type"] for item in data["home_file_type_distribution"]) == {"md", "txt"}
+        assert set(item["file_type"] for item in data["home_file_type_distribution"]) == {
+            "md",
+            "txt",
+        }
         assert data["home_total_source_size"] == 6
 
 

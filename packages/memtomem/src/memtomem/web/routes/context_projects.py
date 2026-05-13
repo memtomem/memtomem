@@ -1,4 +1,4 @@
-"""Context gateway — multi-project discovery + Add Project (PR2 read-only).
+"""Context gateway — multi-project discovery + Add Project.
 
 PR2 of the multi-project context UI series — see
 ``memtomem-docs/memtomem/planning/multi-project-context-ui-rfc.md``.
@@ -10,9 +10,9 @@ Endpoints:
 - ``DELETE /api/context/known-projects/{scope_id}`` — drop a registration
   (including stale entries whose root no longer exists).
 
-Sibling per-scope item routes (``/api/context/skills?scope_id=...``)
-re-use ``resolve_scope_root`` from this module so the discovery contract
-has exactly one implementation.
+Sibling per-scope item routes and mutating routes re-use
+``resolve_scope_root`` from this module so the active-project contract has
+exactly one implementation.
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ from memtomem.context.projects import (
 )
 from memtomem.context.skills import diff_skills, list_canonical_skills
 from memtomem.config import TargetScope
+from memtomem.web.deps import get_project_root
 
 logger = logging.getLogger(__name__)
 
@@ -61,12 +62,30 @@ def _gateway_config(request: Request):
 
 def _discover_for(request: Request) -> list[ProjectScope]:
     cfg = _gateway_config(request)
-    cwd = Path(request.app.state.project_root)
+    cwd = _default_project_root(request)
     return discover_project_scopes(
         cwd,
         Path(cfg.known_projects_path).expanduser(),
         experimental_claude_projects_scan=cfg.experimental_claude_projects_scan,
     )
+
+
+def _default_project_root(request: Request) -> Path:
+    """Return the server default project root.
+
+    Production ``mm web`` sets ``app.state.project_root`` during lifespan.
+    Some focused route tests mount these routers on a minimal FastAPI app and
+    override the old ``get_project_root`` dependency directly; keep honoring
+    that override so migrating routes to ``resolve_scope_root`` does not make
+    those tests construct the full web app.
+    """
+    override = request.app.dependency_overrides.get(get_project_root)
+    if override is not None:
+        return Path(override())
+    state_root = getattr(request.app.state, "project_root", None)
+    if state_root is not None:
+        return Path(state_root)
+    return Path.cwd()
 
 
 def resolve_scope_root(
@@ -81,7 +100,7 @@ def resolve_scope_root(
     too — read endpoints can't usefully serve from a missing dir.
     """
     if scope_id is None:
-        return Path(request.app.state.project_root)
+        return _default_project_root(request)
 
     for scope in _discover_for(request):
         if scope.scope_id != scope_id:

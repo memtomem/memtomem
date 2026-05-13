@@ -28,7 +28,6 @@ from memtomem.context.agents import (
 )
 from memtomem.context.detector import AGENT_DIRS
 from memtomem.context.privacy_scan import PrivacyScanError
-from memtomem.web.deps import get_project_root
 from memtomem.web.routes.context_projects import resolve_scope_root
 from memtomem.web.routes._locks import _gateway_lock
 
@@ -164,7 +163,7 @@ async def list_agents(
 @router.get("/context/agents/{name}")
 async def read_agent(
     name: str,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to read from (ADR-0016).",
@@ -206,7 +205,7 @@ async def read_agent(
 @router.get("/context/agents/{name}/rendered")
 async def rendered_agent(
     name: str,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to render (ADR-0016).",
@@ -267,7 +266,7 @@ class AgentCreateRequest(BaseModel):
 @router.post("/context/agents")
 async def create_agent(
     body: AgentCreateRequest,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to create in. Non-shared rejected (#940).",
@@ -306,7 +305,7 @@ class AgentUpdateRequest(BaseModel):
 async def update_agent(
     name: str,
     body: AgentUpdateRequest,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to update. Non-shared rejected (#940).",
@@ -367,7 +366,7 @@ def _safe_rel(p: Path, project_root: Path) -> str:
 async def delete_agent(
     name: str,
     cascade: bool = Query(False),
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to delete from. Non-shared rejected (#940).",
@@ -416,7 +415,7 @@ async def delete_agent(
 @router.get("/context/agents/{name}/diff")
 async def diff_agent(
     name: str,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to diff against runtime fan-out (ADR-0016).",
@@ -467,7 +466,7 @@ class SyncRequest(BaseModel):
 @router.post("/context/agents/sync")
 async def sync_agents(
     body: SyncRequest | None = None,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to fan out. Non-shared rejected (#940).",
@@ -513,7 +512,7 @@ class ImportRequest(BaseModel):
 @router.post("/context/agents/import")
 async def import_agents(
     body: ImportRequest | None = None,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to import into. Non-shared rejected (#940).",
@@ -548,7 +547,7 @@ async def import_agents(
 async def import_agent(
     name: str,
     body: ImportRequest | None = None,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to import into. Non-shared rejected (#940).",

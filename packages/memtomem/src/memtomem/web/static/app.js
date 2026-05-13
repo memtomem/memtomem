@@ -2448,7 +2448,11 @@ function renderResults(results, retrievalStats) {
     hide(qs('bulk-toolbar'));
     hide(qs('load-more-row'));
     show(empty);
-    empty.innerHTML = emptyState('○', 'No results found', 'Try different keywords or filters');
+    if (_hasSearchAxis()) {
+      empty.innerHTML = emptyState('○', 'No results found', 'Try different keywords or filters');
+    } else {
+      empty.innerHTML = emptyState('🔍', 'Enter a query to search', 'Press / to focus search');
+    }
     clearDetail();
     return;
   }

@@ -27,7 +27,6 @@ from memtomem.context.skills import (
     list_canonical_skills,
 )
 from memtomem.config import TargetScope
-from memtomem.web.deps import get_project_root
 from memtomem.web.routes._locks import _gateway_lock
 from memtomem.web.routes.context_projects import resolve_scope_root
 
@@ -104,8 +103,9 @@ async def list_skills(
 
     Without ``?scope_id=``, lists for the server cwd (legacy single-project
     path). With ``?scope_id=`` from ``GET /api/context/projects``, lists
-    for that scope's root. PR2 keeps mutating endpoints (POST/PUT/DELETE/
-    sync/import) on cwd only — multi-scope writes ship in PR3.
+    for that scope's root. The detail and write routes use the same scope
+    resolver, so the Web UI's active-project switcher can manage any
+    registered project without restarting ``mm web``.
     """
     canonicals = list_canonical_skills(project_root, scope=target_scope)
     diffs = diff_skills(project_root, scope=target_scope)
@@ -184,7 +184,7 @@ def _parse_skill_description(content: str) -> str:
 @router.get("/context/skills/{name}")
 async def read_skill(
     name: str,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to read from (ADR-0016).",
@@ -241,7 +241,7 @@ class SkillCreateRequest(BaseModel):
 @router.post("/context/skills")
 async def create_skill(
     body: SkillCreateRequest,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to create in. Non-shared rejected (#940).",
@@ -282,7 +282,7 @@ class SkillUpdateRequest(BaseModel):
 async def update_skill(
     name: str,
     body: SkillUpdateRequest,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to update. Non-shared rejected (#940).",
@@ -337,7 +337,7 @@ async def update_skill(
 async def delete_skill(
     name: str,
     cascade: bool = Query(False),
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to delete from. Non-shared rejected (#940).",
@@ -389,7 +389,7 @@ async def delete_skill(
 @router.get("/context/skills/{name}/diff")
 async def diff_skill(
     name: str,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to diff against runtime fan-out (ADR-0016).",
@@ -444,7 +444,7 @@ async def diff_skill(
 
 @router.post("/context/skills/sync")
 async def sync_skills(
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description=(
@@ -486,7 +486,7 @@ class ImportRequest(BaseModel):
 @router.post("/context/skills/import")
 async def import_skills(
     body: ImportRequest | None = None,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to import into. Non-shared rejected (#940).",
@@ -519,7 +519,7 @@ async def import_skills(
 async def import_skill(
     name: str,
     body: ImportRequest | None = None,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to import into. Non-shared rejected (#940).",

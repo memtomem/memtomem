@@ -21,8 +21,8 @@ from memtomem.context.settings_doctor import (
     DuplicateTier,
     detect_duplicate_tiers,
 )
-from memtomem.web.deps import get_project_root
 from memtomem.web.routes._locks import _gateway_lock
+from memtomem.web.routes.context_projects import resolve_scope_root
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +181,7 @@ def _compare_hooks(
 @router.get("/settings-sync")
 @router.get("/context/settings")
 async def get_settings_sync(
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Claude Code settings tier to compare against.",
@@ -219,7 +219,7 @@ class ApplySettingsSyncRequest(BaseModel):
 @router.post("/context/settings/sync")
 async def apply_settings_sync(
     body: ApplySettingsSyncRequest | None = None,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Claude Code settings tier to write.",
@@ -274,7 +274,7 @@ class ResolveRequest(BaseModel):
 @router.post("/context/settings/resolve")
 async def resolve_conflict(
     body: ResolveRequest,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Claude Code settings tier to update.",

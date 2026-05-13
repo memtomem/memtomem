@@ -3420,6 +3420,21 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 
 .ctx-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; gap: 8px; }
 .ctx-header div { display: flex; gap: 6px; }
+.ctx-project-switcher {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.ctx-project-switcher span {
+  font-weight: 600;
+  color: var(--text);
+}
+.ctx-project-switcher select {
+  max-width: min(520px, 100%);
+}
 .ctx-tier-filter {
   display: inline-flex;
   align-items: center;

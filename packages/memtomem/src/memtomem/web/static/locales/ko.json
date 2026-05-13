@@ -285,6 +285,8 @@
 
   "settings.ctx.overview_title": "컨텍스트 게이트웨이",
   "settings.ctx.project_root_label": "프로젝트",
+  "settings.ctx.active_project": "활성 프로젝트",
+  "settings.ctx.server_cwd": "서버 실행 폴더",
   "settings.ctx.user_canonical_label": "사용자 canonical",
   "settings.ctx.user_canonical_path": "~/.memtomem/",
   "settings.ctx.runtimes_label": "런타임",
