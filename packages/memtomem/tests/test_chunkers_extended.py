@@ -22,15 +22,15 @@ from helpers import make_chunk
 # ---------------------------------------------------------------------------
 
 try:
-    import tree_sitter  # noqa: F401
-    import tree_sitter_python  # noqa: F401
+    import tree_sitter
+    import tree_sitter_python
 
     HAS_TS_PYTHON = True
 except ImportError:
     HAS_TS_PYTHON = False
 
 try:
-    import tree_sitter_javascript  # noqa: F401
+    import tree_sitter_javascript
 
     HAS_TS_JS = True
 except ImportError:

@@ -75,7 +75,7 @@ def test_wizard_next_steps_hint_respects_web_deps(
     # logic itself is a straightforward branch on _missing_web_deps(). Check
     # both sides by importing and calling the helper directly — this is the
     # same value the wizard uses in `_write_config_and_summary`.
-    from memtomem.cli import init_cmd  # noqa: F401 — ensures import side-effects are OK
+    from memtomem.cli import init_cmd
 
     # When deps are present, helper returns None → wizard shows clean hint.
     with patch("memtomem.cli.web._missing_web_deps", return_value=None):

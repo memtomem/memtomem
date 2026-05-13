@@ -371,7 +371,7 @@ def test_server_warns_but_proceeds_when_legacy_lock_held_exclusively(
     env["HOME"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
 
-    holder = open(legacy_pid, "a+b")  # noqa: SIM115 — held for test scope
+    holder = open(legacy_pid, "a+b")
     try:
         _fcntl.flock(holder, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
         proc = _spawn_server(env)
@@ -465,15 +465,15 @@ def test_legacy_lock_sh_allows_multiple_holders(tmp_path: Path) -> None:
     path = tmp_path / "shared-lock.pid"
     path.touch()
 
-    fp1 = open(path, "a+b")  # noqa: SIM115
-    fp2 = open(path, "a+b")  # noqa: SIM115
+    fp1 = open(path, "a+b")
+    fp2 = open(path, "a+b")
     try:
         _fcntl.flock(fp1, _fcntl.LOCK_SH | _fcntl.LOCK_NB)
         # The second acquire on a different fd of the same file must succeed.
         _fcntl.flock(fp2, _fcntl.LOCK_SH | _fcntl.LOCK_NB)
         # And a LOCK_EX from a third handle must fail while both SH are held,
         # which is how cross-version mutex stays intact.
-        fp3 = open(path, "a+b")  # noqa: SIM115
+        fp3 = open(path, "a+b")
         try:
             with pytest.raises((BlockingIOError, OSError)):
                 _fcntl.flock(fp3, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
@@ -534,7 +534,7 @@ def test_contended_server_start_preserves_pid_file_content(tmp_path: Path) -> No
 
     import portalocker
 
-    holder = open(pid_file, "rb+")  # noqa: SIM115 — held for test scope
+    holder = open(pid_file, "rb+")
     try:
         portalocker.lock(holder, portalocker.LOCK_EX | portalocker.LOCK_NB)
         proc = _spawn_server(env)

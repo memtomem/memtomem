@@ -3411,7 +3411,7 @@ def test_memory_dirs_env_requires_json_array(monkeypatch: pytest.MonkeyPatch) ->
     # The bad format (plain string) must fail — this is the bug the docs and
     # wizard previously produced.
     monkeypatch.setenv("MEMTOMEM_INDEXING__MEMORY_DIRS", "~/notes")
-    with pytest.raises(Exception):  # noqa: BLE001 — pydantic SettingsError wraps JSONDecodeError
+    with pytest.raises(Exception):
         Mem2MemConfig()
 
 
