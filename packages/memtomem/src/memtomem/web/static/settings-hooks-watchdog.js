@@ -123,16 +123,21 @@ async function loadHooksSync() {
   const statusEl = qs('hooks-sync-status');
   const contentEl = qs('hooks-sync-content');
   panelLoading(contentEl);
+  const requestedScope = _hooksCurrentTargetScope();
+  const requestedProjectScope = _hooksCurrentProjectScope();
   if (typeof _ctxFetchProjects === 'function') {
     try {
       await _ctxFetchProjects();
     } catch (err) {
+      if (
+        seq !== _hooksSyncSeq
+        || requestedScope !== _hooksCurrentTargetScope()
+        || requestedProjectScope !== _hooksCurrentProjectScope()
+      ) return;
       contentEl.innerHTML = emptyState('', 'Failed to load projects', err.message);
       return;
     }
   }
-  const requestedScope = _hooksCurrentTargetScope();
-  const requestedProjectScope = _hooksCurrentProjectScope();
   statusEl.innerHTML = _hooksProjectControlsHtml() + _hooksTierControlsHtml();
   _hooksWireProjectControls();
   _hooksWireTierControls();
