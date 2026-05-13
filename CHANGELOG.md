@@ -5,6 +5,129 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-05-13
+
+The 0.2.0 release closes the **ADR-0011 memory scope axis** epic
+(per-tier memory writes and reads — `user` / `project_shared` /
+`project_local`) and the **Tiered Context Gateway v2** epic (#868 —
+ADR-0016 tier-aware Context Gateway + ADR-0017 project-root field
+rename) and flips the **Web UI CSRF / Origin / Host guard to enforce
+mode** (RFC #787 stage 2). The release notes below are split into the
+0.2.0 highlights (post-PR-F work, #930-#972) and the underlying
+ADR-0011 PR-A through PR-F changes that landed earlier in the cycle.
+
+### Highlights
+
+- **Tiered Context Gateway v2 — ADR-0016 (#868 epic complete).** The
+  web Context Gateway is promoted to a top-level main tab (#962/#967)
+  and the surface is now tier-aware end-to-end: write affordances dim
+  + intercept on non-shared tiers with a banner (#945), the overview
+  dashboard surfaces `project_root` + detected runtimes (#947),
+  sync-direction pointers per row (#951), a "last sync" freshness
+  indicator (#954), and tier-correct copy in the header (#955) and
+  empty-state hint (#957). Tile clicks deep-link to the filtered /
+  highlighted leaf via `?section=&filter=&artifact=` URL carriers
+  (#834 / #950). Per-rule Hooks detail panel + detail-meta surface
+  (#968), Hooks scope-aware sync labels with `needs_confirmation`
+  surfacing (#966), no_source state polish (#969), and a guard for
+  tier-aware Hooks sync stale-response handling (#972).
+- **Project-root field rename — ADR-0017 (#922).** Renamed the
+  `project_context_root` BaseSettings field to `project_root` with a
+  kept env alias so existing configs keep working. The kept-alias
+  contract covers four moving parts that `AliasChoices` alone does not
+  (tolerant CLI unset pop, loader env-alias enumeration, Web query
+  both-set precedence, and a 4-cell env × persisted test matrix).
+  Lands three months early via PR #953.
+- **CSRF / Origin / Host guard flipped to enforce mode (RFC #787
+  stage 2).** PR #958 flips the soft-warn observation phase to enforce
+  for all Web UI mutators. PR #961 folds in a codex review that found
+  five SPA mutators that bypassed the threading (including one
+  lazy-import call site) and adds an AST-level architectural guard
+  with a frozenset of protected entry points, a depth-aware
+  fetch-args scanner, and identifier-bound CSRF binding verification.
+  Production-loopback Host pin is observed via the central log. This
+  is a behavioral change for any embedded / proxied deployments — see
+  the RFC for the migration path.
+- **Scope-aware audit / rescan (#934).** `mm context rescan` learns
+  `--scope=user|project_shared|project_local` and the audit closes a
+  cross-project SQLite leak in `iter_chunks_for_audit`. The walker
+  targets `canonical_artifact_dir` per tier and unions
+  `detect_agent_files` only for `project_shared` (per ADR-0011 §3 the
+  project-local tier has no runtime fan-out). MCP parity for the
+  audit-class verbs is intentionally deferred (audit is a CI gate,
+  not an agent-runtime path).
+- **`mem_context_migrate` MCP wrapper (#887 / #926).** The fifth and
+  final context MCP tool — all five (`init`, `sync`, `generate`,
+  `diff`, `migrate`) now expose the canonical artifact `scope=` axis
+  and mirror the CLI's `scope_explicit` gate, click-exception
+  handling, per-call output buffers, and stderr-tail preservation.
+- **FTS5 query tokenization hardening (#963).** Hardens the FTS5
+  query path against the keyword / quote / unicode edge cases that
+  previously surfaced as silent zero-result responses.
+- **Deep-link from overview tile to filtered / highlighted leaf
+  (#834 / #950).** Overview tile click sets a `?section=&filter=&
+  artifact=` URL carrier that the leaf view replays — `?artifact=` is
+  a DOM-remove (count==1 negative pin), `?filter=` is the `hidden`
+  attr (so reset round-trips without refetch). Tier swaps clear the
+  carrier; unknown filter values fall through.
+- **Web "last sync" freshness indicator + sync-direction pointers
+  (#832 / #833 / #951 / #954).** Each row gets a relative-time
+  freshness indicator and an arrow pointer for the direction of the
+  most recent sync. Skill-dir mtime is read from the manifest file
+  rather than the directory itself so any aux-file write does not
+  advance the timestamp.
+- **Pending chunk highlight retry across same-source loads (#680 /
+  #971).** Timeline → Source jumps that land outside the initial
+  100-chunk page now retain the pending target across the next
+  fetch, so a Load All retry can highlight the intended chunk. The
+  pending target is source-scoped via a new
+  `pendingActivateChunkSourcePath` companion field.
+- **Shared `chunk_progress` throttle helper (#659 / #959 / #660 /
+  #964 / #965).** Lifts the 100ms throttle + final-tick bypass +
+  boundary-reset shape out of `runIndexStream` and `mdReindexOne`
+  into `makeChunkProgressRenderer`. Browser tests pin the consumer
+  shape and the locale-toggle mid-stream template via
+  `add_init_script` + a `langchange` flag + `wait_for_function`
+  (the `documentElement.lang` attribute is statically served and is
+  not a usable init-done signal).
+- **Browser + jsdom test harness landed.** Playwright `tests/web/`
+  with 16 specs reaches a stable shape (shared `install_default_stubs`
+  in `conftest.py`, lifespan=None app, `page.route` stubs,
+  browser-marker auto-skip) and a companion `tests-js/` Vitest +
+  jsdom track for fast UI logic specs is documented in CONTRIBUTING
+  alongside a Python-route-vs-browser-test decision rule (#970).
+- **Deferred ADR tracker convention (#922 / `docs/adr/TRACKER.md`).**
+  ADR PRs that defer open questions append a single line per deferred
+  question into `TRACKER.md` in the same PR, with the
+  `adr-feedback` label and tracking-issue comments as the signal
+  channels.
+- **CLA Assistant native workflow (#960).** Replaces the third-party
+  CLA action with a native GitHub workflow gate; the CLA status
+  comment failure is tolerated so a transient failure to post the
+  status comment no longer blocks merges.
+- **Misc Web polish.** Empty-state CTA helper formalized + namespaces
+  layout regression fix (#864); tier filters polish (#940); rescan
+  USERPROFILE-pinned tests for Windows; emptyState i18n authoring
+  carve-out for technical domain vocabulary.
+
+### Behavioral changes — please read before upgrading
+
+- The Web UI now **enforces** CSRF, Origin, and Host on all mutators
+  (RFC #787 stage 2). Integrators that proxy or embed the Web UI must
+  ensure the CSRF token is threaded through every mutating fetch and
+  that the Origin header is preserved or matches the configured
+  loopback Host. The soft-warn observation phase that shipped in
+  0.1.x is gone.
+- The `project_context_root` setting is renamed to `project_root`
+  (ADR-0017). The env alias is kept so existing
+  `MEMTOMEM_PROJECT_CONTEXT_ROOT=` configs keep working in 0.2.x; the
+  tracking row in `docs/adr/TRACKER.md` schedules the alias-removal
+  review for 2026-08-12.
+- `iter_chunks_for_audit` previously cross-leaked between projects on
+  the shared SQLite path. `mm context rescan` and the audit class
+  callers now filter by `(project_root, scope)` and defensively raise
+  on `scope='user' + project_root != None` (#934).
+
 ### Added
 
 - **Web tier badges + `/api/add` project-tier rejection hint (ADR-0011
