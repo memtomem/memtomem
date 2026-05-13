@@ -19,6 +19,7 @@ const STATE = {
   scoreMin: 0,
   currentSortMode: 'score',
   maxResultScore: 0,
+  resultScoreViews: {},
   sourcesBrowserStale: false,
   tagsTabStale: false,
   homeStale: false,
@@ -2276,6 +2277,52 @@ function updateBulkToolbar(total) {
   allCb.indeterminate = count > 0 && count < total;
 }
 
+function _buildScoreViews(results) {
+  const byRank = [...results].sort((a, b) => (a.rank || 0) - (b.rank || 0));
+  const total = Math.max(1, byRank.length);
+  const positiveMax = Math.max(0, ...byRank.map(r => Number(r.score) || 0));
+  const views = {};
+
+  byRank.forEach((r, idx) => {
+    const raw = Number(r.score) || 0;
+    const rank = r.rank || idx + 1;
+    const isReranked = r.source === 'reranked';
+    let percent;
+    let label;
+    let tooltip;
+
+    if (isReranked) {
+      percent = total === 1 ? 100 : Math.round((1 - idx / (total - 1)) * 100);
+      percent = Math.max(1, Math.min(100, percent));
+      label = `#${rank} · ${percent}%`;
+      tooltip = `Reranker percentile ${percent}% by final rank. Raw reranker score ${raw.toFixed(6)}.`;
+    } else {
+      percent = positiveMax > 0 ? Math.round((raw / positiveMax) * 100) : 0;
+      percent = Math.max(0, Math.min(100, percent));
+      label = raw.toFixed(3);
+      tooltip = `Raw ${r.source || 'search'} score ${raw.toFixed(6)}. Normalized ${percent}%.`;
+    }
+
+    views[r.chunk.id] = { label, percent, tooltip, raw, rank, isReranked };
+  });
+
+  return views;
+}
+
+function _scoreViewForResult(r) {
+  const raw = Number(r.score) || 0;
+  return STATE.resultScoreViews[r.chunk.id] || {
+    label: raw.toFixed(3),
+    percent: STATE.maxResultScore > 0
+      ? Math.max(0, Math.min(100, Math.round((raw / STATE.maxResultScore) * 100)))
+      : 0,
+    tooltip: `Raw ${r.source || 'search'} score ${raw.toFixed(6)}.`,
+    raw,
+    rank: r.rank,
+    isReranked: r.source === 'reranked',
+  };
+}
+
 function _buildResultItem(r) {
   const list = qs('results-list');
   const item = document.createElement('div');
@@ -2318,7 +2365,8 @@ function _buildResultItem(r) {
   // contract pinned in the Tiered Context Gateway v2 memory.
   const tierBadge = _tierBadgeHtml(r.chunk.target_scope);
   const validityBadge = _validityBadgeHtml(r.chunk.valid_from_unix, r.chunk.valid_to_unix);
-  const scorePct = STATE.maxResultScore > 0 ? Math.round((r.score / STATE.maxResultScore) * 100) : 0;
+  const scoreView = _scoreViewForResult(r);
+  const scorePct = scoreView.percent;
   const barColor = scorePct > 70 ? 'var(--green)' : scorePct > 40 ? 'var(--accent)' : 'var(--muted)';
 
   const body = document.createElement('div');
@@ -2327,7 +2375,7 @@ function _buildResultItem(r) {
     <div class="result-item-row1">
       <span class="result-type-dot" style="background:${fileTypeColor(r.chunk.source_file || '')}"></span>
       <span class="result-filename">${escapeHtml(fname)}</span>
-      <span class="score-badge">${r.score.toFixed(3)}</span>
+      <span class="score-badge" title="${escapeAttr(scoreView.tooltip)}">${escapeHtml(scoreView.label)}</span>
       <span class="badge badge-retrieval badge-retrieval--${escapeAttr(r.source)}">${escapeHtml(r.source)}</span>
       ${nsBadge}${tierBadge}${validityBadge}
     </div>
@@ -2492,6 +2540,7 @@ function _syncResultTags(chunkId, newTags) {
 
 function renderResults(results, retrievalStats) {
   STATE.lastResults = results;
+  STATE.resultScoreViews = _buildScoreViews(results);
   let display = [...results];
   if (STATE.currentSortMode === 'date-desc') display.sort((a, b) => new Date(b.chunk.created_at) - new Date(a.chunk.created_at));
   else if (STATE.currentSortMode === 'date-asc') display.sort((a, b) => new Date(a.chunk.created_at) - new Date(b.chunk.created_at));
@@ -2500,7 +2549,9 @@ function renderResults(results, retrievalStats) {
   const selectedSources = _getSelectedSourceFilters();
   let filtered = typeFilter ? display.filter(r => r.chunk.chunk_type === typeFilter) : display;
   if (selectedSources.length) filtered = filtered.filter(r => selectedSources.includes(r.chunk.source_file));
-  if (STATE.scoreMin > 0) filtered = filtered.filter(r => r.score >= STATE.scoreMin);
+  if (STATE.scoreMin > 0) {
+    filtered = filtered.filter(r => (_scoreViewForResult(r).percent / 100) >= STATE.scoreMin);
+  }
   // Date range filter
   const dateRange = _getDateRange();
   if (dateRange) {
@@ -2519,14 +2570,16 @@ function renderResults(results, retrievalStats) {
     hide(qs('bulk-toolbar'));
     hide(qs('load-more-row'));
     show(empty);
-    empty.innerHTML = emptyState('○', 'No results found', 'Try different keywords or filters');
+    empty.innerHTML = !_hasSearchAxis()
+      ? emptyState('🔍', 'Enter a query to search', '<kbd>/</kbd> focus · <kbd>j</kbd>/<kbd>k</kbd> navigate · <kbd>p</kbd> pin · <kbd>c</kbd> copy')
+      : emptyState('○', 'No results found', 'Try different keywords or filters');
     clearDetail();
     return;
   }
   hide(empty);
   show(list);
 
-  // Compute max score for mini bars
+  // Keep a raw max for fallback paths; primary result bars use score views.
   STATE.maxResultScore = Math.max(0.001, ...filtered.map(r => r.score));
 
   // Source breakdown summary + pipeline funnel
@@ -2612,7 +2665,11 @@ function showDetail(r) {
   STATE.selectedChunkId = r.chunk.id;
   STATE.selectedOriginal = r.chunk.content;
 
-  qs('d-score').textContent = `score ${r.score.toFixed(4)}`;
+  const scoreView = _scoreViewForResult(r);
+  qs('d-score').textContent = scoreView.isReranked
+    ? `rank #${scoreView.rank} · ${scoreView.percent}%`
+    : `score ${r.score.toFixed(4)}`;
+  qs('d-score').title = scoreView.tooltip;
   qs('d-type').textContent = r.chunk.chunk_type.replace('_', ' ');
   const nsEl = qs('d-namespace');
   if (r.chunk.namespace && r.chunk.namespace !== 'default') {
@@ -2625,17 +2682,19 @@ function showDetail(r) {
   srcEl.textContent = r.source;
   srcEl.className = `badge badge-retrieval badge-retrieval--${r.source}`;
 
-  // Score detail row: rank + bar + pct of theoretical max RRF
+  // Score detail row: rank + normalized display bar + raw diagnostic score.
   const rrfK = (STATE.serverConfig && STATE.serverConfig.search && STATE.serverConfig.search.rrf_k) || 60;
   const rs = STATE.lastRetrievalStats || {};
   const nSources = ((rs.bm25_candidates > 0) ? 1 : 0) + ((rs.dense_candidates > 0) ? 1 : 0) || 2;
   const maxRrf = nSources / (rrfK + 1);
-  const pct = Math.min(r.score / maxRrf * 100, 100);
+  const pct = scoreView.percent;
   qs('d-rank-label').textContent = `#${r.rank}`;
   qs('d-score-bar').style.width = `${pct.toFixed(1)}%`;
   qs('d-score-pct').textContent = `${pct.toFixed(0)}%`;
   const scoreDetailRow = qs('d-score-detail');
-  scoreDetailRow.dataset.tooltip = `RRF ${r.score.toFixed(6)} / max ${maxRrf.toFixed(6)} (k=${rrfK}, ${nSources} sources)`;
+  scoreDetailRow.dataset.tooltip = scoreView.isReranked
+    ? `Reranker percentile ${pct.toFixed(0)}%; raw score ${r.score.toFixed(6)}`
+    : `RRF ${r.score.toFixed(6)} / max ${maxRrf.toFixed(6)} (k=${rrfK}, ${nSources} sources)`;
   show(scoreDetailRow);
   qs('d-hierarchy').textContent = r.chunk.heading_hierarchy.join(' › ');
   qs('d-file').textContent = r.chunk.source_file;

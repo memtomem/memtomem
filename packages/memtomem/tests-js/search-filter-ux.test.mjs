@@ -109,6 +109,78 @@ describe('Search filters - add/remove UX', () => {
     expect(params.get('context_window')).toBe('2');
     expect(params.get('source_filter')).toBe('/repo/docs/cache.md');
   });
+
+  it('shows reranked results with rank percentile instead of raw negative score', () => {
+    const mkResult = (id, score, rank) => ({
+      chunk: {
+        id,
+        content: `content ${id}`,
+        source_file: `/repo/notebooks/${id}.ipynb`,
+        chunk_type: 'paragraph',
+        start_line: 1,
+        end_line: 3,
+        heading_hierarchy: [],
+        tags: [],
+        namespace: 'default',
+        created_at: '2026-05-13T00:00:00Z',
+        updated_at: '2026-05-13T00:00:00Z',
+        target_scope: 'user',
+      },
+      score,
+      rank,
+      source: 'reranked',
+    });
+
+    window.renderResults([
+      mkResult('PA_S01_Intro', -0.42, 1),
+      mkResult('PA_S02_Control', -3.7, 2),
+    ], {
+      bm25_candidates: 2,
+      dense_candidates: 2,
+      fused_total: 2,
+      final_total: 2,
+    });
+
+    const badges = [...document.querySelectorAll('.result-item .score-badge')].map(el => el.textContent);
+    expect(badges).toEqual(['#1 · 100%', '#2 · 1%']);
+    expect(badges.join(' ')).not.toContain('-');
+    expect(document.getElementById('d-score').textContent).toBe('rank #1 · 100%');
+    expect(document.getElementById('d-score-detail').dataset.tooltip).toContain('raw score -0.420000');
+  });
+});
+
+describe('Search config reranker visibility', () => {
+  it('shows current reranker provider, model, and pool in the Search tab hint', async () => {
+    const dom = await bootApp({ scripts: ['i18n.js', 'app.js', 'settings-config.js'] });
+    const { window } = dom;
+    const { document } = window;
+
+    window.STATE.serverConfig = {
+      search: {
+        default_top_k: 10,
+        enable_bm25: true,
+        enable_dense: true,
+        rrf_k: 60,
+        rrf_weights: [1, 1],
+        tokenizer: 'unicode61',
+      },
+      rerank: {
+        enabled: true,
+        provider: 'fastembed',
+        model: 'jinaai/jina-reranker-v2-base-multilingual',
+        oversample: 2,
+        min_pool: 20,
+        max_pool: 200,
+      },
+    };
+
+    window._syncConfigToUI();
+
+    const hint = document.getElementById('search-config-info');
+    expect(hint.hidden).toBe(false);
+    expect(hint.textContent).toContain('Rerank: fastembed/jinaai/jina-reranker-v2-base-multilingual');
+    expect(hint.textContent).toContain('Pool 20-200 ×2');
+  });
 });
 
 describe('Search namespace filter list', () => {

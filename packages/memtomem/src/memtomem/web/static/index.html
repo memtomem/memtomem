@@ -242,7 +242,7 @@
         </select>
       </div>
       <div class="adv-row">
-        <label class="adv-label">Min Score: <span id="score-val">0.0</span> <span class="help-tip" data-help="Minimum similarity score (0–1). Higher = more relevant but fewer results." tabindex="0" role="img" aria-label="Minimum similarity score (0–1). Higher = more relevant but fewer results.">i</span></label>
+        <label class="adv-label">Min Relevance: <span id="score-val">0.0</span> <span class="help-tip" data-help="Minimum normalized relevance (0–1). Reranked results use rank percentile so raw negative model scores do not hide matches." tabindex="0" role="img" aria-label="Minimum normalized relevance (0–1). Reranked results use rank percentile so raw negative model scores do not hide matches.">i</span></label>
         <input id="score-threshold" type="range" min="0" max="1" step="0.05" value="0" />
       </div>
       <div class="adv-row" style="display:none">
