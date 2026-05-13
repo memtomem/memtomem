@@ -794,6 +794,13 @@ read-only in the Web UI, so use the matching `--scope user` CLI flow. The
 `project_local` tier is a gitignored draft tier; use `--scope project_local`
 to seed drafts, and expect sync to report the no-runtime-fan-out skip.
 
+For multi-device sync, treat project-shared Context Gateway files as part of
+the project repo: commit `<project>/.memtomem/context.md`,
+`<project>/.memtomem/{agents,skills,commands}/`, and
+`<project>/.memtomem/settings.json` when you want them shared. Do not sync
+`~/.memtomem/known_projects.json`; it is the Web UI's per-machine Add Project
+registry and stores local absolute paths.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEMTOMEM_CONTEXT_GATEWAY__KNOWN_PROJECTS_PATH` | `~/.memtomem/known_projects.json` | Where the Web UI persists "Add Project" registrations. The Sources, Skills, Custom Commands, and Subagents tabs render one collapsible group per registered project root. |

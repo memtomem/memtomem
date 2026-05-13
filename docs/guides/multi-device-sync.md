@@ -14,6 +14,134 @@ This guide describes the layout, what to commit (and what never to commit),
 the workflow around restarting the runtime after a pull, and `mm sync-doctor`
 — the read-only validator that catches the common footguns.
 
+## Easy mode — copy/paste setup
+
+Start here if you only want your personal memtomem memories to follow you
+between machines. This keeps the default `~/.memtomem/memories` directory in
+place and turns that directory into a private git repo. You can move to the
+namespace-aligned layout later if you need separate `shared/`, `work/`, or
+`local/` trees.
+
+This mode syncs:
+
+- `~/.memtomem/memories/**/*.md`
+
+This mode does **not** sync:
+
+- SQLite databases (`*.db`, `*.db-wal`, `*.db-shm`)
+- machine-local config (`~/.memtomem/config.json`)
+- Context Gateway project files (`<project>/.memtomem/...`)
+- Claude Code per-project auto-memory (`~/.claude/projects/<slug>/memory/`)
+
+### Machine A — create and push the private repo
+
+Create a **private** empty repo on GitHub/GitLab/etc. first. Then replace
+`git@github.com:YOUR_USER/memtomem-memories.git` below with that repo URL and
+run the block:
+
+```bash
+cd ~/.memtomem/memories
+
+git init
+
+cat > .gitignore <<'EOF'
+*.db
+*.db-wal
+*.db-shm
+.server.pid
+.current_session
+config.json
+config.json.bak*
+cache/
+uploads/
+proxy_cache.db*
+proxy_metrics.db*
+stm_feedback.db*
+__pycache__/
+.DS_Store
+EOF
+
+git add -A
+git status
+git commit -m "Initialize memtomem memories"
+
+git remote add origin git@github.com:YOUR_USER/memtomem-memories.git
+git branch -M main
+git push -u origin main
+```
+
+Before the `git commit`, read the `git status` output. If you see `*.db`,
+`config.json`, `cache/`, or `uploads/` staged, stop and fix `.gitignore`
+before committing.
+
+### Machine B — clone and index
+
+On another personal machine, install and initialize memtomem first, then move
+the empty/default memories directory aside and clone the private repo into the
+same path:
+
+```bash
+mv ~/.memtomem/memories ~/.memtomem/memories.bak.$(date +%Y%m%d%H%M%S)
+git clone git@github.com:YOUR_USER/memtomem-memories.git ~/.memtomem/memories
+mm index ~/.memtomem/memories
+```
+
+If the destination already has memories you want to keep, copy those `.md`
+files into `~/.memtomem/memories` after cloning, then commit and push them
+from that machine.
+
+### Daily use
+
+After adding or editing memories on one machine:
+
+```bash
+cd ~/.memtomem/memories
+git pull --rebase
+git add -A
+git commit -m "Update memories"
+git push
+```
+
+On the next machine:
+
+```bash
+cd ~/.memtomem/memories
+git pull --rebase
+mm index ~/.memtomem/memories
+```
+
+If `git commit` says there is nothing to commit, that is fine — just continue.
+
+### Project context is separate
+
+Easy mode only covers the personal memory directory. Project-scoped memories
+and Context Gateway artifacts belong in each project repo:
+
+```text
+<project>/.memtomem/memories/       # project_shared memory
+<project>/.memtomem/context.md      # canonical project context
+<project>/.memtomem/agents/         # canonical agents
+<project>/.memtomem/skills/         # canonical skills
+<project>/.memtomem/commands/       # canonical commands
+<project>/.memtomem/settings.json   # canonical hook/settings source
+```
+
+Commit those files to the project repo when you want them shared with that
+project. Keep these local:
+
+```text
+<project>/.memtomem/memories.local/
+<project>/.memtomem/agents.local/
+<project>/.memtomem/skills.local/
+<project>/.memtomem/commands.local/
+<project>/.claude/settings.local.json
+~/.memtomem/known_projects.json
+```
+
+`known_projects.json` is just the Web UI's per-machine "Add Project" list and
+contains local absolute paths. Re-add projects in the Web UI on each machine
+instead of syncing that file.
+
 ## When this fits
 
 - **Single user, multiple devices.** Laptop ↔ desktop ↔ work machine, one

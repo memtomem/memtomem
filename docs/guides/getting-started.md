@@ -333,6 +333,25 @@ for rules and ADR-0007 for the rationale).
 
 ---
 
+## Optional: Sync across your own machines
+
+For the first multi-device setup, keep the model simple:
+
+| What you want to share | Beginner path |
+|---|---|
+| Personal memories | Put `~/.memtomem/memories` in a private git repo |
+| Project memories | Commit `<project>/.memtomem/memories/` to that project repo |
+| Project rules, skills, agents, commands, hooks | Commit the project's `.memtomem/` files |
+| Local drafts / machine state | Do not sync |
+
+Use the copy/paste flow in
+[Multi-device sync → Easy mode](multi-device-sync.md#easy-mode--copypaste-setup)
+for the personal-memory repo. That guide also lists the files to keep out of
+git (`*.db`, `config.json`, caches, local tiers, and the Web UI's
+`known_projects.json`).
+
+---
+
 ## CLI reference
 
 All commands support `-h` and `--help`. Interactive wizards support `b` (back) and `q` (quit).
@@ -436,6 +455,12 @@ mm context sync --include=skills,agents,commands
 ```
 
 Run `mm context --help` for the full fan-out matrix across editors (Claude Code, Cursor, Gemini CLI, OpenAI Codex, GitHub Copilot) and per-runtime field-drop details.
+
+For multi-device use, treat the project-shared `.memtomem/` tree as part of
+that project repo. Commit `.memtomem/context.md`, `.memtomem/agents/`,
+`.memtomem/skills/`, `.memtomem/commands/`, and `.memtomem/settings.json`
+when you want the context to follow the project checkout. Keep
+`.memtomem/*.local/` and `.claude/settings.local.json` out of git.
 
 > Cursor, OpenAI Codex, and GitHub Copilot generators concatenate the `Rules` and `Style` sections from `context.md` into a single block — `mm context generate` warns on stderr when both are populated. `context.md` remains the source of truth; edit there, not in the generated files.
 
