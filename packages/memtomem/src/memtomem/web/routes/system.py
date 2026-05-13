@@ -161,8 +161,11 @@ async def get_session(request: Request) -> dict[str, str]:
     }
 
 
-@router.get("/health")
-async def health(storage: Any = Depends(get_storage), embedder: Any = Depends(get_embedder)) -> dict[str, Any] | JSONResponse:
+@router.get("/health", response_model=None)
+async def health(
+    storage: Any = Depends(get_storage),
+    embedder: Any = Depends(get_embedder),
+) -> dict[str, Any] | JSONResponse:
     checks: dict[str, str] = {}
     try:
         await storage.get_stats()

@@ -2763,7 +2763,7 @@ async def _memory_migrate_run(
     *,
     stdout_buf: list[str] | None = None,
     stderr_buf: list[str] | None = None,
-    ) -> None:
+) -> None:
     """Apply or dry-run a memory-migrate plan over the resolved sources.
 
     ``stdout_buf`` / ``stderr_buf``: when provided, every plan/summary/
