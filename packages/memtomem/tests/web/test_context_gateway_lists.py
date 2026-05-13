@@ -431,6 +431,47 @@ def test_q_pr4_langchange_rerenders_runtime_only_banner(page, mm_web_url: str) -
     )
 
 
+def test_missing_canonical_remediation_lists_project_shared_cli_commands(
+    page, mm_web_url: str
+) -> None:
+    """Runtime-only entries must show the exact CLI bootstrap path in the
+    default project_shared tier, not just a generic "missing canonical" hint.
+    """
+    install_default_stubs(page)
+    _stub_projects_wide(
+        page,
+        {
+            "scopes": [
+                {
+                    "scope_id": "cwd-scope",
+                    "label": "cwd",
+                    "root": "/srv/cwd",
+                    "tier": "user",
+                    "sources": ["server-cwd"],
+                    "experimental": False,
+                    "missing": False,
+                    "counts": {"skills": 1, "commands": 0, "agents": 0},
+                },
+            ],
+        },
+    )
+    _stub_skills_wide(page, _CWD_SKILLS_RUNTIME_ONLY)
+    page.goto(mm_web_url)
+    _open_skills_list(page)
+
+    banner = page.locator(
+        "#ctx-skills-list .ctx-missing-canonical-remediation[data-tier='project_shared']"
+    )
+    banner.wait_for(timeout=5_000)
+    text = banner.text_content() or ""
+    assert "Click Import" in text, f"project_shared remediation should mention web Import: {text!r}"
+    assert (
+        "mm context init --include=agents,commands,skills "
+        "--scope project_shared --confirm-project-shared"
+    ) in text
+    assert "mm context sync --include=agents,commands,skills --scope project_shared" in text
+
+
 def test_q_pr4_langchange_clears_import_status_box(page, mm_web_url: str) -> None:
     """The Import status box (``ctx-skills-status``) is rendered via
     inline ``t()`` in ``renderImportResult`` and would stale on toggle.
