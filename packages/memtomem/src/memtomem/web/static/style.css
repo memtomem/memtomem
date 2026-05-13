@@ -144,10 +144,15 @@ header h1 { font-size: 1.2rem; font-weight: 700; color: var(--accent); letter-sp
   display: flex; gap: 2px;
   background: var(--surface); border-bottom: 1px solid var(--border);
   padding: 0 20px; flex-shrink: 0;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
 }
 .tab-btn {
   background: none; border: none; cursor: pointer;
   color: var(--muted); padding: 10px 16px; font-size: 0.875rem;
+  white-space: nowrap;
   border-bottom: 2px solid transparent; transition: color 0.15s, border-color 0.15s;
 }
 .tab-btn:hover  { color: var(--text); }
@@ -2480,7 +2485,8 @@ select:focus-visible {
 /* C. Quick Search */
 .home-search-row { display: flex; justify-content: center; }
 .home-search-wrap { display: flex; gap: 8px; width: 100%; max-width: 600px; }
-.home-search-wrap input { flex: 1; }
+.home-search-wrap { align-items: stretch; }
+.home-search-wrap input { flex: 1; min-width: 0; }
 
 /* A. Stats Row */
 .home-stats-row { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; }
@@ -2538,14 +2544,15 @@ select:focus-visible {
 .home-bar-chart { display: flex; flex-direction: column; gap: 6px; }
 .home-bar-row { display: flex; align-items: center; gap: 8px; font-size: 0.75rem; }
 .home-bar-label {
-  font-family: var(--mono); color: var(--text); width: 120px;
+  font-family: var(--mono); color: var(--text);
+  width: min(120px, 36vw); max-width: 120px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0;
 }
-.home-bar-track { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.home-bar-track { flex: 1; min-width: 0; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
 .home-bar-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
 .home-bar-count {
   font-family: var(--mono); color: var(--muted); font-size: 0.68rem;
-  min-width: 40px; text-align: right; flex-shrink: 0; white-space: nowrap;
+  min-width: 40px; max-width: 60px; text-align: right; flex-shrink: 0; white-space: nowrap;
 }
 .muted-sm { color: var(--muted); font-size: 0.72rem; }
 
@@ -2657,6 +2664,74 @@ select:focus-visible {
 
   /* Tab panels need scroll */
   .tab-panel.active { overflow-y: auto; }
+}
+
+@media (max-width: 430px) {
+  .home-layout { padding: 12px; gap: 12px; }
+
+  .tab-nav {
+    padding: 0 8px;
+    gap: 0;
+    overflow-x: auto;
+    scroll-snap-type: x proximity;
+  }
+  .tab-btn {
+    padding: 10px 12px;
+    font-size: 0.76rem;
+    scroll-snap-align: start;
+    flex-shrink: 0;
+  }
+  .tab-nav::-webkit-scrollbar {
+    display: block;
+    height: 6px;
+  }
+  .tab-nav::-webkit-scrollbar-thumb {
+    background-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+    border-radius: 999px;
+  }
+  .tab-nav::-webkit-scrollbar-track {
+    background-color: transparent;
+  }
+
+  .home-search-wrap {
+    flex-direction: column;
+    gap: 6px;
+  }
+  .home-search-wrap button {
+    width: 100%;
+    min-width: 0;
+  }
+  .home-search-wrap,
+  .home-search-wrap input {
+    min-width: 0;
+  }
+
+  .home-stats-row {
+    grid-template-columns: 1fr;
+  }
+
+  .home-bar-label {
+    width: 84px;
+    max-width: 84px;
+  }
+  .home-bar-count {
+    min-width: 32px;
+    max-width: 52px;
+    font-size: 0.64rem;
+    white-space: nowrap;
+  }
+}
+
+@media (max-width: 390px) {
+  .tab-btn {
+    padding: 10px 10px;
+    font-size: 0.72rem;
+  }
+
+  .home-bar-label {
+    width: 76px;
+    max-width: 76px;
+  }
 }
 
 /* ── Sprint 5: Chunk-type filter ── */
@@ -3651,9 +3726,6 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 /* =====================================================================
    TAB NAVIGATION
    ===================================================================== */
-
-.tab-nav { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
-.tab-nav::-webkit-scrollbar { display: none; }
 
 /* =====================================================================
    FOLDER PICKER (issue #582 4.12)

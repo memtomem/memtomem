@@ -127,10 +127,18 @@ class ChunkSizeBucket(BaseModel):
     count: int
 
 
+class HomeFileTypeCount(BaseModel):
+    file_type: str
+    count: int
+
+
 class StatsResponse(BaseModel):
     total_chunks: int
     total_sources: int
     chunk_size_distribution: list[ChunkSizeBucket] = []
+    home_sources: list[SourceOut] = []
+    home_total_source_size: int = 0
+    home_file_type_distribution: list[HomeFileTypeCount] = []
 
 
 class TimelineResponse(BaseModel):

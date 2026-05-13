@@ -26,6 +26,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from memtomem.config import (
     FIELD_CONSTRAINTS,
     MUTABLE_FIELDS,
+    classify_scope,
     build_comparand,
     coerce_and_validate,
     memory_dir_kind,
@@ -75,7 +76,11 @@ from memtomem.web.schemas.memory import (
     UploadResponse,
     UploadUsageResponse,
 )
-from memtomem.web.schemas.sources import StatsResponse
+from memtomem.web.schemas.sources import (
+    HomeFileTypeCount,
+    SourceOut,
+    StatsResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -955,13 +960,102 @@ async def rebuild_fts(storage=Depends(get_storage)):
 
 
 @router.get("/stats", response_model=StatsResponse)
-async def get_stats(storage=Depends(get_storage)) -> StatsResponse:
+async def get_stats(storage=Depends(get_storage), config=Depends(get_config)) -> StatsResponse:
+    from datetime import datetime, timezone
+
+    from memtomem.indexing.engine import norm_dir_prefix
+
+    def _to_datetime(raw: str | None) -> datetime | None:
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed
+        except (ValueError, TypeError):
+            return None
+
     data = await storage.get_stats()
     distribution = await storage.get_chunk_size_distribution()
+
+    pmdirs = config.indexing.project_memory_dirs
+    indexed_dirs = sorted(
+        (
+            (norm_dir_prefix(d), str(Path(d).expanduser().resolve()), memory_dir_kind(d))
+            for d in config.indexing.memory_dirs
+        ),
+        key=lambda t: -len(t[0]),
+    )
+
+    all_sources: list[SourceOut] = []
+    rows = await storage.get_source_files_with_counts()
+    for p, cnt, last_indexed_iso, ns_csv, avg_tok, min_tok, max_tok in rows:
+        source_scope, _src_project_root = classify_scope(p, pmdirs)
+        if source_scope == "project_local":
+            continue
+
+        namespaces = ns_csv.split(",") if ns_csv else ["default"]
+        target = norm_path(p)
+        match = next(
+            (
+                (dir_path, dir_kind)
+                for prefix, dir_path, dir_kind in indexed_dirs
+                if target.startswith(prefix)
+            ),
+            None,
+        )
+
+        source_kind: str | None = None
+        memory_dir_str: str | None = None
+        if match is None:
+            source_kind = None
+            memory_dir_str = None
+        else:
+            owning_dir, source_kind = match
+            memory_dir_str = str(owning_dir)
+
+        try:
+            file_size = Path(p).stat().st_size
+        except OSError:
+            file_size = None
+
+        all_sources.append(
+            SourceOut(
+                path=str(p),
+                chunk_count=cnt,
+                last_indexed_at=_to_datetime(last_indexed_iso),
+                file_size=file_size,
+                namespaces=namespaces,
+                avg_tokens=avg_tok,
+                min_tokens=min_tok,
+                max_tokens=max_tok,
+                memory_dir=memory_dir_str,
+                kind=source_kind,
+                target_scope=source_scope,
+            )
+        )
+
+    file_type_counts: dict[str, int] = {}
+    for s in all_sources:
+        if not s.path:
+            continue
+        file_type = s.path.split(".").pop().lower()
+        file_type_counts[file_type or "other"] = file_type_counts.get(file_type or "other", 0) + 1
+
+    file_type_distribution = [
+        HomeFileTypeCount(file_type=k, count=v)
+        for k, v in sorted(file_type_counts.items(), key=lambda item: item[1], reverse=True)
+    ]
+    total_source_size = sum((s.file_size or 0) for s in all_sources)
+
     return StatsResponse(
         total_chunks=data.get("total_chunks", 0),
         total_sources=data.get("total_sources", 0),
         chunk_size_distribution=distribution,
+        home_sources=all_sources,
+        home_total_source_size=total_source_size,
+        home_file_type_distribution=file_type_distribution,
     )
 
 

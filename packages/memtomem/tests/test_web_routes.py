@@ -322,6 +322,41 @@ class TestStats:
         assert data["total_sources"] == 3
         assert "chunk_size_distribution" in data
 
+    async def test_stats_returns_home_aggregates(self, app, client: AsyncClient, tmp_path):
+        source_md = tmp_path / "notes.md"
+        source_txt = tmp_path / "notes.txt"
+        source_md.write_text("one")
+        source_txt.write_text("two")
+        app.state.storage.get_source_files_with_counts.return_value = [
+            (
+                source_md,
+                1,
+                "2026-01-01T00:00:00",
+                "default",
+                1,
+                1,
+                1,
+            ),
+            (
+                source_txt,
+                2,
+                "2026-01-02T00:00:00",
+                "default",
+                2,
+                2,
+                2,
+            ),
+        ]
+
+        resp = await client.get("/api/stats")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data["home_sources"], list)
+        assert len(data["home_sources"]) == 2
+        assert isinstance(data["home_file_type_distribution"], list)
+        assert set(item["file_type"] for item in data["home_file_type_distribution"]) == {"md", "txt"}
+        assert data["home_total_source_size"] == 6
+
 
 # ---------------------------------------------------------------------------
 # GET /api/config

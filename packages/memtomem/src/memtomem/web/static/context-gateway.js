@@ -122,16 +122,130 @@ let _ctxOverviewSeq = 0;
 // back to a fresh fetch path.
 let _ctxOverviewCache = null;
 let _ctxTargetScope = 'project_shared';
+const _CTX_ACTIVE_SCOPE_KEY = 'memtomem_ctx_active_scope_id';
+let _ctxActiveScopeId = '';
+let _ctxProjectsCache = [];
+
+try {
+  _ctxActiveScopeId = localStorage.getItem(_CTX_ACTIVE_SCOPE_KEY) || '';
+} catch {
+  _ctxActiveScopeId = '';
+}
 
 function _ctxTargetScopeParam() {
   if (_ctxTargetScope === 'project_shared') return '';
   return `target_scope=${encodeURIComponent(_ctxTargetScope)}`;
 }
 
-function _ctxWithTargetScope(url) {
-  const param = _ctxTargetScopeParam();
-  if (!param) return url;
-  return `${url}${url.includes('?') ? '&' : '?'}${param}`;
+function _ctxScopeParam(scopeId = _ctxActiveScopeId) {
+  if (!scopeId) return '';
+  const activeScope = (_ctxProjectsCache || []).find(scope =>
+    scope && scope.scope_id === scopeId && !scope.missing);
+  if (!activeScope) return '';
+  return `scope_id=${encodeURIComponent(scopeId)}`;
+}
+
+function _ctxWithTargetScope(url, opts = {}) {
+  const params = [];
+  const targetParam = _ctxTargetScopeParam();
+  const scopeParam = opts.includeScope === false
+    ? ''
+    : _ctxScopeParam(opts.scopeId);
+  if (targetParam) params.push(targetParam);
+  if (scopeParam) params.push(scopeParam);
+  if (!params.length) return url;
+  return `${url}${url.includes('?') ? '&' : '?'}${params.join('&')}`;
+}
+
+function _ctxScopeIsActive(scope) {
+  return !!scope && !scope.missing && scope.scope_id === _ctxActiveScopeId;
+}
+
+function _ctxScopeDisplayLabel(scope) {
+  if (!scope) return '';
+  if (_ctxScopeIsServerCwd(scope)) return t('settings.ctx.server_cwd');
+  return scope.label || _ctxBasename(scope.root) || scope.scope_id;
+}
+
+function _ctxNormalizeActiveScope(scopes) {
+  const list = Array.isArray(scopes) ? scopes : [];
+  const availableScopes = list.filter(scope => !scope.missing);
+  const previousActiveScopeId = _ctxActiveScopeId;
+  if (!list.length) {
+    _ctxActiveScopeId = '';
+    try { localStorage.setItem(_CTX_ACTIVE_SCOPE_KEY, _ctxActiveScopeId); } catch {}
+    return null;
+  }
+  let active = _ctxActiveScopeId
+    ? availableScopes.find(scope => scope.scope_id === _ctxActiveScopeId)
+    : null;
+  if (!active) {
+    active = availableScopes.find(_ctxScopeIsServerCwd) || availableScopes[0] || null;
+  }
+  _ctxActiveScopeId = active ? (active.scope_id || '') : '';
+  if (previousActiveScopeId !== _ctxActiveScopeId) {
+    _ctxBumpActiveScopeDetailSeq();
+  }
+  try { localStorage.setItem(_CTX_ACTIVE_SCOPE_KEY, _ctxActiveScopeId); } catch {}
+  return active;
+}
+
+async function _ctxFetchProjects() {
+  const res = await fetch(_ctxWithTargetScope('/api/context/projects', { includeScope: false }));
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Failed to load projects');
+  const data = await res.json();
+  _ctxProjectsCache = data.scopes || [];
+  _ctxNormalizeActiveScope(_ctxProjectsCache);
+  return data;
+}
+
+function _ctxProjectControls(type, scopes = _ctxProjectsCache) {
+  const list = Array.isArray(scopes) ? scopes : [];
+  if (!list.length) return '';
+  const options = list.map(scope => {
+    const label = _ctxScopeDisplayLabel(scope);
+    const suffix = scope.missing
+      ? ` ${t('settings.ctx.scope_missing')}`
+      : '';
+    const selected = _ctxScopeIsActive(scope) ? ' selected' : '';
+    return `<option value="${escapeHtml(scope.scope_id)}"${selected}>${escapeHtml(label + suffix)}</option>`;
+  }).join('');
+  return `<label class="ctx-project-switcher" data-type="${escapeHtml(type)}">
+    <span>${escapeHtml(t('settings.ctx.active_project'))}</span>
+    <select class="ctx-project-select">${options}</select>
+  </label>`;
+}
+
+function _ctxWireProjectControls() {
+  document.querySelectorAll('.ctx-project-select').forEach(select => {
+    if (select.dataset.scopeWired === 'true') return;
+    select.dataset.scopeWired = 'true';
+    select.addEventListener('change', () => {
+      const next = select.value || '';
+      if (!next || next === _ctxActiveScopeId) return;
+      _ctxActiveScopeId = next;
+      _ctxNormalizeActiveScope(_ctxProjectsCache);
+      _ctxBumpActiveScopeDetailSeq();
+      try { localStorage.setItem(_CTX_ACTIVE_SCOPE_KEY, _ctxActiveScopeId); } catch {}
+      _ctxClearDeepLink();
+      const type = select.closest('.ctx-project-switcher')?.dataset.type || '';
+      if (type === 'overview') {
+        loadCtxOverview();
+      } else if (type === 'hooks-sync') {
+        loadHooksSync();
+      } else if (type) {
+        loadCtxList(type);
+      }
+    });
+  });
+}
+
+function _ctxBumpActiveScopeDetailSeq() {
+  for (const scopeType of Object.keys(_ctxDetailSeq)) {
+    if (typeof _ctxDetailSeq[scopeType] === 'number') {
+      _ctxDetailSeq[scopeType] += 1;
+    }
+  }
 }
 
 function _ctxTierControls(type) {
@@ -470,6 +584,7 @@ function _renderCtxOverview(data) {
       </div>
       ${lastSyncHtml}
     </div>`;
+  html += _ctxProjectControls('overview');
   html += _ctxTierControls('overview');
   html += '<div class="ctx-overview-grid">';
   for (const typ of types) {
@@ -612,6 +727,7 @@ function _renderCtxOverview(data) {
     }
     html += '</div>';
     el.innerHTML = html;
+    _ctxWireProjectControls();
     _ctxWireTierControls();
 
   // Gate the Sync All button: when every artifact type's items are
@@ -735,6 +851,7 @@ async function loadCtxOverview() {
   const el = qs('ctx-overview-content');
   panelLoading(el);
   try {
+    await _ctxFetchProjects();
     const res = await fetch(_ctxWithTargetScope('/api/context/overview'));
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Failed to load overview');
     const data = await res.json();
@@ -954,6 +1071,7 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
   if (!ok) return;
   btnLoading(btn, true);
   try {
+    const syncAllScopeId = _ctxActiveScopeId;
     const csrf = await ensureCsrfToken();
     const headers = csrf
       ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
@@ -967,7 +1085,7 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
       : ['skills', 'agents'];
     for (const typ of types) {
       const resp = await fetch(
-        _ctxWithTargetScope(`/api/context/${typ}/sync`),
+        _ctxWithTargetScope(`/api/context/${typ}/sync`, { scopeId: syncAllScopeId }),
         { method: 'POST', headers },
       );
       if (!resp.ok) {
@@ -994,7 +1112,7 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     //   needs_confirmation → info partial + Open Settings action (#774)
     //   all ok / skipped   → sync_success
     const settingsResp = await fetch(
-      _ctxWithTargetScope('/api/context/settings/sync'),
+      _ctxWithTargetScope('/api/context/settings/sync', { scopeId: syncAllScopeId }),
       { method: 'POST', headers },
     );
     if (!settingsResp.ok) {
@@ -1217,7 +1335,7 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
   try {
     const params = new URLSearchParams();
     if (_ctxTargetScope !== 'project_shared') params.set('target_scope', _ctxTargetScope);
-    if (!_ctxScopeIsServerCwd(scope)) params.set('scope_id', scope.scope_id);
+    if (scope && scope.scope_id) params.set('scope_id', scope.scope_id);
     const query = params.toString();
     const res = await fetch(`/api/context/${type}${query ? `?${query}` : ''}`);
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Failed to load ${type}`);
@@ -1230,14 +1348,14 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
     // re-insert the runtime-only banner above the fresh list.
     if (seq !== _ctxListSeq[type]) return;
     const items = data[type] || [];
-    // Cards on the cwd scope are clickable across all tiers — the detail /
+    // Cards on the active project scope are clickable across all tiers — the detail /
     // rendered / diff / edit / delete endpoints now accept ``target_scope=``
     // (#940 r3), so a click on a project_local draft opens the project_local
     // canonical, not a same-named project_shared one. Writes on non-shared
     // tiers are rejected at the server with HTTP 400 (the route's
     // ``_reject_non_shared_write`` helper); the JS surfaces those as
     // toasts via the existing ``err.detail`` path.
-    const clickable = _ctxScopeIsServerCwd(scope);
+    const clickable = _ctxScopeIsActive(scope);
     container.innerHTML = _ctxRenderItemsHtml(
       items,
       type,
@@ -1246,8 +1364,8 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
       { clickable },
     );
 
-    if (_ctxScopeIsServerCwd(scope)) {
-      // Only the cwd is mutable, so its canonical/runtime split drives the
+    if (_ctxScopeIsActive(scope)) {
+      // Only the active project is mutable, so its canonical/runtime split drives the
       // section-level Sync vs Import affordance gating. Expose the count via
       // a data attribute so CSS can flip primary/disabled states without a
       // classList toggle that risks drift across re-renders.
@@ -1274,11 +1392,9 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
         });
       }
 
-      // ADR-0009 §3 deep-link applier. Runs only on the cwd group — the
-      // dashboard's tile counts roll up the cwd canonical/runtime split,
-      // so a deep-link landing on a non-cwd scope's container would point
-      // at a list the user did not click into. Non-cwd groups stay
-      // unfiltered and lazy-loaded as today.
+      // ADR-0009 §3 deep-link applier. Runs only on the active project group —
+      // the dashboard's tile counts roll up the active project's canonical /
+      // runtime split, so non-active groups stay unfiltered.
       _ctxApplyDeepLinkToContainer(type, container);
     }
   } catch (err) {
@@ -1474,9 +1590,7 @@ async function loadCtxList(type) {
   }
 
   try {
-    const res = await fetch(_ctxWithTargetScope('/api/context/projects'));
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Failed to load projects');
-    const data = await res.json();
+    const data = await _ctxFetchProjects();
     if (seq !== _ctxListSeq[type]) return;
     const scopes = data.scopes || [];
     if (!scopes.length) {
@@ -1486,12 +1600,13 @@ async function loadCtxList(type) {
       return;
     }
 
-    let html = _ctxTierControls(type);
+    let html = _ctxProjectControls(type, scopes);
+    html += _ctxTierControls(type);
     for (const scope of scopes) {
-      const isCwd = _ctxScopeIsServerCwd(scope);
+      const isActive = _ctxScopeIsActive(scope);
       const count = _ctxScopeCount(scope, type);
       const groupId = `ctx-${type}-group-${escapeHtml(scope.scope_id)}`;
-      const removable = !isCwd;
+      const removable = !_ctxScopeIsServerCwd(scope);
       const removeBtn = removable
         ? `<button class="ctx-scope-remove" data-scope-id="${escapeHtml(scope.scope_id)}" title="${escapeHtml(t('settings.ctx.remove_project'))}">×</button>`
         : '';
@@ -1499,7 +1614,7 @@ async function loadCtxList(type) {
       // disambiguate same-name scopes (``Edu/inflearn`` vs ``Work/inflearn``)
       // on hover without inflating the visible label.
       const rootTitle = scope.root ? `title="${escapeHtml(scope.root)}"` : '';
-      html += `<details class="ctx-scope-group" data-scope-id="${escapeHtml(scope.scope_id)}" data-tier="${escapeHtml(scope.tier)}"${isCwd ? ' open' : ''}>
+      html += `<details class="ctx-scope-group" data-scope-id="${escapeHtml(scope.scope_id)}" data-tier="${escapeHtml(scope.tier)}"${isActive ? ' open' : ''}>
         <summary class="ctx-scope-summary" ${rootTitle}>
           <span class="ctx-scope-summary-label">${escapeHtml(scope.label)}</span>
           <span class="ctx-scope-summary-count">${count}</span>
@@ -1510,6 +1625,7 @@ async function loadCtxList(type) {
       </details>`;
     }
     listEl.innerHTML = html;
+    _ctxWireProjectControls();
     _ctxWireTierControls();
 
     // Tier-aware read-only banner (issue #943): inserted at the top of
@@ -1604,16 +1720,31 @@ async function loadCtxList(type) {
 // destroy work — the next mount of the same detail rehydrates it.
 
 function _ctxStashKey(type, name) {
-  return `m2m-ctx-conflict-buffer:${type}:${encodeURIComponent(name)}`;
+  return `m2m-ctx-conflict-buffer:${type}:${encodeURIComponent(_ctxActiveScopeId || '__default__')}:${encodeURIComponent(name)}`;
 }
 function _ctxStashDraft(type, name, content) {
   try { sessionStorage.setItem(_ctxStashKey(type, name), content); } catch (_e) { /* quota / private mode */ }
 }
 function _ctxRestoreDraft(type, name) {
-  try { return sessionStorage.getItem(_ctxStashKey(type, name)); } catch (_e) { return null; }
+  try {
+    const key = _ctxStashKey(type, name);
+    const scopedDraft = sessionStorage.getItem(key);
+    if (scopedDraft != null) return scopedDraft;
+    if (_ctxActiveScopeId) return null;
+    const legacyKey = `m2m-ctx-conflict-buffer:${type}:${encodeURIComponent(name)}`;
+    return sessionStorage.getItem(legacyKey);
+  } catch (_e) {
+    return null;
+  }
 }
 function _ctxClearDraft(type, name) {
-  try { sessionStorage.removeItem(_ctxStashKey(type, name)); } catch (_e) { /* */ }
+  const legacyKey = `m2m-ctx-conflict-buffer:${type}:${encodeURIComponent(name)}`;
+  try {
+    sessionStorage.removeItem(_ctxStashKey(type, name));
+    sessionStorage.removeItem(legacyKey);
+  } catch (_e) {
+    /* */ 
+  }
 }
 
 async function _ctxFetchFresh(type, name) {
@@ -2557,6 +2688,10 @@ document.querySelectorAll('.ctx-add-project-btn').forEach(btn => {
           showToast(data.warning, 'warning');
         } else {
           showToast(t('settings.ctx.add_project_success'), 'success');
+        }
+        if (data.scope_id) {
+          _ctxActiveScopeId = data.scope_id;
+          try { localStorage.setItem(_CTX_ACTIVE_SCOPE_KEY, _ctxActiveScopeId); } catch {}
         }
         loadCtxList(type);
       } catch (err) {

@@ -37,11 +37,27 @@ function _hooksCurrentTargetScope() {
   return 'project_shared';
 }
 
+function _hooksCurrentProjectScope() {
+  if (typeof _ctxActiveScopeId === 'string') return _ctxActiveScopeId;
+  return '';
+}
+
 function _hooksScopedUrl(path) {
   if (typeof _ctxWithTargetScope === 'function') {
     return _ctxWithTargetScope(path);
   }
   return path;
+}
+
+function _hooksProjectControlsHtml() {
+  if (typeof _ctxProjectControls !== 'function') return '';
+  return _ctxProjectControls('hooks-sync');
+}
+
+function _hooksWireProjectControls() {
+  if (typeof _ctxWireProjectControls === 'function') {
+    _ctxWireProjectControls();
+  }
 }
 
 function _hooksTierControlsHtml() {
@@ -104,22 +120,47 @@ function _renderHookRuleDetail(key, contentEl) {
 
 async function loadHooksSync() {
   const seq = ++_hooksSyncSeq;
-  const requestedScope = _hooksCurrentTargetScope();
   const statusEl = qs('hooks-sync-status');
   const contentEl = qs('hooks-sync-content');
   panelLoading(contentEl);
-  statusEl.innerHTML = _hooksTierControlsHtml();
+  const requestedScope = _hooksCurrentTargetScope();
+  let requestedProjectScope = _hooksCurrentProjectScope();
+  if (typeof _ctxFetchProjects === 'function') {
+    try {
+      await _ctxFetchProjects();
+    } catch (err) {
+      requestedProjectScope = _hooksCurrentProjectScope();
+      if (
+        seq !== _hooksSyncSeq
+        || requestedScope !== _hooksCurrentTargetScope()
+        || requestedProjectScope !== _hooksCurrentProjectScope()
+      ) return;
+      contentEl.innerHTML = emptyState('', 'Failed to load projects', err.message);
+      return;
+    }
+  }
+  requestedProjectScope = _hooksCurrentProjectScope();
+  statusEl.innerHTML = _hooksProjectControlsHtml() + _hooksTierControlsHtml();
+  _hooksWireProjectControls();
   _hooksWireTierControls();
 
   try {
     const res = await fetch(_hooksScopedUrl('/api/settings-sync'));
-    if (seq !== _hooksSyncSeq || requestedScope !== _hooksCurrentTargetScope()) return;
+    if (
+      seq !== _hooksSyncSeq
+      || requestedScope !== _hooksCurrentTargetScope()
+      || requestedProjectScope !== _hooksCurrentProjectScope()
+    ) return;
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || `Request failed: ${res.status}`);
     }
     const data = await res.json();
-    if (seq !== _hooksSyncSeq || requestedScope !== _hooksCurrentTargetScope()) return;
+    if (
+      seq !== _hooksSyncSeq
+      || requestedScope !== _hooksCurrentTargetScope()
+      || requestedProjectScope !== _hooksCurrentProjectScope()
+    ) return;
 
     // Status badge
     const badges = {
@@ -149,12 +190,14 @@ async function loadHooksSync() {
     // target path is often what the user needs to inspect.
     const showTarget = !!data.target_path && data.status !== 'no_source';
     statusEl.innerHTML =
-      _hooksTierControlsHtml()
+      _hooksProjectControlsHtml()
+      + _hooksTierControlsHtml()
       + `<span class="badge ${badge.cls}">${escapeHtml(badge.text)}</span>`
       + (showTarget
         ? `<div class="hooks-status-target" data-target-scope="${escapeHtml(scope || '')}">${escapeHtml(targetLabel)} <code>${escapeHtml(data.target_path)}</code></div>`
         : '');
     _hooksWireTierControls();
+    _hooksWireProjectControls();
 
     // Sync Now is only meaningful when a canonical source exists. Disable
     // the button in ``no_source`` so clicking it doesn't fire a POST that
@@ -329,7 +372,11 @@ async function loadHooksSync() {
     });
 
   } catch (err) {
-    if (seq !== _hooksSyncSeq || requestedScope !== _hooksCurrentTargetScope()) return;
+    if (
+      seq !== _hooksSyncSeq
+      || requestedScope !== _hooksCurrentTargetScope()
+      || requestedProjectScope !== _hooksCurrentProjectScope()
+    ) return;
     contentEl.innerHTML = emptyState('', t('settings.hooks.load_failed'), err.message);
   }
 }
