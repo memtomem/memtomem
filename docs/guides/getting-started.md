@@ -500,6 +500,9 @@ For a visual dashboard:
 
 ```bash
 mm web                     # polished dashboard on http://127.0.0.1:8080
+mm web -b                  # run in the background
+mm web status              # show pid/port/start time
+mm web stop                # stop the tracked Web UI process
 mm web --dev               # adds opt-in maintainer pages
 ```
 

@@ -173,6 +173,15 @@ def server_pid_path() -> Path:
     return runtime_dir() / "server.pid"
 
 
+def web_pid_path() -> Path:
+    """Return the path to ``mm web``'s pid / flock file.
+
+    Does not create the parent directory — callers that intend to open the
+    path for write should go through :func:`ensure_runtime_dir` first.
+    """
+    return runtime_dir() / "web.pid"
+
+
 _LEGACY_PID_NAME = ".server.pid"
 
 

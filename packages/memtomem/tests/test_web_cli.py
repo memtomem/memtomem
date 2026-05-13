@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import sys
 import contextlib
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
 
+from memtomem.cli import web as web_cmd
+from memtomem.cli._liveness import ServerState, _parse_pid_payload
 from memtomem.cli.web import _missing_web_deps, _web_install_hint, web
 
 
@@ -364,3 +367,122 @@ def test_web_non_loopback_host_with_acknowledgement_proceeds(
     )
     assert exit_code == 0, output
     assert "Starting memtomem Web UI" in output
+
+
+# ---------------------------------------------------------------------------
+# background/status/stop daemon plumbing
+# ---------------------------------------------------------------------------
+
+
+def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    runtime_base = tmp_path / "runtime"
+    runtime_base.mkdir(mode=0o700)
+    runtime_base.chmod(0o700)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_base))
+    return runtime_base / "memtomem"
+
+
+def test_liveness_parses_web_pid_payload() -> None:
+    pid, port, started = _parse_pid_payload("12345\n18080\n2026-05-13T10:15:32Z\n")
+    assert pid == 12345
+    assert port == 18080
+    assert started == "2026-05-13T10:15:32Z"
+
+    legacy_pid, legacy_port, legacy_started = _parse_pid_payload("54321\n")
+    assert legacy_pid == 54321
+    assert legacy_port is None
+    assert legacy_started is None
+
+
+def test_web_status_does_not_require_web_extra(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _isolate_runtime(monkeypatch, tmp_path)
+    runner = CliRunner()
+
+    with patch("memtomem.cli.web._missing_web_deps", return_value="fastapi"):
+        result = runner.invoke(web, ["status"])
+
+    assert result.exit_code == 3
+    assert result.output.strip() == "stopped"
+    assert "memtomem[web]" not in result.output
+
+
+def test_web_background_spawns_internal_foreground_child(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _isolate_runtime(monkeypatch, tmp_path)
+    log_file = tmp_path / "logs" / "web.log"
+    captured: dict[str, object] = {}
+
+    class FakeChild:
+        pid = 24680
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            captured["terminated"] = True
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return FakeChild()
+
+    monkeypatch.setattr(web_cmd.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(web_cmd, "_wait_for_tcp", lambda *args, **kwargs: True)
+
+    runner = CliRunner()
+    with patch("memtomem.cli.web._missing_web_deps", return_value=None):
+        result = runner.invoke(
+            web,
+            ["-b", "--port", "18080", "--mode", "prod", "--log-file", str(log_file)],
+        )
+
+    assert result.exit_code == 0, result.output
+    argv = captured["argv"]
+    assert isinstance(argv, list)
+    assert argv[:3] == [sys.executable, "-c", "from memtomem.cli import cli; cli()"]
+    assert argv[3:6] == ["web", "--_internal-foreground", "--host"]
+    assert "-m" not in argv
+    assert "started pid=24680 port=18080" in result.output
+    assert log_file.exists()
+
+
+def test_web_status_uses_sidecar_metadata_when_pid_file_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime_dir = _isolate_runtime(monkeypatch, tmp_path)
+    runtime_dir.mkdir()
+    (runtime_dir / "web.json").write_text(
+        '{"pid": 24680, "port": 18080, "started": "2026-05-13T10:15:32+00:00"}\n',
+        encoding="utf-8",
+    )
+
+    def fake_probe(_pid_file: Path) -> ServerState:
+        return ServerState(alive=True, pid=None, pid_file=runtime_dir / "web.pid")
+
+    monkeypatch.setattr("memtomem.cli._liveness.probe_pid_file", fake_probe)
+
+    result = CliRunner().invoke(web, ["status"])
+
+    assert result.exit_code == 0
+    assert "running" in result.output
+    assert "pid=24680" in result.output
+    assert "port=18080" in result.output
+
+
+def test_web_stop_removes_stale_pid_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    runtime_dir = _isolate_runtime(monkeypatch, tmp_path)
+    runtime_dir.mkdir()
+    pid_file = runtime_dir / "web.pid"
+    info_file = runtime_dir / "web.json"
+    pid_file.write_text("999999\n18080\n2026-05-13T10:15:32+00:00\n", encoding="utf-8")
+    info_file.write_text('{"pid": 999999, "port": 18080}\n', encoding="utf-8")
+
+    result = CliRunner().invoke(web, ["stop"])
+
+    assert result.exit_code == 2
+    assert "removed stale pid file" in result.output
+    assert not pid_file.exists()
+    assert not info_file.exists()

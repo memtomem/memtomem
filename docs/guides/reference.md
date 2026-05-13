@@ -1029,6 +1029,9 @@ mem_do(action="schedule_delete", params={"id": "<id>"})
 ```bash
 mm web                         # http://localhost:8080 (prod surface)
 mm web --port 3000             # custom port
+mm web -b --port 3000          # run in the background
+mm web status                  # show pid/port/start time
+mm web stop                    # stop the tracked Web UI process
 mm web --dev                   # adds opt-in maintainer pages
 mm web --mode {prod,dev}       # explicit mode (mutually exclusive with --dev)
 ```

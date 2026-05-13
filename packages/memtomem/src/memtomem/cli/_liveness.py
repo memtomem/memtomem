@@ -26,6 +26,29 @@ class ServerState:
     alive: bool
     pid: int | None
     pid_file: Path | None
+    port: int | None = None
+    started: str | None = None
+
+
+def _parse_pid_payload(text: str) -> tuple[int | None, int | None, str | None]:
+    """Parse pid-file payloads.
+
+    Legacy server pid files are a single ``pid`` line. ``mm web`` writes
+    ``pid`` / ``port`` / ``started`` on separate lines. The first line stays
+    the pid so older call sites that only care about the process id remain
+    compatible.
+    """
+    lines = [line.strip() for line in text.splitlines()]
+    try:
+        pid = int(lines[0]) if lines and lines[0] else None
+    except ValueError:
+        pid = None
+    try:
+        port = int(lines[1]) if len(lines) > 1 and lines[1] else None
+    except ValueError:
+        port = None
+    started = lines[2] if len(lines) > 2 and lines[2] else None
+    return pid, port, started
 
 
 def probe_pid_file(pid_file: Path) -> ServerState:
@@ -45,11 +68,12 @@ def probe_pid_file(pid_file: Path) -> ServerState:
         return ServerState(alive=False, pid=None, pid_file=None)
 
     pid: int | None
+    port: int | None
+    started: str | None
     try:
-        pid_text = pid_file.read_text().strip()
-        pid = int(pid_text)
-    except (OSError, ValueError):
-        pid = None
+        pid, port, started = _parse_pid_payload(pid_file.read_text())
+    except OSError:
+        pid, port, started = None, None, None
 
     # ``"rb+"`` (read-write) not ``"rb"``: portalocker's default Windows
     # backend (``MsvcrtLocker``) calls ``msvcrt.locking``, which the C
@@ -60,7 +84,7 @@ def probe_pid_file(pid_file: Path) -> ServerState:
     try:
         fp = open(pid_file, "rb+")
     except OSError:
-        return ServerState(alive=True, pid=pid, pid_file=pid_file)
+        return ServerState(alive=True, pid=pid, pid_file=pid_file, port=port, started=started)
 
     try:
         try:
@@ -69,9 +93,15 @@ def probe_pid_file(pid_file: Path) -> ServerState:
             # POSIX raises BlockingIOError; portalocker's Windows backend
             # wraps Win32 errors as LockException. Treat any of them as
             # "another holder, server is alive."
-            return ServerState(alive=True, pid=pid, pid_file=pid_file)
+            return ServerState(
+                alive=True,
+                pid=pid,
+                pid_file=pid_file,
+                port=port,
+                started=started,
+            )
         portalocker.unlock(fp)
-        return ServerState(alive=False, pid=pid, pid_file=pid_file)
+        return ServerState(alive=False, pid=pid, pid_file=pid_file, port=port, started=started)
     finally:
         fp.close()
 
