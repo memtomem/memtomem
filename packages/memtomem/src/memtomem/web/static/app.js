@@ -1788,6 +1788,40 @@ function _renderChunkDist(distribution) {
 }
 
 // G. Namespace Summary
+function _formatHomeNsLabel(nsName) {
+  const raw = String(nsName || '');
+  if (raw.length <= 28) return raw;
+
+  const autoMatch = raw.match(/^([a-z]+):-(.+)$/);
+  if (autoMatch) {
+    const provider = autoMatch[1];
+    const parts = autoMatch[2].split('-').filter(Boolean);
+    const tail = parts.slice(-2).join('/');
+    if (tail) return `${provider}: .../${tail}`;
+  }
+
+  return `${raw.slice(0, 12)}...${raw.slice(-14)}`;
+}
+
+function _homeNsActionLabel(nsName, chunkCount) {
+  const count = Number(chunkCount || 0);
+  return `Open Sources filtered to namespace ${nsName}, ${count.toLocaleString()} chunk${count === 1 ? '' : 's'}`;
+}
+
+function _bindHomeNsChartActions(chart) {
+  chart.querySelectorAll('[data-home-ns]').forEach(el => {
+    el.addEventListener('click', () => {
+      navigateToSourcesByNs(el.dataset.homeNs);
+    });
+  });
+  chart.querySelectorAll('[data-home-ns-more]').forEach(el => {
+    el.addEventListener('click', () => {
+      activateTab('settings');
+      switchSettingsSection('namespaces');
+    });
+  });
+}
+
 function _renderNsChart(namespaces) {
   const chart = qs('home-ns-chart');
   if (!namespaces.length) {
@@ -1795,25 +1829,37 @@ function _renderNsChart(namespaces) {
     return;
   }
 
-  const sorted = [...namespaces].sort((a, b) => b.chunk_count - a.chunk_count).slice(0, 6);
+  const allSorted = [...namespaces].sort((a, b) => b.chunk_count - a.chunk_count);
+  const sorted = allSorted.slice(0, 6);
+  const hiddenCount = Math.max(0, allSorted.length - sorted.length);
   const max = sorted[0]?.chunk_count || 1;
   const palette = ['var(--accent)', 'var(--green)', '#e0a800', '#a29bfe', '#e17055', '#00cec9'];
 
   chart.innerHTML = sorted.map((ns, i) => {
     const pct = Math.round((ns.chunk_count / max) * 100);
     const color = ns.color || palette[i % palette.length];
-    // ``.home-bar-label`` is CSS-clipped at 120px with text-overflow:ellipsis,
-    // which hides the tail of long auto-namespaces like
-    // ``claude:-Users-...-projectname``. The row-level ``title`` makes the
-    // full string visible on hover so users can identify which namespace is
-    // selected.
-    const fullNs = escapeHtml(ns.namespace);
-    return `<div class="home-bar-row" title="${fullNs}">
-      <span class="home-bar-label">${fullNs}</span>
-      <div class="home-bar-track"><div class="home-bar-fill" style="width:${pct}%;background:${color}"></div></div>
-      <span class="home-bar-count">${ns.chunk_count.toLocaleString()}</span>
+    const nsName = String(ns.namespace || '');
+    const fullNs = escapeHtml(nsName);
+    const shortNs = escapeHtml(_formatHomeNsLabel(nsName));
+    const nsAttr = escapeAttr(nsName);
+    const actionLabel = escapeAttr(_homeNsActionLabel(nsName, ns.chunk_count));
+    return `<div class="home-bar-row home-ns-row">
+      <button class="home-ns-open" type="button" data-home-ns="${nsAttr}" aria-label="${actionLabel}">
+        <span class="home-bar-label" title="${escapeAttr(nsName)}">${shortNs}</span>
+        <span class="home-bar-track" aria-hidden="true"><span class="home-bar-fill" style="width:${pct}%;background:${color}"></span></span>
+        <span class="home-bar-count">${ns.chunk_count.toLocaleString()}</span>
+        <span class="home-ns-action">Sources</span>
+      </button>
+      <details class="home-ns-detail">
+        <summary aria-label="Show full namespace ${escapeAttr(nsName)}">Full</summary>
+        <span>${fullNs}</span>
+      </details>
     </div>`;
-  }).join('');
+  }).join('') + (hiddenCount
+    ? `<button class="home-ns-more" type="button" data-home-ns-more="true">+ ${hiddenCount.toLocaleString()} more in Namespaces</button>`
+    : '');
+
+  _bindHomeNsChartActions(chart);
 }
 
 // E. Recent Sources — color dot + 2-row layout
@@ -5678,7 +5724,7 @@ function escapeHtml(str) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 }
-function escapeAttr(str) { return String(str).replace(/"/g, '&quot;'); }
+function escapeAttr(str) { return escapeHtml(str).replace(/"/g, '&quot;'); }
 
 // ---------------------------------------------------------------------------
 // Search History (A)
