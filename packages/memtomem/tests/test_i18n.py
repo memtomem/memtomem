@@ -347,6 +347,62 @@ class TestNoHardcodedStrings:
             "index.html elements named in #698 missing required i18n bindings:\n" + "\n".join(bad)
         )
 
+    def test_home_quick_actions_describe_navigation_flow(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """Home Quick Actions (#989) mostly navigate or prepare forms."""
+        html = (_STATIC_JS_DIR / "index.html").read_text(encoding="utf-8")
+        js = (_STATIC_JS_DIR / "app.js").read_text(encoding="utf-8")
+        ids = ["search", "index", "reindex", "export", "dedup", "tags"]
+        bad: list[str] = []
+
+        for action in ids:
+            el_id = f"home-{action}-btn"
+            tag_re = re.compile(rf'<button[^>]*\bid="{re.escape(el_id)}"[^>]*>')
+            m = tag_re.search(html)
+            if not m:
+                bad.append(f"  id={el_id!r} missing from index.html")
+                continue
+            tag = m.group(0)
+            for attr in [
+                f'data-i18n="home.action.{action}"',
+                f'data-i18n-title="home.action.{action}_title"',
+                f'data-i18n-aria-label="home.action.{action}_title"',
+            ]:
+                if attr not in tag:
+                    bad.append(f"  id={el_id!r} missing attribute: {attr}")
+
+        for locale_name, locale in [("en", en), ("ko", ko)]:
+            for action in ids:
+                label = locale[f"home.action.{action}"]
+                title = locale[f"home.action.{action}_title"]
+                if re.match(r"^[^\w\s가-힣]", label):
+                    bad.append(f"  {locale_name}: home.action.{action} still starts with an icon")
+                if locale_name == "en" and action in {"reindex", "dedup"}:
+                    if "does not start" not in title.lower():
+                        bad.append(
+                            f"  {locale_name}: home.action.{action}_title must say it does not start"
+                        )
+
+        assert en["home.action.reindex"] == "Prepare Full Re-index"
+        assert en["home.action.export"] == "Open Export"
+        assert en["home.action.dedup"] == "Open Dedup Scan"
+        assert "switchSettingsSection('export')" in js
+        assert "switchSettingsSection('dedup')" in js
+        for key in [
+            "toast.quick_action.open_search",
+            "toast.quick_action.open_index",
+            "toast.quick_action.reindex_ready",
+            "toast.quick_action.open_export",
+            "toast.quick_action.open_dedup",
+            "toast.quick_action.open_tags",
+        ]:
+            assert key in js
+            assert key in en
+            assert key in ko
+
+        assert not bad, "Home Quick Actions i18n/a11y drift:\n" + "\n".join(bad)
+
     def test_issue_990_home_strings_are_localized(
         self, en: dict[str, str], ko: dict[str, str]
     ) -> None:

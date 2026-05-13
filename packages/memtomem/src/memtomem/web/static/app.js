@@ -2133,27 +2133,40 @@ qs('home-search-input').addEventListener('keydown', e => {
 });
 
 // F. Quick Actions
+function _quickActionToast(key, focusTarget) {
+  showToast(t(key), 'info');
+  if (focusTarget) {
+    requestAnimationFrame(() => qs(focusTarget)?.focus());
+  }
+}
+
 qs('home-search-btn').addEventListener('click', () => {
   activateTab('search');
   qs('search-input').focus();
+  _quickActionToast('toast.quick_action.open_search');
 });
 qs('home-index-btn').addEventListener('click', () => {
   activateTab('index');
+  _quickActionToast('toast.quick_action.open_index', 'index-path');
 });
 qs('home-reindex-btn').addEventListener('click', () => {
   activateTab('index');
   qs('index-force').checked = true;
+  _quickActionToast('toast.quick_action.reindex_ready', 'index-path');
 });
 qs('home-export-btn').addEventListener('click', () => {
   activateTab('settings');
-  document.querySelector('.settings-nav-btn[data-section="export"]')?.click();
+  switchSettingsSection('export');
+  _quickActionToast('toast.quick_action.open_export', 'exp-preview-btn');
 });
 qs('home-dedup-btn').addEventListener('click', () => {
   activateTab('settings');
-  document.querySelector('.settings-nav-btn[data-section="dedup"]')?.click();
+  switchSettingsSection('dedup');
+  _quickActionToast('toast.quick_action.open_dedup', 'dedup-scan-btn');
 });
 qs('home-tags-btn').addEventListener('click', () => {
   activateTab('tags');
+  _quickActionToast('toast.quick_action.open_tags', 'tags-search');
 });
 
 // ---------------------------------------------------------------------------
