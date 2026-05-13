@@ -131,6 +131,11 @@ def _open_detail(page, kind: str, name: str) -> None:
     """Navigate Settings → ctx-{kind}, wait for the cwd group items to
     render, click the card, await the detail meta header to mount.
     """
+    if kind == "commands":
+        page.wait_for_function(
+            "() => document.body.classList.contains('dev-mode')",
+            timeout=5_000,
+        )
     page.evaluate("() => activateTab('settings')")
     page.evaluate(f"() => switchSettingsSection('ctx-{kind}')")
     # Wait for the cwd group items to populate (it auto-opens because
