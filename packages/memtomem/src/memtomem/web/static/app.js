@@ -4000,6 +4000,7 @@ function _renderMemorySourceTree(sources, list) {
       const pendingPlan = vendorPlans[pendingProvider];
       const pendingEntry = pendingPlan && pendingPlan.visibleCats.find(([cat]) => cat === pendingCat);
       if (pendingEntry) {
+        STATE.sourcesActiveCategoryByVendor[pendingProvider] = pendingCat;
         const [, indexed] = pendingEntry;
         if (indexed.length > 1) {
           const dirIdx = indexed.indexOf(pendingSrc.memory_dir);

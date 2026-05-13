@@ -240,6 +240,7 @@ def app():
     # path-inside-memory_dirs gate (e.g. ``/api/index`` 403s).
     cfg.indexing.exclude_patterns = []
     cfg.indexing.memory_dirs = [Path("/tmp/memories")]
+    cfg.indexing.project_memory_dirs = []
     application.state.config = cfg
     application.state.dedup_scanner = dedup_scanner
 
@@ -631,23 +632,23 @@ class TestSources:
         assert data["offset"] == 0
 
     async def test_source_content_matches_returns_matching_paths(self, app, client: AsyncClient):
-        app.state.storage.search_source_files_by_content.return_value = [
-            Path("/tmp/body-match.md")
-        ]
+        body_match = Path("/tmp/body-match.md")
+        app.state.storage.search_source_files_by_content.return_value = [body_match]
 
         resp = await client.get("/api/sources/content-matches", params={"q": "needle"})
 
         assert resp.status_code == 200
-        assert resp.json() == {"query": "needle", "paths": ["/tmp/body-match.md"]}
+        assert resp.json() == {"query": "needle", "paths": [str(body_match)]}
         app.state.storage.search_source_files_by_content.assert_awaited_once_with(
             "needle",
             limit=10000,
         )
 
     async def test_source_content_matches_includes_ai_summary_text(self, app, client: AsyncClient):
+        summary_match = Path("/tmp/summary-match.md")
         app.state.storage.search_source_files_by_content.return_value = []
         app.state.storage.get_all_ai_summaries.return_value = {
-            "/tmp/summary-match.md": {
+            str(summary_match): {
                 "summary": "감사 로그 정책을 설명하는 문서입니다.",
                 "language": "ko",
             }
@@ -656,7 +657,44 @@ class TestSources:
         resp = await client.get("/api/sources/content-matches", params={"q": "감사"})
 
         assert resp.status_code == 200
-        assert resp.json()["paths"] == ["/tmp/summary-match.md"]
+        assert resp.json()["paths"] == [str(summary_match)]
+
+    async def test_source_content_matches_hides_project_local_by_default(
+        self, app, client: AsyncClient
+    ):
+        project_root = Path("/tmp/project")
+        local_dir = project_root / ".memtomem" / "memories.local"
+        local_path = local_dir / "draft.md"
+        user_path = Path("/tmp/memories/public.md")
+        app.state.config.indexing.project_memory_dirs = [local_dir]
+        app.state.storage.search_source_files_by_content.return_value = [local_path, user_path]
+        app.state.storage.get_all_ai_summaries.return_value = {
+            str(local_path): {"summary": "needle draft", "language": "en"},
+            str(user_path): {"summary": "needle public", "language": "en"},
+        }
+
+        resp = await client.get("/api/sources/content-matches", params={"q": "needle"})
+
+        assert resp.status_code == 200
+        assert resp.json()["paths"] == [str(user_path)]
+
+    async def test_source_content_matches_can_filter_to_project_local(
+        self, app, client: AsyncClient
+    ):
+        project_root = Path("/tmp/project")
+        local_dir = project_root / ".memtomem" / "memories.local"
+        local_path = local_dir / "draft.md"
+        user_path = Path("/tmp/memories/public.md")
+        app.state.config.indexing.project_memory_dirs = [local_dir]
+        app.state.storage.search_source_files_by_content.return_value = [local_path, user_path]
+
+        resp = await client.get(
+            "/api/sources/content-matches",
+            params={"q": "needle", "target_scope": "project_local"},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["paths"] == [str(local_path)]
 
     async def test_source_content_matches_rejects_blank_query(self, client: AsyncClient):
         resp = await client.get("/api/sources/content-matches", params={"q": "   "})
