@@ -337,7 +337,11 @@ async function api(method, path, body, opts = {}) {
       : (err.detail && typeof err.detail === 'object' && typeof err.detail.detail === 'string'
         ? err.detail.detail
         : res.statusText);
-    throw new Error(msg);
+    // Thrown errors expose `.status` so callers can branch on HTTP code
+    // (e.g. 404 → mark resource missing instead of generic toast).
+    const apiErr = new Error(msg);
+    apiErr.status = res.status;
+    throw apiErr;
   }
   return res.json();
 }
@@ -6174,12 +6178,51 @@ function unpinChunk(id) {
   delete store[String(id)];
   _savePinStore(store);
 }
+function _updatePinPreview(id, patch) {
+  const store = _getPinStore();
+  const key = String(id);
+  if (!(key in store)) return;
+  store[key] = { ...(store[key] || {}), ...patch };
+  _savePinStore(store);
+}
 function updatePinBtn(chunkId) {
   const btn = qs('d-pin-btn');
   if (!btn) return;
   const pinned = isPinned(chunkId);
   btn.textContent = pinned ? '★ Pinned' : '☆ Pin';
   btn.classList.toggle('btn-pin-active', pinned);
+}
+// Monotonic counter so a slow click on pin A doesn't clobber the result of
+// a later click on pin B (same pattern as the tier-loader stale-response
+// guard in settings-hooks-watchdog.js).
+let _pinOpenSeq = 0;
+async function openPinnedChunk(id) {
+  const key = String(id);
+  const seq = ++_pinOpenSeq;
+  try {
+    const chunk = await api('GET', `/api/chunks/${encodeURIComponent(key)}`);
+    if (seq !== _pinOpenSeq) return;
+    _updatePinPreview(key, {
+      source: chunk.source_file || '',
+      snippet: (chunk.content || '').slice(0, 100),
+      stale: false,
+    });
+    if (!chunk.source_file) {
+      showToast(t('toast.chunk_target_missing'), 'info');
+      return;
+    }
+    _navigateToSource(chunk.source_file, key);
+  } catch (err) {
+    if (seq !== _pinOpenSeq) return;
+    if (err && err.status === 404) {
+      _updatePinPreview(key, { stale: true });
+      renderPinnedSection();
+      showToast(t('toast.pinned_chunk_missing'), 'error');
+      return;
+    }
+    console.warn('[pin] openPinnedChunk failed', err);
+    showToast(t('toast.error', { error: err.message }), 'error');
+  }
 }
 function renderPinnedSection() {
   const list = qs('home-pinned-list');
@@ -6195,12 +6238,37 @@ function renderPinnedSection() {
     list.innerHTML = `<div class="empty-state" style="height:50px"><span>${escapeHtml(t('home.state.no_pinned'))}</span></div>`;
     return;
   }
-  list.innerHTML = items.map(([id, p]) => `
-    <div class="home-source-item">
-      <span class="home-source-name">${escapeHtml(p.source || t('home.health.unknown'))}</span>
-      <span class="home-pinned-snippet">${escapeHtml(truncate(p.snippet || '', 50))}</span>
-      <button class="unpin-btn btn-ghost btn-xs" data-id="${escapeAttr(id)}" title="${escapeAttr(t('home.pin.unpin_title'))}">✕</button>
-    </div>`).join('');
+  // Row = wrapper div; the navigate target is a real <button> sibling of
+  // the Remove button. Two reasons:
+  //   1. ARIA: a role=button container with a real <button> descendant is
+  //      a nested-interactive antipattern (assistive-tech announces both).
+  //   2. Keyboard: Enter/Space on the focused Remove button bubbles to the
+  //      row's keydown handler, double-firing unpin + navigate.
+  // Sibling buttons sidestep both — each gets native keyboard handling and
+  // there's no shared listener between them.
+  list.innerHTML = items.map(([id, p]) => {
+    const stale = Boolean(p.stale);
+    const source = p.source || t('home.health.unknown');
+    const openTitle = stale
+      ? t('home.pin.missing_title')
+      : t('home.pin.open_title', { source });
+    const removeLabel = stale ? t('home.pin.remove_label') : '✕';
+    const removeTitle = stale
+      ? t('home.pin.remove_title')
+      : t('home.pin.unpin_title');
+    return `
+    <div class="home-source-item home-pinned-item${stale ? ' home-pinned-stale' : ''}">
+      <button type="button" class="home-pinned-open" data-id="${escapeAttr(id)}" title="${escapeAttr(openTitle)}" aria-label="${escapeAttr(openTitle)}">
+        <span class="home-source-name">${escapeHtml(source)}</span>
+        <span class="home-pinned-snippet">${escapeHtml(truncate(p.snippet || '', 50))}</span>
+        ${stale ? `<span class="badge badge-yellow home-pinned-stale-badge">${escapeHtml(t('home.pin.missing_badge'))}</span>` : ''}
+      </button>
+      <button class="unpin-btn btn-ghost btn-xs" data-id="${escapeAttr(id)}" title="${escapeAttr(removeTitle)}">${escapeHtml(removeLabel)}</button>
+    </div>`;
+  }).join('');
+  list.querySelectorAll('.home-pinned-open').forEach(el => {
+    el.addEventListener('click', () => openPinnedChunk(el.dataset.id));
+  });
   list.querySelectorAll('.unpin-btn').forEach(b => {
     b.addEventListener('click', e => {
       e.stopPropagation();
