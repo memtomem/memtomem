@@ -325,7 +325,29 @@ def _sync_reranker(old_cfg: Any, new_cfg: Any, search_pipeline: SearchPipeline) 
 
     from memtomem.search.reranker.factory import create_reranker
 
-    new_reranker = create_reranker(new_cfg.rerank)
+    try:
+        new_reranker = create_reranker(new_cfg.rerank)
+    except Exception:
+        # Disk-edit path is best-effort: a broken factory call leaves the
+        # previous reranker in place so the live pipeline keeps working.
+        # The PATCH path surfaces the same failure as a 200/rejected reply
+        # before mutating any state.
+        logger.exception("Failed to build reranker from hot-reloaded config; keeping previous")
+        return
+
+    # Mirror the PATCH path's eager lazy-load check so a disk edit that
+    # enables rerank against a missing dep (e.g. fastembed) fails here
+    # instead of at first search.
+    if new_reranker is not None:
+        load_model = getattr(new_reranker, "_get_model", None)
+        if callable(load_model):
+            try:
+                load_model()
+            except Exception:
+                logger.exception("Hot-reloaded reranker failed to load; keeping previous instance")
+                _close_async_component(new_reranker)
+                return
+
     old_reranker = getattr(search_pipeline, "_reranker", None)
     search_pipeline._reranker = new_reranker
     search_pipeline._rerank_config = new_cfg.rerank if new_cfg.rerank.enabled else None
@@ -362,15 +384,33 @@ def _close_async_component(component: object) -> None:
     import asyncio
     import inspect
 
-    if not inspect.isawaitable(result):
+    # Narrow to ``Coroutine`` (not just ``Awaitable``) because that's what
+    # ``asyncio.run`` / ``loop.create_task`` accept. In practice every
+    # reranker ``close()`` we wrap is ``async def`` so returns a coroutine.
+    if not inspect.iscoroutine(result):
         return
 
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        asyncio.run(result)
-    else:
-        loop.create_task(result)
+        try:
+            asyncio.run(result)
+        except Exception:
+            logger.exception("Error while closing replaced reranker")
+        return
+
+    task: asyncio.Task[Any] = loop.create_task(result)
+    task.add_done_callback(_log_close_task_exception)
+
+
+def _log_close_task_exception(task: Any) -> None:
+    # Fire-and-forget close tasks must not leak "Task exception was never
+    # retrieved" warnings — surface the failure with a useful stack instead.
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("Error while closing replaced reranker", exc_info=exc)
 
 
 def _schedule_fts_rebuild(

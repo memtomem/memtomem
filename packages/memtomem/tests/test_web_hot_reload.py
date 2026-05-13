@@ -736,9 +736,7 @@ class TestApplyRuntimeConfigChanges:
         storage.rebuild_fts.assert_not_called()
         search_pipeline.invalidate_cache.assert_called_once()
 
-    def test_rerank_change_rebuilds_live_pipeline_reranker(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_rerank_change_rebuilds_live_pipeline_reranker(self, monkeypatch: pytest.MonkeyPatch):
         import memtomem.search.reranker.factory as factory
 
         old = self._cfg(rerank_enabled=False)
@@ -757,9 +755,7 @@ class TestApplyRuntimeConfigChanges:
         assert search_pipeline._rerank_config is new.rerank
         search_pipeline.invalidate_cache.assert_called_once()
 
-    def test_rerank_disable_clears_live_pipeline_reranker(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_rerank_disable_clears_live_pipeline_reranker(self, monkeypatch: pytest.MonkeyPatch):
         import memtomem.search.reranker.factory as factory
 
         class StubReranker:
@@ -784,6 +780,79 @@ class TestApplyRuntimeConfigChanges:
         assert search_pipeline._reranker is None
         assert search_pipeline._rerank_config is None
         assert old_reranker.closed is True
+        search_pipeline.invalidate_cache.assert_called_once()
+
+    def test_rerank_disk_edit_lazy_load_failure_keeps_previous(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Disk hot-reload mirrors the PATCH path: a reranker that can't
+        load (e.g. missing fastembed dep) leaves the previous live
+        instance in place instead of silently breaking search."""
+        import memtomem.search.reranker.factory as factory
+
+        class BrokenReranker:
+            def __init__(self):
+                self.closed = False
+
+            def _get_model(self):
+                raise ImportError("fastembed is required")
+
+            async def close(self):
+                self.closed = True
+
+        class PrevReranker:
+            def __init__(self):
+                self.closed = False
+
+            async def close(self):
+                self.closed = True
+
+        broken = BrokenReranker()
+        previous = PrevReranker()
+        old = self._cfg(rerank_enabled=False)
+        new = self._cfg(rerank_enabled=True)
+        monkeypatch.setattr(factory, "create_reranker", lambda cfg: broken)
+        search_pipeline = SimpleNamespace(
+            _reranker=previous,
+            _rerank_config=None,
+            invalidate_cache=MagicMock(),
+        )
+
+        _hot_reload.apply_runtime_config_changes(old, new, search_pipeline=search_pipeline)
+
+        assert search_pipeline._reranker is previous
+        assert previous.closed is False
+        search_pipeline.invalidate_cache.assert_called_once()
+
+    def test_rerank_disk_edit_factory_failure_keeps_previous(self, monkeypatch: pytest.MonkeyPatch):
+        """A factory that raises mid-disk-reload leaves state untouched."""
+        import memtomem.search.reranker.factory as factory
+
+        class PrevReranker:
+            def __init__(self):
+                self.closed = False
+
+            async def close(self):
+                self.closed = True
+
+        previous = PrevReranker()
+        old = self._cfg(rerank_enabled=False)
+        new = self._cfg(rerank_enabled=True)
+
+        def _boom(cfg):
+            raise RuntimeError("factory exploded")
+
+        monkeypatch.setattr(factory, "create_reranker", _boom)
+        search_pipeline = SimpleNamespace(
+            _reranker=previous,
+            _rerank_config=None,
+            invalidate_cache=MagicMock(),
+        )
+
+        _hot_reload.apply_runtime_config_changes(old, new, search_pipeline=search_pipeline)
+
+        assert search_pipeline._reranker is previous
+        assert previous.closed is False
         search_pipeline.invalidate_cache.assert_called_once()
 
 
