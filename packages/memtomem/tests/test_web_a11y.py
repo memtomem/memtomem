@@ -126,6 +126,33 @@ class TestTimelineRowA11y:
         )
 
 
+class TestHomeActivityHeatmapA11y:
+    """Pin Home activity heatmap accessibility semantics (issue #986)."""
+
+    def test_heatmap_only_active_dates_are_keyboard_buttons(self, app_js: str) -> None:
+        body = _extract_function(app_js, "_renderActivityMap")
+        assert "const isInteractive = cell.count > 0;" in body, (
+            "Home heatmap must not make zero-activity days keyboard-focusable"
+        )
+        assert 'role="button" tabindex="0"' in body, (
+            "active heatmap dates must remain keyboard-focusable timeline jumps"
+        )
+        assert 'aria-hidden="true"' in body, (
+            "non-interactive heatmap cells should stay out of the screen-reader navigation surface"
+        )
+
+    def test_heatmap_has_orientation_summary_and_legend(self, app_js: str) -> None:
+        body = _extract_function(app_js, "_renderActivityMap")
+        for marker in (
+            "activity-summary",
+            "activity-weekdays",
+            "activity-legend",
+            "home.activity.summary_aria",
+            "home.activity.intensity_peak",
+        ):
+            assert marker in body, f"Home heatmap missing a11y/orientation marker: {marker}"
+
+
 class TestChunkCardA11y:
     """Pin a11y attributes on source-detail ``.chunk-card`` rows (issue #700).
 

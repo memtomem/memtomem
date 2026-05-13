@@ -1605,6 +1605,11 @@ function _renderActivityMap(chunks) {
   const map = qs('home-activity-map');
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const tr = (key, params, fallback) => {
+    if (typeof t !== 'function') return fallback;
+    const translated = t(key, params);
+    return translated === key ? fallback : translated;
+  };
 
   // Count chunks per date
   const countByDate = {};
@@ -1624,6 +1629,12 @@ function _renderActivityMap(chunks) {
   const totalDays = Math.round((today - startDate) / 86400000) + 1;
   const cells = [];
   let maxCount = 0;
+  let totalCount = 0;
+  let activeDays = 0;
+  let last7Count = 0;
+  let mostActive = null;
+  const last7Start = new Date(today);
+  last7Start.setDate(last7Start.getDate() - 6);
 
   for (let i = 0; i < totalDays; i++) {
     const d = new Date(startDate);
@@ -1633,6 +1644,14 @@ function _renderActivityMap(chunks) {
     const isFuture = d > today;
     const isBeforeRange = d < dataStart;
     if (!isFuture && !isBeforeRange && count > maxCount) maxCount = count;
+    if (!isFuture && !isBeforeRange) {
+      totalCount += count;
+      if (d >= last7Start) last7Count += count;
+      if (count > 0) {
+        activeDays += 1;
+        if (!mostActive || count > mostActive.count) mostActive = { date: key, count };
+      }
+    }
     cells.push({ date: key, count, isFuture, isBeforeRange, month: d.getMonth() });
   }
 
@@ -1645,10 +1664,22 @@ function _renderActivityMap(chunks) {
     if (q <= 0.75) return 3;
     return 4;
   };
+  const levelLabel = (level) => {
+    const labels = [
+      ['home.activity.intensity_none', 'No activity'],
+      ['home.activity.intensity_low', 'Low activity'],
+      ['home.activity.intensity_medium', 'Medium activity'],
+      ['home.activity.intensity_high', 'High activity'],
+      ['home.activity.intensity_peak', 'Peak activity'],
+    ];
+    const [key, fallback] = labels[level] || labels[0];
+    return tr(key, {}, fallback);
+  };
 
   // Month labels — detect when a new month starts in the first row (Sunday)
   const numWeeks = Math.ceil(totalDays / 7);
   const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const weekdayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
   const monthLabels = [];
   let prevMonth = -1;
   for (let w = 0; w < numWeeks; w++) {
@@ -1663,31 +1694,71 @@ function _renderActivityMap(chunks) {
   }
 
   let html = '';
-
-  // Month labels row
-  html += `<div class="activity-months" style="grid-template-columns:repeat(${numWeeks},1fr);gap:2px">`;
-  monthLabels.forEach(m => {
-    html += `<span style="grid-column:${m.col}">${m.label}</span>`;
-  });
+  const mostActiveCount = mostActive ? mostActive.count : 0;
+  const mostActiveDate = mostActive ? mostActive.date : tr(
+    'home.activity.none',
+    {},
+    'None',
+  );
+  const summaryAria = tr(
+    'home.activity.summary_aria',
+    { total: totalCount, active: activeDays, last7: last7Count, date: mostActiveDate, count: mostActiveCount },
+    `${totalCount} chunks across ${activeDays} active days. ${last7Count} chunks in the last 7 days. Most active day: ${mostActiveDate}, ${mostActiveCount} chunks.`,
+  );
+  html += `<div class="activity-summary" aria-label="${escapeAttr(summaryAria)}">`;
+  html += `<span>${escapeHtml(tr('home.activity.summary_last7', { count: last7Count }, `Last 7 days: ${last7Count}`))}</span>`;
+  html += `<span>${escapeHtml(tr('home.activity.summary_active_days', { count: activeDays }, `Active days: ${activeDays}`))}</span>`;
+  html += `<span>${escapeHtml(tr('home.activity.summary_most_active', { date: mostActiveDate, count: mostActiveCount }, `Most active: ${mostActiveDate} (${mostActiveCount})`))}</span>`;
   html += '</div>';
 
-  // Grid of cells (7 rows × N cols, auto-flow column = weeks)
-  html += `<div class="activity-grid" style="grid-template-columns:repeat(${numWeeks},1fr)">`;
+  // Month labels row
+  html += '<div class="activity-map-frame">';
+  html += '<div class="activity-weekday-spacer" aria-hidden="true"></div>';
+  html += '<div class="activity-months" style="grid-template-columns:repeat(' + numWeeks + ',1fr);gap:2px">';
+  monthLabels.forEach(m => { html += `<span style="grid-column:${m.col}">${m.label}</span>`; });
+  html += '</div>';
+  html += '<div class="activity-weekdays" aria-hidden="true">';
+  weekdayNames.forEach(day => { html += `<span>${day}</span>`; });
+  html += '</div>';
+
+  // Grid of cells (7 rows x N cols, auto-flow column = weeks). Only dates
+  // with activity become buttons, keeping keyboard navigation useful.
+  html += `<div class="activity-grid" style="grid-template-columns:repeat(${numWeeks},1fr)" aria-label="${escapeAttr(summaryAria)}">`;
   cells.forEach(cell => {
     if (cell.isFuture || cell.isBeforeRange) {
       html += '<div class="activity-cell activity-empty"></div>';
     } else {
       const level = getLevel(cell.count);
+      const intensity = levelLabel(level);
       const ariaKey = cell.count === 1
         ? 'home.activity.cell_aria_one'
         : 'home.activity.cell_aria_other';
-      const ariaRaw = (typeof t === 'function')
-        ? t(ariaKey, { date: cell.date, count: cell.count })
-        : `${cell.date}, ${cell.count} chunks. View in Timeline.`;
-      const ariaSafe = ariaRaw.replace(/"/g, '&quot;');
-      html += `<div class="activity-cell activity-cell-link" data-level="${level}" data-date="${cell.date}" role="button" tabindex="0" title="${cell.date}: ${cell.count}" aria-label="${ariaSafe}"></div>`;
+      const ariaRaw = tr(
+        ariaKey,
+        { date: cell.date, count: cell.count, intensity },
+        `${cell.date}, ${cell.count} chunks, ${intensity}. Click to view in Timeline.`,
+      );
+      const title = tr(
+        'home.activity.cell_title',
+        { date: cell.date, count: cell.count, intensity },
+        `${cell.date}: ${cell.count} chunks, ${intensity}`,
+      );
+      const isInteractive = cell.count > 0;
+      const cellClass = isInteractive ? 'activity-cell activity-cell-link' : 'activity-cell';
+      const attrs = isInteractive
+        ? `data-date="${cell.date}" role="button" tabindex="0" aria-label="${escapeAttr(ariaRaw)}"`
+        : 'aria-hidden="true"';
+      html += `<div class="${cellClass}" data-level="${level}" ${attrs} title="${escapeAttr(title)}"></div>`;
     }
   });
+  html += '</div>';
+  html += '</div>';
+  html += '<div class="activity-legend" aria-hidden="true">';
+  html += `<span>${escapeHtml(tr('home.activity.legend_less', {}, 'Less'))}</span>`;
+  for (let level = 0; level <= 4; level++) {
+    html += `<span class="activity-cell activity-legend-cell" data-level="${level}" title="${escapeAttr(levelLabel(level))}"></span>`;
+  }
+  html += `<span>${escapeHtml(tr('home.activity.legend_more', {}, 'More'))}</span>`;
   html += '</div>';
 
   map.innerHTML = html;
