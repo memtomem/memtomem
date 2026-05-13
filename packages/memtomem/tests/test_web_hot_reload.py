@@ -885,6 +885,54 @@ class TestApplyRuntimeConfigChanges:
         assert load_thread_ids
         assert load_thread_ids[0] != event_loop_thread_id
 
+    async def test_rerank_disk_edit_drops_stale_install_if_config_drifts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """While ``_get_model`` runs on a worker thread, a concurrent
+        PATCH can overwrite ``app.state.config``. When the disk-side load
+        returns, its candidate snapshot is no longer current — the guard
+        at ``_sync_reranker`` must discard the loaded instance (and
+        ``close()`` it) instead of clobbering the live pipeline.
+        """
+        import memtomem.search.reranker.factory as factory
+
+        app = create_app(lifespan=None, mode="dev")
+        old = self._cfg(rerank_enabled=False)
+        new = self._cfg(rerank_enabled=True)
+        drifted = self._cfg(rerank_enabled=True, provider="other-provider")
+        app.state.config = new
+
+        class DriftingReranker:
+            def __init__(self):
+                self.closed = False
+
+            def _get_model(self):
+                # Simulate a concurrent PATCH landing during the
+                # ``asyncio.to_thread`` window — by the time the load
+                # completes, ``app.state.config`` no longer matches the
+                # snapshot the disk reload captured.
+                app.state.config = drifted
+
+            async def close(self):
+                self.closed = True
+
+        loaded = DriftingReranker()
+        monkeypatch.setattr(factory, "create_reranker", lambda cfg: loaded)
+        previous = SimpleNamespace()
+        search_pipeline = SimpleNamespace(
+            _reranker=previous,
+            _rerank_config=None,
+            invalidate_cache=MagicMock(),
+        )
+
+        await _hot_reload.apply_runtime_config_changes(
+            old, new, search_pipeline=search_pipeline, app=app
+        )
+
+        assert search_pipeline._reranker is previous
+        assert loaded.closed is True
+        search_pipeline.invalidate_cache.assert_called_once()
+
 
 class TestScheduleFtsRebuildCoalescing:
     """Singleton + coalescing for back-to-back tokenizer changes (issue #278).

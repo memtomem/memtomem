@@ -13,7 +13,6 @@ on the read side at ``memtomem.indexing.engine.memory_dir_stats``.
 from __future__ import annotations
 
 import asyncio as _asyncio
-import inspect
 import json
 import logging
 import os
@@ -133,24 +132,6 @@ async def _validate_reranker_ready(reranker: object | None) -> None:
     load_model = getattr(reranker, "_get_model", None)
     if callable(load_model):
         await _asyncio.to_thread(load_model)
-
-
-async def _close_reranker_safely(reranker: object) -> None:
-    """Close a reranker, tolerating sync/async/missing close + errors.
-
-    The route holds ``_config_lock`` across this, so swallowing close-time
-    exceptions keeps a clean "rejected"/"accepted" reply from turning
-    into a 500 when the old/new instance has a flaky teardown.
-    """
-    close = getattr(reranker, "close", None)
-    if not callable(close):
-        return
-    try:
-        result = close()
-        if inspect.isawaitable(result):
-            await result
-    except Exception:
-        logger.exception("Error while closing reranker")
 
 
 router = APIRouter(tags=["system"])
@@ -480,13 +461,13 @@ async def patch_config(
                             await _validate_reranker_ready(new_reranker)
                         except Exception as e:
                             if new_reranker is not None:
-                                await _close_reranker_safely(new_reranker)
+                                await _hot_reload._close_reranker_safely(new_reranker)
                             rejected.append(f"rerank.enabled: {e}")
                             continue
 
                         old_reranker = getattr(search_pipeline, "_reranker", None)
                         if old_reranker is not None and old_reranker is not new_reranker:
-                            await _close_reranker_safely(old_reranker)
+                            await _hot_reload._close_reranker_safely(old_reranker)
                         search_pipeline._reranker = new_reranker
                         search_pipeline._rerank_config = (
                             candidate_rerank if candidate_rerank.enabled else None

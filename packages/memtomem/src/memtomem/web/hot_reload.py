@@ -353,13 +353,13 @@ async def _sync_reranker(
                 await asyncio.to_thread(load_model)
             except Exception:
                 logger.exception("Hot-reloaded reranker failed to load; keeping previous instance")
-                await _close_component_safely(new_reranker)
+                await _close_reranker_safely(new_reranker)
                 return
 
     if app is not None and _rerank_snapshot(getattr(app.state, "config", None)) != new_snapshot:
         logger.info("Skipping stale hot-reloaded reranker install; config changed while loading")
         if new_reranker is not None:
-            await _close_component_safely(new_reranker)
+            await _close_reranker_safely(new_reranker)
         return
 
     old_reranker = getattr(search_pipeline, "_reranker", None)
@@ -367,7 +367,7 @@ async def _sync_reranker(
     search_pipeline._rerank_config = new_cfg.rerank if new_cfg.rerank.enabled else None
 
     if old_reranker is not None and old_reranker is not new_reranker:
-        await _close_component_safely(old_reranker)
+        await _close_reranker_safely(old_reranker)
 
 
 def _rerank_snapshot(cfg: Any) -> tuple[object, ...] | None:
@@ -386,8 +386,14 @@ def _rerank_snapshot(cfg: Any) -> tuple[object, ...] | None:
     )
 
 
-async def _close_component_safely(component: object) -> None:
-    close = getattr(component, "close", None)
+async def _close_reranker_safely(reranker: object) -> None:
+    """Close a reranker, tolerating sync/async/missing close + errors.
+
+    Shared between the disk hot-reload path (this module) and the PATCH
+    handler in ``web/routes/system.py`` so a flaky teardown never turns
+    a clean "rejected"/"accepted" reply into a 500.
+    """
+    close = getattr(reranker, "close", None)
     if not callable(close):
         return
 
@@ -397,7 +403,6 @@ async def _close_component_safely(component: object) -> None:
             await result
     except Exception:
         logger.exception("Error while closing replaced reranker")
-        return
 
 
 def _schedule_fts_rebuild(
