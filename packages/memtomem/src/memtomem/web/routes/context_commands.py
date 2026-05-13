@@ -266,7 +266,7 @@ async def create_command(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to create in. Non-shared rejected (#940).",
+        description="Canonical-residency tier to create in. Non-shared tiers rejected (ADR-0011).",
     ),
 ) -> dict:
     _reject_non_shared_write(target_scope, "Create command")
@@ -305,7 +305,7 @@ async def update_command(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to update. Non-shared rejected (#940).",
+        description="Canonical-residency tier to update. Non-shared tiers rejected (ADR-0011).",
     ),
 ) -> JSONResponse:
     _reject_non_shared_write(target_scope, "Update command")
@@ -359,7 +359,7 @@ async def delete_command(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to delete from. Non-shared rejected (#940).",
+        description="Canonical-residency tier to delete from. Non-shared tiers rejected (ADR-0011).",
     ),
 ) -> dict:
     _reject_non_shared_write(target_scope, "Delete command")
@@ -461,7 +461,7 @@ async def sync_commands(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to fan out. Non-shared rejected (#940).",
+        description="Canonical-residency tier to fan out. Non-shared tiers rejected (ADR-0011).",
     ),
 ) -> dict:
     _reject_non_shared_write(target_scope, "Sync commands")
@@ -502,7 +502,7 @@ async def import_commands(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to import into. Non-shared rejected (#940).",
+        description="Canonical-residency tier to import into. Non-shared tiers rejected (ADR-0011).",
     ),
 ) -> dict:
     _reject_non_shared_write(target_scope, "Import commands")
@@ -537,7 +537,7 @@ async def import_command(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to import into. Non-shared rejected (#940).",
+        description="Canonical-residency tier to import into. Non-shared tiers rejected (ADR-0011).",
     ),
 ) -> dict:
     """Import a single runtime command into ``.memtomem/commands/``.

@@ -150,7 +150,7 @@ def _counts_for(root: Path, *, target_scope: TargetScope) -> dict[str, int]:
         # acute for ``target_scope=project_local`` where ``diff_commands``
         # returns nothing (no runtime fan-out — ADR-0011 §3 / ADR-0016 §7)
         # so the canonical count is the only contributor (review P2 on
-        # PR #940). Use ``canonical_command_name`` — the single source of
+        # ADR-0011). Use ``canonical_command_name`` — the single source of
         # truth for path → name dispatch, mirrored by
         # ``canonical_agent_name`` below.
         names.update(

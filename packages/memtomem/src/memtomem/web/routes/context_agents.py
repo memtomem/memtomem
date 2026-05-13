@@ -269,7 +269,7 @@ async def create_agent(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to create in. Non-shared rejected (#940).",
+        description="Canonical-residency tier to create in. Non-shared tiers rejected (ADR-0011).",
     ),
 ) -> dict:
     _reject_non_shared_write(target_scope, "Create agent")
@@ -308,7 +308,7 @@ async def update_agent(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to update. Non-shared rejected (#940).",
+        description="Canonical-residency tier to update. Non-shared tiers rejected (ADR-0011).",
     ),
 ) -> JSONResponse:
     _reject_non_shared_write(target_scope, "Update agent")
@@ -369,7 +369,7 @@ async def delete_agent(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to delete from. Non-shared rejected (#940).",
+        description="Canonical-residency tier to delete from. Non-shared tiers rejected (ADR-0011).",
     ),
 ) -> dict:
     _reject_non_shared_write(target_scope, "Delete agent")
@@ -469,7 +469,7 @@ async def sync_agents(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to fan out. Non-shared rejected (#940).",
+        description="Canonical-residency tier to fan out. Non-shared tiers rejected (ADR-0011).",
     ),
 ) -> dict:
     _reject_non_shared_write(target_scope, "Sync agents")
@@ -515,7 +515,7 @@ async def import_agents(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to import into. Non-shared rejected (#940).",
+        description="Canonical-residency tier to import into. Non-shared tiers rejected (ADR-0011).",
     ),
 ) -> dict:
     _reject_non_shared_write(target_scope, "Import agents")
@@ -550,7 +550,7 @@ async def import_agent(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to import into. Non-shared rejected (#940).",
+        description="Canonical-residency tier to import into. Non-shared tiers rejected (ADR-0011).",
     ),
 ) -> dict:
     """Import a single runtime agent into ``.memtomem/agents/``.

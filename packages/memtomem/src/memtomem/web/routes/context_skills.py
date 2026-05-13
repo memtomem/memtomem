@@ -49,7 +49,7 @@ def _canonical_skill_dir(
     """Validate the name via core and return the canonical skill directory.
 
     ``scope`` selects the canonical residency tier (ADR-0011 PR-E3 / ADR-0016).
-    Default ``project_shared`` preserves pre-#940 behavior.
+    Default ``project_shared`` preserves pre-ADR-0011 behavior.
     """
     name = validate_name(raw_name, kind="skill")
     return canonical_skills_root(project_root, scope=scope) / name
@@ -64,7 +64,7 @@ def _reject_non_shared_write(target_scope: TargetScope, action: str) -> None:
     each tier's authoring policy (draft vs runtime fan-out vs user-share)
     can be designed deliberately. Passing the param explicitly + rejecting
     here is preferred over silently overriding the client's selection,
-    because silent override is exactly the cross-tier crossover #940 P1
+    because silent override is exactly the cross-tier crossover (ADR-0011) P1
     flagged ("mutates a same-named project_shared artifact while the UI is
     showing a user/local row").
     """
@@ -244,7 +244,7 @@ async def create_skill(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to create in. Non-shared rejected (#940).",
+        description="Canonical-residency tier to create in. Non-shared tiers rejected (ADR-0011).",
     ),
 ) -> dict:
     """Create a new canonical skill."""
@@ -285,7 +285,7 @@ async def update_skill(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to update. Non-shared rejected (#940).",
+        description="Canonical-residency tier to update. Non-shared tiers rejected (ADR-0011).",
     ),
 ) -> JSONResponse:
     """Update a canonical skill's SKILL.md (mtime-guarded, atomic, locked)."""
@@ -340,7 +340,7 @@ async def delete_skill(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to delete from. Non-shared rejected (#940).",
+        description="Canonical-residency tier to delete from. Non-shared tiers rejected (ADR-0011).",
     ),
 ) -> dict:
     """Delete a canonical skill, optionally cascading to runtime copies.
@@ -450,7 +450,7 @@ async def sync_skills(
         description=(
             "Canonical-residency tier to fan out. Non-shared rejected — "
             "project_local has no runtime fan-out per ADR-0011 §3, and user-tier "
-            "sync is deferred to a follow-up (#940)."
+            "sync is deferred to a follow-up (ADR-0016)."
         ),
     ),
 ) -> dict:
@@ -489,7 +489,7 @@ async def import_skills(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to import into. Non-shared rejected (#940).",
+        description="Canonical-residency tier to import into. Non-shared tiers rejected (ADR-0011).",
     ),
 ) -> dict:
     """Import runtime skills into canonical .memtomem/skills/."""
@@ -522,7 +522,7 @@ async def import_skill(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to import into. Non-shared rejected (#940).",
+        description="Canonical-residency tier to import into. Non-shared tiers rejected (ADR-0011).",
     ),
 ) -> dict:
     """Import a single runtime skill into ``.memtomem/skills/``.
