@@ -561,6 +561,22 @@ def test_app_js_pins_ui_mode_default_and_toast_copy() -> None:
     assert "if (STATE.uiMode === 'dev')" in js, (
         "Home dashboard lost its dev-only sessions+scratch fetch gate"
     )
+    html = _read_static("index.html")
+    assert 'id="home-sessions">—</div>' in html
+    assert 'id="home-scratch">—</div>' in html
+    assert re.search(
+        r'<div class="stat-card card" data-ui-tier="dev" hidden>\s*'
+        r'<div class="stat-value" id="home-sessions">',
+        html,
+    ), "Home Sessions card must stay dev-only and hidden by default"
+    assert re.search(
+        r'<div class="stat-card card" data-ui-tier="dev" hidden>\s*'
+        r'<div class="stat-value" id="home-scratch">',
+        html,
+    ), "Home Working Memory card must stay dev-only and hidden by default"
+    css = _read_static("style.css")
+    assert ".home-stats-row { display: grid; grid-template-columns: repeat(4, 1fr);" in css
+    assert "body.dev-mode .home-stats-row { grid-template-columns: repeat(6, 1fr); }" in css
     # The Context Gateway tab is fully prod — Skills / Subagents shipped
     # first, and Hooks (Phase D) graduated via RFC #761 (ADR-0001 §5
     # readiness criteria). Custom Commands sits on the same Context Gateway
