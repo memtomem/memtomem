@@ -76,6 +76,15 @@ class ConfigMMROut(BaseModel):
     lambda_param: float
 
 
+class ConfigRerankOut(BaseModel):
+    enabled: bool
+    provider: str
+    model: str
+    oversample: float
+    min_pool: int
+    max_pool: int
+
+
 class ConfigNamespaceOut(BaseModel):
     default_namespace: str
     enable_auto_ns: bool
@@ -88,6 +97,7 @@ class ConfigResponse(BaseModel):
     indexing: ConfigIndexingOut
     decay: ConfigDecayOut
     mmr: ConfigMMROut
+    rerank: ConfigRerankOut
     namespace: ConfigNamespaceOut
     # Hot-reload surface: FE uses ``config_mtime_ns`` to detect external
     # edits on visibilitychange and ``config_reload_error`` to render a
@@ -106,6 +116,7 @@ class ConfigPatchRequest(BaseModel):
     embedding: dict[str, Any] | None = None
     decay: dict[str, Any] | None = None
     mmr: dict[str, Any] | None = None
+    rerank: dict[str, Any] | None = None
     namespace: dict[str, Any] | None = None
 
 

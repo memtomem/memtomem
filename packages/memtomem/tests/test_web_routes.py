@@ -109,6 +109,14 @@ class FakeConfig:
         enabled = False
         lambda_param = 0.7
 
+    class _Rerank:
+        enabled = False
+        provider = "fastembed"
+        model = "Xenova/ms-marco-MiniLM-L-6-v2"
+        oversample = 2.0
+        min_pool = 20
+        max_pool = 200
+
     class _Namespace:
         default_namespace = "default"
         enable_auto_ns = False
@@ -119,6 +127,7 @@ class FakeConfig:
     indexing = _Indexing()
     decay = _Decay()
     mmr = _MMR()
+    rerank = _Rerank()
     namespace = _Namespace()
 
 
@@ -188,6 +197,8 @@ def app():
     rstats = RetrievalStats(bm25_candidates=10, dense_candidates=10, fused_total=1, final_total=1)
     search_pipeline.search = AsyncMock(return_value=([result], rstats))
     search_pipeline.invalidate_cache = MagicMock()
+    search_pipeline._reranker = None
+    search_pipeline._rerank_config = None
 
     # -- index engine mock --
     index_engine = AsyncMock()
@@ -429,6 +440,14 @@ class TestConfig:
         assert "indexing" in data
         assert "decay" in data
         assert "mmr" in data
+        assert data["rerank"] == {
+            "enabled": False,
+            "provider": "fastembed",
+            "model": "Xenova/ms-marco-MiniLM-L-6-v2",
+            "oversample": 2.0,
+            "min_pool": 20,
+            "max_pool": 200,
+        }
         assert "namespace" in data
         assert data["indexing"]["exclude_patterns"] == []
 
@@ -470,6 +489,7 @@ class TestConfig:
             "indexing",
             "decay",
             "mmr",
+            "rerank",
             "namespace",
         }
         # Comparand values come through, not app.state.config values.
@@ -496,6 +516,100 @@ class TestConfig:
 
         assert resp.status_code == 200
         assert resp.json()["search"]["default_top_k"] == 7
+
+    async def test_patch_rerank_runtime_fields(self, app, client: AsyncClient):
+        """The Web config card can edit rerank runtime knobs but not restart knobs."""
+        with (
+            patch("memtomem.web.routes.system.save_config_overrides"),
+            patch(
+                "memtomem.web.routes.system._validate_reranker_ready",
+                new_callable=AsyncMock,
+            ),
+        ):
+            resp = await client.patch(
+                "/api/config",
+                json={"rerank": {"enabled": True, "oversample": 3.0, "provider": "cohere"}},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert any(c["field"] == "rerank.enabled" for c in data["applied"])
+        assert any(c["field"] == "rerank.oversample" for c in data["applied"])
+        assert "rerank.provider: read-only field" in data["rejected"]
+        assert app.state.config.rerank.enabled is True
+        assert app.state.config.rerank.oversample == 3.0
+        assert app.state.config.rerank.provider == "fastembed"
+        assert app.state.search_pipeline._reranker is not None
+        assert app.state.search_pipeline._rerank_config is app.state.config.rerank
+
+    async def test_patch_rerank_rejects_lazy_load_failure(self, app, client: AsyncClient):
+        """Runtime enabling must fail if the lazy reranker cannot load."""
+
+        class BrokenReranker:
+            def __init__(self):
+                self.closed = False
+
+            def _get_model(self):
+                raise ImportError("fastembed is required")
+
+            async def close(self):
+                self.closed = True
+
+        reranker = BrokenReranker()
+
+        with (
+            patch("memtomem.web.routes.system.create_reranker", return_value=reranker),
+            patch("memtomem.web.routes.system.save_config_overrides"),
+        ):
+            resp = await client.patch("/api/config", json={"rerank": {"enabled": True}})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["applied"] == []
+        assert "rerank.enabled: fastembed is required" in data["rejected"]
+        assert app.state.config.rerank.enabled is False
+        assert app.state.search_pipeline._reranker is None
+        assert app.state.search_pipeline._rerank_config is None
+        assert reranker.closed is True
+
+    async def test_patch_rerank_disable_syncs_pipeline(self, app, client: AsyncClient):
+        class StubReranker:
+            def __init__(self):
+                self.closed = False
+
+            async def close(self):
+                self.closed = True
+
+        reranker = StubReranker()
+        app.state.config.rerank.enabled = True
+        app.state.search_pipeline._reranker = reranker
+        app.state.search_pipeline._rerank_config = app.state.config.rerank
+
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.patch("/api/config", json={"rerank": {"enabled": False}})
+
+        assert resp.status_code == 200
+        assert resp.json()["rejected"] == []
+        assert app.state.config.rerank.enabled is False
+        assert app.state.search_pipeline._reranker is None
+        assert app.state.search_pipeline._rerank_config is None
+        assert reranker.closed is True
+
+    async def test_patch_rerank_rejects_invalid_pool_bounds(self, app, client: AsyncClient):
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.patch(
+                "/api/config",
+                json={"rerank": {"min_pool": 500, "max_pool": 20}},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["applied"] == []
+        assert any("rerank.max_pool" in r for r in data["rejected"])
+        assert app.state.config.rerank.min_pool == 20
+        assert app.state.config.rerank.max_pool == 200
+        assert app.state.search_pipeline._reranker is None
+        assert app.state.search_pipeline._rerank_config is None
 
     async def test_patch_exclude_patterns_accepts_valid(self, app, client: AsyncClient):
         with patch("memtomem.web.routes.system.save_config_overrides"):

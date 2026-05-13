@@ -286,6 +286,8 @@ def apply_runtime_config_changes(
 
     * ``search.tokenizer`` changed → re-register global tokenizer + schedule
       ``storage.rebuild_fts()`` (async, fire-and-forget on current loop).
+    * ``rerank`` changed → rebuild the live reranker attached to the search
+      pipeline.
     * Any change → invalidate search cache.
 
     Older callers of this helper (e.g. the PATCH handler) may not provide
@@ -311,7 +313,64 @@ def apply_runtime_config_changes(
         _schedule_fts_rebuild(storage, new_cfg.search.tokenizer, app=app)
 
     if search_pipeline is not None:
+        _sync_reranker(old_cfg, new_cfg, search_pipeline)
         search_pipeline.invalidate_cache()
+
+
+def _sync_reranker(old_cfg: Any, new_cfg: Any, search_pipeline: SearchPipeline) -> None:
+    old_snapshot = _rerank_snapshot(old_cfg)
+    new_snapshot = _rerank_snapshot(new_cfg)
+    if new_snapshot is None or old_snapshot == new_snapshot:
+        return
+
+    from memtomem.search.reranker.factory import create_reranker
+
+    new_reranker = create_reranker(new_cfg.rerank)
+    old_reranker = getattr(search_pipeline, "_reranker", None)
+    search_pipeline._reranker = new_reranker
+    search_pipeline._rerank_config = new_cfg.rerank if new_cfg.rerank.enabled else None
+
+    if old_reranker is not None and old_reranker is not new_reranker:
+        _close_async_component(old_reranker)
+
+
+def _rerank_snapshot(cfg: Any) -> tuple[object, ...] | None:
+    rerank = getattr(cfg, "rerank", None)
+    enabled = getattr(rerank, "enabled", None)
+    if not isinstance(enabled, bool):
+        return None
+    return (
+        enabled,
+        getattr(rerank, "provider", None),
+        getattr(rerank, "model", None),
+        getattr(rerank, "api_key", None),
+        getattr(rerank, "oversample", None),
+        getattr(rerank, "min_pool", None),
+        getattr(rerank, "max_pool", None),
+    )
+
+
+def _close_async_component(component: object) -> None:
+    close = getattr(component, "close", None)
+    if not callable(close):
+        return
+
+    result = close()
+    if result is None:
+        return
+
+    import asyncio
+    import inspect
+
+    if not inspect.isawaitable(result):
+        return
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(result)
+    else:
+        loop.create_task(result)
 
 
 def _schedule_fts_rebuild(

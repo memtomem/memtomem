@@ -26,6 +26,7 @@ import json
 import os
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -673,6 +674,20 @@ class TestReloadIfStale:
 
 
 class TestApplyRuntimeConfigChanges:
+    def _cfg(self, *, rerank_enabled: bool, provider: str = "fastembed"):
+        return SimpleNamespace(
+            search=SimpleNamespace(tokenizer="unicode61"),
+            rerank=SimpleNamespace(
+                enabled=rerank_enabled,
+                provider=provider,
+                model="Xenova/ms-marco-MiniLM-L-6-v2",
+                api_key="",
+                oversample=2.0,
+                min_pool=20,
+                max_pool=200,
+            ),
+        )
+
     def test_tokenizer_change_fires_set_tokenizer_and_rebuild(
         self, monkeypatch: pytest.MonkeyPatch
     ):
@@ -719,6 +734,56 @@ class TestApplyRuntimeConfigChanges:
         )
 
         storage.rebuild_fts.assert_not_called()
+        search_pipeline.invalidate_cache.assert_called_once()
+
+    def test_rerank_change_rebuilds_live_pipeline_reranker(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        import memtomem.search.reranker.factory as factory
+
+        old = self._cfg(rerank_enabled=False)
+        new = self._cfg(rerank_enabled=True)
+        reranker = object()
+        monkeypatch.setattr(factory, "create_reranker", lambda cfg: reranker)
+        search_pipeline = SimpleNamespace(
+            _reranker=None,
+            _rerank_config=None,
+            invalidate_cache=MagicMock(),
+        )
+
+        _hot_reload.apply_runtime_config_changes(old, new, search_pipeline=search_pipeline)
+
+        assert search_pipeline._reranker is reranker
+        assert search_pipeline._rerank_config is new.rerank
+        search_pipeline.invalidate_cache.assert_called_once()
+
+    def test_rerank_disable_clears_live_pipeline_reranker(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        import memtomem.search.reranker.factory as factory
+
+        class StubReranker:
+            def __init__(self):
+                self.closed = False
+
+            async def close(self):
+                self.closed = True
+
+        old = self._cfg(rerank_enabled=True)
+        new = self._cfg(rerank_enabled=False)
+        old_reranker = StubReranker()
+        monkeypatch.setattr(factory, "create_reranker", lambda cfg: None)
+        search_pipeline = SimpleNamespace(
+            _reranker=old_reranker,
+            _rerank_config=old.rerank,
+            invalidate_cache=MagicMock(),
+        )
+
+        _hot_reload.apply_runtime_config_changes(old, new, search_pipeline=search_pipeline)
+
+        assert search_pipeline._reranker is None
+        assert search_pipeline._rerank_config is None
+        assert old_reranker.closed is True
         search_pipeline.invalidate_cache.assert_called_once()
 
 
