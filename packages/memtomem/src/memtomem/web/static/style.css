@@ -2843,10 +2843,27 @@ body.dev-mode .home-stats-row { grid-template-columns: repeat(6, 1fr); }
 
 /* ── Sprint 5: Home pinned section ── */
 .home-pinned-list { display: flex; flex-direction: column; gap: 4px; }
+.home-pinned-item.home-pinned-stale {
+  border-color: var(--yellow);
+}
+.home-pinned-open {
+  display: flex; align-items: center; gap: 8px;
+  flex: 1; min-width: 0;
+  background: none; border: 0; padding: 0; margin: 0;
+  text-align: left; color: inherit; font: inherit; cursor: pointer;
+  border-radius: var(--radius);
+}
+.home-pinned-open:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
 .home-pinned-snippet {
   font-size: 0.75rem; color: var(--muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   flex: 1; min-width: 0; margin: 0 6px;
+}
+.home-pinned-stale-badge {
+  flex-shrink: 0;
+  font-size: 0.65rem;
 }
 
 /* ── Sprint 5: Settings modal ── */
