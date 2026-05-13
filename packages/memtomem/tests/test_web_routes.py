@@ -8,6 +8,7 @@ full component initialization (embedding provider, SQLite, etc.).
 from __future__ import annotations
 
 import asyncio
+import json
 import unicodedata
 import uuid
 from dataclasses import dataclass
@@ -3819,6 +3820,45 @@ class TestFsList:
 
         scoped = await client.get(f"/api/fs/list?path={known_project}&purpose=project")
         assert scoped.status_code == 200, scoped.text
+
+    async def test_project_purpose_drops_known_project_at_filesystem_root(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A known project registered at a top-level dir must not widen to ``/``.
+
+        ``_project_allow_list_roots`` guards the server cwd's parent against
+        collapsing to the filesystem anchor; ``_known_project_parent_roots``
+        needs the same guard so a stale ``/foo`` entry can't sidestep it.
+        """
+        memdir = fs_tree["memdir"]
+        known_projects_path = tmp_path / "known_projects.json"
+
+        anchor = Path(Path(memdir).anchor)
+        top_level = anchor / "memtomem-test-top-level"
+        # Bypass KnownProjectsStore.add so the test never has to create or
+        # touch a real top-level directory.
+        known_projects_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "projects": [{"root": str(top_level), "added_at": "2026-01-01T00:00:00Z"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        app.state.config.context_gateway = SimpleNamespace(known_projects_path=known_projects_path)
+        set_home(monkeypatch, fs_tree["home"])
+        self._wire_memory_dirs(app, [memdir], monkeypatch)
+
+        roots = await client.get("/api/fs/list?purpose=project")
+        assert roots.status_code == 200, roots.text
+        root_paths = {Path(e["path"]) for e in roots.json()["entries"]}
+        assert anchor not in root_paths
 
     async def test_project_purpose_still_excludes_symlink_out(
         self,

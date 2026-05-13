@@ -79,7 +79,13 @@ def _known_project_parent_roots(config) -> list[Path]:
 
     roots: list[Path] = []
     for entry in KnownProjectsStore(Path(known_projects_path).expanduser()).load():
-        roots.append(entry.root.expanduser().parent)
+        parent = entry.root.expanduser().parent
+        # Same filesystem-root guard as _project_allow_list_roots: a known
+        # project registered at ``/foo`` would otherwise add ``/`` to the
+        # picker's discovery roots, bypassing the protection used for the
+        # server cwd's parent a few lines below.
+        if parent != Path(parent.anchor):
+            roots.append(parent)
     return roots
 
 
