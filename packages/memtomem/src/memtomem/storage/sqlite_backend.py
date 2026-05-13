@@ -1551,6 +1551,25 @@ class SqliteBackend(
         rows = db.execute("SELECT DISTINCT source_file FROM chunks").fetchall()
         return {Path(row[0]) for row in rows}
 
+    async def search_source_files_by_content(self, query: str, limit: int = 10000) -> list[Path]:
+        term = query.strip()
+        if not term:
+            return []
+        db = self._get_read_db()
+        escaped_term = f"%{escape_like(term)}%"
+        escaped_json_term = f"%{escape_like(json.dumps(term, ensure_ascii=True)[1:-1])}%"
+        rows = db.execute(
+            "SELECT source_file FROM chunks "
+            "WHERE content LIKE ? ESCAPE '\\' "
+            "   OR heading_hierarchy LIKE ? ESCAPE '\\' "
+            "   OR heading_hierarchy LIKE ? ESCAPE '\\' "
+            "GROUP BY source_file "
+            "ORDER BY MAX(updated_at) DESC, source_file "
+            "LIMIT ?",
+            (escaped_term, escaped_term, escaped_json_term, limit),
+        ).fetchall()
+        return [Path(row[0]) for row in rows]
+
     async def get_source_files_with_counts(
         self,
     ) -> list[tuple[Path, int, str | None, str | None, int, int, int]]:

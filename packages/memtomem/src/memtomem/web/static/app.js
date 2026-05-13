@@ -49,6 +49,15 @@ const STATE = {
   // (filter typing, sort change) read the active vendor without
   // hitting localStorage on the hot path.
   sourcesActiveVendor: null,
+  // Per Sources vendor/category visible source-row or folder budget. Mirrors
+  // Search's paging shape, but the data is already client-side so scrolling
+  // just expands the rendered slice by 10 units.
+  sourcesCategoryLimits: {},
+  sourcesExpandedDirs: {},
+  sourcesActiveCategoryByVendor: {},
+  sourcesBodyFilterQuery: '',
+  sourcesBodyFilterPaths: null,
+  sourcesBodyFilterPending: false,
   dedupScanActive: false,
   dedupAbortCtrl: null,
   lastTagsData: [],
@@ -1986,6 +1995,59 @@ document.addEventListener('click', e => {
 });
 
 // E. Active filters display
+function _getSelectedSourceFilters() {
+  return Array.from((qs('source-filter') || { selectedOptions: [] }).selectedOptions)
+    .map(o => o.value)
+    .filter(Boolean);
+}
+
+function _clearSourceFilters() {
+  Array.from((qs('source-filter') || { options: [] }).options)
+    .forEach(o => { o.selected = false; });
+}
+
+function _formatDateFilterLabel() {
+  const preset = qs('date-range-preset')?.value || '';
+  if (!preset) return '';
+  if (preset === 'custom') {
+    const from = qs('date-from')?.value || '...';
+    const to = qs('date-to')?.value || '...';
+    return `date: ${from} - ${to}`;
+  }
+  const selected = qs('date-range-preset')?.selectedOptions?.[0];
+  return `date: ${selected ? selected.textContent : preset}`;
+}
+
+function _clearDateFilter() {
+  qs('date-range-preset').value = '';
+  qs('date-from').value = '';
+  qs('date-to').value = '';
+  qs('date-range-custom').hidden = true;
+}
+
+function _hasSearchAxis() {
+  return !!(
+    qs('search-input').value.trim()
+    || qs('tag-filter').value.trim()
+    || _getSelectedSourceFilters().length
+  );
+}
+
+function _buildSearchParams(topK) {
+  const q = qs('search-input').value.trim();
+  const tf = qs('tag-filter').value.trim();
+  const nsFilter = qs('ns-filter').value;
+  const params = new URLSearchParams({ top_k: topK });
+  if (q) params.set('q', q);
+  if (tf) params.set('tag_filter', tf);
+  if (nsFilter) params.set('namespace', nsFilter);
+  const ctxWin = parseInt((qs('context-window') || {}).value || '0', 10);
+  if (ctxWin > 0) params.set('context_window', ctxWin);
+  const selectedSources = _getSelectedSourceFilters();
+  if (selectedSources.length) params.set('source_filter', selectedSources.join(','));
+  return params;
+}
+
 function _renderActiveFilters() {
   const el = qs('active-filters');
   const chips = [];
@@ -1995,21 +2057,53 @@ function _renderActiveFilters() {
   if (tag) chips.push({ label: `tag: ${tag}`, clear: () => { qs('tag-filter').value = ''; } });
   const ct = qs('chunk-type-filter').value;
   if (ct) chips.push({ label: `type: ${ct.replace('_', ' ')}`, clear: () => { qs('chunk-type-filter').value = ''; } });
+  const sources = _getSelectedSourceFilters();
+  if (sources.length) {
+    const label = sources.length === 1
+      ? `source: ${basename(sources[0])}`
+      : `sources: ${sources.length}`;
+    chips.push({ label, clear: _clearSourceFilters });
+  }
+  const dateLabel = _formatDateFilterLabel();
+  if (dateLabel) chips.push({ label: dateLabel, clear: _clearDateFilter });
   if (STATE.scoreMin > 0) chips.push({ label: `score \u2265 ${STATE.scoreMin}`, clear: () => { qs('score-threshold').value = 0; STATE.scoreMin = 0; qs('score-val').textContent = '0.0'; } });
 
   _updateFilterCountBadge();
   if (!chips.length) { hide(el); return; }
-  el.innerHTML = chips.map((c, i) =>
-    `<span class="active-filter-chip">${escapeHtml(c.label)}<button class="active-filter-remove" data-idx="${i}">\u2715</button></span>`
-  ).join('');
+  el.innerHTML = chips.map((c, i) => {
+    const removeLabel = escapeAttr(`Remove ${c.label} filter`);
+    return `<span class="active-filter-chip">${escapeHtml(c.label)}<button class="active-filter-remove" data-idx="${i}" aria-label="${removeLabel}" title="${removeLabel}">\u2715</button></span>`;
+  }).join('') + `<button id="clear-search-filters" class="active-filters-clear" type="button">Clear all</button>`;
   el.querySelectorAll('.active-filter-remove').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
       chips[parseInt(btn.dataset.idx)].clear();
       _updateFilterCountBadge();
-      renderResults(STATE.lastResults);
-      if (STATE.lastResults.length) doSearch();
+      if (_hasSearchAxis()) {
+        renderResults(STATE.lastResults);
+        doSearch();
+      } else {
+        renderResults([]);
+      }
     });
+  });
+  qs('clear-search-filters').addEventListener('click', e => {
+    e.stopPropagation();
+    qs('ns-filter').value = '';
+    qs('tag-filter').value = '';
+    qs('chunk-type-filter').value = '';
+    _clearSourceFilters();
+    _clearDateFilter();
+    qs('score-threshold').value = 0;
+    STATE.scoreMin = 0;
+    qs('score-val').textContent = '0.0';
+    _updateFilterCountBadge();
+    if (_hasSearchAxis()) {
+      renderResults(STATE.lastResults);
+      doSearch();
+    } else {
+      renderResults([]);
+    }
   });
   show(el);
 }
@@ -2022,6 +2116,8 @@ function _countActiveFilters() {
   if (qs('ns-filter')?.value) n++;
   if (qs('tag-filter')?.value.trim()) n++;
   if (qs('chunk-type-filter')?.value) n++;
+  if (_getSelectedSourceFilters().length) n++;
+  if (qs('date-range-preset')?.value) n++;
   if (STATE.scoreMin > 0) n++;
   return n;
 }
@@ -2051,12 +2147,11 @@ let _searchAbortCtrl = null;
 
 async function doSearch() {
   const q = qs('search-input').value.trim();
-  const tf = qs('tag-filter').value.trim();
-  // #750: tag-only search is a valid path — clicking a tag pill on a
-  // fresh session leaves ``q`` empty but populates ``tag-filter``, and
-  // the user expects "show me all memos with this tag" rather than a
-  // no-op. The early-return now only fires when both axes are empty.
-  if (!q && !tf) return;
+  // #750: tag/source-only search is a valid path — clicking a tag pill
+  // or selecting a source on a fresh session should show matching
+  // memories rather than no-op. The early return only fires when every
+  // server-side selector is empty.
+  if (!_hasSearchAxis()) return;
   // #696: kick the readiness poll. Fire-and-forget; the search request
   // proceeds normally — its response covers the spinner. The poll's job
   // is to surface "Downloading bge-m3 (~2.3 GB)…" while the backend's
@@ -2069,18 +2164,7 @@ async function doSearch() {
   if (q) saveToHistory(q);
   hide(qs('search-history-dropdown'));
   STATE.currentTopK = parseInt(qs('top-k').value, 10);
-  const nsFilter = qs('ns-filter').value;
-
-  const params = new URLSearchParams({ top_k: STATE.currentTopK });
-  if (q) params.set('q', q);
-  if (tf) params.set('tag_filter', tf);
-  if (nsFilter) params.set('namespace', nsFilter);
-  const ctxWin = parseInt((qs('context-window') || {}).value || '0', 10);
-  if (ctxWin > 0) params.set('context_window', ctxWin);
-  // Pass source filter to backend for pre-query filtering
-  const selectedSources = Array.from((qs('source-filter') || {selectedOptions:[]}).selectedOptions)
-    .map(o => o.value).filter(Boolean);
-  if (selectedSources.length) params.set('source_filter', selectedSources.join(','));
+  const params = _buildSearchParams(STATE.currentTopK);
 
   // Cancel any in-flight search
   if (_searchAbortCtrl) _searchAbortCtrl.abort();
@@ -2336,8 +2420,7 @@ function renderResults(results, retrievalStats) {
   else if (STATE.currentSortMode === 'date-asc') display.sort((a, b) => new Date(a.chunk.created_at) - new Date(b.chunk.created_at));
   else if (STATE.currentSortMode === 'source') display.sort((a, b) => (a.chunk.source_file || '').localeCompare(b.chunk.source_file || ''));
   const typeFilter = (qs('chunk-type-filter') || {}).value || '';
-  const selectedSources = Array.from((qs('source-filter') || { selectedOptions: [] }).selectedOptions)
-    .map(o => o.value).filter(Boolean);
+  const selectedSources = _getSelectedSourceFilters();
   let filtered = typeFilter ? display.filter(r => r.chunk.chunk_type === typeFilter) : display;
   if (selectedSources.length) filtered = filtered.filter(r => selectedSources.includes(r.chunk.source_file));
   if (STATE.scoreMin > 0) filtered = filtered.filter(r => r.score >= STATE.scoreMin);
@@ -2352,6 +2435,7 @@ function renderResults(results, retrievalStats) {
   const list = qs('results-list');
   const empty = qs('results-empty');
   STATE.selectedIds.clear();
+  _renderActiveFilters();
 
   if (!filtered.length) {
     hide(list);
@@ -2395,9 +2479,6 @@ function renderResults(results, retrievalStats) {
     STATE.lastRetrievalStats = s;
   }
   const summaryHtml = `<div class="results-summary"><span class="results-summary-total">${total} total</span>${sourceParts.join('')}${funnelHtml}</div>`;
-
-  // E. Active filters display
-  _renderActiveFilters();
 
   show(qs('bulk-toolbar'));
   if (results.length >= STATE.currentTopK) show(qs('load-more-row'));
@@ -2862,6 +2943,9 @@ qs('d-tag-save-btn').addEventListener('click', async () => {
 // ---------------------------------------------------------------------------
 
 // STATE.allSources, STATE.sourcesSortBy now in STATE
+let _sourcesBodyFilterTimer = null;
+let _sourcesBodyFilterAbort = null;
+let _sourcesBodyFilterSeq = 0;
 
 function sortSources(sources) {
   const sorted = [...sources];
@@ -2885,13 +2969,73 @@ function sortSources(sources) {
   return sorted;
 }
 
+function _sourceMatchesLocalFilter(s, q) {
+  return [
+    s.path,
+    s.title,
+    s.excerpt,
+    s.ai_summary,
+    ...((s.namespaces || [])),
+  ].some(value => String(value || '').toLowerCase().includes(q));
+}
+
+function _sourcesFilterHighlightQuery() {
+  return qs('sources-filter') ? qs('sources-filter').value.trim() : '';
+}
+
 function _getFilteredSorted() {
   const q = qs('sources-filter').value.trim().toLowerCase();
-  let filtered = q ? STATE.allSources.filter(s => s.path.toLowerCase().includes(q)) : STATE.allSources;
+  const bodyMatches = q && STATE.sourcesBodyFilterQuery === q && STATE.sourcesBodyFilterPaths instanceof Set
+    ? STATE.sourcesBodyFilterPaths
+    : null;
+  let filtered = q
+    ? STATE.allSources.filter(s => _sourceMatchesLocalFilter(s, q) || (bodyMatches && bodyMatches.has(s.path)))
+    : STATE.allSources;
   if (STATE.sourcesNsFilter) {
     filtered = filtered.filter(s => (s.namespaces || []).includes(STATE.sourcesNsFilter));
   }
   return sortSources(filtered);
+}
+
+function _scheduleSourcesBodyFilter(opts = {}) {
+  const q = qs('sources-filter').value.trim().toLowerCase();
+  if (_sourcesBodyFilterTimer) clearTimeout(_sourcesBodyFilterTimer);
+  if (!q) {
+    STATE.sourcesBodyFilterQuery = '';
+    STATE.sourcesBodyFilterPaths = null;
+    STATE.sourcesBodyFilterPending = false;
+    if (_sourcesBodyFilterAbort) _sourcesBodyFilterAbort.abort();
+    return;
+  }
+  if (STATE.sourcesBodyFilterQuery === q && STATE.sourcesBodyFilterPaths instanceof Set) return;
+  STATE.sourcesBodyFilterQuery = q;
+  STATE.sourcesBodyFilterPaths = null;
+  STATE.sourcesBodyFilterPending = true;
+  const delay = opts.immediate ? 0 : 180;
+  _sourcesBodyFilterTimer = setTimeout(() => _loadSourcesBodyMatches(q), delay);
+}
+
+async function _loadSourcesBodyMatches(q) {
+  const seq = ++_sourcesBodyFilterSeq;
+  if (_sourcesBodyFilterAbort) _sourcesBodyFilterAbort.abort();
+  _sourcesBodyFilterAbort = new AbortController();
+  try {
+    const resp = await api(
+      'GET',
+      `/api/sources/content-matches?q=${encodeURIComponent(q)}&limit=10000`,
+      undefined,
+      { signal: _sourcesBodyFilterAbort.signal },
+    );
+    if (seq !== _sourcesBodyFilterSeq || qs('sources-filter').value.trim().toLowerCase() !== q) return;
+    STATE.sourcesBodyFilterQuery = q;
+    STATE.sourcesBodyFilterPaths = new Set((resp && resp.paths) || []);
+    STATE.sourcesBodyFilterPending = false;
+    renderSourceTree(_getFilteredSorted());
+  } catch (err) {
+    if (err && err.name === 'AbortError') return;
+    STATE.sourcesBodyFilterPending = false;
+    console.warn('[sources-filter] body match lookup failed', err);
+  }
 }
 
 function _renderSourcesNsChip() {
@@ -3027,7 +3171,10 @@ function navigateToSourcesByNs(nsName) {
   activateTab('sources');
 }
 
-qs('sources-filter').addEventListener('input', () => renderSourceTree(_getFilteredSorted()));
+qs('sources-filter').addEventListener('input', () => {
+  _scheduleSourcesBodyFilter();
+  renderSourceTree(_getFilteredSorted());
+});
 
 document.querySelectorAll('.sources-sort-btn').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -3173,6 +3320,7 @@ async function loadSources() {
     STATE.sourcesLanguageDrift = (sourcesResp && sourcesResp.language_drift) || null;
     _renderSourcesNsChip();
     _renderLanguageDriftBanner(STATE.sourcesLanguageDrift);
+    _scheduleSourcesBodyFilter({ immediate: true });
     renderSourceTree(_getFilteredSorted());
   } catch (err) {
     list.innerHTML = `<div class="empty-state"><p>Error: ${escapeHtml(err.message)}</p></div>`;
@@ -3293,6 +3441,9 @@ function _renderMemorySourceTree(sources, list) {
   // matches.
   const filterActive = !!(qs('sources-filter') && qs('sources-filter').value.trim())
     || !!STATE.sourcesNsFilter;
+  const bodyFilterPending = !!(qs('sources-filter') && qs('sources-filter').value.trim())
+    && STATE.sourcesBodyFilterPending;
+  const fileSortMode = ['chunks', 'size', 'recent'].includes(STATE.sourcesSortBy);
 
   const PROVIDER_ORDER = (typeof _MEMORY_DIR_PROVIDER_ORDER !== 'undefined')
     ? _MEMORY_DIR_PROVIDER_ORDER : ['user', 'claude', 'openai'];
@@ -3302,8 +3453,47 @@ function _renderMemorySourceTree(sources, list) {
     ? _MEMORY_DIR_CATEGORY_ORDER : ['user', 'claude-memory', 'claude-plans', 'codex'];
   const CATEGORY_LABEL_KEY = (typeof _MEMORY_DIR_CATEGORY_LABEL_KEY !== 'undefined')
     ? _MEMORY_DIR_CATEGORY_LABEL_KEY : {};
+  const CATEGORY_TO_PROVIDER = {
+    'user': 'user',
+    'claude-memory': 'claude',
+    'claude-plans': 'claude',
+    'codex': 'openai',
+  };
   const PROVIDER_COLLAPSED = (typeof _MEMORY_DIR_PROVIDER_COLLAPSED !== 'undefined')
     ? _MEMORY_DIR_PROVIDER_COLLAPSED : new Set(['claude', 'openai']);
+  const CATEGORY_PAGE_SIZE = 10;
+  const CLAUDE_PROJECT_TREE_MAX_DEPTH = 2;
+  const TREE_DEFAULT_OPEN_DEPTH = 1;
+  if (!STATE.sourcesCategoryLimits || typeof STATE.sourcesCategoryLimits !== 'object') {
+    STATE.sourcesCategoryLimits = {};
+  }
+  if (!STATE.sourcesExpandedDirs || typeof STATE.sourcesExpandedDirs !== 'object') {
+    STATE.sourcesExpandedDirs = {};
+  }
+  if (!STATE.sourcesActiveCategoryByVendor || typeof STATE.sourcesActiveCategoryByVendor !== 'object') {
+    STATE.sourcesActiveCategoryByVendor = {};
+  }
+  const categoryLimitKey = (provider, cat) => `${provider}:${cat}`;
+  const getCategoryLimit = (provider, cat) => (
+    Math.max(CATEGORY_PAGE_SIZE, STATE.sourcesCategoryLimits[categoryLimitKey(provider, cat)] || CATEGORY_PAGE_SIZE)
+  );
+  const setCategoryLimit = (provider, cat, limit) => {
+    STATE.sourcesCategoryLimits[categoryLimitKey(provider, cat)] = Math.max(CATEGORY_PAGE_SIZE, limit);
+  };
+  const normalizeDirPath = (path) => String(path || '').replace(/\\/g, '/').replace(/\/+$/, '');
+  const presentationCategoryForDir = (dir, st) => {
+    const normalized = normalizeDirPath(dir);
+    if (/\/\.claude\/plans(?:\/|$)/.test(normalized)) return 'claude-plans';
+    if (/\/\.claude\/projects\/[^/]+\/memory$/.test(normalized)) return 'claude-memory';
+    return (st && CATEGORY_LABEL_KEY[st.category]) ? st.category : 'user';
+  };
+  const presentationProviderForDir = (dir, st) => {
+    const cat = presentationCategoryForDir(dir, st);
+    const providerFromCat = CATEGORY_TO_PROVIDER[cat];
+    if (providerFromCat) return providerFromCat;
+    const rawProvider = st && st.provider;
+    return PROVIDER_ORDER.includes(rawProvider) ? rawProvider : 'user';
+  };
 
   const byProvider = {};
   for (const p of PROVIDER_ORDER) byProvider[p] = { order: [], byCategory: {} };
@@ -3314,9 +3504,8 @@ function _renderMemorySourceTree(sources, list) {
   for (const k of Object.keys(sourcesByDir)) if (k) allDirs.add(k);
   for (const d of allDirs) {
     const st = statusByPath[d];
-    const cat = (st && CATEGORY_LABEL_KEY[st.category]) ? st.category : 'user';
-    const rawProvider = st && st.provider;
-    const provider = byProvider[rawProvider] ? rawProvider : 'user';
+    const cat = presentationCategoryForDir(d, st);
+    const provider = presentationProviderForDir(d, st);
     const bucket = byProvider[provider];
     if (!bucket.byCategory[cat]) {
       bucket.byCategory[cat] = [];
@@ -3412,12 +3601,9 @@ function _renderMemorySourceTree(sources, list) {
     const discoveredCount = visibleCats.reduce(
       (sum, [, , discovered]) => sum + discovered.length, 0,
     );
-    const visibleIndexedCats = visibleCats.filter(([, indexed]) => indexed.length);
-    const isSingleLeaf = visibleIndexedCats.length === 1
-      || (visibleIndexedCats.length === 0 && visibleCats.length === 1);
     vendorPlans[provider] = {
-      visibleCats, visibleIndexedCats, isEmptyVendor, totalFiles, discoveredCount,
-      isSingleLeaf, orphans: vendorOrphans,
+      visibleCats, isEmptyVendor, totalFiles, discoveredCount,
+      orphans: vendorOrphans,
     };
 
     // Update the sub-tab badge + empty class so all three vendor tabs
@@ -3482,14 +3668,33 @@ function _renderMemorySourceTree(sources, list) {
   // the NS-filter follow-through that mutates ``activeVendor`` here.
   _renderSourcesStats(activeVendor);
 
-  // Helpers shared by the active-vendor render branches. Lifted out of
-  // the per-vendor loop because they don't close over the iteration.
-  const renderDir = (dir) => _renderMemoryDirGroup(
+  const dirOpenStateKey = (provider, cat, dir) => `${provider}:${cat}:${dir}`;
+  const getDirOpen = (provider, cat, dir, defaultOpen) => {
+    const key = dirOpenStateKey(provider, cat, dir);
+    return Object.prototype.hasOwnProperty.call(STATE.sourcesExpandedDirs, key)
+      ? !!STATE.sourcesExpandedDirs[key]
+      : defaultOpen;
+  };
+  const setDirOpen = (provider, cat, dir, open) => {
+    STATE.sourcesExpandedDirs[dirOpenStateKey(provider, cat, dir)] = !!open;
+  };
+  const treeOpenStateKey = (provider, cat, key) => `${provider}:${cat}:tree:${key}`;
+  const getTreeOpen = (provider, cat, key, defaultOpen = false) => {
+    const stateKey = treeOpenStateKey(provider, cat, key);
+    return Object.prototype.hasOwnProperty.call(STATE.sourcesExpandedDirs, stateKey)
+      ? !!STATE.sourcesExpandedDirs[stateKey]
+      : defaultOpen;
+  };
+  const setTreeOpen = (provider, cat, key, open) => {
+    STATE.sourcesExpandedDirs[treeOpenStateKey(provider, cat, key)] = !!open;
+  };
+
+  const renderDir = (dir, opts = {}) => _renderMemoryDirGroup(
     dir,
     sourcesByDir[dir] || [],
     statusByPath[dir],
     maxChunks,
-    { isDefault: dir === defaultDir },
+    { isDefault: dir === defaultDir, ...opts },
   );
 
   const renderDiscoveredBlock = (dirs) => {
@@ -3541,13 +3746,329 @@ function _renderMemorySourceTree(sources, list) {
     return det;
   };
 
+  const categoryFileCount = (indexed) => (
+    indexed.reduce((sum, d) => sum + (sourcesByDir[d] || []).length, 0)
+  );
+
+  const renderCategoryNav = (cats, activeCat) => {
+    const visible = cats.filter(([, indexed, discovered]) => indexed.length || discovered.length);
+    if (visible.length <= 1) return null;
+    const nav = document.createElement('nav');
+    nav.className = 'source-category-nav';
+    nav.setAttribute(
+      'aria-label',
+      (typeof t === 'function') ? t('sources.category_nav_label') : 'Source categories',
+    );
+    for (const [cat, indexed, discovered] of visible) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'source-category-nav-btn';
+      if (cat === activeCat) btn.classList.add('active');
+      btn.dataset.category = cat;
+      btn.setAttribute('aria-pressed', cat === activeCat ? 'true' : 'false');
+      const label = document.createElement('span');
+      label.className = 'source-category-nav-label';
+      const key = CATEGORY_LABEL_KEY[cat] || cat;
+      label.textContent = (typeof t === 'function') ? t(key) : key;
+      btn.appendChild(label);
+      const count = document.createElement('span');
+      count.className = 'source-category-nav-count';
+      count.textContent = String(categoryFileCount(indexed));
+      btn.appendChild(count);
+      btn.addEventListener('click', () => {
+        STATE.sourcesActiveCategoryByVendor[activeVendor] = cat;
+        renderSourceTree(_getFilteredSorted());
+      });
+      nav.appendChild(btn);
+    }
+    return nav;
+  };
+
+  const sliceIndexedFiles = (indexed, limit) => {
+    const rendered = [];
+    let shown = 0;
+    for (const dir of indexed) {
+      const items = sourcesByDir[dir] || [];
+      if (!items.length) {
+        rendered.push([dir, items]);
+        continue;
+      }
+      if (shown >= limit) break;
+      const remaining = limit - shown;
+      const nextItems = items.slice(0, remaining);
+      rendered.push([dir, nextItems]);
+      shown += nextItems.length;
+    }
+    return { rendered, shown };
+  };
+
+  const sliceIndexedFolders = (indexed, limit) => {
+    const rendered = indexed.slice(0, limit).map(dir => [dir, sourcesByDir[dir] || []]);
+    return { rendered, shown: rendered.length };
+  };
+
+  const sliceIndexedFlatFiles = (indexed, limit) => {
+    const dirSet = new Set(indexed);
+    const rendered = sources
+      .filter(s => s.memory_dir && dirSet.has(s.memory_dir))
+      .slice(0, limit);
+    return { rendered, shown: rendered.length };
+  };
+
+  const splitPathSegments = (path) => String(path || '')
+    .replace(/\\/g, '/')
+    .split('/')
+    .filter(Boolean);
+
+  const commonPrefixLength = (segmentLists) => {
+    if (!segmentLists.length) return 0;
+    let len = segmentLists[0].length;
+    for (const segments of segmentLists.slice(1)) {
+      let i = 0;
+      while (i < len && i < segments.length && segments[i] === segmentLists[0][i]) i += 1;
+      len = i;
+    }
+    return len;
+  };
+
+  const claudeProjectSegments = (dir) => {
+    const match = String(dir || '').replace(/\\/g, '/').match(/\/\.claude\/projects\/([^/]+)\/memory\/?$/);
+    if (!match) return null;
+    const slug = match[1];
+    if (!slug.startsWith('-')) return null;
+    return slug.replace(/^-/, '').split('-').filter(Boolean);
+  };
+
+  const dirSegmentsForTree = (cat, dir) => {
+    const claudeSegments = cat === 'claude-memory' ? claudeProjectSegments(dir) : null;
+    if (claudeSegments && claudeSegments.length) return claudeSegments;
+    const segments = splitPathSegments(dir);
+    if (segments.length > 1 && segments[segments.length - 1] === 'memory') {
+      return segments.slice(0, -1);
+    }
+    return segments.length ? segments : [String(dir || '')];
+  };
+
+  const limitTreeSegments = (cat, segments) => {
+    if (cat !== 'claude-memory' || segments.length <= CLAUDE_PROJECT_TREE_MAX_DEPTH) return segments;
+    const head = segments.slice(0, CLAUDE_PROJECT_TREE_MAX_DEPTH - 1);
+    const tail = segments.slice(CLAUDE_PROJECT_TREE_MAX_DEPTH - 1).join('-');
+    return [...head, tail].filter(Boolean);
+  };
+
+  const shouldPreserveTopTreeSegment = (cat, segments) => {
+    if (segments.length <= 1) return false;
+    if (cat === 'claude-memory') return segments.length > CLAUDE_PROJECT_TREE_MAX_DEPTH;
+    return true;
+  };
+
+  const compactSingleChildChains = (node, joiner = '/') => {
+    for (const child of Array.from(node.children.values())) compactSingleChildChains(child, joiner);
+    if (node.preserveSelf) return;
+    while (!node.leaf && node.children.size === 1) {
+      const only = Array.from(node.children.values())[0];
+      node.label = node.label ? `${node.label}${joiner}${only.label}` : only.label;
+      node.key = only.key;
+      node.children = only.children;
+      node.leaf = only.leaf;
+      node.preserveSelf = !!only.preserveSelf;
+      if (node.preserveSelf) break;
+    }
+  };
+
+  const buildDirTree = (cat, dirs, rendered) => {
+    const allSegments = dirs.map(dir => dirSegmentsForTree(cat, dir));
+    const prefixLen = commonPrefixLength(allSegments);
+    const segmentByDir = new Map();
+    dirs.forEach((dir, idx) => {
+      let segments = allSegments[idx].slice(prefixLen);
+      if (!segments.length) segments = [allSegments[idx][allSegments[idx].length - 1] || dir];
+      const preserveTop = shouldPreserveTopTreeSegment(cat, segments);
+      segments = limitTreeSegments(cat, segments);
+      segmentByDir.set(dir, { segments, preserveTop });
+    });
+    const root = { label: '', key: '', children: new Map(), leaf: null };
+    for (const [dir, items] of rendered) {
+      const treeInfo = segmentByDir.get(dir) || { segments: [dir], preserveTop: false };
+      const { segments, preserveTop } = treeInfo;
+      let node = root;
+      let key = '';
+      segments.forEach((segment, idx) => {
+        key = key ? `${key}/${segment}` : segment;
+        if (!node.children.has(segment)) {
+          node.children.set(segment, { label: segment, key, children: new Map(), leaf: null, preserveSelf: false });
+        }
+        node = node.children.get(segment);
+        if (idx === 0 && preserveTop) node.preserveSelf = true;
+      });
+      node.leaf = { dir, items };
+    }
+    for (const child of Array.from(root.children.values())) {
+      compactSingleChildChains(child, cat === 'claude-memory' ? '-' : '/');
+    }
+    return root;
+  };
+
+  const treeKeysForDir = (cat, dirs, dir) => {
+    const allSegments = dirs.map(d => dirSegmentsForTree(cat, d));
+    const prefixLen = commonPrefixLength(allSegments);
+    const idx = dirs.indexOf(dir);
+    if (idx < 0) return [];
+    let segments = allSegments[idx].slice(prefixLen);
+    if (!segments.length) segments = [allSegments[idx][allSegments[idx].length - 1] || dir];
+    segments = limitTreeSegments(cat, segments);
+    const keys = [];
+    let key = '';
+    for (const segment of segments) {
+      key = key ? `${key}/${segment}` : segment;
+      keys.push(key);
+    }
+    return keys.slice(0, -1);
+  };
+
+  const renderDirTreeNode = (node, provider, cat, depth) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'source-dir-tree-node';
+    wrap.style.setProperty('--tree-depth', String(depth));
+
+    if (node.leaf) {
+      const { dir, items } = node.leaf;
+      const pendingInDir = !!STATE.pendingActivatePath
+        && items.some(s => s.path === STATE.pendingActivatePath);
+      wrap.appendChild(_renderMemoryDirGroup(
+        dir,
+        items,
+        statusByPath[dir],
+        maxChunks,
+        {
+          isDefault: dir === defaultDir,
+          label: node.label,
+          open: getDirOpen(provider, cat, dir, pendingInDir),
+          onToggle: (open) => setDirOpen(provider, cat, dir, open),
+        },
+      ));
+    }
+
+    if (node.children.size) {
+      const details = document.createElement('details');
+      details.className = 'source-dir-tree-branch';
+      details.style.setProperty('--tree-depth', String(depth));
+      details.open = getTreeOpen(provider, cat, node.key, depth <= TREE_DEFAULT_OPEN_DEPTH);
+      details.addEventListener('toggle', () => setTreeOpen(provider, cat, node.key, details.open));
+      const summary = document.createElement('summary');
+      summary.className = 'source-dir-tree-summary';
+      const label = document.createElement('span');
+      label.className = 'source-dir-tree-label';
+      label.textContent = node.label;
+      summary.appendChild(label);
+      const count = document.createElement('span');
+      count.className = 'source-vendor-count';
+      count.textContent = String(Array.from(node.children.values()).reduce(
+        (sum, child) => sum + countTreeLeaves(child),
+        0,
+      ));
+      summary.appendChild(count);
+      details.appendChild(summary);
+      for (const child of node.children.values()) {
+        details.appendChild(renderDirTreeNode(child, provider, cat, depth + 1));
+      }
+      wrap.appendChild(details);
+    }
+    return wrap;
+  };
+
+  const countTreeLeaves = (node) => (
+    (node.leaf ? 1 : 0)
+      + Array.from(node.children.values()).reduce((sum, child) => sum + countTreeLeaves(child), 0)
+  );
+
+  const renderDirTree = (cat, dirs, rendered, provider) => {
+    const tree = buildDirTree(cat, dirs, rendered);
+    const frag = document.createDocumentFragment();
+    for (const child of tree.children.values()) {
+      frag.appendChild(renderDirTreeNode(child, provider, cat, 0));
+    }
+    return frag;
+  };
+
+  if (STATE.pendingActivatePath) {
+    const pendingSrc = (STATE.allSources || sources || []).find(s => s.path === STATE.pendingActivatePath);
+    if (pendingSrc && pendingSrc.memory_dir) {
+      const st = statusByPath[pendingSrc.memory_dir];
+      const pendingCat = presentationCategoryForDir(pendingSrc.memory_dir, st);
+      const pendingProvider = presentationProviderForDir(pendingSrc.memory_dir, st);
+      const pendingPlan = vendorPlans[pendingProvider];
+      const pendingEntry = pendingPlan && pendingPlan.visibleCats.find(([cat]) => cat === pendingCat);
+      if (pendingEntry) {
+        const [, indexed] = pendingEntry;
+        if (indexed.length > 1) {
+          const dirIdx = indexed.indexOf(pendingSrc.memory_dir);
+          if (dirIdx >= 0) {
+            setCategoryLimit(
+              pendingProvider,
+              pendingCat,
+              Math.ceil((dirIdx + 1) / CATEGORY_PAGE_SIZE) * CATEGORY_PAGE_SIZE,
+            );
+            for (const key of treeKeysForDir(pendingCat, indexed, pendingSrc.memory_dir)) {
+              setTreeOpen(pendingProvider, pendingCat, key, true);
+            }
+            setDirOpen(pendingProvider, pendingCat, pendingSrc.memory_dir, true);
+          }
+        } else {
+          let seen = 0;
+          for (const dir of indexed) {
+            const items = sourcesByDir[dir] || [];
+            const idx = items.findIndex(s => s.path === STATE.pendingActivatePath);
+            if (idx >= 0) {
+              setCategoryLimit(
+                pendingProvider,
+                pendingCat,
+                Math.ceil((seen + idx + 1) / CATEGORY_PAGE_SIZE) * CATEGORY_PAGE_SIZE,
+              );
+              break;
+            }
+            seen += items.length;
+          }
+        }
+      }
+    }
+  }
+
+  const setupAutoCategoryMore = () => {
+    if (!list) return;
+    if (list._sourcesAutoMoreHandler) {
+      list.removeEventListener('scroll', list._sourcesAutoMoreHandler);
+    }
+    let ticking = false;
+    const handler = () => {
+      if (ticking) return;
+      ticking = true;
+      requestAnimationFrame(() => {
+        ticking = false;
+        const rows = Array.from(list.querySelectorAll('.source-category-more-row[data-auto-more="true"]'));
+        if (!rows.length) return;
+        const listRect = list.getBoundingClientRect();
+        const threshold = listRect.bottom + 48;
+        const row = rows.find(el => el.getBoundingClientRect().top <= threshold);
+        if (!row) return;
+        const cat = row.dataset.category;
+        const nextLimit = Number(row.dataset.nextLimit || 0);
+        if (!cat || !nextLimit) return;
+        setCategoryLimit(activeVendor, cat, nextLimit);
+        renderSourceTree(_getFilteredSorted());
+      });
+    };
+    list._sourcesAutoMoreHandler = handler;
+    list.addEventListener('scroll', handler, { passive: true });
+  };
+
   // Pass 2: render only the active vendor's content directly into the
   // sidebar list — the sub-tab strip carries the vendor disclosure, so
   // no per-vendor ``<details>`` wrapper is needed.
   list.innerHTML = '';
   const plan = vendorPlans[activeVendor];
 
-  if (plan.isEmptyVendor) {
+  if (plan.isEmptyVendor && !filterActive) {
     const placeholder = document.createElement('div');
     placeholder.className = 'source-vendor-placeholder';
     const msg = document.createElement('span');
@@ -3570,32 +4091,94 @@ function _renderMemorySourceTree(sources, list) {
     });
     placeholder.appendChild(cta);
     list.appendChild(placeholder);
-  } else if (plan.isSingleLeaf) {
-    const sole = plan.visibleIndexedCats[0] || plan.visibleCats[0];
-    for (const dir of sole[1]) list.appendChild(renderDir(dir));
-    const disc = renderDiscoveredBlock(sole[2]);
-    if (disc) list.appendChild(disc);
   } else {
     const products = document.createElement('div');
     products.className = 'source-vendor-products';
-    for (const [cat, indexed, discovered] of plan.visibleCats) {
+    const visibleProductCount = plan.visibleCats.filter(
+      ([, indexed, discovered]) => indexed.length || discovered.length,
+    ).length;
+    const hasCategoryNav = visibleProductCount > 1;
+    const visibleCatsForMenu = plan.visibleCats.filter(
+      ([, indexed, discovered]) => indexed.length || discovered.length,
+    );
+    let activeCategory = STATE.sourcesActiveCategoryByVendor[activeVendor];
+    if (hasCategoryNav && !visibleCatsForMenu.some(([cat]) => cat === activeCategory)) {
+      activeCategory = visibleCatsForMenu[0] ? visibleCatsForMenu[0][0] : '';
+      if (activeCategory) STATE.sourcesActiveCategoryByVendor[activeVendor] = activeCategory;
+    }
+    const catsToRender = hasCategoryNav
+      ? visibleCatsForMenu.filter(([cat]) => cat === activeCategory)
+      : visibleCatsForMenu;
+    for (const [cat, indexed, discovered] of catsToRender) {
       if (!indexed.length && !discovered.length) continue;
       const section = document.createElement('section');
       section.className = 'source-vendor-product';
       section.dataset.category = cat;
-      const productHeader = document.createElement('div');
-      productHeader.className = 'source-vendor-product-header';
-      const pLabel = document.createElement('span');
-      pLabel.className = 'source-vendor-product-label';
-      const pKey = CATEGORY_LABEL_KEY[cat] || cat;
-      pLabel.textContent = (typeof t === 'function') ? t(pKey) : pKey;
-      productHeader.appendChild(pLabel);
-      const pCount = document.createElement('span');
-      pCount.className = 'source-vendor-count';
-      pCount.textContent = String(indexed.reduce((sum, d) => sum + (sourcesByDir[d] || []).length, 0));
-      productHeader.appendChild(pCount);
-      section.appendChild(productHeader);
-      for (const dir of indexed) section.appendChild(renderDir(dir));
+      const totalFiles = categoryFileCount(indexed);
+      if (hasCategoryNav) {
+        section.setAttribute('tabindex', '-1');
+      } else {
+        const productHeader = document.createElement('div');
+        productHeader.className = 'source-vendor-product-header';
+        productHeader.setAttribute('tabindex', '-1');
+        const pLabel = document.createElement('span');
+        pLabel.className = 'source-vendor-product-label';
+        const pKey = CATEGORY_LABEL_KEY[cat] || cat;
+        pLabel.textContent = (typeof t === 'function') ? t(pKey) : pKey;
+        productHeader.appendChild(pLabel);
+        const pCount = document.createElement('span');
+        pCount.className = 'source-vendor-count';
+        pCount.textContent = String(totalFiles);
+        productHeader.appendChild(pCount);
+        section.appendChild(productHeader);
+      }
+      const flatFileMode = filterActive || fileSortMode;
+      const folderMode = indexed.length > 1 && !flatFileMode;
+      const limit = getCategoryLimit(activeVendor, cat);
+      const totalVisibleUnits = folderMode ? indexed.length : totalFiles;
+      const { rendered, shown } = folderMode
+        ? sliceIndexedFolders(indexed, limit)
+        : (flatFileMode ? sliceIndexedFlatFiles(indexed, limit) : sliceIndexedFiles(indexed, limit));
+      if (folderMode) {
+        section.appendChild(renderDirTree(cat, indexed, rendered, activeVendor));
+      } else if (flatFileMode) {
+        for (const s of rendered) section.appendChild(_renderMemorySourceItem(s, maxChunks));
+      } else {
+        for (const [dir, items] of rendered) {
+          if (hasCategoryNav && indexed.length === 1) {
+            for (const s of items) section.appendChild(_renderMemorySourceItem(s, maxChunks));
+          } else {
+            section.appendChild(_renderMemoryDirGroup(
+              dir,
+              items,
+              statusByPath[dir],
+              maxChunks,
+              {
+                isDefault: dir === defaultDir,
+                open: getDirOpen(activeVendor, cat, dir, true),
+                onToggle: (open) => setDirOpen(activeVendor, cat, dir, open),
+              },
+            ));
+          }
+        }
+      }
+      if (shown < totalVisibleUnits) {
+        const moreRow = document.createElement('div');
+        moreRow.className = 'source-category-more-row';
+        moreRow.dataset.autoMore = 'true';
+        moreRow.dataset.category = cat;
+        moreRow.dataset.nextLimit = String(limit + CATEGORY_PAGE_SIZE);
+        const status = document.createElement('span');
+        status.className = 'source-category-more-status';
+        status.textContent = (typeof t === 'function')
+          ? t(
+              folderMode ? 'sources.category_scroll_more_folders' : 'sources.category_scroll_more',
+              { shown, total: totalVisibleUnits },
+            )
+          : `Showing ${shown}/${totalVisibleUnits}; scroll for more`;
+        moreRow.appendChild(status);
+        section.appendChild(moreRow);
+      }
       const disc = renderDiscoveredBlock(discovered);
       if (disc) section.appendChild(disc);
       products.appendChild(section);
@@ -3606,7 +4189,13 @@ function _renderMemorySourceTree(sources, list) {
     // ``.source-vendor-products`` div would still ship its CSS margin
     // before the orphan block sits below.
     if (products.children.length) list.appendChild(products);
+    const categoryNav = renderCategoryNav(plan.visibleCats, activeCategory);
+    if (categoryNav) {
+      products.classList.add('source-vendor-products-with-nav');
+      list.insertBefore(categoryNav, products);
+    }
   }
+  setupAutoCategoryMore();
 
   // Append the orphan block last so indexed groups stay primary. Only
   // shows up when ``activeVendor === 'user'`` because ``plan.orphans``
@@ -3623,9 +4212,11 @@ function _renderMemorySourceTree(sources, list) {
   // other vendors do, the muted "no matches" hint sits inside the
   // panel — the populated badge on sibling tabs tells the user where
   // to look.
-  if (!allDirs.size && !orphanItems.length) {
+  if (!filterActive && !allDirs.size && !orphanItems.length) {
     list.innerHTML = '<div class="empty-state">' + emptyState('📁', 'No memory directories', 'Add one with the + Add path button') + '</div>';
-  } else if (filterActive && !plan.totalFiles && !plan.discoveredCount && !plan.isEmptyVendor) {
+  } else if (bodyFilterPending && filterActive && !plan.totalFiles && !plan.discoveredCount) {
+    list.innerHTML = '<div class="empty-state">' + emptyState('🔎', 'Searching indexed body…') + '</div>';
+  } else if (filterActive && !plan.totalFiles && !plan.discoveredCount) {
     // ``totalFiles`` only counts indexed+orphan rows; a vendor whose
     // ``visibleCats`` carries discovered dirs (the #896 carve-out) would
     // otherwise be wiped here, defeating the carry-over fix.
@@ -3698,15 +4289,18 @@ function _renderMemorySourceTree(sources, list) {
 }
 
 function _renderMemoryDirGroup(dir, items, status, maxChunks, opts) {
-  const { isDefault } = opts || {};
+  const { isDefault, label = null, open = true, onToggle = null } = opts || {};
   // ``<details>`` gives us a native chevron + auto-flip on toggle and
   // matches the vendor group's disclosure shape one level up — keeping a
   // single mental model for collapse state across the whole tree.
   const group = document.createElement('details');
   group.className = 'source-group source-group-memory';
   if (status && status.exists === false) group.classList.add('source-group-missing');
-  group.open = true;
+  group.open = !!open;
   group.dataset.dir = dir;
+  if (typeof onToggle === 'function') {
+    group.addEventListener('toggle', () => onToggle(group.open));
+  }
 
   const header = document.createElement('summary');
   header.className = 'source-group-header';
@@ -3714,7 +4308,7 @@ function _renderMemoryDirGroup(dir, items, status, maxChunks, opts) {
 
   const dirLabel = document.createElement('span');
   dirLabel.className = 'source-group-dir';
-  dirLabel.textContent = (typeof shortDir === 'function') ? shortDir(dir) : dir;
+  dirLabel.textContent = label || ((typeof shortDir === 'function') ? shortDir(dir) : dir);
   header.appendChild(dirLabel);
 
   if (isDefault) {
@@ -3817,7 +4411,7 @@ function _renderMemorySourceItem(s, maxChunks) {
   const barPct = Math.round(((s.chunk_count || 0) / maxChunks) * 100);
   const nsBadges = (s.namespaces || [])
     .filter(ns => ns !== 'default')
-    .map(ns => `<span class="badge badge-ns source-ns-badge">${escapeHtml(ns)}</span>`)
+    .map(ns => `<span class="badge badge-ns source-ns-badge">${highlightText(ns, _sourcesFilterHighlightQuery())}</span>`)
     .join('');
   // Three-tier preview: filename row1 (anchor) → title (heading
   // subtitle) → AI summary OR heuristic excerpt (body preview). When an
@@ -3826,18 +4420,19 @@ function _renderMemorySourceItem(s, maxChunks) {
   // the same slot. Title comes from the heading hierarchy regardless,
   // so a row keeps a visible label even when the body slot is empty.
   let summaryHtml = '';
+  const filterQuery = _sourcesFilterHighlightQuery();
   const titlePart = s.title
-    ? `<div class="source-item-title">${escapeHtml(s.title)}</div>`
+    ? `<div class="source-item-title">${highlightText(s.title, filterQuery)}</div>`
     : '';
   let bodyPart = '';
   if (s.ai_summary) {
     bodyPart =
       `<div class="source-item-excerpt" data-ai="true">` +
       `<span class="source-item-ai-badge" aria-hidden="true">✨</span> ` +
-      `${escapeHtml(s.ai_summary)}` +
+      `${highlightText(s.ai_summary, filterQuery)}` +
       `</div>`;
   } else if (s.excerpt) {
-    bodyPart = `<div class="source-item-excerpt">${escapeHtml(s.excerpt)}</div>`;
+    bodyPart = `<div class="source-item-excerpt">${highlightText(s.excerpt, filterQuery)}</div>`;
   }
   if (titlePart || bodyPart) {
     summaryHtml = `<div class="source-item-summary">${titlePart}${bodyPart}</div>`;
@@ -3845,7 +4440,7 @@ function _renderMemorySourceItem(s, maxChunks) {
   item.innerHTML = `
     <div class="source-item-row1">
       <span class="source-type-dot" style="background:${fileTypeColor(s.path)}"></span>
-      <span class="source-name">${escapeHtml(filename)}</span>
+      <span class="source-name">${highlightText(filename, filterQuery)}</span>
       ${nsBadges}
     </div>
     ${summaryHtml}
@@ -5242,8 +5837,19 @@ qs('chunk-type-filter').addEventListener('change', () => {
   _updateFilterCountBadge();
   renderResults(STATE.lastResults);
 });
-qs('ns-filter').addEventListener('change', _updateFilterCountBadge);
-qs('tag-filter').addEventListener('input', _updateFilterCountBadge);
+qs('ns-filter').addEventListener('change', () => {
+  _updateFilterCountBadge();
+  renderResults(STATE.lastResults);
+  if (_hasSearchAxis()) doSearch();
+});
+const _debouncedTagFilterSearch = debounce(() => {
+  if (_hasSearchAxis()) doSearch();
+}, 300);
+qs('tag-filter').addEventListener('input', () => {
+  _updateFilterCountBadge();
+  renderResults(STATE.lastResults);
+  _debouncedTagFilterSearch();
+});
 
 // URL query sync (C2)
 function _syncSearchToURL() {
@@ -5275,14 +5881,11 @@ function _syncSearchToURL() {
 // ---------------------------------------------------------------------------
 
 qs('load-more-btn').addEventListener('click', async () => {
-  const q = qs('search-input').value.trim();
-  const tf = qs('tag-filter').value.trim();
-  // #750: mirror doSearch — load-more is valid in tag-only mode too.
-  if (!q && !tf) return;
+  // Mirror doSearch — load-more must preserve tag/source-only searches
+  // plus namespace/context filters from the current result set.
+  if (!_hasSearchAxis()) return;
   STATE.currentTopK = Math.min(STATE.currentTopK + 10, 100);
-  const params = new URLSearchParams({ top_k: STATE.currentTopK });
-  if (q) params.set('q', q);
-  if (tf) params.set('tag_filter', tf);
+  const params = _buildSearchParams(STATE.currentTopK);
   const btn = qs('load-more-btn');
   btnLoading(btn, true);
   try {
@@ -5440,14 +6043,16 @@ qs('shortcuts-modal').addEventListener('click', e => {
 async function loadSourceFilter() {
   const sel = qs('source-filter');
   if (!sel) return;
+  const selected = new Set(_getSelectedSourceFilters());
   try {
     const data = await api('GET', '/api/sources');
-    if (!data.sources.length) {
+    const sources = Array.isArray(data.sources) ? data.sources : [];
+    if (!sources.length) {
       sel.innerHTML = '<option value="" disabled>No sources indexed</option>';
       return;
     }
-    sel.innerHTML = data.sources.map(s =>
-      `<option value="${escapeAttr(s.path)}">${escapeHtml(basename(s.path))}</option>`
+    sel.innerHTML = sources.map(s =>
+      `<option value="${escapeAttr(s.path)}" ${selected.has(s.path) ? 'selected' : ''}>${escapeHtml(basename(s.path))}</option>`
     ).join('');
   } catch (e) {
     console.warn('[source-filter]', e);
@@ -5455,7 +6060,11 @@ async function loadSourceFilter() {
   }
 }
 
-qs('source-filter').addEventListener('change', () => renderResults(STATE.lastResults));
+qs('source-filter').addEventListener('change', () => {
+  _updateFilterCountBadge();
+  renderResults(STATE.lastResults);
+  if (_hasSearchAxis()) doSearch();
+});
 
 // ---------------------------------------------------------------------------
 // Score Threshold (F2)
@@ -5499,10 +6108,17 @@ function _getDateRange() {
 qs('date-range-preset').addEventListener('change', () => {
   const custom = qs('date-range-custom');
   custom.hidden = qs('date-range-preset').value !== 'custom';
+  _updateFilterCountBadge();
   if (STATE.lastResults.length) renderResults(STATE.lastResults);
 });
-qs('date-from').addEventListener('change', () => { if (STATE.lastResults.length) renderResults(STATE.lastResults); });
-qs('date-to').addEventListener('change', () => { if (STATE.lastResults.length) renderResults(STATE.lastResults); });
+qs('date-from').addEventListener('change', () => {
+  _updateFilterCountBadge();
+  if (STATE.lastResults.length) renderResults(STATE.lastResults);
+});
+qs('date-to').addEventListener('change', () => {
+  _updateFilterCountBadge();
+  if (STATE.lastResults.length) renderResults(STATE.lastResults);
+});
 
 // ---------------------------------------------------------------------------
 // Filter Row Toggle
@@ -5512,6 +6128,7 @@ qs('filter-toggle').addEventListener('click', () => {
   const filters = document.querySelector('.search-filters');
   filters.hidden = !filters.hidden;
   qs('filter-toggle').classList.toggle('btn-active', !filters.hidden);
+  qs('filter-toggle').setAttribute('aria-expanded', String(!filters.hidden));
 });
 
 // ---------------------------------------------------------------------------
@@ -5522,6 +6139,7 @@ qs('adv-toggle').addEventListener('click', () => {
   const panel = qs('search-advanced');
   panel.hidden = !panel.hidden;
   qs('adv-toggle').classList.toggle('btn-active', !panel.hidden);
+  qs('adv-toggle').setAttribute('aria-expanded', String(!panel.hidden));
   if (!panel.hidden) loadSourceFilter();
 });
 

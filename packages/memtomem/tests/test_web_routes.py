@@ -138,6 +138,7 @@ def app():
     storage.get_chunk_size_distribution = AsyncMock(return_value=[])
     storage.get_chunk = AsyncMock(return_value=_make_test_chunk())
     storage.get_all_source_files = AsyncMock(return_value=[Path("/tmp/test.md")])
+    storage.search_source_files_by_content = AsyncMock(return_value=[Path("/tmp/test.md")])
     storage.list_chunks_by_source = AsyncMock(return_value=[_make_test_chunk()])
     storage.count_chunks_by_source = AsyncMock(return_value=1)
     storage.delete_chunks = AsyncMock()
@@ -628,6 +629,40 @@ class TestSources:
         data = resp.json()
         assert data["limit"] == 1
         assert data["offset"] == 0
+
+    async def test_source_content_matches_returns_matching_paths(self, app, client: AsyncClient):
+        app.state.storage.search_source_files_by_content.return_value = [
+            Path("/tmp/body-match.md")
+        ]
+
+        resp = await client.get("/api/sources/content-matches", params={"q": "needle"})
+
+        assert resp.status_code == 200
+        assert resp.json() == {"query": "needle", "paths": ["/tmp/body-match.md"]}
+        app.state.storage.search_source_files_by_content.assert_awaited_once_with(
+            "needle",
+            limit=10000,
+        )
+
+    async def test_source_content_matches_includes_ai_summary_text(self, app, client: AsyncClient):
+        app.state.storage.search_source_files_by_content.return_value = []
+        app.state.storage.get_all_ai_summaries.return_value = {
+            "/tmp/summary-match.md": {
+                "summary": "감사 로그 정책을 설명하는 문서입니다.",
+                "language": "ko",
+            }
+        }
+
+        resp = await client.get("/api/sources/content-matches", params={"q": "감사"})
+
+        assert resp.status_code == 200
+        assert resp.json()["paths"] == ["/tmp/summary-match.md"]
+
+    async def test_source_content_matches_rejects_blank_query(self, client: AsyncClient):
+        resp = await client.get("/api/sources/content-matches", params={"q": "   "})
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "Query must not be blank."
 
     async def test_orphan_source_kind_is_null(self, app, client: AsyncClient):
         """Indexed sources whose owning dir is no longer in

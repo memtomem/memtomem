@@ -363,6 +363,11 @@ header h1 { font-size: 1.2rem; font-weight: 700; color: var(--accent); letter-sp
   font-size: 0.6rem; padding: 0 2px; line-height: 1; opacity: 0.6;
 }
 .active-filter-remove:hover { opacity: 1; color: var(--danger); }
+.active-filters-clear {
+  border: none; background: transparent; color: var(--muted); cursor: pointer;
+  font-size: 0.68rem; padding: 2px 6px; line-height: 1.2;
+}
+.active-filters-clear:hover { color: var(--danger); }
 
 #filter-toggle { display: inline-flex; align-items: center; gap: 4px; }
 .filter-count-badge {
@@ -569,8 +574,16 @@ mark {
 /* ── Sources Tab ── */
 #tab-sources { overflow: hidden; }
 .sources-layout { display: flex; height: 100%; }
-.sources-layout .sources-sidebar { width: var(--sources-width, 420px); flex-shrink: 0; }
-.sources-sidebar { border-right: none; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+.sources-layout .sources-sidebar { width: var(--sources-width, 420px); flex-shrink: 0; min-height: 0; }
+.sources-sidebar {
+  border-right: none;
+  overflow: hidden;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
 .sources-divider {
   width: 4px; cursor: col-resize; background: var(--border);
   transition: background 0.15s; flex-shrink: 0; position: relative;
@@ -720,6 +733,13 @@ mark {
 }
 .sources-sort-btn:hover { color: var(--text); }
 .sources-sort-btn.active { color: var(--accent); border-color: var(--accent); background: rgba(var(--accent-rgb),0.08); }
+#sources-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+}
 
 /* Chunks browser */
 .chunks-browser { flex: 1; min-width: 0; overflow-y: auto; padding: 16px; }
@@ -1450,12 +1470,10 @@ button:active { opacity: 0.7; }
 .sources-view { display: flex; flex-direction: column; flex: 1; min-height: 0; height: 100%; overflow: hidden; }
 
 /* ── Memory mode source tree ──
-   Vendor → memory_dir → file cards inside the unified Sources sidebar.
-   ``.source-vendor-group`` is a ``<details>`` (browser-native keyboard
-   toggle); each summary carries the vendor label + total file count.
-   Multi-leaf vendors (Claude) wrap products in ``.source-vendor-products``
-   with their own header rows (mirrors the previous Phase-2 vendor tree
-   shape inside the new General-style layout). */
+   Vendor → category → memory_dir → file cards inside the unified Sources
+   sidebar. The vendor sub-tab strip scopes the tree; every active vendor
+   renders the same category-section structure so User / Claude / OpenAI
+   keep the same navigation model. */
 .sources-actions { display: flex; gap: 6px; flex-shrink: 0; }
 .source-vendor-group {
   border: none; background: transparent;
@@ -1481,15 +1499,120 @@ button:active { opacity: 0.7; }
   padding: 1px 7px; border-radius: 10px;
   background: var(--bg); border: 1px solid var(--border);
 }
+.source-category-nav {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  gap: 4px;
+  padding: 6px 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.source-category-nav-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 0 0 auto;
+  max-width: 180px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.74rem;
+}
+.source-category-nav-btn:hover,
+.source-category-nav-btn:focus-visible {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  outline: none;
+}
+.source-category-nav-btn.active {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: rgba(var(--accent-rgb), 0.1);
+}
+.source-category-nav-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.source-category-nav-count {
+  flex-shrink: 0;
+  font-size: 0.68rem;
+  color: var(--muted);
+  font-family: var(--mono);
+}
 .source-vendor-products { display: flex; flex-direction: column; gap: 4px; }
 .source-vendor-product { padding: 4px 0; }
 .source-vendor-product + .source-vendor-product { border-top: 1px dashed var(--border); }
 .source-vendor-product-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   display: flex; align-items: center; gap: 8px;
   padding: 4px 4px 4px 18px;
+  background: var(--bg);
   font-size: 0.78rem;
 }
+.source-vendor-products-with-nav .source-vendor-product-header { top: 36px; }
+.source-vendor-product-header:focus-visible {
+  outline: 1px dashed var(--accent);
+  outline-offset: -2px;
+}
 .source-vendor-product-label { color: var(--text); font-weight: 500; }
+.source-category-more-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 4px 10px 18px;
+}
+.source-category-more-status {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-family: var(--mono);
+}
+.source-dir-tree-node {
+  margin-left: calc(var(--tree-depth, 0) * 12px);
+}
+.source-dir-tree-branch {
+  margin: 2px 0 6px;
+}
+.source-dir-tree-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  color: var(--muted);
+}
+.source-dir-tree-summary::-webkit-details-marker { display: none; }
+.source-dir-tree-summary::before {
+  content: '▸';
+  font-size: 0.62rem;
+  color: var(--muted);
+  width: 10px;
+  flex-shrink: 0;
+  transition: transform 0.12s ease;
+}
+.source-dir-tree-branch[open] > .source-dir-tree-summary::before { transform: rotate(90deg); }
+.source-dir-tree-label {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+}
 
 /* Memory source-group: same chevron header as General, plus per-dir
    stats badge and three hover-revealed actions (Open / Reindex / Remove).
@@ -2511,7 +2634,12 @@ select:focus-visible {
 
   /* Sources: stack sidebar above chunks */
   .sources-layout { flex-direction: column; height: auto; overflow-y: auto; }
-  .sources-layout .sources-sidebar { width: 100% !important; max-height: 280px; border-bottom: 1px solid var(--border); }
+  .sources-layout .sources-sidebar {
+    width: 100% !important;
+    height: 280px;
+    max-height: 280px;
+    border-bottom: 1px solid var(--border);
+  }
   .sources-divider { display: none; }
 
   /* Tags, Export: single column */

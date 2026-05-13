@@ -77,6 +77,11 @@ class SourcesResponse(BaseModel):
     language_drift: LanguageDriftInfo | None = None
 
 
+class SourceContentMatchesResponse(BaseModel):
+    query: str
+    paths: list[str]
+
+
 class RegenerateStartResponse(BaseModel):
     """Reply from ``POST /api/sources/regenerate-summaries``.
 

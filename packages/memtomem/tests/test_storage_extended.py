@@ -531,6 +531,33 @@ class TestStorageExtended:
         assert hh == ["# Notes"]
         assert content == "First paragraph of the file."
 
+    async def test_source_content_match_includes_heading_hierarchy(self, components):
+        """Sources filter body matching should include headings too.
+
+        Markdown headings are stored in ``heading_hierarchy`` rather than the
+        chunk body, so searching for a heading-only Korean term such as
+        "이름" must still return the source.
+        """
+        from memtomem.models import Chunk, ChunkMetadata
+
+        storage = components.storage
+        src = Path("/tmp/korean-heading.md")
+        chunk = Chunk(
+            content="본문에는 검색어가 없습니다.",
+            metadata=ChunkMetadata(
+                source_file=src,
+                heading_hierarchy=("## Secret 이름 오타",),
+                start_line=1,
+            ),
+            content_hash="hash-ko-heading",
+            embedding=[0.1] * 1024,
+        )
+        await storage.upsert_chunks([chunk])
+
+        matches = await storage.search_source_files_by_content("이름")
+
+        assert any(p.name == "korean-heading.md" for p in matches)
+
     async def test_source_summaries_handles_empty_hierarchy(self, components):
         """Files with body content but no heading come back with an empty
         hierarchy list — callers substitute fallback UI."""

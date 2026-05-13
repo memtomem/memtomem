@@ -19,6 +19,7 @@ from memtomem.web.schemas.sources import (
     LanguageDriftInfo,
     RegenerateStartResponse,
     RegenerateStatusResponse,
+    SourceContentMatchesResponse,
     SourceOut,
     SourcesResponse,
 )
@@ -252,6 +253,35 @@ async def list_sources(
         limit=limit,
         language_drift=drift_info,
     )
+
+
+@router.get("/content-matches", response_model=SourceContentMatchesResponse)
+async def source_content_matches(
+    q: str = Query(..., min_length=1, max_length=500, description="Plain text to match in indexed chunk content"),
+    limit: int = Query(10000, ge=1, le=10000),
+    storage=Depends(get_storage),
+) -> SourceContentMatchesResponse:
+    """Return source paths whose indexed text contains ``q``.
+
+    This powers the Sources tab's lightweight body-aware filter. It uses
+    indexed chunk text and cached source summaries, not raw file reads, so
+    deleted/unavailable files still match as long as their chunks remain in
+    storage.
+    """
+    query = q.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query must not be blank.")
+    paths = list(await storage.search_source_files_by_content(query, limit=limit))
+    seen = {str(p) for p in paths}
+    needle = query.casefold()
+    for path, record in (await storage.get_all_ai_summaries()).items():
+        if len(paths) >= limit:
+            break
+        summary = (record or {}).get("summary") or ""
+        if path not in seen and needle in summary.casefold():
+            paths.append(Path(path))
+            seen.add(path)
+    return SourceContentMatchesResponse(query=query, paths=[str(p) for p in paths])
 
 
 @router.delete("", response_model=DeleteResponse)
