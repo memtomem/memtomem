@@ -7,11 +7,13 @@
  * allow-list (memory_dirs + ~); going outside requires closing the modal
  * and typing the path manually — the input itself stays free-form.
  *
- * Also exposes ``window.PathPicker.open({ onSelect })`` for other
- * surfaces (Context Gateway "Add Project") so they can reuse the
- * modal instead of falling back to ``window.prompt``. ``onSelect`` is
- * invoked with the selected absolute path; ``close`` is called by the
- * picker itself once the callback returns.
+ * Also exposes ``window.PathPicker.open({ purpose, onSelect })`` for
+ * other surfaces (Context Gateway "Add Project") so they can reuse
+ * the modal instead of falling back to ``window.prompt``. ``purpose``
+ * is forwarded to /api/fs/list so each surface can use an appropriate
+ * discovery scope. ``onSelect`` is invoked with the selected absolute
+ * path; ``close`` is called by the picker itself once the callback
+ * returns.
  */
 'use strict';
 
@@ -23,6 +25,7 @@
   // previous invocation can't fire when the picker is reopened by the
   // default Index-tab path.
   let onSelectCb = null;
+  let pickerPurpose = 'index';
 
   function modal() { return qs('path-picker-modal'); }
   function listEl() { return qs('path-picker-list'); }
@@ -41,7 +44,11 @@
   }
 
   async function _fetchList(path) {
-    const url = path ? `/api/fs/list?path=${encodeURIComponent(path)}` : '/api/fs/list';
+    const params = new URLSearchParams();
+    if (path) params.set('path', path);
+    if (pickerPurpose && pickerPurpose !== 'index') params.set('purpose', pickerPurpose);
+    const query = params.toString();
+    const url = `/api/fs/list${query ? `?${query}` : ''}`;
     let resp;
     try {
       resp = await fetch(url);
@@ -178,6 +185,7 @@
 
   function open(opts) {
     onSelectCb = (opts && typeof opts.onSelect === 'function') ? opts.onSelect : null;
+    pickerPurpose = (opts && opts.purpose) || 'index';
     modal().hidden = false;
     document.addEventListener('keydown', _onKey, true);
     modal().addEventListener('click', _onBackdrop);
@@ -192,6 +200,7 @@
     currentPath = null;
     currentEntries = [];
     onSelectCb = null;
+    pickerPurpose = 'index';
     listEl().textContent = '';
     crumbEl().textContent = '';
     emptyEl().hidden = true;

@@ -8,16 +8,19 @@ full component initialization (embedding provider, SQLite, etc.).
 from __future__ import annotations
 
 import asyncio
+import json
 import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from memtomem.context.projects import KnownProjectsStore
 from memtomem.models import Chunk, ChunkMetadata, IndexingStats, SearchResult
 from memtomem.search.pipeline import RetrievalStats
 from memtomem.web.app import create_app
@@ -109,6 +112,14 @@ class FakeConfig:
         enabled = False
         lambda_param = 0.7
 
+    class _Rerank:
+        enabled = False
+        provider = "fastembed"
+        model = "Xenova/ms-marco-MiniLM-L-6-v2"
+        oversample = 2.0
+        min_pool = 20
+        max_pool = 200
+
     class _Namespace:
         default_namespace = "default"
         enable_auto_ns = False
@@ -119,6 +130,7 @@ class FakeConfig:
     indexing = _Indexing()
     decay = _Decay()
     mmr = _MMR()
+    rerank = _Rerank()
     namespace = _Namespace()
 
 
@@ -188,6 +200,8 @@ def app():
     rstats = RetrievalStats(bm25_candidates=10, dense_candidates=10, fused_total=1, final_total=1)
     search_pipeline.search = AsyncMock(return_value=([result], rstats))
     search_pipeline.invalidate_cache = MagicMock()
+    search_pipeline._reranker = None
+    search_pipeline._rerank_config = None
 
     # -- index engine mock --
     index_engine = AsyncMock()
@@ -429,6 +443,14 @@ class TestConfig:
         assert "indexing" in data
         assert "decay" in data
         assert "mmr" in data
+        assert data["rerank"] == {
+            "enabled": False,
+            "provider": "fastembed",
+            "model": "Xenova/ms-marco-MiniLM-L-6-v2",
+            "oversample": 2.0,
+            "min_pool": 20,
+            "max_pool": 200,
+        }
         assert "namespace" in data
         assert data["indexing"]["exclude_patterns"] == []
 
@@ -470,6 +492,7 @@ class TestConfig:
             "indexing",
             "decay",
             "mmr",
+            "rerank",
             "namespace",
         }
         # Comparand values come through, not app.state.config values.
@@ -496,6 +519,100 @@ class TestConfig:
 
         assert resp.status_code == 200
         assert resp.json()["search"]["default_top_k"] == 7
+
+    async def test_patch_rerank_runtime_fields(self, app, client: AsyncClient):
+        """The Web config card can edit rerank runtime knobs but not restart knobs."""
+        with (
+            patch("memtomem.web.routes.system.save_config_overrides"),
+            patch(
+                "memtomem.web.routes.system._validate_reranker_ready",
+                new_callable=AsyncMock,
+            ),
+        ):
+            resp = await client.patch(
+                "/api/config",
+                json={"rerank": {"enabled": True, "oversample": 3.0, "provider": "cohere"}},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert any(c["field"] == "rerank.enabled" for c in data["applied"])
+        assert any(c["field"] == "rerank.oversample" for c in data["applied"])
+        assert "rerank.provider: read-only field" in data["rejected"]
+        assert app.state.config.rerank.enabled is True
+        assert app.state.config.rerank.oversample == 3.0
+        assert app.state.config.rerank.provider == "fastembed"
+        assert app.state.search_pipeline._reranker is not None
+        assert app.state.search_pipeline._rerank_config is app.state.config.rerank
+
+    async def test_patch_rerank_rejects_lazy_load_failure(self, app, client: AsyncClient):
+        """Runtime enabling must fail if the lazy reranker cannot load."""
+
+        class BrokenReranker:
+            def __init__(self):
+                self.closed = False
+
+            def _get_model(self):
+                raise ImportError("fastembed is required")
+
+            async def close(self):
+                self.closed = True
+
+        reranker = BrokenReranker()
+
+        with (
+            patch("memtomem.web.routes.system.create_reranker", return_value=reranker),
+            patch("memtomem.web.routes.system.save_config_overrides"),
+        ):
+            resp = await client.patch("/api/config", json={"rerank": {"enabled": True}})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["applied"] == []
+        assert "rerank.enabled: fastembed is required" in data["rejected"]
+        assert app.state.config.rerank.enabled is False
+        assert app.state.search_pipeline._reranker is None
+        assert app.state.search_pipeline._rerank_config is None
+        assert reranker.closed is True
+
+    async def test_patch_rerank_disable_syncs_pipeline(self, app, client: AsyncClient):
+        class StubReranker:
+            def __init__(self):
+                self.closed = False
+
+            async def close(self):
+                self.closed = True
+
+        reranker = StubReranker()
+        app.state.config.rerank.enabled = True
+        app.state.search_pipeline._reranker = reranker
+        app.state.search_pipeline._rerank_config = app.state.config.rerank
+
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.patch("/api/config", json={"rerank": {"enabled": False}})
+
+        assert resp.status_code == 200
+        assert resp.json()["rejected"] == []
+        assert app.state.config.rerank.enabled is False
+        assert app.state.search_pipeline._reranker is None
+        assert app.state.search_pipeline._rerank_config is None
+        assert reranker.closed is True
+
+    async def test_patch_rerank_rejects_invalid_pool_bounds(self, app, client: AsyncClient):
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.patch(
+                "/api/config",
+                json={"rerank": {"min_pool": 500, "max_pool": 20}},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["applied"] == []
+        assert any("rerank.max_pool" in r for r in data["rejected"])
+        assert app.state.config.rerank.min_pool == 20
+        assert app.state.config.rerank.max_pool == 200
+        assert app.state.search_pipeline._reranker is None
+        assert app.state.search_pipeline._rerank_config is None
 
     async def test_patch_exclude_patterns_accepts_valid(self, app, client: AsyncClient):
         with patch("memtomem.web.routes.system.save_config_overrides"):
@@ -3644,6 +3761,128 @@ class TestFsList:
         resp = await client.get(f"/api/fs/list?path={outside}")
         assert resp.status_code == 422, resp.text
         assert resp.json()["detail"] == "outside_picker_scope"
+
+    async def test_project_purpose_adds_project_root_parent_without_changing_default(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Add Project can discover sibling project folders outside memory_dirs.
+
+        The default picker still rejects the same path, preserving the Index
+        tab's memory-dir scope. ``purpose=project`` adds the server project
+        root's parent, which is enough for the user to choose sibling checkouts
+        without browsing from filesystem root.
+        """
+        memdir = fs_tree["memdir"]
+        outside = fs_tree["outside"]
+        project_root = outside / "server-cwd"
+        project_root.mkdir()
+        app.state.project_root = project_root
+        set_home(monkeypatch, fs_tree["home"])
+        self._wire_memory_dirs(app, [memdir], monkeypatch)
+
+        default = await client.get(f"/api/fs/list?path={outside / 'target'}")
+        assert default.status_code == 422, default.text
+
+        roots = await client.get("/api/fs/list?purpose=project")
+        assert roots.status_code == 200, roots.text
+        root_paths = [Path(e["path"]) for e in roots.json()["entries"]]
+        assert Path(unicodedata.normalize("NFC", str(outside.resolve()))) in root_paths
+
+        scoped = await client.get(f"/api/fs/list?path={outside / 'target'}&purpose=project")
+        assert scoped.status_code == 200, scoped.text
+        assert scoped.json()["path"] == unicodedata.normalize("NFC", str(outside / "target"))
+
+    async def test_project_purpose_adds_known_project_parents(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        memdir = fs_tree["memdir"]
+        known_parent = tmp_path / "known-family"
+        known_project = known_parent / "project-a"
+        known_project.mkdir(parents=True)
+        known_projects_path = tmp_path / "known_projects.json"
+        KnownProjectsStore(known_projects_path).add(known_project)
+        app.state.config.context_gateway = SimpleNamespace(known_projects_path=known_projects_path)
+        set_home(monkeypatch, fs_tree["home"])
+        self._wire_memory_dirs(app, [memdir], monkeypatch)
+
+        default = await client.get(f"/api/fs/list?path={known_project}")
+        assert default.status_code == 422, default.text
+
+        scoped = await client.get(f"/api/fs/list?path={known_project}&purpose=project")
+        assert scoped.status_code == 200, scoped.text
+
+    async def test_project_purpose_drops_known_project_at_filesystem_root(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A known project registered at a top-level dir must not widen to ``/``.
+
+        ``_project_allow_list_roots`` guards the server cwd's parent against
+        collapsing to the filesystem anchor; ``_known_project_parent_roots``
+        needs the same guard so a stale ``/foo`` entry can't sidestep it.
+        """
+        memdir = fs_tree["memdir"]
+        known_projects_path = tmp_path / "known_projects.json"
+
+        anchor = Path(Path(memdir).anchor)
+        top_level = anchor / "memtomem-test-top-level"
+        # Bypass KnownProjectsStore.add so the test never has to create or
+        # touch a real top-level directory.
+        known_projects_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "projects": [{"root": str(top_level), "added_at": "2026-01-01T00:00:00Z"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        app.state.config.context_gateway = SimpleNamespace(known_projects_path=known_projects_path)
+        set_home(monkeypatch, fs_tree["home"])
+        self._wire_memory_dirs(app, [memdir], monkeypatch)
+
+        roots = await client.get("/api/fs/list?purpose=project")
+        assert roots.status_code == 200, roots.text
+        root_paths = {Path(e["path"]) for e in roots.json()["entries"]}
+        assert anchor not in root_paths
+
+    async def test_project_purpose_still_excludes_symlink_out(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        memdir = fs_tree["memdir"]
+        set_home(monkeypatch, fs_tree["home"])
+        self._wire_memory_dirs(app, [memdir], monkeypatch)
+
+        resp = await client.get(f"/api/fs/list?path={memdir}&purpose=project")
+        assert resp.status_code == 200, resp.text
+        names = [e["name"] for e in resp.json()["entries"]]
+        assert "ln_outside" not in names
+
+    async def test_invalid_picker_purpose_400(
+        self,
+        client: AsyncClient,
+    ):
+        resp = await client.get("/api/fs/list?purpose=everything")
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "invalid_picker_purpose"
 
     async def test_nonexistent_404(
         self,

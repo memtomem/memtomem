@@ -19,6 +19,9 @@ const _CONFIG_LABELS = {
                 tokenizer: 'Tokenizer', rrf_weights: 'RRF Weights (BM25, Dense)' },
   decay:     { enabled: 'Enabled', half_life_days: 'Half-life (days)' },
   mmr:       { enabled: 'Enabled', lambda_param: 'Lambda' },
+  rerank:    { enabled: 'Enabled', provider: 'Provider', model: 'Model',
+                api_key: 'API Key', oversample: 'Oversample',
+                min_pool: 'Min Pool', max_pool: 'Max Pool' },
   indexing:  { supported_extensions: 'Extensions',
                 max_chunk_tokens: 'Max Chunk Tokens', min_chunk_tokens: 'Min Chunk Tokens',
                 target_chunk_tokens: 'Target Chunk Tokens',
@@ -261,6 +264,13 @@ function _syncSearchConfig() {
   textParts.push(retrievers.length ? retrievers.join('+') : 'No retriever');
   if (s.rrf_k) textParts.push(`RRF k=${s.rrf_k}`);
 
+  const rerank = STATE.serverConfig?.rerank;
+  if (rerank) {
+    textParts.push(rerank.enabled
+      ? `Rerank: ${rerank.provider || 'unknown'}/${rerank.model || 'unknown'}`
+      : 'Rerank: off');
+  }
+
   // Non-default settings (shown as clickable badges)
   const badges = [];
   if (s.enable_bm25 === false) badges.push({ label: 'BM25 Off', section: 'search' });
@@ -272,6 +282,12 @@ function _syncSearchConfig() {
   if (dc?.enabled) badges.push({ label: `Decay ${dc.half_life_days}d`, section: 'decay' });
   const mmr = STATE.serverConfig?.mmr;
   if (mmr?.enabled) badges.push({ label: `MMR λ=${mmr.lambda_param}`, section: 'mmr' });
+  if (rerank?.enabled) {
+    badges.push({
+      label: `Pool ${rerank.min_pool}-${rerank.max_pool} ×${rerank.oversample}`,
+      section: 'rerank',
+    });
+  }
 
   const badgeHtml = badges.map(b =>
     `<span class="pipeline-badge" data-section="${b.section}" title="Click to configure">${b.label}</span>`
@@ -366,7 +382,7 @@ async function loadConfig() {
       header.className = 'config-card-header';
       const title = document.createElement('h3');
       title.className = 'config-section-title';
-      const _SECTION_TITLES = { mmr: 'MMR', namespace: 'Namespace', rrf: 'RRF' };
+      const _SECTION_TITLES = { mmr: 'MMR', namespace: 'Namespace', rerank: 'Reranker', rrf: 'RRF' };
       title.textContent = _SECTION_TITLES[section] || section.charAt(0).toUpperCase() + section.slice(1);
       header.appendChild(title);
       if (isReadonly) {
@@ -1593,4 +1609,3 @@ document.addEventListener('visibilitychange', () => {
   if (!configSection || !configSection.classList.contains('active')) return;
   fetchServerConfig();
 });
-

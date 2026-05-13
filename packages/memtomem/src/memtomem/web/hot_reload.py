@@ -34,6 +34,8 @@ else is private.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 import time
 from dataclasses import dataclass
@@ -181,7 +183,7 @@ def _build_fresh_config() -> Mem2MemConfig:
     return cfg
 
 
-def reload_if_stale(
+async def reload_if_stale(
     app: FastAPI,
     *,
     storage: SqliteBackend | None = None,
@@ -200,13 +202,14 @@ def reload_if_stale(
     should pass them through so a disk-triggered tokenizer change still
     propagates.
 
-    Note: FTS rebuild is fire-and-forget scheduled on the running event loop
-    when invoked from an async context, so sync GET callers aren't blocked.
-    Callers in a lock-free read context should still see the Settings swap
-    immediately; the rebuild catches up out-of-band. The rebuild runs
-    concurrently with any writer inside ``_config_lock``: it touches the
-    FTS5 virtual table, not the ``config.json`` file, so there is no file-
-    level race with ``save_config_overrides``.
+    Note: runtime fanout is async so local reranker lazy loads can move to
+    a worker thread instead of blocking the request event loop. FTS rebuild
+    remains fire-and-forget scheduled on the running event loop; callers in
+    a lock-free read context should still see the Settings swap immediately
+    while the rebuild catches up out-of-band. The rebuild runs concurrently
+    with any writer inside ``_config_lock``: it touches the FTS5 virtual
+    table, not the ``config.json`` file, so there is no file-level race with
+    ``save_config_overrides``.
     """
     sig = current_signature()
     last = _get_last_signature(app)
@@ -261,7 +264,7 @@ def reload_if_stale(
     _set_reload_error(app, None)
 
     if old_cfg is not None and (storage is not None or search_pipeline is not None):
-        apply_runtime_config_changes(
+        await apply_runtime_config_changes(
             old_cfg, new_cfg, storage=storage, search_pipeline=search_pipeline, app=app
         )
 
@@ -274,7 +277,7 @@ def reload_if_stale(
 # ---------------------------------------------------------------------------
 
 
-def apply_runtime_config_changes(
+async def apply_runtime_config_changes(
     old_cfg: Any,
     new_cfg: Any,
     *,
@@ -286,18 +289,19 @@ def apply_runtime_config_changes(
 
     * ``search.tokenizer`` changed → re-register global tokenizer + schedule
       ``storage.rebuild_fts()`` (async, fire-and-forget on current loop).
+    * ``rerank`` changed → rebuild the live reranker attached to the search
+      pipeline.
     * Any change → invalidate search cache.
 
-    Older callers of this helper (e.g. the PATCH handler) may not provide
+    Some callers of this helper (e.g. focused tests) may not provide
     ``storage`` / ``search_pipeline`` (rare), in which case the matching
-    fanout step is skipped. This keeps the helper usable in unit tests and
-    from non-web callers.
+    fanout step is skipped.
 
     ``app`` is optional: when provided, the FTS rebuild is tracked on
     ``app.state.fts_rebuild_task`` so back-to-back tokenizer changes coalesce
     (issue #278) instead of spawning overlapping rebuilds. When omitted, the
     rebuild is fire-and-forget without coalescing — preserved for non-web
-    callers and legacy unit tests.
+    callers and focused unit tests.
     """
     try:
         tokenizer_changed = old_cfg.search.tokenizer != new_cfg.search.tokenizer
@@ -311,7 +315,94 @@ def apply_runtime_config_changes(
         _schedule_fts_rebuild(storage, new_cfg.search.tokenizer, app=app)
 
     if search_pipeline is not None:
+        await _sync_reranker(old_cfg, new_cfg, search_pipeline, app=app)
         search_pipeline.invalidate_cache()
+
+
+async def _sync_reranker(
+    old_cfg: Any,
+    new_cfg: Any,
+    search_pipeline: SearchPipeline,
+    *,
+    app: FastAPI | None = None,
+) -> None:
+    old_snapshot = _rerank_snapshot(old_cfg)
+    new_snapshot = _rerank_snapshot(new_cfg)
+    if new_snapshot is None or old_snapshot == new_snapshot:
+        return
+
+    from memtomem.search.reranker.factory import create_reranker
+
+    try:
+        new_reranker = create_reranker(new_cfg.rerank)
+    except Exception:
+        # Disk-edit path is best-effort: a broken factory call leaves the
+        # previous reranker in place so the live pipeline keeps working.
+        # The PATCH path surfaces the same failure as a 200/rejected reply
+        # before mutating any state.
+        logger.exception("Failed to build reranker from hot-reloaded config; keeping previous")
+        return
+
+    # Mirror the PATCH path's eager lazy-load check so a disk edit that
+    # enables rerank against a missing dep (e.g. fastembed) fails here
+    # instead of at first search.
+    if new_reranker is not None:
+        load_model = getattr(new_reranker, "_get_model", None)
+        if callable(load_model):
+            try:
+                await asyncio.to_thread(load_model)
+            except Exception:
+                logger.exception("Hot-reloaded reranker failed to load; keeping previous instance")
+                await _close_reranker_safely(new_reranker)
+                return
+
+    if app is not None and _rerank_snapshot(getattr(app.state, "config", None)) != new_snapshot:
+        logger.info("Skipping stale hot-reloaded reranker install; config changed while loading")
+        if new_reranker is not None:
+            await _close_reranker_safely(new_reranker)
+        return
+
+    old_reranker = getattr(search_pipeline, "_reranker", None)
+    search_pipeline._reranker = new_reranker
+    search_pipeline._rerank_config = new_cfg.rerank if new_cfg.rerank.enabled else None
+
+    if old_reranker is not None and old_reranker is not new_reranker:
+        await _close_reranker_safely(old_reranker)
+
+
+def _rerank_snapshot(cfg: Any) -> tuple[object, ...] | None:
+    rerank = getattr(cfg, "rerank", None)
+    enabled = getattr(rerank, "enabled", None)
+    if not isinstance(enabled, bool):
+        return None
+    return (
+        enabled,
+        getattr(rerank, "provider", None),
+        getattr(rerank, "model", None),
+        getattr(rerank, "api_key", None),
+        getattr(rerank, "oversample", None),
+        getattr(rerank, "min_pool", None),
+        getattr(rerank, "max_pool", None),
+    )
+
+
+async def _close_reranker_safely(reranker: object) -> None:
+    """Close a reranker, tolerating sync/async/missing close + errors.
+
+    Shared between the disk hot-reload path (this module) and the PATCH
+    handler in ``web/routes/system.py`` so a flaky teardown never turns
+    a clean "rejected"/"accepted" reply into a 500.
+    """
+    close = getattr(reranker, "close", None)
+    if not callable(close):
+        return
+
+    try:
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        logger.exception("Error while closing replaced reranker")
 
 
 def _schedule_fts_rebuild(

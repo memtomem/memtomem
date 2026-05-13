@@ -24,8 +24,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -469,7 +471,7 @@ async def test_concurrent_patches_are_serialised_by_lock(
 # ---------------------------------------------------------------------------
 
 
-def test_reload_if_stale_cas_yields_to_concurrent_writer_bump(
+async def test_reload_if_stale_cas_yields_to_concurrent_writer_bump(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """Issue #268: the lock-free reader path had a race where its trailing
@@ -524,7 +526,7 @@ def test_reload_if_stale_cas_yields_to_concurrent_writer_bump(
 
     monkeypatch.setattr(_hot_reload, "_build_fresh_config", build_and_interleave_writer)
 
-    swapped = _hot_reload.reload_if_stale(app)
+    swapped = await _hot_reload.reload_if_stale(app)
 
     # CAS must have fired: no swap happened.
     assert swapped is False
@@ -542,7 +544,7 @@ def test_reload_if_stale_cas_yields_to_concurrent_writer_bump(
 # ---------------------------------------------------------------------------
 
 
-def test_reload_if_stale_error_branch_cas_yields_to_concurrent_writer_bump(
+async def test_reload_if_stale_error_branch_cas_yields_to_concurrent_writer_bump(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """Issue #273: the lock-free reader's *error* branch had the same
@@ -590,7 +592,7 @@ def test_reload_if_stale_error_branch_cas_yields_to_concurrent_writer_bump(
 
     monkeypatch.setattr(_hot_reload, "_build_fresh_config", build_and_interleave_writer_then_raise)
 
-    swapped = _hot_reload.reload_if_stale(app)
+    swapped = await _hot_reload.reload_if_stale(app)
 
     # Error branch fires but CAS guard leaves writer's signature intact.
     assert swapped is False
@@ -633,15 +635,15 @@ class TestSignature:
 
 
 class TestReloadIfStale:
-    def test_no_change_returns_false(self, home: Path):
+    async def test_no_change_returns_false(self, home: Path):
         app = create_app(lifespan=None, mode="dev")
         app.state.config = _hot_reload._build_fresh_config()
         app.state.config_signature = _hot_reload.current_signature()
         app.state.last_reload_error = None
 
-        assert _hot_reload.reload_if_stale(app) is False
+        assert await _hot_reload.reload_if_stale(app) is False
 
-    def test_change_swaps_config(self, home: Path):
+    async def test_change_swaps_config(self, home: Path):
         app = create_app(lifespan=None, mode="dev")
         _write_config(home, {"mmr": {"enabled": False}})
         app.state.config = _hot_reload._build_fresh_config()
@@ -650,10 +652,10 @@ class TestReloadIfStale:
         assert app.state.config.mmr.enabled is False
 
         _write_config(home, {"mmr": {"enabled": True}})
-        assert _hot_reload.reload_if_stale(app) is True
+        assert await _hot_reload.reload_if_stale(app) is True
         assert app.state.config.mmr.enabled is True
 
-    def test_broken_disk_keeps_old_config(self, home: Path):
+    async def test_broken_disk_keeps_old_config(self, home: Path):
         app = create_app(lifespan=None, mode="dev")
         _write_config(home, {"mmr": {"enabled": False}})
         app.state.config = _hot_reload._build_fresh_config()
@@ -665,7 +667,7 @@ class TestReloadIfStale:
         cfg_path.write_text('{"search":', encoding="utf-8")
         _bump_mtime(cfg_path)
 
-        assert _hot_reload.reload_if_stale(app) is False
+        assert await _hot_reload.reload_if_stale(app) is False
         assert app.state.config is old
         err = _hot_reload.get_reload_error(app)
         assert err is not None
@@ -673,7 +675,21 @@ class TestReloadIfStale:
 
 
 class TestApplyRuntimeConfigChanges:
-    def test_tokenizer_change_fires_set_tokenizer_and_rebuild(
+    def _cfg(self, *, rerank_enabled: bool, provider: str = "fastembed"):
+        return SimpleNamespace(
+            search=SimpleNamespace(tokenizer="unicode61"),
+            rerank=SimpleNamespace(
+                enabled=rerank_enabled,
+                provider=provider,
+                model="Xenova/ms-marco-MiniLM-L-6-v2",
+                api_key="",
+                oversample=2.0,
+                min_pool=20,
+                max_pool=200,
+            ),
+        )
+
+    async def test_tokenizer_change_fires_set_tokenizer_and_rebuild(
         self, monkeypatch: pytest.MonkeyPatch
     ):
         set_tokenizer_calls: list[str] = []
@@ -691,20 +707,17 @@ class TestApplyRuntimeConfigChanges:
         storage.rebuild_fts = AsyncMock(return_value=5)
         search_pipeline = MagicMock()
 
-        async def _run():
-            _hot_reload.apply_runtime_config_changes(
-                old, new, storage=storage, search_pipeline=search_pipeline
-            )
-            # Give the scheduled rebuild a chance to run.
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
-
-        asyncio.run(_run())
+        await _hot_reload.apply_runtime_config_changes(
+            old, new, storage=storage, search_pipeline=search_pipeline
+        )
+        # Give the scheduled rebuild a chance to run.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
 
         assert set_tokenizer_calls == ["kiwi"]
         search_pipeline.invalidate_cache.assert_called_once()
 
-    def test_no_tokenizer_change_skips_fts_rebuild(self):
+    async def test_no_tokenizer_change_skips_fts_rebuild(self):
         old = MagicMock()
         old.search.tokenizer = "unicode61"
         new = MagicMock()
@@ -714,11 +727,210 @@ class TestApplyRuntimeConfigChanges:
         storage.rebuild_fts = AsyncMock(return_value=0)
         search_pipeline = MagicMock()
 
-        _hot_reload.apply_runtime_config_changes(
+        await _hot_reload.apply_runtime_config_changes(
             old, new, storage=storage, search_pipeline=search_pipeline
         )
 
         storage.rebuild_fts.assert_not_called()
+        search_pipeline.invalidate_cache.assert_called_once()
+
+    async def test_rerank_change_rebuilds_live_pipeline_reranker(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        import memtomem.search.reranker.factory as factory
+
+        old = self._cfg(rerank_enabled=False)
+        new = self._cfg(rerank_enabled=True)
+        reranker = object()
+        monkeypatch.setattr(factory, "create_reranker", lambda cfg: reranker)
+        search_pipeline = SimpleNamespace(
+            _reranker=None,
+            _rerank_config=None,
+            invalidate_cache=MagicMock(),
+        )
+
+        await _hot_reload.apply_runtime_config_changes(old, new, search_pipeline=search_pipeline)
+
+        assert search_pipeline._reranker is reranker
+        assert search_pipeline._rerank_config is new.rerank
+        search_pipeline.invalidate_cache.assert_called_once()
+
+    async def test_rerank_disable_clears_live_pipeline_reranker(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        import memtomem.search.reranker.factory as factory
+
+        class StubReranker:
+            def __init__(self):
+                self.closed = False
+
+            async def close(self):
+                self.closed = True
+
+        old = self._cfg(rerank_enabled=True)
+        new = self._cfg(rerank_enabled=False)
+        old_reranker = StubReranker()
+        monkeypatch.setattr(factory, "create_reranker", lambda cfg: None)
+        search_pipeline = SimpleNamespace(
+            _reranker=old_reranker,
+            _rerank_config=old.rerank,
+            invalidate_cache=MagicMock(),
+        )
+
+        await _hot_reload.apply_runtime_config_changes(old, new, search_pipeline=search_pipeline)
+
+        assert search_pipeline._reranker is None
+        assert search_pipeline._rerank_config is None
+        assert old_reranker.closed is True
+        search_pipeline.invalidate_cache.assert_called_once()
+
+    async def test_rerank_disk_edit_lazy_load_failure_keeps_previous(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Disk hot-reload mirrors the PATCH path: a reranker that can't
+        load (e.g. missing fastembed dep) leaves the previous live
+        instance in place instead of silently breaking search."""
+        import memtomem.search.reranker.factory as factory
+
+        class BrokenReranker:
+            def __init__(self):
+                self.closed = False
+
+            def _get_model(self):
+                raise ImportError("fastembed is required")
+
+            async def close(self):
+                self.closed = True
+
+        class PrevReranker:
+            def __init__(self):
+                self.closed = False
+
+            async def close(self):
+                self.closed = True
+
+        broken = BrokenReranker()
+        previous = PrevReranker()
+        old = self._cfg(rerank_enabled=False)
+        new = self._cfg(rerank_enabled=True)
+        monkeypatch.setattr(factory, "create_reranker", lambda cfg: broken)
+        search_pipeline = SimpleNamespace(
+            _reranker=previous,
+            _rerank_config=None,
+            invalidate_cache=MagicMock(),
+        )
+
+        await _hot_reload.apply_runtime_config_changes(old, new, search_pipeline=search_pipeline)
+
+        assert search_pipeline._reranker is previous
+        assert previous.closed is False
+        search_pipeline.invalidate_cache.assert_called_once()
+
+    async def test_rerank_disk_edit_factory_failure_keeps_previous(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A factory that raises mid-disk-reload leaves state untouched."""
+        import memtomem.search.reranker.factory as factory
+
+        class PrevReranker:
+            def __init__(self):
+                self.closed = False
+
+            async def close(self):
+                self.closed = True
+
+        previous = PrevReranker()
+        old = self._cfg(rerank_enabled=False)
+        new = self._cfg(rerank_enabled=True)
+
+        def _boom(cfg):
+            raise RuntimeError("factory exploded")
+
+        monkeypatch.setattr(factory, "create_reranker", _boom)
+        search_pipeline = SimpleNamespace(
+            _reranker=previous,
+            _rerank_config=None,
+            invalidate_cache=MagicMock(),
+        )
+
+        await _hot_reload.apply_runtime_config_changes(old, new, search_pipeline=search_pipeline)
+
+        assert search_pipeline._reranker is previous
+        assert previous.closed is False
+        search_pipeline.invalidate_cache.assert_called_once()
+
+    async def test_rerank_disk_edit_lazy_load_runs_off_event_loop_thread(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        import memtomem.search.reranker.factory as factory
+
+        class LazyReranker:
+            def _get_model(self):
+                load_thread_ids.append(threading.get_ident())
+                return object()
+
+        load_thread_ids: list[int] = []
+        old = self._cfg(rerank_enabled=False)
+        new = self._cfg(rerank_enabled=True)
+        monkeypatch.setattr(factory, "create_reranker", lambda cfg: LazyReranker())
+        search_pipeline = SimpleNamespace(
+            _reranker=None,
+            _rerank_config=None,
+            invalidate_cache=MagicMock(),
+        )
+
+        event_loop_thread_id = threading.get_ident()
+        await _hot_reload.apply_runtime_config_changes(old, new, search_pipeline=search_pipeline)
+
+        assert load_thread_ids
+        assert load_thread_ids[0] != event_loop_thread_id
+
+    async def test_rerank_disk_edit_drops_stale_install_if_config_drifts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """While ``_get_model`` runs on a worker thread, a concurrent
+        PATCH can overwrite ``app.state.config``. When the disk-side load
+        returns, its candidate snapshot is no longer current — the guard
+        at ``_sync_reranker`` must discard the loaded instance (and
+        ``close()`` it) instead of clobbering the live pipeline.
+        """
+        import memtomem.search.reranker.factory as factory
+
+        app = create_app(lifespan=None, mode="dev")
+        old = self._cfg(rerank_enabled=False)
+        new = self._cfg(rerank_enabled=True)
+        drifted = self._cfg(rerank_enabled=True, provider="other-provider")
+        app.state.config = new
+
+        class DriftingReranker:
+            def __init__(self):
+                self.closed = False
+
+            def _get_model(self):
+                # Simulate a concurrent PATCH landing during the
+                # ``asyncio.to_thread`` window — by the time the load
+                # completes, ``app.state.config`` no longer matches the
+                # snapshot the disk reload captured.
+                app.state.config = drifted
+
+            async def close(self):
+                self.closed = True
+
+        loaded = DriftingReranker()
+        monkeypatch.setattr(factory, "create_reranker", lambda cfg: loaded)
+        previous = SimpleNamespace()
+        search_pipeline = SimpleNamespace(
+            _reranker=previous,
+            _rerank_config=None,
+            invalidate_cache=MagicMock(),
+        )
+
+        await _hot_reload.apply_runtime_config_changes(
+            old, new, search_pipeline=search_pipeline, app=app
+        )
+
+        assert search_pipeline._reranker is previous
+        assert loaded.closed is True
         search_pipeline.invalidate_cache.assert_called_once()
 
 
