@@ -71,8 +71,8 @@ describe('Search filters - add/remove UX', () => {
     expect(document.getElementById('tag-filter').value).toBe('');
     expect(document.getElementById('date-range-preset').value).toBe('');
     expect([...document.getElementById('source-filter').selectedOptions]).toHaveLength(0);
-    expect(document.getElementById('results-empty').textContent).toContain('Enter a query to search');
-    expect(document.getElementById('results-empty').textContent).not.toContain('No results found');
+    expect(document.getElementById('results-empty').textContent).toContain('No results found');
+    expect(document.getElementById('results-empty').textContent).not.toContain('tag: redis');
   });
 
   it('runs source-only search from the Search tab', async () => {

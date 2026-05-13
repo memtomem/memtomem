@@ -354,10 +354,15 @@ class TestStats:
         assert isinstance(data["home_sources"], list)
         assert len(data["home_sources"]) == 2
         assert isinstance(data["home_file_type_distribution"], list)
-        assert set(item["file_type"] for item in data["home_file_type_distribution"]) == {"md", "txt"}
+        assert set(item["file_type"] for item in data["home_file_type_distribution"]) == {
+            "md",
+            "txt",
+        }
         assert data["home_total_source_size"] == 6
 
-    async def test_stats_home_aggregates_handle_many_sources(self, app, client: AsyncClient, tmp_path):
+    async def test_stats_home_aggregates_handle_many_sources(
+        self, app, client: AsyncClient, tmp_path
+    ):
         source_count = 120
         source_rows = []
         base_dt = datetime(2026, 1, 1, tzinfo=timezone.utc)
