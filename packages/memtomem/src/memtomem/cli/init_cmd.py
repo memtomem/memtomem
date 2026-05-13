@@ -427,7 +427,7 @@ def _step_embedding(state: dict) -> None:
         provider = "onnx"
         _onnx_available = False
         try:
-            import fastembed  # noqa: F401
+            import fastembed
 
             _onnx_available = True
         except ImportError:
@@ -898,7 +898,7 @@ def _step_language(state: dict) -> None:
 
     if tokenizer == "kiwipiepy":
         try:
-            import kiwipiepy  # noqa: F401
+            import kiwipiepy
 
             click.secho("  kiwipiepy is installed.", fg="green")
         except ImportError:

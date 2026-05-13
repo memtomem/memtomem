@@ -380,8 +380,8 @@ class SqliteBackend(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tbl,)
                 ).fetchone()
                 if exists:
-                    count = db.execute(f"SELECT COUNT(*) FROM [{tbl}]").fetchone()[0]  # noqa: S608
-                    db.execute(f"DELETE FROM [{tbl}]")  # noqa: S608
+                    count = db.execute(f"SELECT COUNT(*) FROM [{tbl}]").fetchone()[0]
+                    db.execute(f"DELETE FROM [{tbl}]")
                     deleted[tbl] = count
 
             # Core content tables

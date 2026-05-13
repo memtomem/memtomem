@@ -38,7 +38,7 @@ import click
 
 from memtomem._runtime_paths import runtime_dir, server_pid_path
 from memtomem.cli._liveness import check_server_liveness as _check_server_liveness
-from memtomem.cli._liveness import probe_pid_file as _probe_pid_file  # noqa: F401  (test seam)
+from memtomem.cli._liveness import probe_pid_file as _probe_pid_file
 from memtomem.cli.init_cmd import RuntimeProfile, _runtime_profile
 
 _DEFAULT_STATE_DIR = Path.home() / ".memtomem"
@@ -123,7 +123,7 @@ def _load_config_safely() -> tuple[Path, str | None]:
         load_config_overrides(cfg)
         db_path = Path(cfg.storage.sqlite_path).expanduser()
         return db_path, None
-    except Exception as exc:  # noqa: BLE001 — uninstall must never abort on config
+    except Exception as exc:
         return _DEFAULT_STATE_DIR / _DEFAULT_DB_NAME, f"{type(exc).__name__}: {exc}"
 
 

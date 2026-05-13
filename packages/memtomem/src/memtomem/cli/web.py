@@ -150,7 +150,7 @@ def _web_pid_lock(port: int) -> Iterator[None]:
     from memtomem._runtime_paths import ensure_runtime_dir
 
     pid_file = ensure_runtime_dir() / "web.pid"
-    lock_fp = open(pid_file, "a+")  # noqa: SIM115
+    lock_fp = open(pid_file, "a+")
     try:
         portalocker.lock(lock_fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
     except (portalocker.LockException, BlockingIOError, OSError) as exc:

@@ -29,7 +29,7 @@ from pathlib import Path
 
 # Re-exported for backwards compatibility with the readiness endpoint
 # import site. Source of truth is ``embedding/aliases.py``.
-from memtomem.embedding.aliases import approx_size_mb as approx_size_mb  # noqa: F401
+from memtomem.embedding.aliases import approx_size_mb as approx_size_mb
 
 
 def model_snapshot_present(cache_dir: Path, model_id: str) -> bool:
