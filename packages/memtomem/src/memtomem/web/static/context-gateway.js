@@ -2776,7 +2776,7 @@ document.querySelectorAll('.ctx-add-project-btn').forEach(btn => {
       }
     };
     if (window.PathPicker && typeof window.PathPicker.open === 'function') {
-      window.PathPicker.open({ onSelect });
+      window.PathPicker.open({ purpose: 'project', onSelect });
       return;
     }
     const raw = window.prompt(
