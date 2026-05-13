@@ -334,18 +334,22 @@ def test_home_harness_stat_cards_are_dev_tier() -> None:
     """
     html = _read_static("index.html")
     for element_id in ("home-sessions", "home-scratch"):
+        # Pin the dev-tier attribute to the SAME opening tag whose immediate
+        # child carries the target id. A laxer `[\s\S]*?` between the
+        # `stat-card` opener and the id div would silently swallow earlier
+        # cards and let the assertion pass off the wrong element.
         match = re.search(
-            rf'<div[^>]*class="stat-card card"[^>]*>[\s\S]*?id="{element_id}"',
+            rf'<div[^>]*class="stat-card card"[^>]*data-ui-tier="dev"[^>]*>\s*'
+            rf'<div[^>]*id="{element_id}"',
             html,
         )
-        assert match is not None, f"{element_id} stat card missing from Home markup"
-        assert 'data-ui-tier="dev"' in match.group(0), (
-            f"{element_id} stat card must be dev-tier so prod hides it"
-        )
+        assert match is not None, f"{element_id} stat card must be dev-tier so prod hides it"
 
 
 def test_home_stat_grid_sizes_match_ui_mode() -> None:
-    """Home stat cards are 4-up in prod and 6-up in dev."""
+    """Home stat cards are 4-up in prod and 6-up in dev, and the responsive
+    ladder steps down through 2-col before collapsing to 1-col on narrow
+    mobile."""
     css = _read_static("style.css")
     assert "--home-stat-cols: 4" in css, "prod Home stat grid must default to 4 columns"
     assert re.search(
@@ -355,6 +359,29 @@ def test_home_stat_grid_sizes_match_ui_mode() -> None:
     assert "repeat(var(--home-stat-cols), minmax(0, 1fr))" in css, (
         "Home stat grid must size from the ui-mode column variable"
     )
+    # Responsive ladder: 4/6 desktop → 2/3 at 960 → 2/2 at 768 → 1/1 at 430.
+    #
+    # CSS specificity trap: the desktop + 960px `body.dev-mode .home-stats-row`
+    # rules are (0,0,2). A plain `.home-stats-row` rule at 768px/430px is
+    # (0,0,1) and would lose to the 960px dev-mode rule, freezing dev mode
+    # at 3 cols all the way down to narrow mobile. Pin both selectors
+    # together so the next "cleanup" pass can't drop the dev-mode override
+    # again.
+    # Anchor on the column value (768→2, 430→1) — those are unique to their
+    # breakpoint inside this file, so we don't need to walk into the @media
+    # block (which contains nested rules `[^{}]*?` can't cross).
+    for breakpoint_label, cols in (("768px tablet", "2"), ("430px mobile", "1")):
+        assert re.search(
+            rf"\.home-stats-row,\s*"
+            rf"body\.dev-mode\s+\.home-stats-row\s*\{{\s*"
+            rf"--home-stat-cols:\s*{cols};\s*\}}",
+            css,
+        ), (
+            f"Home stat grid at {breakpoint_label} must list both "
+            "`.home-stats-row` and `body.dev-mode .home-stats-row` together "
+            f"(cols={cols}) so the dev-mode override at 960px doesn't win "
+            "on specificity."
+        )
 
 
 def test_ctx_overview_has_landing_modifier_for_group_dashboard() -> None:

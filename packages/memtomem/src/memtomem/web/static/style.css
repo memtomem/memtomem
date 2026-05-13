@@ -2618,8 +2618,12 @@ body.dev-mode .home-stats-row { --home-stat-cols: 6; }
 }
 @media (max-width: 768px) {
   /* Home tab responsive */
+  /* Both selectors listed to match the (0,0,2) specificity of the
+     desktop/960px `body.dev-mode` rule — a plain `.home-stats-row` here
+     would be (0,0,1) and lose to the 960px dev-mode rule, freezing dev at
+     3 cols all the way to narrow mobile. */
   .home-stats-row,
-  body.dev-mode .home-stats-row { --home-stat-cols: 1; }
+  body.dev-mode .home-stats-row { --home-stat-cols: 2; }
   .home-activity-row { grid-template-columns: 1fr; }
   .home-bottom-row { grid-template-columns: 1fr; }
 
@@ -2713,6 +2717,10 @@ body.dev-mode .home-stats-row { --home-stat-cols: 6; }
   .home-search-wrap input {
     min-width: 0;
   }
+
+  /* Specificity must match the 960px `body.dev-mode` rule (see 768px). */
+  .home-stats-row,
+  body.dev-mode .home-stats-row { --home-stat-cols: 1; }
 
   .home-bar-label {
     width: 84px;
