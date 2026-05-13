@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import cast
 
 import click
 
@@ -920,8 +921,8 @@ async def mem_context_migrate(
     try:
         await _memory_migrate_run(
             sources,
-            from_scope,
-            to_scope,
+            cast(TargetScope, from_scope),
+            cast(TargetScope, to_scope),
             apply_,
             # ``yes=True`` because the MCP wrapper has already gated
             # Gate B above via the explicit ``confirm_project_shared``

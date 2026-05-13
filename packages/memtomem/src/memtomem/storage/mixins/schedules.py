@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from croniter import CroniterBadCronError, CroniterBadDateError, croniter
+from croniter import CroniterBadCronError, CroniterBadDateError, croniter  # type: ignore[import-untyped]
 
 logger = logging.getLogger(__name__)
 

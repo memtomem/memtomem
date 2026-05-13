@@ -368,6 +368,8 @@ async def delete_skill(
                 if cascade:
                     for gen in SKILL_GENERATORS.values():
                         target = gen.target_dir(project_root, name)
+                        if target is None:
+                            continue
                         if not target.exists():
                             continue
                         try:
@@ -406,6 +408,8 @@ async def diff_skill(
     runtimes = []
     for gen_name, gen in SKILL_GENERATORS.items():
         target = gen.target_dir(project_root, name)
+        if target is None:
+            continue
         target_manifest = target / SKILL_MANIFEST
         if canonical_content is None and not target_manifest.is_file():
             continue

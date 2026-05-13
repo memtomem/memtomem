@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+from memtomem.config import TargetScope
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -310,7 +311,7 @@ async def mem_consolidate_apply(
         namespace=group.get("namespace"),
         template=None,
         ctx=ctx,
-        scope=derived_scope,
+        scope=cast(TargetScope, derived_scope),
         confirm_project_shared=confirm_project_shared,
         project_root_override=project_root_override,
     )

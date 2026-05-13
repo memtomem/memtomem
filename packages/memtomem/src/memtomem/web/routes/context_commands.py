@@ -381,18 +381,20 @@ async def delete_command(
                             {"path": _safe_rel(cmd_path, project_root), "reason": str(e)}
                         )
 
-                if cascade:
-                    for gen in COMMAND_GENERATORS.values():
-                        target = gen.target_file(project_root, name)
-                        if not target.is_file():
-                            continue
-                        try:
-                            target.unlink()
-                            removed.append(_safe_rel(target, project_root))
-                        except OSError as e:
-                            skipped.append(
-                                {"path": _safe_rel(target, project_root), "reason": str(e)}
-                            )
+                    if cascade:
+                        for gen in COMMAND_GENERATORS.values():
+                            target = gen.target_file(project_root, name)
+                            if target is None:
+                                continue
+                            if not target.is_file():
+                                continue
+                            try:
+                                target.unlink()
+                                removed.append(_safe_rel(target, project_root))
+                            except OSError as e:
+                                skipped.append(
+                                    {"path": _safe_rel(target, project_root), "reason": str(e)}
+                                )
     except TimeoutError:
         raise HTTPException(503, "Command delete timed out — another sync may be in progress")
 
@@ -421,6 +423,8 @@ async def diff_command(
     runtimes = []
     for gen_name, gen in COMMAND_GENERATORS.items():
         target = gen.target_file(project_root, name)
+        if target is None:
+            continue
         if canonical_content is None and not target.is_file():
             continue
         elif canonical_content is not None and not target.is_file():

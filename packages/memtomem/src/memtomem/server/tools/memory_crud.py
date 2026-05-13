@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
+from memtomem.config import TargetScope
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -28,7 +29,7 @@ def _validate_path(
     memory_dirs: list,
     project_memory_dirs: list | None = None,
     *,
-    scope: str = "user",
+    scope: TargetScope = "user",
     project_root: Path | None = None,
 ) -> tuple[Path | None, str | None]:
     """Validate and resolve a user-supplied path.
@@ -103,7 +104,7 @@ async def _mem_add_core(
     template: str | None,
     ctx: CtxType,
     force_unsafe: bool = False,
-    scope: str = "user",
+    scope: TargetScope = "user",
     confirm_project_shared: bool = False,
     project_root_override: Path | None = None,
 ) -> tuple[str, "IndexingStats | None"]:
@@ -192,6 +193,7 @@ async def _mem_add_core(
             return (err, None)
         assert target is not None
         inferred_scope, inferred_root = classify_scope(target, pmdirs)
+        inferred_scope = cast(TargetScope, inferred_scope)
         effective_scope = inferred_scope
         effective_project_root: Path | None = inferred_root
     else:
@@ -279,10 +281,9 @@ async def _mem_add_core(
             # to the source chunks' persisted project_root) over the
             # server-cwd fallback so cross-project summaries land in
             # the source project's tier, not the server's project.
+            project_root: Path | None = _resolve_project_context_root(app)
             if project_root_override is not None:
                 project_root = project_root_override
-            else:
-                project_root = _resolve_project_context_root(app)
             try:
                 base = resolve_memory_scope_dir(
                     effective_scope, project_root, user_base=Path(mdirs[0])
@@ -373,7 +374,7 @@ async def mem_add(
     namespace: str | None = None,
     template: str | None = None,
     force_unsafe: bool = False,
-    scope: str = "user",
+    scope: TargetScope = "user",
     confirm_project_shared: bool = False,
     ctx: CtxType = None,
 ) -> str:
@@ -670,7 +671,7 @@ async def mem_batch_add(
     namespace: str | None = None,
     file: str | None = None,
     force_unsafe: bool = False,
-    scope: str = "user",
+    scope: TargetScope = "user",
     confirm_project_shared: bool = False,
     ctx: CtxType = None,
 ) -> str:
@@ -753,6 +754,7 @@ async def mem_batch_add(
             return err
         assert target is not None
         inferred_scope, _ = classify_scope(target, pmdirs)
+        inferred_scope = cast(TargetScope, inferred_scope)
         effective_scope = inferred_scope
     else:
         effective_scope = scope

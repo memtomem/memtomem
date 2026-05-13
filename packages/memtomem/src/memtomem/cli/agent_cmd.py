@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 from typing import TYPE_CHECKING
+from typing import cast
 
 import click
 
@@ -347,13 +348,14 @@ def debug_resolve(
     """
     from types import SimpleNamespace
 
+    from memtomem.server.context import AppContext
     from memtomem.server.tools.multi_agent import _resolve_agent_namespace
 
     fake_app = SimpleNamespace(
         current_agent_id=current_agent_id,
         current_namespace=current_namespace,
     )
-    agent_ns = _resolve_agent_namespace(fake_app, agent_id)
+    agent_ns = _resolve_agent_namespace(cast(AppContext, fake_app), agent_id)
 
     if include_shared and agent_ns:
         ns_filter: str | None = f"{agent_ns},{SHARED_NAMESPACE}"

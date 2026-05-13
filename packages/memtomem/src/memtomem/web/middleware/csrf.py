@@ -169,7 +169,7 @@ class CSRFGuardMiddleware(BaseHTTPMiddleware):
             return False
         if host in _LOOPBACK_HOSTS:
             return True
-        trusted = getattr(request.app.state, "csrf_trusted_origins", frozenset())
+        trusted: frozenset[str] = getattr(request.app.state, "csrf_trusted_origins", frozenset())
         return host in trusted
 
     @staticmethod
@@ -181,5 +181,5 @@ class CSRFGuardMiddleware(BaseHTTPMiddleware):
             return False
         if host in _LOOPBACK_HOSTS:
             return True
-        trusted = getattr(request.app.state, "csrf_trusted_hosts", frozenset())
+        trusted: frozenset[str] = getattr(request.app.state, "csrf_trusted_hosts", frozenset())
         return host in trusted
