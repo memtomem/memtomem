@@ -1108,9 +1108,12 @@ async function mdReindexOne(path, btn) {
   // and snap back via ``_origMeta`` on file boundary / cleanup.
   // Renderer lives in ``app.js:_renderMemoryDirGroup`` — ``.source-group``
   // wraps the row, ``.source-group-stats`` is the count badge. The
-  // ``_buildItemRow`` renderer in this file (with the historic
-  // ``.memory-dirs-item`` classes) is dead since #568 (Memory/General
-  // sub-toggle removal) — tracked separately for cleanup.
+  // ``_buildItemRow`` (this file) and ``.memory-dirs-item`` classes are
+  // still used by ``_buildList()`` for Memory Dirs rows. Chunk-progress
+  // in ``mdReindexOne()`` deliberately targets the Sources-tree
+  // ``.source-group-stats`` badge (rendered by
+  // ``app.js:_renderMemoryDirGroup``) instead — the progress slot lives
+  // on the source-group wrapper, not on individual dir-item rows.
   const _item = btn ? btn.closest('.source-group') : null;
   const metaEl = _item ? _item.querySelector('.source-group-stats') : null;
   const _origMeta = metaEl ? metaEl.textContent : '';
