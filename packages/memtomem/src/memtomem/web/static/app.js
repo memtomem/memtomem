@@ -2,6 +2,7 @@
 'use strict';
 
 const API = '';  // same origin
+const HOME_ACTIVITY_TIMELINE_LIMIT = 1000;
 
 // ── Early declarations (referenced before their section) ──
 const _HELP_VISIBLE_KEY = 'm2m-help-visible';
@@ -1525,7 +1526,7 @@ async function loadDashboard() {
       api('GET', '/api/namespaces').catch(() => ({ namespaces: [] })),
       api('GET', '/api/config'),
       api('GET', '/api/embedding-status').catch(() => null),
-      api('GET', '/api/timeline?days=365&limit=1000').catch(() => ({ chunks: [] })),
+      api('GET', `/api/timeline?days=365&limit=${HOME_ACTIVITY_TIMELINE_LIMIT}`).catch(() => ({ chunks: [] })),
       api('GET', '/api/memory-dirs/status').catch(() => ({ dirs: [] })),
     ]);
 
@@ -1576,7 +1577,11 @@ async function loadDashboard() {
     } catch { /* non-critical */ }
 
     // B. Activity Heatmap (GitHub contribution graph)
-    _renderActivityMap(timelineData.chunks || []);
+    const timelineChunks = timelineData.chunks || [];
+    _renderActivityMap(timelineChunks, {
+      isSample: timelineData.has_more === true,
+      sampleLimit: HOME_ACTIVITY_TIMELINE_LIMIT,
+    });
 
     // D. File Type Distribution
     _renderFileTypeChart(allSources, sourceTypeCounts);
@@ -1601,7 +1606,8 @@ async function loadDashboard() {
 }
 
 // B. Activity Heatmap — GitHub contribution graph (1 year)
-function _renderActivityMap(chunks) {
+function _renderActivityMap(chunks, options) {
+  options = options || {};
   const map = qs('home-activity-map');
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -1700,15 +1706,29 @@ function _renderActivityMap(chunks) {
     {},
     'None',
   );
-  const summaryAria = tr(
-    'home.activity.summary_aria',
-    { total: totalCount, active: activeDays, last7: last7Count, date: mostActiveDate, count: mostActiveCount },
-    `${totalCount} chunks across ${activeDays} active days. ${last7Count} chunks in the last 7 days. Most active day: ${mostActiveDate}, ${mostActiveCount} chunks.`,
-  );
+  const isSample = Boolean(options.isSample);
+  const sampleLimit = Number(options.sampleLimit || chunks.length || 0);
+  const summaryAria = isSample
+    ? tr(
+      'home.activity.summary_sample_aria',
+      { limit: sampleLimit, active: activeDays, date: mostActiveDate, count: mostActiveCount },
+      `Activity map is based on the ${sampleLimit} most recent chunks returned by the timeline query. Sample covers ${activeDays} active days. Most active sampled day: ${mostActiveDate}, ${mostActiveCount} chunks.`,
+    )
+    : tr(
+      'home.activity.summary_aria',
+      { total: totalCount, active: activeDays, last7: last7Count, date: mostActiveDate, count: mostActiveCount },
+      `${totalCount} chunks across ${activeDays} active days. ${last7Count} chunks in the last 7 days. Most active day: ${mostActiveDate}, ${mostActiveCount} chunks.`,
+    );
   html += `<div class="activity-summary" aria-label="${escapeAttr(summaryAria)}">`;
-  html += `<span>${escapeHtml(tr('home.activity.summary_last7', { count: last7Count }, `Last 7 days: ${last7Count}`))}</span>`;
-  html += `<span>${escapeHtml(tr('home.activity.summary_active_days', { count: activeDays }, `Active days: ${activeDays}`))}</span>`;
-  html += `<span>${escapeHtml(tr('home.activity.summary_most_active', { date: mostActiveDate, count: mostActiveCount }, `Most active: ${mostActiveDate} (${mostActiveCount})`))}</span>`;
+  if (isSample) {
+    html += `<span>${escapeHtml(tr('home.activity.summary_sample', { count: chunks.length }, `Recent sample: ${chunks.length}`))}</span>`;
+    html += `<span>${escapeHtml(tr('home.activity.summary_sample_active_days', { count: activeDays }, `Sample active days: ${activeDays}`))}</span>`;
+    html += `<span>${escapeHtml(tr('home.activity.summary_sample_most_active', { date: mostActiveDate, count: mostActiveCount }, `Sample most active: ${mostActiveDate} (${mostActiveCount})`))}</span>`;
+  } else {
+    html += `<span>${escapeHtml(tr('home.activity.summary_last7', { count: last7Count }, `Last 7 days: ${last7Count}`))}</span>`;
+    html += `<span>${escapeHtml(tr('home.activity.summary_active_days', { count: activeDays }, `Active days: ${activeDays}`))}</span>`;
+    html += `<span>${escapeHtml(tr('home.activity.summary_most_active', { date: mostActiveDate, count: mostActiveCount }, `Most active: ${mostActiveDate} (${mostActiveCount})`))}</span>`;
+  }
   html += '</div>';
 
   // Month labels row

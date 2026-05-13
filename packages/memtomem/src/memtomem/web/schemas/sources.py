@@ -145,3 +145,4 @@ class StatsResponse(BaseModel):
 class TimelineResponse(BaseModel):
     chunks: list[ChunkOut]
     total: int
+    has_more: bool = False
