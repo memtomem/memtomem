@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Query
 
 from memtomem.privacy import scan as _privacy_scan
 from memtomem.config import TargetScope
-from memtomem.web.deps import get_project_root
+from memtomem.web.routes.context_projects import resolve_scope_root
 
 try:
     import tomllib
@@ -242,7 +242,7 @@ def _error_payload(exc: BaseException, *, shape: str = "total") -> dict:
 
 @router.get("/context/overview")
 async def context_overview(
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description=(

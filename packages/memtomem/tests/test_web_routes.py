@@ -11,7 +11,7 @@ import asyncio
 import unicodedata
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -354,8 +354,56 @@ class TestStats:
         assert isinstance(data["home_sources"], list)
         assert len(data["home_sources"]) == 2
         assert isinstance(data["home_file_type_distribution"], list)
-        assert set(item["file_type"] for item in data["home_file_type_distribution"]) == {"md", "txt"}
+        assert set(item["file_type"] for item in data["home_file_type_distribution"]) == {
+            "md",
+            "txt",
+        }
         assert data["home_total_source_size"] == 6
+
+    async def test_stats_home_aggregates_handle_many_sources(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        source_count = 120
+        source_rows = []
+        base_dt = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        for i in range(source_count):
+            folder = "notes" if i % 2 == 0 else "docs"
+            suffix = ".md" if i % 2 == 0 else ".txt"
+            path = tmp_path / folder / f"doc-{i}{suffix}"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            size = 150 + i
+            path.write_bytes(b"x" * size)
+            source_rows.append(
+                (
+                    path,
+                    1,
+                    (base_dt + timedelta(minutes=i)).isoformat(),
+                    "default",
+                    1,
+                    1,
+                    1,
+                )
+            )
+
+        # Return sources in reverse order to prove aggregation is
+        # independent of storage list ordering and that recent entries
+        # are explicitly sorted by timestamp.
+        app.state.storage.get_source_files_with_counts.return_value = list(reversed(source_rows))
+
+        resp = await client.get("/api/stats")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["home_sources"]) == source_count
+        assert len(data["home_recent_sources"]) == 8
+        # Newest source should be first regardless of input row order.
+        assert data["home_recent_sources"][0]["path"] == str(tmp_path / "docs" / "doc-119.txt")
+
+        dist = {item["file_type"]: item["count"] for item in data["home_file_type_distribution"]}
+        assert dist["md"] == source_count // 2
+        assert dist["txt"] == source_count // 2
+        md_sizes = sum(p.stat().st_size for p in (tmp_path / "notes").glob("*.md"))
+        txt_sizes = sum(p.stat().st_size for p in (tmp_path / "docs").glob("*.txt"))
+        assert data["home_total_source_size"] == (md_sizes + txt_sizes)
 
 
 # ---------------------------------------------------------------------------

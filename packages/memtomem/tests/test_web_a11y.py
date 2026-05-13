@@ -138,8 +138,7 @@ class TestHomeActivityHeatmapA11y:
             "active heatmap dates must remain keyboard-focusable timeline jumps"
         )
         assert 'aria-hidden="true"' in body, (
-            "non-interactive heatmap cells should stay out of the screen-reader "
-            "navigation surface"
+            "non-interactive heatmap cells should stay out of the screen-reader navigation surface"
         )
 
     def test_heatmap_has_orientation_summary_and_legend(self, app_js: str) -> None:

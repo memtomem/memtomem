@@ -39,9 +39,10 @@ async def get_timeline(
     chunks = await storage.recall_chunks(
         since=since,
         source_filter=source,
-        limit=limit,
+        limit=limit + 1,
         namespace_filter=ns_filter,
         project_context_root=project_context_root,
     )
-    out = [chunk_to_out(c) for c in chunks]
-    return TimelineResponse(chunks=out, total=len(out))
+    has_more = len(chunks) > limit
+    out = [chunk_to_out(c) for c in chunks[:limit]]
+    return TimelineResponse(chunks=out, total=len(out), has_more=has_more)

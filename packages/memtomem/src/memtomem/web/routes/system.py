@@ -1048,12 +1048,18 @@ async def get_stats(storage=Depends(get_storage), config=Depends(get_config)) ->
         for k, v in sorted(file_type_counts.items(), key=lambda item: item[1], reverse=True)
     ]
     total_source_size = sum((s.file_size or 0) for s in all_sources)
+    recent_sources = sorted(
+        all_sources,
+        key=lambda s: s.last_indexed_at or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
 
     return StatsResponse(
         total_chunks=data.get("total_chunks", 0),
         total_sources=data.get("total_sources", 0),
         chunk_size_distribution=distribution,
         home_sources=all_sources,
+        home_recent_sources=recent_sources[:8],
         home_total_source_size=total_source_size,
         home_file_type_distribution=file_type_distribution,
     )

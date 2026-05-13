@@ -119,11 +119,11 @@ def _stub_list_and_detail(page, kind: str, detail: dict) -> None:
             body=json.dumps(detail),
         )
 
-    page.route("**/api/context/projects", _projects_handler)
+    page.route("**/api/context/projects**", _projects_handler)
     # ``page.route`` resolves last-registered-first-matched, so the broad
     # list glob goes FIRST and the narrower detail glob goes LAST. This
     # is the same pattern test_context_gateway_lists.py uses.
-    page.route(f"**/api/context/{kind}", _list_handler)
+    page.route(f"**/api/context/{kind}**", _list_handler)
     page.route(f"**/api/context/{kind}/{detail['name']}**", _detail_handler)
 
 
