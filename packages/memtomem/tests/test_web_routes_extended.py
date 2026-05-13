@@ -407,6 +407,30 @@ class TestTimeline:
         data = resp.json()
         assert data["total"] == 0
         assert data["chunks"] == []
+        assert data["has_more"] is False
+
+    async def test_timeline_exact_limit_is_not_truncated(self, app, client: AsyncClient):
+        app.state.storage.recall_chunks.return_value = [
+            _make_test_chunk(uuid.uuid4(), content=f"chunk {idx}") for idx in range(3)
+        ]
+        resp = await client.get("/api/timeline", params={"limit": 3})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 3
+        assert len(data["chunks"]) == 3
+        assert data["has_more"] is False
+        assert app.state.storage.recall_chunks.await_args.kwargs["limit"] == 4
+
+    async def test_timeline_reports_has_more_when_extra_row_exists(self, app, client: AsyncClient):
+        app.state.storage.recall_chunks.return_value = [
+            _make_test_chunk(uuid.uuid4(), content=f"chunk {idx}") for idx in range(4)
+        ]
+        resp = await client.get("/api/timeline", params={"limit": 3})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 3
+        assert len(data["chunks"]) == 3
+        assert data["has_more"] is True
 
 
 # ---------------------------------------------------------------------------
