@@ -5,6 +5,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-05-13
+
+Patch release focused on Web UI stability and release polish after
+0.2.0.
+
+- **Context Gateway project switching is safer.** Adds the Gateway
+  project switcher and fixes stale-response / draft-isolation races
+  around scoped project changes, Hooks sync, and project-normalized
+  requested scope handling.
+- **Home and Sources views are more reliable.** Fixes Home dashboard
+  aggregate counts across visible sources, mobile overflow, pinned
+  chunk navigation, sampled activity heatmap labeling, source-tree
+  navigation, namespace chart actions, and search-filter removal UX.
+- **Runtime reranker settings stay in sync.** Fixes runtime reranker
+  config synchronization and async hot-reload lazy loading.
+- **Add Project and Web copy polish.** Fixes Add Project picker
+  discovery scope, localizes Home dashboard states, clarifies Home
+  quick-action flow, updates Web docs/comments, and embeds the README
+  hero GIF.
+
 ## [0.2.0] — 2026-05-13
 
 The 0.2.0 release closes the **ADR-0011 memory scope axis** epic
