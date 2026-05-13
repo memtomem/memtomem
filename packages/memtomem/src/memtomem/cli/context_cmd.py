@@ -88,7 +88,7 @@ from memtomem.context.skills import (
 )
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.wiki.store import WikiNotFoundError, WikiStore
-from typing import Any, cast, get_args
+from typing import Any, get_args
 
 from memtomem.config import (
     ContextGatewayConfig,
@@ -1986,8 +1986,8 @@ def _print_migrate_scope_result(result: MigrateScopeResult, *, apply_: bool) -> 
 
 def _migrate_memory_dispatch(
     operand: str | None,
-    from_scope: TargetScope | None,
-    to_scope: TargetScope | None,
+    from_scope: str | None,
+    to_scope: str | None,
     apply_: bool,
     force: bool,
     yes: bool,
@@ -2015,10 +2015,6 @@ def _migrate_memory_dispatch(
     if from_scope == to_scope:
         raise click.ClickException("--from and --to must differ.")
 
-    # Narrow to literal scope types after validating required values.
-    from_scope_t = cast(TargetScope, from_scope)
-    to_scope_t = cast(TargetScope, to_scope)
-
     source = Path(operand).expanduser()
     if not source.exists():
         raise click.ClickException(f"source path does not exist: {source}")
@@ -2031,8 +2027,8 @@ def _migrate_memory_dispatch(
     asyncio.run(
         _memory_migrate_run(
             [source_resolved],
-            from_scope_t,
-            to_scope_t,
+            from_scope,
+            to_scope,
             apply_,
             yes,
             confirm_project_shared,
@@ -2159,14 +2155,10 @@ def migrate_cmd(
 
     # ── PR-E4 scope-mode dispatch ────────────────────────────────────
     if asset_type == "memory":
-        if from_scope is None or to_scope is None:
-            raise click.UsageError("--from and --to are both required for kind=memory")
-        from_scope_t = cast(TargetScope, from_scope)
-        to_scope_t = cast(TargetScope, to_scope)
         _migrate_memory_dispatch(
             name,
-            from_scope_t,
-            to_scope_t,
+            from_scope,
+            to_scope,
             apply_,
             force,
             yes,
@@ -2682,8 +2674,8 @@ def _is_within(path: Path, project_root: Path) -> bool:
 )
 def memory_migrate_cmd(
     source: str,
-    from_scope: TargetScope,
-    to_scope: TargetScope,
+    from_scope: str,
+    to_scope: str,
     apply_: bool,
     yes: bool,
     confirm_project_shared: bool,
@@ -2755,15 +2747,15 @@ def _resolve_memory_migrate_sources(source_arg: str) -> list[Path]:
 
 async def _memory_migrate_run(
     sources: list[Path],
-    from_scope: TargetScope,
-    to_scope: TargetScope,
+    from_scope: str,
+    to_scope: str,
     apply_: bool,
     yes: bool,
     confirm_project_shared: bool,
     *,
     stdout_buf: list[str] | None = None,
     stderr_buf: list[str] | None = None,
-    ) -> None:
+) -> None:
     """Apply or dry-run a memory-migrate plan over the resolved sources.
 
     ``stdout_buf`` / ``stderr_buf``: when provided, every plan/summary/

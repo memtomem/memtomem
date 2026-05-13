@@ -12,8 +12,6 @@ from urllib.parse import urlparse
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from httpx import AsyncClient
-
     from memtomem.config import WebhookConfig
 
 logger = logging.getLogger(__name__)
@@ -51,7 +49,7 @@ class WebhookManager:
 
     def __init__(self, config: WebhookConfig):
         self._config = config
-        self._client: AsyncClient | None = None
+        self._client = None
         self._pending_tasks: set[asyncio.Task] = set()
         if config.url:
             err = _validate_webhook_url(config.url)
@@ -65,7 +63,7 @@ class WebhookManager:
                     timeout_seconds=config.timeout_seconds,
                 )
 
-    def _get_client(self) -> AsyncClient:
+    def _get_client(self):
         if self._client is None:
             import httpx
 

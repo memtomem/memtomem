@@ -12,7 +12,7 @@ from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, TypedDict
 
 import pathspec
 
@@ -36,7 +36,6 @@ if TYPE_CHECKING:
     from memtomem.embedding.base import EmbeddingProvider
     from memtomem.llm.base import LLMProvider
     from memtomem.storage.base import StorageBackend
-    from memtomem.storage.sqlite_backend import SqliteBackend
 
 logger = logging.getLogger(__name__)
 
@@ -922,9 +921,7 @@ class IndexEngine:
         # current chunks to remain stable when only some changed.
         from memtomem.indexing.summarizer import maybe_update_ai_summary
 
-        await maybe_update_ai_summary(
-            cast("SqliteBackend", self._storage), self._llm, file_path, new_chunks, self._config
-        )
+        await maybe_update_ai_summary(self._storage, self._llm, file_path, new_chunks, self._config)
 
         return {
             "total": len(new_chunks),

@@ -19,7 +19,6 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -66,7 +65,6 @@ from memtomem.web.schemas.config import (
     EmbeddingResetResponse,
     EmbeddingStatusResponse,
     ModelComponent,
-    ModelComponentState,
     ModelReadinessResponse,
     PrivacyPatternEntry,
     PrivacyPatternsResponse,
@@ -181,7 +179,7 @@ async def get_session(request: Request) -> dict[str, str]:
 
 
 @router.get("/health")
-async def health(storage: Any = Depends(get_storage), embedder: Any = Depends(get_embedder)) -> dict[str, Any] | JSONResponse:
+async def health(storage=Depends(get_storage), embedder=Depends(get_embedder)):
     checks: dict[str, str] = {}
     try:
         await storage.get_stats()
@@ -969,7 +967,7 @@ def _component_for(
         # A lazy loader can keep a stale ``_load_error`` from an earlier
         # failed attempt even after a later search successfully constructs
         # the model. Loaded-in-memory is the authoritative terminal state.
-        state: ModelComponentState = "ready"
+        state = "ready"
         load_error = None
     elif load_error:
         state = "error"

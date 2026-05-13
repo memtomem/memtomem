@@ -11,7 +11,7 @@ import json
 
 import click
 
-from croniter import croniter  # type: ignore[import-untyped]
+from croniter import croniter
 
 from memtomem.scheduler.jobs import JOB_KINDS
 

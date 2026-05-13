@@ -17,7 +17,7 @@ import asyncio
 import json
 import logging
 
-from croniter import croniter  # type: ignore[import-untyped]
+from croniter import croniter
 
 from memtomem.scheduler.jobs import JOB_KINDS
 from memtomem.server import mcp

@@ -6,8 +6,6 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from httpx import AsyncClient
-
     from memtomem.config import RerankConfig
     from memtomem.models import SearchResult
 
@@ -19,9 +17,9 @@ class CohereReranker:
 
     def __init__(self, config: RerankConfig):
         self._config = config
-        self._client: AsyncClient | None = None
+        self._client = None
 
-    def _get_client(self) -> AsyncClient:
+    def _get_client(self):
         if self._client is None:
             import httpx
 
