@@ -517,7 +517,9 @@ _renderNsChart = function(namespaces) {
     return;
   }
 
-  const sorted = [...namespaces].sort((a, b) => b.chunk_count - a.chunk_count).slice(0, 8);
+  const allSorted = [...namespaces].sort((a, b) => b.chunk_count - a.chunk_count);
+  const sorted = allSorted.slice(0, 6);
+  const hiddenCount = Math.max(0, allSorted.length - sorted.length);
   const total = sorted.reduce((s, ns) => s + ns.chunk_count, 0);
   const palette = ['#6c8fff', '#4caf7d', '#e0a800', '#a29bfe', '#e17055', '#00cec9', '#fd79a8', '#636e72'];
 
@@ -543,6 +545,9 @@ _renderNsChart = function(namespaces) {
     .attr('fill', (d, i) => d.data.color || palette[i % palette.length])
     .attr('stroke', 'var(--surface)')
     .attr('stroke-width', 2)
+    .attr('tabindex', 0)
+    .attr('role', 'button')
+    .attr('aria-label', d => _homeNsActionLabel(d.data.namespace, d.data.chunk_count))
     .style('cursor', 'pointer')
     .on('mouseover', function(event, d) {
       d3.select(this).attr('opacity', 0.8);
@@ -554,6 +559,12 @@ _renderNsChart = function(namespaces) {
     })
     .on('click', (event, d) => {
       navigateToSourcesByNs(d.data.namespace);
+    })
+    .on('keydown', (event, d) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        navigateToSourcesByNs(d.data.namespace);
+      }
     });
 
   const centerText = g.append('text')
@@ -565,9 +576,26 @@ _renderNsChart = function(namespaces) {
   legend.className = 'ns-legend-row';
   legend.innerHTML = sorted.map((ns, i) => {
     const c = ns.color || palette[i % palette.length];
-    return `<span class="ns-legend-item"><span class="ns-legend-dot" style="background:${c}"></span>${escapeHtml(truncate(ns.namespace, 18))} ${ns.chunk_count}</span>`;
-  }).join('');
+    const nsName = String(ns.namespace || '');
+    const nsAttr = escapeAttr(nsName);
+    const label = escapeHtml(_formatHomeNsLabel(nsName));
+    const actionLabel = escapeAttr(_homeNsActionLabel(nsName, ns.chunk_count));
+    return `<div class="ns-legend-item">
+      <button class="ns-legend-action" type="button" data-home-ns="${nsAttr}" aria-label="${actionLabel}">
+        <span class="ns-legend-dot" style="background:${c}"></span>
+        <span class="ns-legend-label" title="${nsAttr}">${label}</span>
+        <span class="ns-legend-count">${ns.chunk_count.toLocaleString()}</span>
+      </button>
+      <details class="home-ns-detail ns-legend-detail">
+        <summary aria-label="Show full namespace ${nsAttr}">Full</summary>
+        <span>${escapeHtml(nsName)}</span>
+      </details>
+    </div>`;
+  }).join('') + (hiddenCount
+    ? `<button class="home-ns-more" type="button" data-home-ns-more="true">+ ${hiddenCount.toLocaleString()} more in Namespaces</button>`
+    : '');
   chart.appendChild(legend);
+  _bindHomeNsChartActions(chart);
 };
 
 // ═══════════════════════════════════════════════════════════════════════════

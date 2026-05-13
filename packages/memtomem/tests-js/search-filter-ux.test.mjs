@@ -151,3 +151,35 @@ describe('Search namespace filter list', () => {
     ]);
   });
 });
+
+describe('Home namespace summary chart', () => {
+  it('makes long namespaces identifiable and actionable', async () => {
+    const dom = await bootApp({ scripts: ['i18n.js', 'app.js'] });
+    const { window } = dom;
+    const { document } = window;
+
+    const longNs = 'claude:-Users-pdstudio-Work-agent-harness-memtomem';
+    window._renderNsChart([
+      { namespace: longNs, chunk_count: 42 },
+      { namespace: 'work', chunk_count: 12 },
+      { namespace: 'default', chunk_count: 8 },
+      { namespace: 'codex:-Users-pdstudio-Work-other-project', chunk_count: 7 },
+      { namespace: 'notes', chunk_count: 6 },
+      { namespace: 'archive', chunk_count: 5 },
+      { namespace: 'hidden', chunk_count: 4 },
+    ]);
+
+    const chart = document.getElementById('home-ns-chart');
+    const firstAction = chart.querySelector('[data-home-ns]');
+    expect(firstAction.textContent).toContain('claude: .../harness/memtomem');
+    expect(firstAction.getAttribute('aria-label')).toContain(longNs);
+    expect(firstAction.getAttribute('aria-label')).toContain('42 chunks');
+    expect(chart.querySelector('.home-ns-detail span').textContent).toBe(longNs);
+    expect(chart.querySelector('.home-ns-more').textContent).toContain('+ 1 more');
+
+    firstAction.click();
+
+    expect(window.STATE.sourcesNsFilter).toBe(longNs);
+    expect(document.querySelector('.tab-btn[data-tab="sources"]').classList.contains('active')).toBe(true);
+  });
+});
