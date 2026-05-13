@@ -785,6 +785,15 @@ from `~/.claude/projects/`. These project roots populate `project_shared`
 and `project_local` tier entries; the `user` tier (per ADR-0011 §1) is a
 separate axis gated by `USER_TIER_ENABLED` below.
 
+When an artifact row is `Not yet imported`, the Web Context Gateway shows a
+scope-aware remediation block. `project_shared` can be bootstrapped with the
+web Import action or with `mm context init --include=agents,commands,skills
+--scope project_shared --confirm-project-shared` followed by `mm context sync
+--include=agents,commands,skills --scope project_shared`. The `user` tier is
+read-only in the Web UI, so use the matching `--scope user` CLI flow. The
+`project_local` tier is a gitignored draft tier; use `--scope project_local`
+to seed drafts, and expect sync to report the no-runtime-fan-out skip.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEMTOMEM_CONTEXT_GATEWAY__KNOWN_PROJECTS_PATH` | `~/.memtomem/known_projects.json` | Where the Web UI persists "Add Project" registrations. The Sources, Skills, Custom Commands, and Subagents tabs render one collapsible group per registered project root. |

@@ -1274,6 +1274,55 @@ function _ctxScopeCount(scope, type) {
   return (scope.counts && scope.counts[type]) || 0;
 }
 
+function _ctxMissingCanonicalCommands(scope) {
+  const base = 'mm context';
+  const include = '--include=agents,commands,skills';
+  if (scope === 'project_shared') {
+    return [
+      `${base} init ${include} --scope project_shared --confirm-project-shared`,
+      `${base} sync ${include} --scope project_shared`,
+    ];
+  }
+  if (scope === 'project_local') {
+    return [
+      `${base} init ${include} --scope project_local`,
+      `${base} sync ${include} --scope project_local`,
+    ];
+  }
+  return [
+    `${base} init ${include} --scope user`,
+    `${base} sync ${include} --scope user`,
+  ];
+}
+
+function _ctxMissingCanonicalRemediationHtml(type, count, scannedDirs) {
+  const scanList = (scannedDirs || []).join(', ') || `.${type}/`;
+  const scope = _ctxTargetScope === 'user' || _ctxTargetScope === 'project_local'
+    ? _ctxTargetScope
+    : 'project_shared';
+  const scopeForKey = scope === 'project_shared'
+    ? 'project_shared'
+    : (scope === 'project_local' ? 'project_local' : 'user');
+  const title = t(`settings.ctx.missing_canonical_${scopeForKey}_title`);
+  const body = t(`settings.ctx.missing_canonical_${scopeForKey}_body`)
+    .replace('{count}', count)
+    .replace(/\{type\}/g, type)
+    .replace('{scan_dirs}', scanList);
+  const commands = _ctxMissingCanonicalCommands(scope)
+    .map(cmd => `<code>${escapeHtml(cmd)}</code>`)
+    .join('');
+  return `<div class="ctx-runtime-only-banner ctx-missing-canonical-remediation" data-tier="${escapeHtml(scope)}">
+      <div class="ctx-missing-canonical-title">${escapeHtml(title)}</div>
+      <div class="ctx-missing-canonical-body">${escapeHtml(body)}</div>
+      <div class="ctx-missing-canonical-commands">${commands}</div>
+    </div>`;
+}
+
+function _ctxItemMissingCanonical(item) {
+  if (!item.canonical_path) return true;
+  return (item.runtimes || []).some(r => _ctxStatusBucket(r.status) === 'missing_canonical');
+}
+
 function _ctxRenderItemsHtml(items, type, projectRoot, scannedDirs, { clickable }) {
   if (!items.length) {
     // Branch the hint on the active tier (#956): user canonical lives at
@@ -1452,15 +1501,15 @@ function _ctxRefreshSectionState(type, cwdItems, scannedDirs) {
   if (!listEl) return;
   const existing = listEl.querySelector('.ctx-runtime-only-banner');
   if (existing) existing.remove();
-  if (canonicalCount === 0 && cwdItems.length > 0) {
-    const scanList = (scannedDirs || []).join(', ') || `.${type}/`;
-    const msg = t('settings.ctx.runtime_only_banner')
-      .replace('{count}', cwdItems.length)
-      .replace(/\{type\}/g, type)
-      .replace('{scan_dirs}', scanList);
+  const missingCanonicalCount = cwdItems.filter(_ctxItemMissingCanonical).length;
+  if (missingCanonicalCount > 0) {
     const banner = document.createElement('div');
-    banner.className = 'ctx-runtime-only-banner';
-    banner.textContent = msg;
+    banner.innerHTML = _ctxMissingCanonicalRemediationHtml(
+      type,
+      missingCanonicalCount,
+      scannedDirs,
+    );
+    const remediation = banner.firstElementChild;
     // Keep the tier-aware read-only banner (#943) at the very top of
     // the list — its copy explains *why* the Import button below is
     // dim, so a runtime-only "Click Import to canonicalize" prompt
@@ -1469,7 +1518,7 @@ function _ctxRefreshSectionState(type, cwdItems, scannedDirs) {
     // otherwise fall back to the legacy first-child position.
     const writeBlocked = listEl.querySelector('.ctx-write-blocked-banner');
     const anchor = writeBlocked ? writeBlocked.nextSibling : listEl.firstChild;
-    listEl.insertBefore(banner, anchor);
+    listEl.insertBefore(remediation, anchor);
   }
 }
 

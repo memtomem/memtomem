@@ -3714,6 +3714,30 @@ body.help-hidden #help-toggle { opacity: 0.5; }
   color: var(--text);
   border-radius: 2px;
 }
+.ctx-missing-canonical-remediation {
+  display: grid;
+  gap: 6px;
+}
+.ctx-missing-canonical-title {
+  font-weight: 700;
+  font-size: 0.88rem;
+}
+.ctx-missing-canonical-body {
+  line-height: 1.45;
+}
+.ctx-missing-canonical-commands {
+  display: grid;
+  gap: 4px;
+}
+.ctx-missing-canonical-commands code {
+  display: block;
+  padding: 5px 7px;
+  overflow-x: auto;
+  white-space: nowrap;
+  border-radius: 3px;
+  background: var(--code-bg);
+  color: var(--text);
+}
 
 /* ADR-0009 §3 deep-link state. Banner sits above the scope groups when
    a ``?filter=`` or ``?artifact=`` query param has narrowed the visible

@@ -1451,6 +1451,7 @@ async function loadStats() {
 window.addEventListener('langchange', () => {
   if (typeof I18N !== 'undefined') I18N.applyDOM();
   loadStats();
+  if (qs('tab-home') && !qs('tab-home').hidden) loadDashboard();
 });
 loadStats();
 checkEmbeddingMismatch();
@@ -1517,7 +1518,48 @@ async function checkEmbeddingMismatch() {
 // Home Dashboard (D3)
 // ---------------------------------------------------------------------------
 
+function _homeInlineState(key, tone = 'muted') {
+  const color = tone === 'danger' ? 'var(--danger)' : 'var(--muted)';
+  return `<span style="color:${color};font-size:0.78rem">${escapeHtml(t(key))}</span>`;
+}
+
+function _setHomeStatPlaceholders() {
+  ['home-chunks', 'home-sources', 'home-namespaces', 'home-total-size', 'home-sessions', 'home-scratch']
+    .forEach(id => {
+      const el = qs(id);
+      if (el) el.textContent = '—';
+    });
+}
+
+function _setHomeDashboardLoading() {
+  _setHomeStatPlaceholders();
+  ['home-activity-map', 'home-type-chart', 'home-ns-chart', 'home-chunk-dist', 'home-recent-list', 'home-health-info']
+    .forEach(id => {
+      const el = qs(id);
+      if (el) {
+        el.innerHTML = `<div class="loading-panel" aria-label="${escapeAttr(t('home.state.loading'))}"><div class="spinner-panel"></div></div>`;
+      }
+    });
+  renderPinnedSection();
+}
+
+function _renderHomeDashboardError(err) {
+  _setHomeStatPlaceholders();
+  const detail = err && err.message ? escapeHtml(err.message) : '';
+  ['home-activity-map', 'home-type-chart', 'home-ns-chart', 'home-chunk-dist', 'home-health-info']
+    .forEach(id => {
+      const el = qs(id);
+      if (el) el.innerHTML = _homeInlineState('home.state.load_failed', 'danger');
+    });
+  const recentList = qs('home-recent-list');
+  if (recentList) {
+    recentList.innerHTML = emptyState('⚠', t('home.state.load_failed'), detail);
+  }
+  renderPinnedSection();
+}
+
 async function loadDashboard() {
+  _setHomeDashboardLoading();
   try {
     // /api/sessions and /api/scratch are dev-only — gated below. The
     // namespaces list endpoint is prod-mounted via namespaces_read so
@@ -1602,7 +1644,7 @@ async function loadDashboard() {
     // Pinned chunks
     renderPinnedSection();
   } catch (err) {
-    qs('home-recent-list').innerHTML = `<p style="color:var(--danger);font-size:.83rem">Error: ${escapeHtml(err.message)}</p>`;
+    _renderHomeDashboardError(err);
   }
 }
 
@@ -1842,7 +1884,7 @@ function _renderFileTypeChart(sources, distribution = null) {
   const max = sorted[0]?.[1] || 1;
 
   if (!sorted.length) {
-    chart.innerHTML = '<span style="color:var(--muted);font-size:0.78rem">No files indexed</span>';
+    chart.innerHTML = _homeInlineState('home.state.no_files_indexed');
     return;
   }
 
@@ -1861,7 +1903,7 @@ function _renderFileTypeChart(sources, distribution = null) {
 function _renderChunkDist(distribution) {
   const chart = qs('home-chunk-dist');
   if (!distribution.length) {
-    chart.innerHTML = '<span style="color:var(--muted);font-size:0.78rem">No data</span>';
+    chart.innerHTML = _homeInlineState('home.state.no_data');
     return;
   }
   const total = distribution.reduce((s, d) => s + d.count, 0);
@@ -1917,7 +1959,7 @@ function _bindHomeNsChartActions(chart) {
 function _renderNsChart(namespaces) {
   const chart = qs('home-ns-chart');
   if (!namespaces.length) {
-    chart.innerHTML = '<span style="color:var(--muted);font-size:0.78rem">No namespaces</span>';
+    chart.innerHTML = _homeInlineState('home.state.no_namespaces');
     return;
   }
 
@@ -1958,7 +2000,7 @@ function _renderNsChart(namespaces) {
 function _renderHomeRecent(allSources) {
   const recentList = qs('home-recent-list');
   if (!allSources.length) {
-    recentList.innerHTML = emptyState('📁', 'No sources indexed yet', 'Add files from the Index tab');
+    recentList.innerHTML = emptyState('📁', t('home.state.no_sources_title'), t('home.state.no_sources_hint'));
     return;
   }
 
@@ -1982,7 +2024,7 @@ function _renderHomeRecent(allSources) {
           <span class="home-source-dot" style="background:${fileTypeColor(s.path)}"></span>
           <span class="home-source-name">${escapeHtml(name)}</span>
           ${nsBadges}
-          <span class="badge badge-blue">${s.chunk_count} chunks</span>
+          <span class="badge badge-blue">${escapeHtml(t(s.chunk_count === 1 ? 'home.source_chunks_one' : 'home.source_chunks_other', { count: s.chunk_count }))}</span>
         </div>
         <div class="home-source-row2">
           ${size}${size && age ? ' \u00b7 ' : ''}${age}
@@ -2005,31 +2047,36 @@ function _renderStorageHealth(config, sources, embStatus) {
   const lastIndexed = sources
     .filter(s => s.last_indexed_at)
     .sort((a, b) => new Date(b.last_indexed_at).getTime() - new Date(a.last_indexed_at).getTime())[0];
-  const lastTime = lastIndexed ? relativeTime(lastIndexed.last_indexed_at) : 'Never';
+  const lastTime = lastIndexed ? relativeTime(lastIndexed.last_indexed_at) : t('home.health.never');
 
   // Use DB-stored embedding values when available, fall back to config
   const stored = embStatus && embStatus.stored;
-  const embProvider = stored ? stored.provider : config.embedding.provider;
-  const embModel = stored ? stored.model : config.embedding.model;
-  const embDim = stored ? stored.dimension : config.embedding.dimension;
+  const embProvider = stored ? stored.provider : config?.embedding?.provider;
+  const embModel = stored ? stored.model : config?.embedding?.model;
+  const embDim = stored ? stored.dimension : config?.embedding?.dimension;
+  const storageBackend = config?.storage?.backend || t('home.health.unknown');
   const hasMismatch = embStatus && embStatus.has_mismatch;
   const warnIcon = hasMismatch ? ' ⚠' : '';
+  const embText = embProvider && embModel
+    ? `${embProvider}/${embModel}`
+    : t('home.health.unknown');
+  const dimText = embDim || t('home.health.unknown');
 
   info.innerHTML = `
     <div class="home-health-item">
-      <span class="home-health-label">Embedding</span>
-      <span class="home-health-value">${escapeHtml(embProvider)}/${escapeHtml(embModel)}${warnIcon}</span>
+      <span class="home-health-label">${escapeHtml(t('home.health.embedding'))}</span>
+      <span class="home-health-value">${escapeHtml(embText)}${warnIcon}</span>
     </div>
     <div class="home-health-item">
-      <span class="home-health-label">Dimension</span>
-      <span class="home-health-value">${embDim}${warnIcon}</span>
+      <span class="home-health-label">${escapeHtml(t('home.health.dimension'))}</span>
+      <span class="home-health-value">${escapeHtml(String(dimText))}${warnIcon}</span>
     </div>
     <div class="home-health-item">
-      <span class="home-health-label">Storage</span>
-      <span class="home-health-value">${escapeHtml(config.storage.backend)}</span>
+      <span class="home-health-label">${escapeHtml(t('home.health.storage'))}</span>
+      <span class="home-health-value">${escapeHtml(storageBackend)}</span>
     </div>
     <div class="home-health-item">
-      <span class="home-health-label">Last Indexed</span>
+      <span class="home-health-label">${escapeHtml(t('home.health.last_indexed'))}</span>
       <span class="home-health-value">${escapeHtml(lastTime)}</span>
     </div>
   `;
@@ -6137,17 +6184,22 @@ function updatePinBtn(chunkId) {
 function renderPinnedSection() {
   const list = qs('home-pinned-list');
   if (!list) return;
-  const store = _getPinStore();
+  let store = {};
+  try { store = _getPinStore(); }
+  catch (err) {
+    list.innerHTML = emptyState('⚠', t('home.state.load_failed'), err.message || '');
+    return;
+  }
   const items = Object.entries(store);
   if (!items.length) {
-    list.innerHTML = '<div class="empty-state" style="height:50px"><span>No pinned chunks yet — click ☆ Pin in the detail panel</span></div>';
+    list.innerHTML = `<div class="empty-state" style="height:50px"><span>${escapeHtml(t('home.state.no_pinned'))}</span></div>`;
     return;
   }
   list.innerHTML = items.map(([id, p]) => `
     <div class="home-source-item">
-      <span class="home-source-name">${escapeHtml(p.source || 'unknown')}</span>
+      <span class="home-source-name">${escapeHtml(p.source || t('home.health.unknown'))}</span>
       <span class="home-pinned-snippet">${escapeHtml(truncate(p.snippet || '', 50))}</span>
-      <button class="unpin-btn btn-ghost btn-xs" data-id="${escapeAttr(id)}" title="Unpin">✕</button>
+      <button class="unpin-btn btn-ghost btn-xs" data-id="${escapeAttr(id)}" title="${escapeAttr(t('home.pin.unpin_title'))}">✕</button>
     </div>`).join('');
   list.querySelectorAll('.unpin-btn').forEach(b => {
     b.addEventListener('click', e => {
