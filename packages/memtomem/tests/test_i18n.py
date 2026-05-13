@@ -347,6 +347,72 @@ class TestNoHardcodedStrings:
             "index.html elements named in #698 missing required i18n bindings:\n" + "\n".join(bad)
         )
 
+    def test_issue_990_home_strings_are_localized(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """Home dashboard JS-owned empty/error/health strings must use i18n.
+
+        These strings are not reached by ``data-i18n`` because ``app.js``
+        writes them via ``innerHTML`` after API calls complete.
+        """
+        required = {
+            "home.state.loading",
+            "home.state.load_failed",
+            "home.state.no_files_indexed",
+            "home.state.no_data",
+            "home.state.no_namespaces",
+            "home.state.no_sources_title",
+            "home.state.no_sources_hint",
+            "home.state.no_pinned",
+            "home.source_chunks_one",
+            "home.source_chunks_other",
+            "home.health.embedding",
+            "home.health.dimension",
+            "home.health.storage",
+            "home.health.last_indexed",
+            "home.health.never",
+            "home.health.unknown",
+            "home.pin.unpin_title",
+        }
+        assert not (required - set(en)), f"#990 keys missing from en.json: {sorted(required - set(en))}"
+        assert not (required - set(ko)), f"#990 keys missing from ko.json: {sorted(required - set(ko))}"
+
+        app = (_STATIC_JS_DIR / "app.js").read_text(encoding="utf-8")
+        home_start = app.index("// Home Dashboard (D3)")
+        home_end = app.index("// C. Quick Search from Home", home_start)
+        home_js = app[home_start:home_end]
+        for key in required:
+            assert f"t('{key}" in app or f'"{key}"' in app or f"'{key}'" in app, (
+                f"#990 key {key!r} is present in locales but not wired in app.js"
+            )
+
+        forbidden = [
+            "No files indexed",
+            "No data",
+            "No namespaces",
+            "No sources indexed yet",
+            "Add files from the Index tab",
+            "No pinned chunks yet",
+            ">Embedding<",
+            ">Dimension<",
+            ">Storage<",
+            ">Last Indexed<",
+            "'Never'",
+            '"Never"',
+            " chunks</span>",
+        ]
+        bad = [literal for literal in forbidden if literal in home_js]
+        assert not bad, "#990 Home literals reintroduced in app.js: " + ", ".join(bad)
+
+    def test_issue_990_home_sources_fallback_is_not_mojibake(self) -> None:
+        html = (_STATIC_JS_DIR / "index.html").read_text(encoding="utf-8")
+        tag_re = re.compile(r'<div[^>]*\bid="home-sources"[^>]*>(.*?)</div>')
+        match = tag_re.search(html)
+        assert match, "id='home-sources' missing from index.html"
+        fallback = match.group(1)
+        assert "�" not in fallback, "home-sources fallback must not contain mojibake"
+        assert fallback == "—", f"home-sources fallback should be an em dash, got {fallback!r}"
+
     def test_issue_775_settings_badge_keys_present(
         self, en: dict[str, str], ko: dict[str, str]
     ) -> None:
