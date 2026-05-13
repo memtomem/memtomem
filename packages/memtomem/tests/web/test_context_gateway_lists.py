@@ -141,14 +141,14 @@ _DIFF_RUNTIME_ONLY = {
 
 def _stub_projects(page, payload):
     page.route(
-        "**/api/context/projects",
+        "**/api/context/projects**",
         lambda r: r.fulfill(status=200, content_type="application/json", body=json.dumps(payload)),
     )
 
 
 def _stub_skills(page, payload):
     page.route(
-        "**/api/context/skills",
+        "**/api/context/skills**",
         lambda r: r.fulfill(status=200, content_type="application/json", body=json.dumps(payload)),
     )
 
@@ -379,7 +379,7 @@ def test_q_pr4_langchange_rerenders_runtime_only_banner(page, mm_web_url: str) -
     """
     install_default_stubs(page)
     # Single cwd-only scope with a runtime-only item triggers the banner.
-    _stub_projects(
+    _stub_projects_wide(
         page,
         {
             "scopes": [
@@ -396,7 +396,7 @@ def test_q_pr4_langchange_rerenders_runtime_only_banner(page, mm_web_url: str) -
             ],
         },
     )
-    _stub_skills(page, _CWD_SKILLS_RUNTIME_ONLY)
+    _stub_skills_wide(page, _CWD_SKILLS_RUNTIME_ONLY)
     page.goto(mm_web_url)
     _open_skills_list(page)
 
@@ -616,7 +616,7 @@ def test_q_pr4_langchange_preserves_mtime_for_dirty_buffer(page, mm_web_url: str
         body = json.dumps(initial_resp if idx == 0 else refreshed_resp)
         route.fulfill(status=200, content_type="application/json", body=body)
 
-    page.route("**/api/context/skills/demo-skill", _detail_handler)
+    page.route("**/api/context/skills/demo-skill**", _detail_handler)
     page.goto(mm_web_url)
     _open_skills_list(page)
     page.wait_for_function(
@@ -699,7 +699,7 @@ def test_q_pr4_rapid_toggle_preserves_edit_buffer(page, mm_web_url: str) -> None
     _stub_projects(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
     _stub_skills(page, _CWD_SKILLS_ITEMS)
     page.route(
-        "**/api/context/skills/demo-skill",
+        "**/api/context/skills/demo-skill**",
         lambda r: r.fulfill(
             status=200,
             content_type="application/json",
@@ -805,7 +805,7 @@ def test_q_pr4_langchange_rerenders_dropped_chips_in_diff_pane(page, mm_web_url:
         ),
     )
     page.route(
-        "**/api/context/skills/demo-skill/diff",
+        "**/api/context/skills/demo-skill/diff**",
         lambda r: r.fulfill(
             status=200, content_type="application/json", body=json.dumps(_DIFF_WITH_DROPPED)
         ),
@@ -867,7 +867,7 @@ def test_q_pr4_langchange_rerenders_runtime_only_detail(page, mm_web_url: str) -
     ``런타임 미리보기 — 아직 .memtomem/ 에 없습니다.``
     """
     install_default_stubs(page)
-    _stub_projects(
+    _stub_projects_wide(
         page,
         {
             "scopes": [
@@ -884,12 +884,12 @@ def test_q_pr4_langchange_rerenders_runtime_only_detail(page, mm_web_url: str) -
             ]
         },
     )
-    _stub_skills(page, _CWD_SKILLS_RUNTIME_ONLY)
+    _stub_skills_wide(page, _CWD_SKILLS_RUNTIME_ONLY)
     # Canonical GET 404s for runtime-only — match what the real backend
     # does so a future regression that drops the runtimeOnly flag and
     # falls into loadCtxDetail surfaces as emptyState (KO 미리보기 absent).
     page.route(
-        "**/api/context/skills/drift-skill",
+        "**/api/context/skills/drift-skill**",
         lambda r: r.fulfill(
             status=404,
             content_type="application/json",
@@ -897,7 +897,7 @@ def test_q_pr4_langchange_rerenders_runtime_only_detail(page, mm_web_url: str) -
         ),
     )
     page.route(
-        "**/api/context/skills/drift-skill/diff",
+        "**/api/context/skills/drift-skill/diff**",
         lambda r: r.fulfill(
             status=200, content_type="application/json", body=json.dumps(_DIFF_RUNTIME_ONLY)
         ),

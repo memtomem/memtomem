@@ -137,6 +137,7 @@ class StatsResponse(BaseModel):
     total_sources: int
     chunk_size_distribution: list[ChunkSizeBucket] = []
     home_sources: list[SourceOut] = []
+    home_recent_sources: list[SourceOut] = []
     home_total_source_size: int = 0
     home_file_type_distribution: list[HomeFileTypeCount] = []
 
