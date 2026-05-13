@@ -315,7 +315,7 @@ async def get_config_endpoint(request: Request) -> ConfigResponse:
     # keeps the common GET path cheap while still catching CLI-side edits.
     app = request.app
     try:
-        _hot_reload.reload_if_stale(
+        await _hot_reload.reload_if_stale(
             app,
             storage=getattr(app.state, "storage", None),
             search_pipeline=getattr(app.state, "search_pipeline", None),
@@ -425,7 +425,7 @@ async def patch_config(
                 # Re-read from disk before merging so a concurrent CLI edit
                 # is preserved. If disk is broken, refuse rather than
                 # overwrite it.
-                _hot_reload.reload_if_stale(
+                await _hot_reload.reload_if_stale(
                     request.app, storage=storage, search_pipeline=search_pipeline
                 )
                 _check_reload_block(request)
@@ -572,7 +572,7 @@ async def save_config(
     try:
         async with _asyncio.timeout(60):
             async with _config_lock:
-                _hot_reload.reload_if_stale(
+                await _hot_reload.reload_if_stale(
                     request.app, storage=storage, search_pipeline=search_pipeline
                 )
                 _check_reload_block(request)
@@ -617,7 +617,7 @@ async def add_memory_dir(
     try:
         async with _asyncio.timeout(60):
             async with _config_lock:
-                _hot_reload.reload_if_stale(
+                await _hot_reload.reload_if_stale(
                     request.app, storage=storage, search_pipeline=search_pipeline
                 )
                 _check_reload_block(request)
@@ -700,7 +700,7 @@ async def remove_memory_dir(
     try:
         async with _asyncio.timeout(60):
             async with _config_lock:
-                _hot_reload.reload_if_stale(
+                await _hot_reload.reload_if_stale(
                     request.app, storage=storage, search_pipeline=search_pipeline
                 )
                 _check_reload_block(request)

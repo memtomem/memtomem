@@ -34,6 +34,8 @@ else is private.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 import time
 from dataclasses import dataclass
@@ -181,7 +183,7 @@ def _build_fresh_config() -> Mem2MemConfig:
     return cfg
 
 
-def reload_if_stale(
+async def reload_if_stale(
     app: FastAPI,
     *,
     storage: SqliteBackend | None = None,
@@ -200,13 +202,14 @@ def reload_if_stale(
     should pass them through so a disk-triggered tokenizer change still
     propagates.
 
-    Note: FTS rebuild is fire-and-forget scheduled on the running event loop
-    when invoked from an async context, so sync GET callers aren't blocked.
-    Callers in a lock-free read context should still see the Settings swap
-    immediately; the rebuild catches up out-of-band. The rebuild runs
-    concurrently with any writer inside ``_config_lock``: it touches the
-    FTS5 virtual table, not the ``config.json`` file, so there is no file-
-    level race with ``save_config_overrides``.
+    Note: runtime fanout is async so local reranker lazy loads can move to
+    a worker thread instead of blocking the request event loop. FTS rebuild
+    remains fire-and-forget scheduled on the running event loop; callers in
+    a lock-free read context should still see the Settings swap immediately
+    while the rebuild catches up out-of-band. The rebuild runs concurrently
+    with any writer inside ``_config_lock``: it touches the FTS5 virtual
+    table, not the ``config.json`` file, so there is no file-level race with
+    ``save_config_overrides``.
     """
     sig = current_signature()
     last = _get_last_signature(app)
@@ -261,7 +264,7 @@ def reload_if_stale(
     _set_reload_error(app, None)
 
     if old_cfg is not None and (storage is not None or search_pipeline is not None):
-        apply_runtime_config_changes(
+        await apply_runtime_config_changes(
             old_cfg, new_cfg, storage=storage, search_pipeline=search_pipeline, app=app
         )
 
@@ -274,7 +277,7 @@ def reload_if_stale(
 # ---------------------------------------------------------------------------
 
 
-def apply_runtime_config_changes(
+async def apply_runtime_config_changes(
     old_cfg: Any,
     new_cfg: Any,
     *,
@@ -290,16 +293,15 @@ def apply_runtime_config_changes(
       pipeline.
     * Any change → invalidate search cache.
 
-    Older callers of this helper (e.g. the PATCH handler) may not provide
+    Some callers of this helper (e.g. focused tests) may not provide
     ``storage`` / ``search_pipeline`` (rare), in which case the matching
-    fanout step is skipped. This keeps the helper usable in unit tests and
-    from non-web callers.
+    fanout step is skipped.
 
     ``app`` is optional: when provided, the FTS rebuild is tracked on
     ``app.state.fts_rebuild_task`` so back-to-back tokenizer changes coalesce
     (issue #278) instead of spawning overlapping rebuilds. When omitted, the
     rebuild is fire-and-forget without coalescing — preserved for non-web
-    callers and legacy unit tests.
+    callers and focused unit tests.
     """
     try:
         tokenizer_changed = old_cfg.search.tokenizer != new_cfg.search.tokenizer
@@ -313,11 +315,17 @@ def apply_runtime_config_changes(
         _schedule_fts_rebuild(storage, new_cfg.search.tokenizer, app=app)
 
     if search_pipeline is not None:
-        _sync_reranker(old_cfg, new_cfg, search_pipeline)
+        await _sync_reranker(old_cfg, new_cfg, search_pipeline, app=app)
         search_pipeline.invalidate_cache()
 
 
-def _sync_reranker(old_cfg: Any, new_cfg: Any, search_pipeline: SearchPipeline) -> None:
+async def _sync_reranker(
+    old_cfg: Any,
+    new_cfg: Any,
+    search_pipeline: SearchPipeline,
+    *,
+    app: FastAPI | None = None,
+) -> None:
     old_snapshot = _rerank_snapshot(old_cfg)
     new_snapshot = _rerank_snapshot(new_cfg)
     if new_snapshot is None or old_snapshot == new_snapshot:
@@ -342,18 +350,24 @@ def _sync_reranker(old_cfg: Any, new_cfg: Any, search_pipeline: SearchPipeline) 
         load_model = getattr(new_reranker, "_get_model", None)
         if callable(load_model):
             try:
-                load_model()
+                await asyncio.to_thread(load_model)
             except Exception:
                 logger.exception("Hot-reloaded reranker failed to load; keeping previous instance")
-                _close_async_component(new_reranker)
+                await _close_component_safely(new_reranker)
                 return
+
+    if app is not None and _rerank_snapshot(getattr(app.state, "config", None)) != new_snapshot:
+        logger.info("Skipping stale hot-reloaded reranker install; config changed while loading")
+        if new_reranker is not None:
+            await _close_component_safely(new_reranker)
+        return
 
     old_reranker = getattr(search_pipeline, "_reranker", None)
     search_pipeline._reranker = new_reranker
     search_pipeline._rerank_config = new_cfg.rerank if new_cfg.rerank.enabled else None
 
     if old_reranker is not None and old_reranker is not new_reranker:
-        _close_async_component(old_reranker)
+        await _close_component_safely(old_reranker)
 
 
 def _rerank_snapshot(cfg: Any) -> tuple[object, ...] | None:
@@ -372,45 +386,18 @@ def _rerank_snapshot(cfg: Any) -> tuple[object, ...] | None:
     )
 
 
-def _close_async_component(component: object) -> None:
+async def _close_component_safely(component: object) -> None:
     close = getattr(component, "close", None)
     if not callable(close):
         return
 
-    result = close()
-    if result is None:
-        return
-
-    import asyncio
-    import inspect
-
-    # Narrow to ``Coroutine`` (not just ``Awaitable``) because that's what
-    # ``asyncio.run`` / ``loop.create_task`` accept. In practice every
-    # reranker ``close()`` we wrap is ``async def`` so returns a coroutine.
-    if not inspect.iscoroutine(result):
-        return
-
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        try:
-            asyncio.run(result)
-        except Exception:
-            logger.exception("Error while closing replaced reranker")
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        logger.exception("Error while closing replaced reranker")
         return
-
-    task: asyncio.Task[Any] = loop.create_task(result)
-    task.add_done_callback(_log_close_task_exception)
-
-
-def _log_close_task_exception(task: Any) -> None:
-    # Fire-and-forget close tasks must not leak "Task exception was never
-    # retrieved" warnings — surface the failure with a useful stack instead.
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc is not None:
-        logger.error("Error while closing replaced reranker", exc_info=exc)
 
 
 def _schedule_fts_rebuild(
