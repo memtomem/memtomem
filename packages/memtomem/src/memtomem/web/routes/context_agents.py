@@ -394,6 +394,8 @@ async def delete_agent(
                 if cascade:
                     for gen in AGENT_GENERATORS.values():
                         target = gen.target_file(project_root, name)
+                        if target is None:
+                            continue
                         if not target.is_file():
                             continue
                         try:
@@ -431,6 +433,8 @@ async def diff_agent(
     runtimes = []
     for gen_name, gen in AGENT_GENERATORS.items():
         target = gen.target_file(project_root, name)
+        if target is None:
+            continue
         if canonical_content is None and not target.is_file():
             continue
         elif canonical_content is not None and not target.is_file():
