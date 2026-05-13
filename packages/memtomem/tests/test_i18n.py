@@ -376,6 +376,8 @@ class TestNoHardcodedStrings:
             for action in ids:
                 label = locale[f"home.action.{action}"]
                 title = locale[f"home.action.{action}_title"]
+                # Emoji-prefix guard: leading char must be word/space or a Hangul
+                # syllable. Rejects 🔍/📥/🧹/… that drifted in pre-#989.
                 if re.match(r"^[^\w\s가-힣]", label):
                     bad.append(f"  {locale_name}: home.action.{action} still starts with an icon")
                 if locale_name == "en" and action in {"reindex", "dedup"}:
@@ -389,6 +391,10 @@ class TestNoHardcodedStrings:
         assert en["home.action.dedup"] == "Open Dedup Scan"
         assert "switchSettingsSection('export')" in js
         assert "switchSettingsSection('dedup')" in js
+        # Negative pin: the pre-#989 brittle `.settings-nav-btn?.click()` poke
+        # must not return — `switchSettingsSection(...)` is the public router.
+        assert '.settings-nav-btn[data-section="export"]\')?.click()' not in js
+        assert '.settings-nav-btn[data-section="dedup"]\')?.click()' not in js
         for key in [
             "toast.quick_action.open_search",
             "toast.quick_action.open_index",
