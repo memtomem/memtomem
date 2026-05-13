@@ -12,6 +12,10 @@
 
 > 🚧 **Alpha** — APIs, defaults, and on-disk config surfaces may still change between `0.x` releases. Feedback and issue reports are especially welcome: [Issues](https://github.com/memtomem/memtomem/issues) · [Discussions](https://github.com/memtomem/memtomem/discussions).
 
+<p align="center">
+  <img src="docs/assets/README-hero.gif" alt="memtomem Web UI dashboard — namespaces, file types, chunk-size buckets, activity timeline" width="640">
+</p>
+
 memtomem turns your markdown notes, documents, and code into a searchable knowledge base that any AI coding agent can use. Write notes as plain `.md` files — memtomem indexes them and makes them searchable by both keywords and meaning.
 
 ```mermaid
