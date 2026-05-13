@@ -269,6 +269,53 @@ describe('_renderMemorySourceTree — orphan rendering', () => {
     expect(plansSection.querySelector('.source-item')?.title).toBe(`${plansDir}/plan.md`);
   });
 
+  it('switches category nav to a pending source target before rendering', () => {
+    const projectDir = '/home/user/.claude/projects/demo/memory';
+    const plansDir = '/home/user/.claude/plans';
+    const projectPath = `${projectDir}/project.md`;
+    const planPath = `${plansDir}/plan.md`;
+    Object.assign(window.STATE, {
+      sourcesActiveVendor: 'claude',
+      sourcesActiveCategoryByVendor: { claude: 'claude-plans' },
+      pendingActivatePath: projectPath,
+      allSources: [
+        { memory_dir: projectDir, path: projectPath, chunk_count: 2 },
+        { memory_dir: plansDir, path: planPath, chunk_count: 3 },
+      ],
+      memoryDirs: [projectDir, plansDir],
+      memoryStatusByPath: {
+        [projectDir]: {
+          provider: 'claude',
+          category: 'claude-memory',
+          exists: true,
+          chunk_count: 2,
+          file_count: 1,
+          source_file_count: 1,
+        },
+        [plansDir]: {
+          provider: 'claude',
+          category: 'claude-plans',
+          exists: true,
+          chunk_count: 3,
+          file_count: 1,
+          source_file_count: 1,
+        },
+      },
+    });
+    window.browseSource = () => {};
+
+    const list = document.getElementById('sources-list');
+    list.innerHTML = '';
+
+    window._renderMemorySourceTree(window.STATE.allSources, list);
+
+    expect(window.STATE.sourcesActiveCategoryByVendor.claude).toBe('claude-memory');
+    expect(list.querySelector('.source-vendor-product[data-category="claude-memory"]')).not.toBeNull();
+    expect(list.querySelector('.source-vendor-product[data-category="claude-plans"]')).toBeNull();
+    expect(list.querySelector('.source-item.active')?.title).toBe(projectPath);
+    expect(window.STATE.pendingActivatePath).toBe('');
+  });
+
   it('keeps Claude plans separate even when status category is stale', () => {
     const projectDir = '/home/user/.claude/projects/-Users-me-Work-brain-crew/memory';
     const plansDir = '/home/user/.claude/plans/2-adr-0009-rippling';
