@@ -27,7 +27,6 @@ from memtomem.context.commands import (
 )
 from memtomem.context.detector import COMMAND_DIRS
 from memtomem.context.privacy_scan import PrivacyScanError
-from memtomem.web.deps import get_project_root
 from memtomem.web.routes.context_projects import resolve_scope_root
 from memtomem.web.routes._locks import _gateway_lock
 
@@ -151,7 +150,7 @@ async def list_commands(
 @router.get("/context/commands/{name}")
 async def read_command(
     name: str,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to read from (ADR-0016).",
@@ -203,7 +202,7 @@ _ALL_OPTIONAL_FIELDS = ("argument-hint", "allowed-tools", "model")
 @router.get("/context/commands/{name}/rendered")
 async def rendered_command(
     name: str,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to render (ADR-0016).",
@@ -264,7 +263,7 @@ class CommandCreateRequest(BaseModel):
 @router.post("/context/commands")
 async def create_command(
     body: CommandCreateRequest,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to create in. Non-shared rejected (#940).",
@@ -303,7 +302,7 @@ class CommandUpdateRequest(BaseModel):
 async def update_command(
     name: str,
     body: CommandUpdateRequest,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to update. Non-shared rejected (#940).",
@@ -357,7 +356,7 @@ async def update_command(
 async def delete_command(
     name: str,
     cascade: bool = Query(False),
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to delete from. Non-shared rejected (#940).",
@@ -406,7 +405,7 @@ async def delete_command(
 @router.get("/context/commands/{name}/diff")
 async def diff_command(
     name: str,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to diff against runtime fan-out (ADR-0016).",
@@ -459,7 +458,7 @@ class SyncRequest(BaseModel):
 @router.post("/context/commands/sync")
 async def sync_commands(
     body: SyncRequest | None = None,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to fan out. Non-shared rejected (#940).",
@@ -500,7 +499,7 @@ class ImportRequest(BaseModel):
 @router.post("/context/commands/import")
 async def import_commands(
     body: ImportRequest | None = None,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to import into. Non-shared rejected (#940).",
@@ -535,7 +534,7 @@ async def import_commands(
 async def import_command(
     name: str,
     body: ImportRequest | None = None,
-    project_root: Path = Depends(get_project_root),
+    project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to import into. Non-shared rejected (#940).",

@@ -1,8 +1,8 @@
-"""HTTP-layer tests for the multi-project context-gateway routes (PR2).
+"""HTTP-layer tests for the multi-project context-gateway routes.
 
 Covers:
 - ``GET /api/context/projects`` shape with cwd-only and cwd+known scopes.
-- ``?scope_id=`` query on ``/api/context/skills`` (and unknown scope_id 404).
+- ``?scope_id=`` query on context overview, list, detail, and write routes.
 - ``POST /api/context/known-projects`` validation + marker warning.
 - ``DELETE /api/context/known-projects/{scope_id}`` success / 404.
 """
@@ -287,6 +287,74 @@ async def test_skills_with_scope_id_serves_other_scope(client, tmp_path: Path) -
     cwd_resp = await client.get("/api/context/skills")
     cwd_names = {s["name"] for s in cwd_resp.json()["skills"]}
     assert "from_other" not in cwd_names
+
+
+@pytest.mark.asyncio
+async def test_overview_with_scope_id_serves_other_scope(client, tmp_path: Path) -> None:
+    """The dashboard overview follows the selected project scope."""
+    other = tmp_path / "overview-scope"
+    other.mkdir()
+    (other / ".claude").mkdir()
+    skill_dir = other / ".memtomem" / "skills" / "only_other"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# only_other\n", encoding="utf-8")
+
+    add_resp = await client.post("/api/context/known-projects", json={"root": str(other)})
+    sid = add_resp.json()["scope_id"]
+
+    scoped = await client.get("/api/context/overview", params={"scope_id": sid})
+    assert scoped.status_code == 200, scoped.text
+    assert scoped.json()["project_root"] == str(other)
+    assert scoped.json()["skills"]["total"] == 1
+
+    cwd = await client.get("/api/context/overview")
+    assert cwd.status_code == 200, cwd.text
+    assert cwd.json()["project_root"] != str(other)
+    assert cwd.json()["skills"]["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_skill_detail_with_scope_id_serves_other_scope(client, tmp_path: Path) -> None:
+    """Detail routes use the same selected project as list routes."""
+    other = tmp_path / "detail-scope"
+    other.mkdir()
+    (other / ".claude").mkdir()
+    skill_dir = other / ".memtomem" / "skills" / "remote_detail"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# remote detail\n", encoding="utf-8")
+
+    add_resp = await client.post("/api/context/known-projects", json={"root": str(other)})
+    sid = add_resp.json()["scope_id"]
+
+    scoped = await client.get("/api/context/skills/remote_detail", params={"scope_id": sid})
+    assert scoped.status_code == 200, scoped.text
+    assert scoped.json()["name"] == "remote_detail"
+
+    cwd = await client.get("/api/context/skills/remote_detail")
+    assert cwd.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_skill_create_with_scope_id_writes_other_scope(client, tmp_path: Path) -> None:
+    """Mutating routes can target the active registered project scope."""
+    other = tmp_path / "write-scope"
+    other.mkdir()
+    (other / ".claude").mkdir()
+
+    add_resp = await client.post("/api/context/known-projects", json={"root": str(other)})
+    sid = add_resp.json()["scope_id"]
+
+    resp = await client.post(
+        "/api/context/skills",
+        params={"scope_id": sid},
+        json={"name": "created_remote", "content": "# created remotely\n"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert (other / ".memtomem" / "skills" / "created_remote" / "SKILL.md").is_file()
+
+    cwd_resp = await client.get("/api/context/skills")
+    cwd_names = {s["name"] for s in cwd_resp.json()["skills"]}
+    assert "created_remote" not in cwd_names
 
 
 # ── POST /context/known-projects validation ─────────────────────────────

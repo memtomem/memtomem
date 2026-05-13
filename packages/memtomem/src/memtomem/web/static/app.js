@@ -1530,6 +1530,9 @@ async function loadDashboard() {
     ]);
 
     const allSources = Array.isArray(stats.home_sources) ? stats.home_sources : [];
+    const recentSources = Array.isArray(stats.home_recent_sources) && stats.home_recent_sources.length
+      ? stats.home_recent_sources
+      : allSources;
     const sourceTypeCounts = Array.isArray(stats.home_file_type_distribution)
       ? stats.home_file_type_distribution
       : null;
@@ -1585,7 +1588,7 @@ async function loadDashboard() {
     _renderChunkDist(stats.chunk_size_distribution || []);
 
     // E. Recent Sources (improved)
-    _renderHomeRecent(allSources);
+    _renderHomeRecent(recentSources);
 
     // H. Storage Health — use DB-stored values when available
     _renderStorageHealth(configData, allSources, embStatus);
@@ -2519,7 +2522,11 @@ function renderResults(results, retrievalStats) {
     hide(qs('bulk-toolbar'));
     hide(qs('load-more-row'));
     show(empty);
-    empty.innerHTML = emptyState('○', 'No results found', 'Try different keywords or filters');
+    if (_hasSearchAxis()) {
+      empty.innerHTML = emptyState('○', 'No results found', 'Try different keywords or filters');
+    } else {
+      empty.innerHTML = emptyState('🔍', 'Enter a query to search', 'Press / to focus search');
+    }
     clearDetail();
     return;
   }
@@ -6123,7 +6130,7 @@ async function loadSourceFilter() {
   if (!sel) return;
   const selected = new Set(_getSelectedSourceFilters());
   try {
-    const data = await api('GET', '/api/sources');
+    const data = await api('GET', '/api/sources?limit=10000');
     const sources = Array.isArray(data.sources) ? data.sources : [];
     if (!sources.length) {
       sel.innerHTML = '<option value="" disabled>No sources indexed</option>';

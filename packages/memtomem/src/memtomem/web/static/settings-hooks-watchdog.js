@@ -130,11 +130,8 @@ async function loadHooksSync() {
       await _ctxFetchProjects();
     } catch (err) {
       requestedProjectScope = _hooksCurrentProjectScope();
-      if (
-        seq !== _hooksSyncSeq
-        || requestedScope !== _hooksCurrentTargetScope()
-        || requestedProjectScope !== _hooksCurrentProjectScope()
-      ) return;
+      if (seq !== _hooksSyncSeq || requestedScope !== _hooksCurrentTargetScope()
+        || requestedProjectScope !== _hooksCurrentProjectScope()) return;
       contentEl.innerHTML = emptyState('', 'Failed to load projects', err.message);
       return;
     }
@@ -146,11 +143,8 @@ async function loadHooksSync() {
 
   try {
     const res = await fetch(_hooksScopedUrl('/api/settings-sync'));
-    if (
-      seq !== _hooksSyncSeq
-      || requestedScope !== _hooksCurrentTargetScope()
-      || requestedProjectScope !== _hooksCurrentProjectScope()
-    ) return;
+    if (seq !== _hooksSyncSeq || requestedScope !== _hooksCurrentTargetScope()
+      || requestedProjectScope !== _hooksCurrentProjectScope()) return;
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || `Request failed: ${res.status}`);

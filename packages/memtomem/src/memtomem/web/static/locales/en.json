@@ -298,6 +298,8 @@
 
   "settings.ctx.overview_title": "Context Gateway",
   "settings.ctx.project_root_label": "Project",
+  "settings.ctx.active_project": "Active project",
+  "settings.ctx.server_cwd": "Server CWD",
   "settings.ctx.user_canonical_label": "User canonical",
   "settings.ctx.user_canonical_path": "~/.memtomem/",
   "settings.ctx.runtimes_label": "Runtimes",

@@ -627,7 +627,8 @@ def test_app_js_pins_ui_mode_default_and_toast_copy() -> None:
     assert "_ctxTierControls('hooks-sync')" in hooks_js
     assert "let _hooksSyncSeq = 0;" in hooks_js
     assert "const requestedScope = _hooksCurrentTargetScope();" in hooks_js
-    assert "seq !== _hooksSyncSeq || requestedScope !== _hooksCurrentTargetScope()" in hooks_js
+    assert "seq !== _hooksSyncSeq" in hooks_js
+    assert "|| requestedScope !== _hooksCurrentTargetScope()" in hooks_js
     css = _read_static("style.css")
     assert (
         ".badge-success" in css

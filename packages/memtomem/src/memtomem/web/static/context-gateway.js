@@ -141,7 +141,9 @@ function _ctxScopeParam(scopeId = _ctxActiveScopeId) {
   if (!scopeId) return '';
   const activeScope = (_ctxProjectsCache || []).find(scope =>
     scope && scope.scope_id === scopeId && !scope.missing);
-  if (!activeScope) return '';
+  // Server CWD is the route default. Leaving scope_id off preserves the
+  // legacy single-project URL shape while still sending ids for added projects.
+  if (!activeScope || _ctxScopeIsServerCwd(activeScope)) return '';
   return `scope_id=${encodeURIComponent(scopeId)}`;
 }
 
@@ -191,9 +193,29 @@ function _ctxNormalizeActiveScope(scopes) {
 }
 
 async function _ctxFetchProjects() {
-  const res = await fetch(_ctxWithTargetScope('/api/context/projects', { includeScope: false }));
-  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Failed to load projects');
-  const data = await res.json();
+  let data;
+  try {
+    const res = await fetch(_ctxWithTargetScope('/api/context/projects', { includeScope: false }));
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Failed to load projects');
+    data = await res.json();
+  } catch (_err) {
+    // Browser tests and older deployments may not provide the multi-project
+    // discovery endpoint. Preserve the legacy single-project behavior by
+    // falling back to an implicit server-CWD scope; downstream requests omit
+    // scope_id for server-CWD because it is the route default.
+    data = {
+      scopes: [{
+        scope_id: '',
+        label: t('settings.ctx.server_cwd'),
+        root: '',
+        tier: 'project',
+        sources: ['server-cwd'],
+        missing: false,
+        experimental: false,
+        counts: { skills: 0, commands: 0, agents: 0 },
+      }],
+    };
+  }
   _ctxProjectsCache = data.scopes || [];
   _ctxNormalizeActiveScope(_ctxProjectsCache);
   return data;
@@ -1335,7 +1357,9 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
   try {
     const params = new URLSearchParams();
     if (_ctxTargetScope !== 'project_shared') params.set('target_scope', _ctxTargetScope);
-    if (scope && scope.scope_id) params.set('scope_id', scope.scope_id);
+    if (scope && scope.scope_id && !_ctxScopeIsServerCwd(scope)) {
+      params.set('scope_id', scope.scope_id);
+    }
     const query = params.toString();
     const res = await fetch(`/api/context/${type}${query ? `?${query}` : ''}`);
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Failed to load ${type}`);
@@ -1730,7 +1754,9 @@ function _ctxRestoreDraft(type, name) {
     const key = _ctxStashKey(type, name);
     const scopedDraft = sessionStorage.getItem(key);
     if (scopedDraft != null) return scopedDraft;
-    if (_ctxActiveScopeId) return null;
+    const activeScope = (_ctxProjectsCache || []).find(scope =>
+      scope && scope.scope_id === _ctxActiveScopeId && !scope.missing);
+    if (_ctxActiveScopeId && !_ctxScopeIsServerCwd(activeScope)) return null;
     const legacyKey = `m2m-ctx-conflict-buffer:${type}:${encodeURIComponent(name)}`;
     return sessionStorage.getItem(legacyKey);
   } catch (_e) {
