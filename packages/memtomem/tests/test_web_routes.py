@@ -8,16 +8,19 @@ full component initialization (embedding provider, SQLite, etc.).
 from __future__ import annotations
 
 import asyncio
+import json
 import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from memtomem.context.projects import KnownProjectsStore
 from memtomem.models import Chunk, ChunkMetadata, IndexingStats, SearchResult
 from memtomem.search.pipeline import RetrievalStats
 from memtomem.web.app import create_app
@@ -3758,6 +3761,128 @@ class TestFsList:
         resp = await client.get(f"/api/fs/list?path={outside}")
         assert resp.status_code == 422, resp.text
         assert resp.json()["detail"] == "outside_picker_scope"
+
+    async def test_project_purpose_adds_project_root_parent_without_changing_default(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Add Project can discover sibling project folders outside memory_dirs.
+
+        The default picker still rejects the same path, preserving the Index
+        tab's memory-dir scope. ``purpose=project`` adds the server project
+        root's parent, which is enough for the user to choose sibling checkouts
+        without browsing from filesystem root.
+        """
+        memdir = fs_tree["memdir"]
+        outside = fs_tree["outside"]
+        project_root = outside / "server-cwd"
+        project_root.mkdir()
+        app.state.project_root = project_root
+        set_home(monkeypatch, fs_tree["home"])
+        self._wire_memory_dirs(app, [memdir], monkeypatch)
+
+        default = await client.get(f"/api/fs/list?path={outside / 'target'}")
+        assert default.status_code == 422, default.text
+
+        roots = await client.get("/api/fs/list?purpose=project")
+        assert roots.status_code == 200, roots.text
+        root_paths = [Path(e["path"]) for e in roots.json()["entries"]]
+        assert Path(unicodedata.normalize("NFC", str(outside.resolve()))) in root_paths
+
+        scoped = await client.get(f"/api/fs/list?path={outside / 'target'}&purpose=project")
+        assert scoped.status_code == 200, scoped.text
+        assert scoped.json()["path"] == unicodedata.normalize("NFC", str(outside / "target"))
+
+    async def test_project_purpose_adds_known_project_parents(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        memdir = fs_tree["memdir"]
+        known_parent = tmp_path / "known-family"
+        known_project = known_parent / "project-a"
+        known_project.mkdir(parents=True)
+        known_projects_path = tmp_path / "known_projects.json"
+        KnownProjectsStore(known_projects_path).add(known_project)
+        app.state.config.context_gateway = SimpleNamespace(known_projects_path=known_projects_path)
+        set_home(monkeypatch, fs_tree["home"])
+        self._wire_memory_dirs(app, [memdir], monkeypatch)
+
+        default = await client.get(f"/api/fs/list?path={known_project}")
+        assert default.status_code == 422, default.text
+
+        scoped = await client.get(f"/api/fs/list?path={known_project}&purpose=project")
+        assert scoped.status_code == 200, scoped.text
+
+    async def test_project_purpose_drops_known_project_at_filesystem_root(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A known project registered at a top-level dir must not widen to ``/``.
+
+        ``_project_allow_list_roots`` guards the server cwd's parent against
+        collapsing to the filesystem anchor; ``_known_project_parent_roots``
+        needs the same guard so a stale ``/foo`` entry can't sidestep it.
+        """
+        memdir = fs_tree["memdir"]
+        known_projects_path = tmp_path / "known_projects.json"
+
+        anchor = Path(Path(memdir).anchor)
+        top_level = anchor / "memtomem-test-top-level"
+        # Bypass KnownProjectsStore.add so the test never has to create or
+        # touch a real top-level directory.
+        known_projects_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "projects": [{"root": str(top_level), "added_at": "2026-01-01T00:00:00Z"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        app.state.config.context_gateway = SimpleNamespace(known_projects_path=known_projects_path)
+        set_home(monkeypatch, fs_tree["home"])
+        self._wire_memory_dirs(app, [memdir], monkeypatch)
+
+        roots = await client.get("/api/fs/list?purpose=project")
+        assert roots.status_code == 200, roots.text
+        root_paths = {Path(e["path"]) for e in roots.json()["entries"]}
+        assert anchor not in root_paths
+
+    async def test_project_purpose_still_excludes_symlink_out(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        memdir = fs_tree["memdir"]
+        set_home(monkeypatch, fs_tree["home"])
+        self._wire_memory_dirs(app, [memdir], monkeypatch)
+
+        resp = await client.get(f"/api/fs/list?path={memdir}&purpose=project")
+        assert resp.status_code == 200, resp.text
+        names = [e["name"] for e in resp.json()["entries"]]
+        assert "ln_outside" not in names
+
+    async def test_invalid_picker_purpose_400(
+        self,
+        client: AsyncClient,
+    ):
+        resp = await client.get("/api/fs/list?purpose=everything")
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "invalid_picker_purpose"
 
     async def test_nonexistent_404(
         self,
