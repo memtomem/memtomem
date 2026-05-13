@@ -876,9 +876,14 @@ MUTABLE_FIELDS: dict[str, set[str]] = {
     "decay": {"enabled", "half_life_days"},
     "mmr": {"enabled", "lambda_param"},
     "namespace": {"default_namespace", "enable_auto_ns", "rules"},
-    # ``provider``/``model``/``api_key`` require a restart (reranker
-    # instance is cached on startup), so only the pool-sizing knobs are
-    # runtime-mutable.
+    # Runtime-mutable via ``PATCH /api/config``: only the pool-sizing knobs
+    # plus the on/off toggle. ``provider``/``model``/``api_key`` are kept
+    # off the PATCH surface because a credential or backend swap should
+    # carry intent (and the live reranker instance is otherwise cached on
+    # startup). Disk hot-reload (``apply_runtime_config_changes`` →
+    # ``_sync_reranker`` in ``web/hot_reload.py``) *does* rebuild the live
+    # reranker on any field change, since editing the YAML already implies
+    # operator intent — so the asymmetry is by design.
     "rerank": {"enabled", "oversample", "min_pool", "max_pool"},
     "hooks": {"target_scope"},
 }

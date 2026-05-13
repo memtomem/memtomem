@@ -1108,6 +1108,20 @@ mm context diff --include=settings     # check hook sync status
 # writable tier first. Skills fan-out uses staging-dir-first scan + atomic
 # os.replace promote so a blocked sync leaves the existing dst tree
 # unchanged.
+#
+# Web Context Gateway missing-canonical remediation:
+#   project_shared → web Import can initialize from detected runtime files;
+#                    CLI bootstrap requires explicit git-tracked-tier confirmation.
+mm context init --include=agents,commands,skills --scope project_shared --confirm-project-shared
+mm context sync --include=agents,commands,skills --scope project_shared
+#
+#   user           → web UI is read-only for user-tier canonical operations.
+mm context init --include=agents,commands,skills --scope user
+mm context sync --include=agents,commands,skills --scope user
+#
+#   project_local  → gitignored draft tier; sync reports no runtime fan-out.
+mm context init --include=agents,commands,skills --scope project_local
+mm context sync --include=agents,commands,skills --scope project_local
 
 # Sessions & activity
 mm session start                                              # start a tracked session

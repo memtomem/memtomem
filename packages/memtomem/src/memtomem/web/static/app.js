@@ -2,6 +2,7 @@
 'use strict';
 
 const API = '';  // same origin
+const HOME_ACTIVITY_TIMELINE_LIMIT = 1000;
 
 // ── Early declarations (referenced before their section) ──
 const _HELP_VISIBLE_KEY = 'm2m-help-visible';
@@ -19,6 +20,7 @@ const STATE = {
   scoreMin: 0,
   currentSortMode: 'score',
   maxResultScore: 0,
+  resultScoreViews: {},
   sourcesBrowserStale: false,
   tagsTabStale: false,
   homeStale: false,
@@ -335,7 +337,11 @@ async function api(method, path, body, opts = {}) {
       : (err.detail && typeof err.detail === 'object' && typeof err.detail.detail === 'string'
         ? err.detail.detail
         : res.statusText);
-    throw new Error(msg);
+    // Thrown errors expose `.status` so callers can branch on HTTP code
+    // (e.g. 404 → mark resource missing instead of generic toast).
+    const apiErr = new Error(msg);
+    apiErr.status = res.status;
+    throw apiErr;
   }
   return res.json();
 }
@@ -1449,6 +1455,7 @@ async function loadStats() {
 window.addEventListener('langchange', () => {
   if (typeof I18N !== 'undefined') I18N.applyDOM();
   loadStats();
+  if (qs('tab-home') && !qs('tab-home').hidden) loadDashboard();
 });
 loadStats();
 checkEmbeddingMismatch();
@@ -1515,7 +1522,48 @@ async function checkEmbeddingMismatch() {
 // Home Dashboard (D3)
 // ---------------------------------------------------------------------------
 
+function _homeInlineState(key, tone = 'muted') {
+  const color = tone === 'danger' ? 'var(--danger)' : 'var(--muted)';
+  return `<span style="color:${color};font-size:0.78rem">${escapeHtml(t(key))}</span>`;
+}
+
+function _setHomeStatPlaceholders() {
+  ['home-chunks', 'home-sources', 'home-namespaces', 'home-total-size', 'home-sessions', 'home-scratch']
+    .forEach(id => {
+      const el = qs(id);
+      if (el) el.textContent = '—';
+    });
+}
+
+function _setHomeDashboardLoading() {
+  _setHomeStatPlaceholders();
+  ['home-activity-map', 'home-type-chart', 'home-ns-chart', 'home-chunk-dist', 'home-recent-list', 'home-health-info']
+    .forEach(id => {
+      const el = qs(id);
+      if (el) {
+        el.innerHTML = `<div class="loading-panel" aria-label="${escapeAttr(t('home.state.loading'))}"><div class="spinner-panel"></div></div>`;
+      }
+    });
+  renderPinnedSection();
+}
+
+function _renderHomeDashboardError(err) {
+  _setHomeStatPlaceholders();
+  const detail = err && err.message ? escapeHtml(err.message) : '';
+  ['home-activity-map', 'home-type-chart', 'home-ns-chart', 'home-chunk-dist', 'home-health-info']
+    .forEach(id => {
+      const el = qs(id);
+      if (el) el.innerHTML = _homeInlineState('home.state.load_failed', 'danger');
+    });
+  const recentList = qs('home-recent-list');
+  if (recentList) {
+    recentList.innerHTML = emptyState('⚠', t('home.state.load_failed'), detail);
+  }
+  renderPinnedSection();
+}
+
 async function loadDashboard() {
+  _setHomeDashboardLoading();
   try {
     // /api/sessions and /api/scratch are dev-only — gated below. The
     // namespaces list endpoint is prod-mounted via namespaces_read so
@@ -1525,7 +1573,7 @@ async function loadDashboard() {
       api('GET', '/api/namespaces').catch(() => ({ namespaces: [] })),
       api('GET', '/api/config'),
       api('GET', '/api/embedding-status').catch(() => null),
-      api('GET', '/api/timeline?days=365&limit=1000').catch(() => ({ chunks: [] })),
+      api('GET', `/api/timeline?days=365&limit=${HOME_ACTIVITY_TIMELINE_LIMIT}`).catch(() => ({ chunks: [] })),
       api('GET', '/api/memory-dirs/status').catch(() => ({ dirs: [] })),
     ]);
 
@@ -1576,7 +1624,11 @@ async function loadDashboard() {
     } catch { /* non-critical */ }
 
     // B. Activity Heatmap (GitHub contribution graph)
-    _renderActivityMap(timelineData.chunks || []);
+    const timelineChunks = timelineData.chunks || [];
+    _renderActivityMap(timelineChunks, {
+      isSample: timelineData.has_more === true,
+      sampleLimit: HOME_ACTIVITY_TIMELINE_LIMIT,
+    });
 
     // D. File Type Distribution
     _renderFileTypeChart(allSources, sourceTypeCounts);
@@ -1596,15 +1648,21 @@ async function loadDashboard() {
     // Pinned chunks
     renderPinnedSection();
   } catch (err) {
-    qs('home-recent-list').innerHTML = `<p style="color:var(--danger);font-size:.83rem">Error: ${escapeHtml(err.message)}</p>`;
+    _renderHomeDashboardError(err);
   }
 }
 
 // B. Activity Heatmap — GitHub contribution graph (1 year)
-function _renderActivityMap(chunks) {
+function _renderActivityMap(chunks, options) {
+  options = options || {};
   const map = qs('home-activity-map');
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const tr = (key, params, fallback) => {
+    if (typeof t !== 'function') return fallback;
+    const translated = t(key, params);
+    return translated === key ? fallback : translated;
+  };
 
   // Count chunks per date
   const countByDate = {};
@@ -1624,6 +1682,12 @@ function _renderActivityMap(chunks) {
   const totalDays = Math.round((today - startDate) / 86400000) + 1;
   const cells = [];
   let maxCount = 0;
+  let totalCount = 0;
+  let activeDays = 0;
+  let last7Count = 0;
+  let mostActive = null;
+  const last7Start = new Date(today);
+  last7Start.setDate(last7Start.getDate() - 6);
 
   for (let i = 0; i < totalDays; i++) {
     const d = new Date(startDate);
@@ -1633,6 +1697,14 @@ function _renderActivityMap(chunks) {
     const isFuture = d > today;
     const isBeforeRange = d < dataStart;
     if (!isFuture && !isBeforeRange && count > maxCount) maxCount = count;
+    if (!isFuture && !isBeforeRange) {
+      totalCount += count;
+      if (d >= last7Start) last7Count += count;
+      if (count > 0) {
+        activeDays += 1;
+        if (!mostActive || count > mostActive.count) mostActive = { date: key, count };
+      }
+    }
     cells.push({ date: key, count, isFuture, isBeforeRange, month: d.getMonth() });
   }
 
@@ -1645,10 +1717,22 @@ function _renderActivityMap(chunks) {
     if (q <= 0.75) return 3;
     return 4;
   };
+  const levelLabel = (level) => {
+    const labels = [
+      ['home.activity.intensity_none', 'No activity'],
+      ['home.activity.intensity_low', 'Low activity'],
+      ['home.activity.intensity_medium', 'Medium activity'],
+      ['home.activity.intensity_high', 'High activity'],
+      ['home.activity.intensity_peak', 'Peak activity'],
+    ];
+    const [key, fallback] = labels[level] || labels[0];
+    return tr(key, {}, fallback);
+  };
 
   // Month labels — detect when a new month starts in the first row (Sunday)
   const numWeeks = Math.ceil(totalDays / 7);
   const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const weekdayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
   const monthLabels = [];
   let prevMonth = -1;
   for (let w = 0; w < numWeeks; w++) {
@@ -1663,31 +1747,85 @@ function _renderActivityMap(chunks) {
   }
 
   let html = '';
-
-  // Month labels row
-  html += `<div class="activity-months" style="grid-template-columns:repeat(${numWeeks},1fr);gap:2px">`;
-  monthLabels.forEach(m => {
-    html += `<span style="grid-column:${m.col}">${m.label}</span>`;
-  });
+  const mostActiveCount = mostActive ? mostActive.count : 0;
+  const mostActiveDate = mostActive ? mostActive.date : tr(
+    'home.activity.none',
+    {},
+    'None',
+  );
+  const isSample = Boolean(options.isSample);
+  const sampleLimit = Number(options.sampleLimit || chunks.length || 0);
+  const summaryAria = isSample
+    ? tr(
+      'home.activity.summary_sample_aria',
+      { limit: sampleLimit, active: activeDays, date: mostActiveDate, count: mostActiveCount },
+      `Activity map is based on the ${sampleLimit} most recent chunks returned by the timeline query. Sample covers ${activeDays} active days. Most active sampled day: ${mostActiveDate}, ${mostActiveCount} chunks.`,
+    )
+    : tr(
+      'home.activity.summary_aria',
+      { total: totalCount, active: activeDays, last7: last7Count, date: mostActiveDate, count: mostActiveCount },
+      `${totalCount} chunks across ${activeDays} active days. ${last7Count} chunks in the last 7 days. Most active day: ${mostActiveDate}, ${mostActiveCount} chunks.`,
+    );
+  html += `<div class="activity-summary" aria-label="${escapeAttr(summaryAria)}">`;
+  if (isSample) {
+    html += `<span>${escapeHtml(tr('home.activity.summary_sample', { count: chunks.length }, `Recent sample: ${chunks.length}`))}</span>`;
+    html += `<span>${escapeHtml(tr('home.activity.summary_sample_active_days', { count: activeDays }, `Sample active days: ${activeDays}`))}</span>`;
+    html += `<span>${escapeHtml(tr('home.activity.summary_sample_most_active', { date: mostActiveDate, count: mostActiveCount }, `Sample most active: ${mostActiveDate} (${mostActiveCount})`))}</span>`;
+  } else {
+    html += `<span>${escapeHtml(tr('home.activity.summary_last7', { count: last7Count }, `Last 7 days: ${last7Count}`))}</span>`;
+    html += `<span>${escapeHtml(tr('home.activity.summary_active_days', { count: activeDays }, `Active days: ${activeDays}`))}</span>`;
+    html += `<span>${escapeHtml(tr('home.activity.summary_most_active', { date: mostActiveDate, count: mostActiveCount }, `Most active: ${mostActiveDate} (${mostActiveCount})`))}</span>`;
+  }
   html += '</div>';
 
-  // Grid of cells (7 rows × N cols, auto-flow column = weeks)
-  html += `<div class="activity-grid" style="grid-template-columns:repeat(${numWeeks},1fr)">`;
+  // Month labels row
+  html += '<div class="activity-map-frame">';
+  html += '<div class="activity-weekday-spacer" aria-hidden="true"></div>';
+  html += '<div class="activity-months" style="grid-template-columns:repeat(' + numWeeks + ',1fr);gap:2px">';
+  monthLabels.forEach(m => { html += `<span style="grid-column:${m.col}">${m.label}</span>`; });
+  html += '</div>';
+  html += '<div class="activity-weekdays" aria-hidden="true">';
+  weekdayNames.forEach(day => { html += `<span>${day}</span>`; });
+  html += '</div>';
+
+  // Grid of cells (7 rows x N cols, auto-flow column = weeks). Only dates
+  // with activity become buttons, keeping keyboard navigation useful.
+  html += `<div class="activity-grid" style="grid-template-columns:repeat(${numWeeks},1fr)" aria-label="${escapeAttr(summaryAria)}">`;
   cells.forEach(cell => {
     if (cell.isFuture || cell.isBeforeRange) {
       html += '<div class="activity-cell activity-empty"></div>';
     } else {
       const level = getLevel(cell.count);
+      const intensity = levelLabel(level);
       const ariaKey = cell.count === 1
         ? 'home.activity.cell_aria_one'
         : 'home.activity.cell_aria_other';
-      const ariaRaw = (typeof t === 'function')
-        ? t(ariaKey, { date: cell.date, count: cell.count })
-        : `${cell.date}, ${cell.count} chunks. View in Timeline.`;
-      const ariaSafe = ariaRaw.replace(/"/g, '&quot;');
-      html += `<div class="activity-cell activity-cell-link" data-level="${level}" data-date="${cell.date}" role="button" tabindex="0" title="${cell.date}: ${cell.count}" aria-label="${ariaSafe}"></div>`;
+      const ariaRaw = tr(
+        ariaKey,
+        { date: cell.date, count: cell.count, intensity },
+        `${cell.date}, ${cell.count} chunks, ${intensity}. Click to view in Timeline.`,
+      );
+      const title = tr(
+        'home.activity.cell_title',
+        { date: cell.date, count: cell.count, intensity },
+        `${cell.date}: ${cell.count} chunks, ${intensity}`,
+      );
+      const isInteractive = cell.count > 0;
+      const cellClass = isInteractive ? 'activity-cell activity-cell-link' : 'activity-cell';
+      const attrs = isInteractive
+        ? `data-date="${cell.date}" role="button" tabindex="0" aria-label="${escapeAttr(ariaRaw)}"`
+        : 'aria-hidden="true"';
+      html += `<div class="${cellClass}" data-level="${level}" ${attrs} title="${escapeAttr(title)}"></div>`;
     }
   });
+  html += '</div>';
+  html += '</div>';
+  html += '<div class="activity-legend" aria-hidden="true">';
+  html += `<span>${escapeHtml(tr('home.activity.legend_less', {}, 'Less'))}</span>`;
+  for (let level = 0; level <= 4; level++) {
+    html += `<span class="activity-cell activity-legend-cell" data-level="${level}" title="${escapeAttr(levelLabel(level))}"></span>`;
+  }
+  html += `<span>${escapeHtml(tr('home.activity.legend_more', {}, 'More'))}</span>`;
   html += '</div>';
 
   map.innerHTML = html;
@@ -1750,7 +1888,7 @@ function _renderFileTypeChart(sources, distribution = null) {
   const max = sorted[0]?.[1] || 1;
 
   if (!sorted.length) {
-    chart.innerHTML = '<span style="color:var(--muted);font-size:0.78rem">No files indexed</span>';
+    chart.innerHTML = _homeInlineState('home.state.no_files_indexed');
     return;
   }
 
@@ -1769,7 +1907,7 @@ function _renderFileTypeChart(sources, distribution = null) {
 function _renderChunkDist(distribution) {
   const chart = qs('home-chunk-dist');
   if (!distribution.length) {
-    chart.innerHTML = '<span style="color:var(--muted);font-size:0.78rem">No data</span>';
+    chart.innerHTML = _homeInlineState('home.state.no_data');
     return;
   }
   const total = distribution.reduce((s, d) => s + d.count, 0);
@@ -1788,39 +1926,85 @@ function _renderChunkDist(distribution) {
 }
 
 // G. Namespace Summary
+function _formatHomeNsLabel(nsName) {
+  const raw = String(nsName || '');
+  if (raw.length <= 28) return raw;
+
+  const autoMatch = raw.match(/^([a-z]+):-(.+)$/);
+  if (autoMatch) {
+    const provider = autoMatch[1];
+    const parts = autoMatch[2].split('-').filter(Boolean);
+    const tail = parts.slice(-2).join('/');
+    if (tail) return `${provider}: .../${tail}`;
+  }
+
+  return `${raw.slice(0, 12)}...${raw.slice(-14)}`;
+}
+
+function _homeNsActionLabel(nsName, chunkCount) {
+  const count = Number(chunkCount || 0);
+  return `Open Sources filtered to namespace ${nsName}, ${count.toLocaleString()} chunk${count === 1 ? '' : 's'}`;
+}
+
+function _bindHomeNsChartActions(chart) {
+  chart.querySelectorAll('[data-home-ns]').forEach(el => {
+    el.addEventListener('click', () => {
+      navigateToSourcesByNs(el.dataset.homeNs);
+    });
+  });
+  chart.querySelectorAll('[data-home-ns-more]').forEach(el => {
+    el.addEventListener('click', () => {
+      activateTab('settings');
+      switchSettingsSection('namespaces');
+    });
+  });
+}
+
 function _renderNsChart(namespaces) {
   const chart = qs('home-ns-chart');
   if (!namespaces.length) {
-    chart.innerHTML = '<span style="color:var(--muted);font-size:0.78rem">No namespaces</span>';
+    chart.innerHTML = _homeInlineState('home.state.no_namespaces');
     return;
   }
 
-  const sorted = [...namespaces].sort((a, b) => b.chunk_count - a.chunk_count).slice(0, 6);
+  const allSorted = [...namespaces].sort((a, b) => b.chunk_count - a.chunk_count);
+  const sorted = allSorted.slice(0, 6);
+  const hiddenCount = Math.max(0, allSorted.length - sorted.length);
   const max = sorted[0]?.chunk_count || 1;
   const palette = ['var(--accent)', 'var(--green)', '#e0a800', '#a29bfe', '#e17055', '#00cec9'];
 
   chart.innerHTML = sorted.map((ns, i) => {
     const pct = Math.round((ns.chunk_count / max) * 100);
     const color = ns.color || palette[i % palette.length];
-    // ``.home-bar-label`` is CSS-clipped at 120px with text-overflow:ellipsis,
-    // which hides the tail of long auto-namespaces like
-    // ``claude:-Users-...-projectname``. The row-level ``title`` makes the
-    // full string visible on hover so users can identify which namespace is
-    // selected.
-    const fullNs = escapeHtml(ns.namespace);
-    return `<div class="home-bar-row" title="${fullNs}">
-      <span class="home-bar-label">${fullNs}</span>
-      <div class="home-bar-track"><div class="home-bar-fill" style="width:${pct}%;background:${color}"></div></div>
-      <span class="home-bar-count">${ns.chunk_count.toLocaleString()}</span>
+    const nsName = String(ns.namespace || '');
+    const fullNs = escapeHtml(nsName);
+    const shortNs = escapeHtml(_formatHomeNsLabel(nsName));
+    const nsAttr = escapeAttr(nsName);
+    const actionLabel = escapeAttr(_homeNsActionLabel(nsName, ns.chunk_count));
+    return `<div class="home-bar-row home-ns-row">
+      <button class="home-ns-open" type="button" data-home-ns="${nsAttr}" aria-label="${actionLabel}">
+        <span class="home-bar-label" title="${escapeAttr(nsName)}">${shortNs}</span>
+        <span class="home-bar-track" aria-hidden="true"><span class="home-bar-fill" style="width:${pct}%;background:${color}"></span></span>
+        <span class="home-bar-count">${ns.chunk_count.toLocaleString()}</span>
+        <span class="home-ns-action">Sources</span>
+      </button>
+      <details class="home-ns-detail">
+        <summary aria-label="Show full namespace ${escapeAttr(nsName)}">Full</summary>
+        <span>${fullNs}</span>
+      </details>
     </div>`;
-  }).join('');
+  }).join('') + (hiddenCount
+    ? `<button class="home-ns-more" type="button" data-home-ns-more="true">+ ${hiddenCount.toLocaleString()} more in Namespaces</button>`
+    : '');
+
+  _bindHomeNsChartActions(chart);
 }
 
 // E. Recent Sources — color dot + 2-row layout
 function _renderHomeRecent(allSources) {
   const recentList = qs('home-recent-list');
   if (!allSources.length) {
-    recentList.innerHTML = emptyState('📁', 'No sources indexed yet', 'Add files from the Index tab');
+    recentList.innerHTML = emptyState('📁', t('home.state.no_sources_title'), t('home.state.no_sources_hint'));
     return;
   }
 
@@ -1844,7 +2028,7 @@ function _renderHomeRecent(allSources) {
           <span class="home-source-dot" style="background:${fileTypeColor(s.path)}"></span>
           <span class="home-source-name">${escapeHtml(name)}</span>
           ${nsBadges}
-          <span class="badge badge-blue">${s.chunk_count} chunks</span>
+          <span class="badge badge-blue">${escapeHtml(t(s.chunk_count === 1 ? 'home.source_chunks_one' : 'home.source_chunks_other', { count: s.chunk_count }))}</span>
         </div>
         <div class="home-source-row2">
           ${size}${size && age ? ' \u00b7 ' : ''}${age}
@@ -1867,31 +2051,36 @@ function _renderStorageHealth(config, sources, embStatus) {
   const lastIndexed = sources
     .filter(s => s.last_indexed_at)
     .sort((a, b) => new Date(b.last_indexed_at).getTime() - new Date(a.last_indexed_at).getTime())[0];
-  const lastTime = lastIndexed ? relativeTime(lastIndexed.last_indexed_at) : 'Never';
+  const lastTime = lastIndexed ? relativeTime(lastIndexed.last_indexed_at) : t('home.health.never');
 
   // Use DB-stored embedding values when available, fall back to config
   const stored = embStatus && embStatus.stored;
-  const embProvider = stored ? stored.provider : config.embedding.provider;
-  const embModel = stored ? stored.model : config.embedding.model;
-  const embDim = stored ? stored.dimension : config.embedding.dimension;
+  const embProvider = stored ? stored.provider : config?.embedding?.provider;
+  const embModel = stored ? stored.model : config?.embedding?.model;
+  const embDim = stored ? stored.dimension : config?.embedding?.dimension;
+  const storageBackend = config?.storage?.backend || t('home.health.unknown');
   const hasMismatch = embStatus && embStatus.has_mismatch;
   const warnIcon = hasMismatch ? ' ⚠' : '';
+  const embText = embProvider && embModel
+    ? `${embProvider}/${embModel}`
+    : t('home.health.unknown');
+  const dimText = embDim || t('home.health.unknown');
 
   info.innerHTML = `
     <div class="home-health-item">
-      <span class="home-health-label">Embedding</span>
-      <span class="home-health-value">${escapeHtml(embProvider)}/${escapeHtml(embModel)}${warnIcon}</span>
+      <span class="home-health-label">${escapeHtml(t('home.health.embedding'))}</span>
+      <span class="home-health-value">${escapeHtml(embText)}${warnIcon}</span>
     </div>
     <div class="home-health-item">
-      <span class="home-health-label">Dimension</span>
-      <span class="home-health-value">${embDim}${warnIcon}</span>
+      <span class="home-health-label">${escapeHtml(t('home.health.dimension'))}</span>
+      <span class="home-health-value">${escapeHtml(String(dimText))}${warnIcon}</span>
     </div>
     <div class="home-health-item">
-      <span class="home-health-label">Storage</span>
-      <span class="home-health-value">${escapeHtml(config.storage.backend)}</span>
+      <span class="home-health-label">${escapeHtml(t('home.health.storage'))}</span>
+      <span class="home-health-value">${escapeHtml(storageBackend)}</span>
     </div>
     <div class="home-health-item">
-      <span class="home-health-label">Last Indexed</span>
+      <span class="home-health-label">${escapeHtml(t('home.health.last_indexed'))}</span>
       <span class="home-health-value">${escapeHtml(lastTime)}</span>
     </div>
   `;
@@ -1944,27 +2133,40 @@ qs('home-search-input').addEventListener('keydown', e => {
 });
 
 // F. Quick Actions
+function showQuickActionToast(key, focusTarget) {
+  showToast(t(key), 'info');
+  if (focusTarget) {
+    requestAnimationFrame(() => qs(focusTarget)?.focus());
+  }
+}
+
 qs('home-search-btn').addEventListener('click', () => {
   activateTab('search');
   qs('search-input').focus();
+  showQuickActionToast('toast.quick_action.open_search');
 });
 qs('home-index-btn').addEventListener('click', () => {
   activateTab('index');
+  showQuickActionToast('toast.quick_action.open_index', 'index-path');
 });
 qs('home-reindex-btn').addEventListener('click', () => {
   activateTab('index');
   qs('index-force').checked = true;
+  showQuickActionToast('toast.quick_action.reindex_ready', 'index-path');
 });
 qs('home-export-btn').addEventListener('click', () => {
   activateTab('settings');
-  document.querySelector('.settings-nav-btn[data-section="export"]')?.click();
+  switchSettingsSection('export');
+  showQuickActionToast('toast.quick_action.open_export', 'exp-preview-btn');
 });
 qs('home-dedup-btn').addEventListener('click', () => {
   activateTab('settings');
-  document.querySelector('.settings-nav-btn[data-section="dedup"]')?.click();
+  switchSettingsSection('dedup');
+  showQuickActionToast('toast.quick_action.open_dedup', 'dedup-scan-btn');
 });
 qs('home-tags-btn').addEventListener('click', () => {
   activateTab('tags');
+  showQuickActionToast('toast.quick_action.open_tags', 'tags-search');
 });
 
 // ---------------------------------------------------------------------------
@@ -2208,6 +2410,52 @@ function updateBulkToolbar(total) {
   allCb.indeterminate = count > 0 && count < total;
 }
 
+function _buildScoreViews(results) {
+  const byRank = [...results].sort((a, b) => (a.rank || 0) - (b.rank || 0));
+  const total = Math.max(1, byRank.length);
+  const positiveMax = Math.max(0, ...byRank.map(r => Number(r.score) || 0));
+  const views = {};
+
+  byRank.forEach((r, idx) => {
+    const raw = Number(r.score) || 0;
+    const rank = r.rank || idx + 1;
+    const isReranked = r.source === 'reranked';
+    let percent;
+    let label;
+    let tooltip;
+
+    if (isReranked) {
+      percent = total === 1 ? 100 : Math.round((1 - idx / (total - 1)) * 100);
+      percent = Math.max(1, Math.min(100, percent));
+      label = `#${rank} · ${percent}%`;
+      tooltip = `Reranker percentile ${percent}% by final rank. Raw reranker score ${raw.toFixed(6)}.`;
+    } else {
+      percent = positiveMax > 0 ? Math.round((raw / positiveMax) * 100) : 0;
+      percent = Math.max(0, Math.min(100, percent));
+      label = raw.toFixed(3);
+      tooltip = `Raw ${r.source || 'search'} score ${raw.toFixed(6)}. Normalized ${percent}%.`;
+    }
+
+    views[r.chunk.id] = { label, percent, tooltip, raw, rank, isReranked };
+  });
+
+  return views;
+}
+
+function _scoreViewForResult(r) {
+  const raw = Number(r.score) || 0;
+  return STATE.resultScoreViews[r.chunk.id] || {
+    label: raw.toFixed(3),
+    percent: STATE.maxResultScore > 0
+      ? Math.max(0, Math.min(100, Math.round((raw / STATE.maxResultScore) * 100)))
+      : 0,
+    tooltip: `Raw ${r.source || 'search'} score ${raw.toFixed(6)}.`,
+    raw,
+    rank: r.rank,
+    isReranked: r.source === 'reranked',
+  };
+}
+
 function _buildResultItem(r) {
   const list = qs('results-list');
   const item = document.createElement('div');
@@ -2250,7 +2498,8 @@ function _buildResultItem(r) {
   // contract pinned in the Tiered Context Gateway v2 memory.
   const tierBadge = _tierBadgeHtml(r.chunk.target_scope);
   const validityBadge = _validityBadgeHtml(r.chunk.valid_from_unix, r.chunk.valid_to_unix);
-  const scorePct = STATE.maxResultScore > 0 ? Math.round((r.score / STATE.maxResultScore) * 100) : 0;
+  const scoreView = _scoreViewForResult(r);
+  const scorePct = scoreView.percent;
   const barColor = scorePct > 70 ? 'var(--green)' : scorePct > 40 ? 'var(--accent)' : 'var(--muted)';
 
   const body = document.createElement('div');
@@ -2259,7 +2508,7 @@ function _buildResultItem(r) {
     <div class="result-item-row1">
       <span class="result-type-dot" style="background:${fileTypeColor(r.chunk.source_file || '')}"></span>
       <span class="result-filename">${escapeHtml(fname)}</span>
-      <span class="score-badge">${r.score.toFixed(3)}</span>
+      <span class="score-badge" title="${escapeAttr(scoreView.tooltip)}">${escapeHtml(scoreView.label)}</span>
       <span class="badge badge-retrieval badge-retrieval--${escapeAttr(r.source)}">${escapeHtml(r.source)}</span>
       ${nsBadge}${tierBadge}${validityBadge}
     </div>
@@ -2424,6 +2673,7 @@ function _syncResultTags(chunkId, newTags) {
 
 function renderResults(results, retrievalStats) {
   STATE.lastResults = results;
+  STATE.resultScoreViews = _buildScoreViews(results);
   let display = [...results];
   if (STATE.currentSortMode === 'date-desc') display.sort((a, b) => new Date(b.chunk.created_at) - new Date(a.chunk.created_at));
   else if (STATE.currentSortMode === 'date-asc') display.sort((a, b) => new Date(a.chunk.created_at) - new Date(b.chunk.created_at));
@@ -2432,7 +2682,9 @@ function renderResults(results, retrievalStats) {
   const selectedSources = _getSelectedSourceFilters();
   let filtered = typeFilter ? display.filter(r => r.chunk.chunk_type === typeFilter) : display;
   if (selectedSources.length) filtered = filtered.filter(r => selectedSources.includes(r.chunk.source_file));
-  if (STATE.scoreMin > 0) filtered = filtered.filter(r => r.score >= STATE.scoreMin);
+  if (STATE.scoreMin > 0) {
+    filtered = filtered.filter(r => (_scoreViewForResult(r).percent / 100) >= STATE.scoreMin);
+  }
   // Date range filter
   const dateRange = _getDateRange();
   if (dateRange) {
@@ -2451,18 +2703,16 @@ function renderResults(results, retrievalStats) {
     hide(qs('bulk-toolbar'));
     hide(qs('load-more-row'));
     show(empty);
-    if (_hasSearchAxis()) {
-      empty.innerHTML = emptyState('○', 'No results found', 'Try different keywords or filters');
-    } else {
-      empty.innerHTML = emptyState('🔍', 'Enter a query to search', 'Press / to focus search');
-    }
+    empty.innerHTML = !_hasSearchAxis()
+      ? emptyState('🔍', 'Enter a query to search', '<kbd>/</kbd> focus · <kbd>j</kbd>/<kbd>k</kbd> navigate · <kbd>p</kbd> pin · <kbd>c</kbd> copy')
+      : emptyState('○', 'No results found', 'Try different keywords or filters');
     clearDetail();
     return;
   }
   hide(empty);
   show(list);
 
-  // Compute max score for mini bars
+  // Keep a raw max for fallback paths; primary result bars use score views.
   STATE.maxResultScore = Math.max(0.001, ...filtered.map(r => r.score));
 
   // Source breakdown summary + pipeline funnel
@@ -2548,7 +2798,11 @@ function showDetail(r) {
   STATE.selectedChunkId = r.chunk.id;
   STATE.selectedOriginal = r.chunk.content;
 
-  qs('d-score').textContent = `score ${r.score.toFixed(4)}`;
+  const scoreView = _scoreViewForResult(r);
+  qs('d-score').textContent = scoreView.isReranked
+    ? `rank #${scoreView.rank} · ${scoreView.percent}%`
+    : `score ${r.score.toFixed(4)}`;
+  qs('d-score').title = scoreView.tooltip;
   qs('d-type').textContent = r.chunk.chunk_type.replace('_', ' ');
   const nsEl = qs('d-namespace');
   if (r.chunk.namespace && r.chunk.namespace !== 'default') {
@@ -2561,17 +2815,19 @@ function showDetail(r) {
   srcEl.textContent = r.source;
   srcEl.className = `badge badge-retrieval badge-retrieval--${r.source}`;
 
-  // Score detail row: rank + bar + pct of theoretical max RRF
+  // Score detail row: rank + normalized display bar + raw diagnostic score.
   const rrfK = (STATE.serverConfig && STATE.serverConfig.search && STATE.serverConfig.search.rrf_k) || 60;
   const rs = STATE.lastRetrievalStats || {};
   const nSources = ((rs.bm25_candidates > 0) ? 1 : 0) + ((rs.dense_candidates > 0) ? 1 : 0) || 2;
   const maxRrf = nSources / (rrfK + 1);
-  const pct = Math.min(r.score / maxRrf * 100, 100);
+  const pct = scoreView.percent;
   qs('d-rank-label').textContent = `#${r.rank}`;
   qs('d-score-bar').style.width = `${pct.toFixed(1)}%`;
   qs('d-score-pct').textContent = `${pct.toFixed(0)}%`;
   const scoreDetailRow = qs('d-score-detail');
-  scoreDetailRow.dataset.tooltip = `RRF ${r.score.toFixed(6)} / max ${maxRrf.toFixed(6)} (k=${rrfK}, ${nSources} sources)`;
+  scoreDetailRow.dataset.tooltip = scoreView.isReranked
+    ? `Reranker percentile ${pct.toFixed(0)}%; raw score ${r.score.toFixed(6)}`
+    : `RRF ${r.score.toFixed(6)} / max ${maxRrf.toFixed(6)} (k=${rrfK}, ${nSources} sources)`;
   show(scoreDetailRow);
   qs('d-hierarchy').textContent = r.chunk.heading_hierarchy.join(' › ');
   qs('d-file').textContent = r.chunk.source_file;
@@ -5678,7 +5934,7 @@ function escapeHtml(str) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 }
-function escapeAttr(str) { return String(str).replace(/"/g, '&quot;'); }
+function escapeAttr(str) { return escapeHtml(str).replace(/"/g, '&quot;'); }
 
 // ---------------------------------------------------------------------------
 // Search History (A)
@@ -5935,6 +6191,13 @@ function unpinChunk(id) {
   delete store[String(id)];
   _savePinStore(store);
 }
+function _updatePinPreview(id, patch) {
+  const store = _getPinStore();
+  const key = String(id);
+  if (!(key in store)) return;
+  store[key] = { ...(store[key] || {}), ...patch };
+  _savePinStore(store);
+}
 function updatePinBtn(chunkId) {
   const btn = qs('d-pin-btn');
   if (!btn) return;
@@ -5942,21 +6205,83 @@ function updatePinBtn(chunkId) {
   btn.textContent = pinned ? '★ Pinned' : '☆ Pin';
   btn.classList.toggle('btn-pin-active', pinned);
 }
+// Monotonic counter so a slow click on pin A doesn't clobber the result of
+// a later click on pin B (same pattern as the tier-loader stale-response
+// guard in settings-hooks-watchdog.js).
+let _pinOpenSeq = 0;
+async function openPinnedChunk(id) {
+  const key = String(id);
+  const seq = ++_pinOpenSeq;
+  try {
+    const chunk = await api('GET', `/api/chunks/${encodeURIComponent(key)}`);
+    if (seq !== _pinOpenSeq) return;
+    _updatePinPreview(key, {
+      source: chunk.source_file || '',
+      snippet: (chunk.content || '').slice(0, 100),
+      stale: false,
+    });
+    if (!chunk.source_file) {
+      showToast(t('toast.chunk_target_missing'), 'info');
+      return;
+    }
+    _navigateToSource(chunk.source_file, key);
+  } catch (err) {
+    if (seq !== _pinOpenSeq) return;
+    if (err && err.status === 404) {
+      _updatePinPreview(key, { stale: true });
+      renderPinnedSection();
+      showToast(t('toast.pinned_chunk_missing'), 'error');
+      return;
+    }
+    console.warn('[pin] openPinnedChunk failed', err);
+    showToast(t('toast.error', { error: err.message }), 'error');
+  }
+}
 function renderPinnedSection() {
   const list = qs('home-pinned-list');
   if (!list) return;
-  const store = _getPinStore();
-  const items = Object.entries(store);
-  if (!items.length) {
-    list.innerHTML = '<div class="empty-state" style="height:50px"><span>No pinned chunks yet — click ☆ Pin in the detail panel</span></div>';
+  let store = {};
+  try { store = _getPinStore(); }
+  catch (err) {
+    list.innerHTML = emptyState('⚠', t('home.state.load_failed'), err.message || '');
     return;
   }
-  list.innerHTML = items.map(([id, p]) => `
-    <div class="home-source-item">
-      <span class="home-source-name">${escapeHtml(p.source || 'unknown')}</span>
-      <span class="home-pinned-snippet">${escapeHtml(truncate(p.snippet || '', 50))}</span>
-      <button class="unpin-btn btn-ghost btn-xs" data-id="${escapeAttr(id)}" title="Unpin">✕</button>
-    </div>`).join('');
+  const items = Object.entries(store);
+  if (!items.length) {
+    list.innerHTML = `<div class="empty-state" style="height:50px"><span>${escapeHtml(t('home.state.no_pinned'))}</span></div>`;
+    return;
+  }
+  // Row = wrapper div; the navigate target is a real <button> sibling of
+  // the Remove button. Two reasons:
+  //   1. ARIA: a role=button container with a real <button> descendant is
+  //      a nested-interactive antipattern (assistive-tech announces both).
+  //   2. Keyboard: Enter/Space on the focused Remove button bubbles to the
+  //      row's keydown handler, double-firing unpin + navigate.
+  // Sibling buttons sidestep both — each gets native keyboard handling and
+  // there's no shared listener between them.
+  list.innerHTML = items.map(([id, p]) => {
+    const stale = Boolean(p.stale);
+    const source = p.source || t('home.health.unknown');
+    const openTitle = stale
+      ? t('home.pin.missing_title')
+      : t('home.pin.open_title', { source });
+    const removeLabel = stale ? t('home.pin.remove_label') : '✕';
+    const removeTitle = stale
+      ? t('home.pin.remove_title')
+      : t('home.pin.unpin_title');
+    return `
+    <div class="home-source-item home-pinned-item${stale ? ' home-pinned-stale' : ''}">
+      <button type="button" class="home-pinned-open" data-id="${escapeAttr(id)}" title="${escapeAttr(openTitle)}" aria-label="${escapeAttr(openTitle)}">
+        <span class="home-source-name">${escapeHtml(source)}</span>
+        <span class="home-pinned-snippet">${escapeHtml(truncate(p.snippet || '', 50))}</span>
+        ${stale ? `<span class="badge badge-yellow home-pinned-stale-badge">${escapeHtml(t('home.pin.missing_badge'))}</span>` : ''}
+      </button>
+      <button class="unpin-btn btn-ghost btn-xs" data-id="${escapeAttr(id)}" title="${escapeAttr(removeTitle)}">${escapeHtml(removeLabel)}</button>
+    </div>`;
+  }).join('');
+  list.querySelectorAll('.home-pinned-open').forEach(el => {
+    el.addEventListener('click', () => openPinnedChunk(el.dataset.id));
+  });
   list.querySelectorAll('.unpin-btn').forEach(b => {
     b.addEventListener('click', e => {
       e.stopPropagation();

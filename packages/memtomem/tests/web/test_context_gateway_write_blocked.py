@@ -157,6 +157,12 @@ def test_user_tier_gates_section_write_buttons_and_inserts_banner(page, mm_web_u
     assert "user-tier" in banner_text.lower() or "read-only" in banner_text.lower(), (
         f"banner must surface the user-tier read-only copy; got {banner_text!r}"
     )
+    remediation = page.locator(
+        "#ctx-skills-list .ctx-missing-canonical-remediation[data-tier='user']"
+    )
+    assert remediation.count() == 0, (
+        "canonical-present user-tier list must not show missing-canonical remediation"
+    )
 
 
 def test_project_local_tier_uses_project_local_specific_copy(page, mm_web_url: str) -> None:
@@ -388,6 +394,17 @@ def test_write_blocked_banner_sits_above_runtime_only_banner(page, mm_web_url: s
     # fetch resolves, so the runtime-only banner is the lagging signal.
     page.wait_for_selector("#ctx-skills-list .ctx-runtime-only-banner", timeout=5_000)
     page.wait_for_selector("#ctx-skills-list .ctx-write-blocked-banner", timeout=2_000)
+    remediation_text = (
+        page.locator(
+            "#ctx-skills-list .ctx-missing-canonical-remediation[data-tier='user']"
+        ).text_content()
+        or ""
+    )
+    assert "read-only" in remediation_text.lower(), (
+        f"user-tier remediation must explain web read-only canonical ops; got {remediation_text!r}"
+    )
+    assert "mm context init --include=agents,commands,skills --scope user" in remediation_text
+    assert "mm context sync --include=agents,commands,skills --scope user" in remediation_text
 
     # Compare DOM positions. ``compareDocumentPosition`` returns 4
     # (DOCUMENT_POSITION_FOLLOWING) when the right argument follows the
@@ -407,6 +424,47 @@ def test_write_blocked_banner_sits_above_runtime_only_banner(page, mm_web_url: s
         f"A runtime-only 'Click Import' banner above the read-only banner would tell "
         f"users to press a button the gate has disabled."
     )
+
+
+def test_project_local_missing_canonical_remediation_shows_draft_cli_flow(
+    page, mm_web_url: str
+) -> None:
+    """project_local runtime-only lists use the draft/no-fan-out remediation,
+    including the explicit CLI commands for the draft tier.
+    """
+    install_default_stubs(page)
+    runtime_only_skills = {
+        "skills": [
+            {
+                "name": "draft-only",
+                "canonical_path": "",
+                "runtimes": [
+                    {
+                        "runtime": "claude_skills",
+                        "status": "missing canonical",
+                        "runtime_path": "/srv/cwd/.claude/skills/draft-only.md",
+                        "runtime_content": "# Draft only\n",
+                    }
+                ],
+            }
+        ],
+        "scanned_dirs": ["/srv/cwd/.claude/skills/"],
+    }
+    _stub_projects_and_skills(page, skills_payload=runtime_only_skills)
+    page.goto(mm_web_url)
+    _open_skills(page)
+    _switch_tier(page, "project_local")
+
+    remediation = page.locator(
+        "#ctx-skills-list .ctx-missing-canonical-remediation[data-tier='project_local']"
+    )
+    remediation.wait_for(timeout=5_000)
+    text = remediation.text_content() or ""
+    assert "draft" in text.lower() or "fan-out" in text.lower(), (
+        f"project_local remediation must explain draft/no-fan-out semantics; got {text!r}"
+    )
+    assert "mm context init --include=agents,commands,skills --scope project_local" in text
+    assert "mm context sync --include=agents,commands,skills --scope project_local" in text
 
 
 def test_langchange_re_translates_write_blocked_tooltips(page, mm_web_url: str) -> None:

@@ -2506,12 +2506,43 @@ body.dev-mode .home-stats-row { grid-template-columns: repeat(6, 1fr); }
 .home-activity-map { overflow-x: auto; padding: 4px 0; min-height: 36px; }
 
 /* GitHub contribution graph */
+.activity-summary {
+  display: flex; flex-wrap: wrap; gap: 6px 12px; margin-bottom: 8px;
+  font-size: 0.68rem; color: var(--muted);
+}
+.activity-summary span { white-space: nowrap; }
+.activity-map-frame {
+  display: grid;
+  grid-template-columns: max-content minmax(688px, 1fr);
+  grid-template-rows: auto auto;
+  gap: 3px 6px;
+  min-width: 728px;
+}
+.activity-weekday-spacer { grid-column: 1; grid-row: 1; }
 .activity-months {
+  grid-column: 2; grid-row: 1;
   display: grid; gap: 2px; margin-bottom: 3px;
   font-size: 0.6rem; color: var(--muted); font-family: var(--mono);
 }
 .activity-months span { white-space: nowrap; }
+.activity-weekdays {
+  grid-column: 1; grid-row: 2;
+  display: grid;
+  grid-template-rows: repeat(7, 1fr);
+  gap: 2px;
+  font-size: 0.56rem;
+  line-height: 1;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+.activity-weekdays span {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 9px;
+}
 .activity-grid {
+  grid-column: 2; grid-row: 2;
   display: grid;
   grid-template-rows: repeat(7, 1fr);
   grid-auto-flow: column;
@@ -2540,10 +2571,40 @@ body.dev-mode .home-stats-row { grid-template-columns: repeat(6, 1fr); }
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
+.activity-legend {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  font-size: 0.62rem;
+  color: var(--muted);
+}
+.activity-legend-cell {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 10px;
+}
 
 .home-chart-card { min-width: 0; }
 .home-bar-chart { display: flex; flex-direction: column; gap: 6px; }
 .home-bar-row { display: flex; align-items: center; gap: 8px; font-size: 0.75rem; }
+.home-ns-row { align-items: flex-start; gap: 6px; }
+.home-ns-open {
+  appearance: none; border: 0; background: transparent; color: inherit;
+  display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
+  padding: 2px; margin: -2px; border-radius: 4px; cursor: pointer;
+  font: inherit; text-align: left;
+}
+.home-ns-open:hover .home-bar-label,
+.home-ns-open:focus-visible .home-bar-label,
+.ns-legend-action:hover .ns-legend-label,
+.ns-legend-action:focus-visible .ns-legend-label { color: var(--accent); }
+.home-ns-open:focus-visible,
+.ns-legend-action:focus-visible,
+.home-ns-more:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .home-bar-label {
   font-family: var(--mono); color: var(--text);
   width: min(120px, 36vw); max-width: 120px;
@@ -2554,6 +2615,29 @@ body.dev-mode .home-stats-row { grid-template-columns: repeat(6, 1fr); }
 .home-bar-count {
   font-family: var(--mono); color: var(--muted); font-size: 0.68rem;
   min-width: 40px; max-width: 60px; text-align: right; flex-shrink: 0; white-space: nowrap;
+}
+.home-ns-action {
+  color: var(--accent); font-size: 0.66rem; font-weight: 600; flex-shrink: 0;
+}
+.home-ns-detail {
+  color: var(--muted); font-size: 0.66rem; line-height: 1.35; min-width: 34px;
+}
+.home-ns-detail summary {
+  cursor: pointer; list-style: none; color: var(--muted); white-space: nowrap;
+}
+.home-ns-detail summary::-webkit-details-marker { display: none; }
+.home-ns-detail[open] {
+  flex-basis: 100%;
+  margin-left: 2px;
+  overflow-wrap: anywhere;
+}
+.home-ns-detail[open] summary {
+  margin-bottom: 2px;
+  color: var(--accent);
+}
+.home-ns-more {
+  appearance: none; border: 0; background: transparent; color: var(--accent);
+  align-self: flex-start; padding: 2px 0; font-size: 0.72rem; cursor: pointer;
 }
 .muted-sm { color: var(--muted); font-size: 0.72rem; }
 
@@ -2759,10 +2843,27 @@ body.dev-mode .home-stats-row { grid-template-columns: repeat(6, 1fr); }
 
 /* ── Sprint 5: Home pinned section ── */
 .home-pinned-list { display: flex; flex-direction: column; gap: 4px; }
+.home-pinned-item.home-pinned-stale {
+  border-color: var(--yellow);
+}
+.home-pinned-open {
+  display: flex; align-items: center; gap: 8px;
+  flex: 1; min-width: 0;
+  background: none; border: 0; padding: 0; margin: 0;
+  text-align: left; color: inherit; font: inherit; cursor: pointer;
+  border-radius: var(--radius);
+}
+.home-pinned-open:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
 .home-pinned-snippet {
   font-size: 0.75rem; color: var(--muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   flex: 1; min-width: 0; margin: 0 6px;
+}
+.home-pinned-stale-badge {
+  flex-shrink: 0;
+  font-size: 0.65rem;
 }
 
 /* ── Sprint 5: Settings modal ── */
@@ -3226,8 +3327,20 @@ body.dev-mode .home-stats-row { grid-template-columns: repeat(6, 1fr); }
   display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 6px 0 0;
   font-size: 0.72rem; color: var(--muted); font-family: var(--mono);
 }
-.ns-legend-item { display: flex; align-items: center; gap: 4px; }
+.ns-legend-item { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.ns-legend-action {
+  appearance: none; border: 0; background: transparent; color: inherit;
+  display: flex; align-items: center; gap: 4px; max-width: 100%;
+  padding: 2px; margin: -2px; border-radius: 4px; cursor: pointer;
+  font: inherit;
+}
 .ns-legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.ns-legend-label {
+  color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 150px;
+}
+.ns-legend-count { color: var(--muted); flex-shrink: 0; }
+.ns-legend-detail { flex-shrink: 0; }
 
 
 /* ═══════════════════════════════════════════════════════════════
@@ -3617,6 +3730,30 @@ body.help-hidden #help-toggle { opacity: 0.5; }
   font-size: 0.85rem;
   color: var(--text);
   border-radius: 2px;
+}
+.ctx-missing-canonical-remediation {
+  display: grid;
+  gap: 6px;
+}
+.ctx-missing-canonical-title {
+  font-weight: 700;
+  font-size: 0.88rem;
+}
+.ctx-missing-canonical-body {
+  line-height: 1.45;
+}
+.ctx-missing-canonical-commands {
+  display: grid;
+  gap: 4px;
+}
+.ctx-missing-canonical-commands code {
+  display: block;
+  padding: 5px 7px;
+  overflow-x: auto;
+  white-space: nowrap;
+  border-radius: 3px;
+  background: var(--code-bg);
+  color: var(--text);
 }
 
 /* ADR-0009 §3 deep-link state. Banner sits above the scope groups when

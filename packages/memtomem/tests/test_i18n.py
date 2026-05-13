@@ -347,6 +347,138 @@ class TestNoHardcodedStrings:
             "index.html elements named in #698 missing required i18n bindings:\n" + "\n".join(bad)
         )
 
+    def test_home_quick_actions_describe_navigation_flow(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """Home Quick Actions (#989) mostly navigate or prepare forms."""
+        html = (_STATIC_JS_DIR / "index.html").read_text(encoding="utf-8")
+        js = (_STATIC_JS_DIR / "app.js").read_text(encoding="utf-8")
+        ids = ["search", "index", "reindex", "export", "dedup", "tags"]
+        bad: list[str] = []
+
+        for action in ids:
+            el_id = f"home-{action}-btn"
+            tag_re = re.compile(rf'<button[^>]*\bid="{re.escape(el_id)}"[^>]*>')
+            m = tag_re.search(html)
+            if not m:
+                bad.append(f"  id={el_id!r} missing from index.html")
+                continue
+            tag = m.group(0)
+            for attr in [
+                f'data-i18n="home.action.{action}"',
+                f'data-i18n-title="home.action.{action}_title"',
+                f'data-i18n-aria-label="home.action.{action}_title"',
+            ]:
+                if attr not in tag:
+                    bad.append(f"  id={el_id!r} missing attribute: {attr}")
+
+        for locale_name, locale in [("en", en), ("ko", ko)]:
+            for action in ids:
+                label = locale[f"home.action.{action}"]
+                title = locale[f"home.action.{action}_title"]
+                # Emoji-prefix guard: leading char must be word/space or a Hangul
+                # syllable. Rejects 🔍/📥/🧹/… that drifted in pre-#989.
+                if re.match(r"^[^\w\s가-힣]", label):
+                    bad.append(f"  {locale_name}: home.action.{action} still starts with an icon")
+                if locale_name == "en" and action in {"reindex", "dedup"}:
+                    if "does not start" not in title.lower():
+                        bad.append(
+                            f"  {locale_name}: home.action.{action}_title must say it does not start"
+                        )
+
+        assert en["home.action.reindex"] == "Prepare Full Re-index"
+        assert en["home.action.export"] == "Open Export"
+        assert en["home.action.dedup"] == "Open Dedup Scan"
+        assert "switchSettingsSection('export')" in js
+        assert "switchSettingsSection('dedup')" in js
+        # Negative pin: the pre-#989 brittle `.settings-nav-btn?.click()` poke
+        # must not return — `switchSettingsSection(...)` is the public router.
+        assert '.settings-nav-btn[data-section="export"]\')?.click()' not in js
+        assert '.settings-nav-btn[data-section="dedup"]\')?.click()' not in js
+        for key in [
+            "toast.quick_action.open_search",
+            "toast.quick_action.open_index",
+            "toast.quick_action.reindex_ready",
+            "toast.quick_action.open_export",
+            "toast.quick_action.open_dedup",
+            "toast.quick_action.open_tags",
+        ]:
+            assert key in js
+            assert key in en
+            assert key in ko
+
+        assert not bad, "Home Quick Actions i18n/a11y drift:\n" + "\n".join(bad)
+
+    def test_issue_990_home_strings_are_localized(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """Home dashboard JS-owned empty/error/health strings must use i18n.
+
+        These strings are not reached by ``data-i18n`` because ``app.js``
+        writes them via ``innerHTML`` after API calls complete.
+        """
+        required = {
+            "home.state.loading",
+            "home.state.load_failed",
+            "home.state.no_files_indexed",
+            "home.state.no_data",
+            "home.state.no_namespaces",
+            "home.state.no_sources_title",
+            "home.state.no_sources_hint",
+            "home.state.no_pinned",
+            "home.source_chunks_one",
+            "home.source_chunks_other",
+            "home.health.embedding",
+            "home.health.dimension",
+            "home.health.storage",
+            "home.health.last_indexed",
+            "home.health.never",
+            "home.health.unknown",
+            "home.pin.unpin_title",
+        }
+        assert not (required - set(en)), (
+            f"#990 keys missing from en.json: {sorted(required - set(en))}"
+        )
+        assert not (required - set(ko)), (
+            f"#990 keys missing from ko.json: {sorted(required - set(ko))}"
+        )
+
+        app = (_STATIC_JS_DIR / "app.js").read_text(encoding="utf-8")
+        home_start = app.index("// Home Dashboard (D3)")
+        home_end = app.index("// C. Quick Search from Home", home_start)
+        home_js = app[home_start:home_end]
+        for key in required:
+            assert f"t('{key}" in app or f'"{key}"' in app or f"'{key}'" in app, (
+                f"#990 key {key!r} is present in locales but not wired in app.js"
+            )
+
+        forbidden = [
+            "No files indexed",
+            "No data",
+            "No namespaces",
+            "No sources indexed yet",
+            "Add files from the Index tab",
+            "No pinned chunks yet",
+            ">Embedding<",
+            ">Dimension<",
+            ">Storage<",
+            ">Last Indexed<",
+            "'Never'",
+            '"Never"',
+            " chunks</span>",
+        ]
+        bad = [literal for literal in forbidden if literal in home_js]
+        assert not bad, "#990 Home literals reintroduced in app.js: " + ", ".join(bad)
+
+    def test_issue_990_home_sources_fallback_is_not_mojibake(self) -> None:
+        html = (_STATIC_JS_DIR / "index.html").read_text(encoding="utf-8")
+        tag_re = re.compile(r'<div[^>]*\bid="home-sources"[^>]*>(.*?)</div>')
+        match = tag_re.search(html)
+        assert match, "id='home-sources' missing from index.html"
+        fallback = match.group(1)
+        assert "�" not in fallback, "home-sources fallback must not contain mojibake"
+        assert fallback == "—", f"home-sources fallback should be an em dash, got {fallback!r}"
+
     def test_issue_775_settings_badge_keys_present(
         self, en: dict[str, str], ko: dict[str, str]
     ) -> None:
