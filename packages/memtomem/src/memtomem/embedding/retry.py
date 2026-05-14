@@ -46,8 +46,6 @@ def with_retry(
         raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
     if base_delay < 0:
         raise ValueError(f"base_delay must be >= 0, got {base_delay}")
-    if max_delay < 0:
-        raise ValueError(f"max_delay must be >= 0, got {max_delay}")
 
     def decorator(func):
         @wraps(func)
