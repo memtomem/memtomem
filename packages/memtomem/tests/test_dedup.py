@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -36,6 +37,24 @@ class _FakeStorage:
 
     async def list_chunks_by_source(self, source: Path, limit: int) -> list[Chunk]:
         return self._chunks[:limit]
+
+    async def get_chunks_batch(self, ids: list[UUID]) -> dict[UUID, Chunk]:
+        by_id = {c.id: c for c in self._chunks}
+        return {i: by_id[i] for i in ids if i in by_id}
+
+    async def upsert_chunks(self, chunks: list[Chunk]) -> None:
+        by_id = {c.id: i for i, c in enumerate(self._chunks)}
+        for c in chunks:
+            if c.id in by_id:
+                self._chunks[by_id[c.id]] = c
+            else:
+                self._chunks.append(c)
+
+    async def delete_chunks(self, ids: list[UUID]) -> int:
+        target = set(ids)
+        before = len(self._chunks)
+        self._chunks[:] = [c for c in self._chunks if c.id not in target]
+        return before - len(self._chunks)
 
     async def dense_search(
         self,
@@ -230,3 +249,92 @@ class TestOrdering:
         # 0.99 pair should come before 0.93 pair.
         assert result[0].score == pytest.approx(0.99)
         assert result[1].score == pytest.approx(0.93)
+
+
+class TestMergeDryRun:
+    """``DedupScanner.merge`` safety-default parity with decay/cleanup tools.
+
+    The MCP wrapper ``mem_dedup_merge`` defaults ``dry_run=True`` so a
+    wrong UUID in a maintenance script can't silently destroy data on
+    first call, mirroring ``mem_decay_expire`` and ``mem_cleanup_orphans``.
+    The scanner-side default stays ``False`` because the web route
+    (``POST /api/dedup/merge``) calls through after the user has already
+    confirmed against a visible scan preview — the safety gate lives at
+    the MCP layer for the no-preview path.
+    """
+
+    @pytest.mark.asyncio
+    async def test_dry_run_returns_count_without_deleting(self, scanner_factory):
+        t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        keep = _mk("identical text", created_at=t0)
+        dup_a = _mk("identical text", created_at=t0 + timedelta(minutes=1))
+        dup_b = _mk("identical text", created_at=t0 + timedelta(minutes=2))
+        scanner, storage, _ = scanner_factory([keep, dup_a, dup_b])
+
+        would_delete = await scanner.merge(keep.id, [dup_a.id, dup_b.id], dry_run=True)
+
+        assert would_delete == 2
+        # Storage still holds all three chunks.
+        assert {c.id for c in storage._chunks} == {keep.id, dup_a.id, dup_b.id}
+
+    @pytest.mark.asyncio
+    async def test_dry_run_skips_tag_merge_upsert(self, scanner_factory):
+        t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        keep = Chunk(
+            content="x",
+            metadata=ChunkMetadata(source_file=Path("/s.md"), tags=("a",)),
+            embedding=[],
+            created_at=t0,
+        )
+        dup = Chunk(
+            content="x",
+            metadata=ChunkMetadata(source_file=Path("/s.md"), tags=("b",)),
+            embedding=[],
+            created_at=t0 + timedelta(minutes=1),
+        )
+        scanner, storage, _ = scanner_factory([keep, dup])
+
+        await scanner.merge(keep.id, [dup.id], dry_run=True)
+
+        # keep_chunk's tags are unchanged — no upsert happened.
+        kept = next(c for c in storage._chunks if c.id == keep.id)
+        assert kept.metadata.tags == ("a",)
+
+    @pytest.mark.asyncio
+    async def test_apply_deletes_and_merges_tags(self, scanner_factory):
+        t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        keep = Chunk(
+            content="x",
+            metadata=ChunkMetadata(source_file=Path("/s.md"), tags=("a",)),
+            embedding=[],
+            created_at=t0,
+        )
+        dup = Chunk(
+            content="x",
+            metadata=ChunkMetadata(source_file=Path("/s.md"), tags=("b",)),
+            embedding=[],
+            created_at=t0 + timedelta(minutes=1),
+        )
+        scanner, storage, _ = scanner_factory([keep, dup])
+
+        deleted = await scanner.merge(keep.id, [dup.id], dry_run=False)
+
+        assert deleted == 1
+        assert {c.id for c in storage._chunks} == {keep.id}
+        kept = storage._chunks[0]
+        assert kept.metadata.tags == ("a", "b")
+
+    @pytest.mark.asyncio
+    async def test_default_apply_path_unchanged(self, scanner_factory):
+        # Web route at ``POST /api/dedup/merge`` calls
+        # ``scanner.merge(keep, deletes)`` without the new ``dry_run`` kwarg.
+        # Pin the default behavior so that path stays write-through.
+        t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        keep = _mk("dup", created_at=t0)
+        dup = _mk("dup", created_at=t0 + timedelta(minutes=1))
+        scanner, storage, _ = scanner_factory([keep, dup])
+
+        deleted = await scanner.merge(keep.id, [dup.id])
+
+        assert deleted == 1
+        assert {c.id for c in storage._chunks} == {keep.id}

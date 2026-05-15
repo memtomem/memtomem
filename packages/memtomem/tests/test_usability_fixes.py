@@ -296,3 +296,25 @@ class TestCleanupOrphans:
     def test_cleanup_orphans_has_dry_run(self):
         info = ACTIONS["cleanup_orphans"]
         assert "dry_run" in info.params
+
+
+# ── dedup_merge safety-default parity ────────────────────────────────────
+
+
+class TestDedupMerge:
+    """Pin the ``dry_run`` safety default on the MCP wrapper.
+
+    ``mem_decay_expire`` and ``mem_cleanup_orphans`` both default to
+    ``dry_run=True`` so a typo in a maintenance script can't silently
+    destroy data on first call. ``mem_dedup_merge`` joined that contract
+    after F-D3-1; this test pins it so a future signature change can't
+    silently regress the safety default.
+    """
+
+    def test_dedup_merge_registered(self):
+        assert "dedup_merge" in ACTIONS
+        assert ACTIONS["dedup_merge"].category == "maintenance"
+
+    def test_dedup_merge_has_dry_run(self):
+        info = ACTIONS["dedup_merge"]
+        assert "dry_run" in info.params

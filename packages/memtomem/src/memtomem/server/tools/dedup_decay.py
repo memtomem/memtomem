@@ -62,15 +62,22 @@ async def mem_dedup_scan(
 async def mem_dedup_merge(
     keep_id: str,
     delete_ids: list[str],
+    dry_run: bool = True,
     ctx: CtxType = None,
 ) -> str:
     """Merge duplicate chunks: keep keep_id, delete delete_ids.
 
     Tags from deleted chunks are merged into the kept chunk.
 
+    Defaults to dry_run=True for safety -- set dry_run=False to actually
+    delete. Mirrors the safety-first defaults on mem_decay_expire and
+    mem_cleanup_orphans so a wrong UUID in a maintenance script can't
+    silently destroy data on first call.
+
     Args:
         keep_id: UUID of the chunk to keep
         delete_ids: UUIDs of chunks to delete
+        dry_run: If True (default), preview without making any changes.
     """
     app = await _get_app_initialized(ctx)
     if app.dedup_scanner is None:
@@ -81,9 +88,14 @@ async def mem_dedup_merge(
     except ValueError as exc:
         return f"Invalid UUID: {exc}"
 
-    deleted = await app.dedup_scanner.merge(keep_uuid, delete_uuids)
+    would_or_did = await app.dedup_scanner.merge(keep_uuid, delete_uuids, dry_run=dry_run)
+    if dry_run:
+        return (
+            f"Merge preview (dry-run): {would_or_did} chunks would be deleted, "
+            f"keep_id={keep_id}\n(no changes -- re-run with dry_run=False to apply)"
+        )
     app.search_pipeline.invalidate_cache()
-    return f"Merge complete: {deleted} chunks deleted, keep_id={keep_id}"
+    return f"Merge complete: {would_or_did} chunks deleted, keep_id={keep_id}"
 
 
 @mcp.tool()
