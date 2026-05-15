@@ -957,6 +957,312 @@ class TestSettingsHttpLayer:
         async with AsyncClient(transport=transport, base_url="http://test") as c:
             yield c
 
+    async def test_diff_no_source_still_reports_target_hooks(self, client, claude_home):
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text(
+            json.dumps({"hooks": {"Stop": [_rule("", "echo target")]}}),
+            encoding="utf-8",
+        )
+
+        diff = await client.get("/api/context/settings?target_scope=user")
+        assert diff.status_code == 200
+        diff_body = diff.json()
+        assert diff_body["status"] == "no_source"
+        assert diff_body["target_hooks"]["configured"][0]["event"] == "Stop"
+        assert diff_body["target_hooks"]["target_only"][0]["event"] == "Stop"
+
+    async def test_diff_empty_canonical_reports_no_hooks(self, client, claude_home, tmp_path):
+        """Empty canonical hooks are not a successful sync with hidden content."""
+        _make_canonical_settings(tmp_path, {"hooks": {}})
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text(
+            json.dumps({"hooks": {"PreToolUse": [_rule("Bash", "echo user")]}}),
+            encoding="utf-8",
+        )
+
+        diff = await client.get("/api/context/settings?target_scope=user")
+        assert diff.status_code == 200
+        diff_body = diff.json()
+        assert diff_body["status"] == "no_hooks"
+        assert diff_body["hooks"] == {"synced": [], "conflicts": [], "pending": []}
+        assert diff_body["target_hooks"]["configured"][0]["event"] == "PreToolUse"
+        assert diff_body["target_hooks"]["target_only"][0]["matcher"] == "Bash"
+        assert diff_body["target_hooks"]["configured"][0]["rule_index"] == 0
+        assert diff_body["target_hooks"]["configured"][0]["rule_hash"]
+        assert diff_body["target_mtime_ns"] == str(target.stat().st_mtime_ns)
+        assert diff_body["canonical_mtime_ns"] == str(
+            (tmp_path / CANONICAL_SETTINGS_FILE).stat().st_mtime_ns
+        )
+
+    async def test_promote_target_rule_creates_canonical_after_private_confirm(
+        self, client, claude_home, tmp_path
+    ):
+        """Target → canonical promotion is rule-scoped and gated for user targets."""
+        target = claude_home / ".claude" / "settings.json"
+        target_rule = _rule("Bash", "echo target")
+        target.write_text(
+            json.dumps({"hooks": {"PreToolUse": [target_rule]}}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        diff = await client.get("/api/context/settings?target_scope=user")
+        assert diff.status_code == 200
+        body = diff.json()
+        row = body["target_hooks"]["configured"][0]
+        assert body["canonical_mtime_ns"] is None
+
+        request = {
+            "event": row["event"],
+            "matcher": row["matcher"],
+            "rule_index": row["rule_index"],
+            "rule_hash": row["rule_hash"],
+            "target_mtime_ns": body["target_mtime_ns"],
+            "canonical_mtime_ns": body["canonical_mtime_ns"],
+        }
+        gated = await client.post(
+            "/api/context/settings/rules/promote?target_scope=user",
+            json=request,
+        )
+        assert gated.status_code == 200
+        assert gated.json()["status"] == "needs_confirmation"
+        assert not (tmp_path / CANONICAL_SETTINGS_FILE).exists()
+
+        promoted = await client.post(
+            "/api/context/settings/rules/promote?target_scope=user",
+            json={**request, "confirm_private_to_shared": True},
+        )
+        assert promoted.status_code == 200, promoted.text
+        assert promoted.json()["status"] == "ok"
+
+        canonical = json.loads((tmp_path / CANONICAL_SETTINGS_FILE).read_text(encoding="utf-8"))
+        assert canonical["hooks"]["PreToolUse"] == [target_rule]
+
+    async def test_promote_target_rule_is_idempotent_when_canonical_has_same_hash(
+        self, client, tmp_path
+    ):
+        """A repeated promote of the same rule is a no-op success."""
+        shared_rule = _rule("Write", "echo shared")
+        _make_canonical_settings(tmp_path, {"hooks": {"PostToolUse": [shared_rule]}})
+        (tmp_path / ".claude").mkdir()
+        target = tmp_path / ".claude" / "settings.json"
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [shared_rule]}}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        diff = await client.get("/api/context/settings?target_scope=project_shared")
+        row = diff.json()["target_hooks"]["configured"][0]
+        resp = await client.post(
+            "/api/context/settings/rules/promote?target_scope=project_shared",
+            json={
+                "event": row["event"],
+                "matcher": row["matcher"],
+                "rule_index": row["rule_index"],
+                "rule_hash": row["rule_hash"],
+                "target_mtime_ns": diff.json()["target_mtime_ns"],
+                "canonical_mtime_ns": diff.json()["canonical_mtime_ns"],
+            },
+        )
+        assert resp.status_code == 200
+        out = resp.json()
+        assert out["status"] == "ok"
+        assert out["idempotent"] is True
+
+        canonical = json.loads((tmp_path / CANONICAL_SETTINGS_FILE).read_text(encoding="utf-8"))
+        assert canonical["hooks"]["PostToolUse"] == [shared_rule]
+
+    async def test_promote_target_rule_conflicts_on_same_matcher_different_rule(
+        self, client, tmp_path
+    ):
+        """Same event/matcher with different payload is reported, not merged."""
+        _make_canonical_settings(
+            tmp_path,
+            {"hooks": {"PostToolUse": [_rule("Write", "echo canonical")]}},
+        )
+        (tmp_path / ".claude").mkdir()
+        target = tmp_path / ".claude" / "settings.json"
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [_rule("Write", "echo target")]}}),
+            encoding="utf-8",
+        )
+
+        diff = await client.get("/api/context/settings?target_scope=project_shared")
+        row = diff.json()["target_hooks"]["configured"][0]
+        resp = await client.post(
+            "/api/context/settings/rules/promote?target_scope=project_shared",
+            json={
+                "event": row["event"],
+                "matcher": row["matcher"],
+                "rule_index": row["rule_index"],
+                "rule_hash": row["rule_hash"],
+                "target_mtime_ns": diff.json()["target_mtime_ns"],
+                "canonical_mtime_ns": diff.json()["canonical_mtime_ns"],
+            },
+        )
+        assert resp.status_code == 200
+        out = resp.json()
+        assert out["status"] == "conflict"
+        assert "existing" in out
+
+        canonical = json.loads((tmp_path / CANONICAL_SETTINGS_FILE).read_text(encoding="utf-8"))
+        assert canonical["hooks"]["PostToolUse"] == [_rule("Write", "echo canonical")]
+
+    async def test_delete_target_rule_uses_index_and_hash_for_duplicate_matchers(
+        self, client, claude_home
+    ):
+        """Duplicate same-matcher rows are deleted by exact identity."""
+        target = claude_home / ".claude" / "settings.json"
+        first = _rule("", "echo first")
+        second = _rule("", "echo second")
+        target.write_text(
+            json.dumps({"hooks": {"Stop": [first, second]}}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        diff = await client.get("/api/context/settings?target_scope=user")
+        rows = diff.json()["target_hooks"]["configured"]
+        second_row = rows[1]
+        resp = await client.post(
+            "/api/context/settings/rules/delete?target_scope=user",
+            json={
+                "event": second_row["event"],
+                "matcher": second_row["matcher"],
+                "rule_index": second_row["rule_index"],
+                "rule_hash": second_row["rule_hash"],
+                "target_mtime_ns": diff.json()["target_mtime_ns"],
+                "canonical_mtime_ns": diff.json()["canonical_mtime_ns"],
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+
+        written = json.loads(target.read_text(encoding="utf-8"))
+        assert written["hooks"]["Stop"] == [first]
+
+    async def test_delete_target_rule_ignores_stale_canonical_mtime(
+        self, client, claude_home, tmp_path
+    ):
+        """Delete mutates only target settings, so canonical freshness is not load-bearing."""
+        _make_canonical_settings(
+            tmp_path,
+            {"hooks": {"PostToolUse": [_rule("Write", "echo canonical")]}},
+        )
+        target = claude_home / ".claude" / "settings.json"
+        target_rule = _rule("Bash", "echo target")
+        target.write_text(
+            json.dumps({"hooks": {"PreToolUse": [target_rule]}}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        diff = await client.get("/api/context/settings?target_scope=user")
+        body = diff.json()
+        row = body["target_hooks"]["configured"][0]
+
+        canonical = tmp_path / CANONICAL_SETTINGS_FILE
+        canonical.write_text(
+            json.dumps({"hooks": {"Stop": [_rule("", "echo changed canonical")]}}),
+            encoding="utf-8",
+        )
+        import os as _os
+
+        st = canonical.stat()
+        _os.utime(canonical, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+
+        resp = await client.post(
+            "/api/context/settings/rules/delete?target_scope=user",
+            json={
+                "event": row["event"],
+                "matcher": row["matcher"],
+                "rule_index": row["rule_index"],
+                "rule_hash": row["rule_hash"],
+                "target_mtime_ns": body["target_mtime_ns"],
+                "canonical_mtime_ns": body["canonical_mtime_ns"],
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+
+        written = json.loads(target.read_text(encoding="utf-8"))
+        assert written["hooks"] == {}
+
+    async def test_rule_action_aborts_when_mtime_is_stale(self, client, claude_home):
+        target = claude_home / ".claude" / "settings.json"
+        original = _rule("Bash", "echo original")
+        target.write_text(
+            json.dumps({"hooks": {"PreToolUse": [original]}}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        diff = await client.get("/api/context/settings?target_scope=user")
+        row = diff.json()["target_hooks"]["configured"][0]
+        target.write_text(
+            json.dumps({"hooks": {"PreToolUse": [_rule("Bash", "echo changed")]}}),
+            encoding="utf-8",
+        )
+        import os as _os
+
+        st = target.stat()
+        _os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+
+        resp = await client.post(
+            "/api/context/settings/rules/delete?target_scope=user",
+            json={
+                "event": row["event"],
+                "matcher": row["matcher"],
+                "rule_index": row["rule_index"],
+                "rule_hash": row["rule_hash"],
+                "target_mtime_ns": diff.json()["target_mtime_ns"],
+                "canonical_mtime_ns": diff.json()["canonical_mtime_ns"],
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "aborted"
+        assert "echo changed" in target.read_text(encoding="utf-8")
+
+    async def test_rule_action_aborts_when_index_hash_identity_is_stale(self, client, claude_home):
+        """If the requested slot no longer has the same hash, do not scan elsewhere."""
+        target = claude_home / ".claude" / "settings.json"
+        first = _rule("Bash", "echo first")
+        second = _rule("Bash", "echo second")
+        target.write_text(
+            json.dumps({"hooks": {"PreToolUse": [first, second]}}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        diff = await client.get("/api/context/settings?target_scope=user")
+        body = diff.json()
+        original_first_row = body["target_hooks"]["configured"][0]
+
+        # Reorder the same two rules but preserve the original mtime token.
+        # The target hash still exists at a different index; the endpoint
+        # intentionally refuses to auto-search and returns stale.
+        target.write_text(
+            json.dumps({"hooks": {"PreToolUse": [second, first]}}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        import os as _os
+
+        old_mtime = int(body["target_mtime_ns"])
+        st = target.stat()
+        _os.utime(target, ns=(st.st_atime_ns, old_mtime))
+
+        resp = await client.post(
+            "/api/context/settings/rules/delete?target_scope=user",
+            json={
+                "event": original_first_row["event"],
+                "matcher": original_first_row["matcher"],
+                "rule_index": original_first_row["rule_index"],
+                "rule_hash": original_first_row["rule_hash"],
+                "target_mtime_ns": body["target_mtime_ns"],
+                "canonical_mtime_ns": body["canonical_mtime_ns"],
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "aborted"
+
+        written = json.loads(target.read_text(encoding="utf-8"))
+        assert written["hooks"]["PreToolUse"] == [second, first]
+
     async def test_sync_route_round_trip_unidirectional(self, client, claude_home, tmp_path):
         """ADR-0001 §5 c2 — unidirectional round-trip via the route layer.
 

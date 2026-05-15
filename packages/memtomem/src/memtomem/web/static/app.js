@@ -1078,6 +1078,7 @@ function showConfirm({
     focusables[1].focus();
 
     function cleanup(ok) {
+      const extraChecked = extraOption && ok ? extraCheckbox.checked : false;
       hide(modal);
       // Always reset the checkbox row so a later non-extra confirm
       // doesn't inherit the previous label / checked state.
@@ -1087,7 +1088,7 @@ function showConfirm({
       document.removeEventListener('keydown', onKey, true);
       if (extraOption) {
         const extras = {};
-        extras[extraOption.id] = ok ? extraCheckbox.checked : false;
+        extras[extraOption.id] = extraChecked;
         resolve({ ok, extras });
       } else {
         resolve(ok);
@@ -4671,6 +4672,61 @@ function _renderMemoryDirGroup(dir, items, status, maxChunks, opts) {
   return group;
 }
 
+async function _reindexSourceFile(path, btn) {
+  if (typeof _indexingTryStartOrRefresh === 'function') {
+    if (!(await _indexingTryStartOrRefresh())) return;
+  } else if (typeof _indexingTryStart === 'function' && !_indexingTryStart()) {
+    return;
+  }
+  if (btn) btnLoading(btn, true);
+  try {
+    const resp = await api(
+      'POST',
+      '/api/index',
+      { path, recursive: false, force: true },
+      { timeout: 300_000 },
+    );
+    const count = (resp && resp.indexed_chunks) || 0;
+    const errors = (resp && resp.errors) || [];
+    if (errors.length) {
+      showToast(t('toast.source_reindex_partial', { count: errors.length, first: errors[0] }), 'error');
+    } else {
+      showToast(t('toast.source_reindexed', { count }), 'success');
+    }
+    _markDataStale();
+    loadStats();
+    await loadSources();
+    browseSource(path);
+  } catch (err) {
+    showToast(t('toast.source_reindex_failed', { error: err.message }), 'error');
+  } finally {
+    if (btn) btnLoading(btn, false);
+    if (typeof _indexingEnd === 'function') _indexingEnd();
+  }
+}
+
+async function _deleteSourceFile(path) {
+  const ok = await showConfirm({
+    title: t('confirm.source_delete_title'),
+    message: t('confirm.source_delete_msg', { path }),
+    confirmText: t('common.delete'),
+  });
+  if (!ok) return;
+  try {
+    await api('DELETE', `/api/sources?path=${encodeURIComponent(path)}`);
+    showToast(t('toast.source_deleted'), 'success');
+    STATE.allSources = (STATE.allSources || []).filter(s => s.path !== path);
+    STATE.lastResults = (STATE.lastResults || []).filter(r => r.chunk?.source_file !== path);
+    _markDataStale();
+    loadStats();
+    const activePath = qs('chunks-browser')?.querySelector('.file-path')?.textContent || '';
+    if (activePath === path) hideBrowser();
+    renderSourceTree(_getFilteredSorted());
+  } catch (err) {
+    showToast(t('toast.delete_failed', { error: err.message }), 'error');
+  }
+}
+
 function _renderMemorySourceItem(s, maxChunks) {
   const filename = s.path.split('/').pop() || s.path;
   const item = document.createElement('div');
@@ -4712,6 +4768,10 @@ function _renderMemorySourceItem(s, maxChunks) {
       <span class="source-type-dot" style="background:${fileTypeColor(s.path)}"></span>
       <span class="source-name">${highlightText(filename, filterQuery)}</span>
       ${nsBadges}
+      <span class="source-item-actions">
+        <button type="button" class="source-action-btn source-reindex-btn" title="${escapeAttr(t('sources.source_reindex_title'))}">${escapeHtml(t('sources.source_reindex_btn'))}</button>
+        <button type="button" class="source-action-btn source-del-btn" title="${escapeAttr(t('sources.source_delete_title'))}">${escapeHtml(t('sources.source_delete_btn'))}</button>
+      </span>
     </div>
     ${summaryHtml}
     <div class="source-item-row2">
@@ -4722,6 +4782,14 @@ function _renderMemorySourceItem(s, maxChunks) {
     </div>
   `;
   item.setAttribute('tabindex', '0');
+  item.querySelector('.source-reindex-btn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    _reindexSourceFile(s.path, e.currentTarget);
+  });
+  item.querySelector('.source-del-btn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    _deleteSourceFile(s.path);
+  });
   item.addEventListener('click', () => {
     // Manual source-item click is an explicit user pivot — drop any
     // chunk-highlight target left over from a prior ``_navigateToSource``

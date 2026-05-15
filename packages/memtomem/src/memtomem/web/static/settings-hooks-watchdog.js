@@ -31,6 +31,7 @@ function _wdLabel(status) {
 // references.
 let _hooksRuleRegistry = [];
 let _hooksSyncSeq = 0;
+let _hooksLastSyncData = null;
 
 function _hooksCurrentTargetScope() {
   if (typeof _ctxTargetScope === 'string') return _ctxTargetScope;
@@ -95,7 +96,12 @@ function _renderHookRuleDetail(key, contentEl) {
 
   let html = `<div class="hooks-rule-detail-header">`;
   html += `<strong>${escapeHtml(label)}</strong>`;
-  html += `<span class="badge ${entry._bucket === 'pending' ? 'badge-warning' : 'badge-success'}">${escapeHtml(entry._bucket || '')}</span>`;
+  const badgeClass = entry._bucket === 'pending'
+    ? 'badge-warning'
+    : (entry._bucket === 'configured' || entry._bucket === 'target-only')
+      ? 'badge-muted'
+      : 'badge-success';
+  html += `<span class="badge ${badgeClass}">${escapeHtml(entry._bucket || '')}</span>`;
   html += `</div>`;
   html += `<div class="hooks-rule-detail-inner">`;
   html += _row(t('settings.hooks.detail.event'), entry.event);
@@ -111,11 +117,238 @@ function _renderHookRuleDetail(key, contentEl) {
   html += `<span class="hooks-rule-detail-label">${escapeHtml(t('settings.hooks.detail.rule_json'))}</span>`;
   html += `<pre class="hooks-rule-detail-json">${escapeHtml(JSON.stringify(rule, null, 2))}</pre>`;
   html += `</div>`;
+  if (entry._bucket === 'configured' || entry._bucket === 'target-only') {
+    html += `<div class="hooks-rule-detail-actions">`;
+    html += `<button class="btn-sm btn-secondary hooks-rule-promote-btn" data-action="promote" data-hook-key="${escapeHtml(key)}">${escapeHtml(t('settings.hooks.promote_btn'))}</button>`;
+    html += `<button class="btn-sm btn-danger hooks-rule-delete-btn" data-action="delete" data-hook-key="${escapeHtml(key)}">${escapeHtml(t('settings.hooks.delete_btn'))}</button>`;
+    html += `</div>`;
+    html += `<div class="hooks-rule-edit-hint">${escapeHtml(t('settings.hooks.edit_unavailable_v1_hint', { path: _hooksLastSyncData?.target_path || '' }))}</div>`;
+  }
   html += `</div>`;
 
   panel.innerHTML = html;
   panel.hidden = false;
   panel.setAttribute('data-hook-key', key);
+}
+
+function _hooksRuleActionPayload(entry, confirmPrivateToShared) {
+  const data = _hooksLastSyncData || {};
+  return {
+    event: entry.event || '',
+    matcher: entry.matcher || '',
+    rule_index: entry.rule_index,
+    rule_hash: entry.rule_hash,
+    target_mtime_ns: data.target_mtime_ns ?? null,
+    canonical_mtime_ns: data.canonical_mtime_ns ?? null,
+    confirm_private_to_shared: !!confirmPrivateToShared,
+  };
+}
+
+function _hooksIsPrivateTargetScope() {
+  const scope = _hooksLastSyncData?.target_scope || _hooksCurrentTargetScope();
+  return scope === 'user' || scope === 'project_local';
+}
+
+async function _hooksFetchSyncData() {
+  const csrf = await ensureCsrfToken();
+  const headers = csrf
+    ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
+    : { 'Content-Type': 'application/json' };
+  const res = await fetch(_hooksScopedUrl('/api/settings-sync'), { method: 'GET', headers });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Request failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+async function _hooksPostRuleAction(action, entry, confirmPrivateToShared) {
+  const csrf = await ensureCsrfToken();
+  const headers = csrf
+    ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
+    : { 'Content-Type': 'application/json' };
+  const res = await fetch(_hooksScopedUrl(`/api/context/settings/rules/${action}`), {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(_hooksRuleActionPayload(entry, confirmPrivateToShared)),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Request failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+async function _confirmHooksPromote(count, label) {
+  const privateTarget = _hooksIsPrivateTargetScope();
+  const targetPath = _hooksLastSyncData?.target_path || '';
+  const title = count > 1
+    ? t('settings.hooks.promote_all_btn')
+    : t('settings.hooks.promote_btn');
+  const message = count > 1
+    ? t(
+      privateTarget
+        ? 'settings.hooks.promote_all_confirm_private'
+        : 'settings.hooks.promote_all_confirm',
+      { count, path: targetPath },
+    )
+    : t(
+      privateTarget
+        ? 'settings.hooks.promote_confirm_private'
+        : 'settings.hooks.promote_confirm',
+      { label, path: targetPath },
+    );
+  const choice = await showConfirm({
+    title,
+    message,
+    confirmText: t('settings.hooks.promote_btn'),
+    extraOption: {
+      id: 'delete_original',
+      label: t('settings.hooks.promote_delete_original_option'),
+      defaultChecked: false,
+    },
+  });
+  if (typeof choice === 'boolean') {
+    return { ok: choice, deleteOriginal: false };
+  }
+  return {
+    ok: !!choice?.ok,
+    deleteOriginal: !!choice?.extras?.delete_original,
+  };
+}
+
+function _findMatchingTargetRule(data, entry) {
+  const rows = Array.isArray(data?.target_hooks?.configured)
+    ? data.target_hooks.configured
+    : [];
+  return rows.find(row =>
+    row.event === entry.event
+    && (row.matcher || '') === (entry.matcher || '')
+    && row.rule_hash === entry.rule_hash,
+  );
+}
+
+async function _deleteOriginalAfterPromote(entry) {
+  const latest = await _hooksFetchSyncData();
+  _hooksLastSyncData = latest;
+  const current = _findMatchingTargetRule(latest, entry);
+  if (!current) {
+    return { status: 'ok', reason: t('settings.hooks.original_already_removed') };
+  }
+  return _hooksPostRuleAction('delete', current, false);
+}
+
+async function _handleHooksRuleAction(action, key, btn) {
+  const idx = Number(key);
+  const entry = Number.isInteger(idx) ? _hooksRuleRegistry[idx] : undefined;
+  if (!entry) return;
+  const label = entry.matcher ? `${entry.event}:${entry.matcher}` : entry.event;
+
+  if (action === 'delete') {
+    const ok = await showConfirm({
+      title: t('settings.hooks.delete_btn'),
+      message: t('settings.hooks.delete_confirm', { label }),
+      confirmText: t('common.delete'),
+    });
+    if (!ok) return;
+  } else if (action === 'promote') {
+    const choice = await _confirmHooksPromote(1, label);
+    if (!choice.ok) return;
+    entry._deleteOriginalAfterPromote = choice.deleteOriginal;
+  }
+
+  btnLoading(btn, true);
+  try {
+    let result = await _hooksPostRuleAction(action, entry, _hooksIsPrivateTargetScope());
+    if (result.status === 'needs_confirmation' && action === 'promote') {
+      // Defensive fallback for older clients or unexpected scope changes:
+      // the normal promote path already asks once before the request.
+      result = await _hooksPostRuleAction(action, entry, true);
+    }
+
+    if (result.status === 'ok') {
+      if (action === 'promote' && entry._deleteOriginalAfterPromote) {
+        const deleted = await _deleteOriginalAfterPromote(entry);
+        if (deleted.status === 'ok') {
+          showToast(t('settings.hooks.promote_delete_success'));
+        } else {
+          showToast(deleted.reason || t('settings.hooks.promote_delete_partial'), 'warning');
+        }
+        loadHooksSync();
+        return;
+      }
+      showToast(
+        result.reason || t('settings.hooks.rule_action_success'),
+        result.idempotent ? 'info' : 'success',
+      );
+      loadHooksSync();
+      return;
+    }
+    if (result.status === 'conflict') {
+      showToast(result.reason || t('settings.hooks.promote_conflict'), 'warning');
+      loadHooksSync();
+      return;
+    }
+    if (result.status === 'aborted') {
+      showToast(result.reason || t('settings.hooks.rule_action_stale'), 'error');
+      loadHooksSync();
+      return;
+    }
+    showToast(result.reason || t('toast.unexpected_response'), 'error');
+  } catch (err) {
+    showToast(err.message || t('toast.request_failed'), 'error');
+  } finally {
+    btnLoading(btn, false);
+  }
+}
+
+async function _handleHooksPromoteAll(btn) {
+  const entries = _hooksRuleRegistry.filter(entry => entry._bucket === 'target-only');
+  if (!entries.length) return;
+  const choice = await _confirmHooksPromote(entries.length, '');
+  if (!choice.ok) return;
+
+  btnLoading(btn, true);
+  const summary = { saved: 0, deleted: 0, conflicts: 0, aborted: 0, failed: 0 };
+  const deleteQueue = [];
+  try {
+    for (const entry of entries) {
+      try {
+        let result = await _hooksPostRuleAction('promote', entry, _hooksIsPrivateTargetScope());
+        if (result.status === 'needs_confirmation') {
+          result = await _hooksPostRuleAction('promote', entry, true);
+        }
+        if (result.status === 'ok') {
+          summary.saved += 1;
+          if (choice.deleteOriginal) deleteQueue.push(entry);
+        } else if (result.status === 'conflict') {
+          summary.conflicts += 1;
+        } else if (result.status === 'aborted') {
+          summary.aborted += 1;
+        } else {
+          summary.failed += 1;
+        }
+      } catch (_err) {
+        summary.failed += 1;
+      }
+    }
+
+    for (const entry of deleteQueue) {
+      try {
+        const deleted = await _deleteOriginalAfterPromote(entry);
+        if (deleted.status === 'ok') summary.deleted += 1;
+        else summary.failed += 1;
+      } catch (_err) {
+        summary.failed += 1;
+      }
+    }
+
+    const tone = summary.conflicts || summary.aborted || summary.failed ? 'warning' : 'success';
+    showToast(t('settings.hooks.promote_all_result', summary), tone);
+    loadHooksSync();
+  } finally {
+    btnLoading(btn, false);
+  }
 }
 
 async function loadHooksSync() {
@@ -155,12 +388,14 @@ async function loadHooksSync() {
       || requestedScope !== _hooksCurrentTargetScope()
       || requestedProjectScope !== _hooksCurrentProjectScope()
     ) return;
+    _hooksLastSyncData = data;
 
     // Status badge
     const badges = {
       in_sync: { cls: 'badge-success', text: t('settings.hooks.in_sync') },
       out_of_sync: { cls: 'badge-warning', text: `${data.hooks?.pending?.length || 0} ${t('settings.hooks.pending')}` },
       conflicts: { cls: 'badge-danger', text: `${data.hooks?.conflicts?.length || 0} ${t('settings.hooks.conflicts')}` },
+      no_hooks: { cls: 'badge-muted', text: t('settings.hooks.no_hooks') },
       no_source: { cls: 'badge-muted', text: t('settings.hooks.no_source') },
       error: { cls: 'badge-danger', text: data.error || 'Error' },
     };
@@ -193,24 +428,32 @@ async function loadHooksSync() {
     _hooksWireTierControls();
     _hooksWireProjectControls();
 
-    // Sync Now is only meaningful when a canonical source exists. Disable
-    // the button in ``no_source`` so clicking it doesn't fire a POST that
-    // can never succeed; restore the enabled state on the other branches
-    // since every ``loadHooksSync`` call ends here.
+    // Sync Now is only meaningful when a canonical source exists and has
+    // at least one hook rule. Disable the button for empty sources so a
+    // no-op cannot look like a successful hook sync.
     const syncBtn = document.getElementById('hooks-sync-btn');
     if (syncBtn) {
       const isNoSource = data.status === 'no_source';
-      syncBtn.disabled = isNoSource;
+      const isNoHooks = data.status === 'no_hooks';
+      syncBtn.disabled = isNoSource || isNoHooks;
       if (isNoSource) {
         syncBtn.setAttribute('data-no-source', 'true');
+        syncBtn.removeAttribute('data-no-hooks');
         syncBtn.title = t('settings.hooks.sync_now_disabled_no_source');
+      } else if (isNoHooks) {
+        syncBtn.removeAttribute('data-no-source');
+        syncBtn.setAttribute('data-no-hooks', 'true');
+        syncBtn.title = t('settings.hooks.sync_now_disabled_no_hooks');
       } else {
         syncBtn.removeAttribute('data-no-source');
+        syncBtn.removeAttribute('data-no-hooks');
         syncBtn.title = t('settings.hooks.sync_now_tooltip');
       }
     }
 
-    if (data.status === 'no_source' || data.status === 'error') {
+    const hasTargetConfigured = Array.isArray(data.target_hooks?.configured)
+      && data.target_hooks.configured.length > 0;
+    if ((data.status === 'no_source' && !hasTargetConfigured) || data.status === 'error') {
       // Status badge above already names the condition — keep the body to
       // a single actionable line so the same string isn't echoed twice.
       contentEl.innerHTML = emptyState(
@@ -237,6 +480,7 @@ async function loadHooksSync() {
     _hooksRuleRegistry = [];
     const _pendingKeys = [];
     const _syncedKeys = [];
+    const _configuredKeys = [];
     for (const p of data.hooks.pending) {
       _pendingKeys.push(String(_hooksRuleRegistry.length));
       _hooksRuleRegistry.push({ ...p, _bucket: 'pending' });
@@ -244,6 +488,25 @@ async function loadHooksSync() {
     for (const s of data.hooks.synced) {
       _syncedKeys.push(String(_hooksRuleRegistry.length));
       _hooksRuleRegistry.push({ ...s, _bucket: 'synced' });
+    }
+    const targetConfigured = Array.isArray(data.target_hooks?.configured)
+      ? data.target_hooks.configured
+      : [];
+    const targetOnlyRows = Array.isArray(data.target_hooks?.target_only)
+      ? data.target_hooks.target_only
+      : [];
+    const targetOnlyKeys = new Set(targetOnlyRows.map(row =>
+      `${row.event || ''}\u0000${row.matcher || ''}\u0000${JSON.stringify(row.rule || {})}`,
+    ));
+    function _targetRuleKey(row) {
+      return `${row.event || ''}\u0000${row.matcher || ''}\u0000${JSON.stringify(row.rule || {})}`;
+    }
+    for (const row of targetConfigured) {
+      _configuredKeys.push(String(_hooksRuleRegistry.length));
+      _hooksRuleRegistry.push({
+        ...row,
+        _bucket: targetOnlyKeys.has(_targetRuleKey(row)) ? 'target-only' : 'configured',
+      });
     }
 
     // Conflicts
@@ -300,13 +563,38 @@ async function loadHooksSync() {
       html += '</div>';
     }
 
+    if (targetConfigured.length) {
+      const targetOnlyCount = targetConfigured.filter(row => targetOnlyKeys.has(_targetRuleKey(row))).length;
+      html += '<div class="hooks-section-header">';
+      html += '<h3>' + t('settings.hooks.configured') + '</h3>';
+      if (targetOnlyCount) {
+        html += `<button class="btn-sm btn-primary hooks-promote-all-btn">${escapeHtml(t('settings.hooks.promote_all_btn'))} (${targetOnlyCount})</button>`;
+      }
+      html += '</div>';
+      html += '<div class="hooks-synced-list text-muted">';
+      targetConfigured.forEach((row, i) => {
+        const label = _ruleLabel(row);
+        const key = _configuredKeys[i];
+        const targetOnly = targetOnlyKeys.has(_targetRuleKey(row));
+        html += `<div class="hooks-rule-row hooks-rule-row--configured" data-hook-key="${escapeHtml(key)}" tabindex="0" role="button">`
+          + `${escapeHtml(label)}`
+          + (targetOnly ? ` <span class="badge badge-muted">${escapeHtml(t('settings.hooks.target_only'))}</span>` : '')
+          + `</div>`;
+      });
+      html += '</div>';
+    }
+
     // Shared per-rule detail panel — empty until a row is clicked.
-    if (data.hooks.synced.length || data.hooks.pending.length) {
+    if (data.hooks.synced.length || data.hooks.pending.length || targetConfigured.length) {
       html += `<div id="hooks-rule-detail" class="hooks-rule-detail" hidden></div>`;
     }
 
     if (!html) {
-      html = emptyState('', t('settings.hooks.in_sync'), t('settings.hooks.no_hooks_defined'));
+      if (data.status === 'no_hooks') {
+        html = emptyState('', t('settings.hooks.no_hooks'), t('settings.hooks.no_hooks_hint'));
+      } else {
+        html = emptyState('', t('settings.hooks.in_sync'), t('settings.hooks.no_hooks_defined'));
+      }
     }
 
     contentEl.innerHTML = html;
@@ -324,6 +612,24 @@ async function loadHooksSync() {
         }
       });
     });
+
+    if (!contentEl._hooksRuleActionWired) {
+      contentEl.addEventListener('click', evt => {
+        const bulkBtn = evt.target.closest?.('.hooks-promote-all-btn');
+        if (bulkBtn) {
+          evt.preventDefault();
+          evt.stopPropagation();
+          _handleHooksPromoteAll(bulkBtn);
+          return;
+        }
+        const btn = evt.target.closest?.('.hooks-rule-promote-btn, .hooks-rule-delete-btn');
+        if (!btn) return;
+        evt.preventDefault();
+        evt.stopPropagation();
+        _handleHooksRuleAction(btn.dataset.action, btn.dataset.hookKey, btn);
+      });
+      contentEl._hooksRuleActionWired = true;
+    }
 
     // Resolve buttons
     contentEl.querySelectorAll('.hooks-resolve-btn').forEach(btn => {
