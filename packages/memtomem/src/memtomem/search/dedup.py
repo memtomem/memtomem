@@ -60,11 +60,17 @@ class DedupScanner:
 
         return candidates[:limit]
 
-    async def merge(self, keep_id: UUID, delete_ids: list[UUID]) -> int:
+    async def merge(self, keep_id: UUID, delete_ids: list[UUID], dry_run: bool = False) -> int:
         """Merge duplicate chunks: keep *keep_id*, delete *delete_ids*.
 
         The tags of all deleted chunks are unioned into the kept chunk.
-        Returns the number of chunks actually deleted.
+        Returns the number of chunks that were (or would be) deleted.
+
+        When ``dry_run`` is True, no writes are performed: neither the
+        tag-merge upsert on ``keep_id`` nor the deletion of ``delete_ids``.
+        The return value is the count of ``delete_ids`` that resolve to
+        existing chunks — the same value the non-dry path's
+        ``storage.delete_chunks`` would return.
         """
         if not delete_ids:
             return 0
@@ -83,6 +89,9 @@ class DedupScanner:
             del_chunk = chunks_map.get(del_id)
             if del_chunk is not None:
                 merged_tags.update(del_chunk.metadata.tags)
+
+        if dry_run:
+            return sum(1 for d in delete_ids if d in chunks_map)
 
         # Update keep chunk if tags changed
         if merged_tags != set(keep_chunk.metadata.tags):
