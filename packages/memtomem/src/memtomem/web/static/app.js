@@ -4818,7 +4818,7 @@ async function browseSource(path, limit = 100) {
         );
         card.innerHTML = `
           <div class="chunk-card-meta">
-            <span class="badge badge-gray">${c.chunk_type.replace('_',' ')}</span>
+            <span class="badge badge-gray">${escapeHtml(c.chunk_type.replace('_', ' '))}</span>
             <span class="chunk-card-lines">lines ${c.start_line}–${c.end_line}</span>
             ${_tierBadgeHtml(c.target_scope)}
             ${c.heading_hierarchy.length ? `<span class="hierarchy-trail">${escapeHtml(c.heading_hierarchy.join(' › '))}</span>` : ''}
@@ -5932,9 +5932,14 @@ function escapeHtml(str) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
-function escapeAttr(str) { return escapeHtml(str).replace(/"/g, '&quot;'); }
+// Alias kept for caller-side intent (attribute vs body context). escapeHtml
+// already emits the full ``& < > " '`` set so a single-quoted attribute is
+// also safe — past redundant ``.replace(/"/g, ...)`` was a no-op once the
+// quote handling moved into escapeHtml.
+function escapeAttr(str) { return escapeHtml(str); }
 
 // ---------------------------------------------------------------------------
 // Search History (A)

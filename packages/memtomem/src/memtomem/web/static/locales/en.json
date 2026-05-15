@@ -275,6 +275,7 @@
   "index.add_ns_placeholder": "default (from config)",
   "index.add_content_label": "Content",
   "index.add_content_placeholder": "Write your memory here…",
+  "index.add_privacy_hint": "Privacy guard scans for tokens, API keys, and private keys — not email or phone numbers.",
   "index.add_btn": "Add",
 
   "compose.privacy_warning_title": "Possible secret detected",
@@ -815,7 +816,7 @@
   "confirm.merge_dupe_keep_a_msg": "Keep A and delete B.",
   "confirm.merge_dupe_keep_b_msg": "Keep B and delete A.",
   "confirm.expire_title": "Expire Chunks",
-  "confirm.expire_msg": "Permanently delete expired chunks. This action cannot be undone.",
+  "confirm.expire_msg": "Permanently delete {count} expired chunk(s). This action cannot be undone.",
   "confirm.hooks_replace_title": "Replace hook rule",
   "confirm.hooks_replace_msg": "Replace your \"{label}\" rule with memtomem's version?",
   "confirm.hooks_sync_title": "Sync settings",

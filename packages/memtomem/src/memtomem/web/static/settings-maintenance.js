@@ -200,9 +200,16 @@ async function runDecayScan() {
 }
 
 async function runDecayExpire() {
+  // Pull the count from the most recent scan rendered in the result
+  // panel — the Expire button is only enabled when scan returned > 0
+  // (see ``runDecayScan``), so this is always populated when we get
+  // here. Falling back to '?' keeps the modal sensible if a future
+  // refactor breaks that invariant rather than silently dropping the
+  // count from the message.
+  const expiredCountText = qs('decay-r-expired').textContent || '?';
   const ok = await showConfirm({
     title: t('confirm.expire_title'),
-    message: t('confirm.expire_msg'),
+    message: t('confirm.expire_msg', { count: expiredCountText }),
     confirmText: t('common.expire'),
   });
   if (!ok) return;

@@ -275,6 +275,7 @@
   "index.add_ns_placeholder": "기본값 (설정에서)",
   "index.add_content_label": "내용",
   "index.add_content_placeholder": "여기에 기억을 작성하세요…",
+  "index.add_privacy_hint": "프라이버시 가드는 토큰·API 키·개인 키만 검사하며, 이메일/전화번호는 대상이 아닙니다.",
   "index.add_btn": "추가",
 
   "compose.privacy_warning_title": "비밀 정보 가능성",
@@ -815,7 +816,7 @@
   "confirm.merge_dupe_keep_a_msg": "A를 유지하고 B를 삭제합니다.",
   "confirm.merge_dupe_keep_b_msg": "B를 유지하고 A를 삭제합니다.",
   "confirm.expire_title": "청크 만료",
-  "confirm.expire_msg": "만료된 청크를 영구적으로 삭제합니다. 이 작업은 취소할 수 없습니다.",
+  "confirm.expire_msg": "만료된 청크 {count}개를 영구적으로 삭제합니다. 이 작업은 취소할 수 없습니다.",
   "confirm.hooks_replace_title": "훅 규칙 교체",
   "confirm.hooks_replace_msg": "\"{label}\" 규칙을 memtomem 버전으로 교체하시겠습니까?",
   "confirm.hooks_sync_title": "설정 동기화",
