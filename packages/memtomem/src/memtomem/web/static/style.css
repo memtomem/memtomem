@@ -888,6 +888,16 @@ button:active { opacity: 0.7; }
 .btn-primary { background: var(--accent); color: #fff; font-weight: 600; }
 .btn-danger  { background: var(--danger); color: #fff; font-weight: 600; }
 .btn-ghost   { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+/* Solid-bg .btn-danger needs higher contrast than the foreground-color
+   --danger token: dark-theme #e05a5a behind white text measures 3.63:1
+   (WCAG AA requires 4.5:1). Scope to button-only and exclude .btn-ghost
+   so combined "btn-ghost btn-danger" stays transparent. */
+:root:not([data-theme="light"]) .btn-danger:not(.btn-ghost) { background: #c43c3c; }
+/* Global button:hover { opacity: 0.85 } composites solid-danger over the
+   surface and drops contrast below AA (light ≈ 3.93, dark ≈ 4.64). Replace
+   the opacity dim with a brightness-darken so the hover affordance survives
+   without losing AA. Ghost+danger combo is unaffected (transparent bg). */
+.btn-danger:not(.btn-ghost):hover { opacity: 1; filter: brightness(0.92); }
 
 .badge { display: inline-block; border-radius: 4px; padding: 2px 8px; font-size: 0.72rem; font-weight: 600; }
 .badge-blue   { background: rgba(var(--accent-rgb),0.15); color: var(--accent); }
