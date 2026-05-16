@@ -4804,6 +4804,11 @@ function _renderMemorySourceItem(s, maxChunks) {
     browseSource(s.path);
   });
   item.addEventListener('keydown', e => {
+    // Only treat Enter/Space as a row-open when the row itself has focus.
+    // Buttons inside `.source-item-actions` (reindex / delete) need their
+    // own native activation; if we preventDefault here for descendant
+    // targets, those actions become mouse-only.
+    if (e.target !== item) return;
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); item.click(); }
   });
   return item;
