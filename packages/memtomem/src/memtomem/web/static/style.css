@@ -707,17 +707,47 @@ mark {
 .source-chunk-bar { height: 2px; background: var(--border); border-radius: 1px; margin-top: 4px; overflow: hidden; }
 .source-chunk-bar-fill { height: 100%; background: var(--accent); border-radius: 1px; opacity: 0.5; }
 
-/* Source delete button — hidden by default, visible on hover */
-.source-del-btn {
-  background: none; border: none;
-  color: var(--muted); font-size: 0.72rem;
-  padding: 2px 6px; cursor: pointer; flex-shrink: 0;
-  border-radius: var(--radius);
-  opacity: 0; transition: opacity 0.15s, color 0.15s, background 0.15s;
+/* Source row actions — hidden by default, visible on hover/focus */
+.source-item-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.15s;
 }
-.source-item:hover .source-del-btn { opacity: 1; }
+.source-item:hover .source-item-actions,
+.source-item:focus-within .source-item-actions { opacity: 1; }
+.source-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1;
+  padding: 3px 7px;
+  cursor: pointer;
+  flex-shrink: 0;
+  border-radius: 4px;
+  white-space: nowrap;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+.source-action-btn:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: rgba(var(--accent-rgb),0.08);
+}
+.source-action-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
 .source-del-btn:hover {
-  color: var(--danger); background: rgba(224,90,90,0.1);
+  color: var(--danger);
+  border-color: rgba(224,90,90,0.45);
+  background: rgba(224,90,90,0.1);
 }
 
 /* Sources stats bar */
@@ -888,6 +918,16 @@ button:active { opacity: 0.7; }
 .btn-primary { background: var(--accent); color: #fff; font-weight: 600; }
 .btn-danger  { background: var(--danger); color: #fff; font-weight: 600; }
 .btn-ghost   { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+/* Solid-bg .btn-danger needs higher contrast than the foreground-color
+   --danger token: dark-theme #e05a5a behind white text measures 3.63:1
+   (WCAG AA requires 4.5:1). Scope to button-only and exclude .btn-ghost
+   so combined "btn-ghost btn-danger" stays transparent. */
+:root:not([data-theme="light"]) .btn-danger:not(.btn-ghost) { background: #c43c3c; }
+/* Global button:hover { opacity: 0.85 } composites solid-danger over the
+   surface and drops contrast below AA (light ≈ 3.93, dark ≈ 4.64). Replace
+   the opacity dim with a brightness-darken so the hover affordance survives
+   without losing AA. Ghost+danger combo is unaffected (transparent bg). */
+.btn-danger:not(.btn-ghost):hover { opacity: 1; filter: brightness(0.92); }
 
 .badge { display: inline-block; border-radius: 4px; padding: 2px 8px; font-size: 0.72rem; font-weight: 600; }
 .badge-blue   { background: rgba(var(--accent-rgb),0.15); color: var(--accent); }
@@ -2419,6 +2459,14 @@ select:focus-visible {
 .hooks-rule-row { cursor: pointer; }
 .hooks-rule-row:hover { background: var(--bg); }
 .hooks-rule-row--synced { padding: 0.25rem 0.5rem; border-radius: var(--radius); }
+.hooks-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 1rem 0 0.5rem;
+}
+.hooks-section-header h3 { margin: 0; }
 .hooks-rule-detail {
   display: block;
   width: 100%;
@@ -2477,6 +2525,19 @@ select:focus-visible {
   overflow: auto;
   max-height: 200px;
   width: 100%;
+}
+.hooks-rule-detail-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+.hooks-rule-edit-hint {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-align: right;
 }
 
 /* ── Sprint 4: Home Tab ── */

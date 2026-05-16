@@ -83,6 +83,8 @@ _CSRF_PROTECTED: frozenset[str] = frozenset(
         "scratch.promote_scratch",
         "scratch.set_scratch",
         "settings_sync.apply_settings_sync",
+        "settings_sync.delete_target_rule",
+        "settings_sync.promote_target_rule",
         "settings_sync.resolve_conflict",
         "sources.delete_source",
         "sources.regenerate_summaries",
@@ -182,6 +184,8 @@ _REDACTION_EXEMPT: dict[str, str] = {
     "scratch.set_scratch": "scratch is local-only ephemeral note storage "
     "outside the LTM trust boundary; redaction not applicable",
     "settings_sync.apply_settings_sync": "structured settings merge; no free-form prose",
+    "settings_sync.delete_target_rule": "structured settings hook rule deletion; no free-form prose",
+    "settings_sync.promote_target_rule": "structured settings hook rule promotion; no free-form prose",
     "settings_sync.resolve_conflict": "structured settings conflict resolution; no free-form prose",
     "system.embed_text": "ephemeral compute; no persistence",
     "system.add_memory_dir": "path-only payload, no prose",

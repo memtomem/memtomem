@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -46,6 +49,17 @@ def _rule_label(event: str, matcher: str) -> str:
     return f"{event}:{matcher}" if matcher else event
 
 
+def _rule_hash(rule: dict) -> str:
+    """Stable hash for one Claude hooks rule payload."""
+    payload = json.dumps(rule, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _mtime_ns(path: Path) -> str | None:
+    """Return an mtime token safe for JSON clients, or ``None`` if missing."""
+    return str(path.stat().st_mtime_ns) if path.is_file() else None
+
+
 def _serialize_duplicate_tiers(duplicates: list[DuplicateTier]) -> list[dict]:
     """Serialize :class:`DuplicateTier` results for the JSON response.
 
@@ -70,18 +84,74 @@ def _serialize_duplicate_tiers(duplicates: list[DuplicateTier]) -> list[dict]:
     ]
 
 
+def _has_hook_rules(hooks_record: dict) -> bool:
+    """True when the canonical hooks record contains at least one rule."""
+    for rules in hooks_record.values():
+        if not isinstance(rules, list):
+            continue
+        if any(isinstance(rule, dict) for rule in rules):
+            return True
+    return False
+
+
+def _iter_hook_rules(hooks_record: dict) -> list[dict]:
+    """Flatten a record-format hooks object into serializable rule rows."""
+    rows: list[dict] = []
+    for event, rules in hooks_record.items():
+        if not isinstance(event, str) or not isinstance(rules, list):
+            continue
+        for index, rule in enumerate(rules):
+            if not isinstance(rule, dict):
+                continue
+            rows.append(
+                {
+                    "event": event,
+                    "matcher": rule.get("matcher", ""),
+                    "rule_index": index,
+                    "rule_hash": _rule_hash(rule),
+                    "rule": rule,
+                }
+            )
+    return rows
+
+
 def _compare_hooks(
     canonical_path: Path,
     target_path: Path,
 ) -> dict:
-    """Compare record-format hooks between canonical and target settings."""
+    """Compare record-format hooks between canonical and target settings.
+
+    This display/diff path still compares by ``(event, matcher)`` for the
+    existing conflict UI. Rule mutation endpoints below use
+    ``rule_index`` + ``rule_hash`` exact matching instead, so duplicate
+    same-matcher rows are edited/deleted by identity rather than by label.
+    """
     result: dict = {
         "canonical_path": str(canonical_path),
         "target_path": str(target_path),
+        "canonical_mtime_ns": _mtime_ns(canonical_path),
+        "target_mtime_ns": _mtime_ns(target_path),
         "hooks": {"synced": [], "conflicts": [], "pending": []},
+        "target_hooks": {"configured": [], "target_only": []},
     }
 
+    target_hooks: dict = {}
+    if target_path.is_file():
+        target = _safe_load_json(target_path)
+        if not isinstance(target, dict):
+            result["status"] = "error"
+            result["error"] = f"{target_path} is not valid JSON"
+            return result
+
+        target_hooks = target.get("hooks", {})
+        if not isinstance(target_hooks, dict):
+            target_hooks = {}
+
+        configured = _iter_hook_rules(target_hooks)
+        result["target_hooks"]["configured"] = configured
+
     if not canonical_path.is_file():
+        result["target_hooks"]["target_only"] = result["target_hooks"]["configured"]
         result["status"] = "no_source"
         return result
 
@@ -95,6 +165,21 @@ def _compare_hooks(
     if not isinstance(canonical_hooks, dict):
         result["status"] = "error"
         result["error"] = "hooks must be a record (object), not an array"
+        return result
+
+    canonical_index: dict[tuple[str, str], list[dict]] = {}
+    for row in _iter_hook_rules(canonical_hooks):
+        canonical_index.setdefault((row["event"], row["matcher"]), []).append(row["rule"])
+
+    target_index: dict[tuple[str, str], list[dict]] = {}
+    result["target_hooks"]["target_only"] = [
+        row
+        for row in result["target_hooks"]["configured"]
+        if (row["event"], row["matcher"]) not in canonical_index
+    ]
+
+    if not _has_hook_rules(canonical_hooks):
+        result["status"] = "no_hooks"
         return result
 
     if not target_path.is_file():
@@ -111,23 +196,12 @@ def _compare_hooks(
         result["status"] = "out_of_sync" if result["hooks"]["pending"] else "in_sync"
         return result
 
-    target = _safe_load_json(target_path)
-    if not isinstance(target, dict):
-        result["status"] = "error"
-        result["error"] = f"{target_path} is not valid JSON"
-        return result
-
-    target_hooks: dict = target.get("hooks", {})
-    if not isinstance(target_hooks, dict):
-        target_hooks = {}
-
     # Index target rules by (event, matcher) preserving multiplicity. Claude
     # Code allows the same matcher (or no matcher) to appear more than once
     # under one event, so collapsing to a single dict-of-rule lets a
     # byte-identical canonical contribution mismatch the *second* user rule
     # and surface as a false-positive conflict (mirrors the same fix on the
     # merge side in PR #844).
-    target_index: dict[tuple[str, str], list[dict]] = {}
     for event, rules in target_hooks.items():
         if not isinstance(rules, list):
             continue
@@ -357,3 +431,259 @@ async def resolve_conflict(
                 }
     except TimeoutError:
         raise HTTPException(503, "Resolve timed out — another sync may be in progress")
+
+
+class RuleActionRequest(BaseModel):
+    event: str
+    matcher: str = ""
+    rule_index: int
+    rule_hash: str
+    target_mtime_ns: str | None = None
+    canonical_mtime_ns: str | None = None
+    confirm_private_to_shared: bool = False
+
+
+def _freshness_envelope(
+    *,
+    reason: str,
+    target_path: Path,
+    canonical_path: Path,
+) -> dict:
+    return {
+        "status": "aborted",
+        "reason": reason,
+        "target_mtime_ns": _mtime_ns(target_path),
+        "canonical_mtime_ns": _mtime_ns(canonical_path),
+    }
+
+
+def _ok_envelope(
+    *,
+    reason: str,
+    target_path: Path,
+    canonical_path: Path,
+    extra: dict[str, Any] | None = None,
+) -> dict:
+    payload = {
+        "status": "ok",
+        "reason": reason,
+        "target_mtime_ns": _mtime_ns(target_path),
+        "canonical_mtime_ns": _mtime_ns(canonical_path),
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def _load_settings_record(path: Path, *, label: str) -> dict:
+    data = _safe_load_json(path)
+    if not isinstance(data, dict):
+        raise HTTPException(422, detail=f"{label} settings is not valid JSON")
+    return data
+
+
+def _hooks_record(settings: dict, *, label: str, create: bool = False) -> dict:
+    hooks = settings.get("hooks")
+    if hooks is None and create:
+        hooks = {}
+        settings["hooks"] = hooks
+    if not isinstance(hooks, dict):
+        raise HTTPException(422, detail=f"{label} hooks is not a record")
+    return hooks
+
+
+def _target_rule_for_action(
+    target: dict,
+    body: RuleActionRequest,
+    *,
+    target_path: Path,
+    canonical_path: Path,
+) -> tuple[list, dict] | dict:
+    target_hooks = _hooks_record(target, label="Target")
+    rules = target_hooks.get(body.event, [])
+    if not isinstance(rules, list):
+        raise HTTPException(422, detail="Target hook event is not a list")
+    stale = _freshness_envelope(
+        reason="Target rule changed. Refresh and retry.",
+        target_path=target_path,
+        canonical_path=canonical_path,
+    )
+    if body.rule_index < 0 or body.rule_index >= len(rules):
+        return stale
+    rule = rules[body.rule_index]
+    if not isinstance(rule, dict):
+        return stale
+    if rule.get("matcher", "") != body.matcher or _rule_hash(rule) != body.rule_hash:
+        return stale
+    return rules, rule
+
+
+def _check_rule_action_freshness(
+    body: RuleActionRequest,
+    *,
+    target_path: Path,
+    canonical_path: Path,
+    check_canonical: bool = True,
+) -> dict | None:
+    target_mtime = _mtime_ns(target_path)
+    canonical_mtime = _mtime_ns(canonical_path)
+    if body.target_mtime_ns != target_mtime:
+        return _freshness_envelope(
+            reason="Target settings file was modified by another process. Refresh and retry.",
+            target_path=target_path,
+            canonical_path=canonical_path,
+        )
+    if check_canonical and body.canonical_mtime_ns != canonical_mtime:
+        return _freshness_envelope(
+            reason="Canonical settings file was modified by another process. Refresh and retry.",
+            target_path=target_path,
+            canonical_path=canonical_path,
+        )
+    return None
+
+
+@router.post("/settings-sync/rules/delete")
+@router.post("/context/settings/rules/delete")
+async def delete_target_rule(
+    body: RuleActionRequest,
+    project_root: Path = Depends(resolve_scope_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description="Claude Code settings tier to update.",
+    ),
+) -> dict:
+    """Delete one exact rule from the selected target settings file."""
+    canonical_path = project_root / CANONICAL_SETTINGS_FILE
+    target_path = _claude_target(project_root, target_scope)
+
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                if not target_path.is_file():
+                    raise HTTPException(404, detail="Target settings file does not exist")
+                stale = _check_rule_action_freshness(
+                    body,
+                    target_path=target_path,
+                    canonical_path=canonical_path,
+                    check_canonical=False,
+                )
+                if stale:
+                    return stale
+                target = _load_settings_record(target_path, label="Target")
+                match = _target_rule_for_action(
+                    target,
+                    body,
+                    target_path=target_path,
+                    canonical_path=canonical_path,
+                )
+                if isinstance(match, dict):
+                    return match
+                rules, _rule = match
+                del rules[body.rule_index]
+                target_hooks = _hooks_record(target, label="Target")
+                if rules:
+                    target_hooks[body.event] = rules
+                else:
+                    target_hooks.pop(body.event, None)
+                target["hooks"] = target_hooks
+                _write_json(target_path, target)
+                return _ok_envelope(
+                    reason=f"Rule '{_rule_label(body.event, body.matcher)}' deleted from target",
+                    target_path=target_path,
+                    canonical_path=canonical_path,
+                )
+    except TimeoutError:
+        raise HTTPException(503, "Delete timed out — another sync may be in progress")
+
+
+@router.post("/settings-sync/rules/promote")
+@router.post("/context/settings/rules/promote")
+async def promote_target_rule(
+    body: RuleActionRequest,
+    project_root: Path = Depends(resolve_scope_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description="Claude Code settings tier to read from.",
+    ),
+) -> dict:
+    """Promote one exact target rule into the canonical settings file."""
+    canonical_path = project_root / CANONICAL_SETTINGS_FILE
+    target_path = _claude_target(project_root, target_scope)
+    label = _rule_label(body.event, body.matcher)
+
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                if not target_path.is_file():
+                    raise HTTPException(404, detail="Target settings file does not exist")
+                stale = _check_rule_action_freshness(
+                    body, target_path=target_path, canonical_path=canonical_path
+                )
+                if stale:
+                    return stale
+
+                target = _load_settings_record(target_path, label="Target")
+                match = _target_rule_for_action(
+                    target,
+                    body,
+                    target_path=target_path,
+                    canonical_path=canonical_path,
+                )
+                if isinstance(match, dict):
+                    return match
+                _rules, rule = match
+                if target_scope in ("user", "project_local") and not body.confirm_private_to_shared:
+                    return {
+                        "status": "needs_confirmation",
+                        "reason": (
+                            "Promoting a private target hook writes it to shared canonical "
+                            ".memtomem/settings.json. Confirm to continue."
+                        ),
+                        "target_scope": target_scope,
+                        "target_mtime_ns": _mtime_ns(target_path),
+                        "canonical_mtime_ns": _mtime_ns(canonical_path),
+                    }
+
+                if canonical_path.is_file():
+                    canonical = _load_settings_record(canonical_path, label="Canonical")
+                else:
+                    canonical = {}
+                canonical_hooks = _hooks_record(canonical, label="Canonical", create=True)
+                event_rules = canonical_hooks.get(body.event, [])
+                if not isinstance(event_rules, list):
+                    raise HTTPException(422, detail="Canonical hook event is not a list")
+
+                same_matcher = [
+                    existing
+                    for existing in event_rules
+                    if isinstance(existing, dict) and existing.get("matcher", "") == body.matcher
+                ]
+                if any(_rule_hash(existing) == body.rule_hash for existing in same_matcher):
+                    return _ok_envelope(
+                        reason=f"Rule '{label}' already exists in canonical",
+                        target_path=target_path,
+                        canonical_path=canonical_path,
+                        extra={"idempotent": True},
+                    )
+                if same_matcher:
+                    return {
+                        "status": "conflict",
+                        "reason": f"Canonical already has a different rule for '{label}'",
+                        "existing": same_matcher,
+                        "proposed": rule,
+                        "target_mtime_ns": _mtime_ns(target_path),
+                        "canonical_mtime_ns": _mtime_ns(canonical_path),
+                    }
+
+                event_rules.append(rule)
+                canonical_hooks[body.event] = event_rules
+                canonical["hooks"] = canonical_hooks
+                canonical_path.parent.mkdir(parents=True, exist_ok=True)
+                _write_json(canonical_path, canonical)
+                return _ok_envelope(
+                    reason=f"Rule '{label}' promoted to canonical",
+                    target_path=target_path,
+                    canonical_path=canonical_path,
+                )
+    except TimeoutError:
+        raise HTTPException(503, "Promote timed out — another sync may be in progress")
