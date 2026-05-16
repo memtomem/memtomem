@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import textwrap
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -288,10 +289,18 @@ class TestEmbeddingResetBm25Fallback:
     either invariant changes the F-C4-1 smoke must be re-run before merge."""
 
     @pytest.fixture(scope="class")
-    def pipeline_src(self) -> str:
-        from memtomem.search import pipeline
+    def search_method_src(self) -> str:
+        # Scope the fixture to ``SearchPipeline.search`` specifically — the
+        # main user-facing retrieval method. The runtime probe ran against
+        # this method, so the pin must too. A module-wide AST walk (PR
+        # #1051 review round 2) passes when *any* dense_search Try in the
+        # module has the right shape, which would mask a regression here
+        # if a future helper happens to share the F-C4-1 markers.
+        from memtomem.search.pipeline import SearchPipeline
 
-        return inspect.getsource(pipeline)
+        # ``inspect.getsource`` preserves the method's 4-space class
+        # indent; dedent so ``ast.parse`` sees ``async def`` at column 0.
+        return textwrap.dedent(inspect.getsource(SearchPipeline.search))
 
     @pytest.fixture(scope="class")
     def reset_body(self) -> str:
@@ -303,21 +312,13 @@ class TestEmbeddingResetBm25Fallback:
 
         return inspect.getsource(SqliteBackend.reset_embedding_meta)
 
-    def test_dense_leg_swallows_exception_to_empty_bm25_only(self, pipeline_src: str):
-        # Locate the dense leg's Try node *specifically*, not via
-        # module-wide substring match: `pipeline.py` also contains the
-        # BM25 leg's identical-shape `except Exception as exc:` right
-        # after this block (plus a rescue-path `_dense_leg` that has its
-        # own narrower fallback), so substring assertions on the whole
-        # module pass even when this leg is narrowed (see PR #1051 review).
-        #
-        # Strategy: walk the AST, collect every Try whose body calls
-        # `dense_search`, and require that at least one matches the full
-        # F-C4-1 fallback shape — unconditional ``Exception`` handler,
-        # ``dense_results = []`` reset, and ``dense_error = str(exc)``
-        # surface. Narrowing the handler (e.g. to ``sqlite3.OperationalError``)
-        # drops the candidate out of the match set and trips the pin.
-        tree = ast.parse(pipeline_src)
+    def test_dense_leg_swallows_exception_to_empty_bm25_only(self, search_method_src: str):
+        # Find Try nodes inside ``SearchPipeline.search`` that call
+        # ``dense_search``. There should be exactly one — the main-path
+        # dense leg. Zero means the F-C4-1 structure was removed; more
+        # than one means search() grew a second dense call path and the
+        # pin needs an explicit decision on which Try to gate.
+        tree = ast.parse(search_method_src)
 
         dense_try_nodes: list[ast.Try] = []
         for node in ast.walk(tree):
@@ -336,45 +337,39 @@ class TestEmbeddingResetBm25Fallback:
                     continue
                 break
 
-        assert dense_try_nodes, (
-            "search/pipeline.py no longer has a try/except wrapping a "
-            "dense_search call — the F-C4-1 fallback structure changed; "
-            "re-run the runtime probe before relying on this pin"
+        assert len(dense_try_nodes) == 1, (
+            f"SearchPipeline.search no longer has exactly one Try wrapping "
+            f"a dense_search call (found {len(dense_try_nodes)}). The "
+            "F-C4-1 fallback structure changed; re-run the runtime probe "
+            "and update this pin to match the new shape before relying on it."
         )
 
-        def _handler_caught(handler: ast.ExceptHandler) -> str:
-            if handler.type is None:
-                return "BaseException"
-            return ast.unparse(handler.type)
+        try_node = dense_try_nodes[0]
+        assert try_node.handlers, (
+            "SearchPipeline.search dense leg lost its except handler — "
+            "any dense_search exception (incl. embedding-reset race) will "
+            "now propagate as HTTP 5xx instead of degrading to BM25-only"
+        )
+        handler = try_node.handlers[0]
+        caught = "BaseException" if handler.type is None else ast.unparse(handler.type)
+        assert caught in ("Exception", "BaseException"), (
+            f"SearchPipeline.search dense leg narrowed its handler from "
+            f"`except Exception` to `except {caught}` — embedding-reset "
+            "or dim-mismatch errors not covered by this type will now "
+            "surface as HTTP 5xx instead of the BM25-only fallback "
+            "documented in the F-C4-1 runtime probe"
+        )
 
-        diagnostics: list[str] = []
-        matches: list[ast.Try] = []
-        for try_node in dense_try_nodes:
-            if not try_node.handlers:
-                diagnostics.append(f"  - Try at line {try_node.lineno}: no handlers")
-                continue
-            handler = try_node.handlers[0]
-            caught = _handler_caught(handler)
-            body_src = "\n".join(ast.unparse(s) for s in handler.body)
-            has_empty_reset = "dense_results = []" in body_src
-            has_error_surface = "dense_error = str(exc)" in body_src
-            broadly_caught = caught in ("Exception", "BaseException")
-            if broadly_caught and has_empty_reset and has_error_surface:
-                matches.append(try_node)
-            else:
-                diagnostics.append(
-                    f"  - Try at line {try_node.lineno}: catches `{caught}`; "
-                    f"`dense_results = []`={has_empty_reset}; "
-                    f"`dense_error = str(exc)`={has_error_surface}"
-                )
-
-        assert matches, (
-            "search/pipeline.py main-path dense leg no longer matches the "
-            "F-C4-1 fallback shape (unconditional `Exception` handler, "
-            "`dense_results = []`, `dense_error = str(exc)`). "
-            "Embedding-reset / dim-mismatch may now surface as HTTP 5xx "
-            "instead of the BM25-only fallback documented in the runtime "
-            "probe. Candidates inspected:\n" + "\n".join(diagnostics)
+        handler_src = "\n".join(ast.unparse(s) for s in handler.body)
+        assert "dense_results = []" in handler_src, (
+            "SearchPipeline.search dense handler stopped resetting "
+            "`dense_results = []` — stale prior results would leak across "
+            "queries, breaking the F-C4-1 graceful-degradation contract"
+        )
+        assert "dense_error = str(exc)" in handler_src, (
+            "SearchPipeline.search dense handler stopped surfacing "
+            "`dense_error = str(exc)` — the /api/embedding-status "
+            "diagnostic depends on this string for reset-detection"
         )
 
     def test_reset_embedding_meta_is_single_atomic_transaction(self, reset_body: str):
