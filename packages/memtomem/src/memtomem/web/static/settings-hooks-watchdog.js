@@ -321,6 +321,16 @@ async function _handleHooksPromoteAll(btn) {
         if (result.status === 'ok') {
           summary.saved += 1;
           if (choice.deleteOriginal) deleteQueue.push(entry);
+          // Each successful promote rewrites .memtomem/settings.json; refresh
+          // mtimes so the next iteration's freshness check doesn't abort.
+          if (_hooksLastSyncData) {
+            if (result.canonical_mtime_ns != null) {
+              _hooksLastSyncData.canonical_mtime_ns = result.canonical_mtime_ns;
+            }
+            if (result.target_mtime_ns != null) {
+              _hooksLastSyncData.target_mtime_ns = result.target_mtime_ns;
+            }
+          }
         } else if (result.status === 'conflict') {
           summary.conflicts += 1;
         } else if (result.status === 'aborted') {
