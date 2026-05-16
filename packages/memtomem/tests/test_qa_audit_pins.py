@@ -254,3 +254,112 @@ class TestChunkCardXssGuard:
             "search-result card stopped escaping the source filename "
             "before injecting into innerHTML"
         )
+
+
+# ---------------------------------------------------------------------------
+# F-L5-1 — dark `.btn-danger` solid background + hover affordance
+# ---------------------------------------------------------------------------
+
+
+class TestBtnDangerContrastGuard:
+    """The kind-moth L5 smoke (2026-05-15) found dark-theme ``.btn-danger``
+    at 3.63:1 against white, failing WCAG AA. The fix in ``style.css`` is
+    two scoped rules: a dark-only solid background override to ``#c43c3c``
+    and a hover override that swaps the global ``opacity: 0.85`` dim for a
+    ``filter: brightness(0.92)`` darken so hover contrast survives.
+
+    This static guard catches the deliberate-removal regression vectors —
+    someone deleting either rule, or changing the ``:not(.btn-ghost)``
+    scoping that protects the combined ``btn-ghost btn-danger`` chip. The
+    companion Playwright test in ``tests/web/test_l5_btn_danger_contrast.py``
+    measures effective contrast across the 4-state matrix to catch cascade
+    or filter-composition regressions that a substring check cannot see."""
+
+    @pytest.fixture(scope="class")
+    def style_css(self) -> str:
+        return (_STATIC_DIR / "style.css").read_text(encoding="utf-8")
+
+    def test_dark_solid_background_override(self, style_css: str):
+        # The dark-only solid override. ``:not([data-theme="light"])`` keeps
+        # the rule from leaking into the explicit-light theme; ``:not(.btn-
+        # ghost)`` keeps combined ``btn-ghost btn-danger`` chips transparent.
+        selector = ':root:not([data-theme="light"]) .btn-danger:not(.btn-ghost)'
+        assert selector in style_css, (
+            f"dark .btn-danger solid background override lost its selector "
+            f"({selector!r}) — restore it (audit F-L5-1, style.css:925)"
+        )
+        assert "#c43c3c" in style_css, (
+            "dark .btn-danger background colour #c43c3c no longer in style.css "
+            "— the F-L5-1 fix raises the dark solid bg from #e05a5a (3.63:1) "
+            "to #c43c3c (5.17:1)"
+        )
+
+    def test_hover_brightness_override(self, style_css: str):
+        # The hover override that replaces the global ``button:hover {
+        # opacity: 0.85 }`` dim with ``filter: brightness(0.92)`` darken so
+        # hover contrast stays above AA (light hover would drop to ~3.93:1
+        # under the global opacity dim).
+        hover_selector = ".btn-danger:not(.btn-ghost):hover"
+        assert hover_selector in style_css, (
+            f"hover override for solid .btn-danger lost its selector "
+            f"({hover_selector!r}) — restore it (audit F-L5-1, style.css:930)"
+        )
+        assert "brightness(0.92)" in style_css, (
+            "filter: brightness(0.92) no longer in style.css — without this "
+            "the global button:hover opacity 0.85 drops hover contrast below "
+            "AA (audit F-L5-1)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# E-L5-d — I18N.setLang must serialise _load → applyDOM → langchange
+# ---------------------------------------------------------------------------
+
+
+class TestSetLangAwaitOrder:
+    """The kind-moth audit notes that ``I18N.setLang`` previously raced its
+    locale fetch — the click handler dispatched ``langchange`` immediately
+    after calling ``setLang`` without await, so listeners (e.g. ``app.js``
+    ``loadStats``) read stale ``_cache`` and wrote the wrong language into
+    the DOM right before ``applyDOM`` clobbered them.
+
+    The fix serialised the function body so ``await _load(lang)`` runs to
+    completion, then ``applyDOM()``, then ``dispatchEvent(new CustomEvent(
+    'langchange'`` fires with the fresh cache. The advisory ``tests-js/
+    i18n-apply-dom.test.mjs`` covers the DOM behaviour in jsdom, but
+    AGENTS / CI gate on pytest + ruff, so this source-order pin guards the
+    required surface against a re-introduced race."""
+
+    @pytest.fixture(scope="class")
+    def setlang_body(self) -> str:
+        text = (_STATIC_DIR / "i18n.js").read_text(encoding="utf-8")
+        start = text.find("async function setLang(lang) {")
+        assert start != -1, "setLang function declaration not found in i18n.js"
+        # ``init()`` is the very next declaration; its leading docstring is
+        # a stable sentinel that doesn't appear inside setLang.
+        end = text.find("/** Initialise:", start)
+        assert end != -1, (
+            "init() docstring sentinel not found after setLang — "
+            "the slice helper needs a new boundary"
+        )
+        return text[start:end]
+
+    def test_await_load_before_apply_dom(self, setlang_body: str):
+        load_idx = setlang_body.find("await _load(lang)")
+        apply_idx = setlang_body.find("applyDOM()")
+        assert load_idx != -1, "await _load(lang) missing from setLang body"
+        assert apply_idx != -1, "applyDOM() missing from setLang body"
+        assert load_idx < apply_idx, (
+            "setLang must await _load(lang) BEFORE applyDOM(). Reverting "
+            "this order re-introduces the i18n race that PR #595 fixed."
+        )
+
+    def test_apply_dom_before_langchange_dispatch(self, setlang_body: str):
+        apply_idx = setlang_body.find("applyDOM()")
+        dispatch_idx = setlang_body.find("dispatchEvent(new CustomEvent('langchange'")
+        assert dispatch_idx != -1, "langchange CustomEvent dispatch missing from setLang body"
+        assert apply_idx < dispatch_idx, (
+            "setLang must call applyDOM() BEFORE dispatching the "
+            "'langchange' event, so listeners that re-read t() see the "
+            "newly-applied DOM state (i18n.js:65-76 comment)."
+        )
