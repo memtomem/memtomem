@@ -20,9 +20,9 @@
       <span class="stat-pill" id="stat-sources" data-i18n="header.stat_sources">— sources</span>
     </div>
     <div class="header-actions">
-      <button id="settings-btn" class="btn-ghost btn-icon" data-i18n-title="header.settings_title" title="Settings">⚙️</button>
-      <button id="lang-toggle" class="btn-ghost btn-icon" title="Switch language">EN</button>
-      <button id="theme-toggle" class="btn-ghost btn-icon" data-i18n-title="header.theme_title" title="Toggle theme">🌙</button>
+      <button id="settings-btn" class="btn-ghost btn-icon" data-i18n-title="header.settings_title" data-i18n-aria-label="header.settings_title" title="Settings" aria-label="Settings">⚙️</button>
+      <button id="lang-toggle" class="btn-ghost btn-icon" data-i18n-title="header.lang_toggle_aria" data-i18n-aria-label="header.lang_toggle_aria" title="Switch language" aria-label="Switch language">EN</button>
+      <button id="theme-toggle" class="btn-ghost btn-icon" data-i18n-title="header.theme_title" data-i18n-aria-label="header.theme_title" title="Toggle theme" aria-label="Toggle theme">🌙</button>
       <button id="help-toggle" data-i18n-title="header.help_title" title="Toggle help hints (h)" aria-pressed="true">?</button>
     </div>
   </header>
@@ -65,7 +65,7 @@
       <!-- C. Quick Search -->
       <div class="home-search-row">
         <div class="home-search-wrap">
-          <input id="home-search-input" type="text" data-i18n-placeholder="home.quick_search_placeholder" placeholder="Quick search memories..." autocomplete="off" spellcheck="false" />
+          <input id="home-search-input" type="text" data-i18n-placeholder="home.quick_search_placeholder" placeholder="Quick search memories..." data-i18n-aria-label="home.quick_search_placeholder" aria-label="Quick search memories..." autocomplete="off" spellcheck="false" />
           <button id="home-search-go" class="btn-primary" data-i18n="home.search_btn">Search</button>
         </div>
       </div>
@@ -176,11 +176,11 @@
       </div>
       <button id="search-btn" class="btn-primary has-tip" data-i18n-title="search.search_btn_title" title="Run semantic search (Enter)" data-i18n="search.search_btn">Search</button>
       <button id="save-star-btn" class="btn-ghost btn-icon has-tip" data-i18n-title="search.save_title" title="Save current search">☆</button>
-      <button id="group-toggle" class="btn-ghost btn-icon has-tip" data-i18n-title="search.group_title" title="Group results by source file">⊟</button>
-      <button id="view-toggle" class="btn-ghost btn-icon has-tip" data-i18n-title="search.view_title" title="Switch between card and compact list view">☰</button>
+      <button id="group-toggle" class="btn-ghost btn-icon has-tip" data-i18n-title="search.group_title" data-i18n-aria-label="search.group_title" title="Group results by source file" aria-label="Group results by source file">⊟</button>
+      <button id="view-toggle" class="btn-ghost btn-icon has-tip" data-i18n-title="search.view_title" data-i18n-aria-label="search.view_title" title="Switch between card and compact list view" aria-label="Switch between card and compact list view">☰</button>
     </div>
     <div id="search-filters" class="search-filters" hidden>
-      <input id="tag-filter" type="text" data-i18n-placeholder="search.tag_filter_placeholder" placeholder="Filter by tag…" data-i18n-title="search.tag_filter_title" title="Comma-separated tags to include in results" />
+      <input id="tag-filter" type="text" data-i18n-placeholder="search.tag_filter_placeholder" placeholder="Filter by tag…" data-i18n-title="search.tag_filter_title" title="Comma-separated tags to include in results" data-i18n-aria-label="search.tag_filter_title" aria-label="Comma-separated tags to include in results" />
       <select id="ns-filter" data-i18n-title="search.ns_filter_title" title="Limit search to a specific namespace">
         <option value="" data-i18n="search.ns_all">All Namespaces</option>
       </select>
@@ -243,7 +243,7 @@
       </div>
       <div class="adv-row">
         <label class="adv-label">Min Relevance: <span id="score-val">0.0</span> <span class="help-tip" data-help="Minimum normalized relevance (0–1). Reranked results use rank percentile so raw negative model scores do not hide matches." tabindex="0" role="img" aria-label="Minimum normalized relevance (0–1). Reranked results use rank percentile so raw negative model scores do not hide matches.">i</span></label>
-        <input id="score-threshold" type="range" min="0" max="1" step="0.05" value="0" />
+        <input id="score-threshold" type="range" min="0" max="1" step="0.05" value="0" data-i18n-aria-label="search.min_relevance_aria" aria-label="Minimum relevance score" />
       </div>
       <div class="adv-row" style="display:none">
         <label class="adv-label">Saved Searches</label>
@@ -347,7 +347,7 @@
               </div>
             </div>
             <div id="d-code-view" class="detail-code-view" hidden></div>
-            <textarea id="d-editor" spellcheck="false"></textarea>
+            <textarea id="d-editor" spellcheck="false" data-i18n-aria-label="search.detail_editor_aria" aria-label="Memory content editor"></textarea>
             <div id="d-word-count" class="word-count-bar"></div>
             <div id="d-preview" class="md-preview" hidden></div>
             <div id="d-diff" class="diff-view" hidden></div>
@@ -357,7 +357,7 @@
             <div class="editor-label" data-i18n="search.detail_tags">Tags</div>
             <div id="d-tag-chips" class="tag-chips"></div>
             <div class="tag-input-row">
-              <input id="d-tag-input" type="text" data-i18n-placeholder="search.detail_tag_placeholder" placeholder="Add tag…" autocomplete="off" />
+              <input id="d-tag-input" type="text" data-i18n-placeholder="search.detail_tag_placeholder" placeholder="Add tag…" data-i18n-aria-label="search.detail_tag_input_aria" aria-label="Add tag" autocomplete="off" />
               <button id="d-tag-add-btn" class="btn-ghost" data-i18n="search.detail_tag_add">Add</button>
               <button id="d-tag-save-btn" class="btn-primary" data-i18n="search.detail_tag_save">Save Tags</button>
             </div>
@@ -375,14 +375,14 @@
           <div id="similar-panel" hidden>
             <div class="similar-header">
               <span class="editor-label" data-i18n="search.similar_header">Similar Chunks</span>
-              <button id="similar-close-btn" class="btn-ghost btn-xs">✕</button>
+              <button id="similar-close-btn" class="btn-ghost btn-xs" data-i18n-title="search.similar_close_aria" data-i18n-aria-label="search.similar_close_aria" title="Close similar memories panel" aria-label="Close similar memories panel">✕</button>
             </div>
             <div id="similar-list"></div>
           </div>
           <div id="source-chunks-panel" hidden>
             <div class="similar-header">
               <span class="editor-label" data-i18n="search.source_chunks_header">Chunks in Same Source</span>
-              <button id="source-chunks-close-btn" class="btn-ghost btn-xs">✕</button>
+              <button id="source-chunks-close-btn" class="btn-ghost btn-xs" data-i18n-title="search.source_chunks_close_aria" data-i18n-aria-label="search.source_chunks_close_aria" title="Close source chunks panel" aria-label="Close source chunks panel">✕</button>
             </div>
             <div id="source-chunks-list"></div>
           </div>
@@ -427,7 +427,7 @@
             </div>
           </div>
           <div id="memory-add-row" class="memory-dirs-add" hidden>
-            <input id="memory-add-input" type="text" class="memory-dirs-add-input" data-i18n-placeholder="sources.memory_dirs.add_placeholder" placeholder="/absolute/path/to/directory" />
+            <input id="memory-add-input" type="text" class="memory-dirs-add-input" data-i18n-placeholder="sources.memory_dirs.add_placeholder" placeholder="/absolute/path/to/directory" data-i18n-aria-label="sources.memory_dirs.add_placeholder" aria-label="/absolute/path/to/directory" />
             <button id="memory-add-submit" class="btn-primary btn-sm" data-i18n="sources.memory_dirs.add_submit">Add</button>
             <button id="memory-add-cancel" class="btn-ghost btn-sm" data-i18n="sources.memory_dirs.add_cancel">Cancel</button>
           </div>

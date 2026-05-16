@@ -1035,6 +1035,9 @@ function showToast(message, type = 'success', options = {}) {
   closeBtn.type = 'button';
   closeBtn.className = 'toast-close';
   closeBtn.title = 'Close';
+  closeBtn.setAttribute('aria-label', (window.I18N && window.I18N.t)
+    ? window.I18N.t('toast.close_aria')
+    : 'Close notification');
   closeBtn.textContent = '✕';
   closeBtn.addEventListener('click', dismiss);
   toast.appendChild(closeBtn);
