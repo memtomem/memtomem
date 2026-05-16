@@ -15,6 +15,11 @@ from the manual QA pass. Each ID maps to a finding in the audit doc:
 * **C4 / F-C4-1** — embedding reset concurrent with search degrades to
   BM25-only (never 503 / sqlite error) because reset is one atomic
   transaction *and* the dense leg has a defensive exception catch.
+* **A11Y-1 / A11Y-2 / A11Y-3** — issue #1053. Deferred a11y items from the
+  kind-moth audit: icon-only button + form input accessible names, modal
+  ``role="dialog" aria-modal="true"`` consistency, dynamic search result
+  live region, skip-to-main link, and the modal-overlay direct-toggle
+  antipattern that breaks the global shortcut gate.
 
 The point is to catch a future PR that forgets the guard, not to
 re-derive it from scratch — the underlying enforcement code lives in
@@ -401,4 +406,329 @@ class TestEmbeddingResetBm25Fallback:
             "reset_embedding_meta gained an `await` mid-transaction — "
             "re-run the F-C4-1 runtime probe to confirm search still "
             "degrades to BM25-only instead of surfacing a transient 503"
+        )
+
+
+# ---------------------------------------------------------------------------
+# A11Y-1/2/3 — accessibility pins for issue #1053
+#
+# These are RED until the matching fix PRs land. The plan file lives at
+# ``~/.claude/plans/a11y-1-2-3-audit-pass-dreamy-mccarthy.md``. Each test
+# encodes "what the fix must look like" using substring oracles on the
+# checked-in static assets — no browser, no fixtures — so a future PR that
+# removes the guard fails CI before it ships.
+# ---------------------------------------------------------------------------
+
+
+_INDEX_HTML_PATH = _STATIC_DIR / "index.html"
+
+
+@pytest.fixture(scope="module")
+def index_html() -> str:
+    return _INDEX_HTML_PATH.read_text(encoding="utf-8")
+
+
+def _button_block(html: str, button_id: str) -> str:
+    """Return the substring from ``<button id="X"`` to the closing ``>``.
+
+    Line-number indexing breaks every time the template shifts; this gives
+    each pin a deterministic slice to assert on.
+    """
+    marker = f'id="{button_id}"'
+    idx = html.find(marker)
+    assert idx != -1, f"button #{button_id} not found in index.html"
+    # Walk back to the opening ``<``.
+    start = html.rfind("<", 0, idx)
+    end = html.find(">", idx)
+    assert start != -1 and end != -1
+    return html[start : end + 1]
+
+
+def _input_block(html: str, input_id: str) -> str:
+    marker = f'id="{input_id}"'
+    idx = html.find(marker)
+    assert idx != -1, f"input/textarea #{input_id} not found in index.html"
+    start = html.rfind("<", 0, idx)
+    end = html.find(">", idx)
+    assert start != -1 and end != -1
+    return html[start : end + 1]
+
+
+def _modal_block(html: str, modal_id: str) -> str:
+    marker = f'id="{modal_id}"'
+    idx = html.find(marker)
+    assert idx != -1, f"modal #{modal_id} not found in index.html"
+    start = html.rfind("<", 0, idx)
+    end = html.find(">", idx)
+    assert start != -1 and end != -1
+    return html[start : end + 1]
+
+
+# Icon-only buttons whose only child content is an emoji / symbol. ``title``
+# participates in accessible-name computation but is unreliable across SR /
+# browser combinations and gives a poor visible label — the fix pins an
+# explicit ``aria-label`` (or ``data-i18n-aria-label`` for translation).
+_ICON_ONLY_BUTTONS = (
+    "settings-btn",
+    "lang-toggle",
+    "theme-toggle",
+    "group-toggle",
+    "view-toggle",
+    "similar-close-btn",
+    "source-chunks-close-btn",
+)
+
+
+# ``strict=True`` so the marker self-removes when the fix PR lands: once the
+# assertion passes, pytest reports XPASS as a failure and forces the developer
+# to drop the marker rather than leave a permanent expected-failure that
+# silently re-RED'd later.
+_A11Y_XFAIL_PR1 = pytest.mark.xfail(
+    strict=True, reason="A11Y-2.2 / 2.3 — pending fix in issue #1053 PR #1"
+)
+_A11Y_XFAIL_PR2 = pytest.mark.xfail(
+    strict=True, reason="A11Y-3.4 — pending fix in issue #1053 PR #2"
+)
+_A11Y_XFAIL_PR3 = pytest.mark.xfail(
+    strict=True, reason="A11Y-3.1 — pending modal manager in issue #1053 PR #3"
+)
+_A11Y_XFAIL_PR4 = pytest.mark.xfail(
+    strict=True, reason="A11Y-2.1 — pending fix in issue #1053 PR #4"
+)
+_A11Y_XFAIL_PR5 = pytest.mark.xfail(
+    strict=True, reason="A11Y-1.1 — pending fix in issue #1053 PR #5"
+)
+
+
+@_A11Y_XFAIL_PR1
+class TestA11yIconButtonNames:
+    """A11Y-2.3 — icon-only buttons in the header / panel chrome must carry
+    an explicit accessible name. ``aria-label`` (static) or
+    ``data-i18n-aria-label`` (i18n-bound, resolved by ``i18n.js``) both
+    satisfy this; ``title`` alone does not."""
+
+    @pytest.mark.parametrize("button_id", _ICON_ONLY_BUTTONS)
+    def test_icon_button_has_explicit_accessible_name(self, index_html: str, button_id: str):
+        block = _button_block(index_html, button_id)
+        has_aria_label = "aria-label=" in block or "data-i18n-aria-label=" in block
+        assert has_aria_label, (
+            f"icon-only button #{button_id} relies on title/placeholder "
+            f"for its accessible name — add aria-label= or "
+            f"data-i18n-aria-label= (A11Y-2.3, issue #1053)"
+        )
+
+
+# Inputs that appear without a ``<label for=>`` association or explicit
+# aria-* fallback. Placeholders are visual hints, not accessible names.
+_ORPHAN_INPUTS = (
+    "home-search-input",
+    "tag-filter",
+    "score-threshold",
+    "d-editor",
+    "d-tag-input",
+    "memory-add-input",
+)
+
+
+@_A11Y_XFAIL_PR1
+class TestA11yOrphanInputLabels:
+    """A11Y-2.2 — every form control must have one of: ``aria-label``,
+    ``aria-labelledby``, or a ``<label for="ID">`` somewhere in the
+    document. Otherwise SR users hear only the role + value."""
+
+    @pytest.mark.parametrize("input_id", _ORPHAN_INPUTS)
+    def test_input_has_label_association(self, index_html: str, input_id: str):
+        block = _input_block(index_html, input_id)
+        inline = (
+            "aria-label=" in block
+            or "data-i18n-aria-label=" in block
+            or "aria-labelledby=" in block
+        )
+        # ``<label for="ID">`` can live anywhere in the document; treat any
+        # match as sufficient for this pin.
+        external = f'for="{input_id}"' in index_html
+        assert inline or external, (
+            f"input/textarea #{input_id} has no accessible name — add "
+            f"aria-label=, aria-labelledby=, or a sibling <label for=>"
+            f" (A11Y-2.2, issue #1053)"
+        )
+
+
+# Every modal-overlay container. ``role="dialog"`` + ``aria-modal="true"``
+# is the minimum SR contract — VoiceOver / NVDA use it to scope navigation
+# and stop announcing background landmarks. Two modals already declare both
+# attributes today; the remaining six get the PR #2 xfail marker so the
+# regression guard stays GREEN on the fixed ones.
+_MODALS_ALREADY_PINNED = frozenset({"ctx-conflict-modal", "path-picker-modal"})
+
+_MODAL_PARAMS = [
+    pytest.param(
+        modal_id,
+        marks=[] if modal_id in _MODALS_ALREADY_PINNED else [_A11Y_XFAIL_PR2],
+        id=modal_id,
+    )
+    for modal_id in (
+        "expand-modal",
+        "source-preview-modal",
+        "settings-modal",
+        "shortcuts-modal",
+        "cmd-palette",
+        "confirm-modal",
+        "ctx-conflict-modal",
+        "path-picker-modal",
+    )
+]
+
+
+class TestA11yModalAriaModal:
+    """A11Y-3.4 — every ``.modal-overlay`` must declare itself as a dialog
+    so AT scope into it. ``ctx-conflict-modal`` and ``path-picker-modal``
+    already pass; the other six are the RED rows this pin tracks."""
+
+    @pytest.mark.parametrize("modal_id", _MODAL_PARAMS)
+    def test_modal_declares_dialog_role(self, index_html: str, modal_id: str):
+        block = _modal_block(index_html, modal_id)
+        assert 'role="dialog"' in block, (
+            f'modal #{modal_id} missing role="dialog" — add it to the '
+            f"opening tag (A11Y-3.4, issue #1053)"
+        )
+
+    @pytest.mark.parametrize("modal_id", _MODAL_PARAMS)
+    def test_modal_declares_aria_modal(self, index_html: str, modal_id: str):
+        block = _modal_block(index_html, modal_id)
+        assert 'aria-modal="true"' in block, (
+            f'modal #{modal_id} missing aria-modal="true" — add it to '
+            f"the opening tag (A11Y-3.4, issue #1053)"
+        )
+
+
+class TestA11yLiveRegionsPreserved:
+    """A11Y-2.6 — regression guard for the four existing live regions that
+    announce indexing / model-readiness / upload-usage / toasts. These are
+    *already correct* in main; the pin catches a future refactor that
+    drops the ``aria-live`` attribute or replaces the container."""
+
+    def test_indexing_indicator_live_region(self, index_html: str):
+        assert 'id="indexing-indicator"' in index_html and 'aria-live="polite"' in index_html
+        # Stronger pin: the indexing-indicator block itself carries the
+        # attribute. Avoid asserting on line numbers — they drift.
+        block_start = index_html.find('id="indexing-indicator"')
+        opening = index_html.rfind("<", 0, block_start)
+        opening_tag = index_html[opening : index_html.find(">", block_start) + 1]
+        assert 'aria-live="polite"' in opening_tag, (
+            'indexing-indicator lost its aria-live="polite" — restore it (A11Y-2.6, issue #1053)'
+        )
+
+    def test_model_readiness_banner_live_region(self, index_html: str):
+        block_start = index_html.find('id="model-readiness-banner"')
+        assert block_start != -1, "model-readiness-banner removed"
+        opening = index_html.rfind("<", 0, block_start)
+        opening_tag = index_html[opening : index_html.find(">", block_start) + 1]
+        assert 'aria-live="polite"' in opening_tag, (
+            'model-readiness-banner lost its aria-live="polite"'
+        )
+
+    def test_upload_usage_live_region(self, index_html: str):
+        block_start = index_html.find('id="upload-usage"')
+        assert block_start != -1, "upload-usage span removed"
+        opening = index_html.rfind("<", 0, block_start)
+        opening_tag = index_html[opening : index_html.find(">", block_start) + 1]
+        assert 'aria-live="polite"' in opening_tag, 'upload-usage lost its aria-live="polite"'
+
+    def test_toast_container_live_region(self, index_html: str):
+        block_start = index_html.find('id="toast-container"')
+        assert block_start != -1, "toast-container removed"
+        opening = index_html.rfind("<", 0, block_start)
+        opening_tag = index_html[opening : index_html.find(">", block_start) + 1]
+        assert 'aria-live="polite"' in opening_tag, 'toast-container lost its aria-live="polite"'
+
+
+@_A11Y_XFAIL_PR4
+class TestA11yResultsLiveRegion:
+    """A11Y-2.1 — ``renderResults()`` rewrites the results list every time
+    a search returns; SR users get no notification of the count change.
+    The fix wraps the results-list (or an adjacent summary node) in an
+    ``aria-live="polite"`` region. Either placement satisfies the pin."""
+
+    def test_results_region_is_announced(self, index_html: str):
+        # Look at the opening tag for results-list and its immediate
+        # surroundings (results-summary lives next to it). One of the two
+        # containers should carry aria-live=polite.
+        for marker in ('id="results-list"', 'id="results-summary"'):
+            idx = index_html.find(marker)
+            if idx == -1:
+                continue
+            opening = index_html.rfind("<", 0, idx)
+            opening_tag = index_html[opening : index_html.find(">", idx) + 1]
+            if 'aria-live="polite"' in opening_tag:
+                return
+        raise AssertionError(
+            "neither #results-list nor #results-summary carries "
+            'aria-live="polite" — search count changes are silent for '
+            "SR users (A11Y-2.1, issue #1053)"
+        )
+
+
+@_A11Y_XFAIL_PR5
+class TestSkipLinkPresent:
+    """A11Y-1.1 — first focusable element in the document should be a
+    skip-to-main anchor so keyboard users bypass the header chrome (~6
+    Tabs today)."""
+
+    def test_skip_link_jumps_to_main(self, index_html: str):
+        # The link is visually-hidden until focused but must exist in the
+        # DOM and target a #main landmark.
+        assert 'class="skip-link"' in index_html or 'id="skip-to-main"' in index_html, (
+            'no skip-to-main link found — add an <a> with class="skip-link"'
+            ' (or id="skip-to-main") near the top of <body> (A11Y-1.1, '
+            "issue #1053)"
+        )
+        assert 'href="#main"' in index_html, (
+            "skip link does not target #main — the landmark must exist and "
+            "the anchor href must point at it"
+        )
+        # And there has to actually be a main landmark to jump to.
+        assert 'id="main"' in index_html, 'no element with id="main" to be the skip-link target'
+
+
+@_A11Y_XFAIL_PR3
+class TestA11yModalToggleAntipattern:
+    """A11Y-3 enforcement — once the modal manager lands, every modal
+    open/close path must funnel through ``openModal(el)`` / ``closeModal(el)``
+    so the active-modal set stays accurate and the global shortcut gate
+    works. Direct ``modal().hidden = false/true`` or ``show(qs('X-modal'))``
+    on a ``.modal-overlay`` element re-introduces the bug at A11Y-3.1.
+
+    The pin is intentionally narrow — it only fires on the two known modal
+    files (``path-picker.js``, ``context-gateway.js``) plus any future
+    file that toggles ``modal().hidden``. ``app.js`` ``show()/hide()``
+    calls are still allowed because they go through the modal-manager
+    wrapper once the fix lands.
+    """
+
+    def test_path_picker_uses_modal_manager(self):
+        js = (_STATIC_DIR / "path-picker.js").read_text(encoding="utf-8")
+        # Today the file directly toggles ``modal().hidden = false/true`` —
+        # this assert is RED until PR #3 (modal manager) migrates it.
+        assert "modal().hidden = false" not in js and "modal().hidden = true" not in js, (
+            "path-picker.js still toggles modal().hidden directly — route "
+            "through the modal manager's openModal/closeModal so the global "
+            "shortcut gate sees the picker (A11Y-3.1, issue #1053)"
+        )
+
+    def test_ctx_conflict_uses_modal_manager(self):
+        js = (_STATIC_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        # ``_ctxResolveConflict`` currently calls ``show(modal)`` / ``hide(modal)``
+        # which are the generic helpers at app.js:527-528. After the modal
+        # manager lands the modal-overlay path must use openModal/closeModal.
+        in_resolver = "_ctxResolveConflict" in js
+        assert in_resolver, "_ctxResolveConflict() vanished — re-locate pin"
+        # Slice around the resolver body.
+        start = js.find("function _ctxResolveConflict")
+        end = js.find("\nfunction ", start + 1)
+        body = js[start:end] if end != -1 else js[start:]
+        assert "show(modal)" not in body and "hide(modal)" not in body, (
+            "_ctxResolveConflict still uses generic show()/hide() on the "
+            "modal — switch to openModal(modal)/closeModal(modal) so the "
+            "modal manager tracks it (A11Y-3.1, issue #1053)"
         )
