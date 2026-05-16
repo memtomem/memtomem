@@ -12,6 +12,9 @@ from the manual QA pass. Each ID maps to a finding in the audit doc:
 * **B5** — chunk-card / dedup-row renderers route every user-controlled
   field through ``escapeHtml`` or ``DOMPurify.sanitize`` before
   ``innerHTML`` so a malicious chunk body can't execute JS in the SPA.
+* **C4 / F-C4-1** — embedding reset concurrent with search degrades to
+  BM25-only (never 503 / sqlite error) because reset is one atomic
+  transaction *and* the dense leg has a defensive exception catch.
 
 The point is to catch a future PR that forgets the guard, not to
 re-derive it from scratch — the underlying enforcement code lives in
@@ -253,4 +256,100 @@ class TestChunkCardXssGuard:
         assert 'class="result-filename">${escapeHtml(fname)}' in app_js, (
             "search-result card stopped escaping the source filename "
             "before injecting into innerHTML"
+        )
+
+
+# ---------------------------------------------------------------------------
+# F-C4-1 — embedding reset during search degrades to BM25-only, not 503
+# ---------------------------------------------------------------------------
+
+
+class TestEmbeddingResetBm25Fallback:
+    """Pin for F-C4-1 [Positive] in the kind-moth QA audit.
+
+    The 2026-05-15 runtime probe showed that ``POST /api/embedding-reset``
+    issued mid-search burst never produces a 503, sqlite error, or stale
+    response — search transparently degrades to BM25-only while the dense
+    vector table is recreated. Two layered invariants make that true:
+
+    1. ``reset_embedding_meta`` (``storage/sqlite_backend.py``) is a single
+       *synchronous* transaction — ``DROP TABLE``, ``CREATE VIRTUAL TABLE``,
+       ``db.commit()`` — so a concurrent search never observes a "table
+       missing" intermediate state.
+    2. The dense leg in ``search/pipeline.py`` is wrapped in a defensive
+       ``except Exception`` that resets ``dense_results = []`` and surfaces
+       the failure via ``dense_error``; BM25 still returns hits and the
+       endpoint stays at HTTP 200.
+
+    The probe also confirmed (2) never actually fires today because (1) is
+    atomic — but (2) is the load-bearing safety net the moment reset moves
+    to background execution or grows an inter-statement ``await``. If
+    either invariant changes the F-C4-1 smoke must be re-run before merge."""
+
+    @pytest.fixture(scope="class")
+    def pipeline_src(self) -> str:
+        from memtomem.search import pipeline
+
+        return inspect.getsource(pipeline)
+
+    @pytest.fixture(scope="class")
+    def reset_body(self) -> str:
+        # Extract just the ``reset_embedding_meta`` coroutine so a future
+        # refactor that splits the transaction across helpers will trip
+        # the per-function shape checks below rather than passing on
+        # module-level coincidence.
+        from memtomem.storage.sqlite_backend import SqliteBackend
+
+        return inspect.getsource(SqliteBackend.reset_embedding_meta)
+
+    def test_dense_leg_swallows_exception_to_empty_bm25_only(self, pipeline_src: str):
+        # The hot loop: try { embed_query + dense_search } except Exception:
+        # dense_results = []; dense_error = str(exc). Substring spans the
+        # assignment so a refactor that drops the [] reset (and silently
+        # leaves last-success stale results) also trips the pin.
+        assert "except Exception as exc:" in pipeline_src, (
+            "search/pipeline.py dense leg lost its `except Exception` "
+            "catch — embedding-reset / dim-mismatch will now surface as "
+            "an HTTP 5xx instead of the BM25-only fallback documented in "
+            "the F-C4-1 runtime probe"
+        )
+        assert "dense_results = []" in pipeline_src, (
+            "search/pipeline.py dense leg stopped resetting dense_results "
+            "to [] on exception — stale prior results would leak across "
+            "queries, breaking the F-C4-1 graceful-degradation contract"
+        )
+        assert "dense_error = str(exc)" in pipeline_src, (
+            "search/pipeline.py dense leg stopped surfacing dense_error — "
+            "the /api/embedding-status diagnostic depends on it"
+        )
+
+    def test_reset_embedding_meta_is_single_atomic_transaction(self, reset_body: str):
+        # The audit invariant: DROP + meta-update + CREATE + commit all
+        # share one synchronous transaction inside reset_embedding_meta().
+        # If a refactor splits this — e.g. moves the CREATE to a worker
+        # or inserts an ``await`` between DROP and commit — search would
+        # be able to observe a missing chunks_vec table mid-reset and the
+        # F-C4-1 BM25-only smoke must be re-run before merge.
+        assert "DROP TABLE IF EXISTS chunks_vec" in reset_body, (
+            "reset_embedding_meta no longer DROPs chunks_vec — "
+            "verify the new shape against the F-C4-1 probe"
+        )
+        assert "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec" in reset_body, (
+            "reset_embedding_meta no longer CREATEs chunks_vec — "
+            "verify the new shape against the F-C4-1 probe"
+        )
+        assert reset_body.count("db.commit()") == 1, (
+            "reset_embedding_meta lost its single-commit shape — the "
+            "F-C4-1 runtime probe relies on DROP+CREATE+commit being one "
+            "transaction so search never sees chunks_vec missing"
+        )
+        # An ``await`` *inside* the coroutine body (anywhere other than
+        # the ``async def`` signature) means a sqlite checkpoint could
+        # land mid-reset and a concurrent dense_search could observe the
+        # table absent. The current implementation has no such await.
+        body_only = reset_body.split(":\n", 1)[1] if ":\n" in reset_body else reset_body
+        assert "await " not in body_only, (
+            "reset_embedding_meta gained an `await` mid-transaction — "
+            "re-run the F-C4-1 runtime probe to confirm search still "
+            "degrades to BM25-only instead of surfacing a transient 503"
         )
