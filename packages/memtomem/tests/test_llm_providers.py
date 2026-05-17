@@ -11,7 +11,7 @@ Covers:
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -214,16 +214,23 @@ class TestOpenAILLM:
             await llm.generate("test")
 
     @pytest.mark.anyio
-    async def test_429_raises_rate_limit_error(self):
+    @patch("memtomem.embedding.retry.asyncio.sleep", new_callable=AsyncMock)
+    async def test_429_retries_and_returns_next_success(self, mock_sleep):
         config = _openai_llm_config()
         llm = OpenAILLM(config)
-        fake_resp = _make_httpx_response(status_code=429, headers={"Retry-After": "5"})
+        rate_limited = _make_httpx_response(status_code=429, headers={"Retry-After": "5"})
+        success = _make_httpx_response(
+            json_data={"choices": [{"message": {"content": "Recovered from OpenAI"}}]}
+        )
         mock_client = AsyncMock(spec=httpx.AsyncClient)
-        mock_client.post.return_value = fake_resp
+        mock_client.post.side_effect = [rate_limited, success]
         llm._client = mock_client
 
-        with pytest.raises(LLMError, match="rate limit"):
-            await llm.generate("test")
+        result = await llm.generate("test")
+
+        assert result == "Recovered from OpenAI"
+        assert mock_client.post.await_count == 2
+        mock_sleep.assert_awaited_once_with(5.0)
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +276,25 @@ class TestAnthropicLLM:
 
         with pytest.raises(LLMError, match="authentication failed"):
             await llm.generate("test")
+
+    @pytest.mark.anyio
+    @patch("memtomem.embedding.retry.asyncio.sleep", new_callable=AsyncMock)
+    async def test_429_retries_and_returns_next_success(self, mock_sleep):
+        config = _anthropic_llm_config()
+        llm = AnthropicLLM(config)
+        rate_limited = _make_httpx_response(status_code=429, headers={"Retry-After": "3"})
+        success = _make_httpx_response(
+            json_data={"content": [{"type": "text", "text": "Recovered from Claude"}]}
+        )
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post.side_effect = [rate_limited, success]
+        llm._client = mock_client
+
+        result = await llm.generate("test")
+
+        assert result == "Recovered from Claude"
+        assert mock_client.post.await_count == 2
+        mock_sleep.assert_awaited_once_with(3.0)
 
 
 # ---------------------------------------------------------------------------
