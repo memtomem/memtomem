@@ -23,12 +23,6 @@ from .conftest import install_default_stubs
 pytestmark = pytest.mark.browser
 
 
-_A11Y_XFAIL_PR2 = pytest.mark.xfail(
-    strict=True,
-    reason="A11Y-1.2/1.5/3.2 — pending focus trap + restore + inert in issue #1053 PR #2",
-)
-
-
 # PR #2 installs Tab trapping on these six modals. ``confirm-modal`` and
 # ``path-picker-modal`` already trap Tab via their own custom listeners
 # (dynamic focusable computation) and are exercised only by the restore +
@@ -101,7 +95,6 @@ def _goto_with_stubs(mm_web_url: str, page) -> None:
 class TestA11yModalFocusTrap:
     """A11Y-1.2 — Tab cycles inside the modal, never escapes to background."""
 
-    @_A11Y_XFAIL_PR2
     @pytest.mark.parametrize("modal_id", _TRAP_MODALS)
     def test_tab_stays_inside_modal(self, mm_web_url, page, modal_id):
         _goto_with_stubs(mm_web_url, page)
@@ -125,7 +118,6 @@ class TestA11yModalFocusTrap:
 class TestA11yModalFocusRestore:
     """A11Y-1.5 — closing a modal returns focus to the element that opened it."""
 
-    @_A11Y_XFAIL_PR2
     @pytest.mark.parametrize("modal_id", _ALL_MODALS)
     def test_focus_returns_to_trigger(self, mm_web_url, page, modal_id):
         _goto_with_stubs(mm_web_url, page)
@@ -149,7 +141,6 @@ class TestA11yModalFocusRestore:
 class TestA11yBackgroundInert:
     """A11Y-3.2 — body-level siblings get ``inert`` while a modal is open."""
 
-    @_A11Y_XFAIL_PR2
     @pytest.mark.parametrize("modal_id", _ALL_MODALS)
     def test_background_inerts_while_open(self, mm_web_url, page, modal_id):
         _goto_with_stubs(mm_web_url, page)
@@ -189,7 +180,6 @@ class TestA11yStackedModalInertSurvives:
     a silent regression there.
     """
 
-    @_A11Y_XFAIL_PR2
     def test_inner_close_keeps_outer_background_inert(self, mm_web_url, page):
         _goto_with_stubs(mm_web_url, page)
         page.evaluate("document.getElementById('settings-btn').focus()")

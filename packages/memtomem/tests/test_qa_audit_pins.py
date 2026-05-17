@@ -592,9 +592,6 @@ _ICON_ONLY_BUTTONS = (
 # assertion passes, pytest reports XPASS as a failure and forces the developer
 # to drop the marker rather than leave a permanent expected-failure that
 # silently re-RED'd later.
-_A11Y_XFAIL_PR2 = pytest.mark.xfail(
-    strict=True, reason="A11Y-3.4 — pending fix in issue #1053 PR #2"
-)
 _A11Y_XFAIL_PR3 = pytest.mark.xfail(
     strict=True, reason="A11Y-3.1 — pending modal manager in issue #1053 PR #3"
 )
@@ -660,36 +657,27 @@ class TestA11yOrphanInputLabels:
 
 # Every modal-overlay container. ``role="dialog"`` + ``aria-modal="true"``
 # is the minimum SR contract — VoiceOver / NVDA use it to scope navigation
-# and stop announcing background landmarks. Two modals already declare both
-# attributes today; the remaining six get the PR #2 xfail marker so the
-# regression guard stays GREEN on the fixed ones.
-_MODALS_ALREADY_PINNED = frozenset({"ctx-conflict-modal", "path-picker-modal"})
-
-_MODAL_PARAMS = [
-    pytest.param(
-        modal_id,
-        marks=[] if modal_id in _MODALS_ALREADY_PINNED else [_A11Y_XFAIL_PR2],
-        id=modal_id,
-    )
-    for modal_id in (
-        "expand-modal",
-        "source-preview-modal",
-        "settings-modal",
-        "shortcuts-modal",
-        "cmd-palette",
-        "confirm-modal",
-        "ctx-conflict-modal",
-        "path-picker-modal",
-    )
-]
+# and stop announcing background landmarks. All 8 modals declare both
+# attributes after PR #2 (#1053); this class is now a permanent regression
+# guard against the attributes being dropped.
+_MODAL_IDS = (
+    "expand-modal",
+    "source-preview-modal",
+    "settings-modal",
+    "shortcuts-modal",
+    "cmd-palette",
+    "confirm-modal",
+    "ctx-conflict-modal",
+    "path-picker-modal",
+)
 
 
 class TestA11yModalAriaModal:
     """A11Y-3.4 — every ``.modal-overlay`` must declare itself as a dialog
-    so AT scope into it. ``ctx-conflict-modal`` and ``path-picker-modal``
-    already pass; the other six are the RED rows this pin tracks."""
+    so AT scope into it. All 8 modals carry ``role="dialog"`` +
+    ``aria-modal="true"`` after PR #2; this guards against regression."""
 
-    @pytest.mark.parametrize("modal_id", _MODAL_PARAMS)
+    @pytest.mark.parametrize("modal_id", _MODAL_IDS)
     def test_modal_declares_dialog_role(self, index_html: str, modal_id: str):
         block = _modal_block(index_html, modal_id)
         assert 'role="dialog"' in block, (
@@ -697,7 +685,7 @@ class TestA11yModalAriaModal:
             f"opening tag (A11Y-3.4, issue #1053)"
         )
 
-    @pytest.mark.parametrize("modal_id", _MODAL_PARAMS)
+    @pytest.mark.parametrize("modal_id", _MODAL_IDS)
     def test_modal_declares_aria_modal(self, index_html: str, modal_id: str):
         block = _modal_block(index_html, modal_id)
         assert 'aria-modal="true"' in block, (
