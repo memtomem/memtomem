@@ -1845,17 +1845,18 @@ function _ctxResolveConflict(userBuffer, freshContent) {
   // Opens the 3-button modal and resolves to 'reload' | 'force' | 'diff'
   // — or null if dismissed via Escape / backdrop click.
   return new Promise(resolve => {
-    const modal = qs('ctx-conflict-modal');
+    const modalEl = qs('ctx-conflict-modal');
     qs('ctx-conflict-yours').textContent = userBuffer;
     qs('ctx-conflict-theirs').textContent = freshContent;
     const reloadBtn = qs('ctx-conflict-reload-btn');
     const diffBtn = qs('ctx-conflict-diff-btn');
     const forceBtn = qs('ctx-conflict-force-btn');
-    show(modal);
-    const releaseA11y = window.openModalA11y(modal, {
+    // window.openModal funnels through openModalA11y so the conflict modal
+    // joins _ACTIVE_MODALS and the global shortcut gate (A11Y-3.1) sees it.
+    const releaseA11y = window.openModal(modalEl, {
       focusables: () => [reloadBtn, diffBtn, forceBtn],
     });
-    window.registerModalCloser(modal, () => cleanup(null));
+    window.registerModalCloser(modalEl, () => cleanup(null));
     // Focus the safest choice. Force-save is destructive (overwrites the
     // other writer's edits) and the modal exists precisely to make that
     // choice explicit — auto-focusing the danger button would let a
@@ -1864,20 +1865,20 @@ function _ctxResolveConflict(userBuffer, freshContent) {
     reloadBtn.focus();
 
     function cleanup(choice) {
-      hide(modal);
+      hide(modalEl);
       releaseA11y();
-      modal.removeEventListener('click', onBackdrop);
+      modalEl.removeEventListener('click', onBackdrop);
       document.removeEventListener('keydown', onKey, true);
       reloadBtn.onclick = null;
       diffBtn.onclick = null;
       forceBtn.onclick = null;
       resolve(choice);
     }
-    function onBackdrop(e) { if (e.target === modal) cleanup(null); }
+    function onBackdrop(e) { if (e.target === modalEl) cleanup(null); }
     function onKey(e) {
       if (e.key === 'Escape') { e.stopPropagation(); cleanup(null); }
     }
-    modal.addEventListener('click', onBackdrop);
+    modalEl.addEventListener('click', onBackdrop);
     document.addEventListener('keydown', onKey, true);
     reloadBtn.onclick = () => cleanup('reload');
     diffBtn.onclick = () => cleanup('diff');

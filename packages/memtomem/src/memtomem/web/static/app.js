@@ -606,6 +606,28 @@ function closeModal(modal) {
 window.openModalA11y = openModalA11y;
 window.registerModalCloser = registerModalCloser;
 window.closeModal = closeModal;
+
+// openModal(el, opts) — show + a11y in one call. The single open path that
+// keeps _ACTIVE_MODALS accurate; every modal-overlay opener should funnel
+// through here so window.isAnyModalOpen() reflects every overlay on screen
+// and the global shortcut gate (A11Y-3.1) can trust it. Returns the release
+// closure the caller must invoke on close (idempotent, so double-call is
+// safe — e.g. Esc + close-btn race).
+window.openModal = function (el, opts = {}) {
+  show(el);
+  return openModalA11y(el, opts);
+};
+
+// A11Y-3.1 gate primitives. Both shortcut listeners (app.js bare keys,
+// settings-namespaces.js Cmd+K / tab numbers) consult these to decide
+// whether a keypress should fire or defer to whatever modal is on top.
+// isTopModal() lets the gate preserve toggle-close semantics (?, Cmd+K)
+// for the modal that owns the top of the stack — anything underneath
+// keeps full focus, so a stray ? while the settings modal is up cannot
+// pop the shortcuts modal on top of it.
+window.isAnyModalOpen = () => _ACTIVE_MODALS.length > 0;
+window.isTopModal = (el) => _ACTIVE_MODALS.length > 0
+  && _ACTIVE_MODALS[_ACTIVE_MODALS.length - 1] === el;
 function setMsg(el, text, isErr) {
   if (!el) return;
   el.textContent = text;
@@ -6215,6 +6237,19 @@ document.addEventListener('keydown', e => {
     const sourceChunks = qs('source-chunks-panel');
     if (sourceChunks && !sourceChunks.hidden) { hide(sourceChunks); return; }
     if (qs('detail-view') && !qs('detail-view').hidden) { clearDetail(); return; }
+    return;
+  }
+
+  // A11Y-3.1: every non-Esc bare-key shortcut below (?, /, h, j/k, p, c)
+  // is suspended while any modal is on screen. The one exception is ? as a
+  // toggle-close when the shortcuts modal owns the top of the stack — the
+  // bare-key UX that opened it should also dismiss it. Other modals on top
+  // keep ? entirely (otherwise it could pop the shortcuts modal over them).
+  if (window.isAnyModalOpen()) {
+    if (e.key === '?' && window.isTopModal(qs('shortcuts-modal'))) {
+      e.preventDefault();
+      closeShortcutsModal();
+    }
     return;
   }
 

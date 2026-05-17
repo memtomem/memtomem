@@ -592,9 +592,6 @@ _ICON_ONLY_BUTTONS = (
 # assertion passes, pytest reports XPASS as a failure and forces the developer
 # to drop the marker rather than leave a permanent expected-failure that
 # silently re-RED'd later.
-_A11Y_XFAIL_PR3 = pytest.mark.xfail(
-    strict=True, reason="A11Y-3.1 — pending modal manager in issue #1053 PR #3"
-)
 _A11Y_XFAIL_PR4 = pytest.mark.xfail(
     strict=True, reason="A11Y-2.1 — pending fix in issue #1053 PR #4"
 )
@@ -783,19 +780,18 @@ class TestSkipLinkPresent:
         assert 'id="main"' in index_html, 'no element with id="main" to be the skip-link target'
 
 
-@_A11Y_XFAIL_PR3
 class TestA11yModalToggleAntipattern:
-    """A11Y-3 enforcement — once the modal manager lands, every modal
-    open/close path must funnel through ``openModal(el)`` / ``closeModal(el)``
-    so the active-modal set stays accurate and the global shortcut gate
-    works. Direct ``modal().hidden = false/true`` or ``show(qs('X-modal'))``
-    on a ``.modal-overlay`` element re-introduces the bug at A11Y-3.1.
+    """A11Y-3 enforcement — every modal open path must funnel through
+    ``window.openModal(el)`` / ``window.closeModal(el)`` (or call
+    ``openModalA11y`` directly) so ``_ACTIVE_MODALS`` stays accurate and
+    the global shortcut gate (A11Y-3.1) keeps working. Direct
+    ``modal().hidden = false/true`` or ``show(qs('X-modal'))`` on a
+    ``.modal-overlay`` element bypasses the stack and re-introduces the
+    bug.
 
     The pin is intentionally narrow — it only fires on the two known modal
     files (``path-picker.js``, ``context-gateway.js``) plus any future
-    file that toggles ``modal().hidden``. ``app.js`` ``show()/hide()``
-    calls are still allowed because they go through the modal-manager
-    wrapper once the fix lands.
+    file that toggles ``modal().hidden`` directly.
     """
 
     def test_path_picker_uses_modal_manager(self):

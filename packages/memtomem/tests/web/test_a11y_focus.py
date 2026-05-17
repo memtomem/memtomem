@@ -1,17 +1,20 @@
 """A11Y modal behaviour pins — Playwright lane (issue #1053).
 
-PR #2 adds Tab trap + focus restoration + background ``inert`` to the 8
+PR #2 added Tab trap + focus restoration + background ``inert`` to the 8
 ``.modal-overlay`` elements (``TestA11yModalFocusTrap`` /
 ``TestA11yModalFocusRestore`` / ``TestA11yBackgroundInert`` /
 ``TestA11yStackedModalInertSurvives``).
 
-PR #3 adds a modal manager + global-shortcut gate
-(``test_ctrl_k_blocked_while_confirm_modal_active``).
+PR #3 added the modal manager (``window.openModal`` /
+``window.isAnyModalOpen`` / ``window.isTopModal``) and the global-shortcut
+gate (``TestA11yShortcutGate``). With the gate live, the bare global
+shortcuts (``Cmd+K`` / ``?`` / ``/`` / ``h`` / ``j`` / ``k``) cannot pop
+another overlay on top of one already on screen; ``?`` and ``Cmd+K``
+remain toggle-closes when their own modal owns the top of the stack.
 
-Every test pin here is marked ``xfail(strict=True)`` so it self-removes
-the moment the relevant fix lands: the test xpasses, pytest reports it as
-a failure, and the dev drops the marker rather than leaving a stale
-expected-failure that could silently re-RED later.
+xfail markers in this file are ``strict=True`` so a fix that turns a RED
+pin green forces the dev to remove the marker rather than leaving a
+silent expected-failure that could re-RED later.
 """
 
 from __future__ import annotations
@@ -216,43 +219,111 @@ class TestA11yStackedModalInertSurvives:
 
 
 # ---------------------------------------------------------------------------
-# PR #3 pin — kept here as the original tenant of this file.
+# PR #3 — A11Y-3.1 modal-aware global shortcut gate.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="A11Y-3.1 — pending modal manager in issue #1053 PR #3")
-def test_ctrl_k_blocked_while_confirm_modal_active(mm_web_url, page):
-    install_default_stubs(page)
-    page.goto(mm_web_url)
-    page.wait_for_selector("#confirm-modal", state="attached")
-    page.wait_for_selector("#cmd-palette", state="attached")
+def _open_confirm_modal_keep_open(page) -> None:
+    """Open ``confirm-modal`` and return without dismissing it.
 
-    # ``showConfirm`` returns a Promise that only resolves on OK/Cancel.
-    # Playwright's ``page.evaluate`` awaits Promises by default, so calling
-    # it directly would hang until the modal is dismissed — but the whole
-    # point of this test is to keep the modal open while pressing Ctrl+K.
-    # ``void`` discards the returned Promise so the evaluate call returns
-    # immediately while ``showConfirm`` runs to first render in the
-    # background.
+    ``showConfirm`` returns a Promise that resolves on OK/Cancel.
+    Playwright's ``page.evaluate`` awaits returned Promises by default,
+    so calling it directly would hang the test until the modal is
+    dismissed — the whole point of these probes is to keep the modal up
+    while we drive the shortcut. ``void`` discards the Promise so the
+    evaluate returns immediately while the modal stays on screen.
+    """
     page.evaluate(
         "void window.showConfirm({"
         "title: 'A11Y gate probe', "
-        "message: 'open modal to probe the Cmd+K gate', "
+        "message: 'open modal to probe the shortcut gate', "
         "confirmText: 'OK', cancelText: 'Cancel'"
         "})"
     )
     page.wait_for_selector("#confirm-modal:not([hidden])", timeout=2_000)
 
-    # If the gate is in place, Ctrl+K is swallowed (preventDefault) and
-    # the palette stays hidden. Without the gate, the palette opens on
-    # top of the confirm modal — the bug at A11Y-3.1.
-    page.keyboard.press("Control+k")
 
-    cmd_palette_hidden = page.evaluate("document.getElementById('cmd-palette').hidden")
-    assert cmd_palette_hidden, (
-        "cmd-palette opened while confirm-modal was active — Ctrl+K must "
-        "be gated when any modal-overlay is on screen (A11Y-3.1, "
-        "issue #1053). Check the modal manager wiring in "
-        "static/modal-manager.js + the keydown listener at "
-        "settings-namespaces.js:747"
-    )
+class TestA11yShortcutGate:
+    """A11Y-3.1 — bare global shortcuts must not pop another overlay on
+    top of one already open.
+
+    Coverage map (per shortcut, gated-when-modal-open is the core claim):
+
+    * ``Cmd+K`` — opening shortcut for the command palette. Must not open
+      a second overlay; preserved as toggle-close when the palette itself
+      owns the top of the stack.
+    * ``?`` — opening shortcut for the shortcuts modal. Same contract:
+      blocked otherwise, toggle-close-while-on-top preserved.
+    * ``/`` / ``h`` / ``j`` / ``k`` — focus / help / list-navigation
+      shortcuts. None of these should fire while a modal is up; ``j``/
+      ``k`` in particular would steal focus from a modal's inner list.
+
+    Each test follows the same shape: open a known modal (``confirm-modal``
+    for the no-op gates, the target modal itself for toggle-close tests),
+    press the key, assert the gated overlay's state.
+    """
+
+    def test_ctrl_k_blocked_while_confirm_modal_active(self, mm_web_url, page):
+        _goto_with_stubs(mm_web_url, page)
+        page.wait_for_selector("#cmd-palette", state="attached")
+        _open_confirm_modal_keep_open(page)
+        page.keyboard.press("Control+k")
+        cmd_palette_hidden = page.evaluate("document.getElementById('cmd-palette').hidden")
+        assert cmd_palette_hidden, (
+            "cmd-palette opened while confirm-modal was active — Cmd/Ctrl+K "
+            "must be gated when any modal-overlay is on screen "
+            "(A11Y-3.1, issue #1053). Check the modal-open guard in "
+            "settings-namespaces.js's keydown listener."
+        )
+
+    def test_question_mark_blocked_while_confirm_modal_active(self, mm_web_url, page):
+        _goto_with_stubs(mm_web_url, page)
+        page.wait_for_selector("#shortcuts-modal", state="attached")
+        _open_confirm_modal_keep_open(page)
+        page.keyboard.press("?")
+        shortcuts_hidden = page.evaluate("document.getElementById('shortcuts-modal').hidden")
+        assert shortcuts_hidden, (
+            "shortcuts-modal opened while confirm-modal was active — ``?`` "
+            "must be gated when any modal-overlay is on screen "
+            "(A11Y-3.1, issue #1053). Check the modal-open guard in "
+            "app.js's keydown listener."
+        )
+
+    @pytest.mark.parametrize("key", ["/", "h", "j", "k"])
+    def test_bare_keys_blocked_while_modal_active(self, mm_web_url, page, key):
+        # ``/`` would focus + select the search input (focus theft);
+        # ``h`` toggles the help panel; ``j``/``k`` move the results
+        # selection. None should fire while a modal traps focus.
+        _goto_with_stubs(mm_web_url, page)
+        _open_confirm_modal_keep_open(page)
+        # Capture state before the keypress so we can prove nothing
+        # changed (we can't easily probe every side-effect, so we focus
+        # on the most visible one: active element stays inside the modal).
+        page.keyboard.press(key)
+        inside_modal = page.evaluate(
+            "document.getElementById('confirm-modal').contains(document.activeElement)"
+        )
+        assert inside_modal, (
+            f"pressing '{key}' while confirm-modal was active moved focus "
+            f"outside the modal — bare-key shortcuts must defer to the "
+            f"open modal (A11Y-3.1, issue #1053)."
+        )
+
+    def test_ctrl_k_still_closes_palette_when_palette_is_top(self, mm_web_url, page):
+        # When the palette itself owns the top of the stack, Cmd+K must
+        # still toggle it closed — the gate's preserved toggle path.
+        _goto_with_stubs(mm_web_url, page)
+        page.wait_for_selector("#cmd-palette", state="attached")
+        page.evaluate("void window.openCmdPalette()")
+        page.wait_for_selector("#cmd-palette:not([hidden])", timeout=2_000)
+        page.keyboard.press("Control+k")
+        page.wait_for_selector("#cmd-palette", state="hidden", timeout=2_000)
+
+    def test_question_mark_still_closes_shortcuts_when_shortcuts_is_top(self, mm_web_url, page):
+        # Same contract for ``?`` against shortcuts-modal.
+        _goto_with_stubs(mm_web_url, page)
+        page.wait_for_selector("#shortcuts-modal", state="attached")
+        page.evaluate("void window.openShortcutsModal()")
+        page.wait_for_selector("#shortcuts-modal:not([hidden])", timeout=2_000)
+        page.keyboard.press("?")
+        page.wait_for_selector("#shortcuts-modal", state="hidden", timeout=2_000)
