@@ -102,7 +102,11 @@ class FakeConfig:
         summary_max_tokens = 256
 
         def all_index_roots(self):
-            return list(self.memory_dirs) + list(self.project_memory_dirs)
+            # Mirror ``IndexingConfig.all_index_roots`` — coerce each
+            # entry to ``Path`` so the helper honours its declared
+            # return type even when a test (or
+            # ``load_config_overrides``) assigns raw ``str`` values.
+            return [Path(d) for d in (*self.memory_dirs, *self.project_memory_dirs)]
 
     class _Decay:
         enabled = False
@@ -2529,6 +2533,62 @@ class TestIndex:
         assert data["indexed_chunks"] == 0
         assert len(data["errors"]) == 1
         assert "fastembed" in data["errors"][0]
+
+
+# ---------------------------------------------------------------------------
+# POST /api/reindex — "Reindex all" bulk route
+# ---------------------------------------------------------------------------
+
+
+class TestReindexAll:
+    """End-to-end pin for ``POST /api/reindex``.
+
+    The single-dir ``trigger_index`` route wraps ``Path(req.path)``
+    defensively, so it survives a ``memory_dirs`` field that holds raw
+    ``str`` (the shape ``load_config_overrides`` actually produces on
+    disk-config load). ``reindex_all`` iterates ``all_index_roots()``
+    and calls ``.expanduser()`` directly — without the helper-side
+    coercion this PR adds, the route 500s on the first entry. Lock
+    that contract here so a future "simplify" of ``all_index_roots()``
+    can't silently re-introduce the regression.
+    """
+
+    async def test_reindex_all_with_path_dirs_returns_200(self, app, client: AsyncClient, tmp_path):
+        target = tmp_path / "memdir"
+        target.mkdir()
+        app.state.config.indexing.memory_dirs = [target]
+        app.state.config.indexing.project_memory_dirs = []
+
+        resp = await client.post("/api/reindex")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["errors"] == []
+        assert len(data["results"]) == 1
+        assert data["results"][0]["path"] == str(target)
+
+    async def test_reindex_all_with_str_dirs_returns_200(self, app, client: AsyncClient, tmp_path):
+        """Regression: ``memory_dirs`` loaded from ``~/.memtomem/config.json``
+        comes in as ``list[str]`` because ``load_config_overrides`` writes
+        the JSON-decoded value via ``setattr`` without Pydantic validation.
+        ``all_index_roots()`` MUST coerce these to ``Path`` — otherwise the
+        bulk route 500s on ``str.expanduser()`` (single-dir ``/api/index``
+        is unaffected because it wraps ``Path(req.path)`` at the boundary).
+        """
+        target = tmp_path / "memdir"
+        target.mkdir()
+        # Deliberately store raw strings — mirrors what
+        # ``load_config_overrides`` produces.
+        app.state.config.indexing.memory_dirs = [str(target)]
+        app.state.config.indexing.project_memory_dirs = []
+
+        resp = await client.post("/api/reindex")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["errors"] == []
+        assert len(data["results"]) == 1
+        assert data["results"][0]["path"] == str(target)
 
 
 # ---------------------------------------------------------------------------
