@@ -592,9 +592,6 @@ _ICON_ONLY_BUTTONS = (
 # assertion passes, pytest reports XPASS as a failure and forces the developer
 # to drop the marker rather than leave a permanent expected-failure that
 # silently re-RED'd later.
-_A11Y_XFAIL_PR1 = pytest.mark.xfail(
-    strict=True, reason="A11Y-2.2 / 2.3 — pending fix in issue #1053 PR #1"
-)
 _A11Y_XFAIL_PR2 = pytest.mark.xfail(
     strict=True, reason="A11Y-3.4 — pending fix in issue #1053 PR #2"
 )
@@ -609,7 +606,6 @@ _A11Y_XFAIL_PR5 = pytest.mark.xfail(
 )
 
 
-@_A11Y_XFAIL_PR1
 class TestA11yIconButtonNames:
     """A11Y-2.3 — icon-only buttons in the header / panel chrome must carry
     an explicit accessible name. ``aria-label`` (static) or
@@ -639,7 +635,6 @@ _ORPHAN_INPUTS = (
 )
 
 
-@_A11Y_XFAIL_PR1
 class TestA11yOrphanInputLabels:
     """A11Y-2.2 — every form control must have one of: ``aria-label``,
     ``aria-labelledby``, or a ``<label for="ID">`` somewhere in the
