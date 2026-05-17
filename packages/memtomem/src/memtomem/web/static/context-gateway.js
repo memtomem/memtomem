@@ -1852,6 +1852,10 @@ function _ctxResolveConflict(userBuffer, freshContent) {
     const diffBtn = qs('ctx-conflict-diff-btn');
     const forceBtn = qs('ctx-conflict-force-btn');
     show(modal);
+    const releaseA11y = window.openModalA11y(modal, {
+      focusables: () => [reloadBtn, diffBtn, forceBtn],
+    });
+    window.registerModalCloser(modal, () => cleanup(null));
     // Focus the safest choice. Force-save is destructive (overwrites the
     // other writer's edits) and the modal exists precisely to make that
     // choice explicit — auto-focusing the danger button would let a
@@ -1861,6 +1865,7 @@ function _ctxResolveConflict(userBuffer, freshContent) {
 
     function cleanup(choice) {
       hide(modal);
+      releaseA11y();
       modal.removeEventListener('click', onBackdrop);
       document.removeEventListener('keydown', onKey, true);
       reloadBtn.onclick = null;
@@ -1879,6 +1884,11 @@ function _ctxResolveConflict(userBuffer, freshContent) {
     forceBtn.onclick = () => cleanup('force');
   });
 }
+
+// Test/dev entry point — production callers use ``_ctxResolveConflict``
+// with real user/disk buffers. The no-arg shim is what the A11Y Playwright
+// pins drive so they don't need to set up a full edit-conflict scenario.
+window.openCtxConflictModal = () => _ctxResolveConflict('', '');
 
 function _ctxRenderConflictBanner(detailEl, userBuffer, freshContent) {
   // Inline diff inside the edit pane, above the textarea. Diff orientation

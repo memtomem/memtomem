@@ -700,6 +700,7 @@
   "modal.cancel_btn": "Cancel",
   "modal.delete_btn": "Delete",
   "modal.cmd_placeholder": "Type a command…",
+  "modal.cmd_palette_aria_label": "Command palette",
 
   "shortcut.focus_search": "Focus search input",
   "shortcut.navigate": "Navigate results (next / prev)",

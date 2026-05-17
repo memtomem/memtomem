@@ -183,10 +183,16 @@
     (firstItem || cancelBtn()).focus();
   }
 
+  let _releaseA11y = null;
+
   function open(opts) {
     onSelectCb = (opts && typeof opts.onSelect === 'function') ? opts.onSelect : null;
     pickerPurpose = (opts && opts.purpose) || 'index';
     modal().hidden = false;
+    // Path-picker owns its own Tab trap (dynamic focusables across breadcrumbs
+    // + list items); pass focusables: null so the helper only adds restore +
+    // inert without installing a redundant trap.
+    _releaseA11y = window.openModalA11y(modal());
     document.addEventListener('keydown', _onKey, true);
     modal().addEventListener('click', _onBackdrop);
     selectBtn().disabled = true;
@@ -195,6 +201,7 @@
 
   function close() {
     modal().hidden = true;
+    if (_releaseA11y) { _releaseA11y(); _releaseA11y = null; }
     document.removeEventListener('keydown', _onKey, true);
     modal().removeEventListener('click', _onBackdrop);
     currentPath = null;
@@ -265,6 +272,7 @@
     if (browseBtn) browseBtn.addEventListener('click', () => open());
     if (cancelBtn()) cancelBtn().addEventListener('click', close);
     if (selectBtn()) selectBtn().addEventListener('click', commit);
+    if (window.registerModalCloser) window.registerModalCloser(modal(), close);
   }
 
   if (document.readyState === 'loading') {

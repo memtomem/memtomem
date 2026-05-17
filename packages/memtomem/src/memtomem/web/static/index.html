@@ -1231,7 +1231,7 @@
 
 
   <!-- Expand Modal (I2) -->
-  <div id="expand-modal" class="modal-overlay" hidden>
+  <div id="expand-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="expand-modal-title">
     <div class="modal-inner expand-modal-inner">
       <div class="modal-header">
         <span id="expand-modal-title" class="modal-title"></span>
@@ -1242,7 +1242,7 @@
   </div>
 
   <!-- Source Preview Modal -->
-  <div id="source-preview-modal" class="modal-overlay" hidden>
+  <div id="source-preview-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="source-preview-title">
     <div class="modal-inner source-preview-inner">
       <div class="modal-header">
         <span id="source-preview-title" class="modal-title"></span>
@@ -1256,10 +1256,10 @@
   </div>
 
   <!-- Settings Modal -->
-  <div id="settings-modal" class="modal-overlay" hidden>
+  <div id="settings-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <div class="modal-inner">
       <div class="modal-header">
-        <span class="modal-title" data-i18n="modal.settings_title">Settings</span>
+        <span id="settings-title" class="modal-title" data-i18n="modal.settings_title">Settings</span>
         <button id="settings-close-btn" class="btn-ghost">✕</button>
       </div>
       <div class="settings-form">
@@ -1294,10 +1294,10 @@
   </div>
 
   <!-- Keyboard Shortcuts Modal -->
-  <div id="shortcuts-modal" class="modal-overlay" hidden>
+  <div id="shortcuts-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
     <div class="modal-inner">
       <div class="modal-header">
-        <span class="modal-title" data-i18n="modal.shortcuts_title">Keyboard Shortcuts</span>
+        <span id="shortcuts-title" class="modal-title" data-i18n="modal.shortcuts_title">Keyboard Shortcuts</span>
         <button id="shortcuts-close-btn" class="btn-ghost">✕</button>
       </div>
       <table class="shortcuts-table">
@@ -1320,7 +1320,7 @@
   </div>
 
   <!-- Command Palette (Cmd+K) -->
-  <div id="cmd-palette" class="modal-overlay" hidden>
+  <div id="cmd-palette" class="modal-overlay" hidden role="dialog" aria-modal="true" data-i18n-aria-label="modal.cmd_palette_aria_label">
     <div class="cmd-palette-inner">
       <input id="cmd-input" type="text" class="cmd-input" data-i18n-placeholder="modal.cmd_placeholder" placeholder="Type a command…" autocomplete="off" spellcheck="false" />
       <div id="cmd-list" class="cmd-list"></div>
@@ -1331,7 +1331,7 @@
   <div id="toast-container" class="toast-container" aria-live="polite" aria-atomic="false"></div>
 
   <!-- Confirm Dialog (A3) -->
-  <div id="confirm-modal" class="modal-overlay" hidden>
+  <div id="confirm-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="confirm-title">
     <div class="modal-inner confirm-dialog">
       <div class="modal-header">
         <span id="confirm-title" class="modal-title"></span>

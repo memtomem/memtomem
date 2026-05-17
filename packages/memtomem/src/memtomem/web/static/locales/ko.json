@@ -700,6 +700,7 @@
   "modal.cancel_btn": "취소",
   "modal.delete_btn": "삭제",
   "modal.cmd_placeholder": "명령어 입력…",
+  "modal.cmd_palette_aria_label": "명령 팔레트",
 
   "shortcut.focus_search": "검색 입력창 포커스",
   "shortcut.navigate": "결과 탐색 (다음 / 이전)",
