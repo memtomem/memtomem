@@ -592,9 +592,6 @@ _ICON_ONLY_BUTTONS = (
 # assertion passes, pytest reports XPASS as a failure and forces the developer
 # to drop the marker rather than leave a permanent expected-failure that
 # silently re-RED'd later.
-_A11Y_XFAIL_PR4 = pytest.mark.xfail(
-    strict=True, reason="A11Y-2.1 — pending fix in issue #1053 PR #4"
-)
 _A11Y_XFAIL_PR5 = pytest.mark.xfail(
     strict=True, reason="A11Y-1.1 — pending fix in issue #1053 PR #5"
 )
@@ -732,7 +729,6 @@ class TestA11yLiveRegionsPreserved:
         assert 'aria-live="polite"' in opening_tag, 'toast-container lost its aria-live="polite"'
 
 
-@_A11Y_XFAIL_PR4
 class TestA11yResultsLiveRegion:
     """A11Y-2.1 — ``renderResults()`` rewrites the results list every time
     a search returns; SR users get no notification of the count change.
