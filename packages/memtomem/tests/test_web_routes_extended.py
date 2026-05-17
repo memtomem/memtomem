@@ -91,7 +91,11 @@ class FakeConfig:
         structured_chunk_mode = "original"
 
         def all_index_roots(self):
-            return list(self.memory_dirs) + list(self.project_memory_dirs)
+            # Mirror ``IndexingConfig.all_index_roots`` — coerce each
+            # entry to ``Path`` so the helper honours its declared
+            # return type even when a test (or
+            # ``load_config_overrides``) assigns raw ``str`` values.
+            return [Path(d) for d in (*self.memory_dirs, *self.project_memory_dirs)]
 
     class _Decay:
         enabled = False

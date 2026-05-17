@@ -53,6 +53,28 @@ class TestAllIndexRootsHelper:
         assert Path("/leak") not in cfg.memory_dirs
         assert Path("/leak") not in cfg.project_memory_dirs
 
+    def test_helper_coerces_str_entries_to_path(self):
+        # ``load_config_overrides`` uses ``setattr`` without validation,
+        # so ``memory_dirs`` can hold raw ``str`` values straight off
+        # ``~/.memtomem/config.json``. The helper MUST normalise these
+        # to ``Path`` to match the declared return type — otherwise the
+        # web ``/api/reindex`` route 500s on ``str.expanduser()``.
+        #
+        # ``object.__setattr__`` mirrors the exact path
+        # ``load_config_overrides`` takes (Pydantic ``setattr`` without
+        # ``validate_assignment``) and avoids ``# type: ignore`` noise.
+        cfg = IndexingConfig(memory_dirs=[], project_memory_dirs=[])
+        object.__setattr__(cfg, "memory_dirs", ["/u1", "/u2"])
+        object.__setattr__(cfg, "project_memory_dirs", ["/p1"])
+        roots = cfg.all_index_roots()
+        assert all(isinstance(r, Path) for r in roots)
+        assert roots == [Path("/u1"), Path("/u2"), Path("/p1")]
+        # ``.expanduser()`` is the next caller's contract; round-trip
+        # through it to document that the wrapped Path is filesystem-
+        # usable (the original bug surfaced exactly because callers
+        # could not invoke this on a ``str``).
+        assert [r.expanduser() for r in roots] == [Path("/u1"), Path("/u2"), Path("/p1")]
+
 
 class TestConsumerRegressionPin:
     """Architectural guard — direct ``.memory_dirs`` access is restricted.
