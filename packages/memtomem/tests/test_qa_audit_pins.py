@@ -588,15 +588,6 @@ _ICON_ONLY_BUTTONS = (
 )
 
 
-# ``strict=True`` so the marker self-removes when the fix PR lands: once the
-# assertion passes, pytest reports XPASS as a failure and forces the developer
-# to drop the marker rather than leave a permanent expected-failure that
-# silently re-RED'd later.
-_A11Y_XFAIL_PR5 = pytest.mark.xfail(
-    strict=True, reason="A11Y-1.1 — pending fix in issue #1053 PR #5"
-)
-
-
 class TestA11yIconButtonNames:
     """A11Y-2.3 — icon-only buttons in the header / panel chrome must carry
     an explicit accessible name. ``aria-label`` (static) or
@@ -754,7 +745,6 @@ class TestA11yResultsLiveRegion:
         )
 
 
-@_A11Y_XFAIL_PR5
 class TestSkipLinkPresent:
     """A11Y-1.1 — first focusable element in the document should be a
     skip-to-main anchor so keyboard users bypass the header chrome (~6
@@ -774,6 +764,39 @@ class TestSkipLinkPresent:
         )
         # And there has to actually be a main landmark to jump to.
         assert 'id="main"' in index_html, 'no element with id="main" to be the skip-link target'
+
+    def test_main_landmark_preserves_tab_flex_layout(self):
+        # PR #1061 review (P1): wrapping the .tab-panel children in a
+        # <main id="main"> only works if main itself is a column flex
+        # container with flex: 1 + min-height: 0. Otherwise the panels
+        # — which use ``flex: 1; min-height: 0`` on their parent — lose
+        # their definite remaining-viewport height and overflow gets
+        # clipped by ``html/body { overflow: hidden }``. Pin the four
+        # declarations so a future CSS cleanup can't silently
+        # re-introduce the scroll regression.
+        #
+        # Regex over substring search: ``#main {`` would miss
+        # ``#main\n{`` (formatter-dependent) and ``flex: 1`` in plain
+        # ``in block`` would silently pass on ``flex: 1.5``. The
+        # word-boundaries make both robust to CSS reflow.
+        import re
+
+        css = (_STATIC_DIR / "style.css").read_text(encoding="utf-8")
+        m = re.search(r"^\s*#main\s*\{([^}]*)\}", css, re.M)
+        assert m is not None, "#main { ... } rule missing from style.css"
+        block = m.group(1)
+        required = (
+            (r"\bflex\s*:\s*1\s*;", "flex: 1"),
+            (r"\bmin-height\s*:\s*0\s*;", "min-height: 0"),
+            (r"\bdisplay\s*:\s*flex\s*;", "display: flex"),
+            (r"\bflex-direction\s*:\s*column\s*;", "flex-direction: column"),
+        )
+        for pattern, label in required:
+            assert re.search(pattern, block), (
+                f"#main is missing `{label}` — without it the <main> wrapper "
+                f"breaks the .tab-panel flex sizing chain "
+                f"(A11Y-1.1, issue #1053, PR #1061 P1 review)"
+            )
 
 
 class TestA11yModalToggleAntipattern:

@@ -355,3 +355,44 @@ class TestA11yShortcutGate:
         page.wait_for_selector("#shortcuts-modal:not([hidden])", timeout=2_000)
         page.keyboard.press("?")
         page.wait_for_selector("#shortcuts-modal", state="hidden", timeout=2_000)
+
+
+# ---------------------------------------------------------------------------
+# PR #5 — A11Y-1.1 skip-to-main runtime focus behavior.
+# ---------------------------------------------------------------------------
+
+
+class TestA11ySkipLinkRuntimeFocus:
+    """A11Y-1.1 runtime — the DOM contract pin in
+    ``test_qa_audit_pins.TestSkipLinkPresent`` proves the link + landmark
+    exist, but Chromium/Firefox only move keyboard focus to a hash-link
+    target if that target is focusable (anchor with href, button, input,
+    or any element carrying tabindex). Without ``tabindex="-1"`` on
+    ``<main>`` the link scrolls but focus stays on the now-off-screen
+    skip-link itself, and the next Tab cycles back into the header
+    chrome — defeating the affordance. Pin the runtime so the regression
+    can't slip back."""
+
+    def test_activating_skip_link_moves_focus_into_main(self, mm_web_url, page):
+        _goto_with_stubs(mm_web_url, page)
+        # The skip link is the first tabbable in document order — one
+        # Tab from initial state should land on it.
+        page.keyboard.press("Tab")
+        on_skip = page.evaluate(
+            "document.activeElement && document.activeElement.classList.contains('skip-link')"
+        )
+        assert on_skip, (
+            "first Tab from initial state did not land on the .skip-link — "
+            "ensure the skip-link <a> is the first tabbable child of <body>"
+        )
+        # Enter activates the anchor; href='#main' should focus <main>.
+        page.keyboard.press("Enter")
+        inside_main = page.evaluate(
+            "document.getElementById('main').contains(document.activeElement)"
+        )
+        assert inside_main, (
+            "activating the skip link did not move keyboard focus into "
+            "<main> — add tabindex='-1' to <main id='main'> so it can "
+            "receive programmatic focus from hash-link activation "
+            "(A11Y-1.1, issue #1053, PR #1061 P1 review)"
+        )

@@ -38,6 +38,54 @@
 html { font-size: 14px; height: 100%; overflow: hidden; }
 body { background: var(--bg); color: var(--text); font-family: var(--font); height: 100%; overflow: hidden; display: flex; flex-direction: column; }
 
+/* A11Y-1.1 — the <main id="main"> wrapper sits between <body> (column flex,
+   overflow hidden) and the .tab-panel children which rely on flex: 1 +
+   min-height: 0 for a definite remaining-viewport height. Without this
+   rule <main> is display: block and breaks the sizing chain — active
+   tabs lose their bounded scroll region and overflow gets clipped by
+   body's overflow: hidden. Mirror body's column flex behavior so <main>
+   stays transparent to the layout. */
+#main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* <main tabindex="-1"> is programmatically focusable so activating the
+   skip-link actually moves keyboard focus (Chromium/Firefox don't move
+   focus to a non-focusable target — they only scroll). Suppress the
+   mouse-style focus ring; show a subtle one on :focus-visible so
+   keyboard activation has a brief visual confirmation before the next
+   Tab lands on the active panel's first focusable. */
+#main:focus { outline: none; }
+#main:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* A11Y-1.1 — skip-to-main link. Kept visually off-screen until focused so
+   keyboard users can jump past the header chrome (~6 Tabs today) on the
+   very first Tab from page load. On focus it pins to top-left at a high
+   z-index so it sits over banners + nav. */
+.skip-link {
+  position: absolute;
+  top: -100px;
+  left: 8px;
+  z-index: 10000;
+  padding: 8px 16px;
+  background: var(--surface);
+  color: var(--text);
+  border: 2px solid var(--accent);
+  border-radius: var(--radius);
+  font-weight: 600;
+  text-decoration: none;
+}
+.skip-link:focus {
+  top: 8px;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* ── Header ── */
 /* Embedding mismatch banner */
 .embedding-mismatch-banner {
