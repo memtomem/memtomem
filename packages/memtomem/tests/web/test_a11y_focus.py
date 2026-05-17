@@ -309,6 +309,34 @@ class TestA11yShortcutGate:
             f"open modal (A11Y-3.1, issue #1053)."
         )
 
+    def test_ctrl_k_default_prevented_while_modal_active(self, mm_web_url, page):
+        # Pandas-Studio review (PR #1059): the gate must also call
+        # preventDefault() on blocked Cmd/Ctrl+K, not just early-return.
+        # Some browsers map Cmd/Ctrl+K to address-bar / search focus; if
+        # the default fires, focus escapes the trapped modal even though
+        # the cmd-palette stays hidden. Probe e.defaultPrevented from a
+        # bubble-phase listener — by the time it fires, every capture
+        # handler (including the gate) has run.
+        _goto_with_stubs(mm_web_url, page)
+        _open_confirm_modal_keep_open(page)
+        page.evaluate(
+            "window.__lastCtrlKPrevented = null;"
+            "window.addEventListener('keydown', e => {"
+            "  if (e.key === 'k' && (e.ctrlKey || e.metaKey)) {"
+            "    window.__lastCtrlKPrevented = e.defaultPrevented;"
+            "  }"
+            "}, false);"
+        )
+        page.keyboard.press("Control+k")
+        prevented = page.evaluate("window.__lastCtrlKPrevented")
+        assert prevented is True, (
+            "Ctrl+K's browser default leaked through while a modal was "
+            "open — the gate in settings-namespaces.js must call "
+            "preventDefault() on the blocked Cmd/Ctrl+K path so it can't "
+            "focus the address bar and steal focus from the modal "
+            "(A11Y-3.1, issue #1053)"
+        )
+
     def test_ctrl_k_still_closes_palette_when_palette_is_top(self, mm_web_url, page):
         # When the palette itself owns the top of the stack, Cmd+K must
         # still toggle it closed — the gate's preserved toggle path.

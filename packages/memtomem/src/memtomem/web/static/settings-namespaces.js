@@ -763,10 +763,13 @@ document.addEventListener('keydown', e => {
   // overlay on top of an already-open one. Esc lives in app.js / the
   // cmd-palette's own listener — never gated here.
   if (window.isAnyModalOpen()) {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'k'
-        && window.isTopModal(qs('cmd-palette'))) {
+    // Cmd/Ctrl+K is a modifier shortcut some browsers map to address-bar
+    // focus; always swallow it while a modal is up so the default can't
+    // escape the focus trap. When the palette owns the top, also toggle
+    // it closed — preserves the bare-key dismissal that opened it.
+    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
       e.preventDefault();
-      _closeCmdPalette();
+      if (window.isTopModal(qs('cmd-palette'))) _closeCmdPalette();
     }
     return;
   }
