@@ -310,8 +310,14 @@ class IndexingConfig(BaseSettings):
         view, auto-discover migration); functional consumers that need
         to act on every indexable file go through this helper instead so
         a future scope addition does not fork the consumers.
+
+        Entries are coerced to ``Path`` to honour the declared return
+        type even when raw ``str`` values slipped past Pydantic via the
+        non-validating ``setattr`` path in ``load_config_overrides`` —
+        otherwise ``reindex_all`` blew up calling ``.expanduser()`` on
+        the unwrapped JSON strings.
         """
-        return list(self.memory_dirs) + list(self.project_memory_dirs)
+        return [Path(d) for d in (*self.memory_dirs, *self.project_memory_dirs)]
 
 
 class DecayConfig(BaseSettings):

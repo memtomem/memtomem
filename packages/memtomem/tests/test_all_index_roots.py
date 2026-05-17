@@ -53,6 +53,19 @@ class TestAllIndexRootsHelper:
         assert Path("/leak") not in cfg.memory_dirs
         assert Path("/leak") not in cfg.project_memory_dirs
 
+    def test_helper_coerces_str_entries_to_path(self):
+        # ``load_config_overrides`` uses ``setattr`` without validation,
+        # so ``memory_dirs`` can hold raw ``str`` values straight off
+        # ``~/.memtomem/config.json``. The helper MUST normalise these
+        # to ``Path`` to match the declared return type — otherwise the
+        # web ``/api/reindex`` route 500s on ``str.expanduser()``.
+        cfg = IndexingConfig(memory_dirs=[], project_memory_dirs=[])
+        cfg.memory_dirs = ["~/u1", "~/u2"]  # type: ignore[assignment]
+        cfg.project_memory_dirs = ["~/p1"]  # type: ignore[assignment]
+        roots = cfg.all_index_roots()
+        assert all(isinstance(r, Path) for r in roots)
+        assert roots == [Path("~/u1"), Path("~/u2"), Path("~/p1")]
+
 
 class TestConsumerRegressionPin:
     """Architectural guard — direct ``.memory_dirs`` access is restricted.
