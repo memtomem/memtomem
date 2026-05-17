@@ -588,15 +588,6 @@ _ICON_ONLY_BUTTONS = (
 )
 
 
-# ``strict=True`` so the marker self-removes when the fix PR lands: once the
-# assertion passes, pytest reports XPASS as a failure and forces the developer
-# to drop the marker rather than leave a permanent expected-failure that
-# silently re-RED'd later.
-_A11Y_XFAIL_PR5 = pytest.mark.xfail(
-    strict=True, reason="A11Y-1.1 — pending fix in issue #1053 PR #5"
-)
-
-
 class TestA11yIconButtonNames:
     """A11Y-2.3 — icon-only buttons in the header / panel chrome must carry
     an explicit accessible name. ``aria-label`` (static) or
@@ -754,7 +745,6 @@ class TestA11yResultsLiveRegion:
         )
 
 
-@_A11Y_XFAIL_PR5
 class TestSkipLinkPresent:
     """A11Y-1.1 — first focusable element in the document should be a
     skip-to-main anchor so keyboard users bypass the header chrome (~6
