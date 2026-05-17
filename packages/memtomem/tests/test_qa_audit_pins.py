@@ -765,6 +765,26 @@ class TestSkipLinkPresent:
         # And there has to actually be a main landmark to jump to.
         assert 'id="main"' in index_html, 'no element with id="main" to be the skip-link target'
 
+    def test_main_landmark_preserves_tab_flex_layout(self):
+        # PR #1061 review (P1): wrapping the .tab-panel children in a
+        # <main id="main"> only works if main itself is a column flex
+        # container with flex: 1 + min-height: 0. Otherwise the panels
+        # — which use ``flex: 1; min-height: 0`` on their parent — lose
+        # their definite remaining-viewport height and overflow gets
+        # clipped by ``html/body { overflow: hidden }``. Pin the four
+        # declarations so a future CSS cleanup can't silently
+        # re-introduce the scroll regression.
+        css = (_STATIC_DIR / "style.css").read_text(encoding="utf-8")
+        start = css.find("#main {")
+        assert start != -1, "#main { ... } rule missing from style.css"
+        block = css[start : css.find("}", start) + 1]
+        for prop in ("flex: 1", "min-height: 0", "display: flex", "flex-direction: column"):
+            assert prop in block, (
+                f"#main is missing `{prop}` — without it the <main> wrapper "
+                f"breaks the .tab-panel flex sizing chain "
+                f"(A11Y-1.1, issue #1053, PR #1061 P1 review)"
+            )
+
 
 class TestA11yModalToggleAntipattern:
     """A11Y-3 enforcement — every modal open path must funnel through
