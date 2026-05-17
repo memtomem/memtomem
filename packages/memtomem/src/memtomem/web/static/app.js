@@ -526,6 +526,86 @@ async function uploadFilesWithRedactionRetry(formData) {
 function qs(id) { return document.getElementById(id); }
 function show(el)  { if (el) { el.hidden = false; el.style.display = ''; } }
 function hide(el)  { if (el) el.hidden = true; }
+
+// ---------------------------------------------------------------------------
+// Modal accessibility (A11Y-1.2 / 1.5 / 3.2 — issue #1053 PR #2)
+// ---------------------------------------------------------------------------
+
+// Top-of-stack = most-recently-opened modal. Stacking happens today:
+// settings-modal can have a maintenance showConfirm dialog on top of it
+// (audit row A11Y-3.3). Inert state is derived from this stack each
+// transition, never from a per-open snapshot — so closing the inner modal
+// recomputes inert correctly and leaves the outer modal's background still
+// inerted.
+const _ACTIVE_MODALS = [];
+const _MODAL_CLOSERS = new Map(); // HTMLElement -> () => void
+
+function _recomputeBackgroundInert() {
+  const active = new Set(_ACTIVE_MODALS);
+  const hasAny = _ACTIVE_MODALS.length > 0;
+  Array.from(document.body.children).forEach(el => {
+    if (!hasAny || active.has(el)) el.removeAttribute('inert');
+    else el.setAttribute('inert', '');
+  });
+}
+
+// openModalA11y(modal, { focusables })
+//   - captures the trigger (document.activeElement) for focus restoration
+//   - pushes modal onto _ACTIVE_MODALS and recomputes background inert
+//   - when ``focusables`` is a function, installs a capture-phase keydown
+//     trap that cycles Tab/Shift+Tab through the returned list
+// Returns a release() closure the caller MUST invoke from its close path;
+// release() is idempotent so double-call (ESC + close-btn race) is safe.
+function openModalA11y(modal, { focusables = null } = {}) {
+  const previouslyFocused = document.activeElement;
+  _ACTIVE_MODALS.push(modal);
+  _recomputeBackgroundInert();
+
+  let onKey = null;
+  if (typeof focusables === 'function') {
+    onKey = (e) => {
+      if (modal.hidden || e.key !== 'Tab') return;
+      const f = focusables();
+      if (!f.length) return;
+      e.preventDefault();
+      const idx = f.indexOf(document.activeElement);
+      f[(idx + (e.shiftKey ? -1 : 1) + f.length) % f.length].focus();
+    };
+    document.addEventListener('keydown', onKey, true);
+  }
+
+  let released = false;
+  return function releaseA11y() {
+    if (released) return;
+    released = true;
+    const idx = _ACTIVE_MODALS.indexOf(modal);
+    if (idx !== -1) _ACTIVE_MODALS.splice(idx, 1);
+    _recomputeBackgroundInert();
+    if (onKey) document.removeEventListener('keydown', onKey, true);
+    if (
+      previouslyFocused
+      && document.contains(previouslyFocused)
+      && typeof previouslyFocused.focus === 'function'
+    ) {
+      previouslyFocused.focus();
+    }
+  };
+}
+
+function registerModalCloser(modal, closeFn) { _MODAL_CLOSERS.set(modal, closeFn); }
+// Falls back to hide() when no closer is registered so the ESC dispatcher
+// stays correct for any modal-overlay not yet migrated.
+function closeModal(modal) {
+  const fn = _MODAL_CLOSERS.get(modal);
+  if (fn) fn(); else hide(modal);
+}
+
+// Expose helpers on window so path-picker.js / context-gateway.js /
+// settings-namespaces.js can use them without import wiring (matches the
+// existing window.showConfirm / window.PathPicker style).
+window.openModalA11y = openModalA11y;
+window.registerModalCloser = registerModalCloser;
+window.closeModal = closeModal;
 function setMsg(el, text, isErr) {
   if (!el) return;
   el.textContent = text;
@@ -1078,11 +1158,22 @@ function showConfirm({
 
     show(modal);
     const focusables = [qs('confirm-cancel-btn'), qs('confirm-ok-btn')];
+    // openModalA11y must run AFTER show() so previouslyFocused captures the
+    // trigger (not confirm-ok-btn after focus() below). The Tab trap inside
+    // showConfirm at onKey() below already handles Tab cycling — pass
+    // focusables: null so the helper only adds restore + inert.
+    const releaseA11y = openModalA11y(modal);
     focusables[1].focus();
+    // Register a closer so the generic ESC dispatcher (line ~6119) routes
+    // through cleanup() and the release() runs — without this, ESC on a
+    // confirm modal would hide() the DOM but leak inert + lose focus.
+    registerModalCloser(modal, () => cleanup(false));
 
     function cleanup(ok) {
       const extraChecked = extraOption && ok ? extraCheckbox.checked : false;
       hide(modal);
+      releaseA11y();
+      _MODAL_CLOSERS.delete(modal);
       // Always reset the checkbox row so a later non-extra confirm
       // doesn't inherit the previous label / checked state.
       extraRow.hidden = true;
@@ -6110,13 +6201,13 @@ document.addEventListener('keydown', e => {
     const confirmModal = qs('confirm-modal');
     if (confirmModal && !confirmModal.hidden) return; // handled by showConfirm's own listener
     const srcPreview = qs('source-preview-modal');
-    if (srcPreview && !srcPreview.hidden) { hide(srcPreview); return; }
+    if (srcPreview && !srcPreview.hidden) { closeModal(srcPreview); return; }
     const expandModal = qs('expand-modal');
-    if (expandModal && !expandModal.hidden) { hide(expandModal); return; }
+    if (expandModal && !expandModal.hidden) { closeModal(expandModal); return; }
     const settingsModal = qs('settings-modal');
-    if (settingsModal && !settingsModal.hidden) { hide(settingsModal); return; }
+    if (settingsModal && !settingsModal.hidden) { closeModal(settingsModal); return; }
     const modal = qs('shortcuts-modal');
-    if (modal && !modal.hidden) { hide(modal); return; }
+    if (modal && !modal.hidden) { closeModal(modal); return; }
     const dropdown = qs('search-history-dropdown');
     if (dropdown && !dropdown.hidden) { hide(dropdown); return; }
     const similar = qs('similar-panel');
@@ -6141,7 +6232,7 @@ document.addEventListener('keydown', e => {
   if (e.key === '?') {
     e.preventDefault();
     const modal = qs('shortcuts-modal');
-    modal.hidden ? show(modal) : hide(modal);
+    if (modal.hidden) openShortcutsModal(); else closeShortcutsModal();
     return;
   }
 
@@ -6415,17 +6506,31 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 });
 
-qs('settings-btn').addEventListener('click', () => {
+let _settingsRelease = null;
+function openSettingsModal() {
+  const modal = qs('settings-modal');
   const s = _loadSettings();
   qs('settings-default-tab').value = s.defaultTab;
-  // Show current server config top-k (or UI value as fallback)
   const curTopK = STATE.serverConfig?.search?.default_top_k || STATE.currentTopK || 10;
   qs('settings-default-topk').value = String(curTopK);
-  show(qs('settings-modal'));
-});
-qs('settings-close-btn').addEventListener('click', () => hide(qs('settings-modal')));
+  show(modal);
+  _settingsRelease = openModalA11y(modal, {
+    focusables: () => Array.from(
+      modal.querySelectorAll('input, select, button, [tabindex="0"]')
+    ).filter(el => !el.disabled && el.offsetParent !== null),
+  });
+}
+function closeSettingsModal() {
+  hide(qs('settings-modal'));
+  if (_settingsRelease) { _settingsRelease(); _settingsRelease = null; }
+}
+window.openSettingsModal = openSettingsModal;
+registerModalCloser(qs('settings-modal'), closeSettingsModal);
+
+qs('settings-btn').addEventListener('click', openSettingsModal);
+qs('settings-close-btn').addEventListener('click', closeSettingsModal);
 qs('settings-modal').addEventListener('click', e => {
-  if (e.target === qs('settings-modal')) hide(qs('settings-modal'));
+  if (e.target === qs('settings-modal')) closeSettingsModal();
 });
 qs('settings-save-btn').addEventListener('click', async () => {
   localStorage.setItem('m2m-default-tab', qs('settings-default-tab').value);
@@ -6440,7 +6545,7 @@ qs('settings-save-btn').addEventListener('click', async () => {
     console.warn('Failed to persist top-k to server config:', e);
   }
   showToast(t('toast.settings_saved'), 'success');
-  hide(qs('settings-modal'));
+  closeSettingsModal();
 });
 qs('settings-reset-btn').addEventListener('click', () => {
   localStorage.removeItem('m2m-default-tab');
@@ -6451,9 +6556,25 @@ qs('settings-reset-btn').addEventListener('click', () => {
   showToast(t('toast.settings_reset'), 'info');
 });
 
-qs('shortcuts-close-btn').addEventListener('click', () => hide(qs('shortcuts-modal')));
+let _shortcutsRelease = null;
+function openShortcutsModal() {
+  const modal = qs('shortcuts-modal');
+  show(modal);
+  _shortcutsRelease = openModalA11y(modal, {
+    focusables: () => [qs('shortcuts-close-btn')],
+  });
+}
+function closeShortcutsModal() {
+  hide(qs('shortcuts-modal'));
+  if (_shortcutsRelease) { _shortcutsRelease(); _shortcutsRelease = null; }
+}
+window.openShortcutsModal = openShortcutsModal;
+window.closeShortcutsModal = closeShortcutsModal;
+registerModalCloser(qs('shortcuts-modal'), closeShortcutsModal);
+
+qs('shortcuts-close-btn').addEventListener('click', closeShortcutsModal);
 qs('shortcuts-modal').addEventListener('click', e => {
-  if (e.target === qs('shortcuts-modal')) hide(qs('shortcuts-modal'));
+  if (e.target === qs('shortcuts-modal')) closeShortcutsModal();
 });
 
 // ---------------------------------------------------------------------------
@@ -6578,7 +6699,9 @@ qs('view-toggle').addEventListener('click', () => {
 // Expand Detail (I2)
 // ---------------------------------------------------------------------------
 
-qs('d-expand-btn').addEventListener('click', () => {
+let _expandRelease = null;
+function openExpandModal() {
+  const modal = qs('expand-modal');
   qs('expand-modal-title').textContent = qs('d-file').textContent || 'Content';
   const pre = qs('expand-content');
   pre.textContent = '';
@@ -6589,17 +6712,42 @@ qs('d-expand-btn').addEventListener('click', () => {
   code.textContent = qs('d-editor').value;
   pre.appendChild(code);
   if (lang && window.Prism) Prism.highlightElement(code);
-  show(qs('expand-modal'));
-});
+  show(modal);
+  _expandRelease = openModalA11y(modal, {
+    focusables: () => [qs('expand-close-btn')],
+  });
+}
+function closeExpandModal() {
+  hide(qs('expand-modal'));
+  if (_expandRelease) { _expandRelease(); _expandRelease = null; }
+}
+window.openExpandModal = openExpandModal;
+registerModalCloser(qs('expand-modal'), closeExpandModal);
 
-qs('expand-close-btn').addEventListener('click', () => hide(qs('expand-modal')));
+qs('d-expand-btn').addEventListener('click', openExpandModal);
+qs('expand-close-btn').addEventListener('click', closeExpandModal);
 qs('expand-modal').addEventListener('click', e => {
-  if (e.target === qs('expand-modal')) hide(qs('expand-modal'));
+  if (e.target === qs('expand-modal')) closeExpandModal();
 });
 
 // ---------------------------------------------------------------------------
 // Source Preview Modal — full document view with chunk highlight
 // ---------------------------------------------------------------------------
+
+let _sourcePreviewRelease = null;
+function openSourcePreviewModal() {
+  const modal = qs('source-preview-modal');
+  show(modal);
+  _sourcePreviewRelease = openModalA11y(modal, {
+    focusables: () => [qs('source-preview-close')],
+  });
+}
+function closeSourcePreviewModal() {
+  hide(qs('source-preview-modal'));
+  if (_sourcePreviewRelease) { _sourcePreviewRelease(); _sourcePreviewRelease = null; }
+}
+window.openSourcePreviewModal = openSourcePreviewModal;
+registerModalCloser(qs('source-preview-modal'), closeSourcePreviewModal);
 
 async function openSourcePreview(sourcePath, highlightStart, highlightEnd) {
   const modal = qs('source-preview-modal');
@@ -6611,7 +6759,7 @@ async function openSourcePreview(sourcePath, highlightStart, highlightEnd) {
   title.title = sourcePath;
   info.textContent = 'Loading…';
   body.innerHTML = '<div class="loading-panel"><div class="spinner-panel"></div></div>';
-  show(modal);
+  openSourcePreviewModal();
 
   try {
     const data = await api('GET', `/api/sources/content?path=${encodeURIComponent(sourcePath)}`);
@@ -6654,9 +6802,9 @@ async function openSourcePreview(sourcePath, highlightStart, highlightEnd) {
   }
 }
 
-qs('source-preview-close').addEventListener('click', () => hide(qs('source-preview-modal')));
+qs('source-preview-close').addEventListener('click', closeSourcePreviewModal);
 qs('source-preview-modal').addEventListener('click', e => {
-  if (e.target === qs('source-preview-modal')) hide(qs('source-preview-modal'));
+  if (e.target === qs('source-preview-modal')) closeSourcePreviewModal();
 });
 
 // Make d-file clickable to open source preview

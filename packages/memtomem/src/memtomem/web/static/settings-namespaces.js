@@ -623,7 +623,7 @@ function _buildCommands() {
   const actions = [
     { icon: '🔍', label: 'Focus Search', action: () => { activateTab('search'); qs('search-input').focus(); }, hint: '/' },
     { icon: '🌗', label: 'Toggle Theme', action: () => qs('theme-toggle').click() },
-    { icon: '⌨', label: 'Keyboard Shortcuts', action: () => show(qs('shortcuts-modal')), hint: '?' },
+    { icon: '⌨', label: 'Keyboard Shortcuts', action: () => window.openShortcutsModal(), hint: '?' },
   ];
 
   // Dynamic: recent sources
@@ -639,12 +639,18 @@ function _buildCommands() {
   ];
 }
 
+let _cmdPaletteRelease = null;
 function _openCmdPalette() {
   STATE.cmdPaletteOpen = true;
   const modal = qs('cmd-palette');
   const input = qs('cmd-input');
-  const list = qs('cmd-list');
   show(modal);
+  // cmd-palette navigates items with ArrowUp/Down (cmd-input keydown). The
+  // helper Tab-trap is here only to prevent Tab leaking to background — a
+  // single-focusable cycle just refocuses the input, which is what we want.
+  _cmdPaletteRelease = window.openModalA11y(modal, {
+    focusables: () => [qs('cmd-input')],
+  });
   input.value = '';
   input.focus();
   _renderCmdList('');
@@ -653,7 +659,11 @@ function _openCmdPalette() {
 function _closeCmdPalette() {
   STATE.cmdPaletteOpen = false;
   hide(qs('cmd-palette'));
+  if (_cmdPaletteRelease) { _cmdPaletteRelease(); _cmdPaletteRelease = null; }
 }
+
+window.openCmdPalette = _openCmdPalette;
+window.registerModalCloser(qs('cmd-palette'), _closeCmdPalette);
 
 function _renderCmdList(filter) {
   const list = qs('cmd-list');

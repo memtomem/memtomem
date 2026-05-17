@@ -59,6 +59,12 @@ _ALL_MODALS = (
 def _open_modal_js(modal_id: str) -> str:
     """JS expression that opens ``modal_id``.
 
+    Every expression is ``void``-prefixed: Playwright's ``page.evaluate``
+    awaits returned Promises by default, and the modal openers that resolve
+    only on close (``showConfirm``, ``_ctxResolveConflict``) would hang the
+    test until the modal is dismissed. ``void`` discards the return value
+    so the call returns immediately while the modal stays open.
+
     Most modals route through a ``window.openXModal()`` wrapper that PR #2
     introduces — pre-fix the wrapper is undefined and the evaluate throws,
     which the strict xfail expects. ``confirm-modal`` (``window.showConfirm``)
@@ -71,7 +77,7 @@ def _open_modal_js(modal_id: str) -> str:
             "confirmText: 'OK', cancelText: 'Cancel'})"
         )
     if modal_id == "path-picker-modal":
-        return "window.PathPicker.open()"
+        return "void window.PathPicker.open()"
     # Per-modal wrappers exposed on window by PR #2.
     wrapper = {
         "expand-modal": "openExpandModal",
@@ -81,7 +87,7 @@ def _open_modal_js(modal_id: str) -> str:
         "cmd-palette": "openCmdPalette",
         "ctx-conflict-modal": "openCtxConflictModal",
     }[modal_id]
-    return f"window.{wrapper}()"
+    return f"void window.{wrapper}()"
 
 
 def _goto_with_stubs(mm_web_url: str, page) -> None:
@@ -131,7 +137,7 @@ class TestA11yModalFocusRestore:
         page.evaluate(_open_modal_js(modal_id))
         page.wait_for_selector(f"#{modal_id}:not([hidden])", timeout=2_000)
         page.keyboard.press("Escape")
-        page.wait_for_selector(f"#{modal_id}[hidden]", timeout=2_000)
+        page.wait_for_selector(f"#{modal_id}", state="hidden", timeout=2_000)
         active_id = page.evaluate("document.activeElement && document.activeElement.id")
         assert active_id == "settings-btn", (
             f"closing #{modal_id} did not restore focus to its trigger "
@@ -160,7 +166,7 @@ class TestA11yBackgroundInert:
             f"inert to body-level siblings (A11Y-3.2, issue #1053)"
         )
         page.keyboard.press("Escape")
-        page.wait_for_selector(f"#{modal_id}[hidden]", timeout=2_000)
+        page.wait_for_selector(f"#{modal_id}", state="hidden", timeout=2_000)
         header_inert_closed = page.evaluate(
             "document.querySelector('body > header').hasAttribute('inert')"
         )
@@ -196,7 +202,7 @@ class TestA11yStackedModalInertSurvives:
         # Close inner by clicking OK (Escape would also fire, but OK is the
         # least-ambiguous close path through cleanup()).
         page.click("#confirm-ok-btn")
-        page.wait_for_selector("#confirm-modal[hidden]", timeout=2_000)
+        page.wait_for_selector("#confirm-modal", state="hidden", timeout=2_000)
         # Settings is still open; therefore <header> must STILL be inert
         # (the refcount design holds) and settings-modal itself must NOT be
         # inert (a snapshot-based design would have un-inerted it).
