@@ -774,13 +774,26 @@ class TestSkipLinkPresent:
         # clipped by ``html/body { overflow: hidden }``. Pin the four
         # declarations so a future CSS cleanup can't silently
         # re-introduce the scroll regression.
+        #
+        # Regex over substring search: ``#main {`` would miss
+        # ``#main\n{`` (formatter-dependent) and ``flex: 1`` in plain
+        # ``in block`` would silently pass on ``flex: 1.5``. The
+        # word-boundaries make both robust to CSS reflow.
+        import re
+
         css = (_STATIC_DIR / "style.css").read_text(encoding="utf-8")
-        start = css.find("#main {")
-        assert start != -1, "#main { ... } rule missing from style.css"
-        block = css[start : css.find("}", start) + 1]
-        for prop in ("flex: 1", "min-height: 0", "display: flex", "flex-direction: column"):
-            assert prop in block, (
-                f"#main is missing `{prop}` — without it the <main> wrapper "
+        m = re.search(r"^\s*#main\s*\{([^}]*)\}", css, re.M)
+        assert m is not None, "#main { ... } rule missing from style.css"
+        block = m.group(1)
+        required = (
+            (r"\bflex\s*:\s*1\s*;", "flex: 1"),
+            (r"\bmin-height\s*:\s*0\s*;", "min-height: 0"),
+            (r"\bdisplay\s*:\s*flex\s*;", "display: flex"),
+            (r"\bflex-direction\s*:\s*column\s*;", "flex-direction: column"),
+        )
+        for pattern, label in required:
+            assert re.search(pattern, block), (
+                f"#main is missing `{label}` — without it the <main> wrapper "
                 f"breaks the .tab-panel flex sizing chain "
                 f"(A11Y-1.1, issue #1053, PR #1061 P1 review)"
             )
