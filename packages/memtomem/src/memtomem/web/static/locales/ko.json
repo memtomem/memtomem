@@ -112,6 +112,7 @@
   "search.search_btn": "검색",
   "search.search_btn_title": "시맨틱 검색 실행 (Enter)",
   "search.save_title": "현재 검색 저장",
+  "search.unsave_title": "저장된 검색에서 제거",
   "search.delete_query_aria": "저장된 검색 삭제",
   "search.group_title": "소스 파일별로 결과 그룹화",
   "search.view_title": "카드/목록 보기 전환",

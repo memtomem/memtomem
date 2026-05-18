@@ -109,8 +109,6 @@ class TestIssue1062IconButtonNames:
     @pytest.mark.parametrize(
         "button_id",
         [
-            # ☆ — toolbar save-search trigger
-            "save-star-btn",
             # ✕ — saved-search delete
             "delete-query-btn",
             # ◀ / ▶ — chunk navigation in detail pane
@@ -126,12 +124,59 @@ class TestIssue1062IconButtonNames:
         # Sweep follow-up to #1062 F1/#1065/#1066: the remaining icon-only
         # <button id=...> elements either relied on `title` alone or had no
         # accessible name at all. Same defect class as help-toggle (#1066).
+        #
+        # Excludes #save-star-btn — that button's label is state-dependent
+        # (Save vs Remove) and is JS-owned; see
+        # ``test_save_star_label_survives_langchange`` below.
         m = re.search(rf'<button\b[^>]*\bid="{re.escape(button_id)}"[^>]*>', index_html)
         assert m, f"#{button_id} button not found"
         tag = m.group(0)
         assert "data-i18n-aria-label=" in tag and "aria-label=" in tag, (
             f"#{button_id} is icon-only and must expose a translated accessible "
             "name; `title` alone is not reliably announced by VoiceOver"
+        )
+
+    def test_save_star_label_survives_langchange(self, index_html: str, app_js: str) -> None:
+        # The save-star button is a toggle: ☆ → click saves the current query,
+        # ★ → click *removes* it. A static aria-label="Save current search"
+        # would announce the wrong action in the starred state — exactly the
+        # bug flagged in PR review on #1068. So JS owns the label per-state and
+        # the HTML must not declare data-i18n hooks that applyDOM() would
+        # clobber back to search.save_title on every langchange. Mirrors the
+        # view-toggle pattern.
+        m = re.search(r'<button\b[^>]*\bid="save-star-btn"[^>]*>', index_html)
+        assert m, "#save-star-btn button not found"
+        tag = m.group(0)
+        assert "data-i18n-title" not in tag, (
+            "#save-star-btn must not declare data-i18n-title — applyDOM() "
+            "would clobber the state-dependent label written by _syncSaveStar()"
+        )
+        assert "data-i18n-aria-label" not in tag, (
+            "#save-star-btn must not declare data-i18n-aria-label — applyDOM() "
+            "would clobber the state-dependent label written by _syncSaveStar()"
+        )
+        # The settings-namespaces.js module owns this button; the fixture is
+        # app.js so search there is correct only if we read the right file.
+        ns_js = (_STATIC_DIR / "settings-namespaces.js").read_text(encoding="utf-8")
+        assert "function _syncSaveStar" in ns_js, (
+            "_syncSaveStar helper must exist so click and langchange go through "
+            "one label-writing code path"
+        )
+        # Click handler must delegate (not duplicate textContent/aria writes
+        # inline — that was the original bug shape).
+        click_start = ns_js.index("qs('save-star-btn').addEventListener('click'")
+        click_end = ns_js.index("\n});", click_start)
+        click_block = ns_js[click_start:click_end]
+        assert "_syncSaveStar()" in click_block, (
+            "save-star click handler must call _syncSaveStar so the per-state "
+            "label is written by the shared helper, not inline"
+        )
+        assert re.search(
+            r"window\.addEventListener\(\s*['\"]langchange['\"]\s*,\s*_syncSaveStar\s*\)",
+            ns_js,
+        ), (
+            "_syncSaveStar must be registered as a langchange listener so the "
+            "per-state label is re-translated when the user switches locale"
         )
 
     def test_tab_help_bar_dismiss_buttons_have_accessible_names(self, index_html: str) -> None:

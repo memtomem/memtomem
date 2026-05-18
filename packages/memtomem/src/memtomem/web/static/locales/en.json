@@ -112,6 +112,7 @@
   "search.search_btn": "Search",
   "search.search_btn_title": "Run semantic search (Enter)",
   "search.save_title": "Save current search",
+  "search.unsave_title": "Remove from saved searches",
   "search.delete_query_aria": "Delete saved search",
   "search.group_title": "Group results by source file",
   "search.view_title": "Switch between card and compact list view",
