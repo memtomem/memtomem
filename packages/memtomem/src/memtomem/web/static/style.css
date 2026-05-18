@@ -167,6 +167,13 @@ header h1 { font-size: 1.2rem; font-weight: 700; color: var(--accent); letter-sp
   50%      { opacity: 0.55; }
 }
 @media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
   .indexing-pill { animation: none; }
 }
 .header-actions .btn-icon {
