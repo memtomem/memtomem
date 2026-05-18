@@ -94,6 +94,18 @@ class TestIssue1062IconButtonNames:
                 "accessible name instead of relying on the × glyph"
             )
 
+    def test_help_toggle_has_accessible_name(self, index_html: str) -> None:
+        # Regression pin for #1062 F1: help-toggle was the only header icon-only
+        # button without aria-label, relying on `title` alone — which VoiceOver
+        # does not reliably announce in form-controls rotor mode.
+        m = re.search(r'<button\b[^>]*\bid="help-toggle"[^>]*>', index_html)
+        assert m, "#help-toggle button not found"
+        tag = m.group(0)
+        assert "data-i18n-aria-label=" in tag and "aria-label=" in tag, (
+            "#help-toggle is icon-only ('?' glyph) and must expose a translated "
+            "accessible name; `title` alone is not reliably announced by VoiceOver"
+        )
+
     def test_view_toggle_updates_runtime_aria_label(self, app_js: str) -> None:
         # Bound by intrinsic anchors (the state flip line and the renderResults
         # tail call) rather than a // --- comment delimiter, so a reflow of the
