@@ -106,6 +106,53 @@ class TestIssue1062IconButtonNames:
             "accessible name; `title` alone is not reliably announced by VoiceOver"
         )
 
+    @pytest.mark.parametrize(
+        "button_id",
+        [
+            # ☆ — toolbar save-search trigger
+            "save-star-btn",
+            # ✕ — saved-search delete
+            "delete-query-btn",
+            # ◀ / ▶ — chunk navigation in detail pane
+            "d-prev-btn",
+            "d-next-btn",
+            # ✕ — edit-history panel close (had no title OR aria-label)
+            "history-close-btn",
+        ],
+    )
+    def test_residual_icon_buttons_have_accessible_names(
+        self, index_html: str, button_id: str
+    ) -> None:
+        # Sweep follow-up to #1062 F1/#1065/#1066: the remaining icon-only
+        # <button id=...> elements either relied on `title` alone or had no
+        # accessible name at all. Same defect class as help-toggle (#1066).
+        m = re.search(rf'<button\b[^>]*\bid="{re.escape(button_id)}"[^>]*>', index_html)
+        assert m, f"#{button_id} button not found"
+        tag = m.group(0)
+        assert "data-i18n-aria-label=" in tag and "aria-label=" in tag, (
+            f"#{button_id} is icon-only and must expose a translated accessible "
+            "name; `title` alone is not reliably announced by VoiceOver"
+        )
+
+    def test_tab_help_bar_dismiss_buttons_have_accessible_names(self, index_html: str) -> None:
+        # The ✕ dismiss button on each tab's help bar (search, sources, index,
+        # tags, timeline) is a class, not an id — sweep all instances and pin
+        # that each one carries the shared `common.dismiss_help` aria-label.
+        # Five instances exist today; if a new tab grows a help bar without a
+        # name, this test fails.
+        matches = re.findall(r'<button\b[^>]*\bclass="tab-help-bar-dismiss"[^>]*>', index_html)
+        assert len(matches) >= 5, (
+            f"expected ≥5 tab-help-bar-dismiss buttons, found {len(matches)}; "
+            "if a tab was removed, lower the count — if added, ensure it has "
+            "the aria-label below"
+        )
+        for tag in matches:
+            assert 'data-i18n-aria-label="common.dismiss_help"' in tag and "aria-label=" in tag, (
+                "every .tab-help-bar-dismiss button must declare "
+                'data-i18n-aria-label="common.dismiss_help" + aria-label; '
+                f"found a bare instance: {tag}"
+            )
+
     def test_view_toggle_updates_runtime_aria_label(self, app_js: str) -> None:
         # Bound by intrinsic anchors (the state flip line and the renderResults
         # tail call) rather than a // --- comment delimiter, so a reflow of the
