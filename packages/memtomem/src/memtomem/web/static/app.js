@@ -6725,8 +6725,13 @@ qs('adv-toggle').addEventListener('click', () => {
 
 qs('view-toggle').addEventListener('click', () => {
   STATE.viewMode = STATE.viewMode === 'card' ? 'list' : 'card';
-  qs('view-toggle').textContent = STATE.viewMode === 'list' ? '⊟' : '☰';
-  qs('view-toggle').title = STATE.viewMode === 'list' ? 'Switch to card view' : 'Switch to list view';
+  const btn = qs('view-toggle');
+  const label = STATE.viewMode === 'list'
+    ? t('search.view_card_title')
+    : t('search.view_list_title');
+  btn.textContent = STATE.viewMode === 'list' ? '⊟' : '☰';
+  btn.title = label;
+  btn.setAttribute('aria-label', label);
   renderResults(STATE.lastResults);
 });
 

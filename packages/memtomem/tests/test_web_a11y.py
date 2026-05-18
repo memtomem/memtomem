@@ -14,6 +14,7 @@ import pytest
 
 _STATIC_DIR = Path(__file__).resolve().parents[1] / "src" / "memtomem" / "web" / "static"
 _APP_JS = _STATIC_DIR / "app.js"
+_INDEX_HTML = _STATIC_DIR / "index.html"
 _TIMELINE_JS = _STATIC_DIR / "timeline.js"
 
 
@@ -21,6 +22,12 @@ _TIMELINE_JS = _STATIC_DIR / "timeline.js"
 def app_js() -> str:
     assert _APP_JS.exists(), f"app.js missing: {_APP_JS}"
     return _APP_JS.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def index_html() -> str:
+    assert _INDEX_HTML.exists(), f"index.html missing: {_INDEX_HTML}"
+    return _INDEX_HTML.read_text(encoding="utf-8")
 
 
 @pytest.fixture(scope="module")
@@ -66,6 +73,39 @@ class TestSearchResultItemA11y:
         assert "setAttribute('aria-label'" in body, (
             "result-item must set aria-label from filename/lines/namespace/age "
             "so screen readers announce a meaningful name"
+        )
+
+
+class TestIssue1062IconButtonNames:
+    """Pin source-level labels for icon-only controls checked by issue #1062."""
+
+    def test_modal_close_buttons_have_accessible_names(self, index_html: str) -> None:
+        for button_id in (
+            "expand-close-btn",
+            "source-preview-close",
+            "settings-close-btn",
+            "shortcuts-close-btn",
+        ):
+            m = re.search(rf'<button\b[^>]*\bid="{re.escape(button_id)}"[^>]*>', index_html)
+            assert m, f"#{button_id} button not found"
+            tag = m.group(0)
+            assert "data-i18n-aria-label=" in tag and "aria-label=" in tag, (
+                f"#{button_id} is icon-only and must expose a translated "
+                "accessible name instead of relying on the × glyph"
+            )
+
+    def test_view_toggle_updates_runtime_aria_label(self, app_js: str) -> None:
+        listener_start = app_js.index("qs('view-toggle').addEventListener")
+        listener_end = app_js.index(
+            "// ---------------------------------------------------------------------------",
+            listener_start + 1,
+        )
+        block = app_js[listener_start:listener_end]
+        assert "search.view_card_title" in block
+        assert "search.view_list_title" in block
+        assert "setAttribute('aria-label', label)" in block, (
+            "view-toggle changes state dynamically, so its aria-label must "
+            "change with its title/text rather than keeping the startup label"
         )
 
 
