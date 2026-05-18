@@ -6723,17 +6723,28 @@ qs('adv-toggle').addEventListener('click', () => {
 // View Toggle (I1)
 // ---------------------------------------------------------------------------
 
-qs('view-toggle').addEventListener('click', () => {
-  STATE.viewMode = STATE.viewMode === 'card' ? 'list' : 'card';
+// JS owns #view-toggle's title/aria-label because the label is state-dependent
+// (next action, not current mode). The HTML element therefore has no
+// data-i18n-title / data-i18n-aria-label — applyDOM() would otherwise reset
+// both attributes to the generic search.view_title string on every langchange,
+// silently undoing the per-state label written here.
+function _syncViewToggle() {
   const btn = qs('view-toggle');
-  const label = STATE.viewMode === 'list'
-    ? t('search.view_card_title')
-    : t('search.view_list_title');
-  btn.textContent = STATE.viewMode === 'list' ? '⊟' : '☰';
+  if (!btn) return;
+  const isList = STATE.viewMode === 'list';
+  const label = isList ? t('search.view_card_title') : t('search.view_list_title');
+  btn.textContent = isList ? '⊟' : '☰';
   btn.title = label;
   btn.setAttribute('aria-label', label);
+}
+
+qs('view-toggle').addEventListener('click', () => {
+  STATE.viewMode = STATE.viewMode === 'card' ? 'list' : 'card';
+  _syncViewToggle();
   renderResults(STATE.lastResults);
 });
+
+window.addEventListener('langchange', _syncViewToggle);
 
 // ---------------------------------------------------------------------------
 // Expand Detail (I2)

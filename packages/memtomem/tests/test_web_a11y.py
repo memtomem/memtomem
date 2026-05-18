@@ -95,17 +95,44 @@ class TestIssue1062IconButtonNames:
             )
 
     def test_view_toggle_updates_runtime_aria_label(self, app_js: str) -> None:
+        # Bound by intrinsic anchors (the state flip line and the renderResults
+        # tail call) rather than a // --- comment delimiter, so a reflow of the
+        # surrounding section header doesn't break the test in a confusing way.
         listener_start = app_js.index("qs('view-toggle').addEventListener")
-        listener_end = app_js.index(
-            "// ---------------------------------------------------------------------------",
-            listener_start + 1,
+        listener_end = app_js.index("renderResults(STATE.lastResults);", listener_start) + len(
+            "renderResults(STATE.lastResults);"
         )
         block = app_js[listener_start:listener_end]
-        assert "search.view_card_title" in block
-        assert "search.view_list_title" in block
-        assert "setAttribute('aria-label', label)" in block, (
-            "view-toggle changes state dynamically, so its aria-label must "
-            "change with its title/text rather than keeping the startup label"
+        assert "_syncViewToggle()" in block, (
+            "view-toggle click handler must delegate to _syncViewToggle so the "
+            "same label logic runs on click and on langchange"
+        )
+
+    def test_view_toggle_label_survives_langchange(self, app_js: str, index_html: str) -> None:
+        # Regression pin: a previous iteration left data-i18n-title /
+        # data-i18n-aria-label on #view-toggle. I18N.applyDOM() (invoked on
+        # every langchange) then reset both attributes to the generic
+        # search.view_title string, silently undoing the per-state runtime
+        # label written by the click handler. JS now owns these attributes,
+        # so the HTML element must NOT carry the i18n hooks, and a langchange
+        # listener must call the shared sync helper.
+        m = re.search(r'<button\b[^>]*\bid="view-toggle"[^>]*>', index_html)
+        assert m, "#view-toggle button not found"
+        tag = m.group(0)
+        assert "data-i18n-title" not in tag, (
+            "#view-toggle must not declare data-i18n-title — applyDOM() would "
+            "clobber the state-dependent label written by _syncViewToggle()"
+        )
+        assert "data-i18n-aria-label" not in tag, (
+            "#view-toggle must not declare data-i18n-aria-label — applyDOM() "
+            "would clobber the state-dependent label written by _syncViewToggle()"
+        )
+        assert re.search(
+            r"window\.addEventListener\(\s*['\"]langchange['\"]\s*,\s*_syncViewToggle\s*\)",
+            app_js,
+        ), (
+            "_syncViewToggle must be registered as a langchange listener so "
+            "the per-state label is re-translated when the user switches locale"
         )
 
 

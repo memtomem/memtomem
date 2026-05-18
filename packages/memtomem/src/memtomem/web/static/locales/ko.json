@@ -704,7 +704,7 @@
   "modal.delete_btn": "삭제",
   "modal.cmd_placeholder": "명령어 입력…",
   "modal.cmd_palette_aria_label": "명령 팔레트",
-  "modal.close_btn_aria": "대화상자 닫기",
+  "modal.close_expand_aria": "대화상자 닫기",
   "modal.close_settings_aria": "설정 닫기",
   "modal.close_shortcuts_aria": "키보드 단축키 닫기",
   "modal.close_source_preview_aria": "소스 미리보기 닫기",
