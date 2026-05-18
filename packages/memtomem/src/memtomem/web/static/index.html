@@ -160,7 +160,7 @@
   <div id="tab-search" class="tab-panel active" role="tabpanel" aria-labelledby="tabbtn-search">
     <div class="tab-help-bar" id="help-search" role="status" hidden>
       <span class="tab-help-bar-text" data-i18n="search.help">Semantic search across indexed memories. Filters: tag, namespace, type, score. Pipeline: BM25 (keyword) + Dense (semantic) → RRF fusion.</span>
-      <button class="tab-help-bar-dismiss" data-help-tab="search">✕</button>
+      <button class="tab-help-bar-dismiss" data-help-tab="search" data-i18n-title="common.dismiss_help" data-i18n-aria-label="common.dismiss_help" title="Dismiss help" aria-label="Dismiss help">✕</button>
     </div>
     <div class="search-bar">
       <button id="filter-toggle" class="btn-ghost btn-icon has-tip" data-i18n-title="search.filter_toggle_title" title="Show/hide tag, type, sort and other filters" aria-controls="search-filters" aria-expanded="false"><span data-i18n="search.filter_toggle">▾ Filters</span><span id="filter-count-badge" class="filter-count-badge" hidden></span></button>
@@ -177,7 +177,7 @@
         <div id="search-history-dropdown" class="search-history-dropdown" hidden></div>
       </div>
       <button id="search-btn" class="btn-primary has-tip" data-i18n-title="search.search_btn_title" title="Run semantic search (Enter)" data-i18n="search.search_btn">Search</button>
-      <button id="save-star-btn" class="btn-ghost btn-icon has-tip" data-i18n-title="search.save_title" title="Save current search">☆</button>
+      <button id="save-star-btn" class="btn-ghost btn-icon has-tip" title="Save current search" aria-label="Save current search">☆</button>
       <button id="group-toggle" class="btn-ghost btn-icon has-tip" data-i18n-title="search.group_title" data-i18n-aria-label="search.group_title" title="Group results by source file" aria-label="Group results by source file">⊟</button>
       <button id="view-toggle" class="btn-ghost btn-icon has-tip" title="Switch to list view" aria-label="Switch to list view">☰</button>
     </div>
@@ -252,7 +252,7 @@
         <div class="saved-wrap">
           <select id="saved-queries-select"><option value="">— Load saved —</option></select>
           <button id="save-query-btn" class="btn-ghost btn-xs" title="Save current search">Save</button>
-          <button id="delete-query-btn" class="btn-ghost btn-xs" title="Delete selected">✕</button>
+          <button id="delete-query-btn" class="btn-ghost btn-xs" data-i18n-title="search.delete_query_aria" data-i18n-aria-label="search.delete_query_aria" title="Delete saved search" aria-label="Delete saved search">✕</button>
         </div>
       </div>
       <div class="adv-row">
@@ -329,9 +329,9 @@
               <span id="d-lines" class="lines-info"></span>
             </div>
             <div class="source-nav">
-              <button id="d-prev-btn" class="btn-ghost btn-xs" title="Previous chunk in source" disabled>◀</button>
+              <button id="d-prev-btn" class="btn-ghost btn-xs" data-i18n-title="search.prev_title" data-i18n-aria-label="search.prev_title" title="Previous chunk in source" aria-label="Previous chunk in source" disabled>◀</button>
               <span id="d-source-pos" class="source-pos"></span>
-              <button id="d-next-btn" class="btn-ghost btn-xs" title="Next chunk in source" disabled>▶</button>
+              <button id="d-next-btn" class="btn-ghost btn-xs" data-i18n-title="search.next_title" data-i18n-aria-label="search.next_title" title="Next chunk in source" aria-label="Next chunk in source" disabled>▶</button>
             </div>
           </div>
 
@@ -391,7 +391,7 @@
           <div id="history-panel" hidden>
             <div class="similar-header">
               <span class="editor-label" data-i18n="search.history_header">Edit History</span>
-              <button id="history-close-btn" class="btn-ghost btn-xs">✕</button>
+              <button id="history-close-btn" class="btn-ghost btn-xs" data-i18n-title="search.history_close_aria" data-i18n-aria-label="search.history_close_aria" title="Close edit history panel" aria-label="Close edit history panel">✕</button>
             </div>
             <div id="history-list"></div>
           </div>
@@ -416,7 +416,7 @@
   <div id="tab-sources" class="tab-panel" role="tabpanel" aria-labelledby="tabbtn-sources" hidden>
     <div class="tab-help-bar" id="help-sources" role="status" hidden>
       <span class="tab-help-bar-text" data-i18n="sources.help">Indexed source files. Click a file to browse chunks. Drag the divider to resize. Sort by name, chunks, size, or recency.</span>
-      <button class="tab-help-bar-dismiss" data-help-tab="sources">✕</button>
+      <button class="tab-help-bar-dismiss" data-help-tab="sources" data-i18n-title="common.dismiss_help" data-i18n-aria-label="common.dismiss_help" title="Dismiss help" aria-label="Dismiss help">✕</button>
     </div>
     <div id="sources-view" class="sources-view" role="region" aria-labelledby="tabbtn-sources">
       <div class="sources-layout">
@@ -661,7 +661,7 @@
   <div id="tab-index" class="tab-panel" role="tabpanel" aria-labelledby="tabbtn-index" hidden>
     <div class="tab-help-bar" id="help-index" role="status" hidden>
       <span class="tab-help-bar-text" data-i18n="index.help">Three ways to add memories to memtomem.</span>
-      <button class="tab-help-bar-dismiss" data-help-tab="index">✕</button>
+      <button class="tab-help-bar-dismiss" data-help-tab="index" data-i18n-title="common.dismiss_help" data-i18n-aria-label="common.dismiss_help" title="Dismiss help" aria-label="Dismiss help">✕</button>
     </div>
     <div class="index-mode-toggle" role="tablist" data-i18n-aria-label="index.mode_aria" aria-label="Index mode">
       <button id="index-mode-folder" class="btn-ghost btn-active"
@@ -1109,7 +1109,7 @@
   <div id="tab-tags" class="tab-panel" role="tabpanel" aria-labelledby="tabbtn-tags" hidden>
     <div class="tab-help-bar" id="help-tags" role="status" hidden>
       <span class="tab-help-bar-text" data-i18n="tags.help">Tag cloud sized by frequency. Click a tag to filter search. Auto-Tag analyzes content to suggest tags for untagged chunks.</span>
-      <button class="tab-help-bar-dismiss" data-help-tab="tags">✕</button>
+      <button class="tab-help-bar-dismiss" data-help-tab="tags" data-i18n-title="common.dismiss_help" data-i18n-aria-label="common.dismiss_help" title="Dismiss help" aria-label="Dismiss help">✕</button>
     </div>
     <div class="tags-layout">
       <div class="tags-left card">
@@ -1182,7 +1182,7 @@
   <div id="tab-timeline" class="tab-panel" role="tabpanel" aria-labelledby="tabbtn-timeline" hidden>
     <div class="tab-help-bar" id="help-timeline" role="status" hidden>
       <span class="tab-help-bar-text" data-i18n="timeline.help">Activity timeline of indexed chunks. Heatmap shows daily activity. Toggle Chunks/Files view.</span>
-      <button class="tab-help-bar-dismiss" data-help-tab="timeline">✕</button>
+      <button class="tab-help-bar-dismiss" data-help-tab="timeline" data-i18n-title="common.dismiss_help" data-i18n-aria-label="common.dismiss_help" title="Dismiss help" aria-label="Dismiss help">✕</button>
     </div>
     <div class="timeline-controls">
       <div class="date-range-picker">

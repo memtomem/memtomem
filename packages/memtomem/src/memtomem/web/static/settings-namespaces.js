@@ -352,18 +352,33 @@ async function deleteNamespace(name) {
 // Phase 1a: Saved Searches — Star button + history dropdown integration
 // ═══════════════════════════════════════════════════════════════════════════
 
+// JS owns #save-star-btn's title/aria-label because the label is
+// state-dependent (the next action — Save vs Remove — flips with the glyph).
+// The HTML element therefore has no data-i18n-title / data-i18n-aria-label:
+// applyDOM() would otherwise reset both attributes to search.save_title on
+// every langchange, silently announcing "Save current search" while the
+// button is in the starred (unsave) state. Mirrors the #view-toggle pattern.
+function _syncSaveStar() {
+  const btn = qs('save-star-btn');
+  if (!btn) return;
+  const q = qs('search-input').value.trim();
+  const isSaved = q.length > 0 && _getSavedQueries().some(s => s.query === q);
+  const label = isSaved ? t('search.unsave_title') : t('search.save_title');
+  btn.textContent = isSaved ? '★' : '☆';
+  btn.classList.toggle('starred', isSaved);
+  btn.title = label;
+  btn.setAttribute('aria-label', label);
+}
+
 qs('save-star-btn').addEventListener('click', () => {
   const q = qs('search-input').value.trim();
   if (!q) { showToast(t('toast.enter_query'), 'error'); return; }
   const list = _getSavedQueries();
   const exists = list.some(s => s.query === q);
   if (exists) {
-    // Unsave
     const idx = list.findIndex(s => s.query === q);
     list.splice(idx, 1);
     _setSavedQueries(list);
-    qs('save-star-btn').textContent = '☆';
-    qs('save-star-btn').classList.remove('starred');
     showToast(t('toast.search_removed'), 'info');
   } else {
     const name = q.length > 40 ? q.slice(0, 40) + '…' : q;
@@ -372,22 +387,15 @@ qs('save-star-btn').addEventListener('click', () => {
     const topK = parseInt(qs('top-k').value, 10);
     list.push({ name, query: q, namespace: nsFilter, tags: tf, topK, ts: new Date().toISOString() });
     _setSavedQueries(list);
-    qs('save-star-btn').textContent = '★';
-    qs('save-star-btn').classList.add('starred');
     showToast(t('toast.query_saved', { name }), 'success');
   }
+  _syncSaveStar();
   _renderSavedSelect();
   _renderSavedBar();
 });
 
-// Update star button state when search input changes
-qs('search-input').addEventListener('input', () => {
-  const q = qs('search-input').value.trim();
-  const list = _getSavedQueries();
-  const isSaved = list.some(s => s.query === q);
-  qs('save-star-btn').textContent = isSaved ? '★' : '☆';
-  qs('save-star-btn').classList.toggle('starred', isSaved);
-});
+qs('search-input').addEventListener('input', _syncSaveStar);
+window.addEventListener('langchange', _syncSaveStar);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Phase 1b: Related Chunks — auto-load on detail view
