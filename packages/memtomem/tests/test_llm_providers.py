@@ -232,6 +232,23 @@ class TestOpenAILLM:
         assert mock_client.post.await_count == 2
         mock_sleep.assert_awaited_once_with(5.0)
 
+    @pytest.mark.anyio
+    @patch("memtomem.embedding.retry.asyncio.sleep", new_callable=AsyncMock)
+    async def test_429_exhausts_retries_raises_llm_error(self, mock_sleep):
+        config = _openai_llm_config()
+        llm = OpenAILLM(config)
+        rate_limited = _make_httpx_response(status_code=429, headers={"Retry-After": "1"})
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post.return_value = rate_limited
+        llm._client = mock_client
+
+        with pytest.raises(LLMError, match="after retries"):
+            await llm.generate("test")
+
+        # with_retry max_attempts=3 → 3 POST calls, 2 sleeps before giving up
+        assert mock_client.post.await_count == 3
+        assert mock_sleep.await_count == 2
+
 
 # ---------------------------------------------------------------------------
 # 4. AnthropicLLM — mocked httpx
@@ -295,6 +312,22 @@ class TestAnthropicLLM:
         assert result == "Recovered from Claude"
         assert mock_client.post.await_count == 2
         mock_sleep.assert_awaited_once_with(3.0)
+
+    @pytest.mark.anyio
+    @patch("memtomem.embedding.retry.asyncio.sleep", new_callable=AsyncMock)
+    async def test_429_exhausts_retries_raises_llm_error(self, mock_sleep):
+        config = _anthropic_llm_config()
+        llm = AnthropicLLM(config)
+        rate_limited = _make_httpx_response(status_code=429, headers={"Retry-After": "1"})
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post.return_value = rate_limited
+        llm._client = mock_client
+
+        with pytest.raises(LLMError, match="after retries"):
+            await llm.generate("test")
+
+        assert mock_client.post.await_count == 3
+        assert mock_sleep.await_count == 2
 
 
 # ---------------------------------------------------------------------------

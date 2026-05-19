@@ -6,7 +6,7 @@ Covers:
   - OpenAIEmbedder (mocked httpx)
   - OnnxEmbedder (mocked fastembed)
   - create_embedder factory
-  - with_retry decorator & _parse_retry_after helper
+  - with_retry decorator & parse_retry_after helper
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from memtomem.embedding.noop import NoopEmbedder
 from memtomem.embedding.ollama import OllamaEmbedder
 from memtomem.embedding.onnx import OnnxEmbedder
 from memtomem.embedding.openai import OpenAIEmbedder
-from memtomem.embedding.retry import _parse_retry_after, with_retry
+from memtomem.embedding.retry import parse_retry_after, with_retry
 from memtomem.errors import ConfigError, EmbeddingError
 
 
@@ -591,7 +591,7 @@ class TestNoopEmbedder:
 
 
 # ---------------------------------------------------------------------------
-# 5. Retry logic — with_retry decorator and _parse_retry_after
+# 5. Retry logic — with_retry decorator and parse_retry_after
 # ---------------------------------------------------------------------------
 
 
@@ -671,19 +671,19 @@ class TestRetryDecorator:
 
 class TestParseRetryAfter:
     def test_none_input(self):
-        assert _parse_retry_after(None) is None
+        assert parse_retry_after(None) is None
 
     def test_empty_string(self):
-        assert _parse_retry_after("") is None
+        assert parse_retry_after("") is None
 
     def test_numeric_seconds(self):
-        assert _parse_retry_after("5") == 5.0
+        assert parse_retry_after("5") == 5.0
 
     def test_float_seconds(self):
-        assert _parse_retry_after("1.5") == 1.5
+        assert parse_retry_after("1.5") == 1.5
 
     def test_unparseable_string(self):
-        assert _parse_retry_after("not-a-date-or-number") is None
+        assert parse_retry_after("not-a-date-or-number") is None
 
     def test_rfc7231_date(self):
         """A valid HTTP-date in the future returns a positive delay."""
@@ -692,7 +692,7 @@ class TestParseRetryAfter:
 
         future = datetime.now(timezone.utc) + timedelta(seconds=30)
         header = format_datetime(future, usegmt=True)
-        result = _parse_retry_after(header)
+        result = parse_retry_after(header)
         assert result is not None
         # Should be roughly 30s (allow some tolerance for test execution time)
         assert 25.0 <= result <= 35.0
@@ -704,6 +704,6 @@ class TestParseRetryAfter:
 
         past = datetime.now(timezone.utc) - timedelta(seconds=60)
         header = format_datetime(past, usegmt=True)
-        result = _parse_retry_after(header)
+        result = parse_retry_after(header)
         assert result is not None
         assert result == 0.0
