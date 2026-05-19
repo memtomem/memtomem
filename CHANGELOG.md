@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+- **`memtomem-server` direct TTY launches now exit with guidance.** Running the
+  stdio MCP server directly in a terminal prints MCP-client setup and
+  network-transport examples instead of waiting on stdin.
+
 ## [0.2.1] — 2026-05-13
 
 Patch release focused on Web UI stability and release polish after

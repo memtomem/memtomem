@@ -408,7 +408,10 @@ def _parse_server_args(argv: list[str] | None = None):
     parser.add_argument(
         "--disable-dns-rebinding-protection",
         action="store_true",
-        help="Advanced: disable MCP transport DNS rebinding protection for sse/http transports.",
+        help=(
+            "Advanced/dangerous: disables DNS rebinding protection; only safe "
+            "behind an authenticated reverse proxy."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -543,6 +546,8 @@ def main(argv: list[str] | None = None) -> None:
 
     args = _parse_server_args(argv)
     transport = _normalize_transport(args.transport)
+    # These informational banners are safe on stdout: the stdio TTY guard exits
+    # before mcp.run(), and network transports do not use stdout as the MCP stream.
     if transport == "stdio" and _is_direct_stdio_terminal():
         _print_direct_stdio_help()
         raise SystemExit(2)
