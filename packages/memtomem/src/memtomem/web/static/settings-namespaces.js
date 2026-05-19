@@ -352,18 +352,33 @@ async function deleteNamespace(name) {
 // Phase 1a: Saved Searches — Star button + history dropdown integration
 // ═══════════════════════════════════════════════════════════════════════════
 
+// JS owns #save-star-btn's title/aria-label because the label is
+// state-dependent (the next action — Save vs Remove — flips with the glyph).
+// The HTML element therefore has no data-i18n-title / data-i18n-aria-label:
+// applyDOM() would otherwise reset both attributes to search.save_title on
+// every langchange, silently announcing "Save current search" while the
+// button is in the starred (unsave) state. Mirrors the #view-toggle pattern.
+function _syncSaveStar() {
+  const btn = qs('save-star-btn');
+  if (!btn) return;
+  const q = qs('search-input').value.trim();
+  const isSaved = q.length > 0 && _getSavedQueries().some(s => s.query === q);
+  const label = isSaved ? t('search.unsave_title') : t('search.save_title');
+  btn.textContent = isSaved ? '★' : '☆';
+  btn.classList.toggle('starred', isSaved);
+  btn.title = label;
+  btn.setAttribute('aria-label', label);
+}
+
 qs('save-star-btn').addEventListener('click', () => {
   const q = qs('search-input').value.trim();
   if (!q) { showToast(t('toast.enter_query'), 'error'); return; }
   const list = _getSavedQueries();
   const exists = list.some(s => s.query === q);
   if (exists) {
-    // Unsave
     const idx = list.findIndex(s => s.query === q);
     list.splice(idx, 1);
     _setSavedQueries(list);
-    qs('save-star-btn').textContent = '☆';
-    qs('save-star-btn').classList.remove('starred');
     showToast(t('toast.search_removed'), 'info');
   } else {
     const name = q.length > 40 ? q.slice(0, 40) + '…' : q;
@@ -372,22 +387,15 @@ qs('save-star-btn').addEventListener('click', () => {
     const topK = parseInt(qs('top-k').value, 10);
     list.push({ name, query: q, namespace: nsFilter, tags: tf, topK, ts: new Date().toISOString() });
     _setSavedQueries(list);
-    qs('save-star-btn').textContent = '★';
-    qs('save-star-btn').classList.add('starred');
     showToast(t('toast.query_saved', { name }), 'success');
   }
+  _syncSaveStar();
   _renderSavedSelect();
   _renderSavedBar();
 });
 
-// Update star button state when search input changes
-qs('search-input').addEventListener('input', () => {
-  const q = qs('search-input').value.trim();
-  const list = _getSavedQueries();
-  const isSaved = list.some(s => s.query === q);
-  qs('save-star-btn').textContent = isSaved ? '★' : '☆';
-  qs('save-star-btn').classList.toggle('starred', isSaved);
-});
+qs('search-input').addEventListener('input', _syncSaveStar);
+window.addEventListener('langchange', _syncSaveStar);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Phase 1b: Related Chunks — auto-load on detail view
@@ -623,7 +631,7 @@ function _buildCommands() {
   const actions = [
     { icon: '🔍', label: 'Focus Search', action: () => { activateTab('search'); qs('search-input').focus(); }, hint: '/' },
     { icon: '🌗', label: 'Toggle Theme', action: () => qs('theme-toggle').click() },
-    { icon: '⌨', label: 'Keyboard Shortcuts', action: () => show(qs('shortcuts-modal')), hint: '?' },
+    { icon: '⌨', label: 'Keyboard Shortcuts', action: () => window.openShortcutsModal(), hint: '?' },
   ];
 
   // Dynamic: recent sources
@@ -639,12 +647,18 @@ function _buildCommands() {
   ];
 }
 
+let _cmdPaletteRelease = null;
 function _openCmdPalette() {
   STATE.cmdPaletteOpen = true;
   const modal = qs('cmd-palette');
   const input = qs('cmd-input');
-  const list = qs('cmd-list');
   show(modal);
+  // cmd-palette navigates items with ArrowUp/Down (cmd-input keydown). The
+  // helper Tab-trap is here only to prevent Tab leaking to background — a
+  // single-focusable cycle just refocuses the input, which is what we want.
+  _cmdPaletteRelease = window.openModalA11y(modal, {
+    focusables: () => [qs('cmd-input')],
+  });
   input.value = '';
   input.focus();
   _renderCmdList('');
@@ -653,7 +667,11 @@ function _openCmdPalette() {
 function _closeCmdPalette() {
   STATE.cmdPaletteOpen = false;
   hide(qs('cmd-palette'));
+  if (_cmdPaletteRelease) { _cmdPaletteRelease(); _cmdPaletteRelease = null; }
 }
+
+window.openCmdPalette = _openCmdPalette;
+window.registerModalCloser(qs('cmd-palette'), _closeCmdPalette);
 
 function _renderCmdList(filter) {
   const list = qs('cmd-list');
@@ -745,11 +763,29 @@ qs('cmd-palette').addEventListener('click', e => {
 // Extend existing keydown handler — we add a new listener that fires before
 // We need to intercept certain keys
 document.addEventListener('keydown', e => {
-  // Cmd+K / Ctrl+K: Command Palette
+  // A11Y-3.1: when any modal-overlay is on screen the only global shortcut
+  // that fires from this listener is Cmd+K-as-close — and only when the
+  // command palette itself owns the top of the stack. Everything else
+  // (Cmd+K open, tab numbers 1–7, Enter, Backspace, g-then-_) defers to
+  // the modal's own key handlers so a stray hotkey can't pop a second
+  // overlay on top of an already-open one. Esc lives in app.js / the
+  // cmd-palette's own listener — never gated here.
+  if (window.isAnyModalOpen()) {
+    // Cmd/Ctrl+K is a modifier shortcut some browsers map to address-bar
+    // focus; always swallow it while a modal is up so the default can't
+    // escape the focus trap. When the palette owns the top, also toggle
+    // it closed — preserves the bare-key dismissal that opened it.
+    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+      e.preventDefault();
+      if (window.isTopModal(qs('cmd-palette'))) _closeCmdPalette();
+    }
+    return;
+  }
+
+  // Cmd+K / Ctrl+K: Command Palette (close-while-open is handled above)
   if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
     e.preventDefault();
-    if (STATE.cmdPaletteOpen) _closeCmdPalette();
-    else _openCmdPalette();
+    _openCmdPalette();
     return;
   }
 

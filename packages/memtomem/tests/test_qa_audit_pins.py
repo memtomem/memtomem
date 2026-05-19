@@ -588,24 +588,6 @@ _ICON_ONLY_BUTTONS = (
 )
 
 
-# ``strict=True`` so the marker self-removes when the fix PR lands: once the
-# assertion passes, pytest reports XPASS as a failure and forces the developer
-# to drop the marker rather than leave a permanent expected-failure that
-# silently re-RED'd later.
-_A11Y_XFAIL_PR2 = pytest.mark.xfail(
-    strict=True, reason="A11Y-3.4 — pending fix in issue #1053 PR #2"
-)
-_A11Y_XFAIL_PR3 = pytest.mark.xfail(
-    strict=True, reason="A11Y-3.1 — pending modal manager in issue #1053 PR #3"
-)
-_A11Y_XFAIL_PR4 = pytest.mark.xfail(
-    strict=True, reason="A11Y-2.1 — pending fix in issue #1053 PR #4"
-)
-_A11Y_XFAIL_PR5 = pytest.mark.xfail(
-    strict=True, reason="A11Y-1.1 — pending fix in issue #1053 PR #5"
-)
-
-
 class TestA11yIconButtonNames:
     """A11Y-2.3 — icon-only buttons in the header / panel chrome must carry
     an explicit accessible name. ``aria-label`` (static) or
@@ -660,36 +642,27 @@ class TestA11yOrphanInputLabels:
 
 # Every modal-overlay container. ``role="dialog"`` + ``aria-modal="true"``
 # is the minimum SR contract — VoiceOver / NVDA use it to scope navigation
-# and stop announcing background landmarks. Two modals already declare both
-# attributes today; the remaining six get the PR #2 xfail marker so the
-# regression guard stays GREEN on the fixed ones.
-_MODALS_ALREADY_PINNED = frozenset({"ctx-conflict-modal", "path-picker-modal"})
-
-_MODAL_PARAMS = [
-    pytest.param(
-        modal_id,
-        marks=[] if modal_id in _MODALS_ALREADY_PINNED else [_A11Y_XFAIL_PR2],
-        id=modal_id,
-    )
-    for modal_id in (
-        "expand-modal",
-        "source-preview-modal",
-        "settings-modal",
-        "shortcuts-modal",
-        "cmd-palette",
-        "confirm-modal",
-        "ctx-conflict-modal",
-        "path-picker-modal",
-    )
-]
+# and stop announcing background landmarks. All 8 modals declare both
+# attributes after PR #2 (#1053); this class is now a permanent regression
+# guard against the attributes being dropped.
+_MODAL_IDS = (
+    "expand-modal",
+    "source-preview-modal",
+    "settings-modal",
+    "shortcuts-modal",
+    "cmd-palette",
+    "confirm-modal",
+    "ctx-conflict-modal",
+    "path-picker-modal",
+)
 
 
 class TestA11yModalAriaModal:
     """A11Y-3.4 — every ``.modal-overlay`` must declare itself as a dialog
-    so AT scope into it. ``ctx-conflict-modal`` and ``path-picker-modal``
-    already pass; the other six are the RED rows this pin tracks."""
+    so AT scope into it. All 8 modals carry ``role="dialog"`` +
+    ``aria-modal="true"`` after PR #2; this guards against regression."""
 
-    @pytest.mark.parametrize("modal_id", _MODAL_PARAMS)
+    @pytest.mark.parametrize("modal_id", _MODAL_IDS)
     def test_modal_declares_dialog_role(self, index_html: str, modal_id: str):
         block = _modal_block(index_html, modal_id)
         assert 'role="dialog"' in block, (
@@ -697,7 +670,7 @@ class TestA11yModalAriaModal:
             f"opening tag (A11Y-3.4, issue #1053)"
         )
 
-    @pytest.mark.parametrize("modal_id", _MODAL_PARAMS)
+    @pytest.mark.parametrize("modal_id", _MODAL_IDS)
     def test_modal_declares_aria_modal(self, index_html: str, modal_id: str):
         block = _modal_block(index_html, modal_id)
         assert 'aria-modal="true"' in block, (
@@ -747,7 +720,6 @@ class TestA11yLiveRegionsPreserved:
         assert 'aria-live="polite"' in opening_tag, 'toast-container lost its aria-live="polite"'
 
 
-@_A11Y_XFAIL_PR4
 class TestA11yResultsLiveRegion:
     """A11Y-2.1 — ``renderResults()`` rewrites the results list every time
     a search returns; SR users get no notification of the count change.
@@ -773,7 +745,6 @@ class TestA11yResultsLiveRegion:
         )
 
 
-@_A11Y_XFAIL_PR5
 class TestSkipLinkPresent:
     """A11Y-1.1 — first focusable element in the document should be a
     skip-to-main anchor so keyboard users bypass the header chrome (~6
@@ -794,20 +765,52 @@ class TestSkipLinkPresent:
         # And there has to actually be a main landmark to jump to.
         assert 'id="main"' in index_html, 'no element with id="main" to be the skip-link target'
 
+    def test_main_landmark_preserves_tab_flex_layout(self):
+        # PR #1061 review (P1): wrapping the .tab-panel children in a
+        # <main id="main"> only works if main itself is a column flex
+        # container with flex: 1 + min-height: 0. Otherwise the panels
+        # — which use ``flex: 1; min-height: 0`` on their parent — lose
+        # their definite remaining-viewport height and overflow gets
+        # clipped by ``html/body { overflow: hidden }``. Pin the four
+        # declarations so a future CSS cleanup can't silently
+        # re-introduce the scroll regression.
+        #
+        # Regex over substring search: ``#main {`` would miss
+        # ``#main\n{`` (formatter-dependent) and ``flex: 1`` in plain
+        # ``in block`` would silently pass on ``flex: 1.5``. The
+        # word-boundaries make both robust to CSS reflow.
+        import re
 
-@_A11Y_XFAIL_PR3
+        css = (_STATIC_DIR / "style.css").read_text(encoding="utf-8")
+        m = re.search(r"^\s*#main\s*\{([^}]*)\}", css, re.M)
+        assert m is not None, "#main { ... } rule missing from style.css"
+        block = m.group(1)
+        required = (
+            (r"\bflex\s*:\s*1\s*;", "flex: 1"),
+            (r"\bmin-height\s*:\s*0\s*;", "min-height: 0"),
+            (r"\bdisplay\s*:\s*flex\s*;", "display: flex"),
+            (r"\bflex-direction\s*:\s*column\s*;", "flex-direction: column"),
+        )
+        for pattern, label in required:
+            assert re.search(pattern, block), (
+                f"#main is missing `{label}` — without it the <main> wrapper "
+                f"breaks the .tab-panel flex sizing chain "
+                f"(A11Y-1.1, issue #1053, PR #1061 P1 review)"
+            )
+
+
 class TestA11yModalToggleAntipattern:
-    """A11Y-3 enforcement — once the modal manager lands, every modal
-    open/close path must funnel through ``openModal(el)`` / ``closeModal(el)``
-    so the active-modal set stays accurate and the global shortcut gate
-    works. Direct ``modal().hidden = false/true`` or ``show(qs('X-modal'))``
-    on a ``.modal-overlay`` element re-introduces the bug at A11Y-3.1.
+    """A11Y-3 enforcement — every modal open path must funnel through
+    ``window.openModal(el)`` / ``window.closeModal(el)`` (or call
+    ``openModalA11y`` directly) so ``_ACTIVE_MODALS`` stays accurate and
+    the global shortcut gate (A11Y-3.1) keeps working. Direct
+    ``modal().hidden = false/true`` or ``show(qs('X-modal'))`` on a
+    ``.modal-overlay`` element bypasses the stack and re-introduces the
+    bug.
 
     The pin is intentionally narrow — it only fires on the two known modal
     files (``path-picker.js``, ``context-gateway.js``) plus any future
-    file that toggles ``modal().hidden``. ``app.js`` ``show()/hide()``
-    calls are still allowed because they go through the modal-manager
-    wrapper once the fix lands.
+    file that toggles ``modal().hidden`` directly.
     """
 
     def test_path_picker_uses_modal_manager(self):

@@ -6,10 +6,11 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=85" />
+  <link rel="stylesheet" href="/style.css?v=88" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
+  <a class="skip-link" href="#main" data-i18n="nav.skip_to_main">Skip to main content</a>
   <header>
     <h1>memtomem</h1>
     <div class="header-info-bar">
@@ -23,7 +24,7 @@
       <button id="settings-btn" class="btn-ghost btn-icon" data-i18n-title="header.settings_title" data-i18n-aria-label="header.settings_title" title="Settings" aria-label="Settings">⚙️</button>
       <button id="lang-toggle" class="btn-ghost btn-icon" data-i18n-title="header.lang_toggle_aria" data-i18n-aria-label="header.lang_toggle_aria" title="Switch language" aria-label="Switch language">EN</button>
       <button id="theme-toggle" class="btn-ghost btn-icon" data-i18n-title="header.theme_title" data-i18n-aria-label="header.theme_title" title="Toggle theme" aria-label="Toggle theme">🌙</button>
-      <button id="help-toggle" data-i18n-title="header.help_title" title="Toggle help hints (h)" aria-pressed="true">?</button>
+      <button id="help-toggle" data-i18n-title="header.help_title" data-i18n-aria-label="header.help_title" title="Toggle help hints (h)" aria-label="Toggle help hints (h)" aria-pressed="true">?</button>
     </div>
   </header>
 
@@ -57,6 +58,7 @@
     <button id="tabbtn-settings" class="tab-btn" role="tab" aria-controls="tab-settings" aria-selected="false" tabindex="-1" data-ui-tier="prod" data-tab="settings" data-i18n="nav.more">More</button>
   </nav>
 
+  <main id="main" tabindex="-1">
   <!-- ===== HOME TAB ===== -->
   <div id="tab-home" class="tab-panel" role="tabpanel" aria-labelledby="tabbtn-home" hidden>
     <div class="home-layout">
@@ -158,7 +160,7 @@
   <div id="tab-search" class="tab-panel active" role="tabpanel" aria-labelledby="tabbtn-search">
     <div class="tab-help-bar" id="help-search" role="status" hidden>
       <span class="tab-help-bar-text" data-i18n="search.help">Semantic search across indexed memories. Filters: tag, namespace, type, score. Pipeline: BM25 (keyword) + Dense (semantic) → RRF fusion.</span>
-      <button class="tab-help-bar-dismiss" data-help-tab="search">✕</button>
+      <button class="tab-help-bar-dismiss" data-help-tab="search" data-i18n-title="common.dismiss_help" data-i18n-aria-label="common.dismiss_help" title="Dismiss help" aria-label="Dismiss help">✕</button>
     </div>
     <div class="search-bar">
       <button id="filter-toggle" class="btn-ghost btn-icon has-tip" data-i18n-title="search.filter_toggle_title" title="Show/hide tag, type, sort and other filters" aria-controls="search-filters" aria-expanded="false"><span data-i18n="search.filter_toggle">▾ Filters</span><span id="filter-count-badge" class="filter-count-badge" hidden></span></button>
@@ -175,9 +177,9 @@
         <div id="search-history-dropdown" class="search-history-dropdown" hidden></div>
       </div>
       <button id="search-btn" class="btn-primary has-tip" data-i18n-title="search.search_btn_title" title="Run semantic search (Enter)" data-i18n="search.search_btn">Search</button>
-      <button id="save-star-btn" class="btn-ghost btn-icon has-tip" data-i18n-title="search.save_title" title="Save current search">☆</button>
+      <button id="save-star-btn" class="btn-ghost btn-icon has-tip" title="Save current search" aria-label="Save current search">☆</button>
       <button id="group-toggle" class="btn-ghost btn-icon has-tip" data-i18n-title="search.group_title" data-i18n-aria-label="search.group_title" title="Group results by source file" aria-label="Group results by source file">⊟</button>
-      <button id="view-toggle" class="btn-ghost btn-icon has-tip" data-i18n-title="search.view_title" data-i18n-aria-label="search.view_title" title="Switch between card and compact list view" aria-label="Switch between card and compact list view">☰</button>
+      <button id="view-toggle" class="btn-ghost btn-icon has-tip" title="Switch to list view" aria-label="Switch to list view">☰</button>
     </div>
     <div id="search-filters" class="search-filters" hidden>
       <input id="tag-filter" type="text" data-i18n-placeholder="search.tag_filter_placeholder" placeholder="Filter by tag…" data-i18n-title="search.tag_filter_title" title="Comma-separated tags to include in results" data-i18n-aria-label="search.tag_filter_title" aria-label="Comma-separated tags to include in results" />
@@ -250,7 +252,7 @@
         <div class="saved-wrap">
           <select id="saved-queries-select"><option value="">— Load saved —</option></select>
           <button id="save-query-btn" class="btn-ghost btn-xs" title="Save current search">Save</button>
-          <button id="delete-query-btn" class="btn-ghost btn-xs" title="Delete selected">✕</button>
+          <button id="delete-query-btn" class="btn-ghost btn-xs" data-i18n-title="search.delete_query_aria" data-i18n-aria-label="search.delete_query_aria" title="Delete saved search" aria-label="Delete saved search">✕</button>
         </div>
       </div>
       <div class="adv-row">
@@ -292,7 +294,7 @@
           <span class="empty-state-hint"><kbd>/</kbd> focus · <kbd>j</kbd>/<kbd>k</kbd> navigate · <kbd>p</kbd> pin · <kbd>c</kbd> copy</span>
           <div id="recent-chips" class="recent-chips" hidden></div>
         </div>
-        <div id="results-list" hidden></div>
+        <div id="results-list" aria-live="polite" hidden></div>
         <div id="load-more-row" class="load-more-row" hidden>
           <button id="load-more-btn" class="btn-ghost" data-i18n="search.load_more">Load More</button>
         </div>
@@ -327,9 +329,9 @@
               <span id="d-lines" class="lines-info"></span>
             </div>
             <div class="source-nav">
-              <button id="d-prev-btn" class="btn-ghost btn-xs" title="Previous chunk in source" disabled>◀</button>
+              <button id="d-prev-btn" class="btn-ghost btn-xs" data-i18n-title="search.prev_title" data-i18n-aria-label="search.prev_title" title="Previous chunk in source" aria-label="Previous chunk in source" disabled>◀</button>
               <span id="d-source-pos" class="source-pos"></span>
-              <button id="d-next-btn" class="btn-ghost btn-xs" title="Next chunk in source" disabled>▶</button>
+              <button id="d-next-btn" class="btn-ghost btn-xs" data-i18n-title="search.next_title" data-i18n-aria-label="search.next_title" title="Next chunk in source" aria-label="Next chunk in source" disabled>▶</button>
             </div>
           </div>
 
@@ -389,7 +391,7 @@
           <div id="history-panel" hidden>
             <div class="similar-header">
               <span class="editor-label" data-i18n="search.history_header">Edit History</span>
-              <button id="history-close-btn" class="btn-ghost btn-xs">✕</button>
+              <button id="history-close-btn" class="btn-ghost btn-xs" data-i18n-title="search.history_close_aria" data-i18n-aria-label="search.history_close_aria" title="Close edit history panel" aria-label="Close edit history panel">✕</button>
             </div>
             <div id="history-list"></div>
           </div>
@@ -414,7 +416,7 @@
   <div id="tab-sources" class="tab-panel" role="tabpanel" aria-labelledby="tabbtn-sources" hidden>
     <div class="tab-help-bar" id="help-sources" role="status" hidden>
       <span class="tab-help-bar-text" data-i18n="sources.help">Indexed source files. Click a file to browse chunks. Drag the divider to resize. Sort by name, chunks, size, or recency.</span>
-      <button class="tab-help-bar-dismiss" data-help-tab="sources">✕</button>
+      <button class="tab-help-bar-dismiss" data-help-tab="sources" data-i18n-title="common.dismiss_help" data-i18n-aria-label="common.dismiss_help" title="Dismiss help" aria-label="Dismiss help">✕</button>
     </div>
     <div id="sources-view" class="sources-view" role="region" aria-labelledby="tabbtn-sources">
       <div class="sources-layout">
@@ -659,7 +661,7 @@
   <div id="tab-index" class="tab-panel" role="tabpanel" aria-labelledby="tabbtn-index" hidden>
     <div class="tab-help-bar" id="help-index" role="status" hidden>
       <span class="tab-help-bar-text" data-i18n="index.help">Three ways to add memories to memtomem.</span>
-      <button class="tab-help-bar-dismiss" data-help-tab="index">✕</button>
+      <button class="tab-help-bar-dismiss" data-help-tab="index" data-i18n-title="common.dismiss_help" data-i18n-aria-label="common.dismiss_help" title="Dismiss help" aria-label="Dismiss help">✕</button>
     </div>
     <div class="index-mode-toggle" role="tablist" data-i18n-aria-label="index.mode_aria" aria-label="Index mode">
       <button id="index-mode-folder" class="btn-ghost btn-active"
@@ -1107,7 +1109,7 @@
   <div id="tab-tags" class="tab-panel" role="tabpanel" aria-labelledby="tabbtn-tags" hidden>
     <div class="tab-help-bar" id="help-tags" role="status" hidden>
       <span class="tab-help-bar-text" data-i18n="tags.help">Tag cloud sized by frequency. Click a tag to filter search. Auto-Tag analyzes content to suggest tags for untagged chunks.</span>
-      <button class="tab-help-bar-dismiss" data-help-tab="tags">✕</button>
+      <button class="tab-help-bar-dismiss" data-help-tab="tags" data-i18n-title="common.dismiss_help" data-i18n-aria-label="common.dismiss_help" title="Dismiss help" aria-label="Dismiss help">✕</button>
     </div>
     <div class="tags-layout">
       <div class="tags-left card">
@@ -1180,7 +1182,7 @@
   <div id="tab-timeline" class="tab-panel" role="tabpanel" aria-labelledby="tabbtn-timeline" hidden>
     <div class="tab-help-bar" id="help-timeline" role="status" hidden>
       <span class="tab-help-bar-text" data-i18n="timeline.help">Activity timeline of indexed chunks. Heatmap shows daily activity. Toggle Chunks/Files view.</span>
-      <button class="tab-help-bar-dismiss" data-help-tab="timeline">✕</button>
+      <button class="tab-help-bar-dismiss" data-help-tab="timeline" data-i18n-title="common.dismiss_help" data-i18n-aria-label="common.dismiss_help" title="Dismiss help" aria-label="Dismiss help">✕</button>
     </div>
     <div class="timeline-controls">
       <div class="date-range-picker">
@@ -1228,27 +1230,28 @@
     <div id="tl-list" class="timeline-list" hidden></div>
     <div id="tl-msg" class="status-msg" hidden></div>
   </div>
+  </main>
 
 
   <!-- Expand Modal (I2) -->
-  <div id="expand-modal" class="modal-overlay" hidden>
+  <div id="expand-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="expand-modal-title">
     <div class="modal-inner expand-modal-inner">
       <div class="modal-header">
         <span id="expand-modal-title" class="modal-title"></span>
-        <button id="expand-close-btn" class="btn-ghost">✕</button>
+        <button id="expand-close-btn" class="btn-ghost" data-i18n-title="modal.close_expand_aria" data-i18n-aria-label="modal.close_expand_aria" title="Close dialog" aria-label="Close dialog">✕</button>
       </div>
       <pre id="expand-content" class="expand-content"></pre>
     </div>
   </div>
 
   <!-- Source Preview Modal -->
-  <div id="source-preview-modal" class="modal-overlay" hidden>
+  <div id="source-preview-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="source-preview-title">
     <div class="modal-inner source-preview-inner">
       <div class="modal-header">
         <span id="source-preview-title" class="modal-title"></span>
         <div class="source-preview-actions">
           <span id="source-preview-info" class="source-preview-info"></span>
-          <button id="source-preview-close" class="btn-ghost">✕</button>
+          <button id="source-preview-close" class="btn-ghost" data-i18n-title="modal.close_source_preview_aria" data-i18n-aria-label="modal.close_source_preview_aria" title="Close source preview" aria-label="Close source preview">✕</button>
         </div>
       </div>
       <div id="source-preview-body" class="source-preview-body"></div>
@@ -1256,11 +1259,11 @@
   </div>
 
   <!-- Settings Modal -->
-  <div id="settings-modal" class="modal-overlay" hidden>
+  <div id="settings-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <div class="modal-inner">
       <div class="modal-header">
-        <span class="modal-title" data-i18n="modal.settings_title">Settings</span>
-        <button id="settings-close-btn" class="btn-ghost">✕</button>
+        <span id="settings-title" class="modal-title" data-i18n="modal.settings_title">Settings</span>
+        <button id="settings-close-btn" class="btn-ghost" data-i18n-title="modal.close_settings_aria" data-i18n-aria-label="modal.close_settings_aria" title="Close settings" aria-label="Close settings">✕</button>
       </div>
       <div class="settings-form">
         <label class="settings-label" data-i18n="modal.default_tab_label">Default Tab</label>
@@ -1294,11 +1297,11 @@
   </div>
 
   <!-- Keyboard Shortcuts Modal -->
-  <div id="shortcuts-modal" class="modal-overlay" hidden>
+  <div id="shortcuts-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
     <div class="modal-inner">
       <div class="modal-header">
-        <span class="modal-title" data-i18n="modal.shortcuts_title">Keyboard Shortcuts</span>
-        <button id="shortcuts-close-btn" class="btn-ghost">✕</button>
+        <span id="shortcuts-title" class="modal-title" data-i18n="modal.shortcuts_title">Keyboard Shortcuts</span>
+        <button id="shortcuts-close-btn" class="btn-ghost" data-i18n-title="modal.close_shortcuts_aria" data-i18n-aria-label="modal.close_shortcuts_aria" title="Close keyboard shortcuts" aria-label="Close keyboard shortcuts">✕</button>
       </div>
       <table class="shortcuts-table">
         <tbody>
@@ -1320,7 +1323,7 @@
   </div>
 
   <!-- Command Palette (Cmd+K) -->
-  <div id="cmd-palette" class="modal-overlay" hidden>
+  <div id="cmd-palette" class="modal-overlay" hidden role="dialog" aria-modal="true" data-i18n-aria-label="modal.cmd_palette_aria_label">
     <div class="cmd-palette-inner">
       <input id="cmd-input" type="text" class="cmd-input" data-i18n-placeholder="modal.cmd_placeholder" placeholder="Type a command…" autocomplete="off" spellcheck="false" />
       <div id="cmd-list" class="cmd-list"></div>
@@ -1331,7 +1334,7 @@
   <div id="toast-container" class="toast-container" aria-live="polite" aria-atomic="false"></div>
 
   <!-- Confirm Dialog (A3) -->
-  <div id="confirm-modal" class="modal-overlay" hidden>
+  <div id="confirm-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="confirm-title">
     <div class="modal-inner confirm-dialog">
       <div class="modal-header">
         <span id="confirm-title" class="modal-title"></span>
@@ -1400,16 +1403,16 @@
   <script src="/vendor/prism-bash.min.js?v=1"></script>
   <script src="/vendor/prism-yaml.min.js?v=1"></script>
   <script src="/i18n.js?v=3"></script>
-  <script src="/app.js?v=116"></script>
+  <script src="/app.js?v=117"></script>
   <script src="/chunk-progress.js?v=1"></script>
   <script src="/settings-config.js?v=9"></script>
   <script src="/sources-memory-dirs.js?v=12"></script>
   <script src="/settings-maintenance.js?v=2"></script>
-  <script src="/settings-namespaces.js?v=6"></script>
+  <script src="/settings-namespaces.js?v=8"></script>
   <script src="/settings-harness.js?v=2"></script>
   <script src="/settings-hooks-watchdog.js?v=12"></script>
   <script src="/timeline.js?v=3"></script>
-  <script src="/context-gateway.js?v=36"></script>
-  <script src="/path-picker.js?v=2"></script>
+  <script src="/context-gateway.js?v=37"></script>
+  <script src="/path-picker.js?v=3"></script>
 </body>
 </html>
