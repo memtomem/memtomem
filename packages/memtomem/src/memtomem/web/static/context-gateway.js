@@ -243,8 +243,10 @@ function _ctxWireProjectControls() {
     if (select.dataset.scopeWired === 'true') return;
     select.dataset.scopeWired = 'true';
     select.addEventListener('change', () => {
+      // Server CWD is intentionally represented by an empty scope_id, so
+      // treat '' as a valid selection and only short-circuit a no-op re-pick.
       const next = select.value || '';
-      if (!next || next === _ctxActiveScopeId) return;
+      if (next === _ctxActiveScopeId) return;
       _ctxActiveScopeId = next;
       _ctxNormalizeActiveScope(_ctxProjectsCache);
       _ctxBumpActiveScopeDetailSeq();
