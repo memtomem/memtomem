@@ -9,18 +9,10 @@ from typing import Sequence
 import httpx
 
 from memtomem.config import EmbeddingConfig
-from memtomem.embedding.retry import _parse_retry_after, with_retry
+from memtomem.embedding.retry import RateLimitError, parse_retry_after, with_retry
 from memtomem.errors import EmbeddingError
 
 logger = logging.getLogger(__name__)
-
-
-class _RateLimitError(Exception):
-    """Raised on HTTP 429 to trigger retry via with_retry decorator."""
-
-    def __init__(self, retry_after: float | None = None) -> None:
-        self.retry_after = retry_after
-        super().__init__(f"Rate limited (retry_after={retry_after})")
 
 
 class OpenAIEmbedder:
@@ -57,7 +49,7 @@ class OpenAIEmbedder:
     @with_retry(
         max_attempts=4,
         base_delay=1.0,
-        retryable_exceptions=(httpx.ConnectError, httpx.TimeoutException, _RateLimitError),
+        retryable_exceptions=(httpx.ConnectError, httpx.TimeoutException, RateLimitError),
     )
     async def _embed_batch_with_retry(self, batch: list[str]) -> list[list[float]]:
         """Send a single batch to OpenAI with retry on transient errors and 429."""
@@ -67,8 +59,8 @@ class OpenAIEmbedder:
             json={"input": batch, "model": self._config.model},
         )
         if resp.status_code == 429:
-            ra_val = _parse_retry_after(resp.headers.get("retry-after"))
-            raise _RateLimitError(retry_after=ra_val)
+            ra_val = parse_retry_after(resp.headers.get("retry-after"))
+            raise RateLimitError(retry_after=ra_val)
         resp.raise_for_status()
         data = resp.json()["data"]
         data.sort(key=lambda x: x["index"])
@@ -124,7 +116,7 @@ class OpenAIEmbedder:
             raise EmbeddingError(
                 f"OpenAI embedding request timed out. The API may be overloaded. Error: {exc}"
             ) from exc
-        except _RateLimitError as exc:
+        except RateLimitError as exc:
             raise EmbeddingError(
                 "OpenAI API rate limit exceeded after retries. "
                 "Please wait before retrying or upgrade your plan."
