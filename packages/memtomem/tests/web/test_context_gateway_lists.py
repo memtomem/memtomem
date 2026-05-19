@@ -1234,9 +1234,7 @@ def test_deep_link_cold_load_routes_to_target_section(page, mm_web_url: str) -> 
     _stub_projects(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
     _stub_skills(page, _CWD_SKILLS_THREE)
 
-    page.goto(
-        f"{mm_web_url}/?section=ctx-skills&filter=missing_canonical#context-gateway"
-    )
+    page.goto(f"{mm_web_url}/?section=ctx-skills&filter=missing_canonical#context-gateway")
     # Wait for cold-load routing to land on ctx-skills and the deep-link
     # banner to render. The banner is the same wait-handle the existing
     # specs use because both filter- and missing-link modes paint one.
