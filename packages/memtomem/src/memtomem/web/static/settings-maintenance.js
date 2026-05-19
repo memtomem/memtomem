@@ -11,6 +11,7 @@
 qs('dedup-scan-btn').addEventListener('click', runDedupScan);
 
 // STATE.dedupScanActive, STATE.dedupAbortCtrl now in STATE
+const DEDUP_SCAN_TIMEOUT_MS = 120_000;
 
 function resetDedupPanel() {
   // Don't reset while a scan is still running — keep the UI consistent
@@ -35,19 +36,22 @@ async function runDedupScan() {
   show(empty);
   empty.innerHTML = '<div class="spinner-panel"></div>';
 
-  // Abort any previous request and set a 30 s timeout
+  // Abort any previous request and set a timeout aligned with the server.
   if (STATE.dedupAbortCtrl) STATE.dedupAbortCtrl.abort();
   STATE.dedupAbortCtrl = new AbortController();
-  const timeoutId = setTimeout(() => STATE.dedupAbortCtrl.abort(), 30_000);
+  const timeoutId = setTimeout(() => STATE.dedupAbortCtrl.abort(), DEDUP_SCAN_TIMEOUT_MS);
 
   try {
     const params = new URLSearchParams({ threshold, limit, max_scan: maxScan });
     const res = await fetch(`/api/dedup/candidates?${params}`, { signal: STATE.dedupAbortCtrl.signal });
-    if (!res.ok) throw new Error(res.statusText);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(typeof err.detail === 'string' ? err.detail : res.statusText);
+    }
     const data = await res.json();
     renderDedupCandidates(data.candidates, threshold);
   } catch (err) {
-    const msg = err.name === 'AbortError' ? 'Scan timed out (30 s). Try a smaller Max Scan.' : err.message;
+    const msg = err.name === 'AbortError' ? 'Scan timed out (120 s). Try a smaller Max Scan.' : err.message;
     setMsg(qs('dedup-msg'), 'Scan error: ' + msg, true);
     empty.innerHTML = emptyState('📋', 'Scan failed');
   } finally {

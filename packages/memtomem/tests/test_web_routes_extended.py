@@ -7,6 +7,7 @@ with mocked app.state dependencies.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -529,6 +530,26 @@ class TestDedup:
         assert resp.status_code == 200
         data = resp.json()
         assert data["scanned_chunks"] == 200
+
+    async def test_dedup_scan_timeout_returns_408(
+        self,
+        app,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        async def slow_scan(**_kwargs):
+            await asyncio.sleep(0.05)
+            return []
+
+        app.state.dedup_scanner.scan = AsyncMock(side_effect=slow_scan)
+        monkeypatch.setattr("memtomem.web.routes.dedup._DEDUP_SCAN_TIMEOUT", 0.001)
+
+        resp = await client.get("/api/dedup/candidates", params={"max_scan": 500})
+
+        assert resp.status_code == 408
+        assert resp.json()["detail"] == (
+            "Dedup scan timed out after 0.001s. Try reducing max_scan (current: 500)."
+        )
 
 
 # ---------------------------------------------------------------------------
