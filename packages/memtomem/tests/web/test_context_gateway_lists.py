@@ -1216,6 +1216,50 @@ def test_deep_link_banner_reset_restores_full_list(page, mm_web_url: str) -> Non
     assert "filter=" not in href, f"reset must strip filter param: {href}"
 
 
+def test_deep_link_cold_load_routes_to_target_section(page, mm_web_url: str) -> None:
+    """#1070: cold-loading ``?section=ctx-skills&filter=...#context-gateway``
+    must route to the target leaf, not Overview.
+
+    Previously, ``activateTab('context-gateway')`` consulted only
+    ``opts.sectionOverride`` → ``STATE.lastSettingsSection`` → localStorage
+    → ``ctx-overview``. The query-string was ignored on cold load, so the
+    share-URL landed on Overview and ``_ctxApplyDeepLinkToContainer``
+    never had a target list to filter. The previous deep-link specs in
+    this file all cheated past this by explicitly calling
+    ``activateTab('settings')`` + ``switchSettingsSection('ctx-skills')``
+    after the goto — this spec deliberately does NOT, so it exercises the
+    cold-load routing the issue actually reports.
+    """
+    install_default_stubs(page)
+    _stub_projects(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
+    _stub_skills(page, _CWD_SKILLS_THREE)
+
+    page.goto(
+        f"{mm_web_url}/?section=ctx-skills&filter=missing_canonical#context-gateway"
+    )
+    # Wait for cold-load routing to land on ctx-skills and the deep-link
+    # banner to render. The banner is the same wait-handle the existing
+    # specs use because both filter- and missing-link modes paint one.
+    page.wait_for_function(
+        "() => document.querySelector('#settings-ctx-skills.active') !== null"
+        " && document.querySelector('#ctx-skills-list .ctx-deep-link-banner') !== null",
+        timeout=5_000,
+    )
+
+    # Positive: the target section is the active one.
+    assert page.locator("#settings-ctx-skills.active").count() == 1, (
+        "cold-loaded ?section=ctx-skills must activate the Skills section"
+    )
+    # Negative: Overview is not the active section — pin the regression
+    # shape (``activeSections: ['settings-ctx-overview']`` per the issue).
+    assert page.locator("#settings-ctx-overview.active").count() == 0, (
+        "cold-loaded deep-link must not land on Overview (regression pin for #1070)"
+    )
+    # And the filter banner is present, proving the deep-link payload
+    # reached ``_ctxApplyDeepLinkToContainer`` after routing.
+    assert page.locator("#ctx-skills-list .ctx-deep-link-banner").count() == 1
+
+
 # Empty-list skills payload used by the #956 tier-aware empty-hint tests.
 # ``scanned_dirs`` is present so the project-tier branch's ``{scan_dirs}``
 # token interpolates with a real value (the user-tier branch ignores it).
