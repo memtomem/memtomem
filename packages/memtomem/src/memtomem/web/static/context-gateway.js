@@ -844,7 +844,14 @@ function _renderCtxOverview(data) {
     });
     // #1073: role=button without Enter/Space activation is a lie. Mirrors
     // the search/timeline/chunk-card pattern (see app.js result-item).
+    // ``e.target !== card`` guard (PR #1088 review): the tile contains
+    // ``.ctx-overview-pointer`` buttons whose own Enter/Space activation
+    // bubbles up here — without the guard, ``preventDefault`` would
+    // swallow the pointer button's native click AND ``card.click()``
+    // would navigate to the section, so a keyboard user could not
+    // activate Sync All from the tile's pointer line.
     card.addEventListener('keydown', (e) => {
+      if (e.target !== card) return;
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
         card.click();
@@ -1071,7 +1078,7 @@ window.addEventListener('langchange', () => {
             // Re-resolve panes — the previous detailEl children were
             // wiped by loadCtxDetail's innerHTML rewrite.
             const newTa = detailEl.querySelector('#ctx-edit-content');
-            const newCanonPane = detailEl.querySelector('#ctx-pane-canonical');
+            const newCanonPane = detailEl.querySelector(`#ctx-pane-${type}-canonical`);
             const newEditPane = detailEl.querySelector('#ctx-pane-edit');
             if (!newTa || !newEditPane) return;
             newTa.value = pending.content;
@@ -2177,12 +2184,22 @@ async function loadCtxDetail(type, name, opts = {}) {
     // by the tab that controls them, and only the active tab is in the
     // focus order (others tabindex=-1, arrow keys move focus). Mirrors
     // the main app's ``.tab-nav`` pattern in app.js.
+    //
+    // IDs are qualified by ``type`` (PR #1088 review): inactive sections
+    // keep their detail DOM mounted, so ``ctx-tab-canonical`` /
+    // ``ctx-pane-canonical`` would collide across skills/commands/agents.
+    // ``aria-controls`` and ``aria-labelledby`` resolve via document-level
+    // ``getElementById`` regardless of the surrounding DOM tree, so an
+    // un-qualified ID would point at a hidden earlier section's pane
+    // instead of the active one's. (The pre-existing ``ctx-pane-edit``
+    // duplicate is functionally invisible because its lookups are all
+    // detailEl-scoped — only the new ARIA refs needed qualifying.)
     html += '<div class="ctx-detail-tabs" role="tablist">';
-    html += `<button type="button" class="ctx-detail-tab active" data-pane="canonical" role="tab" id="ctx-tab-canonical" aria-controls="ctx-pane-canonical" aria-selected="true" tabindex="0">${t('settings.ctx.canonical_source')}</button>`;
-    html += `<button type="button" class="ctx-detail-tab" data-pane="diff" role="tab" id="ctx-tab-diff" aria-controls="ctx-pane-diff" aria-selected="false" tabindex="-1">${t('settings.ctx.diff_view')}</button>`;
+    html += `<button type="button" class="ctx-detail-tab active" data-pane="canonical" role="tab" id="ctx-tab-${type}-canonical" aria-controls="ctx-pane-${type}-canonical" aria-selected="true" tabindex="0">${t('settings.ctx.canonical_source')}</button>`;
+    html += `<button type="button" class="ctx-detail-tab" data-pane="diff" role="tab" id="ctx-tab-${type}-diff" aria-controls="ctx-pane-${type}-diff" aria-selected="false" tabindex="-1">${t('settings.ctx.diff_view')}</button>`;
     html += '</div>';
 
-    html += '<div class="ctx-detail-pane active" id="ctx-pane-canonical" role="tabpanel" aria-labelledby="ctx-tab-canonical">';
+    html += `<div class="ctx-detail-pane active" id="ctx-pane-${type}-canonical" role="tabpanel" aria-labelledby="ctx-tab-${type}-canonical">`;
     html += `<pre class="ctx-content-pre">${escapeHtml(data.content || '')}</pre>`;
     if (data.files && data.files.length) {
       html += `<div style="margin-top:8px"><strong>${t('settings.ctx.auxiliary_files')}</strong>`;
@@ -2193,7 +2210,7 @@ async function loadCtxDetail(type, name, opts = {}) {
     }
     html += '</div>';
 
-    html += '<div class="ctx-detail-pane" id="ctx-pane-diff" role="tabpanel" aria-labelledby="ctx-tab-diff"><div class="text-muted">Click Diff tab to load...</div></div>';
+    html += `<div class="ctx-detail-pane" id="ctx-pane-${type}-diff" role="tabpanel" aria-labelledby="ctx-tab-${type}-diff"><div class="text-muted">Click Diff tab to load...</div></div>`;
 
     // ``ctx-conflict-banner`` stays hidden in the normal edit flow. When a
     // 409 reaches the dialog and the user picks "Open diff editor", we
@@ -2221,7 +2238,7 @@ async function loadCtxDetail(type, name, opts = {}) {
     if (stashed != null) {
       const ta = detailEl.querySelector('#ctx-edit-content');
       if (ta) ta.value = stashed;
-      const canonPane = detailEl.querySelector('#ctx-pane-canonical');
+      const canonPane = detailEl.querySelector(`#ctx-pane-${type}-canonical`);
       const editPane = detailEl.querySelector('#ctx-pane-edit');
       if (canonPane) canonPane.hidden = true;
       if (editPane) editPane.hidden = false;
@@ -2245,7 +2262,7 @@ async function loadCtxDetail(type, name, opts = {}) {
       tab.setAttribute('aria-selected', 'true');
       tab.setAttribute('tabindex', '0');
       if (opts.focus) tab.focus();
-      const pane = detailEl.querySelector(`#ctx-pane-${tab.dataset.pane}`);
+      const pane = detailEl.querySelector(`#ctx-pane-${type}-${tab.dataset.pane}`);
       if (pane) pane.classList.add('active');
       if (tab.dataset.pane === 'diff') _ctxLoadDiff(type, name, detailEl);
     };
@@ -2276,7 +2293,7 @@ async function loadCtxDetail(type, name, opts = {}) {
 
     // Edit
     detailEl.querySelector('.ctx-detail-edit-btn')?.addEventListener('click', () => {
-      const canonPane = detailEl.querySelector('#ctx-pane-canonical');
+      const canonPane = detailEl.querySelector(`#ctx-pane-${type}-canonical`);
       const editPane = detailEl.querySelector('#ctx-pane-edit');
       if (canonPane) canonPane.hidden = true;
       if (editPane) editPane.hidden = false;
@@ -2285,7 +2302,7 @@ async function loadCtxDetail(type, name, opts = {}) {
 
     // Cancel edit
     detailEl.querySelector('.ctx-edit-cancel')?.addEventListener('click', () => {
-      const canonPane = detailEl.querySelector('#ctx-pane-canonical');
+      const canonPane = detailEl.querySelector(`#ctx-pane-${type}-canonical`);
       const editPane = detailEl.querySelector('#ctx-pane-edit');
       if (canonPane) canonPane.hidden = false;
       if (editPane) editPane.hidden = true;
@@ -2452,7 +2469,7 @@ async function _ctxFetchFieldMap(type, name) {
 }
 
 async function _ctxLoadDiff(type, name, detailEl) {
-  const pane = detailEl.querySelector('#ctx-pane-diff');
+  const pane = detailEl.querySelector(`#ctx-pane-${type}-diff`);
   if (!pane) return;
   pane.innerHTML = '<div class="empty-state"><div class="spinner-panel"></div></div>';
   try {

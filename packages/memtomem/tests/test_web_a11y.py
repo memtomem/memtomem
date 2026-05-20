@@ -431,6 +431,23 @@ class TestIssue1073CtxKeyboardSemantics:
         )
         assert "'Enter'" in block and "' '" in block, "keydown handler must accept Enter and Space"
 
+    def test_overview_tile_keydown_skips_nested_pointers(self, ctx_js: str) -> None:
+        # Regression pin (PR #1088 review): tiles render nested
+        # ``.ctx-overview-pointer`` buttons. Without an
+        # ``e.target !== card`` guard, pressing Enter/Space on a pointer
+        # button bubbles into the tile keydown handler, which then
+        # ``preventDefault()``s the pointer button's native click AND
+        # fires ``card.click()`` — so keyboard users could not activate
+        # Sync All from the tile's pointer line.
+        loop_start = ctx_js.index("el.querySelectorAll('.ctx-overview-stat').forEach(card => {")
+        loop_end = ctx_js.index("\n  });", loop_start)
+        block = ctx_js[loop_start:loop_end]
+        assert "e.target !== card" in block, (
+            "ctx-overview-stat keydown handler must early-return when the "
+            "event target is not the tile itself, so nested pointer "
+            "buttons keep their native keyboard activation (#1088 review)"
+        )
+
     # ── Artifact cards (.ctx-card) ────────────────────────────────────
     def test_clickable_ctx_card_has_button_semantics(self, ctx_js: str) -> None:
         # _ctxRenderItemsHtml gates a11y attrs on ``clickable``; readonly
@@ -492,7 +509,7 @@ class TestIssue1073CtxKeyboardSemantics:
             "ctx-detail-tabs container must declare role=tablist (#1073)"
         )
         # Both tab buttons must exist, with aria-controls pointing at
-        # their pane id (canonical / diff).
+        # their pane id (type-qualified, see ``test_detail_ids_qualified_by_type``).
         canonical_tab = re.search(
             r'<button[^>]*class="ctx-detail-tab active"[^>]*data-pane="canonical"[^>]*>',
             ctx_js,
@@ -505,7 +522,7 @@ class TestIssue1073CtxKeyboardSemantics:
         assert diff_tab, "diff tab must render as <button role=tab>"
         for label, tag in (("canonical", canonical_tab.group(0)), ("diff", diff_tab.group(0))):
             assert 'role="tab"' in tag, f"{label} tab missing role=tab"
-            assert 'aria-controls="ctx-pane-' in tag, (
+            assert "aria-controls=" in tag and "ctx-pane-" in tag, (
                 f"{label} tab must declare aria-controls pointing at its pane id"
             )
             assert "aria-selected=" in tag, (
@@ -518,17 +535,53 @@ class TestIssue1073CtxKeyboardSemantics:
     def test_detail_panes_are_tabpanels(self, ctx_js: str) -> None:
         # Each pane must declare role=tabpanel + aria-labelledby pointing
         # at its tab, so the SR announces "canonical source, tab panel"
-        # on focus enter.
+        # on focus enter. IDs are type-qualified per ``test_detail_ids_
+        # qualified_by_type``, so anchor on the role/aria pair alone.
         canonical_pane = re.search(
-            r'id="ctx-pane-canonical"[^>]*role="tabpanel"[^>]*aria-labelledby="ctx-tab-canonical"',
+            r'id="ctx-pane-\$\{type\}-canonical"[^>]*role="tabpanel"'
+            r'[^>]*aria-labelledby="ctx-tab-\$\{type\}-canonical"',
             ctx_js,
         )
         diff_pane = re.search(
-            r'id="ctx-pane-diff"[^>]*role="tabpanel"[^>]*aria-labelledby="ctx-tab-diff"',
+            r'id="ctx-pane-\$\{type\}-diff"[^>]*role="tabpanel"'
+            r'[^>]*aria-labelledby="ctx-tab-\$\{type\}-diff"',
             ctx_js,
         )
         assert canonical_pane, "canonical pane missing role=tabpanel + aria-labelledby"
         assert diff_pane, "diff pane missing role=tabpanel + aria-labelledby"
+
+    def test_detail_ids_qualified_by_type(self, ctx_js: str) -> None:
+        # Regression pin (PR #1088 review): inactive sections (skills /
+        # commands / agents) keep their detail DOM mounted, so the new
+        # ``ctx-tab-*`` and ``ctx-pane-*`` IDs MUST include ``type`` —
+        # otherwise multiple sections share the same id and the
+        # ``aria-controls`` / ``aria-labelledby`` references (which
+        # resolve via document-wide ``getElementById``) point at an
+        # earlier hidden section's pane instead of the active one.
+        for fragment in (
+            'id="ctx-tab-${type}-canonical"',
+            'id="ctx-tab-${type}-diff"',
+            'id="ctx-pane-${type}-canonical"',
+            'id="ctx-pane-${type}-diff"',
+            'aria-controls="ctx-pane-${type}-canonical"',
+            'aria-controls="ctx-pane-${type}-diff"',
+            'aria-labelledby="ctx-tab-${type}-canonical"',
+            'aria-labelledby="ctx-tab-${type}-diff"',
+        ):
+            assert fragment in ctx_js, (
+                f"detail-tab/pane fragment must be type-qualified to avoid "
+                f"duplicate-ID collisions across sections (#1088 review): {fragment}"
+            )
+        # And the negative: the previous un-qualified literals must NOT
+        # appear as JS strings or HTML attributes (the only allowed
+        # mentions are in the explanatory comment paragraph above the
+        # tablist HTML).
+        for literal in ('"ctx-tab-canonical"', '"ctx-pane-canonical"',
+                        '"ctx-tab-diff"', '"ctx-pane-diff"'):
+            assert literal not in ctx_js, (
+                f"un-qualified ID {literal} must not appear — see the"
+                " type-qualified version above"
+            )
 
     def test_detail_tab_keyboard_navigation(self, ctx_js: str) -> None:
         # Arrow nav within the tablist + ARIA state update on activation.
