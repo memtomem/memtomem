@@ -97,6 +97,83 @@ describe('Sync All — disabled-state tooltip', () => {
     expect(btn.title).not.toBe('stale tooltip');
   });
 
+  it('toast on click uses project_local copy when the active tier is project_local', async () => {
+    // #1075 / #962: the disabled-state hover title for project_local
+    // says "no runtime fan-out" (canonical drafts only), but the
+    // post-click toast previously hard-coded the generic
+    // ``sync_all_disabled_tooltip`` ("canonicals missing / import
+    // first"). For a project_local user with canonical drafts already
+    // present, that guidance is misleading. Pin the tier-aware toast
+    // copy so the hover/click pair stays consistent.
+    const dom = await bootApp({
+      scripts: ['i18n.js', 'app.js', 'context-gateway.js'],
+    });
+    const { window } = dom;
+    stubOverviewFetch(window, { allRuntimeOnly: true });
+    await window.I18N.init();
+    await window.loadCtxOverview();
+
+    // Flip to project_local via the tier filter button — this is the
+    // only externally-reachable path to mutate the module-local
+    // ``_ctxTargetScope``. The click handler updates it synchronously
+    // before the (awaited-here) loadCtxOverview re-render runs.
+    const tierBtn = window.document.querySelector(
+      '.ctx-tier-filter button[data-scope="project_local"]'
+    );
+    expect(tierBtn).not.toBeNull();
+    tierBtn.click();
+    // The click schedules a loadCtxOverview but doesn't await it; await
+    // one explicitly so the re-render's project_local branch lands
+    // (``dataset.runtimeOnly='true'`` + project_local hover title).
+    await window.loadCtxOverview();
+
+    const btn = window.document.getElementById('ctx-sync-all-btn');
+    expect(btn.dataset.runtimeOnly).toBe('true');
+    expect(btn.title).toBe(window.I18N.t('settings.ctx.project_local_no_fanout_tooltip'));
+
+    // Click and assert the toast text matches the project_local copy,
+    // not the generic "canonicals missing" message. Toast rendering is
+    // synchronous in ``showToast`` (DOM append before the dismiss
+    // timer), so we can read it back immediately.
+    btn.click();
+    const toastMsg = window.document.querySelector('#toast-container .toast-msg');
+    expect(toastMsg).not.toBeNull();
+    expect(toastMsg.textContent).toBe(
+      window.I18N.t('settings.ctx.project_local_no_fanout_tooltip')
+    );
+    expect(toastMsg.textContent).not.toBe(
+      window.I18N.t('settings.ctx.sync_all_disabled_tooltip')
+    );
+  });
+
+  it('toast on click keeps the generic copy on non-project_local tiers', async () => {
+    // Negative companion to the project_local test above: on
+    // project_shared (default) with everything runtime-only, the toast
+    // must still surface the generic ``sync_all_disabled_tooltip``
+    // ("import first") copy. Without this pin, a future refactor that
+    // accidentally branches both tiers to the project_local copy would
+    // silently slip through.
+    const dom = await bootApp({
+      scripts: ['i18n.js', 'app.js', 'context-gateway.js'],
+    });
+    const { window } = dom;
+    stubOverviewFetch(window, { allRuntimeOnly: true });
+    await window.I18N.init();
+    await window.loadCtxOverview();
+
+    const btn = window.document.getElementById('ctx-sync-all-btn');
+    expect(btn.dataset.runtimeOnly).toBe('true');
+    btn.click();
+    const toastMsg = window.document.querySelector('#toast-container .toast-msg');
+    expect(toastMsg).not.toBeNull();
+    expect(toastMsg.textContent).toBe(
+      window.I18N.t('settings.ctx.sync_all_disabled_tooltip')
+    );
+    expect(toastMsg.textContent).not.toBe(
+      window.I18N.t('settings.ctx.project_local_no_fanout_tooltip')
+    );
+  });
+
   it('refreshes title on langchange while the gate is still active', async () => {
     const dom = await bootApp({
       scripts: ['i18n.js', 'app.js', 'context-gateway.js'],

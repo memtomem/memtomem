@@ -1111,8 +1111,19 @@ window.addEventListener('langchange', () => {
 document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () => {
   const btn = document.getElementById('ctx-sync-all-btn');
   if (btn.dataset.runtimeOnly === 'true') {
-    showToast(t('settings.ctx.sync_all_disabled_tooltip'),
-      'info');
+    // ``_renderCtxOverview`` stamps ``runtimeOnly='true'`` in two cases:
+    // project_local (canonical drafts have no fan-out — ADR-0011 §3 /
+    // ADR-0016 §7) and all-canonicals-empty for any other tier. The
+    // post-click toast must mirror the pre-click hover tooltip's
+    // tier-aware copy choice (already done in ``_renderCtxOverview``
+    // and in the ``langchange`` listener above); otherwise a
+    // project_local user sees "import first" guidance that doesn't
+    // apply, since their canonical drafts may already exist. Issue
+    // #1075 follow-up to #962.
+    const msgKey = _ctxTargetScope === 'project_local'
+      ? 'settings.ctx.project_local_no_fanout_tooltip'
+      : 'settings.ctx.sync_all_disabled_tooltip';
+    showToast(t(msgKey), 'info');
     return;
   }
   const ok = await showConfirm({
