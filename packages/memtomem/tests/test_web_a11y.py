@@ -433,16 +433,18 @@ class TestIssue1073CtxKeyboardSemantics:
 
     def test_overview_tile_keydown_skips_nested_pointers(self, ctx_js: str) -> None:
         # Regression pin (PR #1088 review): tiles render nested
-        # ``.ctx-overview-pointer`` buttons. Without an
-        # ``e.target !== card`` guard, pressing Enter/Space on a pointer
-        # button bubbles into the tile keydown handler, which then
-        # ``preventDefault()``s the pointer button's native click AND
-        # fires ``card.click()`` — so keyboard users could not activate
-        # Sync All from the tile's pointer line.
+        # ``.ctx-overview-pointer`` buttons. Without a target guard,
+        # pressing Enter/Space on a pointer button bubbles into the tile
+        # keydown handler, which then ``preventDefault()``s the pointer
+        # button's native click AND fires ``card.click()`` — so keyboard
+        # users could not activate Sync All from the tile's pointer line.
         loop_start = ctx_js.index("el.querySelectorAll('.ctx-overview-stat').forEach(card => {")
         loop_end = ctx_js.index("\n  });", loop_start)
         block = ctx_js[loop_start:loop_end]
-        assert "e.target !== card" in block, (
+        # Anchor on the actual statement (``if (...) return;``) rather
+        # than the bare expression, since the substring also appears in
+        # the explanatory comment paragraph above the handler.
+        assert re.search(r"if\s*\(\s*e\.target\s*!==\s*card\s*\)\s*return\s*;", block), (
             "ctx-overview-stat keydown handler must early-return when the "
             "event target is not the tile itself, so nested pointer "
             "buttons keep their native keyboard activation (#1088 review)"
@@ -576,11 +578,14 @@ class TestIssue1073CtxKeyboardSemantics:
         # appear as JS strings or HTML attributes (the only allowed
         # mentions are in the explanatory comment paragraph above the
         # tablist HTML).
-        for literal in ('"ctx-tab-canonical"', '"ctx-pane-canonical"',
-                        '"ctx-tab-diff"', '"ctx-pane-diff"'):
+        for literal in (
+            '"ctx-tab-canonical"',
+            '"ctx-pane-canonical"',
+            '"ctx-tab-diff"',
+            '"ctx-pane-diff"',
+        ):
             assert literal not in ctx_js, (
-                f"un-qualified ID {literal} must not appear — see the"
-                " type-qualified version above"
+                f"un-qualified ID {literal} must not appear — see the type-qualified version above"
             )
 
     def test_detail_tab_keyboard_navigation(self, ctx_js: str) -> None:
