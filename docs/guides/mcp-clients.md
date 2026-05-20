@@ -482,16 +482,30 @@ headers don't match either `127.0.0.1`/`localhost`, the hostname in
 This blocks DNS-rebinding attacks against the local listener.
 
 - `--allowed-host VALUE` — extra `Host` header to accept. Repeatable.
+  Matching is **exact** unless the value ends in `:*` (port wildcard);
+  most clients send `Host: <hostname>:<port>`, so for non-default ports
+  pass either `<hostname>:*` or the exact `<hostname>:<port>`.
 - `--allowed-origin VALUE` — extra `Origin` header to accept. Repeatable.
+  Same matching rules — typical browser-style Origins look like
+  `http://<hostname>:<port>`, so use `<scheme>://<hostname>:*` or the
+  full `<scheme>://<hostname>:<port>`.
 - `--disable-dns-rebinding-protection` — turn the check off entirely.
   **Only safe behind an authenticated reverse proxy** that already
   validates the request origin.
 
 > **`--host 0.0.0.0` binds on all interfaces but does not auto-allow them.**
 > If you bind to `0.0.0.0` without passing a `--url` whose hostname
-> matches how clients reach you (or an explicit `--allowed-host`), the
-> allow-list stays loopback-only and LAN clients are rejected. Either
-> set `--url http://<lan-ip>:<port>/mcp` or pass `--allowed-host <lan-ip>`.
+> matches how clients reach you, the allow-list stays loopback-only
+> and LAN clients are rejected (HTTP 421 / 403). The simplest fix is
+> to pass `--url http://<reachable-host>:<port>/mcp` — `memtomem-server`
+> derives both port-wildcard (`<reachable-host>:*`) and exact
+> (`<reachable-host>:<port>`) entries from that URL and adds the matching
+> `Origin`. **Advanced:** if you must keep a loopback `--url`, pass both
+> `--allowed-host <reachable-host>:*` **and**
+> `--allowed-origin http://<reachable-host>:<port>` — a bare
+> `--allowed-host <reachable-host>` does **not** match `Host:
+> <reachable-host>:<port>` (the SDK only treats `:*`-suffixed values as
+> port wildcards) and Origin-bearing clients are blocked separately.
 
 ### One server at a time
 
