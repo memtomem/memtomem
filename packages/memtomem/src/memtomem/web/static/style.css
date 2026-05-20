@@ -293,6 +293,31 @@ header h1 { font-size: 1.2rem; font-weight: 700; color: var(--accent); letter-sp
   .settings-nav-btn .nav-sub { display: none; }
 }
 
+/* Stack the two-pane Settings/Gateway layout on narrow viewports so the
+   content panel gets full width instead of being squeezed by the 180px nav.
+   See issue #1072. */
+@media (max-width: 520px) {
+  .settings-layout { flex-direction: column; }
+  .settings-nav {
+    width: 100%;
+    max-height: 38vh;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .settings-content {
+    width: 100%;
+    min-width: 0;
+    padding: 12px 12px;
+  }
+  .ctx-header {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    row-gap: 8px;
+  }
+  .ctx-header > div { flex-wrap: wrap; }
+  .ctx-overview-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* ── Tab Panels ── */
 .tab-panel { flex: 1; min-height: 0; overflow: hidden; display: none; flex-direction: column; }
 .tab-panel.active { display: flex; }
