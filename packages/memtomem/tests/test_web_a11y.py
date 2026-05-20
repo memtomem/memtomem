@@ -16,6 +16,7 @@ _STATIC_DIR = Path(__file__).resolve().parents[1] / "src" / "memtomem" / "web" /
 _APP_JS = _STATIC_DIR / "app.js"
 _INDEX_HTML = _STATIC_DIR / "index.html"
 _TIMELINE_JS = _STATIC_DIR / "timeline.js"
+_CTX_JS = _STATIC_DIR / "context-gateway.js"
 
 
 @pytest.fixture(scope="module")
@@ -34,6 +35,12 @@ def index_html() -> str:
 def timeline_js() -> str:
     assert _TIMELINE_JS.exists(), f"timeline.js missing: {_TIMELINE_JS}"
     return _TIMELINE_JS.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def ctx_js() -> str:
+    assert _CTX_JS.exists(), f"context-gateway.js missing: {_CTX_JS}"
+    return _CTX_JS.read_text(encoding="utf-8")
 
 
 def _extract_function(source: str, name: str) -> str:
@@ -374,4 +381,296 @@ class TestChunkCardA11y:
         assert "chunk-card-actions" in block, (
             "keydown handler must skip when focus is in .chunk-card-actions "
             "(button Enter must not also toggle the parent card)"
+        )
+
+
+class TestIssue1073CtxKeyboardSemantics:
+    """Pin keyboard/screen-reader semantics on Context Gateway clickable
+    rows (issue #1073). Overview tiles, artifact cards, and detail tabs
+    were rendered as clickable ``<div>``s with mouse-only handlers — same
+    defect class as the search/timeline rows in issue #700 but specific
+    to ``context-gateway.js``.
+    """
+
+    # ── Overview tiles ────────────────────────────────────────────────
+    def test_overview_tile_uses_inner_nav_button(self, ctx_js: str) -> None:
+        # PR #1088 review (Codex P2): the navigation control must be a
+        # real ``<button class="ctx-overview-stat-nav">`` *inside* the
+        # tile, NOT ``role=button`` on the outer ``<div>``. Putting the
+        # role on the outer div nests the ``.ctx-overview-pointer``
+        # button children inside a button-role ancestor — invalid ARIA
+        # (interactive content inside ``role=button`` is forbidden) and
+        # inconsistently exposed by assistive tech.
+        outer_match = re.search(
+            r'`<div class="ctx-overview-stat"([^>]*)>\s*\n\s*'
+            r'<button([^`>]*)class="ctx-overview-stat-nav"([^`>]*)>',
+            ctx_js,
+            re.DOTALL,
+        )
+        assert outer_match, (
+            "tile must render as a plain <div class='ctx-overview-stat'> "
+            "containing a <button class='ctx-overview-stat-nav'> — see"
+            " PR #1088 review (nested-button regression)."
+        )
+        outer_attrs = outer_match.group(1)
+        # ``data-section`` / ``data-tile-key`` stay on the outer div so
+        # existing selectors (test suite, deep-link applier, CSS scoping)
+        # keep working — the click handler reads them via
+        # ``closest('.ctx-overview-stat')``.
+        for marker in ("data-section=", "data-tile-key="):
+            assert marker in outer_attrs, (
+                f"outer .ctx-overview-stat must carry {marker} — "
+                "existing browser-test selectors scope by these attrs"
+            )
+        nav_attrs = outer_match.group(2) + outer_match.group(3)
+        for marker in ('type="button"', "aria-label="):
+            assert marker in nav_attrs, (
+                f"ctx-overview-stat-nav <button> must declare {marker} "
+                "(carries the activation semantics + accessible name)"
+            )
+
+    def test_outer_tile_has_no_role_button(self, ctx_js: str) -> None:
+        # Negative pin: the outer ``.ctx-overview-stat`` <div> must NOT
+        # carry ``role="button"`` / ``tabindex="0"`` — that's what made
+        # the pointer buttons nested-interactive (Codex P2 #1088 review).
+        outer_match = re.search(r'`<div class="ctx-overview-stat"([^>]*)>', ctx_js)
+        assert outer_match, "outer ctx-overview-stat div literal not found"
+        outer_attrs = outer_match.group(1)
+        assert "role=" not in outer_attrs, (
+            "outer .ctx-overview-stat <div> must not carry role= — the "
+            "navigation role belongs on the inner .ctx-overview-stat-nav"
+            " button so pointer descendants aren't nested interactives"
+        )
+        assert "tabindex=" not in outer_attrs, (
+            "outer .ctx-overview-stat <div> must not be focusable — only "
+            "the inner nav button is in the keyboard focus order"
+        )
+
+    def test_overview_tile_click_wired_to_nav_button(self, ctx_js: str) -> None:
+        # The click handler must target the inner ``.ctx-overview-stat-nav``
+        # selector, not the outer ``.ctx-overview-stat``. Otherwise the
+        # nested-button regression would silently re-appear if someone
+        # restored ``role=button`` on the outer div and re-wired
+        # ``.ctx-overview-stat`` as the click target.
+        assert "el.querySelectorAll('.ctx-overview-stat-nav').forEach" in ctx_js, (
+            "tile click wiring must use the inner .ctx-overview-stat-nav selector (PR #1088 review)"
+        )
+        # Pointer line stays its own wiring loop (sibling, not child).
+        assert "el.querySelectorAll('.ctx-overview-pointer').forEach" in ctx_js, (
+            "pointer-line wiring must remain a separate forEach loop on "
+            ".ctx-overview-pointer so each pointer button keeps its own "
+            "click handler"
+        )
+
+    # ── Artifact cards (.ctx-card) ────────────────────────────────────
+    def test_clickable_ctx_card_has_button_semantics(self, ctx_js: str) -> None:
+        # _ctxRenderItemsHtml gates a11y attrs on ``clickable``; readonly
+        # cards (other-scope groups) must NOT get role=button. Anchor on
+        # the ternary that builds the attrs.
+        render_start = ctx_js.index("function _ctxRenderItemsHtml(")
+        render_end = ctx_js.index("\n}\n", render_start)
+        body = ctx_js[render_start:render_end]
+        assert 'role="button" tabindex="0"' in body, (
+            "clickable ctx-card must render with role=button + tabindex=0 "
+            "(#1073) so it joins the keyboard focus order"
+        )
+        # The aria-label must be derived from the artifact name (and flag
+        # out-of-sync state) — pinning the substring is enough; an
+        # implementation that aria-labels with a stale string would still
+        # need to read ``item.name``.
+        assert "aria-label=" in body and "item.name" in body, (
+            "ctx-card aria-label must include the artifact name so screen "
+            "readers announce which item the row activates"
+        )
+
+    def test_clickable_ctx_card_aria_label_covers_all_statuses(self, ctx_js: str) -> None:
+        # PR #1088 review (Codex P2): the aria-label must surface every
+        # distinct non-``in sync`` runtime status, not just the
+        # ``out of sync`` case. Otherwise cards with missing target /
+        # missing canonical / parse error / runtime-only would announce
+        # just the artifact name — and aria-label overrides the visible
+        # runtime-badge text for screen readers, so the SR user would
+        # lose the status that explains why the card needs action.
+        render_start = ctx_js.index("function _ctxRenderItemsHtml(")
+        render_end = ctx_js.index("\n}\n", render_start)
+        body = ctx_js[render_start:render_end]
+        # Pin the loop that collects per-runtime statuses via the shared
+        # ``_ctxStatusText`` helper (same source the visible badge uses,
+        # so SR string and visual badge cannot drift).
+        assert re.search(
+            r"for\s*\(\s*const\s+r\s+of\s*\(item\.runtimes.*?\)\s*\)\s*\{[^}]*"
+            r"_ctxStatusText\s*\(\s*r\.status\s*\)",
+            body,
+            re.DOTALL,
+        ), (
+            "ctx-card aria-label builder must iterate ``item.runtimes`` "
+            "and translate each non-in-sync status via ``_ctxStatusText`` "
+            "so SR announce mirrors the visible badge (PR #1088 review)"
+        )
+        # And the runtime-only fallback: ``!item.canonical_path`` must
+        # inject the ``missing canonical`` translation into the status
+        # set so cards with an empty ``runtimes`` list still announce
+        # the runtime-only state.
+        assert re.search(
+            r"!item\.canonical_path[^}]*?_ctxStatusText\s*\(\s*['\"]missing canonical['\"]\s*\)",
+            body,
+            re.DOTALL,
+        ), (
+            "ctx-card aria-label builder must add the localized "
+            "``missing canonical`` text when ``item.canonical_path`` is "
+            "empty, so runtime-only cards announce their state even "
+            "when no per-runtime row carries the status"
+        )
+        # Negative pin: the old ``outOfSync ? ' — out of sync' : ''``
+        # short-circuit MUST be gone — that's what hid the other four
+        # status classes from SR users.
+        assert "' — out of sync'" not in body, (
+            "the legacy single-status aria-label suffix must be removed; "
+            "use the per-runtime status set instead (PR #1088 review)"
+        )
+
+    def test_clickable_ctx_card_keydown_activates(self, ctx_js: str) -> None:
+        # Anchor on the card-wiring loop inside _loadScopeGroupItems
+        # (clickable branch) and pin keydown next to click. Without this,
+        # a SR user hears "button" but pressing Enter does nothing.
+        loop_start = ctx_js.index("container.querySelectorAll('.ctx-card').forEach(card => {")
+        # The forEach body ends at the matching ``});`` — slice generously
+        # and pin both handlers exist within the same block.
+        loop_end = ctx_js.index("\n        });", loop_start)
+        block = ctx_js[loop_start:loop_end]
+        assert "addEventListener('click'" in block, "ctx-card click handler missing"
+        assert "addEventListener('keydown'" in block, (
+            "ctx-card must wire a keydown handler so Enter/Space activate "
+            "the same path as click (#1073)"
+        )
+
+    def test_readonly_ctx_card_skips_button_role(self, ctx_js: str) -> None:
+        # Pin that the a11y attrs are gated on ``clickable`` — a readonly
+        # row would render a focusable button with no handler, which is
+        # worse than a non-focusable div.
+        render_start = ctx_js.index("function _ctxRenderItemsHtml(")
+        render_end = ctx_js.index("\n}\n", render_start)
+        body = ctx_js[render_start:render_end]
+        assert re.search(
+            r"clickable\s*\?\s*'\s*role=\"button\"\s*tabindex=\"0\"'\s*:\s*''",
+            body,
+        ), (
+            "role=button + tabindex must be gated on ``clickable`` so "
+            "readonly other-scope cards don't enter the focus order with "
+            "no activation handler"
+        )
+
+    # ── Detail tabs ───────────────────────────────────────────────────
+    def test_detail_tabs_render_as_tablist(self, ctx_js: str) -> None:
+        # The tabs row must declare role=tablist; each tab must be a
+        # <button role=tab> with aria-selected + aria-controls so the
+        # screen reader announces the tab name AND the panel it controls.
+        assert 'class="ctx-detail-tabs" role="tablist"' in ctx_js, (
+            "ctx-detail-tabs container must declare role=tablist (#1073)"
+        )
+        # Both tab buttons must exist, with aria-controls pointing at
+        # their pane id (type-qualified, see ``test_detail_ids_qualified_by_type``).
+        canonical_tab = re.search(
+            r'<button[^>]*class="ctx-detail-tab active"[^>]*data-pane="canonical"[^>]*>',
+            ctx_js,
+        )
+        diff_tab = re.search(
+            r'<button[^>]*class="ctx-detail-tab"[^>]*data-pane="diff"[^>]*>',
+            ctx_js,
+        )
+        assert canonical_tab, "canonical tab must render as <button role=tab>"
+        assert diff_tab, "diff tab must render as <button role=tab>"
+        for label, tag in (("canonical", canonical_tab.group(0)), ("diff", diff_tab.group(0))):
+            assert 'role="tab"' in tag, f"{label} tab missing role=tab"
+            assert "aria-controls=" in tag and "ctx-pane-" in tag, (
+                f"{label} tab must declare aria-controls pointing at its pane id"
+            )
+            assert "aria-selected=" in tag, (
+                f"{label} tab must declare aria-selected so the SR announces the selected state"
+            )
+            assert "tabindex=" in tag, (
+                f"{label} tab must declare tabindex for the roving focus model"
+            )
+
+    def test_detail_panes_are_tabpanels(self, ctx_js: str) -> None:
+        # Each pane must declare role=tabpanel + aria-labelledby pointing
+        # at its tab, so the SR announces "canonical source, tab panel"
+        # on focus enter. IDs are type-qualified per ``test_detail_ids_
+        # qualified_by_type``, so anchor on the role/aria pair alone.
+        canonical_pane = re.search(
+            r'id="ctx-pane-\$\{type\}-canonical"[^>]*role="tabpanel"'
+            r'[^>]*aria-labelledby="ctx-tab-\$\{type\}-canonical"',
+            ctx_js,
+        )
+        diff_pane = re.search(
+            r'id="ctx-pane-\$\{type\}-diff"[^>]*role="tabpanel"'
+            r'[^>]*aria-labelledby="ctx-tab-\$\{type\}-diff"',
+            ctx_js,
+        )
+        assert canonical_pane, "canonical pane missing role=tabpanel + aria-labelledby"
+        assert diff_pane, "diff pane missing role=tabpanel + aria-labelledby"
+
+    def test_detail_ids_qualified_by_type(self, ctx_js: str) -> None:
+        # Regression pin (PR #1088 review): inactive sections (skills /
+        # commands / agents) keep their detail DOM mounted, so the new
+        # ``ctx-tab-*`` and ``ctx-pane-*`` IDs MUST include ``type`` —
+        # otherwise multiple sections share the same id and the
+        # ``aria-controls`` / ``aria-labelledby`` references (which
+        # resolve via document-wide ``getElementById``) point at an
+        # earlier hidden section's pane instead of the active one.
+        for fragment in (
+            'id="ctx-tab-${type}-canonical"',
+            'id="ctx-tab-${type}-diff"',
+            'id="ctx-pane-${type}-canonical"',
+            'id="ctx-pane-${type}-diff"',
+            'aria-controls="ctx-pane-${type}-canonical"',
+            'aria-controls="ctx-pane-${type}-diff"',
+            'aria-labelledby="ctx-tab-${type}-canonical"',
+            'aria-labelledby="ctx-tab-${type}-diff"',
+        ):
+            assert fragment in ctx_js, (
+                f"detail-tab/pane fragment must be type-qualified to avoid "
+                f"duplicate-ID collisions across sections (#1088 review): {fragment}"
+            )
+        # And the negative: the previous un-qualified literals must NOT
+        # appear as JS strings or HTML attributes (the only allowed
+        # mentions are in the explanatory comment paragraph above the
+        # tablist HTML).
+        for literal in (
+            '"ctx-tab-canonical"',
+            '"ctx-pane-canonical"',
+            '"ctx-tab-diff"',
+            '"ctx-pane-diff"',
+        ):
+            assert literal not in ctx_js, (
+                f"un-qualified ID {literal} must not appear — see the type-qualified version above"
+            )
+
+    def test_detail_tab_keyboard_navigation(self, ctx_js: str) -> None:
+        # Arrow nav within the tablist + ARIA state update on activation.
+        # Pin (a) the helper that mutates aria-selected/tabindex on
+        # activation, and (b) a keydown handler that delegates to
+        # ``_arrowNavIndex`` so the tablist follows the same convention
+        # as the main app's ``.tab-nav``.
+        helper_start = ctx_js.index("_activateCtxDetailTab")
+        helper_end = ctx_js.index("\n    };", helper_start)
+        helper = ctx_js[helper_start:helper_end]
+        assert "aria-selected" in helper, (
+            "_activateCtxDetailTab must update aria-selected so the SR "
+            "announce stays in sync with the visual .active class"
+        )
+        assert "tabindex" in helper, (
+            "_activateCtxDetailTab must update tabindex (roving focus model) "
+            "so only the active tab is in the keyboard focus order"
+        )
+        # The arrow-key listener must call _arrowNavIndex (shared helper
+        # in app.js, used by .tab-nav and sources vendor tabs).
+        nav_match = re.search(
+            r"_ctxTabsContainer\.addEventListener\('keydown'.*?_arrowNavIndex",
+            ctx_js,
+            re.DOTALL,
+        )
+        assert nav_match, (
+            "ctx-detail-tabs must wire keydown → _arrowNavIndex so Left/Right/"
+            "Home/End move focus between tabs (#1073)"
         )

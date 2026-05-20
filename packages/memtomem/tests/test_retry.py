@@ -1,4 +1,4 @@
-"""Tests for embedding/retry.py — _parse_retry_after and with_retry."""
+"""Tests for embedding/retry.py — parse_retry_after and with_retry."""
 
 from __future__ import annotations
 
@@ -6,27 +6,58 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from memtomem.embedding.retry import _parse_retry_after, with_retry
+from memtomem.embedding.retry import RateLimitError, parse_retry_after, with_retry
 
 
-# ── _parse_retry_after ────────────────────────────────────────────────
+# ── RateLimitError ───────────────────────────────────────────────────
+
+
+class TestRateLimitError:
+    def test_default_retry_after_is_none(self):
+        exc = RateLimitError()
+        assert exc.retry_after is None
+
+    def test_retry_after_attribute_set(self):
+        exc = RateLimitError(retry_after=5.0)
+        assert exc.retry_after == 5.0
+
+    @pytest.mark.asyncio
+    async def test_with_retry_honors_retry_after(self):
+        call_count = 0
+
+        @with_retry(max_attempts=2, base_delay=1.0, retryable_exceptions=(RateLimitError,))
+        async def fn():
+            nonlocal call_count
+            call_count += 1
+            raise RateLimitError(retry_after=7.0)
+
+        mock_sleep = AsyncMock()
+        with patch("memtomem.embedding.retry.asyncio.sleep", mock_sleep):
+            with pytest.raises(RateLimitError):
+                await fn()
+
+        # base_delay=1.0, retry_after=7.0 → max(1.0, 7.0) = 7.0
+        assert mock_sleep.call_args_list[0].args[0] == 7.0
+
+
+# ── parse_retry_after ────────────────────────────────────────────────
 
 
 class TestParseRetryAfter:
     def test_numeric_string(self):
-        assert _parse_retry_after("5") == 5.0
+        assert parse_retry_after("5") == 5.0
 
     def test_float_string(self):
-        assert _parse_retry_after("2.5") == 2.5
+        assert parse_retry_after("2.5") == 2.5
 
     def test_none_returns_none(self):
-        assert _parse_retry_after(None) is None
+        assert parse_retry_after(None) is None
 
     def test_empty_string_returns_none(self):
-        assert _parse_retry_after("") is None
+        assert parse_retry_after("") is None
 
     def test_non_numeric_non_date_returns_none(self):
-        assert _parse_retry_after("not-a-number") is None
+        assert parse_retry_after("not-a-number") is None
 
     def test_valid_http_date(self):
         from datetime import datetime, timezone
@@ -37,7 +68,7 @@ class TestParseRetryAfter:
         from datetime import timedelta
 
         future = future + timedelta(seconds=10)
-        result = _parse_retry_after(format_datetime(future))
+        result = parse_retry_after(format_datetime(future))
         assert result is not None
         assert 0 < result <= 11  # allow 1s clock drift
 

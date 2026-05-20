@@ -10,7 +10,19 @@ from functools import wraps
 logger = logging.getLogger(__name__)
 
 
-def _parse_retry_after(value: str | None) -> float | None:
+class RateLimitError(Exception):
+    """Raised on HTTP 429 to trigger retry via with_retry decorator.
+
+    The optional retry_after attribute is honored by with_retry when set:
+    the loop sleeps for max(exponential_delay, retry_after).
+    """
+
+    def __init__(self, retry_after: float | None = None) -> None:
+        self.retry_after = retry_after
+        super().__init__(f"Rate limited (retry_after={retry_after})")
+
+
+def parse_retry_after(value: str | None) -> float | None:
     """Parse a Retry-After header value (seconds or RFC 7231 HTTP-date).
 
     Returns the delay in seconds, or None if unparseable.

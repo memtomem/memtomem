@@ -1326,7 +1326,20 @@ function activateTab(tabName, opts = {}) {
     switchSettingsSection(start || 'config');
   }
   if (tabName === 'context-gateway') {
-    let start = opts.sectionOverride || STATE.lastSettingsSection;
+    let start = opts.sectionOverride;
+    // #1070: prefer the deep-link ``?section=`` over remembered state so a
+    // cold-loaded share-URL routes to the target leaf instead of landing on
+    // Overview. ``sectionOverride`` (set by ``switchSettingsSection``'s
+    // re-entry hop) still wins so an in-page click is not overridden by a
+    // stale URL param. ``_ctxParseDeepLink`` is declared at module scope in
+    // ``context-gateway.js`` and is on ``window`` by the time the
+    // DOMContentLoaded handler fires ``activateTab`` — fall back gracefully
+    // if it isn't (e.g., script-load ordering regression).
+    if (!start && typeof _ctxParseDeepLink === 'function') {
+      const link = _ctxParseDeepLink();
+      if (link && GATEWAY_SECTIONS.has(link.section)) start = link.section;
+    }
+    if (!start) start = STATE.lastSettingsSection;
     if (!start) {
       try { start = localStorage.getItem(LAST_SECTION_KEY); } catch {}
     }

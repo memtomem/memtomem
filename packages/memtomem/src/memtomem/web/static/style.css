@@ -293,6 +293,11 @@ header h1 { font-size: 1.2rem; font-weight: 700; color: var(--accent); letter-sp
   .settings-nav-btn .nav-sub { display: none; }
 }
 
+/* The mobile (<=520px) Settings/Gateway stacking overrides live at the END
+   of this file (search "issue #1072"). They must come after the base
+   Context Gateway rules below to win the cascade — equal-specificity
+   selectors lose to whichever comes later in source order. */
+
 /* ── Tab Panels ── */
 .tab-panel { flex: 1; min-height: 0; overflow: hidden; display: none; flex-direction: column; }
 .tab-panel.active { display: flex; }
@@ -3702,12 +3707,22 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 .ctx-overview-last-sync-value { font-variant-numeric: tabular-nums; }
 
 .ctx-overview-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
-.ctx-overview-stat { text-align: center; padding: 20px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); cursor: pointer; transition: border-color 0.15s; }
+/* PR #1088 review: tile is now a layout container holding a separate
+   ``<button class="ctx-overview-stat-nav">`` (navigation target) plus the
+   pointer buttons as siblings — avoids nesting interactive descendants
+   inside a button-role element. The visual frame stays on the outer div
+   so hover still highlights the whole tile. */
+.ctx-overview-stat { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); transition: border-color 0.15s; overflow: hidden; }
 .ctx-overview-stat:hover { border-color: var(--accent); }
+.ctx-overview-stat-nav { display: block; width: 100%; padding: 20px 16px; background: transparent; border: none; cursor: pointer; color: inherit; font: inherit; text-align: center; }
 .ctx-overview-count { font-size: 2rem; font-weight: 700; color: var(--accent); }
 .ctx-overview-label { font-size: 0.85rem; color: var(--muted); margin-top: 4px; }
 .ctx-overview-badge { font-size: 0.72rem; margin-top: 8px; }
-.ctx-overview-pointers { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; text-align: left; }
+/* Pointer line sits BELOW the nav button (sibling, not child). Inset it
+   horizontally to match the nav button's 16px padding so the visual gutter
+   stays continuous, and pull it up against the nav button's bottom padding
+   so the row reads as one tile rather than two stacked panels. */
+.ctx-overview-pointers { margin: 0 0 12px; padding: 0 16px; display: flex; flex-direction: column; gap: 4px; text-align: left; }
 .ctx-overview-pointer { background: transparent; border: 1px solid transparent; padding: 4px 6px; color: var(--muted); font: inherit; font-size: 0.72rem; text-align: left; cursor: pointer; border-radius: 4px; line-height: 1.35; }
 .ctx-overview-pointer:hover { background: rgba(108, 143, 255, 0.08); color: var(--text); border-color: var(--border); }
 .ctx-overview-pointer:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -3971,7 +3986,11 @@ body.help-hidden #help-toggle { opacity: 0.5; }
   font-family: var(--mono);
 }
 .ctx-detail-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
-.ctx-detail-tab { padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; color: var(--muted); font-size: 0.85rem; transition: color 0.15s; }
+/* #1073: rendered as real <button role=tab> so screen readers announce
+   "tab" and Enter/Space activate without a custom keydown shim. The
+   button defaults (background, border, font) are reset so the visual
+   matches the prior <div>-based tab. */
+.ctx-detail-tab { padding: 8px 16px; cursor: pointer; border: none; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font-family: inherit; font-size: 0.85rem; line-height: inherit; transition: color 0.15s; }
 .ctx-detail-tab:hover { color: var(--text); }
 .ctx-detail-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 .ctx-detail-pane { display: none; }
@@ -4073,4 +4092,35 @@ body.help-hidden #help-toggle { opacity: 0.5; }
   color: var(--muted);
   font-size: 0.85rem;
   margin: 24px 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Mobile (<=520px) Settings + Context Gateway stacking — issue #1072
+   ───────────────────────────────────────────────────────────────
+   Keep this block at the END of the file. The .ctx-* overrides have
+   the same specificity as the base Context Gateway rules higher up,
+   so source order is what makes them win in the 436–520px band
+   (where auto-fill, minmax(200px, 1fr) would otherwise pick 2
+   columns).
+   ═══════════════════════════════════════════════════════════════ */
+@media (max-width: 520px) {
+  .settings-layout { flex-direction: column; }
+  .settings-nav {
+    width: 100%;
+    max-height: 38vh;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .settings-content {
+    width: 100%;
+    min-width: 0;
+    padding: 12px 12px;
+  }
+  .ctx-header {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    row-gap: 8px;
+  }
+  .ctx-header > div { flex-wrap: wrap; }
+  .ctx-overview-grid { grid-template-columns: minmax(0, 1fr); }
 }

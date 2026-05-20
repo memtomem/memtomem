@@ -18,7 +18,7 @@ from memtomem.web.schemas.core import chunk_to_out
 
 router = APIRouter(prefix="/dedup", tags=["dedup"])
 
-_DEDUP_SCAN_TIMEOUT = 30  # seconds
+_DEDUP_SCAN_TIMEOUT = 120  # seconds
 
 
 @router.get("/candidates", response_model=DedupScanResponse)
