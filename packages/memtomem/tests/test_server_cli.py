@@ -329,3 +329,152 @@ def test_network_url_requires_full_http_url(url: str) -> None:
         server_mod.main(["--transport", "http", "--url", url])
 
     assert "must be a full http(s) URL" in str(exc.value)
+
+
+def test_network_banner_prints_internal_and_public_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from memtomem import server as server_mod
+
+    callbacks = _isolate_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr(server_mod, "_try_hold_legacy_flock", lambda _path: None)
+    monkeypatch.setattr(server_mod, "_install_sigterm_handler", lambda *_paths: None)
+    monkeypatch.setattr(server_mod.mcp, "run", lambda *args, **kwargs: None)
+
+    try:
+        server_mod.main(
+            [
+                "--transport",
+                "http",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8771",
+                "--url",
+                "https://mcp.example.test/mcp",
+            ]
+        )
+    finally:
+        _run_callbacks(callbacks)
+
+    out = capsys.readouterr().out
+    assert "Transport: http (streamable-http)" in out
+    assert "Internal URL: http://127.0.0.1:8771/mcp" in out
+    assert "Public URL:   https://mcp.example.test/mcp" in out
+    # Symmetric with the stdio TTY guard test — the hint should not pollute
+    # network-server output.
+    assert "memtomem-server is an MCP stdio server." not in out
+
+
+def test_network_banner_emits_wildcard_host_hint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from memtomem import server as server_mod
+
+    callbacks = _isolate_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr(server_mod, "_try_hold_legacy_flock", lambda _path: None)
+    monkeypatch.setattr(server_mod, "_install_sigterm_handler", lambda *_paths: None)
+    monkeypatch.setattr(server_mod.mcp, "run", lambda *args, **kwargs: None)
+
+    try:
+        server_mod.main(["--transport", "http", "--host", "0.0.0.0", "--port", "8772"])
+    finally:
+        _run_callbacks(callbacks)
+
+    out = capsys.readouterr().out
+    assert "Note: bound on 0.0.0.0 but only loopback Host/Origin headers are" in out
+    assert "--allowed-host" in out
+
+
+def test_network_banner_suppressed_when_url_overrides_wildcard_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Mutation-validates the hint gate: --url present means user knows.
+
+    Without the ``args.url is None`` guard in ``_print_network_server_info``,
+    the hint would fire whenever ``args.host == "0.0.0.0"`` regardless of
+    whether a public ``--url`` was supplied — which would be wrong because
+    the URL hostname is in the allow-list. Asserting absence here pins that
+    branch.
+    """
+    from memtomem import server as server_mod
+
+    callbacks = _isolate_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr(server_mod, "_try_hold_legacy_flock", lambda _path: None)
+    monkeypatch.setattr(server_mod, "_install_sigterm_handler", lambda *_paths: None)
+    monkeypatch.setattr(server_mod.mcp, "run", lambda *args, **kwargs: None)
+
+    try:
+        server_mod.main(
+            [
+                "--transport",
+                "http",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8773",
+                "--url",
+                "https://mcp.example.test/mcp",
+            ]
+        )
+    finally:
+        _run_callbacks(callbacks)
+
+    out = capsys.readouterr().out
+    assert "bound on 0.0.0.0" not in out
+
+
+def test_disable_dns_rebinding_protection_pins_empty_allow_lists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The disable-rebind branch must pass allow-lists explicitly, not rely on defaults.
+
+    Mutation-validates the pin: this captures the kwargs passed to
+    ``TransportSecuritySettings`` rather than the resulting attributes, so
+    a regression that drops the explicit ``allowed_hosts=[]`` /
+    ``allowed_origins=[]`` would surface here even if the SDK's current
+    default happens to be ``[]``.
+    """
+    import mcp.server.transport_security as ts_mod
+
+    from memtomem import server as server_mod
+
+    callbacks = _isolate_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr(server_mod, "_try_hold_legacy_flock", lambda _path: None)
+    monkeypatch.setattr(server_mod, "_install_sigterm_handler", lambda *_paths: None)
+    monkeypatch.setattr(server_mod.mcp, "run", lambda *args, **kwargs: None)
+
+    captured_kwargs: list[dict[str, object]] = []
+    real_cls = ts_mod.TransportSecuritySettings
+
+    def _capture(**kwargs: object) -> object:
+        captured_kwargs.append(kwargs)
+        return real_cls(**kwargs)
+
+    monkeypatch.setattr(ts_mod, "TransportSecuritySettings", _capture)
+
+    try:
+        server_mod.main(
+            [
+                "--transport",
+                "http",
+                "--url",
+                "https://mcp.example.test/mcp",
+                "--disable-dns-rebinding-protection",
+            ]
+        )
+    finally:
+        _run_callbacks(callbacks)
+
+    assert len(captured_kwargs) == 1
+    kwargs = captured_kwargs[0]
+    assert kwargs["enable_dns_rebinding_protection"] is False
+    assert kwargs["allowed_hosts"] == []
+    assert kwargs["allowed_origins"] == []
