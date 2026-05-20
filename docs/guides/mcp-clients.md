@@ -423,6 +423,89 @@ ollama pull bge-m3
 
 ---
 
+## 10. Network transports (advanced)
+
+Every editor section above launches `memtomem-server` over **stdio** — the
+MCP client spawns the server as a subprocess and talks to it on stdin/stdout.
+That is the right transport for almost every setup; you don't need this
+section unless you specifically want a long-running server an editor on a
+different machine can connect to over the network.
+
+`memtomem-server` also supports two MCP **network transports**:
+
+| Transport | Flag | Notes |
+|-----------|------|-------|
+| Streamable HTTP | `--transport http` (alias for `streamable-http`) | Recommended for new deployments |
+| Server-Sent Events | `--transport sse` | Older transport, kept for editors that haven't moved off SSE |
+
+> **Trusted-network only.** Both network transports speak the MCP protocol
+> with **no built-in authentication**. Bind to loopback (`127.0.0.1`) and
+> put an authenticated reverse proxy in front before exposing publicly.
+> Do not expose them on the public internet without that layer.
+
+### Quick start — Streamable HTTP on loopback
+
+```bash
+memtomem-server \
+  --transport http \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --url http://127.0.0.1:8000/mcp
+```
+
+The server prints the internal and public URLs at startup and waits for
+client connections. Stop it with `Ctrl+C`.
+
+### Behind a reverse proxy
+
+`--url` is the **public endpoint your MCP client connects to**, and the
+URL path is also used as the server's internal endpoint path. Forward the
+public path unchanged to the internal listener:
+
+```bash
+memtomem-server \
+  --transport http \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --url https://mcp.example.com/mcp
+```
+
+For SSE, the URL path is split into a mount point plus the SSE endpoint
+(`https://mcp.example.com/memtomem/events` → mount `/memtomem`, endpoint
+`/events`).
+
+### DNS rebinding protection
+
+By default, `memtomem-server` rejects requests whose `Host` / `Origin`
+headers don't match either `127.0.0.1`/`localhost`, the hostname in
+`--url`, or values you pass via `--allowed-host` / `--allowed-origin`.
+This blocks DNS-rebinding attacks against the local listener.
+
+- `--allowed-host VALUE` — extra `Host` header to accept. Repeatable.
+- `--allowed-origin VALUE` — extra `Origin` header to accept. Repeatable.
+- `--disable-dns-rebinding-protection` — turn the check off entirely.
+  **Only safe behind an authenticated reverse proxy** that already
+  validates the request origin.
+
+> **`--host 0.0.0.0` binds on all interfaces but does not auto-allow them.**
+> If you bind to `0.0.0.0` without passing a `--url` whose hostname
+> matches how clients reach you (or an explicit `--allowed-host`), the
+> allow-list stays loopback-only and LAN clients are rejected. Either
+> set `--url http://<lan-ip>:<port>/mcp` or pass `--allowed-host <lan-ip>`.
+
+### One server at a time
+
+`memtomem-server` takes a per-user pid lock regardless of transport.
+Run **either** the stdio server (spawned by your editor) **or** a network
+server, not both — a second launch logs a warning about concurrent writes
+and leaves the primary server's pid file in place. If you need both MCP
+and Web UI access concurrently, see the [Concurrent MCP + Web server]
+section in the reference guide.
+
+[Concurrent MCP + Web server]: reference.md#concurrent-mcp--web-server
+
+---
+
 ## Troubleshooting
 
 ### Tools don't appear in my editor
@@ -432,7 +515,12 @@ ollama pull bge-m3
 3. Verify the install is reachable: `mm --version` (or `uvx --from memtomem mm --version` for uvx-only setups) — side-effect-free
 4. From inside the editor, ask it to call the `mem_status` tool — a successful response confirms the MCP handshake reached the server
 
-> Don't run `uvx --from memtomem memtomem-server` bare in a terminal as a "does it start?" test — it expects JSON-RPC on stdin, so TTY noise triggers `ERROR` lines that don't reflect install health, and it provisions `~/.memtomem/` on a fresh machine.
+> Running `uvx --from memtomem memtomem-server` bare in a terminal prints
+> a setup hint (MCP client configuration plus the network-transport
+> examples from §10) and exits — it is **not** a "does it serve?" smoke
+> test because no MCP client is connected. To test stdio, configure your
+> editor and call `mem_status` from there; to test a network transport,
+> start the server with `--transport http|sse` and connect a client.
 
 ### "Connection refused" or timeout
 

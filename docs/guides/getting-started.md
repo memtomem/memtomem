@@ -426,7 +426,13 @@ uv pip install -e "packages/memtomem[all]"  # Source
 3. Verify the install is reachable: `mm --version` (or `uvx --from memtomem mm --version` for uvx-only setups) — side-effect-free, no state dir is touched
 4. From inside the editor, ask it to call the `mem_status` tool — a successful response confirms the MCP handshake reached the server
 
-> Don't run `uvx --from memtomem memtomem-server` in a terminal to test — it expects JSON-RPC on stdin, so TTY noise triggers `ERROR` lines that don't reflect install health, and the startup itself provisions `~/.memtomem/` even on a fresh machine.
+> Running `uvx --from memtomem memtomem-server` directly in a terminal
+> now prints a setup hint and exits without provisioning `~/.memtomem/`.
+> That hint confirms the binary launches but is **not** a "does it
+> serve?" check — for that, configure your editor and call `mem_status`
+> from there. The network-transport flags (`--transport http|sse`) are
+> intended for remote deployments; see
+> [mcp-clients.md → Network transports](mcp-clients.md#10-network-transports-advanced).
 
 ---
 
