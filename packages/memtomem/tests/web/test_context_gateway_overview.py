@@ -1145,6 +1145,15 @@ def test_overview_last_sync_renders_relative_text_and_iso_tooltip(page, mm_web_u
         f"value span must mirror the raw ISO on data-iso for non-tooltip "
         f"consumers; got {value.get_attribute('data-iso')!r}"
     )
+    # #1076: the label carries its own ``title=`` explaining that the value
+    # is canonical-file mtime, not a recorded sync event. Without this
+    # tooltip the renamed "Canonical updated" label still leaves the
+    # diagnose-case user guessing why edits also bump the value.
+    label = row.locator(".ctx-overview-last-sync-label")
+    label_title = label.get_attribute("title") or ""
+    assert "mtime" in label_title, (
+        f"label title= must explain the canonical-mtime data source; got {label_title!r}"
+    )
     # Relative formatter routes through ``t('time.relative.*')``; for ~5
     # minutes ago we expect the minutes-ago branch in EN ("5m ago").
     text = (value.text_content() or "").strip()
@@ -1184,6 +1193,8 @@ def test_overview_last_sync_absent_when_null(page, mm_web_url: str) -> None:
     # by the data-i18n attribute name in case the locale flips around test
     # execution.
     header_text = page.locator("#ctx-overview-content .ctx-overview-header").text_content() or ""
-    assert "Last sync" not in header_text, (
+    # Label was renamed from "Last sync" → "Canonical updated" in #1076 to
+    # stop overstating the mtime-based data source as a sync-event log.
+    assert "Canonical updated" not in header_text, (
         f"label must not leak into header when value is null; got: {header_text!r}"
     )
