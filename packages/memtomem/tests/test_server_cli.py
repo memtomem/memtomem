@@ -387,7 +387,13 @@ def test_network_banner_emits_wildcard_host_hint(
 
     out = capsys.readouterr().out
     assert "Note: bound on 0.0.0.0 but only loopback Host/Origin headers are" in out
-    assert "--allowed-host" in out
+    # Hint must recommend --url only. A bare ``--allowed-host <hostname>``
+    # would not match the typical ``Host: <hostname>:<port>`` header — the
+    # MCP SDK does exact-match unless the allow-list entry ends in ``:*``
+    # (see ``mcp/server/transport_security.py``). Pinning both arms here
+    # catches a regression that re-introduces the misleading flag pair.
+    assert "Pass --url http://<reachable-host>:<port>/..." in out
+    assert "--allowed-host" not in out
 
 
 def test_network_banner_suppressed_when_url_overrides_wildcard_host(

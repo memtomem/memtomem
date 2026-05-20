@@ -540,18 +540,21 @@ def _print_network_server_info(
     ]
     # ``--host 0.0.0.0`` binds on every interface but ``_host_patterns``
     # returns ``[]`` for the wildcard, so the DNS-rebinding allow-list only
-    # contains loopback unless ``--url`` carries a non-loopback hostname or
-    # ``--allowed-host`` is passed. Without that, LAN clients hit a 421/403
-    # and the misconfiguration is hard to diagnose. Surface a one-line hint
-    # whenever the wildcard host is paired with the auto-substituted
-    # loopback ``--url`` (i.e. the user did not provide one).
+    # contains loopback unless ``--url`` carries a non-loopback hostname.
+    # The hint recommends only ``--url`` because the MCP SDK does exact
+    # ``Host`` matching unless an allow-list entry ends in ``:*`` (see
+    # ``mcp/server/transport_security.py``); ``--url`` derives both the
+    # ``:*`` wildcard *and* the matching ``Origin`` automatically, while
+    # a bare ``--allowed-host <reachable-host>`` does not match the
+    # typical ``Host: <reachable-host>:<port>`` header and still leaves
+    # Origin-bearing clients blocked.
     if args.host in {"0.0.0.0", "::"} and args.url is None:
         lines.extend(
             [
                 "",
                 f"Note: bound on {args.host} but only loopback Host/Origin headers are",
-                "      accepted. Pass --url http://<reachable-host>:<port>/... or",
-                "      --allowed-host <reachable-host> for LAN clients.",
+                "      accepted. Pass --url http://<reachable-host>:<port>/... for",
+                "      LAN clients (auto-populates the Host and Origin allow-lists).",
             ]
         )
     lines.extend(["", "Press Ctrl+C to stop."])
