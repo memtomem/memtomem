@@ -1122,6 +1122,15 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
   });
   if (!ok) return;
   btnLoading(btn, true);
+  // Track per-phase outcomes so we can (a) refresh the overview even when
+  // a later phase fails — without this the dashboard keeps showing
+  // pre-sync counts while disk has already moved (issue #1074) — and
+  // (b) surface a partial-result toast naming what landed and what
+  // didn't. Without the partial copy, a "Sync failed: X" toast after
+  // skills already wrote to disk looks like nothing happened.
+  const succeeded = [];
+  let failed = null;
+  let anyPhaseStarted = false;
   try {
     const syncAllScopeId = _ctxActiveScopeId;
     const csrf = await ensureCsrfToken();
@@ -1136,18 +1145,32 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
       ? ['skills', 'commands', 'agents']
       : ['skills', 'agents'];
     for (const typ of types) {
-      const resp = await fetch(
-        _ctxWithTargetScope(`/api/context/${typ}/sync`, { scopeId: syncAllScopeId }),
-        { method: 'POST', headers },
-      );
-      if (!resp.ok) {
-        throw new Error(await _ctxErrorMessageFromResponse(resp, `Sync ${typ} failed`));
+      anyPhaseStarted = true;
+      let resp;
+      try {
+        resp = await fetch(
+          _ctxWithTargetScope(`/api/context/${typ}/sync`, { scopeId: syncAllScopeId }),
+          { method: 'POST', headers },
+        );
+      } catch (err) {
+        failed = { phase: typ, reason: err.message };
+        break;
       }
+      if (!resp.ok) {
+        failed = {
+          phase: typ,
+          reason: await _ctxErrorMessageFromResponse(resp, `Sync ${typ} failed`),
+        };
+        break;
+      }
+      succeeded.push(typ);
     }
     // Settings hooks sync (additive merge) — appends memtomem-owned hook
     // entries to ~/.claude/settings.json without clobbering user-authored
     // entries. Promoted from dev-only via RFC #761 (ADR-0001 §5 criteria
-    // + HTTP-layer test fixtures).
+    // + HTTP-layer test fixtures). Skipped entirely if a prior artifact
+    // phase failed — settings often share root cause with artifacts
+    // (perms/scope), and attempting it after a failure is just noise.
     //
     // The route returns HTTP 200 even when individual generators fail —
     // each per-result entry carries its own ``status`` (one of ``ok`` /
@@ -1163,24 +1186,68 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     //   aborted            → mtime_conflict warning    (#799)
     //   needs_confirmation → info partial + Open Settings action (#774)
     //   all ok / skipped   → sync_success
-    const settingsResp = await fetch(
-      _ctxWithTargetScope('/api/context/settings/sync', { scopeId: syncAllScopeId }),
-      { method: 'POST', headers },
-    );
-    if (!settingsResp.ok) {
-      throw new Error(await _ctxErrorMessageFromResponse(settingsResp, 'Settings sync failed'));
+    let settingsSeverity = null;
+    let settingsReason = '';
+    if (!failed) {
+      anyPhaseStarted = true;
+      let settingsResp;
+      try {
+        settingsResp = await fetch(
+          _ctxWithTargetScope('/api/context/settings/sync', { scopeId: syncAllScopeId }),
+          { method: 'POST', headers },
+        );
+      } catch (err) {
+        failed = { phase: 'settings', reason: err.message };
+      }
+      if (!failed) {
+        if (!settingsResp.ok) {
+          failed = {
+            phase: 'settings',
+            reason: await _ctxErrorMessageFromResponse(settingsResp, 'Settings sync failed'),
+          };
+        } else {
+          const settingsData = await settingsResp.json().catch(() => ({}));
+          const settingsResults = settingsData.results || [];
+          const firstWithStatus = (s) => settingsResults.find(r => r && r.status === s);
+          const errored = firstWithStatus('error');
+          const aborted = firstWithStatus('aborted');
+          const needsConfirmation = firstWithStatus('needs_confirmation');
+          if (errored) {
+            settingsSeverity = 'error';
+            settingsReason = errored.reason || '';
+          } else if (aborted) {
+            settingsSeverity = 'aborted';
+          } else if (needsConfirmation) {
+            settingsSeverity = 'needs_confirmation';
+          } else {
+            settingsSeverity = 'ok';
+          }
+        }
+      }
     }
-    const settingsData = await settingsResp.json().catch(() => ({}));
-    const settingsResults = settingsData.results || [];
-    const firstWithStatus = (s) => settingsResults.find(r => r && r.status === s);
-    const errored = firstWithStatus('error');
-    const aborted = firstWithStatus('aborted');
-    const needsConfirmation = firstWithStatus('needs_confirmation');
-    if (errored) {
-      showToast(t('toast.sync_failed', { error: errored.reason || '' }), 'error');
-    } else if (aborted) {
+    // Decide the final toast. Partial-success branches name the phases
+    // that landed so the user can map the toast to what disk actually
+    // changed; a bare "Sync failed: X" after a half-completed run is
+    // the failure mode the issue calls out.
+    const phaseLabel = (p) => t(`settings.ctx.${p}_phase_title`);
+    if (failed) {
+      if (succeeded.length === 0) {
+        showToast(t('toast.sync_failed', { error: failed.reason }), 'error');
+      } else {
+        showToast(
+          t('toast.sync_partial_failed', {
+            succeeded: succeeded.map(phaseLabel).join(', '),
+            failed_phase: phaseLabel(failed.phase),
+            reason: failed.reason,
+          }),
+          'error',
+        );
+      }
+    } else if (settingsSeverity === 'error') {
+      showToast(t('toast.sync_failed', { error: settingsReason }), 'error');
+    } else if (settingsSeverity === 'aborted') {
       showToast(t('settings.ctx.mtime_conflict'), 'warning');
-    } else if (needsConfirmation) {
+    } else if (settingsSeverity === 'needs_confirmation') {
       showToast(
         t('toast.sync_partial_settings_needs_confirmation'),
         'info',
@@ -1194,10 +1261,16 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     } else {
       showToast(t('settings.ctx.sync_success'));
     }
-    loadCtxOverview();
-  } catch (err) {
-    showToast(t('toast.sync_failed', { error: err.message }), 'error');
-  } finally { btnLoading(btn, false); }
+  } finally {
+    // Refresh the overview whenever any phase actually fired — this
+    // is the load-bearing line for #1074. A mid-run failure still
+    // leaves disk in a new state, so the dashboard counts must
+    // reflect what the next attempt would be diffing against.
+    if (anyPhaseStarted) {
+      loadCtxOverview();
+    }
+    btnLoading(btn, false);
+  }
 });
 
 // Refresh button — re-fetches /api/context/overview to pick up freshly
