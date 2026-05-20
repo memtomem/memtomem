@@ -12,6 +12,10 @@ This test asserts:
 * ``#ctx-sync-all-btn`` fits inside the viewport.
 * The settings nav is no longer occupying the 180px sidebar slot — the
   content pane takes the full viewport width.
+* The overview grid resolves to one column at 480px. At 390px the base
+  ``minmax(200px, 1fr)`` already happens to pick one track due to the
+  narrow content width, which masks the cascade-order regression Codex
+  caught — the 480px assertion is what actually pins it.
 """
 
 from __future__ import annotations
@@ -101,4 +105,54 @@ def test_gateway_mobile_390px_no_overflow(page, mm_web_url) -> None:
         "settings-content should span the full viewport width at 390px, got "
         f"contentWidth={metrics['contentWidth']} vs "
         f"innerWidth={metrics['innerWidth']}"
+    )
+
+
+def test_gateway_overview_grid_single_column_at_480px(page, mm_web_url) -> None:
+    """At 480px the override must beat the base auto-fill rule.
+
+    The cascade-order bug (Codex P2 on PR #1087) lived in the 436–520px
+    band: the @media block was placed BEFORE the base
+    ``.ctx-overview-grid { grid-template-columns: repeat(auto-fill,
+    minmax(200px, 1fr)); }`` rule, so the equal-specificity base rule
+    won source order and produced two columns. Pin this by asserting
+    the resolved track count at 480px.
+    """
+    page.set_viewport_size({"width": 480, "height": 800})
+    install_default_stubs(page)
+    page.route(
+        "**/api/context/overview",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_EMPTY_OVERVIEW),
+        ),
+    )
+
+    page.goto(mm_web_url, wait_until="domcontentloaded")
+    page.wait_for_selector(".tab-nav .tab-btn", timeout=5_000)
+    page.locator('.tab-btn[data-tab="context-gateway"]').click()
+    page.wait_for_function(
+        "() => document.querySelector('.tab-btn.active')?.dataset.tab === 'context-gateway'",
+        timeout=4_000,
+    )
+    page.wait_for_selector("#tab-context-gateway .ctx-overview-grid", timeout=4_000)
+
+    track_count = page.evaluate(
+        """
+        () => {
+          const grid = document.querySelector(
+            '#tab-context-gateway .ctx-overview-grid'
+          );
+          if (!grid) return null;
+          const tracks = getComputedStyle(grid).gridTemplateColumns.trim();
+          return tracks ? tracks.split(/\\s+/).length : 0;
+        }
+        """
+    )
+
+    assert track_count == 1, (
+        "ctx-overview-grid should resolve to one column at 480px, got "
+        f"{track_count} tracks (cascade-order regression on the @media "
+        "override — see PR #1087 review)"
     )

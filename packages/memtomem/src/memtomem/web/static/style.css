@@ -293,30 +293,10 @@ header h1 { font-size: 1.2rem; font-weight: 700; color: var(--accent); letter-sp
   .settings-nav-btn .nav-sub { display: none; }
 }
 
-/* Stack the two-pane Settings/Gateway layout on narrow viewports so the
-   content panel gets full width instead of being squeezed by the 180px nav.
-   See issue #1072. */
-@media (max-width: 520px) {
-  .settings-layout { flex-direction: column; }
-  .settings-nav {
-    width: 100%;
-    max-height: 38vh;
-    border-right: 0;
-    border-bottom: 1px solid var(--border);
-  }
-  .settings-content {
-    width: 100%;
-    min-width: 0;
-    padding: 12px 12px;
-  }
-  .ctx-header {
-    flex-wrap: wrap;
-    align-items: flex-start;
-    row-gap: 8px;
-  }
-  .ctx-header > div { flex-wrap: wrap; }
-  .ctx-overview-grid { grid-template-columns: minmax(0, 1fr); }
-}
+/* The mobile (<=520px) Settings/Gateway stacking overrides live at the END
+   of this file (search "issue #1072"). They must come after the base
+   Context Gateway rules below to win the cascade — equal-specificity
+   selectors lose to whichever comes later in source order. */
 
 /* ── Tab Panels ── */
 .tab-panel { flex: 1; min-height: 0; overflow: hidden; display: none; flex-direction: column; }
@@ -4098,4 +4078,35 @@ body.help-hidden #help-toggle { opacity: 0.5; }
   color: var(--muted);
   font-size: 0.85rem;
   margin: 24px 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Mobile (<=520px) Settings + Context Gateway stacking — issue #1072
+   ───────────────────────────────────────────────────────────────
+   Keep this block at the END of the file. The .ctx-* overrides have
+   the same specificity as the base Context Gateway rules higher up,
+   so source order is what makes them win in the 436–520px band
+   (where auto-fill, minmax(200px, 1fr) would otherwise pick 2
+   columns).
+   ═══════════════════════════════════════════════════════════════ */
+@media (max-width: 520px) {
+  .settings-layout { flex-direction: column; }
+  .settings-nav {
+    width: 100%;
+    max-height: 38vh;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .settings-content {
+    width: 100%;
+    min-width: 0;
+    padding: 12px 12px;
+  }
+  .ctx-header {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    row-gap: 8px;
+  }
+  .ctx-header > div { flex-wrap: wrap; }
+  .ctx-overview-grid { grid-template-columns: minmax(0, 1fr); }
 }
