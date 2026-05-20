@@ -476,10 +476,24 @@ For SSE, the URL path is split into a mount point plus the SSE endpoint
 
 ### DNS rebinding protection
 
-By default, `memtomem-server` rejects requests whose `Host` / `Origin`
-headers don't match either `127.0.0.1`/`localhost`, the hostname in
-`--url`, or values you pass via `--allowed-host` / `--allowed-origin`.
-This blocks DNS-rebinding attacks against the local listener.
+By default, `memtomem-server` validates the `Host` and `Origin` headers
+on every request and returns 421 / 403 on a mismatch. This blocks
+DNS-rebinding attacks against the local listener.
+
+The `Host` and `Origin` allow-lists are seeded **asymmetrically**:
+
+- **`Host` allow-list** auto-includes loopback variants (`127.0.0.1` /
+  `localhost` / `[::1]`, each in bare and `:*` port-wildcard form), the
+  hostname from `--url` (bare and `:*` form), the explicit `--host` value
+  when it isn't a wildcard, plus any `--allowed-host` values you pass.
+- **`Origin` allow-list** auto-includes **only** the scheme+host+port
+  derived from `--url` (e.g. `--url https://mcp.example.com/mcp` →
+  `https://mcp.example.com`), plus any `--allowed-origin` values you
+  pass. Loopback Origins are **not** auto-allowed: a browser-style
+  client sending `Origin: http://127.0.0.1:<port>` against a server
+  configured with a non-loopback `--url` will be rejected. Pass
+  `--allowed-origin http://127.0.0.1:<port>` (or `--allowed-origin
+  http://localhost:*`) to test the internal listener from a browser.
 
 - `--allowed-host VALUE` — extra `Host` header to accept. Repeatable.
   Matching is **exact** unless the value ends in `:*` (port wildcard);
