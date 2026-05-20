@@ -548,7 +548,21 @@ def _print_network_server_info(
     # a bare ``--allowed-host <reachable-host>`` does not match the
     # typical ``Host: <reachable-host>:<port>`` header and still leaves
     # Origin-bearing clients blocked.
-    if args.host in {"0.0.0.0", "::"} and args.url is None:
+    #
+    # Only emit the hint when the user has not signalled they intend an
+    # advanced configuration. ``--disable-dns-rebinding-protection``
+    # skips Host/Origin checks entirely; explicit ``--allowed-host`` or
+    # ``--allowed-origin`` values mean the user has already authorized
+    # additional headers. In those cases the "only loopback ... accepted"
+    # message is wrong, so suppress it rather than mislead.
+    hint_applies = (
+        args.host in {"0.0.0.0", "::"}
+        and args.url is None
+        and not args.disable_dns_rebinding_protection
+        and not args.allowed_host
+        and not args.allowed_origin
+    )
+    if hint_applies:
         lines.extend(
             [
                 "",

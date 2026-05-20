@@ -436,6 +436,47 @@ def test_network_banner_suppressed_when_url_overrides_wildcard_host(
     assert "bound on 0.0.0.0" not in out
 
 
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        pytest.param(["--disable-dns-rebinding-protection"], id="disable-rebind"),
+        pytest.param(["--allowed-host", "lan.example.test:*"], id="allowed-host"),
+        pytest.param(["--allowed-origin", "http://lan.example.test:9000"], id="allowed-origin"),
+    ],
+)
+def test_network_banner_suppresses_hint_for_advanced_configurations(
+    extra_args: list[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The hint must not fire when the user has signalled an advanced setup.
+
+    ``--disable-dns-rebinding-protection`` skips Host/Origin validation
+    entirely, and explicit ``--allowed-host`` / ``--allowed-origin``
+    values mean the user has already authorized additional headers — so
+    "only loopback Host/Origin headers are accepted" would be false. Each
+    parametrised case mutation-validates one arm of the gate.
+    """
+    from memtomem import server as server_mod
+
+    callbacks = _isolate_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr(server_mod, "_try_hold_legacy_flock", lambda _path: None)
+    monkeypatch.setattr(server_mod, "_install_sigterm_handler", lambda *_paths: None)
+    monkeypatch.setattr(server_mod.mcp, "run", lambda *args, **kwargs: None)
+
+    try:
+        server_mod.main(["--transport", "http", "--host", "0.0.0.0", "--port", "8774", *extra_args])
+    finally:
+        _run_callbacks(callbacks)
+
+    out = capsys.readouterr().out
+    assert "bound on 0.0.0.0" not in out
+    # The rest of the banner should still print — the suppression only
+    # drops the hint block, not the whole network-server info.
+    assert "Public URL:" in out
+
+
 def test_disable_dns_rebinding_protection_pins_empty_allow_lists(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
