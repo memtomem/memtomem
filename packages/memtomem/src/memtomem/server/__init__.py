@@ -363,6 +363,10 @@ def _parse_server_args(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(
         prog="memtomem-server",
         description="Run the memtomem MCP server.",
+        epilog=(
+            "Security: treat sse/http transports as trusted-network only; place an "
+            "authenticated reverse proxy in front before exposing publicly."
+        ),
     )
     parser.add_argument(
         "--transport",
@@ -375,7 +379,7 @@ def _parse_server_args(argv: list[str] | None = None):
         default="127.0.0.1",
         help=(
             "Local host/interface to listen on for sse/http transports, usually "
-            "127.0.0.1 behind nginx or 0.0.0.0 for direct network access."
+            "127.0.0.1 behind nginx or 0.0.0.0 for trusted direct network access."
         ),
     )
     parser.add_argument(
