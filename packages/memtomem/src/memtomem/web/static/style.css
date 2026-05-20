@@ -3707,12 +3707,22 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 .ctx-overview-last-sync-value { font-variant-numeric: tabular-nums; }
 
 .ctx-overview-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
-.ctx-overview-stat { text-align: center; padding: 20px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); cursor: pointer; transition: border-color 0.15s; }
+/* PR #1088 review: tile is now a layout container holding a separate
+   ``<button class="ctx-overview-stat-nav">`` (navigation target) plus the
+   pointer buttons as siblings — avoids nesting interactive descendants
+   inside a button-role element. The visual frame stays on the outer div
+   so hover still highlights the whole tile. */
+.ctx-overview-stat { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); transition: border-color 0.15s; overflow: hidden; }
 .ctx-overview-stat:hover { border-color: var(--accent); }
+.ctx-overview-stat-nav { display: block; width: 100%; padding: 20px 16px; background: transparent; border: none; cursor: pointer; color: inherit; font: inherit; text-align: center; }
 .ctx-overview-count { font-size: 2rem; font-weight: 700; color: var(--accent); }
 .ctx-overview-label { font-size: 0.85rem; color: var(--muted); margin-top: 4px; }
 .ctx-overview-badge { font-size: 0.72rem; margin-top: 8px; }
-.ctx-overview-pointers { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; text-align: left; }
+/* Pointer line sits BELOW the nav button (sibling, not child). Inset it
+   horizontally to match the nav button's 16px padding so the visual gutter
+   stays continuous, and pull it up against the nav button's bottom padding
+   so the row reads as one tile rather than two stacked panels. */
+.ctx-overview-pointers { margin: 0 0 12px; padding: 0 16px; display: flex; flex-direction: column; gap: 4px; text-align: left; }
 .ctx-overview-pointer { background: transparent; border: 1px solid transparent; padding: 4px 6px; color: var(--muted); font: inherit; font-size: 0.72rem; text-align: left; cursor: pointer; border-radius: 4px; line-height: 1.35; }
 .ctx-overview-pointer:hover { background: rgba(108, 143, 255, 0.08); color: var(--text); border-color: var(--border); }
 .ctx-overview-pointer:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }

@@ -393,61 +393,73 @@ class TestIssue1073CtxKeyboardSemantics:
     """
 
     # ── Overview tiles ────────────────────────────────────────────────
-    def test_overview_tile_renders_with_button_role(self, ctx_js: str) -> None:
-        # The tile HTML is built in a template literal — pin that the
-        # rendered ``ctx-overview-stat`` element carries ``role="button"``
-        # + ``tabindex="0"`` + an ``aria-label``. Without all three, a
-        # screen-reader user can't reach it (no focus order) and a
-        # keyboard user can't activate it (no tabindex / no name).
-        tile_decl = re.search(
-            r'`<div class="ctx-overview-stat"[^`]*data-tile-key=', ctx_js, re.DOTALL
+    def test_overview_tile_uses_inner_nav_button(self, ctx_js: str) -> None:
+        # PR #1088 review (Codex P2): the navigation control must be a
+        # real ``<button class="ctx-overview-stat-nav">`` *inside* the
+        # tile, NOT ``role=button`` on the outer ``<div>``. Putting the
+        # role on the outer div nests the ``.ctx-overview-pointer``
+        # button children inside a button-role ancestor — invalid ARIA
+        # (interactive content inside ``role=button`` is forbidden) and
+        # inconsistently exposed by assistive tech.
+        outer_match = re.search(
+            r'`<div class="ctx-overview-stat"([^>]*)>\s*\n\s*'
+            r'<button([^`>]*)class="ctx-overview-stat-nav"([^`>]*)>',
+            ctx_js,
+            re.DOTALL,
         )
-        assert tile_decl, "ctx-overview-stat template literal not found"
-        decl = tile_decl.group(0)
-        assert 'role="button"' in decl, (
-            "ctx-overview-stat must render with role=button so screen "
-            "readers announce it as a navigation control, not a generic group"
+        assert outer_match, (
+            "tile must render as a plain <div class='ctx-overview-stat'> "
+            "containing a <button class='ctx-overview-stat-nav'> — see"
+            " PR #1088 review (nested-button regression)."
         )
-        assert 'tabindex="0"' in decl, (
-            "ctx-overview-stat must render with tabindex=0 so keyboard "
-            "users can tab into the overview row"
+        outer_attrs = outer_match.group(1)
+        # ``data-section`` / ``data-tile-key`` stay on the outer div so
+        # existing selectors (test suite, deep-link applier, CSS scoping)
+        # keep working — the click handler reads them via
+        # ``closest('.ctx-overview-stat')``.
+        for marker in ("data-section=", "data-tile-key="):
+            assert marker in outer_attrs, (
+                f"outer .ctx-overview-stat must carry {marker} — "
+                "existing browser-test selectors scope by these attrs"
+            )
+        nav_attrs = outer_match.group(2) + outer_match.group(3)
+        for marker in ('type="button"', "aria-label="):
+            assert marker in nav_attrs, (
+                f"ctx-overview-stat-nav <button> must declare {marker} "
+                "(carries the activation semantics + accessible name)"
+            )
+
+    def test_outer_tile_has_no_role_button(self, ctx_js: str) -> None:
+        # Negative pin: the outer ``.ctx-overview-stat`` <div> must NOT
+        # carry ``role="button"`` / ``tabindex="0"`` — that's what made
+        # the pointer buttons nested-interactive (Codex P2 #1088 review).
+        outer_match = re.search(r'`<div class="ctx-overview-stat"([^>]*)>', ctx_js)
+        assert outer_match, "outer ctx-overview-stat div literal not found"
+        outer_attrs = outer_match.group(1)
+        assert "role=" not in outer_attrs, (
+            "outer .ctx-overview-stat <div> must not carry role= — the "
+            "navigation role belongs on the inner .ctx-overview-stat-nav"
+            " button so pointer descendants aren't nested interactives"
         )
-        assert "aria-label=" in decl, (
-            "ctx-overview-stat must carry an aria-label so screen readers "
-            "announce a meaningful name (kind + dominant status)"
+        assert "tabindex=" not in outer_attrs, (
+            "outer .ctx-overview-stat <div> must not be focusable — only "
+            "the inner nav button is in the keyboard focus order"
         )
 
-    def test_overview_tile_keydown_activates(self, ctx_js: str) -> None:
-        # Anchor on the ``ctx-overview-stat`` querySelectorAll wiring
-        # block and pin a keydown handler exists alongside the click
-        # handler — Enter/Space activation parity is what makes
-        # ``role=button`` honest.
-        loop_start = ctx_js.index("el.querySelectorAll('.ctx-overview-stat').forEach(card => {")
-        loop_end = ctx_js.index("\n  });", loop_start)
-        block = ctx_js[loop_start:loop_end]
-        assert "addEventListener('keydown'" in block, (
-            "ctx-overview-stat must wire a keydown handler — role=button "
-            "without Enter/Space is a screen-reader lie (#1073)"
+    def test_overview_tile_click_wired_to_nav_button(self, ctx_js: str) -> None:
+        # The click handler must target the inner ``.ctx-overview-stat-nav``
+        # selector, not the outer ``.ctx-overview-stat``. Otherwise the
+        # nested-button regression would silently re-appear if someone
+        # restored ``role=button`` on the outer div and re-wired
+        # ``.ctx-overview-stat`` as the click target.
+        assert "el.querySelectorAll('.ctx-overview-stat-nav').forEach" in ctx_js, (
+            "tile click wiring must use the inner .ctx-overview-stat-nav selector (PR #1088 review)"
         )
-        assert "'Enter'" in block and "' '" in block, "keydown handler must accept Enter and Space"
-
-    def test_overview_tile_keydown_skips_nested_pointers(self, ctx_js: str) -> None:
-        # Regression pin (PR #1088 review): tiles render nested
-        # ``.ctx-overview-pointer`` buttons. Without a target guard,
-        # pressing Enter/Space on a pointer button bubbles into the tile
-        # keydown handler, which then ``preventDefault()``s the pointer
-        # button's native click AND fires ``card.click()`` — so keyboard
-        # users could not activate Sync All from the tile's pointer line.
-        loop_start = ctx_js.index("el.querySelectorAll('.ctx-overview-stat').forEach(card => {")
-        loop_end = ctx_js.index("\n  });", loop_start)
-        block = ctx_js[loop_start:loop_end]
-        # Anchor on the actual statement (``if (...) return;``) rather
-        # than the bare expression, since the substring also appears in
-        # the explanatory comment paragraph above the handler.
-        assert re.search(r"if\s*\(\s*e\.target\s*!==\s*card\s*\)\s*return\s*;", block), (
-            "ctx-overview-stat keydown handler must early-return when the "
-            "event target is not the tile itself, so nested pointer "
-            "buttons keep their native keyboard activation (#1088 review)"
+        # Pointer line stays its own wiring loop (sibling, not child).
+        assert "el.querySelectorAll('.ctx-overview-pointer').forEach" in ctx_js, (
+            "pointer-line wiring must remain a separate forEach loop on "
+            ".ctx-overview-pointer so each pointer button keeps its own "
+            "click handler"
         )
 
     # ── Artifact cards (.ctx-card) ────────────────────────────────────
@@ -469,6 +481,52 @@ class TestIssue1073CtxKeyboardSemantics:
         assert "aria-label=" in body and "item.name" in body, (
             "ctx-card aria-label must include the artifact name so screen "
             "readers announce which item the row activates"
+        )
+
+    def test_clickable_ctx_card_aria_label_covers_all_statuses(self, ctx_js: str) -> None:
+        # PR #1088 review (Codex P2): the aria-label must surface every
+        # distinct non-``in sync`` runtime status, not just the
+        # ``out of sync`` case. Otherwise cards with missing target /
+        # missing canonical / parse error / runtime-only would announce
+        # just the artifact name — and aria-label overrides the visible
+        # runtime-badge text for screen readers, so the SR user would
+        # lose the status that explains why the card needs action.
+        render_start = ctx_js.index("function _ctxRenderItemsHtml(")
+        render_end = ctx_js.index("\n}\n", render_start)
+        body = ctx_js[render_start:render_end]
+        # Pin the loop that collects per-runtime statuses via the shared
+        # ``_ctxStatusText`` helper (same source the visible badge uses,
+        # so SR string and visual badge cannot drift).
+        assert re.search(
+            r"for\s*\(\s*const\s+r\s+of\s*\(item\.runtimes.*?\)\s*\)\s*\{[^}]*"
+            r"_ctxStatusText\s*\(\s*r\.status\s*\)",
+            body,
+            re.DOTALL,
+        ), (
+            "ctx-card aria-label builder must iterate ``item.runtimes`` "
+            "and translate each non-in-sync status via ``_ctxStatusText`` "
+            "so SR announce mirrors the visible badge (PR #1088 review)"
+        )
+        # And the runtime-only fallback: ``!item.canonical_path`` must
+        # inject the ``missing canonical`` translation into the status
+        # set so cards with an empty ``runtimes`` list still announce
+        # the runtime-only state.
+        assert re.search(
+            r"!item\.canonical_path[^}]*?_ctxStatusText\s*\(\s*['\"]missing canonical['\"]\s*\)",
+            body,
+            re.DOTALL,
+        ), (
+            "ctx-card aria-label builder must add the localized "
+            "``missing canonical`` text when ``item.canonical_path`` is "
+            "empty, so runtime-only cards announce their state even "
+            "when no per-runtime row carries the status"
+        )
+        # Negative pin: the old ``outOfSync ? ' — out of sync' : ''``
+        # short-circuit MUST be gone — that's what hid the other four
+        # status classes from SR users.
+        assert "' — out of sync'" not in body, (
+            "the legacy single-status aria-label suffix must be removed; "
+            "use the per-runtime status set instead (PR #1088 review)"
         )
 
     def test_clickable_ctx_card_keydown_activates(self, ctx_js: str) -> None:

@@ -742,17 +742,29 @@ function _renderCtxOverview(data) {
       // too — the tile routes to ``hooks-sync`` (not a context list), so
       // the filter is a no-op there, but keeping the attribute uniform
       // avoids a dataset-shape branch in the click loop.
-      // #1073: tiles navigate to a settings section, so they're buttons —
-      // expose ``role=button`` + ``tabindex=0`` so keyboard users can reach
-      // them and screen readers announce the correct widget type. The
-      // accessible name composes the dominant badge text with the kind
-      // label ("12 out of sync — Skills") so screen-reader announce isn't
-      // just "Skills" with no context.
+      //
+      // #1073 / PR #1088 review: the navigation control is a real
+      // ``<button>`` *inside* the tile, NOT ``role=button`` on the outer
+      // ``<div>``. Putting the role on the outer div nests the
+      // ``.ctx-overview-pointer`` buttons inside a button-role element —
+      // invalid ARIA (interactive content inside ``role=button`` is
+      // forbidden) and inconsistently exposed by assistive tech. The
+      // pointer buttons are siblings of the nav button so they keep
+      // their own focus / activation. The accessible name composes the
+      // dominant badge text with the kind label ("12 out of sync —
+      // Skills") so screen-reader announce isn't just "Skills" with no
+      // context.
+      // ``data-section`` / ``data-tile-key`` stay on the outer tile div
+      // because existing selectors (browser tests, deep-link applier,
+      // CSS scoping) use them to identify the tile by kind — the click
+      // handler reads them via ``navBtn.closest('.ctx-overview-stat')``.
       const tileAriaLabel = `${badgeText} — ${typ.label}`;
-      html += `<div class="ctx-overview-stat" role="button" tabindex="0" aria-label="${escapeHtml(tileAriaLabel)}" data-section="${typ.section}" data-tile-key="${typ.key}">
-        <div class="ctx-overview-count">${total}</div>
-        <div class="ctx-overview-label">${escapeHtml(typ.label)}</div>
-        <div class="ctx-overview-badge"><span class="badge ${badgeCls}">${escapeHtml(badgeText)}</span></div>
+      html += `<div class="ctx-overview-stat" data-section="${typ.section}" data-tile-key="${typ.key}">
+        <button type="button" class="ctx-overview-stat-nav" aria-label="${escapeHtml(tileAriaLabel)}">
+          <div class="ctx-overview-count">${total}</div>
+          <div class="ctx-overview-label">${escapeHtml(typ.label)}</div>
+          <div class="ctx-overview-badge"><span class="badge ${badgeCls}">${escapeHtml(badgeText)}</span></div>
+        </button>
         ${pointersHtml}
       </div>`;
     }
@@ -829,33 +841,27 @@ function _renderCtxOverview(data) {
   // empty. The artifact slot exists for shareable URLs (a teammate
   // pasting "open this URL to see the artifact I'm asking about") and
   // for future per-artifact issue panels.
-  el.querySelectorAll('.ctx-overview-stat').forEach(card => {
-    const tileKey = card.dataset.tileKey;
+  // PR #1088 review: navigation lives on the inner ``.ctx-overview-stat-nav``
+  // <button> (a real button — Enter/Space activate natively, no custom
+  // keydown shim). ``data-section`` / ``data-tile-key`` stay on the outer
+  // tile so existing selectors keep working; the click handler reads them
+  // via ``navBtn.closest('.ctx-overview-stat').dataset``. Pointer buttons
+  // are siblings of the nav button (separate ``.ctx-overview-pointer``
+  // selector below), so they're no longer nested inside the navigation
+  // control.
+  el.querySelectorAll('.ctx-overview-stat-nav').forEach(navBtn => {
+    const tile = navBtn.closest('.ctx-overview-stat');
+    const tileKey = tile ? tile.dataset.tileKey : '';
     const tileData = tileKey ? (data[tileKey] || {}) : null;
     const filter = tileData ? _ctxTileDominantFilter(tileData) : null;
-    const section = card.dataset.section;
-    card.addEventListener('click', () => {
+    const section = tile ? tile.dataset.section : '';
+    navBtn.addEventListener('click', () => {
       if (filter) {
         _ctxSetDeepLink({ section, filter, artifact: '' });
       } else {
         _ctxClearDeepLink();
       }
       switchSettingsSection(section);
-    });
-    // #1073: role=button without Enter/Space activation is a lie. Mirrors
-    // the search/timeline/chunk-card pattern (see app.js result-item).
-    // ``e.target !== card`` guard (PR #1088 review): the tile contains
-    // ``.ctx-overview-pointer`` buttons whose own Enter/Space activation
-    // bubbles up here — without the guard, ``preventDefault`` would
-    // swallow the pointer button's native click AND ``card.click()``
-    // would navigate to the section, so a keyboard user could not
-    // activate Sync All from the tile's pointer line.
-    card.addEventListener('keydown', (e) => {
-      if (e.target !== card) return;
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        card.click();
-      }
     });
   });
 
@@ -1412,14 +1418,37 @@ function _ctxRenderItemsHtml(items, type, projectRoot, scannedDirs, { clickable 
     if (!item.canonical_path) buckets.add('missing_canonical');
     const statusesAttr = ` data-statuses="${escapeHtml(Array.from(buckets).join(' '))}"`;
     const tierBadge = _tierBadgeHtml(item.target_scope, { isContextRow: true });
-    // #1073: clickable cards expose button semantics + keyboard focus so a
-    // screen-reader user can hear the artifact name + sync status and a
-    // keyboard user can tab through the list. Readonly cards (other-scope
-    // groups) stay non-interactive and inherit ``ctx-card--readonly``.
+    // #1073 / PR #1088 review: clickable cards expose button semantics +
+    // keyboard focus, AND the aria-label includes every distinct non-
+    // ``in sync`` status across runtimes (plus runtime-only if the
+    // canonical is absent). The previous label was just the name + an
+    // ``out of sync`` suffix, which silently dropped ``missing target``
+    // / ``missing canonical`` / ``parse error`` / runtime-only cards —
+    // because ``aria-label`` overrides the visible runtime-badge
+    // contents for screen readers, those users would tab past a card
+    // with no clue why it needed action. Statuses come from
+    // ``_ctxStatusText`` so the SR string matches the visible badge
+    // text (and stays localized). Readonly cards (other-scope groups)
+    // stay non-interactive and inherit ``ctx-card--readonly``.
     const a11yAttrs = clickable ? ' role="button" tabindex="0"' : '';
-    const cardAriaLabel = clickable
-      ? ` aria-label="${escapeHtml(item.name)}${outOfSync ? ' — out of sync' : ''}"`
-      : '';
+    let cardAriaLabel = '';
+    if (clickable) {
+      const statusSet = new Set();
+      for (const r of (item.runtimes || [])) {
+        if (r.status && r.status !== 'in sync') {
+          statusSet.add(_ctxStatusText(r.status));
+        }
+      }
+      // Mirrors the bucket fallback below: ``!canonical_path`` is the
+      // wire signal that the artifact is runtime-only, even when no
+      // per-runtime row carries the ``missing canonical`` status.
+      if (!item.canonical_path) {
+        statusSet.add(_ctxStatusText('missing canonical'));
+      }
+      const statusParts = Array.from(statusSet);
+      const suffix = statusParts.length ? ` — ${statusParts.join(', ')}` : '';
+      cardAriaLabel = ` aria-label="${escapeHtml(item.name + suffix)}"`;
+    }
     html += `<div class="${cardClass}"${a11yAttrs}${cardAriaLabel} data-name="${escapeHtml(item.name)}"${canonAttr} data-out-of-sync="${outOfSync}"${statusesAttr}>
       <div class="ctx-card-header">
         <div>
