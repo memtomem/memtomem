@@ -7,7 +7,7 @@ import logging
 import httpx
 
 from memtomem.config import LLMConfig
-from memtomem.embedding.retry import with_retry
+from memtomem.embedding.retry import RateLimitError, parse_retry_after, with_retry
 from memtomem.errors import LLMError
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ class AnthropicLLM:
     @with_retry(
         max_attempts=3,
         base_delay=1.0,
-        retryable_exceptions=(httpx.ConnectError, httpx.TimeoutException),
+        retryable_exceptions=(httpx.ConnectError, httpx.TimeoutException, RateLimitError),
     )
     async def _generate_with_retry(self, prompt: str, *, system: str, max_tokens: int) -> str:
         client = self._get_client()
@@ -55,10 +55,8 @@ class AnthropicLLM:
             payload["system"] = system
         resp = await client.post("/v1/messages", json=payload)
         if resp.status_code == 429:
-            raise LLMError(
-                f"Anthropic rate limit exceeded. "
-                f"Retry-After: {resp.headers.get('Retry-After', 'unknown')}"
-            )
+            ra_val = parse_retry_after(resp.headers.get("retry-after"))
+            raise RateLimitError(retry_after=ra_val)
         if resp.status_code == 401:
             raise LLMError("Anthropic authentication failed. Check your API key.")
         resp.raise_for_status()
@@ -79,6 +77,11 @@ class AnthropicLLM:
             ) from e
         except httpx.TimeoutException as e:
             raise LLMError(f"Anthropic request timed out. Error: {e}") from e
+        except RateLimitError as e:
+            raise LLMError(
+                "Anthropic rate limit exceeded after retries. "
+                "Please wait before retrying or upgrade your plan."
+            ) from e
         except httpx.HTTPError as e:
             raise LLMError(f"Anthropic generation failed: {e}") from e
 
