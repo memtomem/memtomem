@@ -742,7 +742,14 @@ function _renderCtxOverview(data) {
       // too — the tile routes to ``hooks-sync`` (not a context list), so
       // the filter is a no-op there, but keeping the attribute uniform
       // avoids a dataset-shape branch in the click loop.
-      html += `<div class="ctx-overview-stat" data-section="${typ.section}" data-tile-key="${typ.key}">
+      // #1073: tiles navigate to a settings section, so they're buttons —
+      // expose ``role=button`` + ``tabindex=0`` so keyboard users can reach
+      // them and screen readers announce the correct widget type. The
+      // accessible name composes the dominant badge text with the kind
+      // label ("12 out of sync — Skills") so screen-reader announce isn't
+      // just "Skills" with no context.
+      const tileAriaLabel = `${badgeText} — ${typ.label}`;
+      html += `<div class="ctx-overview-stat" role="button" tabindex="0" aria-label="${escapeHtml(tileAriaLabel)}" data-section="${typ.section}" data-tile-key="${typ.key}">
         <div class="ctx-overview-count">${total}</div>
         <div class="ctx-overview-label">${escapeHtml(typ.label)}</div>
         <div class="ctx-overview-badge"><span class="badge ${badgeCls}">${escapeHtml(badgeText)}</span></div>
@@ -834,6 +841,14 @@ function _renderCtxOverview(data) {
         _ctxClearDeepLink();
       }
       switchSettingsSection(section);
+    });
+    // #1073: role=button without Enter/Space activation is a lie. Mirrors
+    // the search/timeline/chunk-card pattern (see app.js result-item).
+    card.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        card.click();
+      }
     });
   });
 
@@ -1390,7 +1405,15 @@ function _ctxRenderItemsHtml(items, type, projectRoot, scannedDirs, { clickable 
     if (!item.canonical_path) buckets.add('missing_canonical');
     const statusesAttr = ` data-statuses="${escapeHtml(Array.from(buckets).join(' '))}"`;
     const tierBadge = _tierBadgeHtml(item.target_scope, { isContextRow: true });
-    html += `<div class="${cardClass}" data-name="${escapeHtml(item.name)}"${canonAttr} data-out-of-sync="${outOfSync}"${statusesAttr}>
+    // #1073: clickable cards expose button semantics + keyboard focus so a
+    // screen-reader user can hear the artifact name + sync status and a
+    // keyboard user can tab through the list. Readonly cards (other-scope
+    // groups) stay non-interactive and inherit ``ctx-card--readonly``.
+    const a11yAttrs = clickable ? ' role="button" tabindex="0"' : '';
+    const cardAriaLabel = clickable
+      ? ` aria-label="${escapeHtml(item.name)}${outOfSync ? ' — out of sync' : ''}"`
+      : '';
+    html += `<div class="${cardClass}"${a11yAttrs}${cardAriaLabel} data-name="${escapeHtml(item.name)}"${canonAttr} data-out-of-sync="${outOfSync}"${statusesAttr}>
       <div class="ctx-card-header">
         <div>
           <div class="ctx-card-name">${escapeHtml(item.name)}${tierBadge}</div>
@@ -1462,6 +1485,15 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
             } else {
               const detailEl = qs(`ctx-${type}-detail`);
               _ctxLoadRuntimeOnlyDetail(type, card.dataset.name, detailEl);
+            }
+          });
+          // #1073: keyboard activation parity with click. Card renders with
+          // role=button + tabindex=0 in ``_ctxRenderItemsHtml``; without
+          // this handler the SR announce ("button") would be a lie.
+          card.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              card.click();
             }
           });
         });
@@ -2141,12 +2173,16 @@ async function loadCtxDetail(type, name, opts = {}) {
     // commands. Skills get the meta only — no chip row.
     html += _ctxRenderDetailMetaHeader(type, data);
 
-    html += '<div class="ctx-detail-tabs">';
-    html += `<div class="ctx-detail-tab active" data-pane="canonical">${t('settings.ctx.canonical_source')}</div>`;
-    html += `<div class="ctx-detail-tab" data-pane="diff">${t('settings.ctx.diff_view')}</div>`;
+    // #1073: ARIA tablist — tabs are buttons, panes are tabpanels labelled
+    // by the tab that controls them, and only the active tab is in the
+    // focus order (others tabindex=-1, arrow keys move focus). Mirrors
+    // the main app's ``.tab-nav`` pattern in app.js.
+    html += '<div class="ctx-detail-tabs" role="tablist">';
+    html += `<button type="button" class="ctx-detail-tab active" data-pane="canonical" role="tab" id="ctx-tab-canonical" aria-controls="ctx-pane-canonical" aria-selected="true" tabindex="0">${t('settings.ctx.canonical_source')}</button>`;
+    html += `<button type="button" class="ctx-detail-tab" data-pane="diff" role="tab" id="ctx-tab-diff" aria-controls="ctx-pane-diff" aria-selected="false" tabindex="-1">${t('settings.ctx.diff_view')}</button>`;
     html += '</div>';
 
-    html += '<div class="ctx-detail-pane active" id="ctx-pane-canonical">';
+    html += '<div class="ctx-detail-pane active" id="ctx-pane-canonical" role="tabpanel" aria-labelledby="ctx-tab-canonical">';
     html += `<pre class="ctx-content-pre">${escapeHtml(data.content || '')}</pre>`;
     if (data.files && data.files.length) {
       html += `<div style="margin-top:8px"><strong>${t('settings.ctx.auxiliary_files')}</strong>`;
@@ -2157,7 +2193,7 @@ async function loadCtxDetail(type, name, opts = {}) {
     }
     html += '</div>';
 
-    html += '<div class="ctx-detail-pane" id="ctx-pane-diff"><div class="text-muted">Click Diff tab to load...</div></div>';
+    html += '<div class="ctx-detail-pane" id="ctx-pane-diff" role="tabpanel" aria-labelledby="ctx-tab-diff"><div class="text-muted">Click Diff tab to load...</div></div>';
 
     // ``ctx-conflict-banner`` stays hidden in the normal edit flow. When a
     // 409 reaches the dialog and the user picks "Open diff editor", we
@@ -2193,17 +2229,41 @@ async function loadCtxDetail(type, name, opts = {}) {
       showToast(t('settings.ctx.conflict_draft_restored'), 'info');
     }
 
-    // Tab switching
-    detailEl.querySelectorAll('.ctx-detail-tab').forEach(tab => {
-      tab.addEventListener('click', () => {
-        detailEl.querySelectorAll('.ctx-detail-tab').forEach(t => t.classList.remove('active'));
-        detailEl.querySelectorAll('.ctx-detail-pane').forEach(p => p.classList.remove('active'));
-        tab.classList.add('active');
-        const pane = detailEl.querySelector(`#ctx-pane-${tab.dataset.pane}`);
-        if (pane) pane.classList.add('active');
-        if (tab.dataset.pane === 'diff') _ctxLoadDiff(type, name, detailEl);
+    // Tab switching — click + keyboard. ARIA state (aria-selected,
+    // tabindex roving) tracks the visual ``.active`` class so the screen
+    // reader announces the right tab and only one tab is in the focus
+    // order at a time (#1073). Mirrors app.js's main ``.tab-nav``.
+    const _activateCtxDetailTab = (tab, opts = {}) => {
+      const tabs = Array.from(detailEl.querySelectorAll('.ctx-detail-tab'));
+      tabs.forEach(t => {
+        t.classList.remove('active');
+        t.setAttribute('aria-selected', 'false');
+        t.setAttribute('tabindex', '-1');
       });
+      detailEl.querySelectorAll('.ctx-detail-pane').forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      tab.setAttribute('aria-selected', 'true');
+      tab.setAttribute('tabindex', '0');
+      if (opts.focus) tab.focus();
+      const pane = detailEl.querySelector(`#ctx-pane-${tab.dataset.pane}`);
+      if (pane) pane.classList.add('active');
+      if (tab.dataset.pane === 'diff') _ctxLoadDiff(type, name, detailEl);
+    };
+    detailEl.querySelectorAll('.ctx-detail-tab').forEach(tab => {
+      tab.addEventListener('click', () => _activateCtxDetailTab(tab));
     });
+    const _ctxTabsContainer = detailEl.querySelector('.ctx-detail-tabs');
+    if (_ctxTabsContainer) {
+      _ctxTabsContainer.addEventListener('keydown', (e) => {
+        if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
+        const tabs = Array.from(_ctxTabsContainer.querySelectorAll('.ctx-detail-tab'));
+        const currentIdx = tabs.indexOf(document.activeElement);
+        const nextIdx = _arrowNavIndex(tabs.length, currentIdx === -1 ? 0 : currentIdx, e.key);
+        if (nextIdx < 0) return;
+        e.preventDefault();
+        _activateCtxDetailTab(tabs[nextIdx], { focus: true });
+      });
+    }
 
     // Out-of-sync prefetch + tab activation. Uses a synthetic ``click()``
     // on the Diff tab so the same handler above runs — keeps the active

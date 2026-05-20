@@ -16,6 +16,7 @@ _STATIC_DIR = Path(__file__).resolve().parents[1] / "src" / "memtomem" / "web" /
 _APP_JS = _STATIC_DIR / "app.js"
 _INDEX_HTML = _STATIC_DIR / "index.html"
 _TIMELINE_JS = _STATIC_DIR / "timeline.js"
+_CTX_JS = _STATIC_DIR / "context-gateway.js"
 
 
 @pytest.fixture(scope="module")
@@ -34,6 +35,12 @@ def index_html() -> str:
 def timeline_js() -> str:
     assert _TIMELINE_JS.exists(), f"timeline.js missing: {_TIMELINE_JS}"
     return _TIMELINE_JS.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def ctx_js() -> str:
+    assert _CTX_JS.exists(), f"context-gateway.js missing: {_CTX_JS}"
+    return _CTX_JS.read_text(encoding="utf-8")
 
 
 def _extract_function(source: str, name: str) -> str:
@@ -374,4 +381,180 @@ class TestChunkCardA11y:
         assert "chunk-card-actions" in block, (
             "keydown handler must skip when focus is in .chunk-card-actions "
             "(button Enter must not also toggle the parent card)"
+        )
+
+
+class TestIssue1073CtxKeyboardSemantics:
+    """Pin keyboard/screen-reader semantics on Context Gateway clickable
+    rows (issue #1073). Overview tiles, artifact cards, and detail tabs
+    were rendered as clickable ``<div>``s with mouse-only handlers — same
+    defect class as the search/timeline rows in issue #700 but specific
+    to ``context-gateway.js``.
+    """
+
+    # ── Overview tiles ────────────────────────────────────────────────
+    def test_overview_tile_renders_with_button_role(self, ctx_js: str) -> None:
+        # The tile HTML is built in a template literal — pin that the
+        # rendered ``ctx-overview-stat`` element carries ``role="button"``
+        # + ``tabindex="0"`` + an ``aria-label``. Without all three, a
+        # screen-reader user can't reach it (no focus order) and a
+        # keyboard user can't activate it (no tabindex / no name).
+        tile_decl = re.search(
+            r'`<div class="ctx-overview-stat"[^`]*data-tile-key=', ctx_js, re.DOTALL
+        )
+        assert tile_decl, "ctx-overview-stat template literal not found"
+        decl = tile_decl.group(0)
+        assert 'role="button"' in decl, (
+            "ctx-overview-stat must render with role=button so screen "
+            "readers announce it as a navigation control, not a generic group"
+        )
+        assert 'tabindex="0"' in decl, (
+            "ctx-overview-stat must render with tabindex=0 so keyboard "
+            "users can tab into the overview row"
+        )
+        assert "aria-label=" in decl, (
+            "ctx-overview-stat must carry an aria-label so screen readers "
+            "announce a meaningful name (kind + dominant status)"
+        )
+
+    def test_overview_tile_keydown_activates(self, ctx_js: str) -> None:
+        # Anchor on the ``ctx-overview-stat`` querySelectorAll wiring
+        # block and pin a keydown handler exists alongside the click
+        # handler — Enter/Space activation parity is what makes
+        # ``role=button`` honest.
+        loop_start = ctx_js.index("el.querySelectorAll('.ctx-overview-stat').forEach(card => {")
+        loop_end = ctx_js.index("\n  });", loop_start)
+        block = ctx_js[loop_start:loop_end]
+        assert "addEventListener('keydown'" in block, (
+            "ctx-overview-stat must wire a keydown handler — role=button "
+            "without Enter/Space is a screen-reader lie (#1073)"
+        )
+        assert "'Enter'" in block and "' '" in block, "keydown handler must accept Enter and Space"
+
+    # ── Artifact cards (.ctx-card) ────────────────────────────────────
+    def test_clickable_ctx_card_has_button_semantics(self, ctx_js: str) -> None:
+        # _ctxRenderItemsHtml gates a11y attrs on ``clickable``; readonly
+        # cards (other-scope groups) must NOT get role=button. Anchor on
+        # the ternary that builds the attrs.
+        render_start = ctx_js.index("function _ctxRenderItemsHtml(")
+        render_end = ctx_js.index("\n}\n", render_start)
+        body = ctx_js[render_start:render_end]
+        assert 'role="button" tabindex="0"' in body, (
+            "clickable ctx-card must render with role=button + tabindex=0 "
+            "(#1073) so it joins the keyboard focus order"
+        )
+        # The aria-label must be derived from the artifact name (and flag
+        # out-of-sync state) — pinning the substring is enough; an
+        # implementation that aria-labels with a stale string would still
+        # need to read ``item.name``.
+        assert "aria-label=" in body and "item.name" in body, (
+            "ctx-card aria-label must include the artifact name so screen "
+            "readers announce which item the row activates"
+        )
+
+    def test_clickable_ctx_card_keydown_activates(self, ctx_js: str) -> None:
+        # Anchor on the card-wiring loop inside _loadScopeGroupItems
+        # (clickable branch) and pin keydown next to click. Without this,
+        # a SR user hears "button" but pressing Enter does nothing.
+        loop_start = ctx_js.index("container.querySelectorAll('.ctx-card').forEach(card => {")
+        # The forEach body ends at the matching ``});`` — slice generously
+        # and pin both handlers exist within the same block.
+        loop_end = ctx_js.index("\n        });", loop_start)
+        block = ctx_js[loop_start:loop_end]
+        assert "addEventListener('click'" in block, "ctx-card click handler missing"
+        assert "addEventListener('keydown'" in block, (
+            "ctx-card must wire a keydown handler so Enter/Space activate "
+            "the same path as click (#1073)"
+        )
+
+    def test_readonly_ctx_card_skips_button_role(self, ctx_js: str) -> None:
+        # Pin that the a11y attrs are gated on ``clickable`` — a readonly
+        # row would render a focusable button with no handler, which is
+        # worse than a non-focusable div.
+        render_start = ctx_js.index("function _ctxRenderItemsHtml(")
+        render_end = ctx_js.index("\n}\n", render_start)
+        body = ctx_js[render_start:render_end]
+        assert re.search(
+            r"clickable\s*\?\s*'\s*role=\"button\"\s*tabindex=\"0\"'\s*:\s*''",
+            body,
+        ), (
+            "role=button + tabindex must be gated on ``clickable`` so "
+            "readonly other-scope cards don't enter the focus order with "
+            "no activation handler"
+        )
+
+    # ── Detail tabs ───────────────────────────────────────────────────
+    def test_detail_tabs_render_as_tablist(self, ctx_js: str) -> None:
+        # The tabs row must declare role=tablist; each tab must be a
+        # <button role=tab> with aria-selected + aria-controls so the
+        # screen reader announces the tab name AND the panel it controls.
+        assert 'class="ctx-detail-tabs" role="tablist"' in ctx_js, (
+            "ctx-detail-tabs container must declare role=tablist (#1073)"
+        )
+        # Both tab buttons must exist, with aria-controls pointing at
+        # their pane id (canonical / diff).
+        canonical_tab = re.search(
+            r'<button[^>]*class="ctx-detail-tab active"[^>]*data-pane="canonical"[^>]*>',
+            ctx_js,
+        )
+        diff_tab = re.search(
+            r'<button[^>]*class="ctx-detail-tab"[^>]*data-pane="diff"[^>]*>',
+            ctx_js,
+        )
+        assert canonical_tab, "canonical tab must render as <button role=tab>"
+        assert diff_tab, "diff tab must render as <button role=tab>"
+        for label, tag in (("canonical", canonical_tab.group(0)), ("diff", diff_tab.group(0))):
+            assert 'role="tab"' in tag, f"{label} tab missing role=tab"
+            assert 'aria-controls="ctx-pane-' in tag, (
+                f"{label} tab must declare aria-controls pointing at its pane id"
+            )
+            assert "aria-selected=" in tag, (
+                f"{label} tab must declare aria-selected so the SR announces the selected state"
+            )
+            assert "tabindex=" in tag, (
+                f"{label} tab must declare tabindex for the roving focus model"
+            )
+
+    def test_detail_panes_are_tabpanels(self, ctx_js: str) -> None:
+        # Each pane must declare role=tabpanel + aria-labelledby pointing
+        # at its tab, so the SR announces "canonical source, tab panel"
+        # on focus enter.
+        canonical_pane = re.search(
+            r'id="ctx-pane-canonical"[^>]*role="tabpanel"[^>]*aria-labelledby="ctx-tab-canonical"',
+            ctx_js,
+        )
+        diff_pane = re.search(
+            r'id="ctx-pane-diff"[^>]*role="tabpanel"[^>]*aria-labelledby="ctx-tab-diff"',
+            ctx_js,
+        )
+        assert canonical_pane, "canonical pane missing role=tabpanel + aria-labelledby"
+        assert diff_pane, "diff pane missing role=tabpanel + aria-labelledby"
+
+    def test_detail_tab_keyboard_navigation(self, ctx_js: str) -> None:
+        # Arrow nav within the tablist + ARIA state update on activation.
+        # Pin (a) the helper that mutates aria-selected/tabindex on
+        # activation, and (b) a keydown handler that delegates to
+        # ``_arrowNavIndex`` so the tablist follows the same convention
+        # as the main app's ``.tab-nav``.
+        helper_start = ctx_js.index("_activateCtxDetailTab")
+        helper_end = ctx_js.index("\n    };", helper_start)
+        helper = ctx_js[helper_start:helper_end]
+        assert "aria-selected" in helper, (
+            "_activateCtxDetailTab must update aria-selected so the SR "
+            "announce stays in sync with the visual .active class"
+        )
+        assert "tabindex" in helper, (
+            "_activateCtxDetailTab must update tabindex (roving focus model) "
+            "so only the active tab is in the keyboard focus order"
+        )
+        # The arrow-key listener must call _arrowNavIndex (shared helper
+        # in app.js, used by .tab-nav and sources vendor tabs).
+        nav_match = re.search(
+            r"_ctxTabsContainer\.addEventListener\('keydown'.*?_arrowNavIndex",
+            ctx_js,
+            re.DOTALL,
+        )
+        assert nav_match, (
+            "ctx-detail-tabs must wire keydown → _arrowNavIndex so Left/Right/"
+            "Home/End move focus between tabs (#1073)"
         )

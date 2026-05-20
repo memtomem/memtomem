@@ -3976,7 +3976,11 @@ body.help-hidden #help-toggle { opacity: 0.5; }
   font-family: var(--mono);
 }
 .ctx-detail-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
-.ctx-detail-tab { padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; color: var(--muted); font-size: 0.85rem; transition: color 0.15s; }
+/* #1073: rendered as real <button role=tab> so screen readers announce
+   "tab" and Enter/Space activate without a custom keydown shim. The
+   button defaults (background, border, font) are reset so the visual
+   matches the prior <div>-based tab. */
+.ctx-detail-tab { padding: 8px 16px; cursor: pointer; border: none; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font-family: inherit; font-size: 0.85rem; line-height: inherit; transition: color 0.15s; }
 .ctx-detail-tab:hover { color: var(--text); }
 .ctx-detail-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 .ctx-detail-pane { display: none; }
