@@ -47,6 +47,9 @@ SYNC_PARTIAL_NEEDS_CONFIRMATION_TOAST = (
     "Sync All complete except Settings — confirm host writes in the Settings panel."
 )
 SYNC_FAILED_TEMPLATE = "Sync failed: {error}"  # toast.sync_failed
+SYNC_PARTIAL_FAILED_TEMPLATE = (
+    "{succeeded} synced — {failed_phase} failed: {reason}"  # toast.sync_partial_failed
+)
 
 
 _HEALTHY_OVERVIEW = {
@@ -338,6 +341,108 @@ def test_sync_all_artifact_422_surfaces_backend_error(
     sync_paths = [u.split("/api/")[-1] for u in sync_calls]
     assert sync_paths == ["context/skills/sync"], (
         f"Sync All must stop after the blocked artifact sync, got {sync_paths!r}"
+    )
+
+
+def test_sync_all_mid_run_failure_refreshes_overview_with_partial_toast(
+    page, mm_web_url: str
+) -> None:
+    """S1-b.2 (#1074): skills succeed → agents fails → settings is skipped,
+    but the overview is still refreshed and the toast names what landed.
+
+    Pre-fix the handler ``throw``-ed on the first non-OK response and the
+    ``catch`` branch fell straight through to ``btnLoading(btn, false)``
+    without re-fetching the overview. Disk had changed (skills already
+    wrote) but the dashboard kept showing the pre-sync counts — a stale
+    diff target that made retries confusing.
+
+    Symmetric pin (``feedback_pin_invert_symmetric_assertion.md``):
+    positive on the partial toast text + overview reload counter, negative
+    on the settings sync POST not firing (we stop on first failure to
+    avoid cascading noise; settings often shares root cause with
+    artifact failures).
+    """
+    install_default_stubs(page)
+    overview_state = _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
+
+    sync_calls: list[str] = []
+
+    def _record_ok(route):
+        sync_calls.append(route.request.url)
+        route.fulfill(status=200, content_type="application/json", body="{}")
+
+    agents_reason = "Agents target folder is read-only"
+
+    def _agents_fail(route):
+        sync_calls.append(route.request.url)
+        route.fulfill(
+            status=422,
+            content_type="application/json",
+            body=json.dumps({"detail": agents_reason}),
+        )
+
+    def _unexpected_settings(route):
+        sync_calls.append(route.request.url)
+        route.fulfill(status=200, content_type="application/json", body="{}")
+
+    page.route("**/api/context/skills/sync", _record_ok)
+    page.route("**/api/context/agents/sync", _agents_fail)
+    page.route("**/api/context/settings/sync", _unexpected_settings)
+
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    initial_overview_calls = overview_state["n"]
+
+    page.locator("#ctx-sync-all-btn").click()
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    page.locator("#confirm-ok-btn").click()
+    page.wait_for_function(
+        "() => document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+
+    page.wait_for_selector("#toast-container .toast.toast-error", timeout=4_000)
+    toast_text = (
+        page.locator("#toast-container .toast.toast-error .toast-msg").text_content() or ""
+    ).strip()
+    expected = SYNC_PARTIAL_FAILED_TEMPLATE.format(
+        succeeded="Skills",
+        failed_phase="Subagents",
+        reason=agents_reason,
+    )
+    assert toast_text == expected, (
+        f"Partial-failure toast must name landed + failed phase ({expected!r}), got {toast_text!r}"
+    )
+
+    # Negative: the generic single-phase ``Sync failed`` toast must NOT
+    # render. A regression that drops the partial branch and falls back
+    # to ``toast.sync_failed`` would still produce an error toast with
+    # the agents reason — distinguishing them requires the exact text.
+    sync_failed_only = SYNC_FAILED_TEMPLATE.format(error=agents_reason)
+    error_toasts = page.locator(
+        "#toast-container .toast.toast-error .toast-msg"
+    ).all_text_contents()
+    assert sync_failed_only not in [t.strip() for t in error_toasts], (
+        f"Partial failure must not render the bare {sync_failed_only!r} toast; saw {error_toasts!r}"
+    )
+
+    # Settings POST must not have fired — we stop on first failure.
+    sync_paths = [u.split("/api/")[-1] for u in sync_calls]
+    assert sync_paths == [
+        "context/skills/sync",
+        "context/agents/sync",
+    ], f"Sync All must stop at the failed phase, got {sync_paths!r}"
+
+    # Load-bearing assertion for #1074: overview reloaded even though the
+    # run failed mid-way. Without this the dashboard would show the
+    # pre-sync skills count after skills has already written to disk.
+    assert overview_state["n"] >= initial_overview_calls + 1, (
+        f"Mid-run failure must still refresh overview; calls before "
+        f"= {initial_overview_calls}, after = {overview_state['n']}"
     )
 
 
