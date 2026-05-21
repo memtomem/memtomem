@@ -473,6 +473,7 @@
   "settings.ctx.add_project_success": "프로젝트가 추가되었습니다",
   "settings.ctx.add_project_warning_no_runtime_marker": "이 루트 아래에 .claude/.gemini/.agents/.memtomem 디렉터리를 찾지 못했습니다.",
   "settings.ctx.remove_project": "프로젝트 제거",
+  "settings.ctx.remove_project_aria": "프로젝트 {label} ({root}) 제거",
   "settings.ctx.confirm_remove_project": "\"{label}\" ({root}) 추적을 중지하시겠습니까? 디스크상의 파일은 영향받지 않습니다.",
   "settings.ctx.remove": "제거",
   "settings.ctx.scope_experimental": "experimental",
