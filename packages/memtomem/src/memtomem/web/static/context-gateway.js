@@ -2967,7 +2967,24 @@ document.querySelectorAll('.ctx-add-project-btn').forEach(btn => {
           return;
         }
         const data = await r.json();
-        if (data.warning) {
+        // Prefer ``warning_code`` so the toast is localized; fall back to
+        // ``data.warning`` only when the server emitted a code this client
+        // doesn't have a translation for yet. Plain ``data.warning`` would
+        // ship English prose to KO users even though the route already
+        // provides a stable code (#1077 follow-up to #962).
+        const warningKey = data.warning_code
+          ? `settings.ctx.add_project_warning_${data.warning_code}`
+          : null;
+        if (warningKey) {
+          const localized = t(warningKey);
+          // ``t()`` returns the key itself when no translation exists; in
+          // that case fall back to the server prose rather than showing the
+          // bare lookup key to the user.
+          const message = localized === warningKey
+            ? (data.warning || localized)
+            : localized;
+          showToast(message, 'warning');
+        } else if (data.warning) {
           showToast(data.warning, 'warning');
         } else {
           showToast(t('settings.ctx.add_project_success'), 'success');
