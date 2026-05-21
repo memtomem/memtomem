@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import ModuleType
-from typing import Literal, get_args
+from typing import Literal, TypeGuard, get_args
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -54,6 +54,18 @@ WebMode = Literal["prod", "dev"]
 # (e.g. "preview") in one place updates both type-checking and runtime
 # membership tests — see `feedback_literal_drives_frozenset.md`.
 _VALID_WEB_MODES: frozenset[str] = frozenset(get_args(WebMode))
+
+
+def _is_valid_web_mode(value: str) -> TypeGuard[WebMode]:
+    """Narrow ``str`` to ``WebMode`` when ``value`` matches a known mode.
+
+    Lets ``resolve_web_mode_from_env`` return without ``# type: ignore`` —
+    membership in the runtime ``_VALID_WEB_MODES`` set is now also a
+    type-level narrowing.
+    """
+    return value in _VALID_WEB_MODES
+
+
 _WEB_MODE_ENV = "MEMTOMEM_WEB__MODE"
 
 # CSRF enforcement default flipped to True in RFC #787 stage 2. The env var
@@ -122,8 +134,8 @@ def resolve_web_mode_from_env(*, strict: bool = False) -> WebMode:
     raw = os.environ.get(_WEB_MODE_ENV, "").strip().lower()
     if not raw:
         return "prod"
-    if raw in _VALID_WEB_MODES:
-        return raw  # type: ignore[return-value]
+    if _is_valid_web_mode(raw):
+        return raw
     if strict:
         raise ValueError(
             f"Invalid {_WEB_MODE_ENV}={raw!r}; expected one of {sorted(_VALID_WEB_MODES)}"
