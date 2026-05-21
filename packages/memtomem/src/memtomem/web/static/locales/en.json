@@ -345,6 +345,7 @@
   "settings.ctx.project_root_label": "Project",
   "settings.ctx.active_project": "Active project",
   "settings.ctx.server_cwd": "Server CWD",
+  "settings.ctx.projects_fetch_failed": "Project list failed to load — falling back to Server CWD only ({error})",
   "settings.ctx.user_canonical_label": "User canonical",
   "settings.ctx.user_canonical_path": "~/.memtomem/",
   "settings.ctx.runtimes_label": "Runtimes",

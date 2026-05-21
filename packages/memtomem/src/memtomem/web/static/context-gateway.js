@@ -194,10 +194,29 @@ function _ctxNormalizeActiveScope(scopes) {
 
 async function _ctxFetchProjects() {
   let data;
+  // Three failure shapes need to stay distinguishable per #1080:
+  //   - 404 / network throw   → older deployment or absent endpoint; the
+  //     legacy single-server-CWD fallback is the documented contract here,
+  //     so stay silent to avoid noise on intentional-omit deployments.
+  //   - 5xx (and non-404 4xx)  → endpoint exists but is failing; surface a
+  //     non-blocking toast so a broken store doesn't masquerade as "no
+  //     registered projects".
+  //   - 200 with malformed JSON → endpoint reachable, response unreadable;
+  //     same "endpoint exists but failing" class, surface a toast.
+  let warn = null;
   try {
     const res = await fetch(_ctxWithTargetScope('/api/context/projects', { includeScope: false }));
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Failed to load projects');
-    data = await res.json();
+    if (!res.ok) {
+      const detail = (await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`;
+      if (res.status !== 404) warn = { kind: 'http', status: res.status, detail };
+      throw new Error(detail);
+    }
+    try {
+      data = await res.json();
+    } catch (parseErr) {
+      warn = { kind: 'parse', detail: String((parseErr && parseErr.message) || parseErr) };
+      throw parseErr;
+    }
   } catch (_err) {
     // Browser tests and older deployments may not provide the multi-project
     // discovery endpoint. Preserve the legacy single-project behavior by
@@ -218,6 +237,9 @@ async function _ctxFetchProjects() {
   }
   _ctxProjectsCache = data.scopes || [];
   _ctxNormalizeActiveScope(_ctxProjectsCache);
+  if (warn && typeof showToast === 'function') {
+    showToast(t('settings.ctx.projects_fetch_failed', { error: warn.detail }), 'error');
+  }
   return data;
 }
 
