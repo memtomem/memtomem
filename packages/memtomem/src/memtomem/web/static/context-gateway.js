@@ -1839,8 +1839,16 @@ async function loadCtxList(type) {
       const count = _ctxScopeCount(scope, type);
       const groupId = `ctx-${type}-group-${escapeHtml(scope.scope_id)}`;
       const removable = !_ctxScopeIsServerCwd(scope);
+      // ``×`` is the visible glyph; ``aria-label`` carries the
+      // disambiguating "Remove project {label} ({root})" so screen-reader
+      // users hear which destructive control they're on, and ``title``
+      // mirrors it for sighted hover. Two registrations sharing a
+      // basename (``app`` x2) otherwise read identically. #1079
+      const removeAria = t('settings.ctx.remove_project_aria')
+        .replace('{label}', scope.label)
+        .replace('{root}', scope.root || scope.scope_id);
       const removeBtn = removable
-        ? `<button class="ctx-scope-remove" data-scope-id="${escapeHtml(scope.scope_id)}" title="${escapeHtml(t('settings.ctx.remove_project'))}">×</button>`
+        ? `<button class="ctx-scope-remove" data-scope-id="${escapeHtml(scope.scope_id)}" aria-label="${escapeHtml(removeAria)}" title="${escapeHtml(removeAria)}">×</button>`
         : '';
       // Full root path on the summary's title attribute lets the user
       // disambiguate same-name scopes (``Edu/inflearn`` vs ``Work/inflearn``)
