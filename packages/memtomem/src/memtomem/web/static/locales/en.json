@@ -473,7 +473,7 @@
   "settings.ctx.add_project_success": "Project added",
   "settings.ctx.add_project_warning_no_runtime_marker": "No .claude/.gemini/.agents/.memtomem directory found under this root.",
   "settings.ctx.remove_project": "Remove project",
-  "settings.ctx.confirm_remove_project": "Stop tracking \"{label}\"? Files on disk are unaffected.",
+  "settings.ctx.confirm_remove_project": "Stop tracking \"{label}\" ({root})? Files on disk are unaffected.",
   "settings.ctx.remove": "Remove",
   "settings.ctx.scope_experimental": "experimental",
   "settings.ctx.scope_experimental_tip": "Discovered via the opt-in ~/.claude/projects scan; the path may be misdecoded.",

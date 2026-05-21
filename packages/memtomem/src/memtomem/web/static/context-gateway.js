@@ -1905,8 +1905,13 @@ async function loadCtxList(type) {
           ev.stopPropagation();
           const ok = await showConfirm({
             title: t('settings.ctx.remove_project'),
+            // Include the full root path so the user can disambiguate
+            // duplicate folder names (e.g. ``Edu/app`` vs ``Work/app``)
+            // at the moment of confirmation — labels alone default to
+            // the basename and Add Project doesn't expose a rename. #1078
             message: t('settings.ctx.confirm_remove_project')
-              .replace('{label}', scope.label),
+              .replace('{label}', scope.label)
+              .replace('{root}', scope.root || scope.scope_id),
             confirmText: t('settings.ctx.remove'),
           });
           if (!ok) return;
