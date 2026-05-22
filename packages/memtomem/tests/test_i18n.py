@@ -1373,9 +1373,10 @@ class TestNoHardcodedStrings:
         """Q-PR2 Drift-3: the Context Gateway dashboard description must
         not enumerate individual tile names. The desc is rendered
         unconditionally via ``data-i18n="settings.ctx.overview_desc"``
-        but the dashboard renders 3 tiles in prod tier and 4 tiles in
-        dev tier (Custom Commands is ``devOnly``), so any enumeration
-        in the desc is wrong in at least one tier.
+        and the tile set evolves over time (Custom Commands graduated
+        from dev to prod alongside Skills/Subagents/Hooks), so any
+        enumeration in the desc is wrong as soon as a tile is added,
+        removed, or renamed.
 
         Word-bounded, case-sensitive, each token checked separately so a
         creative future regression (``"Subagents and Skills"``,
@@ -1385,7 +1386,7 @@ class TestNoHardcodedStrings:
         KO uses substring (not word-bounded) because Korean has no word
         boundary character; ``"훅"`` matches inside ``"훅을"`` etc. — that's
         the desired strictness, since the desc is intentionally
-        tier-agnostic and shouldn't mention the term at all in any
+        tile-agnostic and shouldn't mention the term at all in any
         inflection.
 
         Positive anchors keep ``"Claude Code"`` + ``"Codex"`` in both
@@ -1397,8 +1398,8 @@ class TestNoHardcodedStrings:
         present_en = {t for t in forbidden_en if re.search(rf"\b{t}\b", desc_en)}
         assert not present_en, (
             f"en overview_desc reintroduced tile-name enumeration: "
-            f"{sorted(present_en)} (must stay tier-agnostic so the dev-tier "
-            f"4th 'Custom Commands' tile doesn't make the desc lie)"
+            f"{sorted(present_en)} (must stay tile-agnostic so the desc "
+            f"doesn't lie when the tile set changes)"
         )
 
         forbidden_ko = {"스킬", "서브에이전트", "훅"}
@@ -1406,7 +1407,7 @@ class TestNoHardcodedStrings:
         present_ko = {t for t in forbidden_ko if t in desc_ko}
         assert not present_ko, (
             f"ko overview_desc reintroduced tile-name enumeration: "
-            f"{sorted(present_ko)} (must stay tier-agnostic)"
+            f"{sorted(present_ko)} (must stay tile-agnostic)"
         )
 
         for locale_name, desc in (("en", desc_en), ("ko", desc_ko)):

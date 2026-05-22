@@ -181,6 +181,7 @@ def test_sync_all_happy_path_emits_success_toast(page, mm_web_url: str) -> None:
         route.fulfill(status=200, content_type="application/json", body="{}")
 
     page.route("**/api/context/skills/sync", _record_sync)
+    page.route("**/api/context/commands/sync", _record_sync)
     page.route("**/api/context/agents/sync", _record_sync)
 
     def _settings_sync(route):
@@ -234,15 +235,16 @@ def test_sync_all_happy_path_emits_success_toast(page, mm_web_url: str) -> None:
         f"Happy-path toast must be {SYNC_SUCCESS_TOAST!r}, got {toast_text!r}"
     )
 
-    # All three POSTs fired in the prod-mode order: skills → agents → settings.
+    # All four POSTs fired in order: skills → commands → agents → settings.
     # The exact order matters because a regression that reorders or drops one
-    # would surface here. Commands is dev-only and should not appear.
+    # would surface here.
     sync_paths = [u.split("/api/")[-1] for u in sync_calls]
     assert sync_paths == [
         "context/skills/sync",
+        "context/commands/sync",
         "context/agents/sync",
         "context/settings/sync",
-    ], f"Sync All must fire skills→agents→settings in prod, got {sync_paths!r}"
+    ], f"Sync All must fire skills→commands→agents→settings, got {sync_paths!r}"
 
     # After all POSTs the handler calls ``loadCtxOverview()`` (line 510) to
     # refresh the cards. Pin the second GET to catch a regression that drops
@@ -386,6 +388,7 @@ def test_sync_all_mid_run_failure_refreshes_overview_with_partial_toast(
         route.fulfill(status=200, content_type="application/json", body="{}")
 
     page.route("**/api/context/skills/sync", _record_ok)
+    page.route("**/api/context/commands/sync", _record_ok)
     page.route("**/api/context/agents/sync", _agents_fail)
     page.route("**/api/context/settings/sync", _unexpected_settings)
 
@@ -410,7 +413,7 @@ def test_sync_all_mid_run_failure_refreshes_overview_with_partial_toast(
         page.locator("#toast-container .toast.toast-error .toast-msg").text_content() or ""
     ).strip()
     expected = SYNC_PARTIAL_FAILED_TEMPLATE.format(
-        succeeded="Skills",
+        succeeded="Skills, Custom Commands",
         failed_phase="Subagents",
         reason=agents_reason,
     )
@@ -434,6 +437,7 @@ def test_sync_all_mid_run_failure_refreshes_overview_with_partial_toast(
     sync_paths = [u.split("/api/")[-1] for u in sync_calls]
     assert sync_paths == [
         "context/skills/sync",
+        "context/commands/sync",
         "context/agents/sync",
     ], f"Sync All must stop at the failed phase, got {sync_paths!r}"
 
@@ -467,6 +471,10 @@ def test_sync_all_settings_aborted_emits_mtime_conflict_warning(page, mm_web_url
 
     page.route(
         "**/api/context/skills/sync",
+        lambda r: r.fulfill(status=200, content_type="application/json", body="{}"),
+    )
+    page.route(
+        "**/api/context/commands/sync",
         lambda r: r.fulfill(status=200, content_type="application/json", body="{}"),
     )
     page.route(
@@ -546,6 +554,10 @@ def test_sync_all_settings_error_emits_failure_toast(page, mm_web_url: str) -> N
         lambda r: r.fulfill(status=200, content_type="application/json", body="{}"),
     )
     page.route(
+        "**/api/context/commands/sync",
+        lambda r: r.fulfill(status=200, content_type="application/json", body="{}"),
+    )
+    page.route(
         "**/api/context/agents/sync",
         lambda r: r.fulfill(status=200, content_type="application/json", body="{}"),
     )
@@ -614,6 +626,10 @@ def test_sync_all_settings_needs_confirmation_opens_hooks_sync(page, mm_web_url:
 
     page.route(
         "**/api/context/skills/sync",
+        lambda r: r.fulfill(status=200, content_type="application/json", body="{}"),
+    )
+    page.route(
+        "**/api/context/commands/sync",
         lambda r: r.fulfill(status=200, content_type="application/json", body="{}"),
     )
     page.route(
