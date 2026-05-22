@@ -131,11 +131,6 @@ def _open_detail(page, kind: str, name: str) -> None:
     """Navigate Settings → ctx-{kind}, wait for the cwd group items to
     render, click the card, await the detail meta header to mount.
     """
-    if kind == "commands":
-        page.wait_for_function(
-            "() => document.body.classList.contains('dev-mode')",
-            timeout=5_000,
-        )
     page.evaluate("() => activateTab('settings')")
     page.evaluate(f"() => switchSettingsSection('ctx-{kind}')")
     # Wait for the cwd group items to populate (it auto-opens because
@@ -205,20 +200,8 @@ def test_agent_detail_chip_row_renders_role_isolation_kind_temperature(
 
 
 def test_command_detail_chip_row_renders_argument_hint_tools_model(page, mm_web_url: str) -> None:
-    """Command detail surfaces argument_hint / allowed_tools / model chips.
-
-    Commands live in the dev tier (``data-ui-tier="dev"``), so the test
-    has to flip the SPA into dev mode — the prod-mode redirect path
-    otherwise bounces ``switchSettingsSection('ctx-commands')`` to the
-    first visible section.
-    """
+    """Command detail surfaces argument_hint / allowed_tools / model chips."""
     install_default_stubs(page)
-    page.route(
-        "**/api/system/ui-mode",
-        lambda r: r.fulfill(
-            status=200, content_type="application/json", body=json.dumps({"mode": "dev"})
-        ),
-    )
     _stub_list_and_detail(page, "commands", _COMMAND_DETAIL)
 
     page.goto(mm_web_url)

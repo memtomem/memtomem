@@ -577,50 +577,27 @@ def test_app_js_pins_ui_mode_default_and_toast_copy() -> None:
     css = _read_static("style.css")
     assert ".home-stats-row { display: grid; grid-template-columns: repeat(4, 1fr);" in css
     assert "body.dev-mode .home-stats-row { grid-template-columns: repeat(6, 1fr); }" in css
-    # The Context Gateway tab is fully prod — Skills / Subagents shipped
-    # first, and Hooks (Phase D) graduated via RFC #761 (ADR-0001 §5
-    # readiness criteria). Custom Commands sits on the same Context Gateway
-    # surface but is dev-tier pending an external deprecation signal from
-    # Anthropic on .claude/commands/ (the docs already mark it merged into
-    # Skills as the recommended path). PR #813 mirrors the sidebar tier
-    # gate in three client-side surfaces — overview tile render, Sync All
-    # POST loop, and the runtime-only totals reducer — so prod users
-    # don't see Custom Commands in the overview, can't click through to a
-    # dev-only-section toast, and aren't gated on an artifact set they
-    # can't see. Pin both directions per
-    # ``feedback_pin_invert_symmetric_assertion.md``: positive marker
-    # (the three Custom Commands gate sites must exist) + negative
-    # marker (no *other* dev gate may sneak in alongside them, since
-    # the historical RFC #761 dev gates were intentionally removed).
+    # The Context Gateway tab is fully prod — Skills / Custom Commands /
+    # Subagents / Hooks all live on the same surface and all render in
+    # prod ``mm web``. Custom Commands was previously dev-tier (PR #813)
+    # pending an external Anthropic deprecation signal on
+    # ``.claude/commands/``; that gate has been removed and the surface
+    # is now treated like the other Context Gateway leaves. Pin the
+    # absence of any client-side ``STATE.uiMode`` gate in
+    # ``context-gateway.js`` so a future refactor doesn't silently
+    # reintroduce a tier split that hides artifacts from prod users.
     cg_js = _read_static("context-gateway.js")
     eq_count = cg_js.count("STATE.uiMode === 'dev'")
     ne_count = cg_js.count("STATE.uiMode !== 'dev'")
-    assert (eq_count, ne_count) == (2, 1), (
-        f"context-gateway.js dev-mode gate distribution drifted from "
-        f"(2 ===, 1 !==), got ({eq_count} ===, {ne_count} !==). "
-        "Expected three Custom Commands gate sites: one negation "
-        "(overview tile devOnly skip via ``!==``) and two ternaries "
-        "(syncKinds reducer split + Sync All POST loop split via "
-        "``===``)."
+    assert (eq_count, ne_count) == (0, 0), (
+        f"context-gateway.js must not gate any surface by ``STATE.uiMode``; "
+        f"found {eq_count} ``=== 'dev'`` and {ne_count} ``!== 'dev'`` site(s). "
+        "Custom Commands is no longer dev-tier — adding a new tier gate here "
+        "would hide an artifact category from prod users."
     )
-    # Tie each gate to a specific marker so a future refactor that
-    # collapses the gates into one helper (or accidentally drops one of
-    # the three sites) trips a precise failure rather than a stale-
-    # count drift.
-    assert "if (typ.devOnly && STATE.uiMode !== 'dev') continue;" in cg_js, (
-        "context-gateway.js lost the overview-tile devOnly skip; prod "
-        "users would see Custom Commands and bounce off the dev-only-"
-        "section toast in switchSettingsSection."
-    )
-    assert "syncKinds = STATE.uiMode === 'dev'" in cg_js, (
-        "context-gateway.js lost the runtime-only totals tier split; "
-        "prod users would see Sync All disabled because of an artifact "
-        "category (commands) they can't see."
-    )
-    assert "STATE.uiMode === 'dev'\n      ? ['skills', 'commands', 'agents']" in cg_js, (
-        "context-gateway.js lost the Sync All POST loop tier split; "
-        "Sync All would still POST /api/context/commands/sync in prod "
-        "even though the surface is dev-only."
+    assert "devOnly" not in cg_js, (
+        "context-gateway.js must not reintroduce a ``devOnly`` flag on the "
+        "overview-tile types list; Custom Commands is prod now."
     )
     assert "const chips = runtimes.map" in cg_js, (
         "Context Gateway runtime tags must render from detected_runtimes."
@@ -718,15 +695,11 @@ def test_html_classification_matches_router_lists() -> None:
         # ``hooks-sync`` graduated to prod via RFC #761 (ADR-0001 §5
         # readiness criteria); the section's data-ui-tier was flipped
         # together with the router move.
-        # ``ctx-commands``: sidebar leaf is dev-tier (hidden in
-        # ``mm web`` prod) following Anthropic's IA shift — the official
-        # Claude Code docs mark ``.claude/commands/`` as "merged into
-        # skills" with Skills as the recommended path, but the files
-        # "keep working", so ``context_commands`` is intentionally kept
-        # in ``_PROD_ROUTERS`` to keep the API responsive for existing
-        # users until an explicit deprecation signal lands. UI-only
-        # demote, no router move.
-        "ctx-commands",
+        # ``ctx-commands`` was previously dev-tier (UI-only demote
+        # pending Anthropic's deprecation signal on ``.claude/commands/``)
+        # and has since been promoted to prod alongside Skills/Subagents
+        # — it now lives in the normal Context Gateway surface and is no
+        # longer expected to appear here.
         "harness-sessions",
         "harness-scratch",
         "harness-procedures",

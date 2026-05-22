@@ -318,9 +318,13 @@ def test_ui_smoke_matrix(page, mode: str, viewport: tuple[int, int]) -> None:
                 assert tab.get_attribute("aria-selected") == "true"
 
         page.locator('.tab-btn[data-tab="context-gateway"]').click()
-        gateway_sections = ["ctx-overview", "ctx-skills", "ctx-agents", "hooks-sync"]
-        if mode == "dev":
-            gateway_sections.insert(2, "ctx-commands")
+        gateway_sections = [
+            "ctx-overview",
+            "ctx-skills",
+            "ctx-commands",
+            "ctx-agents",
+            "hooks-sync",
+        ]
         for section in gateway_sections:
             nav = _ensure_nav_visible(page, "#tab-context-gateway", section)
             assert nav.count() == 1

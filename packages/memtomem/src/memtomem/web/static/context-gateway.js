@@ -553,13 +553,9 @@ function _renderCtxOverview(data) {
   const el = qs('ctx-overview-content');
   if (!el) return;
 
-  // Custom Commands sidebar leaf is dev-tier (Anthropic merged
-  // .claude/commands/ into Skills); the overview tile mirrors that —
-  // surfacing it in prod would let users click through and trigger
-  // the dev-only-section toast in switchSettingsSection.
   const types = [
     { key: 'skills',   label: t('settings.ctx.skills_title'),   section: 'ctx-skills' },
-    { key: 'commands', label: t('settings.ctx.commands_title'), section: 'ctx-commands', devOnly: true },
+    { key: 'commands', label: t('settings.ctx.commands_title'), section: 'ctx-commands' },
     { key: 'agents',   label: t('settings.ctx.agents_title'),   section: 'ctx-agents' },
     { key: 'settings', label: t('settings.hooks.title'),        section: 'hooks-sync' },
   ];
@@ -639,7 +635,6 @@ function _renderCtxOverview(data) {
   html += _ctxTierControls('overview');
   html += '<div class="ctx-overview-grid">';
   for (const typ of types) {
-      if (typ.devOnly && STATE.uiMode !== 'dev') continue;
       const d = data[typ.key] || {};
       const total = d.total || 0;
       const inSync = d.in_sync || 0;
@@ -822,13 +817,7 @@ function _renderCtxOverview(data) {
       syncAllBtn.title = t('settings.ctx.project_local_no_fanout_tooltip');
       syncAllBtn.setAttribute('aria-disabled', 'true');
     } else {
-      // Mirror the overview-tile gate: in prod the Custom Commands
-      // surface is hidden, so its missing_canonical count must not
-      // gate the Sync All button (otherwise prod users would see Sync
-      // All disabled because of an artifact set they can't even see).
-      const syncKinds = STATE.uiMode === 'dev'
-        ? ['skills', 'commands', 'agents']
-        : ['skills', 'agents'];
+      const syncKinds = ['skills', 'commands', 'agents'];
       const totals = syncKinds.reduce((acc, k) => {
         const d = data[k] || {};
         acc.total += d.total || 0;
@@ -1175,13 +1164,7 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     const headers = csrf
       ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
       : { 'Content-Type': 'application/json' };
-    // Skip the dev-tier Custom Commands surface in prod — calling its
-    // backend route still 200s, but Sync All advertises itself as
-    // synchronizing what the user can see, and the prod sidebar /
-    // overview no longer expose ``ctx-commands``.
-    const types = STATE.uiMode === 'dev'
-      ? ['skills', 'commands', 'agents']
-      : ['skills', 'agents'];
+    const types = ['skills', 'commands', 'agents'];
     for (const typ of types) {
       anyPhaseStarted = true;
       let resp;
