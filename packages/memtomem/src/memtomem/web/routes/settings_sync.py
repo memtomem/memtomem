@@ -180,7 +180,6 @@ def _compare_hooks(
     for row in _iter_hook_rules(canonical_hooks):
         canonical_index.setdefault((row["event"], row["matcher"]), []).append(row["rule"])
 
-    target_index: dict[tuple[str, str], list[dict]] = {}
     result["target_hooks"]["target_only"] = [
         row
         for row in result["target_hooks"]["configured"]
@@ -214,18 +213,49 @@ def _compare_hooks(
         result["status"] = "out_of_sync" if result["hooks"]["pending"] else "in_sync"
         return result
 
-    # Index target rules by (event, matcher) preserving multiplicity. Claude
-    # Code allows the same matcher (or no matcher) to appear more than once
-    # under one event, so collapsing to a single dict-of-rule lets a
-    # byte-identical canonical contribution mismatch the *second* user rule
-    # and surface as a false-positive conflict (mirrors the same fix on the
-    # merge side in PR #844).
-    for event, rules in target_hooks.items():
+    # Split the target rows (which carry their original ``rule_index`` +
+    # ``rule_hash`` via ``_iter_hook_rules``) by (event, matcher), preserving
+    # multiplicity. Claude Code allows the same matcher (or no matcher) to
+    # appear more than once under one event, so collapsing to a single
+    # dict-of-rule lets a byte-identical canonical contribution mismatch the
+    # *second* user rule and surface as a false-positive conflict (mirrors the
+    # merge-side fix in PR #844). Keeping the full rows lets each conflict carry
+    # a stable identity for the resolve endpoint (issue #1112).
+    configured_rows: list[dict] = result["target_hooks"]["configured"]
+    owned_by_matcher: dict[tuple[str, str], list[dict]] = {}
+    user_rows_by_matcher: dict[tuple[str, str], list[dict]] = {}
+    for row in configured_rows:
+        key = (row["event"], row["matcher"])
+        if _rule_is_memtomem_owned(row["rule"]):
+            owned_by_matcher.setdefault(key, []).append(row["rule"])
+        else:
+            user_rows_by_matcher.setdefault(key, []).append(row)
+    consumed_owned: dict[tuple[str, str], int] = {}
+
+    # A user row that is byte-equal to *some* canonical rule under the same
+    # matcher is already in sync and must never be offered as a replacement
+    # target. Everything else is conflict-eligible; we hand those out FIFO so
+    # the Nth colliding canonical rule pairs with a *distinct* Nth user row —
+    # this is what lets the resolve endpoint update the Nth duplicate instead
+    # of always rewriting the first (issue #1112).
+    canonical_by_matcher: dict[tuple[str, str], list[dict]] = {}
+    for event, rules in canonical_hooks.items():
         if not isinstance(rules, list):
             continue
         for rule in rules:
             if isinstance(rule, dict):
-                target_index.setdefault((event, rule.get("matcher", "")), []).append(rule)
+                canonical_by_matcher.setdefault((event, rule.get("matcher", "")), []).append(rule)
+    conflict_user_rows: dict[tuple[str, str], list[dict]] = {
+        key: [
+            row
+            for row in rows
+            if not any(
+                _rule_content_equal(row["rule"], c) for c in canonical_by_matcher.get(key, [])
+            )
+        ]
+        for key, rows in user_rows_by_matcher.items()
+    }
+    consumed_conflict: dict[tuple[str, str], int] = {}
 
     # Mirror _merge_hooks_record's resolution so the GET diff classifies rules
     # exactly as a sync would (ADR-0019). Each memtomem-owned target rule under
@@ -234,15 +264,6 @@ def _compare_hooks(
     # the *specific* owned rule being consumed — not any same-matcher rule —
     # keeps the diff and the merge in agreement even when a user rule happens to
     # equal canonical while a stale owned rule still needs replacing (Codex r2).
-    owned_by_matcher: dict[tuple[str, str], list[dict]] = {}
-    user_by_matcher: dict[tuple[str, str], list[dict]] = {}
-    for key, rules_at in target_index.items():
-        for r in rules_at:
-            (owned_by_matcher if _rule_is_memtomem_owned(r) else user_by_matcher).setdefault(
-                key, []
-            ).append(r)
-    consumed_owned: dict[tuple[str, str], int] = {}
-
     for event, rules in canonical_hooks.items():
         if not isinstance(rules, list):
             continue
@@ -263,26 +284,51 @@ def _compare_hooks(
                 result["hooks"][bucket].append({"event": event, "matcher": matcher, "rule": rule})
                 continue
 
-            # Owned slots exhausted → merge additively against the user rules.
-            user_rules = user_by_matcher.get(key, [])
-            if any(_rule_content_equal(u, rule) for u in user_rules):
+            # Owned slots exhausted → mirror _merge_hooks_record's Pass 2: a
+            # canonical rule byte-equal to a user rule is synced; one with *no*
+            # same-matcher user rule is appended (pending); otherwise the user
+            # rule wins and we surface a conflict the user can manually accept.
+            user_rows = user_rows_by_matcher.get(key, [])
+            if any(_rule_content_equal(r["rule"], rule) for r in user_rows):
                 result["hooks"]["synced"].append({"event": event, "matcher": matcher, "rule": rule})
-            elif user_rules:
-                # Surface the first user rule as the conflict representative —
-                # keeps the payload shape stable for the resolve flow while not
-                # silently shadowing the rest of the user's same-matcher rules.
-                result["hooks"]["conflicts"].append(
-                    {
-                        "event": event,
-                        "matcher": matcher,
-                        "existing": user_rules[0],
-                        "proposed": rule,
-                    }
-                )
-            else:
+                continue
+            if not user_rows:
+                # Merge only appends when nothing under the matcher belongs to
+                # the user — that is the sole "will be added" case.
                 result["hooks"]["pending"].append(
                     {"event": event, "matcher": matcher, "rule": rule}
                 )
+                continue
+
+            # A conflict. Pair it with a *distinct* conflict-eligible user row
+            # (FIFO) and stamp both identities so the resolve endpoint replaces
+            # the *exact* row with the *exact* proposed rule — the Nth conflict
+            # updates the Nth row (issue #1112). ``proposed`` is the
+            # marker-stamped canonical rule so ``proposed_hash`` matches what
+            # resolve re-derives. When more colliding canonical rules share a
+            # matcher than there are distinct user rows, the overflow stays a
+            # conflict (merge would also warn, never append) bound to the
+            # representative row; there is only one slot to replace, and
+            # resolve's ``rule_hash`` guard turns the second attempt on it into
+            # a refresh-and-retry rather than a silent double-write.
+            eligible = conflict_user_rows.get(key, [])
+            taken = consumed_conflict.get(key, 0)
+            if taken < len(eligible):
+                partner = eligible[taken]
+                consumed_conflict[key] = taken + 1
+            else:
+                partner = eligible[-1] if eligible else user_rows[0]
+            result["hooks"]["conflicts"].append(
+                {
+                    "event": event,
+                    "matcher": matcher,
+                    "existing": partner["rule"],
+                    "proposed": rule,
+                    "target_rule_index": partner["rule_index"],
+                    "target_rule_hash": partner["rule_hash"],
+                    "proposed_hash": _rule_hash(rule),
+                }
+            )
 
     # Any memtomem-owned target slot a canonical rule did NOT consume will be
     # pruned by the next sync (ADR-0019) — whether the whole (event, matcher) is
@@ -393,6 +439,17 @@ class ResolveRequest(BaseModel):
     event: str
     matcher: str = ""
     action: str = "use_proposed"
+    # Exact-rule identity (issue #1112). When the client sends these, the
+    # endpoint replaces the *specific* target row (``rule_index`` + ``rule_hash``)
+    # with the *specific* proposed canonical rule (``proposed_hash``), so
+    # duplicate same-matcher conflict rows resolve deterministically — the Nth
+    # displayed conflict updates the Nth row. Omitting them falls back to
+    # best-effort first-match by (event, matcher): old label-only clients keep
+    # working and the single-conflict case is unaffected, at the cost of the
+    # historical "first row wins" ambiguity when a matcher is duplicated.
+    rule_index: int | None = None
+    rule_hash: str | None = None
+    proposed_hash: str | None = None
 
 
 @router.post("/settings-sync/resolve")
@@ -409,6 +466,22 @@ async def resolve_conflict(
     if body.action != "use_proposed":
         raise HTTPException(400, detail=f"Unknown action: {body.action}")
 
+    # Rule identity (issue #1112) is all-or-nothing: ``rule_index`` +
+    # ``rule_hash`` pin the exact target row and ``proposed_hash`` pins the
+    # exact canonical rule. A partial set would mix an exact target row with a
+    # first-match proposed rule and could write the wrong rule when a matcher
+    # is duplicated, so reject it rather than silently mis-resolve. With none
+    # set we fall back to the legacy label-only first-match for both sides.
+    identity = (body.rule_index, body.rule_hash, body.proposed_hash)
+    if any(v is not None for v in identity) and not all(v is not None for v in identity):
+        raise HTTPException(
+            400,
+            detail=(
+                "Partial rule identity: send rule_index, rule_hash, and "
+                "proposed_hash together, or none for label-only resolve."
+            ),
+        )
+
     label = _rule_label(body.event, body.matcher)
 
     canonical_path = project_root / CANONICAL_SETTINGS_FILE
@@ -424,22 +497,37 @@ async def resolve_conflict(
                 if not isinstance(canonical, dict):
                     raise HTTPException(422, detail="Canonical source is not valid JSON")
 
+                # Resolve the proposed canonical rule. Each candidate is
+                # marker-stamped (ADR-0019) so the rule we write matches what
+                # ``generate_all_settings`` would write — a later re-sync then
+                # recognizes it as memtomem-owned and updates it instead of
+                # re-flagging it as a conflict (issue #1110). When the client
+                # sends ``proposed_hash`` (issue #1112) we pick the *exact*
+                # canonical rule whose stamped hash the GET diff published,
+                # which is the same hash the diff computed over stamped
+                # canonical; otherwise we keep the first-match-by-matcher
+                # behavior for old label-only clients.
                 proposed = None
                 canonical_hooks: dict = canonical.get("hooks", {})
                 for rule in canonical_hooks.get(body.event, []):
-                    if isinstance(rule, dict) and rule.get("matcher", "") == body.matcher:
-                        proposed = rule
+                    if not (isinstance(rule, dict) and rule.get("matcher", "") == body.matcher):
+                        continue
+                    stamped = _stamp_status_markers({"hooks": {body.event: [rule]}})["hooks"][
+                        body.event
+                    ][0]
+                    if body.proposed_hash is None:
+                        proposed = stamped
+                        break
+                    if _rule_hash(stamped) == body.proposed_hash:
+                        proposed = stamped
                         break
                 if proposed is None:
-                    raise HTTPException(404, detail=f"Rule '{label}' not in canonical source")
-
-                # Stamp the ownership marker (ADR-0019) so the rule we write
-                # matches what ``generate_all_settings`` would write — a later
-                # re-sync then recognizes it as memtomem-owned and can update
-                # it instead of re-flagging it as a conflict (issue #1110).
-                proposed = _stamp_status_markers({"hooks": {body.event: [proposed]}})["hooks"][
-                    body.event
-                ][0]
+                    detail = (
+                        f"Proposed rule for '{label}' not found in canonical source"
+                        if body.proposed_hash is not None
+                        else f"Rule '{label}' not in canonical source"
+                    )
+                    raise HTTPException(404, detail=detail)
 
                 # Read target + mtime guard. ``st_mtime_ns`` matches
                 # ``hot_reload.py`` precision and detects sub-second writes
@@ -452,21 +540,44 @@ async def resolve_conflict(
                 if not isinstance(target, dict):
                     raise HTTPException(422, detail="Target settings is not valid JSON")
 
-                # Replace the rule in-place
                 target_hooks: dict = target.get("hooks", {})
                 if not isinstance(target_hooks, dict):
                     raise HTTPException(422, detail="Target hooks is not a record")
 
                 rules = target_hooks.get(body.event, [])
-                replaced = False
-                for i, rule in enumerate(rules):
-                    if isinstance(rule, dict) and rule.get("matcher", "") == body.matcher:
-                        rules[i] = proposed
-                        replaced = True
-                        break
+                if not isinstance(rules, list):
+                    raise HTTPException(422, detail="Target hook event is not a list")
 
-                if not replaced:
-                    raise HTTPException(404, detail=f"Rule '{label}' not found in target")
+                # Replace the rule in place. With identity (issue #1112) the Nth
+                # duplicate resolves deterministically: address the exact row by
+                # ``rule_index`` and verify ``rule_hash`` so a row that moved or
+                # changed under us is rejected (stale → aborted, not a silent
+                # mis-resolve). Without identity, keep the historical
+                # first-match-by-matcher behavior.
+                if body.rule_index is not None and body.rule_hash is not None:
+                    candidate = (
+                        rules[body.rule_index] if 0 <= body.rule_index < len(rules) else None
+                    )
+                    if (
+                        not isinstance(candidate, dict)
+                        or candidate.get("matcher", "") != body.matcher
+                        or _rule_hash(candidate) != body.rule_hash
+                    ):
+                        return {
+                            "status": "aborted",
+                            "reason": "Target rule changed. Refresh and retry.",
+                            "mtime_ns": str(target_path.stat().st_mtime_ns),
+                        }
+                    rules[body.rule_index] = proposed
+                else:
+                    replaced = False
+                    for i, rule in enumerate(rules):
+                        if isinstance(rule, dict) and rule.get("matcher", "") == body.matcher:
+                            rules[i] = proposed
+                            replaced = True
+                            break
+                    if not replaced:
+                        raise HTTPException(404, detail=f"Rule '{label}' not found in target")
 
                 # mtime check before write — protects against cross-process
                 # writers (CLI, manual edit) that the in-process lock can't see.

@@ -907,6 +907,309 @@ class TestSettingsSync:
             elif target.is_file():
                 target.unlink()
 
+    async def test_conflict_payload_carries_rule_identity(self, app, client: AsyncClient, tmp_path):
+        """Issue #1112: each conflict row exposes a stable identity for both
+        the target row (``target_rule_index`` + ``target_rule_hash``) and the
+        proposed canonical rule (``proposed_hash``) so the resolve endpoint can
+        address the exact row."""
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        canonical.write_text(
+            json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo new")]}}),
+            encoding="utf-8",
+        )
+        target = Path.home() / ".claude" / "settings.json"
+        backup = target.read_text(encoding="utf-8") if target.is_file() else None
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo old")]}}),
+                encoding="utf-8",
+            )
+            app.state.project_root = tmp_path
+
+            data = (await client.get("/api/settings-sync?target_scope=user")).json()
+            c = data["hooks"]["conflicts"][0]
+            assert c["target_rule_index"] == 0
+            assert isinstance(c["target_rule_hash"], str) and len(c["target_rule_hash"]) == 64
+            assert isinstance(c["proposed_hash"], str) and len(c["proposed_hash"]) == 64
+            # Target identity hashes the unstamped on-disk row; the proposed
+            # identity hashes the marker-stamped canonical rule, so they differ.
+            assert c["target_rule_hash"] != c["proposed_hash"]
+        finally:
+            if backup is not None:
+                target.write_text(backup, encoding="utf-8")
+            elif target.is_file():
+                target.unlink()
+
+    async def test_resolve_replaces_rule_by_identity(self, app, client: AsyncClient, tmp_path):
+        """Issue #1112: the single-conflict case resolves via exact identity
+        (regression) — the row addressed by index+hash is replaced with the
+        proposed canonical rule."""
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        canonical.write_text(
+            json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo new")]}}),
+            encoding="utf-8",
+        )
+        target = Path.home() / ".claude" / "settings.json"
+        backup = target.read_text(encoding="utf-8") if target.is_file() else None
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo old")]}}),
+                encoding="utf-8",
+            )
+            app.state.project_root = tmp_path
+
+            c = (await client.get("/api/settings-sync?target_scope=user")).json()["hooks"][
+                "conflicts"
+            ][0]
+            resp = await client.post(
+                "/api/settings-sync/resolve?target_scope=user",
+                json={
+                    "event": "PostToolUse",
+                    "matcher": "Write",
+                    "action": "use_proposed",
+                    "rule_index": c["target_rule_index"],
+                    "rule_hash": c["target_rule_hash"],
+                    "proposed_hash": c["proposed_hash"],
+                },
+            )
+            assert resp.json()["status"] == "ok"
+            updated = json.loads(target.read_text(encoding="utf-8"))
+            assert updated["hooks"]["PostToolUse"][0]["hooks"][0]["command"] == "echo new"
+        finally:
+            if backup is not None:
+                target.write_text(backup, encoding="utf-8")
+            elif target.is_file():
+                target.unlink()
+
+    async def test_two_same_matcher_conflicts_resolve_independently(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """Issue #1112: two canonical rules under one matcher each conflict with
+        a *distinct* user row. Resolving the conflict bound to the Nth row must
+        update that Nth row and leave the others alone — the by-label bug would
+        have rewritten row 0 and left the real conflict unresolved."""
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        canonical.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PostToolUse": [
+                            self._rule("Write", "echo c1"),
+                            self._rule("Write", "echo c2"),
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        target = Path.home() / ".claude" / "settings.json"
+        backup = target.read_text(encoding="utf-8") if target.is_file() else None
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "PostToolUse": [
+                                self._rule("Write", "echo u1"),
+                                self._rule("Write", "echo u2"),
+                            ]
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            app.state.project_root = tmp_path
+
+            data = (await client.get("/api/settings-sync?target_scope=user")).json()
+            assert data["status"] == "conflicts"
+            conflicts = data["hooks"]["conflicts"]
+            assert len(conflicts) == 2
+            by_index = {c["target_rule_index"]: c for c in conflicts}
+            # Distinct target rows — not both pointing at the first slot.
+            assert set(by_index) == {0, 1}
+            assert by_index[1]["existing"]["hooks"][0]["command"] == "echo u2"
+            assert by_index[1]["proposed"]["hooks"][0]["command"] == "echo c2"
+
+            # Resolve only the row-1 conflict.
+            resp = await client.post(
+                "/api/settings-sync/resolve?target_scope=user",
+                json={
+                    "event": "PostToolUse",
+                    "matcher": "Write",
+                    "action": "use_proposed",
+                    "rule_index": by_index[1]["target_rule_index"],
+                    "rule_hash": by_index[1]["target_rule_hash"],
+                    "proposed_hash": by_index[1]["proposed_hash"],
+                },
+            )
+            assert resp.json()["status"] == "ok"
+            rules = json.loads(target.read_text(encoding="utf-8"))["hooks"]["PostToolUse"]
+            assert rules[0]["hooks"][0]["command"] == "echo u1"  # untouched
+            assert rules[1]["hooks"][0]["command"] == "echo c2"  # the Nth row
+
+            # Resolving the row-0 conflict (its identity is still valid since
+            # row 0 was untouched) replaces the first row with the first rule.
+            resp = await client.post(
+                "/api/settings-sync/resolve?target_scope=user",
+                json={
+                    "event": "PostToolUse",
+                    "matcher": "Write",
+                    "action": "use_proposed",
+                    "rule_index": by_index[0]["target_rule_index"],
+                    "rule_hash": by_index[0]["target_rule_hash"],
+                    "proposed_hash": by_index[0]["proposed_hash"],
+                },
+            )
+            assert resp.json()["status"] == "ok"
+            rules = json.loads(target.read_text(encoding="utf-8"))["hooks"]["PostToolUse"]
+            assert rules[0]["hooks"][0]["command"] == "echo c1"
+            assert rules[1]["hooks"][0]["command"] == "echo c2"
+        finally:
+            if backup is not None:
+                target.write_text(backup, encoding="utf-8")
+            elif target.is_file():
+                target.unlink()
+
+    async def test_resolve_stale_hash_returns_aborted(self, app, client: AsyncClient, tmp_path):
+        """Issue #1112: an out-of-date ``rule_hash`` (the row moved or changed
+        under the client) aborts with a clear message instead of silently
+        replacing the wrong row."""
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        canonical.write_text(
+            json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo new")]}}),
+            encoding="utf-8",
+        )
+        target = Path.home() / ".claude" / "settings.json"
+        backup = target.read_text(encoding="utf-8") if target.is_file() else None
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo old")]}}),
+                encoding="utf-8",
+            )
+            app.state.project_root = tmp_path
+
+            c = (await client.get("/api/settings-sync?target_scope=user")).json()["hooks"][
+                "conflicts"
+            ][0]
+            resp = await client.post(
+                "/api/settings-sync/resolve?target_scope=user",
+                json={
+                    "event": "PostToolUse",
+                    "matcher": "Write",
+                    "action": "use_proposed",
+                    "rule_index": c["target_rule_index"],
+                    "rule_hash": "0" * 64,  # stale / wrong identity
+                    "proposed_hash": c["proposed_hash"],
+                },
+            )
+            body = resp.json()
+            assert body["status"] == "aborted"
+            assert "changed" in body["reason"].lower()
+            # No silent mis-resolve: the target row is left exactly as it was.
+            rules = json.loads(target.read_text(encoding="utf-8"))["hooks"]["PostToolUse"]
+            assert rules[0]["hooks"][0]["command"] == "echo old"
+        finally:
+            if backup is not None:
+                target.write_text(backup, encoding="utf-8")
+            elif target.is_file():
+                target.unlink()
+
+    async def test_more_canonical_than_user_rows_stays_conflict_not_pending(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """Issue #1112 (Codex r1): when canonical emits more colliding rules
+        under a matcher than there are user rows, the overflow must remain a
+        conflict — ``_merge_hooks_record`` warns and never appends while a
+        same-matcher user rule exists, so reporting the overflow as ``pending``
+        ("will be added") would lie about what a sync does."""
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        canonical.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PostToolUse": [
+                            self._rule("Write", "echo c1"),
+                            self._rule("Write", "echo c2"),
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        target = Path.home() / ".claude" / "settings.json"
+        backup = target.read_text(encoding="utf-8") if target.is_file() else None
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo u1")]}}),
+                encoding="utf-8",
+            )
+            app.state.project_root = tmp_path
+
+            data = (await client.get("/api/settings-sync?target_scope=user")).json()
+            assert data["status"] == "conflicts"
+            # Both canonical rules collide with the single user row → two
+            # conflicts, zero pending (a sync would emit two warnings, add none).
+            assert len(data["hooks"]["conflicts"]) == 2
+            assert data["hooks"]["pending"] == []
+        finally:
+            if backup is not None:
+                target.write_text(backup, encoding="utf-8")
+            elif target.is_file():
+                target.unlink()
+
+    async def test_resolve_partial_identity_returns_400(self, app, client: AsyncClient, tmp_path):
+        """Issue #1112 (Codex r2): rule identity is all-or-nothing. A request
+        with a target row identity but no ``proposed_hash`` would pin the exact
+        row yet pick the first canonical same-matcher rule — wrong when canonical
+        is duplicated — so it is rejected rather than silently mis-resolved."""
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        canonical.write_text(
+            json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo new")]}}),
+            encoding="utf-8",
+        )
+        target = Path.home() / ".claude" / "settings.json"
+        backup = target.read_text(encoding="utf-8") if target.is_file() else None
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo old")]}}),
+                encoding="utf-8",
+            )
+            app.state.project_root = tmp_path
+
+            resp = await client.post(
+                "/api/settings-sync/resolve?target_scope=user",
+                json={
+                    "event": "PostToolUse",
+                    "matcher": "Write",
+                    "action": "use_proposed",
+                    "rule_index": 0,
+                    "rule_hash": "a" * 64,
+                    # proposed_hash deliberately omitted → partial identity.
+                },
+            )
+            assert resp.status_code == 400
+            assert "Partial rule identity" in resp.json()["detail"]
+            # Target untouched by the rejected request.
+            rules = json.loads(target.read_text(encoding="utf-8"))["hooks"]["PostToolUse"]
+            assert rules[0]["hooks"][0]["command"] == "echo old"
+        finally:
+            if backup is not None:
+                target.write_text(backup, encoding="utf-8")
+            elif target.is_file():
+                target.unlink()
+
     async def test_marked_rule_differing_is_not_conflict(self, app, client: AsyncClient, tmp_path):
         """ADR-0019: a memtomem-marked target rule that differs is a pending
         update (a plain re-sync fixes it), not a user conflict (issue #1110)."""

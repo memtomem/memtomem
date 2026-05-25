@@ -527,7 +527,16 @@ async function loadHooksSync() {
         const oldText = JSON.stringify(c.existing, null, 2);
         const newText = JSON.stringify(c.proposed, null, 2);
         const ops = diffLines(oldText, newText);
-        html += `<div class="hooks-sync-card hooks-sync-conflict" data-event="${escapeHtml(c.event)}" data-matcher="${escapeHtml(c.matcher || '')}">
+        // Carry the exact rule identity (issue #1112) so resolving the Nth
+        // same-matcher conflict updates the Nth target row, not the first.
+        // Absent on legacy payloads → the resolve POST falls back to
+        // label-only first-match.
+        const idAttrs = (c.target_rule_index != null && c.target_rule_hash != null)
+          ? ` data-rule-index="${escapeHtml(String(c.target_rule_index))}"`
+            + ` data-rule-hash="${escapeHtml(c.target_rule_hash)}"`
+            + ` data-proposed-hash="${escapeHtml(c.proposed_hash || '')}"`
+          : '';
+        html += `<div class="hooks-sync-card hooks-sync-conflict" data-event="${escapeHtml(c.event)}" data-matcher="${escapeHtml(c.matcher || '')}"${idAttrs}>
           <div class="hooks-sync-card-header">
             <strong>${escapeHtml(label)}</strong>
             <button class="btn-sm btn-primary hooks-resolve-btn"
@@ -660,10 +669,19 @@ async function loadHooksSync() {
           const headers = csrf
             ? {'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf}
             : {'Content-Type': 'application/json'};
+          // Send the exact rule identity when the card carries it (issue
+          // #1112) so the Nth same-matcher conflict resolves the Nth row.
+          // Legacy cards without identity fall back to label-only first-match.
+          const resolveBody = {event, matcher, action: 'use_proposed'};
+          if (card.dataset.ruleIndex !== undefined && card.dataset.ruleHash !== undefined) {
+            resolveBody.rule_index = Number(card.dataset.ruleIndex);
+            resolveBody.rule_hash = card.dataset.ruleHash;
+            if (card.dataset.proposedHash) resolveBody.proposed_hash = card.dataset.proposedHash;
+          }
           const r = await fetch(_hooksScopedUrl('/api/context/settings/resolve'), {
             method: 'POST',
             headers,
-            body: JSON.stringify({event, matcher, action: 'use_proposed'}),
+            body: JSON.stringify(resolveBody),
           });
           if (!r.ok) {
             const err = await r.json().catch(() => ({}));
