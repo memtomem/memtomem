@@ -706,10 +706,12 @@ document.getElementById('hooks-sync-btn')?.addEventListener('click', async () =>
     const headers = csrf
       ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
       : { 'Content-Type': 'application/json' };
-    // The confirm modal IS the host-write trust gate (issue #962). Send
-    // ``allow_host_writes: true`` so the server doesn't re-prompt with
-    // ``needs_confirmation`` for the user-scope ``~/.claude/settings.json``
-    // path — the same gate the CLI confirms interactively
+    // The confirm modal IS the host-write trust gate (issue #962). Its copy
+    // (``confirm.hooks_sync_msg``) discloses that the merge fans out to every
+    // installed runtime's user-scope settings file (Claude/Codex/Gemini,
+    // ADR-0018) — not just ``~/.claude``. Send ``allow_host_writes: true`` so
+    // the server doesn't re-prompt with ``needs_confirmation`` for those host
+    // paths — the same gate the CLI confirms interactively
     // (``cli/context_cmd.py:_confirm_settings_host_writes``).
     const res = await fetch(_hooksScopedUrl('/api/settings-sync'), {
       method: 'POST',

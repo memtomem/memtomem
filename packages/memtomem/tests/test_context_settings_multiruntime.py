@@ -360,3 +360,96 @@ class TestGeminiMatcherEdgeCases:
         mapped, unmapped = _map_gemini_matcher("WebFetch")
         assert mapped is None
         assert unmapped == ["WebFetch"]
+
+
+# ── Gemini handler normalization (timeout units + name collisions) ───
+
+
+class TestGeminiHandlerNormalization:
+    """Gemini handler config needs two conversions the Claude/Codex paths
+    don't: seconds→ms timeout rescale, and collision-proof synthesized names
+    (distinct Claude matchers can collapse to one Gemini tool)."""
+
+    def test_timeout_seconds_rescaled_to_milliseconds(self, tmp_path, all_home):
+        """Claude/Codex timeouts are seconds; Gemini's are ms. A canonical
+        ``timeout: 30`` (30s) must land as ``30000`` on Gemini — otherwise it
+        would be read as 30ms and kill the hook before it runs."""
+        _canonical(tmp_path, {"PreToolUse": [_rule("Bash", "b", timeout=30)]})
+        generate_all_settings(tmp_path, scope="user", allow_host_writes=True)
+
+        hooks = json.loads((all_home / ".gemini" / "settings.json").read_text(encoding="utf-8"))[
+            "hooks"
+        ]
+        assert hooks["BeforeTool"][0]["hooks"][0]["timeout"] == 30000
+
+    def test_codex_timeout_left_in_seconds(self, tmp_path, all_home):
+        """Codex shares Claude's seconds unit — its timeout must NOT be rescaled."""
+        _canonical(tmp_path, {"PreToolUse": [_rule("Bash", "b", timeout=30)]})
+        generate_all_settings(tmp_path, scope="user", allow_host_writes=True)
+
+        hooks = json.loads((all_home / ".codex" / "hooks.json").read_text(encoding="utf-8"))[
+            "hooks"
+        ]
+        assert hooks["PreToolUse"][0]["hooks"][0]["timeout"] == 30
+
+    def test_collapsed_matchers_get_distinct_handler_names(self, tmp_path, all_home):
+        """``Edit`` and ``MultiEdit`` both map to Gemini's ``replace`` tool. Two
+        handlers with DIFFERENT commands must NOT share one synthesized name —
+        Gemini's ``/hooks disable <name>`` would otherwise be ambiguous."""
+        _canonical(
+            tmp_path,
+            {
+                "PreToolUse": [
+                    _rule("Edit", "edit-cmd"),
+                    _rule("MultiEdit", "multiedit-cmd"),
+                ]
+            },
+        )
+        generate_all_settings(tmp_path, scope="user", allow_host_writes=True)
+
+        hooks = json.loads((all_home / ".gemini" / "settings.json").read_text(encoding="utf-8"))[
+            "hooks"
+        ]
+        before = hooks["BeforeTool"]
+        # Both rules collapsed onto the same ``replace`` matcher...
+        assert {r["matcher"] for r in before} == {"replace"}
+        # ...but the synthesized handler names are distinct.
+        names = [r["hooks"][0]["name"] for r in before]
+        assert len(names) == 2
+        assert names[0] != names[1]
+
+    def test_collapsed_matchers_same_command_still_distinct(self, tmp_path, all_home):
+        """Even when ``Edit`` and ``MultiEdit`` collapse to ``replace`` AND run
+        the SAME command, the names must differ — the synthesized name hashes
+        the *original* (pre-remap) matcher, not just the command, so
+        ``/hooks disable <name>`` stays unambiguous."""
+        _canonical(
+            tmp_path,
+            {
+                "PreToolUse": [
+                    _rule("Edit", "same-cmd"),
+                    _rule("MultiEdit", "same-cmd"),
+                ]
+            },
+        )
+        generate_all_settings(tmp_path, scope="user", allow_host_writes=True)
+
+        hooks = json.loads((all_home / ".gemini" / "settings.json").read_text(encoding="utf-8"))[
+            "hooks"
+        ]
+        names = [r["hooks"][0]["name"] for r in hooks["BeforeTool"]]
+        assert len(names) == 2
+        assert names[0] != names[1], f"same-command collapsed matchers must differ, got {names!r}"
+
+    def test_synthesized_name_is_deterministic_across_syncs(self, tmp_path, all_home):
+        """The command-hash name is stable, so a re-sync is idempotent (no dup
+        rule, no spurious conflict warning)."""
+        _canonical(tmp_path, {"PreToolUse": [_rule("Bash", "stable")]})
+        generate_all_settings(tmp_path, scope="user", allow_host_writes=True)
+        first = json.loads((all_home / ".gemini" / "settings.json").read_text(encoding="utf-8"))
+
+        results = generate_all_settings(tmp_path, scope="user", allow_host_writes=True)
+        assert results["gemini_settings"].status == "ok"
+        assert not results["gemini_settings"].warnings
+        second = json.loads((all_home / ".gemini" / "settings.json").read_text(encoding="utf-8"))
+        assert first == second  # byte-identical → idempotent

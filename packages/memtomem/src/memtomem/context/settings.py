@@ -44,6 +44,7 @@ Merge semantics
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
@@ -387,8 +388,29 @@ def _map_gemini_matcher(matcher: str) -> tuple[str | None, list[str]]:
     return "|".join(mapped), []
 
 
-def _ensure_gemini_handler_names(handlers: object, event: str, matcher: str) -> list:
-    """Gemini hook handlers carry a ``name``; synthesize a stable one if absent."""
+def _ensure_gemini_handler_names(
+    handlers: object, event: str, matcher: str, original_matcher: str
+) -> list:
+    """Normalize handlers for Gemini: synthesize a ``name`` and rescale ``timeout``.
+
+    Two conversions, both keyed off the canonical (Claude/Codex-shaped) handler:
+
+    * **timeout unit.** Claude/Codex hook timeouts are *seconds*; Gemini's are
+      *milliseconds*. A numeric ``timeout`` is multiplied by 1000 so a canonical
+      ``timeout: 30`` (30s) doesn't become 30ms on Gemini and kill the hook
+      before it can run. ``bool`` (an ``int`` subclass) is left alone.
+    * **stable name.** Gemini exposes ``/hooks disable <name>``, so each handler
+      needs a *distinct* stable name. The slug alone is not enough: distinct
+      Claude matchers can collapse to one Gemini tool (``Edit`` and ``MultiEdit``
+      both map to ``replace``), which previously made two handlers share
+      ``memtomem-<event>-replace-0``. We hash the handler's **canonical
+      identity** — the *original* (pre-remap) matcher, its position in the rule,
+      and the command — *not* the remapped Gemini matcher. So ``Edit`` and
+      ``MultiEdit`` get distinct names even when they run the *same* command,
+      and the hash is content-derived → stable across re-syncs (idempotent).
+      Two byte-identical canonical rules intentionally share a name: they are
+      the same hook, and ``/hooks disable`` should govern both.
+    """
     if not isinstance(handlers, list):
         return []
     out: list = []
@@ -397,8 +419,17 @@ def _ensure_gemini_handler_names(handlers: object, event: str, matcher: str) -> 
         if not isinstance(handler, dict):
             continue
         new_handler = dict(handler)
+        timeout = new_handler.get("timeout")
+        if isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
+            new_handler["timeout"] = timeout * 1000
         if not new_handler.get("name"):
-            new_handler["name"] = f"memtomem-{event}-{slug}-{idx}"
+            command = new_handler.get("command")
+            command_str = command if isinstance(command, str) else ""
+            # NUL-delimited so the three fields can't be confused with each
+            # other (e.g. matcher "a" + command "b" vs matcher "a\x00b").
+            identity = f"{original_matcher}\x00{idx}\x00{command_str}"
+            digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:8]
+            new_handler["name"] = f"memtomem-{event}-{slug}-{digest}"
         out.append(new_handler)
     return out
 
@@ -447,7 +478,7 @@ def _remap_for_gemini(contributions: dict) -> tuple[dict, list[str]]:
                     continue
                 new_rule["matcher"] = mapped_matcher
             new_rule["hooks"] = _ensure_gemini_handler_names(
-                rule.get("hooks", []), gemini_event, new_rule.get("matcher", "")
+                rule.get("hooks", []), gemini_event, new_rule.get("matcher", ""), matcher
             )
             out.setdefault(gemini_event, []).append(new_rule)
     return {"hooks": out}, warnings

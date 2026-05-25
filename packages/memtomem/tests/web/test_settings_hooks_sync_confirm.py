@@ -546,3 +546,26 @@ def test_hooks_sync_runtime_error_not_reported_as_success(page, mm_web_url: str)
         assert msg != "Sync completed", (
             f"a runtime error must NOT show the sync_success toast, got {msg!r}"
         )
+
+
+def test_hooks_sync_confirm_discloses_multiruntime_targets(page, mm_web_url: str) -> None:
+    """ADR-0018: the confirm modal is the host-write trust gate, and the click
+    handler authorizes ``allow_host_writes`` for Codex + Gemini too — not just
+    ``~/.claude``. The modal copy must therefore disclose all three runtimes so
+    the user isn't approving a Claude-only write while silently getting three.
+    """
+    install_default_stubs(page)
+    _stub_settings_sync(page, _OUT_OF_SYNC_GET)
+
+    page.goto(mm_web_url)
+    _open_hooks_sync(page)
+
+    page.locator("#hooks-sync-btn").click()
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    msg = page.locator("#confirm-message").text_content() or ""
+    assert "Codex" in msg and "Gemini" in msg, (
+        f"consent modal must disclose all fan-out runtimes (Codex/Gemini), got {msg!r}"
+    )
