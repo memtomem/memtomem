@@ -225,6 +225,8 @@ def detect_settings_files(project_root: Path, scope: str) -> list[DetectedFile]:
         if not gen.is_available(project_root):
             continue
         target = gen.target_file(project_root, scope)
+        if target is None:
+            continue  # no fan-out target for this (runtime, scope)
         if target.is_file():
             found.append(
                 DetectedFile(

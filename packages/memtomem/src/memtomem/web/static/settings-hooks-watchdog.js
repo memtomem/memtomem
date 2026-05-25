@@ -722,6 +722,19 @@ document.getElementById('hooks-sync-btn')?.addEventListener('click', async () =>
     }
     const data = await res.json();
     const results = Array.isArray(data.results) ? data.results : [];
+    // Multi-runtime fan-out (Codex/Gemini, ADR-0018): a per-runtime
+    // ``error`` (malformed target JSON) or ``aborted`` (concurrent write)
+    // must NOT be reported as success — same no-silent-failure contract as
+    // the needs_confirmation branch below. Without this a Codex/Gemini
+    // failure would fall through to ``sync_success`` while only Claude
+    // actually synced.
+    const failed = results.filter(r => r.status === 'error' || r.status === 'aborted');
+    if (failed.length) {
+      const detail = failed.map(r => `${r.name}: ${r.reason || r.status}`).join('; ');
+      showToast(t('toast.sync_failed', { error: detail }), 'error');
+      loadHooksSync();
+      return;
+    }
     const needsConfirmation = results.filter(r => r.status === 'needs_confirmation');
     if (needsConfirmation.length) {
       // Defensive branch: the first POST already carried
