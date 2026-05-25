@@ -82,6 +82,22 @@ def _bundled_hook() -> dict:
     return {"PostToolUse": [_rule("Edit|Write", inners=[_inner("mm session start")])]}
 
 
+def _stamped_bundled_hook() -> dict:
+    return {
+        "PostToolUse": [
+            _rule(
+                "Edit|Write",
+                inners=[
+                    {
+                        **_inner("mm session start"),
+                        "statusMessage": "memtomem · PostToolUse",
+                    }
+                ],
+            )
+        ]
+    }
+
+
 def _read_settings(path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -251,6 +267,19 @@ class TestPlanMigration:
         assert plan.moves[0].already_at_target is True
         assert plan.moves[0].conflict_at_target is False
 
+    def test_target_stamped_canonical_inner_is_already_at_target(self, project_root, fake_home):
+        """ADR-0019 marker fields are cosmetic for migrate's target check."""
+        _write_canonical(project_root, _bundled_hook())
+        _write_settings(fake_home / ".claude" / "settings.json", _settings_doc(_bundled_hook()))
+        _write_settings(
+            project_root / ".claude" / "settings.local.json",
+            _settings_doc(_stamped_bundled_hook()),
+        )
+        plan = plan_migration(project_root, source_scope="user", target_scope="project_local")
+        assert len(plan.moves) == 1
+        assert plan.moves[0].already_at_target is True
+        assert plan.moves[0].conflict_at_target is False
+
 
 # ── Apply unit tests ───────────────────────────────────────────────
 
@@ -279,6 +308,8 @@ class TestApplyMigration:
             and any(inner.get("command") == "mm session start" for inner in rule.get("hooks", []))
             for rule in post
         )
+        handler = post[0]["hooks"][0]
+        assert handler["statusMessage"] == "memtomem · PostToolUse"
 
     def test_idempotent_rerun(self, project_root, fake_home):
         """After a successful apply, a second plan/apply is a no-op."""

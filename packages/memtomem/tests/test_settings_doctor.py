@@ -58,6 +58,25 @@ def _bundled_hook() -> dict:
     return {"PostToolUse": [_rule("Edit|Write", "mm session start")]}
 
 
+def _stamped_bundled_hook() -> dict:
+    """A generated ADR-0019-stamped hook record."""
+    return {
+        "PostToolUse": [
+            {
+                "matcher": "Edit|Write",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "mm session start",
+                        "timeout": 5000,
+                        "statusMessage": "memtomem · PostToolUse",
+                    }
+                ],
+            }
+        ]
+    }
+
+
 # ── Fixtures ────────────────────────────────────────────────────────
 
 
@@ -135,6 +154,18 @@ class TestDetectDuplicateTiers:
         assert duplicates[0].tier == "user"
         assert duplicates[0].path == fake_home / ".claude" / "settings.json"
         assert len(duplicates[0].entries) == 1
+
+    def test_stamped_duplicate_in_user_when_active_is_project_local(self, project_root, fake_home):
+        """ADR-0019 statusMessage markers do not perturb doctor classification."""
+        _write_canonical(project_root, _bundled_hook())
+        _write_settings(fake_home / ".claude" / "settings.json", _stamped_bundled_hook())
+        duplicates = detect_duplicate_tiers(project_root, active_scope="project_local")
+        assert len(duplicates) == 1
+        assert duplicates[0].entries[0] == HookSignature(
+            event="PostToolUse",
+            matcher="Edit|Write",
+            command_shape="mm session start",
+        )
 
     def test_duplicate_in_project_shared_when_active_is_user(self, project_root, fake_home):
         _write_canonical(project_root, _bundled_hook())

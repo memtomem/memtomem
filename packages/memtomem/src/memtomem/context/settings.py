@@ -225,7 +225,11 @@ def _strip_ownership_markers(rule: dict) -> dict:
 
 
 def _rule_content_equal(a: object, b: object) -> bool:
-    """True if *a* and *b* are functionally equal (ignoring marker-carrier fields)."""
+    """True if *a* and *b* are functionally equal (ignoring marker-carrier fields).
+
+    Shared outside this module by the Web hooks diff and settings-migrate
+    planner; keep its cosmetic-field semantics aligned with merge behavior.
+    """
     if not isinstance(a, dict) or not isinstance(b, dict):
         return a == b
     return _strip_ownership_markers(a) == _strip_ownership_markers(b)
@@ -379,9 +383,10 @@ def _merge_hooks_record(
             contrib_commands = _rule_commands(c)
             if contrib_commands and any(contrib_commands & _rule_commands(u) for u in same_user):
                 warnings.append(
-                    f"Hook rule '{label}' looks like a memtomem-managed rule "
-                    f"from a previous version (same command, no ownership "
-                    f"marker). Remove it, then re-run "
+                    f"Hook rule '{label}' has the same command as a "
+                    f"memtomem-managed rule but no ownership marker. If this "
+                    f"is a memtomem-managed rule from a previous version, "
+                    f"remove it, then re-run "
                     f"`mm context sync --include=settings` to let memtomem "
                     f"update it."
                 )

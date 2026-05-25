@@ -61,15 +61,16 @@ an Accepted ADR).
    rule, so memtomem does **not** silently overwrite it (a genuine user rule
    that merely shares a command must not be clobbered). Instead, when an
    unmarked colliding rule shares a `command` with the contribution, the warning
-   is sharpened to "looks like a memtomem-managed rule from a previous version —
-   remove it and re-run sync." After one marked sync, the rule self-updates.
+   explains that it may be a memtomem-managed rule from a previous version and,
+   if so, should be removed before re-running sync. After one marked sync, the
+   rule self-updates.
 
-5. **All Claude write paths agree.** The CLI merge, the web `GET
-   /settings-sync` diff (`_compare_hooks` stamps the canonical before comparing
-   and classifies a differing memtomem-owned target rule as *pending*, not a
-   conflict), and the web `POST /settings-sync/resolve` "use memtomem's version"
-   action all stamp through the one shared helper, so no path writes an unmarked
-   rule.
+5. **All Claude write paths agree.** The CLI merge, settings-migrate target
+   writes, the web `GET /settings-sync` diff (`_compare_hooks` stamps the
+   canonical before comparing and classifies a differing memtomem-owned target
+   rule as *pending*, not a conflict), and the web
+   `POST /settings-sync/resolve` "use memtomem's version" action all stamp
+   through the one shared helper, so no path writes an unmarked rule.
 
 ## Consequences
 
@@ -81,6 +82,10 @@ an Accepted ADR).
 - No new runtime-schema risk: only documented fields are written; the Gemini
   file never receives `statusMessage`, and Claude/Codex never receive a
   Gemini-only field.
+- A user edit inside the reserved marker field is unsupported. The web diff may
+  report a cosmetic-only marker change as already in sync because functional
+  comparison ignores marker-carrier fields; the next sync still rewrites
+  memtomem-owned slots wholesale.
 - One-time upgrade gap: pre-marker rules warn once (command-changed) or after a
   single re-sync (command-unchanged) before they become owned.
 

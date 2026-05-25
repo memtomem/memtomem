@@ -29,6 +29,8 @@ from pathlib import Path
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
+    _rule_content_equal,
+    _stamp_status_markers,
     resolve_scope_path,
 )
 from memtomem.context.settings_doctor import (
@@ -52,8 +54,9 @@ class MigrateMove:
     :func:`_classify_target` and surface here as a pair of booleans:
 
     * ``already_at_target=True``, ``conflict_at_target=False`` —
-      target already carries an inner **byte-equal** to the canonical
-      one. Target write is skipped; source is still cleaned.
+      target already carries an inner functionally equal to the
+      canonical one (ownership marker fields ignored). Target write is
+      skipped; source is still cleaned.
     * ``already_at_target=False``, ``conflict_at_target=False`` —
       target either has no rule under ``(event, matcher)`` or has one
       that we can extend safely. Target gets the canonical rule
@@ -210,11 +213,12 @@ def _classify_target(
     * ``("missing", "")`` — no rule under ``(event, matcher)`` exists at
       target. Safe: the canonical rule will be appended.
     * ``("exact", "")`` — a rule under ``(event, matcher)`` carries an
-      inner **byte-equal** to ``canonical_inner``. Safe: target write is
-      skipped, source can still be cleaned (the canonical entry is
-      already exactly there).
+      inner functionally equal to ``canonical_inner``. Ownership marker
+      fields are ignored so an ADR-0019-stamped target is not reported
+      as drift. Safe: target write is skipped, source can still be
+      cleaned (the canonical entry is already there).
     * ``("conflict", reason)`` — a rule under ``(event, matcher)``
-      exists but **no** inner is byte-equal to ``canonical_inner``.
+      exists but **no** inner is functionally equal to ``canonical_inner``.
       Refuse: blindly appending the canonical rule would create a
       second same-matcher rule (Claude Code merges them additively, so
       both would fire); skipping target while cleaning source would
@@ -234,7 +238,9 @@ def _classify_target(
         if not isinstance(rule, dict):
             continue
         for inner in rule.get("hooks", []):
-            if isinstance(inner, dict) and inner == canonical_inner:
+            if isinstance(inner, dict) and _inner_content_equal(
+                sig.matcher, inner, canonical_inner
+            ):
                 return ("exact", "")
     label = f"{sig.event}:{sig.matcher}" if sig.matcher else sig.event
     return (
@@ -246,6 +252,26 @@ def _classify_target(
             f"the source can be cleaned."
         ),
     )
+
+
+def _inner_content_equal(matcher: str, target_inner: dict, canonical_inner: dict) -> bool:
+    """Compare inner handlers using the shared ownership-marker semantics."""
+    return _rule_content_equal(
+        {"matcher": matcher, "hooks": [target_inner]},
+        {"matcher": matcher, "hooks": [canonical_inner]},
+    )
+
+
+def _stamp_rule_for_target(event: str, rule: dict) -> dict:
+    """Stamp one Claude/Codex-shaped rule before writing it to a target tier."""
+    stamped = _stamp_status_markers({"hooks": {event: [rule]}})
+    hooks = stamped.get("hooks", {})
+    if not isinstance(hooks, dict):
+        return rule
+    rules = hooks.get(event, [])
+    if not isinstance(rules, list) or not rules or not isinstance(rules[0], dict):
+        return rule
+    return rules[0]
 
 
 def plan_migration(
@@ -332,10 +358,13 @@ def plan_migration(
                         continue
                     seen_sigs.add(sig)
                     canonical_inner = canonical_inners[sig]
-                    rule_to_write = {
-                        "matcher": sig.matcher,
-                        "hooks": [canonical_inner],
-                    }
+                    rule_to_write = _stamp_rule_for_target(
+                        sig.event,
+                        {
+                            "matcher": sig.matcher,
+                            "hooks": [canonical_inner],
+                        },
+                    )
                     status, reason = _classify_target(target_index, sig, canonical_inner)
                     moves.append(
                         MigrateMove(
