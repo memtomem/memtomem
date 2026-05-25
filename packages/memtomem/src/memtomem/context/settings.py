@@ -47,6 +47,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -628,7 +629,12 @@ def _ensure_gemini_handler_names(
     if not isinstance(handlers, list):
         return []
     out: list = []
-    slug = (matcher or "all").replace("|", "-").replace("*", "all")
+    # Sanitize the remapped matcher to the Gemini name charset: lifecycle or
+    # multi-tool matchers can carry ``|`` / ``*`` / spaces / punctuation, which
+    # would leak into ``memtomem-<event>-<slug>-<digest>`` and break
+    # ``/hooks disable <name>``. Collapse any run of non-[A-Za-z0-9_.-] to ``-``.
+    # Uniqueness still comes from the digest, so the slug is purely cosmetic.
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", matcher or "all").strip("-") or "all"
     for idx, handler in enumerate(handlers):
         if not isinstance(handler, dict):
             continue

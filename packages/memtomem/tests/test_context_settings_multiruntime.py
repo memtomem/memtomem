@@ -543,3 +543,21 @@ class TestGeminiHandlerNormalization:
         assert not results["gemini_settings"].warnings
         second = json.loads((all_home / ".gemini" / "settings.json").read_text(encoding="utf-8"))
         assert first == second  # byte-identical → idempotent
+
+    def test_handler_name_slug_sanitizes_unsafe_matcher_chars(self):
+        """A matcher carrying spaces/punctuation must not leak unsafe chars into
+        the synthesized ``memtomem-<event>-<slug>-<digest>`` name — that would
+        break Gemini's ``/hooks disable <name>``. Uniqueness still comes from the
+        digest, so the slug is sanitized to the safe charset (slug-regex fold)."""
+        from memtomem.context.settings import _ensure_gemini_handler_names
+
+        out = _ensure_gemini_handler_names(
+            [{"type": "command", "command": "echo hi"}],
+            "BeforeTool",
+            "weird matcher!@#|*",
+            "weird matcher!@#|*",
+        )
+        name = out[0]["name"]
+        assert name.startswith("memtomem-BeforeTool-")
+        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
+        assert set(name) <= allowed, f"unsafe chars leaked into Gemini name: {name!r}"
