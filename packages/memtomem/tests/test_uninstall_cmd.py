@@ -81,6 +81,12 @@ def home(tmp_path, monkeypatch):
 
     h = tmp_path / "home"
     h.mkdir()
+    # The external-MCP probe also checks ``Path.cwd() / ".mcp.json"`` (the
+    # project-local Claude config). Pin cwd into the tmp home so the repo's
+    # own ``.mcp.json`` doesn't leak into the probe and trip the negative
+    # "not reported" assertions — CI runs pytest from the repo root, which
+    # ships a real ``.mcp.json``.
+    monkeypatch.chdir(h)
     xdg = tmp_path / "xdg_runtime"
     xdg.mkdir()
     os.chmod(xdg, 0o700)  # _runtime_paths validator requires owner-only
