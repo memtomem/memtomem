@@ -119,3 +119,31 @@ def install_default_stubs(page) -> None:
     page.route("**/api/namespaces", lambda r: _ok(r, {"namespaces": []}))
     page.route("**/api/stats", lambda r: _ok(r, {}))
     page.route("**/api/privacy/patterns", lambda r: _ok(r, {"patterns": []}))
+    # ``/api/context/projects`` needs a valid ``{scopes: [...]}`` shape, not
+    # the catch-all ``{}``: since #1100 ``_ctxFetchProjects`` treats a 200 that
+    # isn't ``{scopes: Array}`` as a failure and fires a "project list failed to
+    # load" error toast. Under the bare ``{}`` that toast lands in
+    # ``#toast-container`` on every boot and shadows / duplicates the toast
+    # specs assert on (strict-mode "resolved to 2 elements"). One synthetic
+    # server-CWD scope mirrors the legacy single-project payload and stays
+    # silent. ``**`` tail also matches the ``?target_scope=`` query variant.
+    page.route(
+        "**/api/context/projects**",
+        lambda r: _ok(
+            r,
+            {
+                "scopes": [
+                    {
+                        "scope_id": "",
+                        "label": "Server CWD",
+                        "root": "",
+                        "tier": "project",
+                        "sources": ["server-cwd"],
+                        "experimental": False,
+                        "missing": False,
+                        "counts": {"skills": 0, "commands": 0, "agents": 0},
+                    }
+                ]
+            },
+        ),
+    )
