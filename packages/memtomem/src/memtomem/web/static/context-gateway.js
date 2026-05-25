@@ -219,7 +219,7 @@ function _ctxNormalizeActiveScope(scopes) {
 
 async function _ctxFetchProjects() {
   let data;
-  // Three failure shapes need to stay distinguishable per #1080:
+  // Four failure shapes need to stay distinguishable per #1080:
   //   - 404 / network throw   → older deployment or absent endpoint; the
   //     legacy single-server-CWD fallback is the documented contract here,
   //     so stay silent to avoid noise on intentional-omit deployments.
@@ -228,6 +228,8 @@ async function _ctxFetchProjects() {
   //     registered projects".
   //   - 200 with malformed JSON → endpoint reachable, response unreadable;
   //     same "endpoint exists but failing" class, surface a toast.
+  //   - 200 with unexpected shape → parses cleanly but isn't {scopes: Array};
+  //     same "endpoint exists but failing" class, surface a toast (#1100).
   let warn = null;
   try {
     const res = await fetch(_ctxWithTargetScope('/api/context/projects', { includeScope: false }));
@@ -241,6 +243,18 @@ async function _ctxFetchProjects() {
     } catch (parseErr) {
       warn = { kind: 'parse', detail: String((parseErr && parseErr.message) || parseErr) };
       throw parseErr;
+    }
+    // Validate the shape *outside* the parse try/catch so it isn't
+    // misclassified as a parse failure. A 200 that parses but isn't
+    // {scopes: Array} — null, {}, {error: …}, a string, an array — would
+    // otherwise fall through to ``data.scopes || []`` below: literal ``null``
+    // TypeErrors (caller shows a generic "Failed to load overview", toast
+    // never reached) and ``{}`` silently empties the cache, reproducing the
+    // #1080 "unreadable store masquerading as no-projects" symptom. Route it
+    // through the same loud-fallback path as the other failing-endpoint shapes.
+    if (!data || !Array.isArray(data.scopes)) {
+      warn = { kind: 'shape', detail: `unexpected response shape: ${typeof data}` };
+      throw new Error(warn.detail);
     }
   } catch (_err) {
     // Browser tests and older deployments may not provide the multi-project

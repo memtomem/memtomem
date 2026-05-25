@@ -1,18 +1,20 @@
-/* Regression guard for #1080 — distinguish the three failure shapes of
+/* Regression guard for #1080 / #1100 — distinguish the failure shapes of
  * ``GET /api/context/projects`` instead of silently collapsing them all
  * onto the Server-CWD-only fallback.
  *
  *   - 404 / network throw     → silent fallback (legacy/older-deploy contract)
  *   - 5xx / non-404 4xx       → toast + fallback (endpoint failing)
  *   - 200 + malformed JSON    → toast + fallback (response unreadable)
+ *   - 200 + unexpected shape  → toast + fallback (parses but not {scopes:[…]})
  *   - 200 + real {scopes:[…]} → no toast, real scopes rendered (baseline)
  *
- * The four cells together pin the symmetric pair per
+ * The cells together pin the symmetric pair per
  * ``feedback_pin_invert_symmetric_assertion.md``: positive-only or
- * negative-only would false-pass since the bug is "three cases collapsing
- * to one". The mutation that proves these tests bite is restoring the
- * original blanket ``catch (_err) { fallback }`` — the 503 / parse cases
- * then stop toasting.
+ * negative-only would false-pass since the bug is "several failing cases
+ * collapsing to one silent no-projects state". The mutation that proves
+ * these tests bite is restoring the original blanket ``catch (_err)
+ * { fallback }`` — the 503 / parse cases then stop toasting; deleting the
+ * shape branch (#1100) flips the null / {} cells specifically.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -132,6 +134,35 @@ describe('_ctxFetchProjects — failure-shape signal split (#1080)', () => {
     expect(toasts[0].level).toBe('error');
     // Parse-error detail string varies by engine; just pin that *something*
     // about the failure surfaced (not the empty/raw key fallback).
+    expect(toasts[0].msg).not.toBe('settings.ctx.projects_fetch_failed');
+    expect(toasts[0].msg.length).toBeGreaterThan(0);
+  });
+
+  it('200 with null body — toast + fallback (shape failure, #1100)', async () => {
+    // Server returns the JSON literal ``null``. Pre-#1100 this slipped past
+    // both the !res.ok and parse branches, then ``data.scopes`` TypeErrored —
+    // the caller surfaced a generic "Failed to load overview" and the toast
+    // line was never reached. Now it routes through the shape branch.
+    installProjectsFetch(window, () => jsonRes(null));
+    const data = await window._ctxFetchProjects();
+    expect(data.scopes).toHaveLength(1);
+    expect(data.scopes[0].sources).toEqual(['server-cwd']);
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].level).toBe('error');
+    expect(toasts[0].msg).not.toBe('settings.ctx.projects_fetch_failed');
+    expect(toasts[0].msg.length).toBeGreaterThan(0);
+  });
+
+  it('200 with {} body — toast + fallback (shape failure, #1100)', async () => {
+    // Parses fine but has no ``scopes`` array. Pre-#1100 this silently set
+    // ``_ctxProjectsCache = []`` with no toast — indistinguishable from "no
+    // registered projects", the exact #1080 symptom via a different path.
+    installProjectsFetch(window, () => jsonRes({}));
+    const data = await window._ctxFetchProjects();
+    expect(data.scopes).toHaveLength(1);
+    expect(data.scopes[0].sources).toEqual(['server-cwd']);
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].level).toBe('error');
     expect(toasts[0].msg).not.toBe('settings.ctx.projects_fetch_failed');
     expect(toasts[0].msg.length).toBeGreaterThan(0);
   });

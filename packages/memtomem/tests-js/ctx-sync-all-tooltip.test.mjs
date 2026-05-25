@@ -42,6 +42,16 @@ function stubOverviewFetch(window, { allRuntimeOnly }) {
     if (url.endsWith('/api/context/overview')) {
       return { ok: true, status: 200, json: async () => data };
     }
+    // ``loadCtxOverview`` also calls ``_ctxFetchProjects`` → GET
+    // /api/context/projects. bootApp's default stub returns ``{}`` for it,
+    // which since #1100 is a shape failure that fires its own error toast —
+    // that would land *first* in ``#toast-container`` and shadow the
+    // click-toast these tests read back. Return a minimal valid scopes
+    // payload so the projects fetch stays silent and the subject toast is
+    // the only one present.
+    if (url.includes('/api/context/projects')) {
+      return { ok: true, status: 200, json: async () => ({ scopes: [] }) };
+    }
     return upstream(input);
   };
 }
