@@ -1,19 +1,20 @@
 """Canonical ⇄ runtime slash/custom command fan-out.
 
-Phase 3 (+ Phase 3.5) of the "memtomem as canonical context gateway" plan. A
-slash command lives at ``.memtomem/commands/<name>.md`` with YAML frontmatter
-(Claude Code-compatible superset) and a Markdown body that acts as the prompt
-template. From that single canonical source we fan out to three runtimes:
+Phase 3 of the "memtomem as canonical context gateway" plan. A slash command
+lives at ``.memtomem/commands/<name>.md`` with YAML frontmatter (Claude
+Code-compatible superset) and a Markdown body that acts as the prompt
+template. From that single canonical source we fan out to **two** runtimes:
 
 * ``.claude/commands/<name>.md`` — Claude Code (Markdown + YAML, pass-through)
 * ``.gemini/commands/<name>.toml`` — Gemini CLI (TOML: ``prompt`` + ``description``)
-* ``~/.codex/prompts/<name>.md`` — OpenAI Codex CLI (**user-scope**, Markdown +
-  YAML superset minus ``allowed-tools`` / ``model``)
 
-Codex custom prompts are *upstream-deprecated* — OpenAI recommends migrating
-command-like workflows to **skills** (which memtomem already fans out to Codex
-via ``.agents/skills/`` in Phase 1). Phase 3.5 still provides fan-out for
-parity with the Claude + Gemini pipeline; new workflows should prefer skills.
+Codex commands are **not** fanned out: :data:`COMMAND_GENERATORS` registers
+only Claude + Gemini, and Codex custom prompts (``~/.codex/prompts/*.md``) are
+*upstream-deprecated*. OpenAI recommends migrating command-like workflows to
+**skills**, which memtomem already fans out to Codex via ``.agents/skills/``
+(Phase 1). The runtime fan-out table reserves a ``("commands", "codex", "user")``
+slot so a future ``CodexCommandsGenerator`` can land without churn, but none is
+registered today.
 
 Placeholder normalization
 -------------------------
@@ -21,12 +22,9 @@ Claude's ``$ARGUMENTS`` placeholder and Gemini's ``{{args}}`` placeholder have
 the same semantics — both substitute the entire user-supplied argument string.
 When fanning out Claude-flavoured canonical → Gemini TOML we rewrite
 ``$ARGUMENTS`` → ``{{args}}``; the reverse import rewrites it back.
-Codex natively supports ``$ARGUMENTS``, ``$1``..``$9``, ``$NAME``, and ``$$``
-(verbatim to Claude's surface), so the canonical body passes through unchanged
-for the Codex target — **no rewrite**. ``!{...}`` shell injection and
-``@{...}`` file embed syntax are Gemini-only advanced features and remain out
-of scope — users who need them can hand-edit ``.gemini/commands/*.toml``
-directly.
+``!{...}`` shell injection and ``@{...}`` file embed syntax are Gemini-only
+advanced features and remain out of scope — users who need them can hand-edit
+``.gemini/commands/*.toml`` directly.
 """
 
 from __future__ import annotations

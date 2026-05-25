@@ -2,14 +2,22 @@
 
 Phase D of the "memtomem as canonical context gateway" plan.  A project's
 canonical settings live at ``.memtomem/settings.json`` with a ``hooks``
-record (keyed by event name).  From that single canonical source we fan
-out to:
+record (keyed by Claude-style event name).  From that single canonical
+source we fan out to each installed runtime's hooks file:
 
 * ``~/.claude/settings.json`` — Claude Code (JSON deep-merge into ``hooks``)
+* ``~/.codex/hooks.json`` — Codex CLI (same event names + record shape as
+  Claude; matchers ``Bash``/``Edit``/``Write`` are accepted natively, so
+  the merge is near-identical — events Codex lacks, ``Notification`` /
+  ``SessionEnd``, are dropped with a warning)
+* ``~/.gemini/settings.json`` — Gemini CLI (event names AND tool-name
+  matchers are remapped — ``PreToolUse``→``BeforeTool``, ``Bash``→
+  ``run_shell_command`` etc.; unmappable events/matchers are dropped with a
+  warning — see :func:`_remap_for_gemini`)
 
-Gemini and Codex have no known settings-file equivalent as of 2026-04-12;
-runtimes can be added by implementing :class:`SettingsGenerator` and
-registering in :data:`SETTINGS_GENERATORS`.
+Codex/Gemini have no ``project_local`` hooks target (``target_file`` returns
+``None`` there).  Additional runtimes can be added by implementing
+:class:`SettingsGenerator` and registering in :data:`SETTINGS_GENERATORS`.
 
 Hooks format (Claude Code ≥ 2.1.104)
 -------------------------------------
@@ -36,6 +44,7 @@ Merge semantics
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
@@ -89,8 +98,13 @@ class SettingsGenerator(Protocol):
         """
         ...
 
-    def target_file(self, project_root: Path, scope: str) -> Path:
-        """Return the path to the runtime's settings file for *scope*."""
+    def target_file(self, project_root: Path, scope: str) -> Path | None:
+        """Return the runtime's settings file for *scope*.
+
+        ``None`` means "no runtime fan-out for this (runtime, scope)" —
+        e.g. Codex/Gemini have no ``project_local`` hooks target. Every
+        consumer treats ``None`` as *skipped* (no write, not an error).
+        """
         ...
 
     def canonical_source(self, project_root: Path) -> Path:
@@ -131,6 +145,74 @@ def _register(gen: SettingsGenerator) -> SettingsGenerator:
     return gen
 
 
+def _merge_hooks_record(
+    existing: dict | None,
+    contributions: dict,
+) -> tuple[dict, list[str]]:
+    """Additive merge of record-format ``hooks``.  User rules always win.
+
+    Identity key is ``(event, matcher)``; on a same-key collision with a
+    different payload the user's existing rule is kept and a guided warning
+    is emitted.  Shared by Claude and Codex (identical event names + record
+    shape).  Gemini remaps event/matcher names first via
+    :func:`_remap_for_gemini`, then merges the remapped record through this
+    same function — so the conflict/dedup semantics stay identical across
+    runtimes.
+    """
+    warnings: list[str] = []
+    merged = dict(existing) if existing else {}
+
+    contrib_hooks: dict = contributions.get("hooks", {})
+    if not isinstance(contrib_hooks, dict):
+        contrib_hooks = {}
+    existing_hooks: dict = dict(merged.get("hooks", {}))
+    if not isinstance(existing_hooks, dict):
+        existing_hooks = {}
+
+    for event, rules in contrib_hooks.items():
+        if not isinstance(rules, list):
+            continue
+        if event not in existing_hooks:
+            existing_hooks[event] = list(rules)
+            continue
+
+        # Index existing rules by matcher for conflict detection. Keep
+        # the value as a list, not a single dict — Claude Code allows the
+        # same matcher to appear more than once under one event (e.g. a
+        # user keeping two PostToolUse rules without explicit matchers).
+        # Collapsing to a dict-of-rule means whichever same-matcher rule
+        # comes last silently shadows the rest, so byte-identical
+        # contributions can mismatch and emit a noisy warning.
+        existing_rules: list = list(existing_hooks[event])
+        existing_by_matcher: dict[str, list[dict]] = {}
+        for rule in existing_rules:
+            if isinstance(rule, dict):
+                existing_by_matcher.setdefault(rule.get("matcher", ""), []).append(rule)
+
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            matcher = rule.get("matcher", "")
+            same_matcher = existing_by_matcher.get(matcher, [])
+            if same_matcher:
+                if any(existing == rule for existing in same_matcher):
+                    continue  # already in sync (with at least one)
+                label = f"{event}:{matcher}" if matcher else event
+                warnings.append(
+                    f"Hook rule '{label}' already exists in the target "
+                    f"settings with different config. To use memtomem's "
+                    f"version, remove the existing rule, then re-run "
+                    f"`mm context sync --include=settings`."
+                )
+                continue
+            existing_rules.append(rule)
+
+        existing_hooks[event] = existing_rules
+
+    merged["hooks"] = existing_hooks
+    return merged, warnings
+
+
 @dataclass
 class ClaudeSettingsGenerator:
     """Fan out canonical hooks to ``~/.claude/settings.json``."""
@@ -154,61 +236,322 @@ class ClaudeSettingsGenerator:
         contributions: dict,
     ) -> tuple[dict, list[str]]:
         """Additive merge of record-format ``hooks``.  User rules always win."""
-        warnings: list[str] = []
-        merged = dict(existing) if existing else {}
-
-        contrib_hooks: dict = contributions.get("hooks", {})
-        if not isinstance(contrib_hooks, dict):
-            contrib_hooks = {}
-        existing_hooks: dict = dict(merged.get("hooks", {}))
-        if not isinstance(existing_hooks, dict):
-            existing_hooks = {}
-
-        for event, rules in contrib_hooks.items():
-            if not isinstance(rules, list):
-                continue
-            if event not in existing_hooks:
-                existing_hooks[event] = list(rules)
-                continue
-
-            # Index existing rules by matcher for conflict detection. Keep
-            # the value as a list, not a single dict — Claude Code allows the
-            # same matcher to appear more than once under one event (e.g. a
-            # user keeping two PostToolUse rules without explicit matchers).
-            # Collapsing to a dict-of-rule means whichever same-matcher rule
-            # comes last silently shadows the rest, so byte-identical
-            # contributions can mismatch and emit a noisy warning.
-            existing_rules: list = list(existing_hooks[event])
-            existing_by_matcher: dict[str, list[dict]] = {}
-            for rule in existing_rules:
-                if isinstance(rule, dict):
-                    existing_by_matcher.setdefault(rule.get("matcher", ""), []).append(rule)
-
-            for rule in rules:
-                if not isinstance(rule, dict):
-                    continue
-                matcher = rule.get("matcher", "")
-                same_matcher = existing_by_matcher.get(matcher, [])
-                if same_matcher:
-                    if any(existing == rule for existing in same_matcher):
-                        continue  # already in sync (with at least one)
-                    label = f"{event}:{matcher}" if matcher else event
-                    warnings.append(
-                        f"Hook rule '{label}' already exists in the target "
-                        f"settings with different config. To use memtomem's "
-                        f"version, remove the existing rule, then re-run "
-                        f"`mm context sync --include=settings`."
-                    )
-                    continue
-                existing_rules.append(rule)
-
-            existing_hooks[event] = existing_rules
-
-        merged["hooks"] = existing_hooks
-        return merged, warnings
+        return _merge_hooks_record(existing, contributions)
 
 
 _register(ClaudeSettingsGenerator())
+
+
+# ── Codex + Gemini hook fan-out (ADR-0010 multi-runtime) ─────────────
+#
+# Canonical hook event names are Claude's. Mappings below were verified
+# against official docs this session: code.claude.com/docs/en/hooks,
+# developers.openai.com/codex/hooks, and gemini-cli
+# docs/hooks/writing-hooks.md (event list + tool-name matchers).
+
+# Events Codex understands. Codex shares Claude's event names and accepts
+# Bash/Edit/Write matchers natively, so supported events pass through
+# unchanged; canonical events outside this set (Notification, SessionEnd)
+# are dropped with a warning.
+_CODEX_EVENTS: frozenset[str] = frozenset(
+    {
+        "SessionStart",
+        "SubagentStart",
+        "PreToolUse",
+        "PermissionRequest",
+        "PostToolUse",
+        "PreCompact",
+        "PostCompact",
+        "UserPromptSubmit",
+        "SubagentStop",
+        "Stop",
+    }
+)
+
+# Canonical (Claude) event → Gemini event. Canonical events with no entry
+# here have no Gemini equivalent and are dropped with a warning.
+#
+# ``UserPromptSubmit`` and ``Stop`` are **best-effort lifecycle mappings — not
+# a verified 1:1**. Gemini's docs define no exact analog for either; we map
+# them so memtomem's prompt-time context-injection (UserPromptSubmit) and
+# session-close (Stop) hook paths still fire on Gemini — ``BeforeAgent``
+# injects context before agent processing, ``AfterAgent`` runs after the agent
+# completes — while acknowledging the firing timing is approximate, not
+# formally identical (see ADR-0018).
+_GEMINI_EVENT_MAP: dict[str, str] = {
+    "PreToolUse": "BeforeTool",
+    "PostToolUse": "AfterTool",
+    "SessionStart": "SessionStart",
+    "SessionEnd": "SessionEnd",
+    "Notification": "Notification",
+    "PreCompact": "PreCompress",
+    "UserPromptSubmit": "BeforeAgent",  # best-effort — approximate timing
+    "Stop": "AfterAgent",  # best-effort — approximate timing
+}
+
+# Gemini events whose matcher is a *tool name* (matcher must be remapped);
+# other Gemini events take their matcher through unchanged.
+_GEMINI_TOOL_EVENTS: frozenset[str] = frozenset({"BeforeTool", "AfterTool", "BeforeToolSelection"})
+
+# Claude tool token → Gemini built-in tool name. Claude matchers are
+# tool-name regexes (e.g. "Edit|Write"); each pipe-delimited token is
+# mapped. A token with no entry here makes the hook undeliverable (it could
+# never fire), so the rule is dropped with a warning rather than emitted.
+_GEMINI_TOOL_MAP: dict[str, str] = {
+    "Bash": "run_shell_command",
+    # Gemini's in-place edit tool is ``replace``; ``write_file`` is whole-file
+    # create/overwrite. Claude Edit/MultiEdit are surgical edits → ``replace``;
+    # Claude Write (full file) → ``write_file``. Verified against gemini-cli
+    # docs/tools/file-system.md.
+    "Edit": "replace",
+    "MultiEdit": "replace",
+    "Write": "write_file",
+    "Read": "read_file",
+}
+
+
+def _codex_target_file(project_root: Path, scope: str) -> Path | None:
+    """Codex hooks file per scope. ``project_local`` has no fan-out (``None``)."""
+    if scope == "user":
+        return Path.home() / ".codex" / "hooks.json"
+    if scope == "project_shared":
+        return project_root / ".codex" / "hooks.json"
+    if scope == "project_local":
+        return None
+    raise ValueError(f"Unknown target_scope: {scope!r}")
+
+
+def _gemini_target_file(project_root: Path, scope: str) -> Path | None:
+    """Gemini settings file per scope. ``project_local`` has no fan-out (``None``)."""
+    if scope == "user":
+        return Path.home() / ".gemini" / "settings.json"
+    if scope == "project_shared":
+        return project_root / ".gemini" / "settings.json"
+    if scope == "project_local":
+        return None
+    raise ValueError(f"Unknown target_scope: {scope!r}")
+
+
+def _filter_codex_events(contributions: dict) -> tuple[dict, list[str]]:
+    """Drop canonical events Codex doesn't support (Notification, SessionEnd).
+
+    Codex shares Claude's event names and accepts Bash/Edit/Write matchers,
+    so supported events pass through verbatim; only the unsupported ones are
+    dropped, each with a warning.
+    """
+    warnings: list[str] = []
+    src_hooks = contributions.get("hooks", {})
+    if not isinstance(src_hooks, dict):
+        return {"hooks": {}}, warnings
+    out: dict[str, list] = {}
+    for event, rules in src_hooks.items():
+        if event not in _CODEX_EVENTS:
+            warnings.append(
+                f"Hook event '{event}' has no Codex equivalent and was dropped "
+                f"from the Codex hooks file. Codex supports: "
+                f"{', '.join(sorted(_CODEX_EVENTS))}."
+            )
+            continue
+        out[event] = rules
+    return {"hooks": out}, warnings
+
+
+def _map_gemini_matcher(matcher: str) -> tuple[str | None, list[str]]:
+    """Map a Claude tool-name matcher to Gemini tool names.
+
+    Returns ``(mapped_matcher, unmapped_tokens)``. An empty matcher (Claude
+    "all tools") maps to ``"*"``. Pipe-delimited tokens are mapped
+    individually and de-duplicated. If *any* token has no Gemini equivalent
+    the rule is undeliverable, so ``unmapped_tokens`` is returned non-empty
+    and ``mapped_matcher`` is ``None`` (the caller drops the rule).
+    """
+    matcher = matcher.strip()
+    if not matcher:
+        return "*", []
+    mapped: list[str] = []
+    unmapped: list[str] = []
+    for raw in matcher.split("|"):
+        token = raw.strip()
+        if not token:
+            continue
+        gemini_tool = _GEMINI_TOOL_MAP.get(token)
+        if gemini_tool is None:
+            unmapped.append(token)
+        elif gemini_tool not in mapped:
+            mapped.append(gemini_tool)
+    if unmapped:
+        return None, unmapped
+    if not mapped:
+        # Separator-only matcher (e.g. "|") — no real tokens to map, so
+        # treat it the same as an empty matcher: all tools ("*").
+        return "*", []
+    return "|".join(mapped), []
+
+
+def _ensure_gemini_handler_names(
+    handlers: object, event: str, matcher: str, original_matcher: str
+) -> list:
+    """Normalize handlers for Gemini: synthesize a ``name`` and rescale ``timeout``.
+
+    Two conversions, both keyed off the canonical (Claude/Codex-shaped) handler:
+
+    * **timeout unit.** Claude/Codex hook timeouts are *seconds*; Gemini's are
+      *milliseconds*. A numeric ``timeout`` is multiplied by 1000 so a canonical
+      ``timeout: 30`` (30s) doesn't become 30ms on Gemini and kill the hook
+      before it can run. ``bool`` (an ``int`` subclass) is left alone.
+    * **stable name.** Gemini exposes ``/hooks disable <name>``, so each handler
+      needs a *distinct* stable name. The slug alone is not enough: distinct
+      Claude matchers can collapse to one Gemini tool (``Edit`` and ``MultiEdit``
+      both map to ``replace``), which previously made two handlers share
+      ``memtomem-<event>-replace-0``. We hash the handler's **canonical
+      identity** — the *original* (pre-remap) matcher, its position in the rule,
+      and the command — *not* the remapped Gemini matcher. So ``Edit`` and
+      ``MultiEdit`` get distinct names even when they run the *same* command,
+      and the hash is content-derived → stable across re-syncs (idempotent).
+      Two byte-identical canonical rules intentionally share a name: they are
+      the same hook, and ``/hooks disable`` should govern both.
+    """
+    if not isinstance(handlers, list):
+        return []
+    out: list = []
+    slug = (matcher or "all").replace("|", "-").replace("*", "all")
+    for idx, handler in enumerate(handlers):
+        if not isinstance(handler, dict):
+            continue
+        new_handler = dict(handler)
+        timeout = new_handler.get("timeout")
+        if isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
+            new_handler["timeout"] = timeout * 1000
+        if not new_handler.get("name"):
+            command = new_handler.get("command")
+            command_str = command if isinstance(command, str) else ""
+            # NUL-delimited so the three fields can't be confused with each
+            # other (e.g. matcher "a" + command "b" vs matcher "a\x00b").
+            identity = f"{original_matcher}\x00{idx}\x00{command_str}"
+            digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:8]
+            new_handler["name"] = f"memtomem-{event}-{slug}-{digest}"
+        out.append(new_handler)
+    return out
+
+
+def _remap_for_gemini(contributions: dict) -> tuple[dict, list[str]]:
+    """Rewrite canonical (Claude-shaped) hooks into Gemini's settings.json shape.
+
+    Two-stage conversion (verified against gemini-cli writing-hooks.md):
+    event names are remapped (``PreToolUse``→``BeforeTool`` …) and, for
+    tool-matching events, the matcher tool tokens are remapped
+    (``Bash``→``run_shell_command`` …); handlers gain a synthesized
+    ``name``. Anything that can't convert faithfully — an event with no
+    Gemini equivalent, or a matcher whose tokens don't map to a Gemini tool
+    — is dropped and reported in the returned warnings (a hook that can
+    never fire is worse than a clear warning).
+    """
+    warnings: list[str] = []
+    src_hooks = contributions.get("hooks", {})
+    if not isinstance(src_hooks, dict):
+        return {"hooks": {}}, warnings
+    out: dict[str, list] = {}
+    for event, rules in src_hooks.items():
+        gemini_event = _GEMINI_EVENT_MAP.get(event)
+        if gemini_event is None:
+            warnings.append(
+                f"Hook event '{event}' has no Gemini equivalent and was dropped. "
+                f"Gemini supports: {', '.join(sorted(_GEMINI_EVENT_MAP))}."
+            )
+            continue
+        if not isinstance(rules, list):
+            continue
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            matcher = rule.get("matcher", "")
+            new_rule = dict(rule)
+            if gemini_event in _GEMINI_TOOL_EVENTS:
+                mapped_matcher, unmapped = _map_gemini_matcher(matcher)
+                if mapped_matcher is None:
+                    warnings.append(
+                        f"Hook '{event}:{matcher}' matcher token(s) "
+                        f"{', '.join(unmapped)} have no Gemini tool equivalent; "
+                        f"rule dropped (would never fire). Known tools: "
+                        f"{', '.join(sorted(set(_GEMINI_TOOL_MAP.values())))}."
+                    )
+                    continue
+                new_rule["matcher"] = mapped_matcher
+            new_rule["hooks"] = _ensure_gemini_handler_names(
+                rule.get("hooks", []), gemini_event, new_rule.get("matcher", ""), matcher
+            )
+            out.setdefault(gemini_event, []).append(new_rule)
+    return {"hooks": out}, warnings
+
+
+@dataclass
+class CodexSettingsGenerator:
+    """Fan out canonical hooks to Codex's ``hooks.json`` (ADR-0010 multi-runtime).
+
+    Codex shares Claude's event names + record shape and accepts
+    ``Bash``/``Edit``/``Write`` matchers natively, so the merge is the same
+    :func:`_merge_hooks_record` Claude uses — only events Codex lacks
+    (``Notification`` / ``SessionEnd``) are dropped with a warning. Writes a
+    dedicated ``hooks.json`` rather than touching the user's ``config.toml``.
+    """
+
+    name: str = "codex_settings"
+
+    def is_available(self, project_root: Path) -> bool:
+        return (Path.home() / ".codex").is_dir() or (project_root / ".codex").is_dir()
+
+    def target_file(self, project_root: Path, scope: str) -> Path | None:
+        return _codex_target_file(project_root, scope)
+
+    def canonical_source(self, project_root: Path) -> Path:
+        return project_root / CANONICAL_SETTINGS_FILE
+
+    def merge(
+        self,
+        existing: dict | None,
+        contributions: dict,
+    ) -> tuple[dict, list[str]]:
+        filtered, drop_warnings = _filter_codex_events(contributions)
+        merged, merge_warnings = _merge_hooks_record(existing, filtered)
+        return merged, drop_warnings + merge_warnings
+
+
+_register(CodexSettingsGenerator())
+
+
+@dataclass
+class GeminiSettingsGenerator:
+    """Fan out canonical hooks to Gemini's ``settings.json`` (ADR-0010 multi-runtime).
+
+    Gemini renames events and matches on its own tool names, so canonical
+    hooks are remapped via :func:`_remap_for_gemini` (dropping anything that
+    can't convert faithfully, with warnings) before the shared additive
+    merge. The merge preserves the user's other ``settings.json`` keys and
+    their own hook rules.
+    """
+
+    name: str = "gemini_settings"
+
+    def is_available(self, project_root: Path) -> bool:
+        return (Path.home() / ".gemini").is_dir() or (project_root / ".gemini").is_dir()
+
+    def target_file(self, project_root: Path, scope: str) -> Path | None:
+        return _gemini_target_file(project_root, scope)
+
+    def canonical_source(self, project_root: Path) -> Path:
+        return project_root / CANONICAL_SETTINGS_FILE
+
+    def merge(
+        self,
+        existing: dict | None,
+        contributions: dict,
+    ) -> tuple[dict, list[str]]:
+        remapped, drop_warnings = _remap_for_gemini(contributions)
+        merged, merge_warnings = _merge_hooks_record(existing, remapped)
+        return merged, drop_warnings + merge_warnings
+
+
+_register(GeminiSettingsGenerator())
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
@@ -256,6 +599,8 @@ def host_write_targets(project_root: Path, *, scope: str) -> list[Path]:
         if not gen.canonical_source(project_root).exists():
             continue
         target = gen.target_file(project_root, scope)
+        if target is None:
+            continue  # no runtime fan-out for this (runtime, scope)
         if not _is_under_project_root(target, project_root):
             pending.append(target)
     return pending
@@ -348,6 +693,12 @@ def generate_all_settings(
         contributions: dict = raw  # type: ignore[assignment]
 
         target_path = gen.target_file(project_root, scope)
+        if target_path is None:
+            results[name] = SettingsSyncResult(
+                status="skipped",
+                reason=f"{name} has no fan-out target for scope {scope!r}",
+            )
+            continue
         if not allow_host_writes and not _is_under_project_root(target_path, project_root):
             results[name] = SettingsSyncResult(
                 status="needs_confirmation",
@@ -434,6 +785,12 @@ def diff_settings(
         contributions: dict = raw  # type: ignore[assignment]
 
         target_path = gen.target_file(project_root, scope)
+        if target_path is None:
+            results[name] = SettingsSyncResult(
+                status="skipped",
+                reason=f"{name} has no fan-out target for scope {scope!r}",
+            )
+            continue
         existing_raw, _ = _read_with_mtime(target_path)
         if existing_raw is _MALFORMED:
             results[name] = SettingsSyncResult(
@@ -471,6 +828,8 @@ sync_all_settings = generate_all_settings
 __all__ = [
     "CANONICAL_SETTINGS_FILE",
     "ClaudeSettingsGenerator",
+    "CodexSettingsGenerator",
+    "GeminiSettingsGenerator",
     "SETTINGS_GENERATORS",
     "SettingsGenerator",
     "SettingsSyncResult",

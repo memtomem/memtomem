@@ -478,3 +478,94 @@ def test_hooks_sync_needs_confirmation_surfaces_banner(page, mm_web_url: str) ->
             f"needs_confirmation branch must NOT show the sync_success toast, "
             f"got toast text = {msg!r}"
         )
+
+
+def test_hooks_sync_runtime_error_not_reported_as_success(page, mm_web_url: str) -> None:
+    """ADR-0018 multi-runtime fan-out: a per-runtime ``error`` (or
+    ``aborted``) result — e.g. Codex's ``.codex/hooks.json`` is malformed
+    while Claude syncs fine — must surface an error toast and must NOT show
+    the success toast. Pins the no-silent-failure branch PR1 added for the
+    Codex/Gemini statuses (mirror of the needs_confirmation pin above).
+    """
+    install_default_stubs(page)
+
+    def _post(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "results": [
+                        {
+                            "name": "claude_settings",
+                            "status": "ok",
+                            "reason": None,
+                            "warnings": [],
+                            "target": "/fake/.claude/settings.json",
+                        },
+                        {
+                            "name": "codex_settings",
+                            "status": "error",
+                            "reason": "/fake/.codex/hooks.json is not valid JSON",
+                            "warnings": [],
+                            "target": "/fake/.codex/hooks.json",
+                        },
+                    ],
+                    "duplicate_tier_warnings": [],
+                }
+            ),
+        )
+
+    _stub_settings_sync(page, _OUT_OF_SYNC_GET, post_handler=_post)
+
+    page.goto(mm_web_url)
+    _open_hooks_sync(page)
+
+    page.locator("#hooks-sync-btn").click()
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    with page.expect_request(
+        lambda req: "/api/settings-sync" in req.url and req.method == "POST",
+        timeout=4_000,
+    ):
+        page.locator("#confirm-ok-btn").click()
+
+    # An error toast must surface and name the failing runtime.
+    err_toast = page.wait_for_selector("#toast-container .toast-error .toast-msg", timeout=4_000)
+    err_text = (err_toast.text_content() or "").strip()
+    assert "codex_settings" in err_text, (
+        f"error toast must name the failing runtime, got {err_text!r}"
+    )
+
+    # The success toast must NOT have fired — silent failure 금지.
+    success_toasts = page.locator("#toast-container .toast-success .toast-msg")
+    for i in range(success_toasts.count()):
+        msg = (success_toasts.nth(i).text_content() or "").strip()
+        assert msg != "Sync completed", (
+            f"a runtime error must NOT show the sync_success toast, got {msg!r}"
+        )
+
+
+def test_hooks_sync_confirm_discloses_multiruntime_targets(page, mm_web_url: str) -> None:
+    """ADR-0018: the confirm modal is the host-write trust gate, and the click
+    handler authorizes ``allow_host_writes`` for Codex + Gemini too — not just
+    ``~/.claude``. The modal copy must therefore disclose all three runtimes so
+    the user isn't approving a Claude-only write while silently getting three.
+    """
+    install_default_stubs(page)
+    _stub_settings_sync(page, _OUT_OF_SYNC_GET)
+
+    page.goto(mm_web_url)
+    _open_hooks_sync(page)
+
+    page.locator("#hooks-sync-btn").click()
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    msg = page.locator("#confirm-message").text_content() or ""
+    assert "Codex" in msg and "Gemini" in msg, (
+        f"consent modal must disclose all fan-out runtimes (Codex/Gemini), got {msg!r}"
+    )

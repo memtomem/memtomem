@@ -415,11 +415,11 @@ mm context sync --include=skills
 # Fan out .memtomem/agents/<name>.md to .claude/agents/, .gemini/agents/, .codex/agents/
 mm context sync --include=agents
 
-# Fan out .memtomem/commands/<name>.md to .claude/commands/*.md, .gemini/commands/*.toml, and ~/.codex/prompts/*.md
+# Fan out .memtomem/commands/<name>.md to .claude/commands/*.md and .gemini/commands/*.toml
 mm context sync --include=commands
 ```
 
-Sub-agent conversions are lossy for non-Claude targets — Gemini drops `skills` + `isolation`, Codex additionally drops `tools`, `kind`, `temperature`. Slash commands fan out to all three runtimes — Codex keeps `description` / `argument-hint` and the `$ARGUMENTS` placeholder natively, dropping only `allowed-tools` and `model` (Codex custom prompts are upstream-deprecated; prefer a skill for new workflows). memtomem reports every dropped field; add `--strict` to fail if you need 1:1 fidelity. Run `mm context --help` for the full per-runtime field-drop matrix.
+Sub-agent conversions are lossy for non-Claude targets — Gemini drops `skills` + `isolation`, Codex additionally drops `tools`, `kind`, `temperature`. Slash commands fan out to **Claude + Gemini only** — Codex command fan-out is not implemented (Codex custom prompts are upstream-deprecated; use a skill for Codex command-like workflows). memtomem reports every dropped field; add `--strict` to fail if you need 1:1 fidelity. Run `mm context --help` for the full per-runtime field-drop matrix.
 
 ---
 

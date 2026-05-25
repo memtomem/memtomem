@@ -706,10 +706,12 @@ document.getElementById('hooks-sync-btn')?.addEventListener('click', async () =>
     const headers = csrf
       ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
       : { 'Content-Type': 'application/json' };
-    // The confirm modal IS the host-write trust gate (issue #962). Send
-    // ``allow_host_writes: true`` so the server doesn't re-prompt with
-    // ``needs_confirmation`` for the user-scope ``~/.claude/settings.json``
-    // path — the same gate the CLI confirms interactively
+    // The confirm modal IS the host-write trust gate (issue #962). Its copy
+    // (``confirm.hooks_sync_msg``) discloses that the merge fans out to every
+    // installed runtime's user-scope settings file (Claude/Codex/Gemini,
+    // ADR-0018) — not just ``~/.claude``. Send ``allow_host_writes: true`` so
+    // the server doesn't re-prompt with ``needs_confirmation`` for those host
+    // paths — the same gate the CLI confirms interactively
     // (``cli/context_cmd.py:_confirm_settings_host_writes``).
     const res = await fetch(_hooksScopedUrl('/api/settings-sync'), {
       method: 'POST',
@@ -722,6 +724,19 @@ document.getElementById('hooks-sync-btn')?.addEventListener('click', async () =>
     }
     const data = await res.json();
     const results = Array.isArray(data.results) ? data.results : [];
+    // Multi-runtime fan-out (Codex/Gemini, ADR-0018): a per-runtime
+    // ``error`` (malformed target JSON) or ``aborted`` (concurrent write)
+    // must NOT be reported as success — same no-silent-failure contract as
+    // the needs_confirmation branch below. Without this a Codex/Gemini
+    // failure would fall through to ``sync_success`` while only Claude
+    // actually synced.
+    const failed = results.filter(r => r.status === 'error' || r.status === 'aborted');
+    if (failed.length) {
+      const detail = failed.map(r => `${r.name}: ${r.reason || r.status}`).join('; ');
+      showToast(t('toast.sync_failed', { error: detail }), 'error');
+      loadHooksSync();
+      return;
+    }
     const needsConfirmation = results.filter(r => r.status === 'needs_confirmation');
     if (needsConfirmation.length) {
       // Defensive branch: the first POST already carried
