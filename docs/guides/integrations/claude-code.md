@@ -182,7 +182,7 @@ Add the following to `~/.claude/settings.json`:
       "hooks": [{
         "type": "command",
         "command": "mm session start --idempotent --auto-end-stale 24h --agent-id claude-code 2>>/tmp/mm-hook.log || true",
-        "timeout": 5000
+        "timeout": 5
       }]
     }],
     "UserPromptSubmit": [{
@@ -190,7 +190,7 @@ Add the following to `~/.claude/settings.json`:
       "hooks": [{
         "type": "command",
         "command": "P=$(printf '%s' \"${prompt}\" | head -c 500); [ ${#P} -gt 20 ] && mm search \"$P\" --top-k 3 --format context 2>>/tmp/mm-hook.log || true",
-        "timeout": 5000
+        "timeout": 5
       }]
     }],
     "PostToolUse": [{
@@ -198,7 +198,7 @@ Add the following to `~/.claude/settings.json`:
       "hooks": [{
         "type": "command",
         "command": "FP=\"${tool_input.file_path}\"; case \"$FP\" in *.md|*.py|*.ts|*.tsx|*.js|*.jsx|*.go|*.rs|*.rb|*.java|*.kt|*.swift|*.c|*.cpp|*.h|*.hpp|*.sh|*.toml|*.yaml|*.yml|*.json) ;; *) exit 0 ;; esac; case \"$FP\" in node_modules/*|*/node_modules/*|dist/*|*/dist/*|build/*|*/build/*|target/*|*/target/*|.next/*|*/.next/*|.nuxt/*|*/.nuxt/*|__pycache__/*|*/__pycache__/*|.git/*|*/.git/*|.venv/*|*/.venv/*|venv/*|*/venv/*|coverage/*|*/coverage/*|.cache/*|*/.cache/*) exit 0 ;; esac; mm index --debounce-window 5 \"$FP\" 2>>/tmp/mm-hook.log || true",
-        "timeout": 10000
+        "timeout": 10
       }]
     }],
     "Stop": [{
@@ -206,12 +206,21 @@ Add the following to `~/.claude/settings.json`:
       "hooks": [{
         "type": "command",
         "command": "mm index --flush 2>>/tmp/mm-hook.log; mm session end --auto 2>>/tmp/mm-hook.log || true",
-        "timeout": 10000
+        "timeout": 10
       }]
     }]
   }
 }
 ```
+
+> **Hook `timeout` is in seconds.** Claude Code (and Codex) interpret a hook's
+> `timeout` as **seconds** (the default is 60), so the values above are 5 s and
+> 10 s — generous headroom over the 100–500 ms a search takes, while still
+> capping a hung command. Don't use millisecond values like `5000` here: Claude
+> reads that as 5000 **seconds** (~83 min), which defeats the cap. When
+> `mm context sync` fans these out to Gemini (whose hook timeouts are in
+> milliseconds) it converts the unit for you — author the canonical value in
+> seconds.
 
 ### Hook Event Summary
 
@@ -394,7 +403,7 @@ Agent:
 No. memtomem operates as separate MCP tools (`mem_search`, etc.) and coexists independently with the existing system. Continue using CLAUDE.md for project instructions as before.
 
 **Q: Do hooks slow down Claude Code?**
-Searches typically complete within 100–500ms depending on the embedding provider. The `timeout: 5000` setting ensures hooks don't block the session. Errors are logged to `/tmp/mm-hook.log` instead of discarded, so you can diagnose issues without disrupting the session.
+Searches typically complete within 100–500ms depending on the embedding provider. The `timeout: 5` setting (Claude hook timeouts are in **seconds**) ensures hooks don't block the session. Errors are logged to `/tmp/mm-hook.log` instead of discarded, so you can diagnose issues without disrupting the session.
 
 **Q: It doesn't work after changing `.mcp.json`.**
 Restart Claude Code or use the `/mcp` command to reconnect to MCP servers. Old processes may be using cached modules.
